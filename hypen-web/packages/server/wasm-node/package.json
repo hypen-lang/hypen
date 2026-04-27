@@ -4,7 +4,7 @@
     "Hypen Contributors"
   ],
   "description": "A Rust implementation of the Hypen engine",
-  "version": "0.4.956",
+  "version": "0.4.980",
   "license": "MIT",
   "repository": {
     "type": "git",

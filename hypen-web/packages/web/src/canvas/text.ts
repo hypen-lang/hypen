@@ -191,7 +191,13 @@ export function renderText(
   ctx.save();
   ctx.font = font;
   ctx.fillStyle = style.color;
-  ctx.textBaseline = "top";
+  // Use `middle` baseline so we can position each glyph at the visual centre
+  // of its line box. With `top`, canvas draws from the top of the EM square
+  // and any extra `line-height − font-size` space lands as padding BELOW the
+  // glyph — visible as `+` inside a round FAB drifting toward the top of
+  // the circle. CSS centres glyphs within the line box; matching that
+  // requires `middle` + half-lineHeight offset.
+  ctx.textBaseline = "middle";
 
   const metrics = measureText(ctx, text, style, width, maxLines, textOverflow);
 
@@ -206,7 +212,8 @@ export function renderText(
   // Render each line
   for (let i = 0; i < metrics.lines.length; i++) {
     const line = metrics.lines[i];
-    const lineY = startY + i * metrics.lineHeight;
+    // Centre of the line box (top of line + half of line-height).
+    const lineY = startY + i * metrics.lineHeight + metrics.lineHeight / 2;
 
     // Calculate X based on text alignment
     let lineX = x;

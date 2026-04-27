@@ -53,5 +53,5 @@
 ///     """)
 /// ```
 public enum HypenServerVersion {
-    public static let version = "0.4.956"
+    public static let version = "0.4.980"
 }

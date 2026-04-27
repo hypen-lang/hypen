@@ -79,14 +79,18 @@ struct GalleryBrowserView: View {
             }
 
             // Floating pill — small, top-centered, appears only on app screen
-            // when the toolbar is collapsed.
+            // when the toolbar is collapsed. Hypen content fills the screen
+            // edge-to-edge so the surrounding ZStack stretches into the
+            // top safe-area / Dynamic Island region; without explicit
+            // padding the pill sits behind the island. Use the window's
+            // safe-area inset so the pill clears it on every device.
             if showPill {
                 BrowserPill(
                     currentUrl: currentUrl,
                     isConnected: isConnected,
                     onTap: { isToolbarExpanded = true }
                 )
-                .padding(.top, 6)
+                .padding(.top, topSafeAreaInset() + 6)
                 .transition(.move(edge: .top).combined(with: .opacity))
             }
 
@@ -302,4 +306,15 @@ private func extractNameFromUrl(_ url: String) -> String {
     case "10.0.2.2": return "Local (Emulator)"
     default: return host
     }
+}
+
+/// Top safe-area inset for the active key window. Used to position the
+/// floating BrowserPill below the Dynamic Island / status bar. Returns 0
+/// before the window scene is up.
+private func topSafeAreaInset() -> CGFloat {
+    UIApplication.shared.connectedScenes
+        .compactMap { $0 as? UIWindowScene }
+        .flatMap(\.windows)
+        .first(where: \.isKeyWindow)?
+        .safeAreaInsets.top ?? 0
 }

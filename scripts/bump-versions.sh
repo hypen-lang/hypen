@@ -14,11 +14,11 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Current versions (edit these as the source of truth)
-CURRENT_RUST_VERSION="0.4.956"
-CURRENT_NPM_VERSION="0.4.956"
-CURRENT_LSP_VERSION="0.4.956"
-CURRENT_GRADLE_VERSION="0.4.956"
-CURRENT_SWIFT_SERVER_VERSION="0.4.956"
+CURRENT_RUST_VERSION="0.4.980"
+CURRENT_NPM_VERSION="0.4.980"
+CURRENT_LSP_VERSION="0.4.980"
+CURRENT_GRADLE_VERSION="0.4.980"
+CURRENT_SWIFT_SERVER_VERSION="0.4.980"
 # @hypen-space/ios-streamer is versioned independently (macOS-only, optional
 # CLI dep). Bump it via --ios-streamer <version>; otherwise it's left alone.
 CURRENT_IOS_STREAMER_VERSION="0.1.0"
@@ -156,10 +156,6 @@ OLD="$CURRENT_NPM_VERSION"
 NEW="$NEW_NPM_VERSION"
 OLD_LSP="$CURRENT_LSP_VERSION"
 NEW_LSP="$NEW_LSP_VERSION"
-
-# hypen-web workspace root (private, but tracks the SDK version for clarity)
-update_version "$ROOT_DIR/hypen-web/package.json" "$OLD" "$NEW"
-echo "  ✓ hypen-web/package.json"
 
 # @hypen-space/core
 update_version "$ROOT_DIR/hypen-web/packages/core/package.json" "$OLD" "$NEW"

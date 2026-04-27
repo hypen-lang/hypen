@@ -532,7 +532,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-engine"
-version = "0.4.956"
+version = "0.4.980"
 dependencies = [
  "console_error_panic_hook",
  "criterion",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-parser"
-version = "0.4.956"
+version = "0.4.980"
 dependencies = [
  "ariadne",
  "chumsky",
@@ -568,7 +568,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-server"
-version = "0.4.956"
+version = "0.4.980"
 dependencies = [
  "hypen-engine",
  "hypen-parser",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-tailwind-parse"
-version = "0.4.956"
+version = "0.4.980"
 dependencies = [
  "serde",
  "serde_json",

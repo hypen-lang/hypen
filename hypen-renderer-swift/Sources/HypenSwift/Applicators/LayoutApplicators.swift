@@ -29,6 +29,51 @@ public struct AlignmentApplicator: ApplicatorHandler {
     }
 }
 
+// MARK: - AlignItems Applicator
+//
+// Mirrors `align-items` / `horizontalAlignment` (Tailwind `items-center` etc.)
+// onto `modifier.alignment` so the *outer* frame applied by
+// `applyWeightExpansion` knows where to anchor a flex-allocated child.
+//
+// Why this exists in addition to Column/Row reading the prop directly:
+// the layout component uses `alignItems` to set the inner VStack/HStack
+// alignment (children-relative-to-widest-child). But when the container
+// is wrapped in a flex slot (`flex-1`), that inner alignment doesn't reach
+// the slot — `applyWeightExpansion`'s frame defaults to `.topLeading`, so
+// `flex-1 items-center` siblings of a fixed-width element visually hug the
+// outer edges of the row instead of centering within their own slot.
+public struct AlignItemsApplicator: ApplicatorHandler {
+    public let name = "alignItems"
+
+    public init() {}
+
+    public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        guard let str = (value as? String)?.lowercased() else { return }
+        // Only set if not already explicitly set by the `.alignment(...)` applicator.
+        guard modifier.alignment == nil else { return }
+        switch str {
+        case "center":
+            modifier.alignment = .center
+        case "end", "trailing", "right", "flex-end":
+            modifier.alignment = .trailing
+        case "start", "leading", "left", "flex-start":
+            modifier.alignment = .leading
+        default:
+            break
+        }
+    }
+}
+
+public struct HorizontalAlignmentApplicator: ApplicatorHandler {
+    public let name = "horizontalAlignment"
+
+    public init() {}
+
+    public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        AlignItemsApplicator().apply(modifier: &modifier, value: value, context: context)
+    }
+}
+
 // MARK: - Weight/Flex Applicator
 
 public struct WeightApplicator: ApplicatorHandler {

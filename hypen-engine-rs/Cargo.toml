@@ -18,10 +18,10 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 indexmap = { version = "2.0", features = ["serde"] }
 slotmap = "1.0"
-hypen-parser = { version = "0.4.956", path = "../parser" }
+hypen-parser = { version = "0.4.980", path = "../parser" }
 exprimo = "0.6.1"
 im = { version = "15.1", features = ["serde"] }  # Persistent/immutable data structures for O(1) clone
-hypen-tailwind-parse = { version = "0.4.956", path = "../tailwind-parse" }
+hypen-tailwind-parse = { version = "0.4.980", path = "../tailwind-parse" }
 
 # UniFFI for native bindings (Kotlin, Swift, Python, Ruby)
 uniffi = { version = "0.31", features = ["cli"], optional = true }

@@ -232,6 +232,17 @@ public struct ColumnComponent: ComponentHandler {
                                 renderer: context.renderer,
                                 actionDispatcher: context.actionDispatcher
                             )
+                        } else if effectiveModifier.fillMaxHeight {
+                            // h-full / fillMaxHeight: propagate parent's offered height
+                            // through the VStack so descendants (e.g. an inner Column
+                            // with `flex-1` siblings) actually receive the full height.
+                            // Without this the VStack sizes to children's ideal and
+                            // a non-flex sibling further down (BottomNav) gets pushed
+                            // off-screen.
+                            VStack(alignment: horizontalAlignment, spacing: gap) {
+                                wrappedChildren()
+                            }
+                            .frame(maxHeight: .infinity, alignment: .top)
                         } else {
                             VStack(alignment: horizontalAlignment, spacing: gap) {
                                 wrappedChildren()
@@ -1032,10 +1043,6 @@ public struct GridComponent: ComponentHandler {
         // needs to lay out the individual items directly (not a single wrapper as one cell).
         let rawChildren = context.renderer.getChildren(of: context.element.id)
         let childElements = GridComponent.flattenControlFlowChildren(rawChildren, renderer: context.renderer)
-        print("[HypenGrid] columns=\(columns) spacing=\(spacing) scrollable=\(scrollable) raw=\(rawChildren.count) types=\(rawChildren.map { $0.elementType }), flattened=\(childElements.count)")
-        for (i, child) in childElements.enumerated() {
-            print("[HypenGrid]   child[\(i)] id=\(child.id) type=\(child.elementType) props=\(child.props.keys.sorted())")
-        }
 
         // Scrollable grids use ScrollView + LazyVGrid — the canonical SwiftUI pattern.
         // LazyVGrid's "reports one row in sizeThatFits" bug doesn't matter here because the
@@ -1178,7 +1185,6 @@ private struct HypenGridLayout: Layout {
 
         let totalWidth = proposal.width ?? 0
         let colWidth = columnWidth(in: totalWidth)
-        print("[HypenGridLayout] sizeThatFits proposal=\(proposal) totalWidth=\(totalWidth) colWidth=\(colWidth) subviews=\(subviews.count)")
         let grid = computeGrid(subviews: subviews)
 
         // Compute row heights by measuring each child with its column-span width
@@ -1201,7 +1207,6 @@ private struct HypenGridLayout: Layout {
         guard !subviews.isEmpty else { return }
 
         let colWidth = columnWidth(in: bounds.width)
-        print("[HypenGridLayout] placeSubviews bounds=\(bounds) colWidth=\(colWidth)")
         let grid = computeGrid(subviews: subviews)
 
         // Compute row heights (same logic as sizeThatFits)

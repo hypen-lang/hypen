@@ -31,20 +31,16 @@ import { StudioEngineHost } from "./server/engine-host.ts";
 // at runtime from an installed npm package because Tailwind v4's oxide
 // scanner refuses to scan files under `node_modules` — which is exactly
 // where studio-ui lives once installed. Every `.tsx` source is dropped,
-// every utility class is missing, the page loads unstyled. Several past
-// "fixes" tried to outsmart this with detection heuristics (node_modules
-// probe, then HYPEN_PROJECT_DIR env, then "always rebuild") — each shipped
-// a CSS-less Studio when its assumption fell over.
+// every utility class is missing, the page loads unstyled. So: do all the
+// Tailwind work at publish time, serve the static output at runtime, and
+// never invoke Tailwind from a node_modules location.
 //
-// The durable fix is to do the Tailwind work *before* the package is in
-// node_modules: build at publish time, ship the static output, serve it.
-// The runtime never invokes Tailwind, so the node_modules scanning rule
-// can't bite. `STUDIO_DEV=1` opts in to a live Bun.build for HMR while
+// `STUDIO_DEV=1` opts into Bun's HTML import + --hot for live reload while
 // iterating on studio-ui itself — only useful from inside the monorepo.
 //
 // Regression guards:
 //   - `build.ts` asserts the publish-time CSS contains sentinel utilities
-//     before allowing the build to succeed.
+//     before allowing the build to succeed (catches it at the right place).
 //   - `tests/studio.test.ts` boots studio-ui exactly the way `hypen studio`
 //     does and verifies utility classes reach the served CSS.
 const useHmrDevServer = process.env.STUDIO_DEV === "1";
@@ -58,10 +54,21 @@ let buildAssetsDir: string | null = null;
 
 if (hasPrebuilt) {
   buildAssetsDir = prebuiltDist;
-} else if (!useHmrDevServer) {
-  // No prebuilt bundle (running from a fresh checkout pre-build, or a
-  // broken install). Fall back to a live Bun.build — works in the monorepo,
-  // will produce empty utility CSS under node_modules and fail the guard.
+} else if (useHmrDevServer) {
+  // STUDIO_DEV=1 — Bun's HTML import + --hot for live reload while editing
+  // studio-ui itself. No Tailwind plugin runs through this path; styles
+  // come from a separately-compiled CSS chunk if any.
+  serveIndex = (await import("./index.html")).default;
+} else {
+  // No prebuilt bundle and no HMR opt-in — usually means a monorepo checkout
+  // before `bun run build` has been run. Do a one-shot Bun.build with the
+  // Tailwind plugin: works fine when CWD is outside node_modules (monorepo
+  // dev), produces empty utility CSS when running from inside an installed
+  // package (Tailwind v4's oxide scanner refuses to look in node_modules).
+  // We log a single-line warning in the empty case rather than crashing,
+  // so the studio still loads — even unstyled, file browser / editor /
+  // terminal remain usable. The build-time guard in `build.ts` is what
+  // prevents this state from shipping in the first place.
   const tailwindPlugin = (await import("bun-plugin-tailwind")).default;
   buildAssetsDir = join(tmpdir(), `hypen-studio-${process.pid}`);
 
@@ -79,26 +86,19 @@ if (hasPrebuilt) {
 
   const cssOutputs = result.outputs.filter((o) => o.path.endsWith(".css"));
   const cssText = (await Promise.all(cssOutputs.map((o) => o.text()))).join("\n");
-  const hasUtilities =
-    /\.bg-card\b/.test(cssText) &&
-    /\.text-foreground\b/.test(cssText) &&
-    /\.flex\b\s*\{/.test(cssText);
+  const hasUtilities = /\.bg-card\b/.test(cssText) && /\.text-foreground\b/.test(cssText);
   if (!hasUtilities) {
-    console.error(
-      `Studio UI fell back to a runtime Tailwind build but produced ${cssText.length} bytes ` +
-        `with no utility classes. This typically means studio-ui is running from inside ` +
-        `node_modules, where Tailwind v4's scanner won't look. Reinstall @hypen-space/cli ` +
-        `or run \`bun run build\` in the CLI source so studio-ui/dist is produced.`,
+    // Soft warning — don't kill the process. Most studio surfaces don't
+    // need utility CSS to function; the user can still read files, edit,
+    // and run the terminal even with bare theme defaults.
+    console.warn(
+      "[studio] runtime Tailwind build emitted no utility classes — UI may render unstyled. " +
+        "Reinstall @hypen-space/cli to pick up the prebuilt bundle.",
     );
-    process.exit(1);
   }
 
   const dir = buildAssetsDir;
   process.on("exit", () => { try { rmSync(dir, { recursive: true }); } catch {} });
-} else {
-  // STUDIO_DEV=1 — Bun's HTML import + --hot for live reload while editing
-  // studio-ui itself. No Tailwind plugin runs through this path.
-  serveIndex = (await import("./index.html")).default;
 }
 
 // Get the project directory from environment or use cwd

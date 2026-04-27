@@ -32,7 +32,8 @@ export const headingHandler: ComponentHandler = {
     }
 
     // Text content
-    const text = props["0"] || props.text;
+    // `??` (not `||`) so the literal `0`, `false`, `""` still render.
+    const text = props["0"] ?? props.text;
     if (text !== undefined) {
       el.textContent = String(text);
     }

@@ -1,7 +1,27 @@
 import SwiftUI
 import Combine
+#if os(iOS) || os(tvOS) || os(watchOS)
+import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 private let log = HypenLoggers.view
+
+/// Resolved screen width without relying on GeometryReader. The previous
+/// `ScreenWidthReader` used a `.preference` → `@State` feedback loop that
+/// hung the main thread on heavy element trees (calorie-counter), making
+/// the whole app stop processing input.
+@MainActor
+private func resolvedScreenWidth() -> CGFloat {
+    #if os(iOS) || os(tvOS) || os(watchOS)
+    return UIScreen.main.bounds.width
+    #elseif os(macOS)
+    return NSScreen.main?.frame.width ?? 1024
+    #else
+    return 1024
+    #endif
+}
 
 /// The main entry point for rendering Hypen UI from a remote server
 public struct HypenView: View {
@@ -42,19 +62,26 @@ public struct HypenView: View {
     @Environment(\.backNavigationOptions) private var backNavigationOptions
 
     public var body: some View {
-        GeometryReader { geometry in
-            content
-                .environment(\.componentRegistry, componentRegistry)
-                .environment(\.applicatorRegistry, applicatorRegistry)
-                .environment(\.screenWidth, geometry.size.width)
-                .onAppear {
-                    viewModel.connect()
-                }
-                .onDisappear {
-                    viewModel.disconnect()
-                }
-                .id(url)
-        }
+        // Resolve screen width once via UIScreen rather than a
+        // GeometryReader/preference-key feedback loop. The previous
+        // `ScreenWidthReader` set @State from `.onPreferenceChange`,
+        // which in calorie-counter's heavy element tree caused
+        // SwiftUI to re-render → preference fires again → state set
+        // → re-render … the main thread spun and the entire app
+        // stopped processing input (taps, view-hierarchy capture,
+        // etc.) — the thread was alive but never returning to the
+        // run loop.
+        content
+            .environment(\.componentRegistry, componentRegistry)
+            .environment(\.applicatorRegistry, applicatorRegistry)
+            .environment(\.screenWidth, resolvedScreenWidth())
+            .onAppear {
+                viewModel.connect()
+            }
+            .onDisappear {
+                viewModel.disconnect()
+            }
+            .id(url)
     }
 
     @ViewBuilder

@@ -9,7 +9,7 @@ import { renderText } from "./text.js";
 import { ScrollManager, isScrollable } from "./scroll.js";
 import { getVisibleChildren, VIRTUALIZE_THRESHOLD } from "./virtualize.js";
 import type { SelectionManager } from "./selection.js";
-import { cssLengthToPx } from "./utils.js";
+import { cssLengthToPx, resolveLineHeight } from "./utils.js";
 
 /**
  * Module-level reference to the active SelectionManager so paintText
@@ -271,13 +271,14 @@ function paintText(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const layout = node.layout!;
   const props = node.props;
 
-  let text = String(props[0] || props.text || "");
+  // `??` (not `||`) so a bound `0`, `false`, or `""` still renders.
+  let text = String(props[0] ?? props.text ?? "");
   const color = props.color || "#000000";
   const fontSize = cssLengthToPx(props.fontSize) ?? 16;
   const fontWeight = props.fontWeight || "normal";
   const fontFamily = props.fontFamily || "system-ui, sans-serif";
   const textAlign = props.textAlign || "left";
-  const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
+  const lineHeight = resolveLineHeight(props.lineHeight, fontSize) ?? fontSize * 1.2;
   const textDecoration = props.textDecoration || "none";
   const textTransform = props.textTransform || "none";
   const letterSpacing = cssLengthToPx(props.letterSpacing) ?? 0;
@@ -474,7 +475,7 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     const fontSize = cssLengthToPx(props.fontSize) ?? 16;
     const fontWeight = props.fontWeight || "normal";
     const fontFamily = props.fontFamily || "system-ui, sans-serif";
-    const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
+    const lineHeight = resolveLineHeight(props.lineHeight, fontSize) ?? fontSize * 1.2;
 
     renderText(
       ctx,
@@ -1332,8 +1333,8 @@ function paintBadge(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   drawRoundedRect(ctx, x, y, width, height, radius);
   ctx.fill();
 
-  // Text content
-  const text = String(props[0] || props.text || "");
+  // `??` so a literal `0`/`false`/`""` value still renders.
+  const text = String(props[0] ?? props.text ?? "");
   if (text) {
     ctx.fillStyle = props.color || "#ffffff";
     ctx.font = `${props.fontWeight || "bold"} ${props.fontSize || 10}px ${props.fontFamily || "sans-serif"}`;
@@ -1368,8 +1369,8 @@ function paintAvatar(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
   ctx.fill();
 
-  // Text initials if provided
-  const text = String(props[0] || props.text || props.initials || "");
+  // `??` so a literal `0`/`false`/`""` value still renders.
+  const text = String(props[0] ?? props.text ?? props.initials ?? "");
   if (text) {
     ctx.fillStyle = props.color || "#ffffff";
     ctx.font = `${props.fontWeight || "bold"} ${props.fontSize || size / 2.5}px ${props.fontFamily || "sans-serif"}`;
@@ -1509,7 +1510,8 @@ function paintLink(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const layout = node.layout!;
   const props = node.props;
 
-  const text = String(props[0] || props.text || "");
+  // `??` so a literal `0`/`false`/`""` value still renders.
+  const text = String(props[0] ?? props.text ?? "");
   const color = node.hovered ? (props.hoverColor || "#0056b3") : (props.color || "#007bff");
   const fontSize = cssLengthToPx(props.fontSize) ?? 16;
   const fontWeight = props.fontWeight || "normal";

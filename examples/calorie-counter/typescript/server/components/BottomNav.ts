@@ -35,18 +35,17 @@ export default app
             .tw("text-xl md:text-2xl leading-none")
           Text("Diary")
             .tw("text-xs md:text-sm mt-1")
-            .color("#9CA3AF")
+            .color("@{state.location == '/diary' ? '#EC4899' : '#9CA3AF'}")
         }
         .tw("items-center")
       }
       .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
       .onClick(@router.push, to: "/diary")
-
       Button {
         Text("+")
           .tw("text-white text-2xl md:text-3xl font-bold leading-none")
       }
-      .tw("bg-pink-500 border-0 w-14 h-14 md:w-16 md:h-16 rounded-full shadow-lg items-center justify-center -mt-4")
+      .tw("bg-pink-500 border-0 w-14 h-14 md:w-16 md:h-16 rounded-full shadow-lg items-center justify-center")
       .onClick(@router.push, to: "/add/breakfast")
 
       Button {

@@ -87,6 +87,38 @@ export function cssLengthToPx(value: any): number | null {
 }
 
 /**
+ * Resolve a CSS `line-height` value to a pixel value.
+ *
+ * Unitless numbers (e.g. `1`, `1.5`, `"1.25"`) are CSS multipliers of the
+ * font-size — `line-height: 1` (Tailwind's `leading-none`) means line box =
+ * 1 × font-size, NOT 1 pixel. Without this branch, `cssLengthToPx("1")`
+ * returned literally `1`, and a Column of `leading-none` Texts collapsed
+ * each line to 1px tall — emoji + label in a bottom-tab button rendered at
+ * the same y and overlapped.
+ *
+ * Anything with an explicit unit (`16px`, `1.5em`, `1rem`, `120%` is
+ * rejected → null since Taffy/measure expects px) falls through to
+ * `cssLengthToPx`.
+ */
+export function resolveLineHeight(value: any, fontSize: number): number | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "number" && Number.isFinite(value)) {
+    // Unitless number: multiplier of font-size (matches CSS spec).
+    return value * fontSize;
+  }
+  if (typeof value === "string") {
+    const s = value.trim();
+    if (s === "" || s === "auto" || s === "normal") return null;
+    // Pure numeric string with no unit → unitless multiplier.
+    if (/^-?\d*\.?\d+$/.test(s)) {
+      const n = parseFloat(s);
+      return Number.isFinite(n) ? n * fontSize : null;
+    }
+  }
+  return cssLengthToPx(value);
+}
+
+/**
  * Parse a CSS length string for Taffy's Dimension type. Keeps `%` values as
  * the tagged percentage string, turns `"auto"`/empty/invalid into `"auto"`,
  * converts everything else (including rem/em) through `cssLengthToPx`.
