@@ -1,0 +1,79 @@
+module Header {
+  Row {
+    Text("HYPEN")
+      .fontSize(28)
+      .fontWeight("900")
+      .color("#00ff88")
+      .letterSpacing("2px")
+
+    Row {
+    Button {
+      Text("Home")
+        .color("#e0e0e0")
+        .fontWeight("600")
+    }
+      .onClick("@actions.navigateHome")
+      .padding(12)
+      .paddingLeft(20)
+      .paddingRight(20)
+      .backgroundColor("transparent")
+      .border("1px solid transparent")
+      .borderRadius(8)
+      .cursor("pointer")
+      .transition("all 0.3s ease")
+
+    Button {
+      Text("Products")
+        .color("#e0e0e0")
+        .fontWeight("600")
+    }
+      .onClick("@actions.navigateProducts")
+      .padding(12)
+      .paddingLeft(20)
+      .paddingRight(20)
+      .backgroundColor("transparent")
+      .border("1px solid transparent")
+      .borderRadius(8)
+      .cursor("pointer")
+      .transition("all 0.3s ease")
+
+    Button {
+      Text("About")
+        .color("#e0e0e0")
+        .fontWeight("600")
+    }
+      .onClick("@actions.navigateAbout")
+      .padding(12)
+      .paddingLeft(20)
+      .paddingRight(20)
+      .backgroundColor("transparent")
+      .border("1px solid transparent")
+      .borderRadius(8)
+      .cursor("pointer")
+      .transition("all 0.3s ease")
+
+    Button {
+      Text("Cart (@{state.cartCount})")
+        .color("#0a0a0a")
+        .fontWeight("700")
+    }
+      .onClick("@actions.navigateCart")
+      .padding(12)
+      .paddingLeft(20)
+      .paddingRight(20)
+      .backgroundColor("#00ff88")
+      .borderRadius(8)
+      .border("none")
+      .cursor("pointer")
+      .transition("all 0.3s ease")
+    }
+    .gap(12)
+  }
+  .horizontalAlignment("space-between")
+  .verticalAlignment("center")
+  .padding(20)
+  .paddingLeft(40)
+  .paddingRight(40)
+  .backgroundColor("#0a0a0a")
+  .borderBottom("1px solid #2a2a2a")
+}

@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "session-reject-new-when-occupied",
+  "description": "reject-new policy refuses any new connection while one is attached.",
+  "function": "session_step",
+  "priority": "P0",
+  "input": {
+    "state": { "policy": "reject-new" },
+    "event": { "kind": "connect", "existing_connection_count": 1 }
+  },
+  "expected": { "kind": "reject_connection" }
+}

@@ -1,0 +1,285 @@
+---
+title: iOS Adapter
+description: Hypen adapter for iOS with SwiftUI
+---
+
+# iOS Adapter
+
+The iOS adapter (`HypenSwift`) renders Hypen components to native SwiftUI views. It connects to a Hypen server over WebSocket and translates the patch-based rendering protocol into a live SwiftUI view hierarchy.
+
+## Installation
+
+Add the package to your Xcode project via Swift Package Manager:
+
+```swift
+// In Package.swift
+dependencies: [
+    .package(url: "https://github.com/hypen-lang/hypen-swiftui.git", from: "1.0.0")
+]
+```
+
+Or in Xcode: **File > Add Package Dependencies**, then enter `https://github.com/hypen-lang/hypen-swiftui.git`.
+
+## Basic Usage
+
+Drop a `HypenView` into any SwiftUI view to render a remote Hypen app:
+
+```swift
+import HypenSwift
+
+struct ContentView: View {
+    var body: some View {
+        HypenView(url: "ws://localhost:3000")
+    }
+}
+```
+
+`HypenView` manages the full lifecycle automatically -- it connects on appear, renders the component tree, and disconnects on disappear.
+
+## Configuration
+
+Customize the connection with `RemoteEngineConfig`:
+
+```swift
+HypenView(
+    url: "ws://localhost:3000",
+    config: RemoteEngineConfig(
+        autoReconnect: true,
+        reconnectInterval: 3.0,
+        maxReconnectAttempts: 10,
+        connectTimeout: 10.0,
+        pingInterval: 30.0,
+        debugLogging: true
+    )
+)
+```
+
+### Configuration Options
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `autoReconnect` | `Bool` | `true` | Automatically reconnect on disconnect |
+| `reconnectInterval` | `TimeInterval` | `3.0` | Seconds between reconnection attempts |
+| `maxReconnectAttempts` | `Int` | `10` | Max attempts before giving up (0 = unlimited) |
+| `connectTimeout` | `TimeInterval` | `10.0` | Connection timeout in seconds |
+| `readTimeout` | `TimeInterval` | `30.0` | Read timeout in seconds |
+| `writeTimeout` | `TimeInterval` | `10.0` | Write timeout in seconds |
+| `pingInterval` | `TimeInterval` | `30.0` | Keep-alive ping interval in seconds |
+| `debugLogging` | `Bool` | `false` | Enable debug logging |
+
+Built-in presets are available: `RemoteEngineConfig.default`, `.debug`, and `.noReconnect`.
+
+## Custom Loading and Error Views
+
+Provide custom SwiftUI views for loading and error states:
+
+```swift
+HypenView(
+    url: "ws://localhost:3000",
+    loadingContent: {
+        VStack {
+            ProgressView()
+            Text("Loading app...")
+        }
+    },
+    errorContent: { message in
+        VStack {
+            Image(systemName: "wifi.slash")
+                .font(.largeTitle)
+            Text(message)
+        }
+    }
+)
+```
+
+## Supported Components
+
+HypenSwift includes native SwiftUI renderers for all standard Hypen components:
+
+- **Layout**: Column, Row, Box, Stack, Center, Container, Spacer, Grid
+- **Content**: Text, Heading, Paragraph, Image, Divider, Link
+- **Interactive**: Button
+- **Forms**: Input, Textarea, Checkbox, Switch, Slider, Select
+- **UI**: Card, Badge, Avatar, Spinner, ProgressBar, List
+- **Media**: Audio, Video (via AVFoundation/AVKit)
+- **Navigation**: Router, Route, Link (with client-side routing)
+
+## Supported Applicators (Styling)
+
+All standard Hypen applicators map to native SwiftUI modifiers:
+
+- **Spacing**: padding, margin
+- **Size**: width, height, fillMaxWidth, fillMaxHeight, aspectRatio
+- **Color**: backgroundColor, foregroundColor (color names, hex, rgba)
+- **Gradients**: linearGradient, radialGradient, conicGradient
+- **Background**: backgroundImage, backgroundSize, backgroundPosition
+- **Border**: border, borderRadius, borderStyle (solid, dashed, dotted, double)
+- **Layout**: alignment, weight, flex, gap, rowGap, columnGap
+- **Visual Effects**: opacity, shadow, blur, boxShadow, clipToBounds
+- **Transform**: rotate, scale, translateX, translateY, compound transforms
+- **Text**: fontSize, fontWeight, fontFamily, textAlign, lineHeight, maxLines
+- **Events**: onClick, onLongPress
+
+## Custom Components
+
+Register custom component handlers to extend the renderer:
+
+```swift
+public struct VideoPlayerComponent: ComponentHandler {
+    public let typeName = "videoplayer"
+
+    public func render(
+        context: ComponentContext,
+        modifier: HypenModifier,
+        children: @escaping () -> AnyView
+    ) -> AnyView {
+        let src = context.element.getStringProp("src.0") ?? ""
+
+        return AnyView(
+            VideoPlayer(player: AVPlayer(url: URL(string: src)!))
+                .hypenModifier(modifier)
+        )
+    }
+}
+
+// Register it
+let registry = ComponentRegistry.withDefaults()
+registry.register(VideoPlayerComponent())
+
+HypenView(
+    url: "ws://localhost:3000",
+    componentRegistry: registry
+)
+```
+
+## Custom Applicators
+
+Add custom styling applicators:
+
+```swift
+public struct GlowApplicator: ApplicatorHandler {
+    public let name = "glow"
+
+    public func apply(
+        modifier: inout HypenModifier,
+        value: Any?,
+        context: ApplicatorContext
+    ) {
+        if let radius = value as? Double {
+            modifier.shadowRadius = CGFloat(radius)
+            modifier.shadowColor = .blue.opacity(0.5)
+        }
+    }
+}
+
+let applicators = ApplicatorRegistry.withDefaults()
+applicators.register(GlowApplicator())
+
+HypenView(
+    url: "ws://localhost:3000",
+    applicatorRegistry: applicators
+)
+```
+
+## Using RemoteEngine Directly
+
+For more control, use `RemoteEngine` and `HypenRenderer` directly:
+
+```swift
+import HypenSwift
+import Combine
+
+@MainActor
+class AppViewModel: ObservableObject {
+    private var engine: RemoteEngine?
+    private let renderer = HypenRenderer()
+    private var cancellables = Set<AnyCancellable>()
+
+    func connect() {
+        let engine = try! RemoteEngine(urlString: "ws://localhost:3000")
+        self.engine = engine
+
+        engine.connectionState
+            .sink { state in print("State: \(state)") }
+            .store(in: &cancellables)
+
+        engine.patches
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] patches in
+                self?.renderer.applyPatches(patches)
+            }
+            .store(in: &cancellables)
+
+        engine.state
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] state in
+                self?.renderer.updateState(state)
+            }
+            .store(in: &cancellables)
+
+        engine.connect()
+    }
+
+    func dispatchAction(_ action: String, payload: [String: Any]? = nil) {
+        engine?.dispatchAction(action, payload: payload)
+    }
+}
+```
+
+## Session Management
+
+`RemoteEngine` supports session persistence and resumption:
+
+```swift
+let engine = try RemoteEngine(
+    urlString: "ws://localhost:3000",
+    sessionOptions: SessionOptions(
+        id: savedSessionId,       // Resume a previous session
+        props: [                  // Client metadata
+            "platform": "ios",
+            "version": "1.0.0"
+        ]
+    )
+)
+
+// Listen for session events
+engine.sessionEstablished
+    .sink { info in
+        print("Session: \(info.sessionId), new: \(info.isNew), restored: \(info.isRestored)")
+    }
+    .store(in: &cancellables)
+
+engine.sessionExpired
+    .sink { reason in
+        print("Session expired: \(reason)")
+    }
+    .store(in: &cancellables)
+```
+
+## Platform Support
+
+HypenSwift supports all Apple platforms:
+
+| Platform | Minimum Version |
+|---|---|
+| iOS | 15.0+ |
+| macOS | 12.0+ |
+| tvOS | 15.0+ |
+| watchOS | 8.0+ |
+
+Platform-specific features (such as keyboard types on iOS or window background colors on macOS) are handled automatically with `#if os()` conditionals.
+
+## Requirements
+
+- Xcode 16+ (Swift 6.0)
+- iOS 15+ / macOS 12+ / tvOS 15+ / watchOS 8+
+- A running Hypen server to connect to (see [TypeScript SDK](/docs/servers/typescript))
+
+## See Also
+
+- [TypeScript SDK](/docs/servers/typescript) -- Server-side module and state API
+- [Remote App Tutorial](/docs/getting-started/remote-app) -- Build a cross-platform remote app
+- [Android Adapter](/docs/adapters/android) -- Android/Jetpack Compose adapter
+- [Web Adapter](/docs/adapters/web) -- Browser DOM and Canvas adapter
+- [Components Guide](/docs/guide/components) -- All built-in components
+- [Styling Guide](/docs/guide/styling) -- Applicators reference

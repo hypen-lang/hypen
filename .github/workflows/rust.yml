@@ -1,0 +1,171 @@
+name: Rust
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "parser/**"
+      - "tailwind-parse/**"
+      - "hypen-engine-rs/**"
+      - "hypen-sdk-rs/**"
+      - ".github/workflows/rust.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "parser/**"
+      - "tailwind-parse/**"
+      - "hypen-engine-rs/**"
+      - "hypen-sdk-rs/**"
+      - ".github/workflows/rust.yml"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            parser
+            tailwind-parse
+            hypen-engine-rs
+            hypen-sdk-rs
+
+      - name: Check parser
+        run: cargo check
+        working-directory: parser
+
+      - name: Check tailwind-parse
+        run: cargo check
+        working-directory: tailwind-parse
+
+      - name: Check engine
+        run: cargo check
+        working-directory: hypen-engine-rs
+
+      - name: Check hypen-server
+        run: cargo check
+        working-directory: hypen-sdk-rs
+
+      - name: Clippy parser
+        run: cargo clippy --all-targets
+        working-directory: parser
+        continue-on-error: true
+
+      - name: Clippy tailwind-parse
+        run: cargo clippy --all-targets
+        working-directory: tailwind-parse
+        continue-on-error: true
+
+      - name: Clippy engine
+        run: cargo clippy --all-targets
+        working-directory: hypen-engine-rs
+        continue-on-error: true
+
+      - name: Clippy hypen-server
+        run: cargo clippy --all-targets
+        working-directory: hypen-sdk-rs
+        continue-on-error: true
+
+  format:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Check formatting
+        run: |
+          cargo fmt --check --manifest-path parser/Cargo.toml
+          cargo fmt --check --manifest-path tailwind-parse/Cargo.toml
+          cargo fmt --check --manifest-path hypen-engine-rs/Cargo.toml
+          cargo fmt --check --manifest-path hypen-sdk-rs/Cargo.toml
+        continue-on-error: true
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            parser
+            tailwind-parse
+            hypen-engine-rs
+            hypen-sdk-rs
+
+      - name: Test parser
+        run: cargo test
+        working-directory: parser
+
+      - name: Test tailwind-parse
+        run: cargo test
+        working-directory: tailwind-parse
+
+      - name: Test engine
+        run: cargo test
+        working-directory: hypen-engine-rs
+
+      - name: Test hypen-server
+        run: cargo test
+        working-directory: hypen-sdk-rs
+
+  wasm-build:
+    name: WASM Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            parser
+            tailwind-parse
+            hypen-engine-rs
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM (bundler)
+        run: wasm-pack build --target bundler --out-dir pkg/bundler --features js
+        working-directory: hypen-engine-rs
+
+      - name: Build WASM (nodejs)
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js
+        working-directory: hypen-engine-rs
+
+      - name: Build WASM (web)
+        run: wasm-pack build --target web --out-dir pkg/web --features js
+        working-directory: hypen-engine-rs
+
+      - name: Build WASI
+        run: cargo build --target wasm32-wasip1 --release --features wasi
+        working-directory: hypen-engine-rs
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-packages
+          path: |
+            hypen-engine-rs/pkg/bundler/
+            hypen-engine-rs/pkg/nodejs/
+            hypen-engine-rs/pkg/web/
+          retention-days: 7

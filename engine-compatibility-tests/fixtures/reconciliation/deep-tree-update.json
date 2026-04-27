@@ -1,0 +1,41 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "deep-tree-update",
+  "description": "Updating a deeply nested binding should only patch that specific node",
+  "category": "reconciliation",
+  "priority": "P1",
+
+  "input": {
+    "source": "Column { Row { Column { Row { Text(\"@{state.deep.value}\") } } } }",
+    "initialState": {
+      "deep": {
+        "value": "Initial"
+      }
+    },
+    "module": {
+      "name": "DeepModule",
+      "actions": [],
+      "stateKeys": ["deep"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render creates deep hierarchy",
+      "action": "initialRender",
+      "expectedPatchCount": 10
+    },
+    {
+      "description": "Updating deep.value should only patch the Text element",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["deep"],
+        "newValues": {
+          "deep": { "value": "Updated" }
+        }
+      },
+      "expectedPatchCount": 1,
+      "forbiddenPatchTypes": ["create", "remove", "insert", "move"]
+    }
+  ]
+}

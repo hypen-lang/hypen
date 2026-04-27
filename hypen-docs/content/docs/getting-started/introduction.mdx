@@ -1,0 +1,144 @@
+---
+title: Introduction
+description: Learn what Hypen is and why you might want to use it
+---
+
+# Introduction
+
+## What is Hypen?
+
+Hypen is a declarative UI language for building cross-platform applications. Write your UI once and deploy to Web, Android, and iOS with native performance.
+
+```hypen
+Column {
+    Text("Hello, Hypen!")
+        .fontSize(24)
+        .fontWeight("bold")
+
+    Button { Text("Click me") }
+        .onClick(@actions.sayHello)
+        .backgroundColor("#3B82F6")
+        .padding(16)
+        .borderRadius(8)
+}
+```
+
+Unlike traditional cross-platform frameworks that use WebViews or custom rendering engines, Hypen compiles to native UI components on each platform:
+
+- **Web**: Native DOM elements
+- **Android**: Jetpack Compose
+- **iOS**: SwiftUI (coming soon)
+
+## Why Hypen?
+
+### Write Once, Run Everywhere
+
+Define your UI in a single `.hypen` file and it renders natively on every platform. No more maintaining separate codebases for web and mobile.
+
+### Simple, Intuitive Syntax
+
+Hypen's syntax is designed to be readable and easy to learn. If you've used SwiftUI, Jetpack Compose, or Flutter, you'll feel right at home.
+
+```hypen
+// Layout with Column and Row
+Column {
+    Row {
+        Image("avatar.png").size(48)
+        Text("John Doe").fontWeight("bold")
+    }
+    .gap(12)
+
+    Text("Welcome back!")
+        .color("#666666")
+}
+.padding(16)
+```
+
+### Reactive by Default
+
+State changes automatically update the UI. No manual DOM manipulation, no setState calls.
+
+```hypen
+module Counter {
+    Text("Count: @{state.count}")
+
+    Button { Text("+1") }
+        .onClick(@actions.increment)
+}
+```
+
+```typescript
+// counter.ts
+export default app
+  .defineState({ count: 0 })
+  .onAction("increment", async ({ state }) => {
+    state.count++;
+  });
+```
+
+### Native Performance
+
+Hypen renders to platform-native components, not WebViews. Your app looks and feels native because it *is* native.
+
+### Type-Safe State Management
+
+Modules provide TypeScript-powered state management with full type inference. Catch errors at compile time, not runtime.
+
+## How It Works
+
+Hypen separates UI and logic:
+
+1. **Templates** (`.hypen` files) - Define the visual structure
+2. **Modules** (TypeScript) - Handle state and business logic
+
+```
+┌─────────────────┐     ┌─────────────────┐
+│  Template.hypen │────▶│  Hypen Engine   │
+└─────────────────┘     │    (WASM)       │
+                        │                 │
+┌─────────────────┐     │    Parses &     │
+│   Module.ts     │────▶│   Reconciles    │
+└─────────────────┘     └────────┬────────┘
+                                 │
+                                 ▼
+              ┌──────────────────┬──────────────────┐
+              │                  │                  │
+              ▼                  ▼                  ▼
+        ┌──────────┐      ┌──────────┐      ┌──────────┐
+        │   Web    │      │ Android  │      │   iOS    │
+        │   DOM    │      │ Compose  │      │ SwiftUI  │
+        └──────────┘      └──────────┘      └──────────┘
+```
+
+The Hypen engine (written in Rust, compiled to WASM) parses your templates, manages state, and generates minimal patches that platform-specific renderers apply to the native UI.
+
+## Developer Tools
+
+Hypen includes a complete development environment:
+
+- **`hypen dev`** — Hot-reloading dev server for rapid iteration in the browser
+- **[Hypen Studio](/docs/tooling/studio)** — A full in-browser IDE with a code editor, live preview, state inspector, action log, time-travel debugging, and an integrated terminal. Run `hypen studio` to launch it.
+- **`hypen run android / ios`** — Preview your app on a real device or simulator with hot reload. Combine with `--studio` to edit in the browser and see changes on the device in real time.
+
+## When to Use Hypen
+
+Hypen is great for:
+
+- **Cross-platform apps** — One codebase for web and mobile
+- **Design systems** — Consistent UI across platforms
+- **Rapid prototyping** — Quick iteration with hot reload on web and native devices
+- **Server-driven UI** — Dynamic interfaces from backend
+
+Hypen might not be the best fit for:
+
+- Platform-specific apps that need deep OS integration
+- Games or graphics-intensive applications
+- Apps that need to be as small as possible (WASM adds ~200KB)
+
+## Next Steps
+
+Ready to get started?
+
+1. [Installation](/docs/getting-started/installation) — Set up Hypen for your platform
+2. [Your First App](/docs/getting-started/first-app) — Build a simple counter app
+3. [Guide](/docs/guide/basics) — Learn the language in depth

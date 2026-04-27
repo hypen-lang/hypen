@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hypen.space/schemas/state-change.schema.json",
+  "title": "StateChange",
+  "description": "Represents a state change notification with affected paths and new values",
+  "type": "object",
+  "properties": {
+    "paths": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Array of dot-notation paths that changed (e.g., ['user.name', 'count'])"
+    },
+    "newValues": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "Map of path -> new value for changed paths"
+    }
+  },
+  "required": ["paths", "newValues"],
+  "additionalProperties": false
+}

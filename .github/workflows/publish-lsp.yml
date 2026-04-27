@@ -1,0 +1,104 @@
+name: Publish LSP Extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to publish (e.g. 0.3.0)"
+        required: true
+        type: string
+      dry-run:
+        description: "Dry run — build only, skip publishing"
+        required: false
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      dry-run:
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      VSCE_PAT:
+        required: true
+
+jobs:
+  build-and-test:
+    name: Build + Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Build parser WASM that the LSP imports
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: parser
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build parser WASM
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features wasm
+        working-directory: parser
+
+      - name: Setup WASM symlink
+        run: |
+          cd hypen-lsp
+          rm -rf wasm
+          ln -sf ../parser/pkg/nodejs wasm
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: hypen-lsp
+
+      - name: Compile
+        run: npx tsc -b
+        working-directory: hypen-lsp
+
+      - name: Lint
+        run: npx eslint ./src --ext .ts
+        working-directory: hypen-lsp
+
+      - name: Package VSIX
+        run: npx vsce package
+        working-directory: hypen-lsp
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: hypen-lsp-vsix
+          path: hypen-lsp/*.vsix
+
+  publish:
+    name: Publish to VS Code Marketplace
+    runs-on: ubuntu-latest
+    needs: [build-and-test]
+    if: ${{ !inputs.dry-run }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: hypen-lsp-vsix
+          path: hypen-lsp
+
+      - name: Publish
+        run: npx vsce publish --packagePath *.vsix
+        working-directory: hypen-lsp
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}

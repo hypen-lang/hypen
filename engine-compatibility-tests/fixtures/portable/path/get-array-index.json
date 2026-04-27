@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "path-get-array-index",
+  "description": "Numeric segments index into arrays; a 2-digit index works.",
+  "function": "path_get",
+  "priority": "P0",
+  "input": {
+    "value": { "items": ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"] },
+    "path": "items.10"
+  },
+  "expected": "k"
+}

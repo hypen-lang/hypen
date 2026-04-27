@@ -1,0 +1,60 @@
+module App {
+    Column {
+    Router {
+        Route(path: "/") {
+            Column {
+                HomePage()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-gray-50")
+        }
+
+        Route(path: "/search") {
+            Column {
+                Search()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-gray-50")
+        }
+
+        Route(path: "/cart") {
+            Column {
+                Cart()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-gray-50")
+        }
+
+        Route(path: "/orders") {
+            Column {
+                Orders()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-gray-50")
+        }
+
+        Route(path: "/profile") {
+            Column {
+                Profile()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-gray-50")
+        }
+
+        Route(path: "/restaurant/:id") {
+            RestaurantDetail()
+        }
+
+        Route(path: "/order/:id") {
+            OrderDetail()
+        }
+    }
+    .tw("flex-1 w-full h-full")
+    }
+    .tw("flex-1 w-full h-full min-h-screen bg-gray-50")
+}

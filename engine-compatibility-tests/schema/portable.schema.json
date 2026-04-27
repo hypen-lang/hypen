@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hypen.space/schemas/portable.schema.json",
+  "title": "PortableFixture",
+  "description": "A cross-SDK fixture for the engine's portable pure helpers (diff, route, session). Every host SDK feeds the `input` to its binding of the named portable function and must produce output byte-equal to `expected`.",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique identifier for the test case (kebab-case)."
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what this fixture verifies."
+    },
+    "function": {
+      "type": "string",
+      "enum": [
+        "diff_paths",
+        "match_path",
+        "session_step",
+        "path_get",
+        "path_has",
+        "path_set",
+        "path_delete",
+        "encode_uri_component",
+        "decode_uri_component",
+        "parse_query",
+        "build_url"
+      ],
+      "description": "Which portable function the SDK must call with `input` to produce `expected`."
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["P0", "P1", "P2"],
+      "default": "P1"
+    },
+    "input": {
+      "oneOf": [
+        {
+          "description": "diff_paths: two JSON values to compare.",
+          "type": "object",
+          "properties": {
+            "old": {},
+            "new": {}
+          },
+          "required": ["old", "new"],
+          "additionalProperties": false
+        },
+        {
+          "description": "match_path: pattern and path.",
+          "type": "object",
+          "properties": {
+            "pattern": { "type": "string" },
+            "path": { "type": "string" }
+          },
+          "required": ["pattern", "path"],
+          "additionalProperties": false
+        },
+        {
+          "description": "session_step: serialised SessionState and SessionEvent.",
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "object",
+              "properties": {
+                "policy": { "type": "string", "enum": ["kick-old", "reject-new", "allow-multiple"] }
+              },
+              "required": ["policy"]
+            },
+            "event": {
+              "type": "object"
+            }
+          },
+          "required": ["state", "event"],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "expected": {
+      "description": "The exact output the portable function must return. SDKs must compare byte-equal after JSON normalisation.",
+      "oneOf": [
+        {
+          "description": "diff_paths: an ordered array of (path, value) entries.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": { "type": "string" },
+              "value": {}
+            },
+            "required": ["path", "value"]
+          }
+        },
+        {
+          "description": "match_path: matched/params pair.",
+          "type": "object",
+          "properties": {
+            "matched": { "type": "boolean" },
+            "params": {
+              "type": "object",
+              "additionalProperties": { "type": "string" }
+            }
+          },
+          "required": ["matched", "params"]
+        },
+        {
+          "description": "session_step: a single SessionEffect object.",
+          "type": "object",
+          "properties": {
+            "kind": { "type": "string" }
+          },
+          "required": ["kind"]
+        }
+      ]
+    }
+  },
+  "required": ["name", "description", "function", "input", "expected"],
+  "additionalProperties": false
+}

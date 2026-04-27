@@ -1,0 +1,32 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "document-without-imports",
+  "description": "Renders a document without imports - should work identically to parse_component",
+  "category": "imports",
+  "priority": "P0",
+
+  "input": {
+    "source": "Column { Text(\"No imports\") Row { Text(\"Nested\") } }",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 8,
+    "patchTypes": ["create", "insert", "create", "insert", "create", "insert", "create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Column" },
+      { "type": "create", "elementType": "Text", "props": { "0": "No imports" } },
+      { "type": "create", "elementType": "Row" },
+      { "type": "create", "elementType": "Text", "props": { "0": "Nested" } },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

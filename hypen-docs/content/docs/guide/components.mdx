@@ -1,0 +1,530 @@
+---
+title: Components
+description: Complete reference of all built-in Hypen components
+---
+
+# Components
+
+Hypen provides a set of built-in components for building UIs. This guide covers all available components.
+
+## Layout Components
+
+### Column
+
+Arranges children vertically.
+
+```hypen
+Column {
+    Text("First")
+    Text("Second")
+    Text("Third")
+}
+.gap(12)
+```
+
+### Row
+
+Arranges children horizontally.
+
+```hypen
+Row {
+    Text("Left")
+    Spacer()
+    Text("Right")
+}
+.gap(12)
+```
+
+### Box / Container
+
+Generic container with z-axis stacking (overlay).
+
+```hypen
+Box {
+    Image("background.jpg")
+    Text("Overlay")
+}
+```
+
+### Center
+
+Centers content both horizontally and vertically.
+
+```hypen
+Center {
+    Spinner()
+}
+.fillMaxSize(true)
+```
+
+### Stack
+
+Overlays children on the z-axis.
+
+```hypen
+Stack {
+    Card { Text("Base") }
+    Badge("New")
+}
+```
+
+### Grid
+
+Arranges children in a grid.
+
+```hypen
+Grid {
+    Card { Text("1") }
+    Card { Text("2") }
+    Card { Text("3") }
+    Card { Text("4") }
+}
+.gridColumns(2)
+.gap(16)
+```
+
+### List
+
+Scrollable container for items.
+
+```hypen
+List {
+    Text("Item 1")
+    Text("Item 2")
+    Text("Item 3")
+}
+```
+
+### Spacer
+
+Flexible empty space.
+
+```hypen
+Row {
+    Text("Left")
+    Spacer()
+    Text("Right")
+}
+```
+
+### Divider
+
+Visual separator line.
+
+```hypen
+Column {
+    Text("Section 1")
+    Divider()
+    Text("Section 2")
+}
+```
+
+## Content Components
+
+### Text
+
+Displays text.
+
+```hypen
+Text("Hello World")
+    .fontSize(18)
+    .fontWeight("bold")
+    .color("#333333")
+```
+
+### Heading
+
+Heading text with larger default styling.
+
+```hypen
+Heading("Page Title")
+    .fontSize(32)
+```
+
+### Paragraph
+
+Paragraph text with appropriate line spacing.
+
+```hypen
+Paragraph("Long text content that spans multiple lines...")
+    .lineHeight(1.6)
+```
+
+### Image
+
+Displays an image.
+
+```hypen
+Image("https://example.com/photo.jpg")
+    .width(200)
+    .height(200)
+    .borderRadius(8)
+```
+
+## Input Components
+
+### Button
+
+Clickable button.
+
+```hypen
+Button {
+    Text("Submit")
+}
+.onClick(@actions.submit)
+.backgroundColor("#3B82F6")
+.padding(12)
+.borderRadius(6)
+```
+
+### Input
+
+Single-line text input.
+
+```hypen
+Input(placeholder: "Enter your name")
+    .value(@{state.name})
+    .onInput(@actions.updateName)
+    .padding(12)
+    .borderRadius(4)
+```
+
+### Textarea
+
+Multi-line text input.
+
+```hypen
+Textarea(placeholder: "Enter message...")
+    .onInput(@actions.updateMessage)
+    .height(100)
+```
+
+### Checkbox
+
+Toggle checkbox.
+
+```hypen
+Checkbox {}
+    .checked(@{state.agreed})
+    .onChange(@actions.toggleAgreed)
+```
+
+### Switch
+
+Toggle switch.
+
+```hypen
+Switch {}
+    .checked(@{state.darkMode})
+    .onChange(@actions.toggleDarkMode)
+```
+
+### Select
+
+Dropdown selection.
+
+```hypen
+Select {}
+    .value(@{state.country})
+    .onChange(@actions.updateCountry)
+```
+
+### Slider
+
+Range slider.
+
+```hypen
+Slider {}
+    .value(@{state.volume})
+    .onChange(@actions.updateVolume)
+```
+
+## Display Components
+
+### Card
+
+Container with elevation and rounded corners.
+
+```hypen
+Card {
+    Column {
+        Text("Card Title")
+        Text("Card content")
+    }
+    .padding(16)
+}
+```
+
+### Badge
+
+Small label indicator.
+
+```hypen
+Badge("3")
+    .backgroundColor("#EF4444")
+```
+
+### Avatar
+
+User avatar display.
+
+```hypen
+Avatar("https://example.com/user.jpg")
+    .size(48)
+    .borderRadius(24)
+```
+
+### Spinner
+
+Loading indicator.
+
+```hypen
+Spinner()
+    .size(24)
+```
+
+### ProgressBar
+
+Progress indicator.
+
+```hypen
+ProgressBar(value: @{state.progress})
+    .height(4)
+```
+
+### Icon
+
+SVG icon rendered from a registered resource. Icons are registered server-side
+via `resources()` or `resourcesDir()` and resolved at render time — the client
+receives pre-resolved SVG path data, not raw SVG strings.
+
+```hypen
+Icon(@resources.heart)
+    .size(24)
+    .color("#ed4956")
+```
+
+Reference a resource by name with the `@resources` prefix:
+
+```hypen
+Icon(@resources.search)
+    .size(20)
+    .color("#8e8e8e")
+
+Icon(@resources.plus-square)
+    .size(28)
+```
+
+You can also use a static string (resolved against the same registry):
+
+```hypen
+Icon("heart")
+    .size(24)
+```
+
+**Props:**
+- `@resources.name` or `"name"` — resource name (positional)
+- `size` — icon size in pixels (default: 24)
+- `color` — icon color (default: "currentColor")
+
+**Registering resources (server-side):**
+
+```typescript
+// TypeScript
+const server = new RemoteServer()
+  .resources({
+    heart: '<svg viewBox="0 0 24 24"><path d="M20.84 4.61..."/></svg>',
+  })
+// Or load from a JSON file (name → SVG map)
+await server.resourcesFile("./resources.json")
+// Or load all .svg files from a directory
+await server.resourcesDir("./icons/")
+```
+
+## Media Components
+
+### Video
+
+Video player.
+
+```hypen
+Video("https://example.com/video.mp4")
+    .width(640)
+    .height(360)
+```
+
+### Audio
+
+Audio player.
+
+```hypen
+Audio("https://example.com/audio.mp3")
+```
+
+## Navigation Components
+
+### Link
+
+Navigation link.
+
+```hypen
+Link(href: "/about") {
+    Text("About Us")
+}
+```
+
+### Router / Route
+
+Declarative routing driven by module state. Routes are matched by the platform renderer based on `state.location`. For a complete routing guide, see **[Routing](/docs/guide/routing)**.
+
+```hypen
+Router(initialRoute: "/home") {
+    Route(path: "/home") {
+        HomePage()
+    }
+    Route(path: "/users/:id") {
+        UserProfile(userId: @{state.params.id})
+    }
+    Route(path: "/settings", guard: @actions.requireAuth) {
+        SettingsPage()
+    }
+    Route.fallback {
+        NotFoundPage()
+    }
+}
+```
+
+**Router Arguments:**
+- `initialRoute`: Default route on mount
+
+**Route Arguments:**
+- `path`: URL pattern (supports `:param` segments)
+- `guard` (optional): Async action to run before entering the route
+- `exact` (optional): Only match the exact path
+
+## Control Flow Components
+
+Control flow components are first-class constructs in the engine. They don't create DOM elements — their children render directly into the parent container. For a complete guide with patterns, performance tips, and end-to-end examples, see **[Control Flow](/docs/guide/control-flow)**.
+
+### ForEach
+
+Iterates over a collection and renders children for each item. Use `@item` to reference each item, and always provide `key` for dynamic lists.
+
+```hypen
+ForEach(items: @state.todos, key: "id") {
+    Row {
+        Checkbox {}
+            .checked(@item.completed)
+            .onChange(@actions.toggleTodo)
+
+        Text(@item.title)
+            .fontSize(16)
+            .color("@{item.completed ? '#9CA3AF' : '#111827'}")
+            .flex(1)
+
+        Button { Text("Delete") }
+            .onClick(@actions.deleteTodo)
+            .color("#EF4444")
+    }
+    .padding(12)
+    .gap(12)
+    .verticalAlignment("center")
+}
+```
+
+**Arguments:**
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `items` or `in` | Yes | — | Array binding from state |
+| `key` | No | index | Property name for stable identity across updates |
+| `as` | No | `"item"` | Custom variable name for each element |
+
+### When
+
+Pattern matching on a value with multiple cases. Great for loading/error/success states.
+
+```hypen
+When(value: @state.status) {
+    Case(match: "loading") {
+        Center { Spinner() }
+    }
+    Case(match: "error") {
+        Column {
+            Text("Something went wrong")
+            Button { Text("Retry") }
+                .onClick(@actions.reload)
+        }
+    }
+    Case(match: "success") {
+        ContentView()
+    }
+    Else {
+        Text("Unknown status")
+    }
+}
+```
+
+**Arguments:**
+- `value`: The value to match against
+
+**Children:**
+- `Case(match: ...)`: One or more case branches
+- `Else`: Optional fallback when no Case matches
+
+**Match Patterns:**
+- Exact values: `"loading"`, `200`, `true`
+- Multiple values (OR): `[200, 201, 204]`
+- Wildcards: `"_"` or `"*"`
+- Expressions: `"@{value >= 90}"`
+
+### If
+
+Boolean conditional for simple true/false branching. Under the hood it's syntactic sugar over When.
+
+```hypen
+If(condition: @state.isLoggedIn) {
+    ProfileMenu()
+    Else {
+        LoginButton()
+    }
+}
+
+// Without Else — just hide/show
+If(condition: @state.hasNotifications) {
+    Badge("New")
+        .backgroundColor("#EF4444")
+}
+```
+
+**Arguments:**
+- `condition`: Boolean binding or expression
+
+**Children:**
+- Main content (rendered when truthy)
+- `Else`: Optional fallback (rendered when falsy)
+
+## Platform Support
+
+| Component | Web | Android | iOS |
+|-----------|-----|---------|-----|
+| Column, Row, Box | Yes | Yes | Yes |
+| Center, Stack, Grid | Yes | Yes | Yes |
+| List, Spacer, Divider | Yes | Yes | Yes |
+| Text, Heading, Paragraph | Yes | Yes | Yes |
+| Image | Yes | Yes | Yes |
+| Button, Input, Textarea | Yes | Yes | Yes |
+| Checkbox, Switch, Select | Yes | Yes | Yes |
+| Slider | Yes | Yes | Yes |
+| Card, Badge, Avatar | Yes | Yes | Yes |
+| Spinner, ProgressBar | Yes | Yes | Yes |
+| Video, Audio | Yes | Yes | Yes |
+| Link, Router, Route | Yes | Yes | Yes |
+| ForEach, When, If | Yes | Yes | Yes |
+
+## Next Steps
+
+- [Control Flow](/docs/guide/control-flow) — Deep dive into ForEach, When, If with patterns and performance tips
+- [Routing](/docs/guide/routing) — Navigation, route guards, and nested routing
+- [Layout](/docs/guide/layout) — Layout components and alignment
+- [Styling](/docs/guide/styling) — Complete applicator reference
+- [Inputs](/docs/guide/inputs) — Forms and user interaction

@@ -1,0 +1,536 @@
+---
+title: Layout
+description: Layout components for structuring UI elements in Hypen
+---
+
+# Layout
+
+Layout components are the foundation for creating structure and arrangement of UI elements. Every layout component can contain children that are rendered according to the layout's rules.
+
+## Column
+
+Arranges children vertically from top to bottom.
+
+```hypen
+Column {
+    Text("First")
+    Text("Second")
+    Text("Third")
+}
+```
+
+### Alignment
+
+```hypen
+// Center children horizontally
+Column {
+    Text("Centered")
+}
+.horizontalAlignment("center")
+
+// Distribute children vertically
+Column {
+    Text("Top")
+    Text("Middle")
+    Text("Bottom")
+}
+.verticalAlignment("space-between")
+```
+
+### Spacing
+
+```hypen
+Column {
+    Text("Item 1")
+    Text("Item 2")
+    Text("Item 3")
+}
+.gap(16)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Row
+
+Arranges children horizontally from left to right.
+
+```hypen
+Row {
+    Text("Left")
+    Text("Center")
+    Text("Right")
+}
+```
+
+### Alignment
+
+```hypen
+// Center children vertically
+Row {
+    Text("Vertically centered")
+}
+.verticalAlignment("center")
+
+// Distribute children horizontally
+Row {
+    Text("Left")
+    Spacer()
+    Text("Right")
+}
+.horizontalAlignment("space-between")
+```
+
+### Flexible Children
+
+Use `weight` to make children fill available space:
+
+```hypen
+Row {
+    Text("Fixed")
+    Box {
+        Text("Flexible")
+    }
+    .weight(1)
+    Text("Fixed")
+}
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Box / Container
+
+A generic container that positions children using z-axis stacking. Children are overlaid on top of each other, with later children appearing above earlier ones.
+
+```hypen
+Box {
+    Image("background.jpg")
+        .fillMaxSize(true)
+
+    Column {
+        Text("Overlay content")
+    }
+    .padding(16)
+}
+```
+
+Use `Container` as an alias for `Box`:
+
+```hypen
+Container {
+    Text("Content")
+}
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Center
+
+Centers its children both horizontally and vertically within its bounds.
+
+```hypen
+Center {
+    Spinner()
+}
+.fillMaxSize(true)
+```
+
+Useful for centering loading indicators, modals, or any content that needs to be visually centered.
+
+**Platform Support:** Web, Android, iOS
+
+## Stack
+
+Similar to Box, stacks children on the z-axis for overlapping layouts. Useful for creating layered UI elements like badges on cards.
+
+```hypen
+Stack {
+    Card {
+        Text("Background card")
+    }
+
+    Badge("New")
+        .position("absolute")
+        .top(8)
+        .right(8)
+}
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Grid
+
+Arranges children in a grid layout with specified columns.
+
+```hypen
+Grid {
+    Card { Text("1") }
+    Card { Text("2") }
+    Card { Text("3") }
+    Card { Text("4") }
+    Card { Text("5") }
+    Card { Text("6") }
+}
+.gridColumns(3)
+.gap(16)
+```
+
+### Grid Configuration
+
+```hypen
+// Fixed number of columns
+Grid { }
+.gridColumns(2)
+
+// Custom column template (Web)
+Grid { }
+.gridTemplateColumns("1fr 2fr 1fr")
+
+// Separate row and column gaps
+Grid { }
+.rowGap(16)
+.columnGap(8)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## List
+
+A scrollable container optimized for displaying collections of items. On Android, uses virtualized rendering (LazyColumn) for performance with large lists.
+
+```hypen
+List {
+    Text("Item 1")
+    Text("Item 2")
+    Text("Item 3")
+}
+```
+
+### List Direction
+
+```hypen
+// Vertical list (default)
+List { }
+
+// Horizontal list
+List { }
+.flexDirection("row")
+```
+
+### Scrolling
+
+```hypen
+List { }
+.scrollable(true)
+.height(400)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Spacer
+
+Creates flexible empty space between components. Expands to fill available space within a Row or Column.
+
+```hypen
+Row {
+    Text("Left aligned")
+    Spacer()
+    Text("Right aligned")
+}
+```
+
+Multiple spacers distribute space evenly:
+
+```hypen
+Row {
+    Text("Left")
+    Spacer()
+    Text("Center")
+    Spacer()
+    Text("Right")
+}
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Divider
+
+A thin horizontal line for visual separation between content sections.
+
+```hypen
+Column {
+    Text("Section 1 content")
+    Divider()
+    Text("Section 2 content")
+}
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Size
+
+### Understanding Size Units
+
+Hypen supports multiple size units that work consistently across all platforms:
+
+| Unit | Example | Description |
+|------|---------|-------------|
+| *(number)* | `200` | Density-independent points (default) |
+| `px` | `"200px"` | Absolute pixels (converted to points on mobile) |
+| `dp` / `pt` | `"16dp"` | Density-independent points (equivalent) |
+| `%` | `"50%"` | Percentage of parent element |
+| `vw` | `"100vw"` | Viewport width (100vw = full screen width) |
+| `vh` | `"50vh"` | Viewport height (50vh = half screen height) |
+
+**Keywords:**
+- `"fill"` or `"match_parent"` → expands to `100%`
+- `"wrap"` or `"auto"` → shrinks to fit content
+
+### How Sizing Works Per Platform
+
+The units `dp` and `pt` are equivalent — both represent density-independent points that scale appropriately with the device's screen density:
+
+| Platform | Bare Number | `px` Conversion | `dp`/`pt` |
+|----------|-------------|-----------------|-----------|
+| **Android** | dp | `px / density` | Native dp |
+| **iOS** | pt | `px / scale` | Native pt |
+| **Web** | CSS px | 1:1 | CSS px |
+
+- **Android**: Uses `displayMetrics.density` (typically 2-3x on modern phones)
+- **iOS**: Uses `UIScreen.main.scale` (2x on Retina, 3x on Super Retina)
+- **Web**: CSS pixels are already density-independent in browsers
+
+**Example:** `.width(100)` renders as:
+- Android: 100dp → 200-300 physical pixels on a 2-3x density screen
+- iOS: 100pt → 200-300 physical pixels on a 2-3x scale screen
+- Web: 100px → browser handles scaling automatically
+
+```hypen
+// Using different units
+Box { }
+    .width(200)           // 200 points (density-independent)
+    .height("50%")        // 50% of parent
+    .minWidth("320px")    // 320 absolute pixels
+    .maxWidth("100vw")    // full viewport width
+
+// Responsive full-width container
+Box { }
+    .width("fill")        // same as "100%"
+
+// Content-sized element
+Text("Hello")
+    .width("wrap")        // same as "auto"
+```
+
+### width / height
+
+Sets explicit dimensions for a component.
+
+```hypen
+Box { }
+    .width(200)
+    .height(100)
+```
+
+Accepts numbers (density-independent points) or strings with units:
+
+```hypen
+Box { }
+    .width("50%")
+    .height("100vh")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### minWidth / maxWidth / minHeight / maxHeight
+
+Sets size constraints, allowing the component to flex within bounds.
+
+```hypen
+Box { }
+    .minWidth(100)
+    .maxWidth(500)
+    .minHeight(50)
+    .maxHeight(300)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### size
+
+A convenience applicator that sets both width and height to the same value. Useful for square elements like avatars and icons.
+
+```hypen
+Avatar("user.jpg").size(48)
+Icon("star").size(24)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### fillMaxWidth / fillMaxHeight / fillMaxSize
+
+Expands a component to fill available space in its parent container.
+
+```hypen
+// Fill entire width
+Box { }.fillMaxWidth(true)
+
+// Fill with a fraction (0.5 = 50% of available space)
+Box { }.fillMaxWidth(0.5)
+
+// Fill both width and height
+Box { }.fillMaxSize(true)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### aspectRatio
+
+Maintains a consistent width-to-height ratio regardless of container size. Useful for images and video containers.
+
+```hypen
+// 16:9 widescreen ratio
+Image("photo.jpg")
+    .aspectRatio(16/9)
+
+// Square
+Image("avatar.jpg")
+    .aspectRatio(1)
+```
+
+**Platform Support:** Android, iOS (Web: use width/height)
+
+## Layout Applicators
+
+These applicators work with layout components to control spacing, alignment, and flexibility.
+
+### Spacing Applicators
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| `padding` | Internal spacing | `.padding(16)` |
+| `margin` | External spacing | `.margin(8)` |
+| `gap` | Space between children | `.gap(12)` |
+| `rowGap` | Vertical gap in grid | `.rowGap(16)` |
+| `columnGap` | Horizontal gap in grid | `.columnGap(8)` |
+
+### Padding Variants
+
+```hypen
+// Uniform padding
+Box { }.padding(16)
+
+// Horizontal and vertical
+Box { }.padding(horizontal: 16, vertical: 8)
+
+// Individual sides
+Box { }.padding(top: 16, right: 12, bottom: 16, left: 12)
+```
+
+### Alignment Applicators
+
+| Applicator | Description | Values |
+|------------|-------------|--------|
+| `horizontalAlignment` | Horizontal alignment of children | `start`, `center`, `end`, `space-between`, `space-around` |
+| `verticalAlignment` | Vertical alignment of children | `start`, `center`, `end`, `space-between`, `space-around` |
+
+### Flex Applicators
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| `weight` | Flex grow factor | `.weight(1)` |
+| `flex` | CSS flex shorthand | `.flex(1)` |
+| `flexGrow` | Grow factor | `.flexGrow(1)` |
+| `flexShrink` | Shrink factor | `.flexShrink(0)` |
+
+## Layout Examples
+
+### Navigation Bar
+
+```hypen
+Row {
+    Text("Logo")
+        .fontWeight("bold")
+
+    Spacer()
+
+    Row {
+        Link(href: "/home") { Text("Home") }
+        Link(href: "/about") { Text("About") }
+        Link(href: "/contact") { Text("Contact") }
+    }
+    .gap(24)
+}
+.padding(16)
+.backgroundColor("#ffffff")
+```
+
+### Card Grid
+
+```hypen
+Grid {
+    Card {
+        Column {
+            Image("product1.jpg")
+            Text("Product 1")
+            Text("$29.99")
+        }
+    }
+    Card {
+        Column {
+            Image("product2.jpg")
+            Text("Product 2")
+            Text("$39.99")
+        }
+    }
+}
+.gridColumns(3)
+.gap(24)
+.padding(16)
+```
+
+### Centered Loading
+
+```hypen
+Center {
+    Column {
+        Spinner()
+            .size(48)
+        Text("Loading...")
+            .color("#666666")
+    }
+    .gap(16)
+}
+.fillMaxSize(true)
+```
+
+### Sidebar Layout
+
+```hypen
+Row {
+    // Sidebar
+    Column {
+        Text("Menu")
+            .fontWeight("bold")
+        Divider()
+        Link(href: "/dashboard") { Text("Dashboard") }
+        Link(href: "/settings") { Text("Settings") }
+    }
+    .width(250)
+    .padding(16)
+    .backgroundColor("#f5f5f5")
+
+    // Main content
+    Column {
+        Text("Main Content")
+    }
+    .weight(1)
+    .padding(24)
+}
+.fillMaxSize(true)
+```
+
+## Next Steps
+
+- [Styling](/docs/guide/styling) - Complete applicator reference
+- [Inputs](/docs/guide/inputs) - Forms and user interaction
+- [State & Modules](/docs/guide/state) - State management

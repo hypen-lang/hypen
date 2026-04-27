@@ -1,0 +1,96 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hypen.space/schemas/patch.schema.json",
+  "title": "Patch",
+  "description": "A patch operation emitted by the Hypen engine during reconciliation",
+  "type": "object",
+  "oneOf": [
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "create" },
+        "id": { "type": "string", "description": "Unique identifier for the created element" },
+        "elementType": { "type": "string", "description": "Type of element (e.g., 'Text', 'Column', 'Button')" },
+        "props": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Initial properties for the element"
+        }
+      },
+      "required": ["type", "id", "elementType"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "setProp" },
+        "id": { "type": "string", "description": "Element ID to update" },
+        "name": { "type": "string", "description": "Property name" },
+        "value": { "description": "New property value" }
+      },
+      "required": ["type", "id", "name", "value"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "setText" },
+        "id": { "type": "string", "description": "Element ID to update" },
+        "text": { "type": "string", "description": "New text content" }
+      },
+      "required": ["type", "id", "text"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "insert" },
+        "parentId": { "type": "string", "description": "Parent element ID" },
+        "id": { "type": "string", "description": "Element ID to insert" },
+        "beforeId": { "type": ["string", "null"], "description": "Insert before this element (null = append)" }
+      },
+      "required": ["type", "parentId", "id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "move" },
+        "parentId": { "type": "string", "description": "Parent element ID" },
+        "id": { "type": "string", "description": "Element ID to move" },
+        "beforeId": { "type": ["string", "null"], "description": "Move before this element (null = move to end)" }
+      },
+      "required": ["type", "parentId", "id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "remove" },
+        "id": { "type": "string", "description": "Element ID to remove" }
+      },
+      "required": ["type", "id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "attachEvent" },
+        "id": { "type": "string", "description": "Element ID" },
+        "eventName": { "type": "string", "description": "Event name to attach (e.g., 'click', 'change')" }
+      },
+      "required": ["type", "id", "eventName"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "detachEvent" },
+        "id": { "type": "string", "description": "Element ID" },
+        "eventName": { "type": "string", "description": "Event name to detach" }
+      },
+      "required": ["type", "id", "eventName"],
+      "additionalProperties": false
+    }
+  ]
+}

@@ -1,0 +1,68 @@
+---
+title: Android Adapter
+description: Hypen adapter for Android with Jetpack Compose
+---
+
+# Android Adapter
+
+The Android adapter renders Hypen components to native Jetpack Compose UI.
+
+## Installation
+
+Add to your `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("space.hypen:hypen-renderer:0.4.80")
+}
+
+// In settings.gradle.kts
+dependencyResolutionManagement {
+    repositories {
+        maven { url = uri("https://maven.hypen.space") }
+    }
+}
+```
+
+## Basic Usage
+
+```kotlin
+import space.hypen.renderer.HypenApp
+
+@Composable
+fun MyScreen() {
+    HypenView(
+        source = """
+            Column {
+                Text("Hello from Hypen!")
+                    .fontSize(24)
+            }
+        """,
+        state = mapOf("name" to "World")
+    )
+}
+```
+
+## Remote Apps
+
+Connect to a Hypen server:
+
+```kotlin
+import space.hypen.renderer.HypenApp
+
+@Composable
+fun RemoteScreen() {
+    // Use 10.0.2.2 for emulator to reach host machine
+    HypenApp(
+        url = "ws://10.0.2.2:3000",
+        modifier = Modifier.fillMaxSize()
+    )
+}
+```
+
+## Requirements
+
+- Android Studio Arctic Fox+
+- Kotlin 1.9+
+- minSdk 24+
+- Jetpack Compose 1.5+

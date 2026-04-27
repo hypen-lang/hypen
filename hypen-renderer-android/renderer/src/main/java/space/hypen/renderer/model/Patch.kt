@@ -1,0 +1,211 @@
+package space.hypen.renderer.model
+
+import com.squareup.moshi.Json
+import com.squareup.moshi.JsonClass
+
+/**
+ * Represents the type of patch operation.
+ */
+enum class PatchType {
+    @Json(name = "create")
+    CREATE,
+
+    @Json(name = "setProp")
+    SET_PROP,
+
+    @Json(name = "removeProp")
+    REMOVE_PROP,
+
+    @Json(name = "setText")
+    SET_TEXT,
+
+    @Json(name = "insert")
+    INSERT,
+
+    @Json(name = "move")
+    MOVE,
+
+    @Json(name = "remove")
+    REMOVE,
+
+    @Json(name = "attachEvent")
+    ATTACH_EVENT,
+
+    @Json(name = "detachEvent")
+    DETACH_EVENT,
+
+    /**
+     * Unlink a subtree from its parent without destroying it. The
+     * renderer keeps the element and its descendants alive under
+     * the same id; a subsequent ATTACH reinserts them, an optional
+     * REMOVE tears them down normally.
+     *
+     * Used by the engine's Router subtree cache to preserve
+     * off-screen routes between navigations.
+     */
+    @Json(name = "detach")
+    DETACH,
+
+    /**
+     * Reattach a previously-detached subtree to a parent.
+     * `id` must still be in the renderer's element map.
+     */
+    @Json(name = "attach")
+    ATTACH,
+}
+
+/**
+ * Represents a patch operation from the Hypen engine.
+ * Patches are atomic UI updates that describe how to modify the render tree.
+ */
+@JsonClass(generateAdapter = true)
+data class Patch(
+    val type: PatchType,
+    val id: String? = null,
+    val elementType: String? = null,
+    val props: Map<String, Any?>? = null,
+    val name: String? = null,
+    val value: Any? = null,
+    val text: String? = null,
+    val parentId: String? = null,
+    val beforeId: String? = null,
+    val eventName: String? = null,
+) {
+    companion object {
+        /**
+         * Create a CREATE patch for a new element.
+         */
+        fun create(
+            id: String,
+            elementType: String,
+            props: Map<String, Any?> = emptyMap(),
+        ) = Patch(
+            type = PatchType.CREATE,
+            id = id,
+            elementType = elementType,
+            props = props,
+        )
+
+        /**
+         * Create a SET_PROP patch to update a property.
+         */
+        fun setProp(
+            id: String,
+            name: String,
+            value: Any?,
+        ) = Patch(
+            type = PatchType.SET_PROP,
+            id = id,
+            name = name,
+            value = value,
+        )
+
+        /**
+         * Create a REMOVE_PROP patch to remove a property.
+         */
+        fun removeProp(
+            id: String,
+            name: String,
+        ) = Patch(
+            type = PatchType.REMOVE_PROP,
+            id = id,
+            name = name,
+        )
+
+        /**
+         * Create a SET_TEXT patch to update text content.
+         */
+        fun setText(
+            id: String,
+            text: String,
+        ) = Patch(
+            type = PatchType.SET_TEXT,
+            id = id,
+            text = text,
+        )
+
+        /**
+         * Create an INSERT patch to add an element to the tree.
+         */
+        fun insert(
+            parentId: String,
+            id: String,
+            beforeId: String? = null,
+        ) = Patch(
+            type = PatchType.INSERT,
+            parentId = parentId,
+            id = id,
+            beforeId = beforeId,
+        )
+
+        /**
+         * Create a MOVE patch to reposition an element.
+         */
+        fun move(
+            parentId: String,
+            id: String,
+            beforeId: String? = null,
+        ) = Patch(
+            type = PatchType.MOVE,
+            parentId = parentId,
+            id = id,
+            beforeId = beforeId,
+        )
+
+        /**
+         * Create a REMOVE patch to delete an element.
+         */
+        fun remove(id: String) =
+            Patch(
+                type = PatchType.REMOVE,
+                id = id,
+            )
+
+        /**
+         * Create an ATTACH_EVENT patch.
+         */
+        fun attachEvent(
+            id: String,
+            eventName: String,
+        ) = Patch(
+            type = PatchType.ATTACH_EVENT,
+            id = id,
+            eventName = eventName,
+        )
+
+        /**
+         * Create a DETACH_EVENT patch.
+         */
+        fun detachEvent(
+            id: String,
+            eventName: String,
+        ) = Patch(
+            type = PatchType.DETACH_EVENT,
+            id = id,
+            eventName = eventName,
+        )
+
+        /**
+         * Create a DETACH patch to unlink a subtree without destroying it.
+         */
+        fun detach(id: String) =
+            Patch(
+                type = PatchType.DETACH,
+                id = id,
+            )
+
+        /**
+         * Create an ATTACH patch to reinsert a previously-detached subtree.
+         */
+        fun attach(
+            parentId: String,
+            id: String,
+            beforeId: String? = null,
+        ) = Patch(
+            type = PatchType.ATTACH,
+            parentId = parentId,
+            id = id,
+            beforeId = beforeId,
+        )
+    }
+}

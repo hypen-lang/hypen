@@ -1,0 +1,9 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "route-trailing-wildcard",
+  "description": "`/api/*` must match `/api`, `/api/users`, and `/api/users/42`.",
+  "function": "match_path",
+  "priority": "P0",
+  "input": { "pattern": "/api/*", "path": "/api/users/42" },
+  "expected": { "matched": true, "params": {} }
+}

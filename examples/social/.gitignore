@@ -1,0 +1,26 @@
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Node/Bun
+node_modules/
+bun.lock
+
+# Rust
+rust/target/
+rust/Cargo.lock
+
+# Swift
+swift/.build/
+swift/Package.resolved
+
+# Go
+go/go.sum
+
+# Kotlin
+kotlin/.gradle/
+kotlin/build/
+
+# Generated temp projects
+hypen-*/

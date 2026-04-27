@@ -1,0 +1,13 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "path-set-auto-vivify",
+  "description": "Missing intermediate objects are created on the way down.",
+  "function": "path_set",
+  "priority": "P0",
+  "input": {
+    "value": {},
+    "path": "a.b.c",
+    "new_value": 42
+  },
+  "expected": { "a": { "b": { "c": 42 } } }
+}

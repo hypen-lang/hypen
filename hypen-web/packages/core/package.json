@@ -1,0 +1,158 @@
+{
+  "name": "@hypen-space/core",
+  "version": "0.4.956",
+  "description": "Hypen core - Platform-agnostic reactive UI runtime (types, state, router, events)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.browser.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "browser": "./dist/index.browser.js",
+      "node": "./dist/index.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./app": {
+      "types": "./dist/app.d.ts",
+      "bun": "./src/app.ts",
+      "import": "./dist/app.js",
+      "default": "./dist/app.js"
+    },
+    "./state": {
+      "types": "./dist/state.d.ts",
+      "bun": "./src/state.ts",
+      "import": "./dist/state.js",
+      "default": "./dist/state.js"
+    },
+    "./renderer": {
+      "types": "./dist/renderer.d.ts",
+      "bun": "./src/renderer.ts",
+      "import": "./dist/renderer.js",
+      "default": "./dist/renderer.js"
+    },
+    "./router": {
+      "types": "./dist/router.d.ts",
+      "bun": "./src/router.ts",
+      "import": "./dist/router.js",
+      "default": "./dist/router.js"
+    },
+    "./events": {
+      "types": "./dist/events.d.ts",
+      "bun": "./src/events.ts",
+      "import": "./dist/events.js",
+      "default": "./dist/events.js"
+    },
+    "./context": {
+      "types": "./dist/context.d.ts",
+      "bun": "./src/context.ts",
+      "import": "./dist/context.js",
+      "default": "./dist/context.js"
+    },
+    "./remote": {
+      "types": "./dist/remote/index.d.ts",
+      "bun": "./src/remote/index.ts",
+      "import": "./dist/remote/index.js",
+      "default": "./dist/remote/index.js"
+    },
+    "./remote/client": {
+      "types": "./dist/remote/client.d.ts",
+      "bun": "./src/remote/client.ts",
+      "browser": "./src/remote/client.ts",
+      "import": "./dist/remote/client.js",
+      "default": "./dist/remote/client.js"
+    },
+    "./resolver": {
+      "types": "./dist/resolver.d.ts",
+      "bun": "./src/resolver.ts",
+      "import": "./dist/resolver.js",
+      "default": "./dist/resolver.js"
+    },
+    "./components": {
+      "types": "./dist/components/builtin.d.ts",
+      "bun": "./src/components/builtin.ts",
+      "import": "./dist/components/builtin.js",
+      "default": "./dist/components/builtin.js"
+    },
+    "./disposable": {
+      "types": "./dist/disposable.d.ts",
+      "bun": "./src/disposable.ts",
+      "import": "./dist/disposable.js",
+      "default": "./dist/disposable.js"
+    },
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "bun": "./src/types.ts",
+      "import": "./dist/types.js",
+      "default": "./dist/types.js"
+    },
+    "./result": {
+      "types": "./dist/result.d.ts",
+      "bun": "./src/result.ts",
+      "import": "./dist/result.js",
+      "default": "./dist/result.js"
+    },
+    "./logger": {
+      "types": "./dist/logger.d.ts",
+      "bun": "./src/logger.ts",
+      "import": "./dist/logger.js",
+      "default": "./dist/logger.js"
+    },
+    "./engine-base": {
+      "types": "./dist/engine-base.d.ts",
+      "bun": "./src/engine-base.ts",
+      "import": "./dist/engine-base.js",
+      "default": "./dist/engine-base.js"
+    },
+    "./portable": {
+      "types": "./dist/portable.d.ts",
+      "bun": "./src/portable.ts",
+      "import": "./dist/portable.js",
+      "default": "./dist/portable.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "build:types": "tsc --emitDeclarationOnly",
+    "prepublishOnly": "bun run build",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "hypen",
+    "ui",
+    "declarative",
+    "reactive",
+    "types",
+    "state"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-web/packages/core"
+  }
+}

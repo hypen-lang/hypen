@@ -1,0 +1,71 @@
+Column {
+    Row {
+        Row {
+            Icon(@resources.search)
+                .size(18)
+                .color("#9ca3af")
+            Input(placeholder: "Search restaurants or dishes")
+                .tw("flex-1 bg-transparent border-0 ml-2 text-sm")
+                .bind(@state.searchQuery)
+        }
+        .tw("flex-1 bg-gray-100 rounded-xl px-4 py-3 items-center")
+    }
+    .tw("px-4 py-3 bg-white border-b border-gray-200")
+
+    If(condition: "@{length(state.searchQuery) == 0}") {
+        Column {
+            Text("Suggested searches")
+                .tw("text-sm font-bold text-gray-500 px-4 pt-2 pb-3")
+
+            ForEach(items: @state.suggestions, key: "id") {
+                Button {
+                    Row {
+                        Icon(@resources.search)
+                            .size(16)
+                            .color("#9ca3af")
+                        Text("@{item.name}")
+                            .tw("text-sm ml-3 flex-1")
+                        Icon(@resources.chevron-right)
+                            .size(16)
+                            .color("#9ca3af")
+                    }
+                    .tw("items-center")
+                }
+                .tw("bg-white px-4 py-3 border-b border-gray-100 w-full")
+                .onClick(@actions.applySuggestion, query: "@{item.name}")
+            }
+        }
+        .scrollable(true)
+        .tw("flex-1 bg-white")
+    }
+
+    If(condition: "@{length(state.searchQuery) > 0}") {
+        Column {
+            Row {
+                Text("Results for ")
+                    .tw("text-xs text-gray-500")
+                Text("@{state.searchQuery}")
+                    .tw("text-xs font-semibold")
+            }
+            .tw("px-4 py-2 bg-gray-100 border-b border-gray-200")
+
+            If(condition: "@{length(state.searchResults) == 0}") {
+                Column {
+                    Text("No restaurants match your search")
+                        .tw("text-sm text-gray-500 mt-10 text-center")
+                }
+                .tw("px-4")
+            }
+
+            Column {
+                ForEach(items: @state.searchResults, key: "id") {
+                    RestaurantCard()
+                }
+            }
+            .tw("px-4 pt-4 w-full")
+        }
+        .scrollable(true)
+        .tw("flex-1")
+    }
+}
+.tw("flex-1 w-full bg-gray-50")

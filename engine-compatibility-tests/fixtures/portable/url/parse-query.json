@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "url-parse-query",
+  "description": "Split a path into clean path + decoded query map.",
+  "function": "parse_query",
+  "priority": "P0",
+  "input": "/search?q=hello%20world&page=2",
+  "expected": {
+    "path": "/search",
+    "query": { "q": "hello world", "page": "2" }
+  }
+}

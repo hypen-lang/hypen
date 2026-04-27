@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "url-build-url",
+  "description": "Build path + query; keys sorted, values percent-encoded.",
+  "function": "build_url",
+  "priority": "P0",
+  "input": {
+    "path": "/users",
+    "query": { "id": "42", "tab": "profile" }
+  },
+  "expected": "/users?id=42&tab=profile"
+}

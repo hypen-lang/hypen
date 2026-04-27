@@ -1,0 +1,66 @@
+{
+  "name": "hypen-web",
+  "version": "0.4.956",
+  "private": true,
+  "description": "Hypen Web SDK Monorepo - Declarative UI with stateful modules",
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "example-bun"
+  ],
+  "scripts": {
+    "build": "bun run build:core && bun run build:web && bun run build:server && bun run build:web-engine",
+    "build:core": "cd packages/core && bun run build.ts",
+    "build:web": "cd packages/web && bun run build.ts",
+    "build:server": "cd packages/server && bun run build.ts",
+    "build:web-engine": "cd packages/web-engine && bun run build.ts",
+    "build:wasm": "cd ../hypen-engine-rs && ./build-wasm.sh && cd ../hypen-web && bun run setup:wasm",
+    "setup:wasm": "echo 'WASM is now copied by server and web-engine build scripts'",
+    "test": "bun test",
+    "test:canvas": "bun test tests/canvas-renderer.test.ts",
+    "typecheck": "bun run typecheck:core && bun run typecheck:web && bun run typecheck:server && bun run typecheck:web-engine",
+    "typecheck:core": "cd packages/core && bunx tsc --noEmit",
+    "typecheck:web": "cd packages/web && bunx tsc --noEmit",
+    "typecheck:server": "cd packages/server && bunx tsc --noEmit",
+    "typecheck:web-engine": "cd packages/web-engine && bunx tsc --noEmit",
+    "typecheck:root": "tsc --noEmit",
+    "example": "bun run examples/simple-counter.ts",
+    "example:canvas": "bun run examples/canvas-counter.ts",
+    "example:canvas-social": "bun run examples/canvas-social.ts",
+    "example:canvas-gallery": "bun run examples/canvas-component-gallery.ts",
+    "example:remote-server": "bun run examples/remote/counter-server.ts",
+    "dev": "bun run examples/counter.ts",
+    "playground": "bun build playground/playground.ts --outdir playground --target browser && cp playground/hypen_engine_bg-*.wasm playground/hypen_engine_bg.wasm 2>/dev/null || true && bun --hot playground/server.ts",
+    "replayground": "cd .. && wasm-pack build --target bundler --out-dir pkg/nodejs && wasm-pack build --target web --out-dir pkg/browser && cd hypen-web && pkill -f 'playground/server.ts' || pkill -f 'bun.*playground' || lsof -ti:3000 | xargs kill -9 2>/dev/null || true && cp ../pkg/browser/hypen_engine_bg.wasm playground/ && bun build playground/playground.ts --outdir playground --target browser && bun --hot playground/server.ts",
+    "publish:core": "cd packages/core && npm publish --access public",
+    "publish:web": "cd packages/web && npm publish --access public",
+    "publish:server": "cd packages/server && npm publish --access public",
+    "publish:web-engine": "cd packages/web-engine && npm publish --access public",
+    "publish:all": "bun run build && bun run publish:core && bun run publish:web && bun run publish:server && bun run publish:web-engine"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/jsdom": "^27.0.0",
+    "jsdom": "^27.4.0",
+    "typescript": "^5"
+  },
+  "keywords": [
+    "hypen",
+    "ui",
+    "declarative",
+    "reactive",
+    "wasm",
+    "bun",
+    "typescript"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-web"
+  }
+}

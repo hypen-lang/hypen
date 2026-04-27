@@ -1,0 +1,278 @@
+---
+title: Routing
+description: Declarative routing with @router.* and per-route modules
+---
+
+# Routing
+
+Hypen routing is declarative: you describe your route table in the DSL, and the SDK wires navigation for you. The same `Router { Route ... }` block works across web, iOS, Android, and remote UI — the renderer never sees routing logic, just patches.
+
+## Quick Start
+
+Declare routes in your primary template:
+
+```hypen
+module App {
+    Router {
+        Route(path: "/")         { HomePage() }
+        Route(path: "/search")   { Search()   }
+        Route(path: "/profile")  { Profile()  }
+    }
+}
+```
+
+Navigate with the reserved `@router.*` namespace — no action handler required:
+
+```hypen
+Button { Text("Search") }
+    .onClick(@router.push, to: "/search")
+
+Button { Text("Back") }
+    .onClick(@router.back)
+```
+
+Each `Route`'s body references a component (e.g. `HomePage()`). Register those as modules the same way you'd register any module; the SDK's auto-wire handles the rest:
+
+```typescript
+import { app } from "@hypen-space/core";
+import { RemoteServer } from "@hypen-space/server";
+
+export default app
+    .module("HomePage")
+    .defineState({ posts: [] })
+    .onCreated(async (state) => {
+        state.posts = await fetchFeed();
+    })
+    .build();
+
+// server/index.ts
+new RemoteServer()
+    .module("App", appModule)
+    .source("./components")
+    .listen(3000);
+```
+
+No routing glue in host code. The server discovers every `Router { Route ... }` block at session start, matches each route body against registered modules, and spins up a per-session `ManagedRouter` that mounts / unmounts modules as the URL changes.
+
+## The `@router.*` namespace
+
+Four reserved actions — dispatch them from any DSL click, no user handler needed:
+
+| Action             | Effect                                                              |
+| ------------------ | ------------------------------------------------------------------- |
+| `@router.push`     | Push a new path onto the history stack. Payload: `{ to: "/x" }`.    |
+| `@router.replace`  | Replace the current path in place. Payload: `{ to: "/x" }`.         |
+| `@router.back`     | Pop the current path off history.                                   |
+| `@router.forward`  | Server-side no-op. Reserved for client-side history forward.        |
+
+```hypen
+Row {
+    Button { Text("Home")   }.onClick(@router.push,    to: "/")
+    Button { Text("Search") }.onClick(@router.push,    to: "/search")
+    Button { Text("←")      }.onClick(@router.back)
+}
+```
+
+The server's primary state mirrors the current path into `state.location` automatically (when the primary's state shape has a `location` field). You can bind against it for active-tab styling:
+
+```hypen
+Button { Text("Search") }
+    .onClick(@router.push, to: "/search")
+    .color("@{state.location == '/search' ? '#3B82F6' : '#6B7280'}")
+```
+
+## Route parameters
+
+Use `:param` in the path pattern:
+
+```hypen
+Router {
+    Route(path: "/users/:id")                      { UserProfile() }
+    Route(path: "/posts/:postId/comments/:cid")    { CommentView() }
+}
+```
+
+Read params inside a per-route module's lifecycle. `onActivated` fires on every navigation (fresh mount or persist-cache restore), so it's the canonical place to load route-param-dependent data:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+export default app
+    .module("UserProfile")
+    .defineState<{ user: User | null }>({ user: null })
+    .onActivated(async (state, ctx) => {
+        const match = ctx?.router?.matchPath("/users/:id", ctx.router.getCurrentPath());
+        const id = match?.params.id;
+        if (id) state.user = await fetchUser(id);
+    })
+    .build();
+```
+
+Every SDK exposes the same pattern. Kotlin: `ctx?.getRouter()?.matchPath(...)`. Swift: `ctx?.router?.matchPath(...)`. Go: `ctx.Context.GetRouter().MatchPath(...)`.
+
+**Rust exception.** The Rust SDK's `on_activated` is read-only. Use `session.on_route_enter(pattern, |params, state, ctx| …)` instead — it fires from the same `@router.*` dispatch path and gives you mutable access to every scope's state:
+
+```rust
+session.on_route_enter("/users/:id", move |params, state, _ctx| {
+    let id = params.get("id").cloned().unwrap_or_default();
+    if let Some(slot) = state.get_mut("userprofile") {
+        if let Some(obj) = slot.as_object_mut() {
+            obj.insert("user".into(), json!(load_user(&id)));
+        }
+    }
+});
+```
+
+## Per-route modules
+
+Every `Route(path:) { Foo() }` can be backed by a real module — state, actions, lifecycle. The SDK auto-mounts it when the route becomes active and unmounts when you navigate away:
+
+```typescript
+app.module("Comments")
+    .defineState<{ postId: string; comments: Comment[]; commentText: string }>({
+        postId: "",
+        comments: [],
+        commentText: "",
+    })
+    .onActivated(async (state, ctx) => {
+        const m = ctx?.router?.matchPath("/comments/:postId", ctx.router.getCurrentPath());
+        state.postId = m?.params.postId ?? "";
+        state.comments = await fetchComments(state.postId);
+    })
+    .onAction("postComment", async ({ state }) => {
+        await submitComment(state.postId, state.commentText);
+        state.commentText = "";
+    })
+    .build();
+```
+
+Inside `Comments/component.hypen`, `@{state.comments}` resolves against the Comments module's scope:
+
+```hypen
+module Comments {
+    ForEach(items: @state.comments, key: "id") {
+        Text("@{item.user.username}: @{item.text}")
+    }
+    Input(placeholder: "Add a comment...").bind(@state.commentText)
+    Button { Text("Post") }.onClick(@actions.postComment)
+}
+```
+
+## Persistence (no loading flash on back-nav)
+
+Module-backed routes **persist by default**. Navigate away and back and you get the same instance — no `onCreated` re-run, no loading flash.
+
+```
+first visit:   construct → onCreated → onActivated
+navigate away: onDeactivated     (cached)
+revisit:                         onActivated only
+```
+
+Opt out per module:
+
+```typescript
+app.module("Ephemeral")
+    .defineState({ ... }, { persist: false })
+    .build();
+```
+
+The persist cache is a bounded LRU (default cap 10 modules) so long sessions can't leak. Evicted modules fire `onDestroyed` and are torn down cleanly.
+
+### Engine-level subtree cache
+
+Underneath the SDK, the engine's `Router` IR keeps a per-route **UI subtree** cache keyed by pattern. The leaving route's subtree is detached (engine emits `Detach` patches, not `Remove`) and reattached on return (`Attach`, not `Create`). DOM scroll, form values, and focus all survive on web for free. Cap: 10 routes, same LRU semantics.
+
+Route-param changes that hit the same pattern (`/users/42 → /users/99`) don't invalidate the cache — only the reactive bindings re-evaluate. Matches React Router / Vue Router semantics.
+
+## Nested routers
+
+A per-route module's own template can declare its own `Router { Route ... }` block. The SDK's auto-wire discovers nested Routers from every component template (not just the primary) and **flattens them into a single route table** against one `HypenRouter`. All routes share the URL space:
+
+```hypen
+// App/component.hypen
+module App {
+    Router {
+        Route(path: "/")    { Home() }
+    }
+}
+
+// Home/component.hypen — nested Router
+module Home {
+    Column {
+        Header()
+        Router {
+            Route(path: "/home/feed")    { Feed()    }
+            Route(path: "/home/explore") { Explore() }
+        }
+    }
+}
+```
+
+Navigating to `/home/feed` mounts `Feed` inside Home's subtree. Authors spell out the full prefix in each `Route(path:)` — there's no automatic sub-path stitching.
+
+Path conflicts: the **outermost** Router wins. `discoverRouters` emits outer blocks first, so if both the primary and a nested module declare `Route(path: "/")`, the primary's route is kept and the nested duplicate is ignored (debug-logged).
+
+## Server setup
+
+```typescript
+// TypeScript — @hypen-space/server
+new RemoteServer()
+    .module("App", appModule)        // primary
+    .source("./components")          // discovers App, Home, Search, ...
+    .listen(3000);
+```
+
+```go
+// Go — github.com/hypen-space/core/remote
+remote.NewRemoteServer().
+    WithDefinition(appDef).
+    Source("./components").
+    UI(appTemplate).
+    ListenAndServe(":3000")
+```
+
+```swift
+// Swift — HypenServer
+try RemoteServer()
+    .module("App", appModule)
+    .ui(appTemplate)
+    .componentsDir("./components")
+    .listenAndWait(3000)
+```
+
+```kotlin
+// Kotlin — space.hypen.core
+HypenServer {
+    module("App", appModule)
+    route("/", "App")
+    watchComponents("./components")
+}
+```
+
+```rust
+// Rust — hypen-server
+// Rust SDK uses explicit route registration via on_route_enter
+// and module factories. See the Rust servers guide for setup.
+```
+
+Opt out of auto-wire with `.disableAutoRouter()` (TS/Go/Swift) or `.disableAutoRouter()` on the Kotlin builder, then wire a `ManagedRouter` by hand in an `onSessionCreate` hook.
+
+## How it works
+
+Route matching is an engine concern — not a renderer one. `Router` and `Route` are first-class IR nodes:
+
+- The engine evaluates `state.location` against every `Route(path: ...)` pattern via `portable::route::match_path`. Exact segments, `:param` captures, and trailing `/*` wildcards are supported.
+- Location changes emit minimal patches: `Detach` the leaving subtree, `Attach` the cached one, or `Create` + `Insert` fresh.
+- The renderer (DOM, Canvas, SwiftUI, Compose) applies patches. No platform carries routing logic.
+
+Same contract everywhere:
+- **Web**: browser `history.pushState` / hash navigation
+- **iOS**: SwiftUI view-tree swaps driven by `state.location`
+- **Android**: Compose recomposition driven by `state.location`
+- **Remote UI**: server-side state streamed over WebSocket
+
+## Next steps
+
+- [State & Modules](/docs/guide/state) — module lifecycle, action handlers
+- [Control Flow](/docs/guide/control-flow) — ForEach, When, If
+- Server guides: [TypeScript](/docs/servers/typescript), [Go](/docs/servers/golang), [Swift](/docs/servers/swift), [Kotlin](/docs/servers/kotlin), [Rust](/docs/servers/rust)

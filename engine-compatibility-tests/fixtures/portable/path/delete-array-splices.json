@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "path-delete-array-splices",
+  "description": "Deleting an array index shrinks the array (splice, not null).",
+  "function": "path_delete",
+  "priority": "P0",
+  "input": {
+    "value": { "items": ["a", "b", "c"] },
+    "path": "items.1"
+  },
+  "expected": { "json": { "items": ["a", "c"] }, "removed": true }
+}

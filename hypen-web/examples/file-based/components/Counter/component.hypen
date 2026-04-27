@@ -1,0 +1,46 @@
+module Counter {
+  Column {
+    Text("Counter Demo")
+      .fontSize(24)
+      .fontWeight("bold")
+      .marginBottom(16)
+
+    Text("Count: @{state.count}")
+      .fontSize(48)
+      .fontWeight("bold")
+      .color("#007bff")
+      .marginBottom(24)
+
+    Row {
+      Button {
+        Text("-")
+          .fontSize(20)
+          .fontWeight("bold")
+      }
+      .onClick(@actions.decrement)
+      .padding(12)
+      .paddingLeft(20)
+      .paddingRight(20)
+
+      Button {
+        Text("Reset")
+          .fontSize(14)
+      }
+      .onClick(@actions.reset)
+      .padding(12)
+
+      Button {
+        Text("+")
+          .fontSize(20)
+          .fontWeight("bold")
+      }
+      .onClick(@actions.increment)
+      .padding(12)
+      .paddingLeft(20)
+      .paddingRight(20)
+    }
+    .gap(12)
+  }
+  .padding(32)
+  .horizontalAlignment("center")
+}

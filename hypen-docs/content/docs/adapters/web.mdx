@@ -1,0 +1,426 @@
+---
+title: Web Adapter
+description: Render Hypen components to the browser using DOM or Canvas renderers
+---
+
+# Web Adapter
+
+The web adapter (`@hypen-space/web`) renders Hypen components in the browser. It supports two rendering modes: **DOM** (native HTML elements) and **Canvas** (2D canvas drawing), plus a high-level `Hypen` class for quick setup.
+
+## Installation
+
+```bash
+# Using Bun
+bun add @hypen-space/core @hypen-space/web @hypen-space/web-engine
+
+# Using npm
+npm install @hypen-space/core @hypen-space/web @hypen-space/web-engine
+```
+
+## Quick Start
+
+The simplest way to render a Hypen app in the browser:
+
+```typescript
+import { render } from "@hypen-space/web-engine";
+
+await render("App", "#app");
+```
+
+This discovers components from the default `./src/components` directory, initializes the WASM engine, and renders the `App` component into the `#app` element.
+
+### With Configuration
+
+```typescript
+import { render } from "@hypen-space/web-engine";
+
+const hypen = await render("App", "#app", {
+  componentsDir: "./src/components",
+  debug: true,
+  debugHeatmap: true,      // Visualize re-renders
+  heatmapIncrement: 5,     // Opacity increase per re-render (%)
+  heatmapFadeOut: 2000,    // Fade out duration (ms)
+});
+
+// Access runtime
+const state = hypen.getState();
+const router = hypen.getRouter();
+```
+
+### With Inline Components
+
+If you prefer to register components directly instead of using file discovery:
+
+```typescript
+import { renderWithComponents } from "@hypen-space/web-engine";
+import counterModule from "./Counter";
+
+const hypen = await renderWithComponents(
+  {
+    Counter: {
+      module: counterModule,
+      template: `
+        Column {
+          Text("Count: @{state.count}")
+          Button { Text("+") }.onClick(@actions.increment)
+        }
+      `,
+    },
+  },
+  "Counter",
+  "#app",
+);
+```
+
+## Hypen Class
+
+For full control over the lifecycle, use the `Hypen` class directly:
+
+```typescript
+import { Hypen } from "@hypen-space/web-engine";
+
+const app = new Hypen({
+  componentsDir: "./src/components",
+  debug: true,
+});
+
+// Initialize WASM engine
+await app.init();
+
+// Discover and load components
+await app.loadComponents();
+
+// Render a component
+await app.render("HomePage", "#app");
+
+// Access state and router
+const state = app.getState();
+const router = app.getRouter();
+const globalContext = app.getGlobalContext();
+
+// Navigate
+router.push("/about");
+
+// Lazy-load a route component
+await app.renderLazyRoute("/settings", "SettingsPage", settingsElement);
+
+// Debug tools
+app.setDebugHeatmap(true);
+app.resetDebugTracking();
+const stats = app.getDebugStats();
+// { totalRerenders, elementCount, avgRerenders }
+
+// Cleanup
+await app.unmount();
+```
+
+### Configuration
+
+```typescript
+interface HypenConfig {
+  componentsDir?: string;    // Default: "./src/components"
+  debug?: boolean;           // Enable debug logging
+  wasmUrl?: string;          // Custom WASM binary URL
+  jsUrl?: string;            // Custom WASM JS glue URL
+  debugHeatmap?: boolean;    // Re-render heatmap visualization
+  heatmapIncrement?: number; // Opacity increase per re-render (default: 5%)
+  heatmapFadeOut?: number;   // Fade out duration in ms (default: 2000)
+}
+```
+
+## DOM Renderer
+
+The default renderer creates native HTML elements for each Hypen component:
+
+`createHypenClient` is the recommended one-call wiring (renderer + patch subscription in one go). The bare `DOMRenderer` constructor is still exported for advanced setups (custom subscription, multi-listener fan-out).
+
+```typescript
+import { createHypenClient } from "@hypen-space/web/dom";
+import { Engine } from "@hypen-space/web-engine";
+
+const engine = new Engine();
+await engine.init(); // Loads WASM from CDN
+
+const container = document.getElementById("app")!;
+const { renderer } = createHypenClient(container, engine);
+```
+
+### Debug Heatmap
+
+The DOM renderer includes a re-render heatmap for performance debugging. Elements that re-render frequently glow red:
+
+```typescript
+const { renderer } = createHypenClient(container, engine, {
+  debug: {
+    enabled: true,
+    showHeatmap: true,
+    heatmapIncrement: 5,    // +5% opacity per re-render
+    fadeOutDuration: 2000,  // Fade out over 2 seconds
+    maxOpacity: 0.8,
+  },
+});
+
+// Or toggle at runtime
+renderer.setDebugConfig({ showHeatmap: true });
+
+// Get stats
+const stats = renderer.getDebugStats();
+// { totalRerenders, elementCount, avgRerenders }
+
+// Reset tracking
+renderer.resetDebugTracking();
+```
+
+### Custom Components
+
+Register custom DOM component handlers:
+
+```typescript
+import { ComponentRegistry } from "@hypen-space/web/dom";
+
+const registry = new ComponentRegistry();
+
+registry.register("VideoPlayer", {
+  create: (props) => {
+    const video = document.createElement("video");
+    video.src = props.src;
+    video.controls = true;
+    return video;
+  },
+  update: (element, props) => {
+    element.src = props.src;
+  },
+});
+```
+
+### Custom Applicators
+
+Register custom style applicators:
+
+```typescript
+import { ApplicatorRegistry } from "@hypen-space/web/dom";
+
+const registry = new ApplicatorRegistry();
+
+registry.register("glow", {
+  apply: (element, value) => {
+    element.style.boxShadow = `0 0 ${value}px rgba(59, 130, 246, 0.5)`;
+  },
+});
+```
+
+Then use in your template:
+
+```hypen
+Text("Highlighted")
+  .glow(10)
+```
+
+## Canvas Renderer
+
+For canvas-based rendering (useful for games, data visualizations, or pixel-perfect control):
+
+```typescript
+import { createHypenClient } from "@hypen-space/web/canvas";
+import { Engine } from "@hypen-space/web-engine";
+
+const engine = new Engine();
+await engine.init();
+
+const canvas = document.getElementById("canvas") as HTMLCanvasElement;
+const { renderer } = createHypenClient(canvas, engine, {
+  devicePixelRatio: window.devicePixelRatio,
+  backgroundColor: "#ffffff",
+  enableAccessibility: true,
+  enableHitTesting: true,
+  enableInputOverlay: true,
+});
+```
+
+### Canvas Options
+
+```typescript
+interface CanvasRendererOptions {
+  devicePixelRatio?: number;    // HiDPI support (default: window.devicePixelRatio)
+  backgroundColor?: string;     // Canvas background color
+  enableAccessibility?: boolean; // Accessibility tree for screen readers
+  enableHitTesting?: boolean;    // Click/tap detection on canvas elements
+  enableInputOverlay?: boolean;  // HTML input overlays for text fields
+  enableDirtyRects?: boolean;    // Only repaint changed regions
+  enableLayerCaching?: boolean;  // Cache unchanged layers
+  maxLayerCacheSize?: number;    // Max cached layers
+  showLayoutBounds?: boolean;    // Debug: show element bounds
+  showDirtyRects?: boolean;      // Debug: show repaint regions
+  logPerformance?: boolean;      // Debug: log frame timings
+}
+```
+
+### Canvas API
+
+```typescript
+// Apply patches from engine
+renderer.applyPatches(patches);
+
+// Get virtual node by ID
+const node = renderer.getNode("element-id");
+// { id, type, props, children, key, rect }
+
+// Update state
+renderer.updateState(newState);
+
+// Animation loop
+renderer.setAnimationFrameCallback(() => {
+  // Called each frame when canvas needs repaint
+});
+
+// Clear
+renderer.clear();
+```
+
+## Remote Apps
+
+Connect to a Hypen server that streams UI over WebSocket:
+
+### Using HypenApp Component
+
+The simplest way — embed a remote app directly in Hypen DSL:
+
+```hypen
+Column {
+  Text("My App")
+    .fontSize(24)
+
+  HypenApp("ws://localhost:3000")
+}
+```
+
+With options:
+
+```hypen
+HypenApp(
+  url: "ws://localhost:3000",
+  autoReconnect: true,
+  reconnectInterval: 3000
+)
+```
+
+### Using RemoteEngine
+
+For programmatic control over the remote connection:
+
+```typescript
+import { RemoteEngine } from "@hypen-space/core";
+import { createHypenClient } from "@hypen-space/web/dom";
+
+const container = document.getElementById("app")!;
+
+const remote = new RemoteEngine("ws://localhost:3000", {
+  autoReconnect: true,
+  reconnectInterval: 3000,
+  maxReconnectAttempts: 10,
+});
+
+// One-call wiring: renderer + patch subscription
+const { renderer } = createHypenClient(container, remote);
+
+// Handle state updates
+remote.onStateUpdate((state) => {
+  renderer.updateState(state);
+});
+
+// Connection events
+remote.onConnect(() => console.log("Connected"));
+remote.onDisconnect(() => console.log("Disconnected"));
+remote.onError((error) => console.error("Error:", error));
+
+// Connect
+await remote.connect();
+
+// Dispatch actions to the server
+remote.dispatchAction("increment", { amount: 5 });
+
+// Disconnect
+remote.disconnect();
+```
+
+## Browser WASM Initialization
+
+When using `@hypen-space/web-engine`, WASM must be explicitly initialized:
+
+```typescript
+import { Engine } from "@hypen-space/web-engine";
+
+const engine = new Engine();
+
+// Default: loads from unpkg CDN
+await engine.init();
+
+// Custom WASM location
+await engine.init({
+  wasmUrl: "/assets/hypen_engine_bg.wasm",
+  jsUrl: "/assets/hypen_engine.js",
+});
+```
+
+The Node.js engine (`@hypen-space/server`) initializes WASM automatically.
+
+## Engine API
+
+The engine provides low-level control over parsing and rendering. Most apps
+should use `createHypenClient` (above) to mount a renderer; the methods below
+are the underlying primitives it wraps:
+
+```typescript
+// Render a Hypen DSL string
+engine.renderSource(`
+  Column {
+    Text("Hello, world!")
+  }
+`);
+
+// Subscribe to patches (createHypenClient does this for you)
+engine.setRenderCallback((patches) => {
+  renderer.applyPatches(patches);
+});
+
+// Notify engine of state changes
+engine.updateStateSparse(
+  "",                                              // scope ("" = primary module)
+  ["count", "user.name"],                          // changed paths
+  { count: 42, "user.name": "Alice" },             // new values
+);
+
+// Dispatch an action
+engine.dispatchAction("increment", { step: 5 });
+
+// Set up module
+engine.setModule(
+  "Counter",                        // module name
+  ["increment", "decrement"],       // action names
+  ["count"],                        // state keys
+  { count: 0 },                     // initial state
+);
+
+// Component resolution for imports
+engine.setComponentResolver((name, contextPath) => {
+  return { source: componentDSL, path: `/components/${name}` };
+});
+
+// Debug
+engine.debugParseComponent(source);  // Returns parsed AST as JSON
+engine.getRevision();                // Current render revision
+engine.clearTree();                  // Clear the render tree
+```
+
+## Requirements
+
+- Modern browser with WebAssembly support
+- Chrome 57+, Firefox 52+, Safari 11+, Edge 16+
+
+## See Also
+
+- [TypeScript SDK](/docs/servers/typescript) — Server-side module and state API
+- [Remote App Tutorial](/docs/getting-started/remote-app) — Build a cross-platform remote app
+- [Your First App](/docs/getting-started/first-app) — Counter app tutorial
+- [Components Guide](/docs/guide/components) — All built-in components
+- [Styling Guide](/docs/guide/styling) — Applicators reference

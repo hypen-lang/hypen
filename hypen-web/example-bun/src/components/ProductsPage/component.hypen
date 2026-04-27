@@ -1,0 +1,76 @@
+module Column {
+  Text("Products")
+    .fontSize(32)
+    .fontWeight("bold")
+    .color("#00ff88")
+    .marginBottom(32)
+    .alignSelf("center")
+    .textAlign("center")
+
+  Column {
+    List(@state.products) {
+      Column {
+        Column {
+          Image("@{item.images.0}")
+            .width(300)
+            .height(300)
+            .objectFit("cover")
+            .borderRadius(12)
+            .marginBottom(16)
+
+          Text("@{item.title}")
+            .fontSize(18)
+            .fontWeight("600")
+            .color("#e0e0e0")
+            .marginBottom(8)
+
+          Text("@{item.category.name}")
+            .fontSize(14)
+            .color("#888888")
+            .marginBottom(8)
+
+          Text("$@{item.price}")
+            .fontSize(20)
+            .fontWeight("bold")
+            .color("#00ff88")
+            .marginBottom(16)
+
+          Button {
+            Text("Add to Cart")
+              .color("#0a0a0a")
+              .fontWeight("600")
+          }
+          .onClick("@actions.addToCart", id: "@{item.id}", title: "@{item.title}", price: "@{item.price}", image: "@{item.images.0}")
+          .padding(12)
+          .backgroundColor("#00ff88")
+          .color("#0a0a0a")
+          .border("none")
+          .borderRadius(8)
+          .cursor("pointer")
+          .width("100%")
+          .transition("all 0.3s ease")
+        }
+        .backgroundColor("#1a1a1a")
+        .borderRadius(16)
+        .padding(20)
+        .border("1px solid #2a2a2a")
+        .width(320)
+        .transition("all 0.3s ease")
+      }
+    }
+    .display("grid")
+    .gridTemplateColumns("repeat(auto-fill, minmax(320px, 1fr))")
+    .gap(24)
+    .width("100%")
+  }
+  .overflow("auto")
+  .maxHeight("calc(100vh - 200px)")
+  .onScroll("@actions.loadMore")
+  .padding(2)
+}
+.padding(40)
+.maxWidth(1400)
+.width("100%")
+.alignSelf("center")
+.flex(1)
+

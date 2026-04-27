@@ -1,0 +1,158 @@
+---
+title: Installation
+description: Install the Hypen CLI and set up your development environment
+---
+
+# Installation
+
+The fastest way to get started with Hypen is using the CLI.
+
+## Install the CLI
+
+```bash
+# Using Bun (recommended)
+bun install -g @hypen-space/cli
+
+# Using npm
+npm install -g @hypen-space/cli
+```
+
+## Create a New Project
+
+```bash
+hypen init my-app
+cd my-app
+```
+
+This creates a new Hypen project with:
+- A starter component with state and actions
+- TypeScript configuration
+- A `hypen.json` configuration file
+
+## Start Development Server
+
+```bash
+hypen dev
+```
+
+This starts a hot-reloading development server at `http://localhost:3000`.
+
+## Preview Your App
+
+### Hypen Studio
+
+[Hypen Studio](/docs/tooling/studio) is a full in-browser IDE for building Hypen apps. It includes a code editor with LSP support, live preview, file browser, and powerful debugging tools — state inspector, action log, time-travel debugging, console, and an integrated terminal.
+
+```bash
+hypen studio
+```
+
+Studio opens at `http://localhost:5173`. See the [Studio documentation](/docs/tooling/studio) for the full feature reference.
+
+### Preview on Android and iOS
+
+You can preview your app on a physical device or simulator directly from the CLI:
+
+```bash
+# Android (requires adb)
+hypen run android
+
+# iOS Simulator (requires Xcode)
+hypen run ios
+```
+
+The CLI downloads a runner app, detects connected devices, and launches your app with hot reload. Add `--studio` to open Hypen Studio alongside the device runner — edit in the browser, see changes on the device in real time:
+
+```bash
+hypen run android --studio
+hypen run ios --studio
+```
+
+## Project Structure
+
+The CLI creates this structure:
+
+```
+my-app/
+├── src/
+│   └── components/
+│       └── App/
+│           ├── component.hypen    # UI template
+│           └── component.ts       # Module logic
+├── hypen.json                     # Project configuration
+├── package.json
+└── tsconfig.json
+```
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `hypen init <name>` | Create a new Hypen project |
+| `hypen dev` | Start development server with hot reload |
+| `hypen build` | Build for production |
+| `hypen generate` | Generate component imports |
+| `hypen studio` | Open Hypen Studio IDE |
+| `hypen run android` | Install and launch on Android device/emulator |
+| `hypen run ios` | Install and launch on iOS Simulator |
+
+## Manual Setup (Alternative)
+
+If you prefer to set up manually:
+
+### Web
+
+```bash
+mkdir my-hypen-app
+cd my-hypen-app
+npm init -y
+npm install @hypen-space/core @hypen-space/web @hypen-space/web-engine
+```
+
+See the [Web Adapter docs](/docs/adapters/web) for detailed web setup.
+
+### Android
+
+Add to your `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("space.hypen:hypen-android:0.1.0")
+}
+```
+
+See the [Android Adapter docs](/docs/adapters/android) for detailed Android setup.
+
+### iOS
+
+See the [iOS Adapter docs](/docs/adapters/ios) for iOS setup.
+
+## Requirements
+
+- **Node.js 18+** or **Bun 1.0+**
+- Modern browser with WASM support (Chrome, Firefox, Safari, Edge)
+
+## IDE Setup
+
+For the best development experience, install the Hypen Language Server:
+
+### VS Code / Cursor
+
+1. Download the `.vsix` from [releases](https://github.com/hypen-lang/hypen/releases)
+2. Extensions → Install from VSIX
+3. Select the file and reload
+
+See [LSP Documentation](/docs/tooling/lsp) for more details.
+
+## Verify Installation
+
+```bash
+hypen --version
+```
+
+You should see the version number printed.
+
+## Next Steps
+
+- [Your First App](/docs/getting-started/first-app) - Build a counter app step by step
+- [Basics Guide](/docs/guide/basics) - Learn the Hypen syntax

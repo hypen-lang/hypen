@@ -1,0 +1,5 @@
+# Ignore screenshot results (generated files)
+*.png
+.progress.json
+diffs/comparison-report.json
+!.gitignore

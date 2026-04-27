@@ -1,0 +1,21 @@
+module Search {
+    Column {
+        Row {
+            Input(placeholder: "Search")
+                .tw("flex-1 bg-gray-100 rounded-lg px-4 py-2 text-sm")
+                .bind(@state.searchQuery)
+        }
+        .tw("px-4 py-2 bg-white border-b border-gray-200")
+
+        Grid(@state.explorePosts, key: "id") {
+            Image(src: "@{item.imageUrl}")
+                .objectFit("cover")
+                .tw("aspect-square w-full")
+        }
+        .gridColumns(3)
+        .gap(4)
+        .scrollable(true)
+        .tw("flex-1")
+    }
+    .tw("flex-1 w-full bg-white")
+}

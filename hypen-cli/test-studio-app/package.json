@@ -1,0 +1,21 @@
+{
+  "name": "test-studio-app",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "hypen dev",
+    "build": "hypen build",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@hypen-space/core": "^0.4.956",
+    "@hypen-space/server": "^0.4.956",
+    "@hypen-space/web": "^0.4.956",
+    "@hypen-space/web-engine": "^0.4.956"
+  },
+  "devDependencies": {
+    "@hypen-space/cli": "^0.4.956",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.0.0"
+  }
+}

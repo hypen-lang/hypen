@@ -1,0 +1,149 @@
+---
+title: Basics Reference
+description: Complete language reference for Hypen fundamentals
+---
+
+# Basics Reference
+
+This is a complete reference for the fundamental syntax elements of the Hypen language.
+
+## Syntax Overview
+
+```hypen
+// Component with arguments
+Text("Hello World")
+
+// Component with children
+Column {
+    Text("First")
+    Text("Second")
+}
+
+// Component with applicators
+Text("Styled")
+    .fontSize(18)
+    .color("#333")
+
+// Module (stateful component)
+module Counter {
+    Text("Count: @{state.count}")
+}
+```
+
+## Components
+
+Components are declared with a PascalCase name, optional arguments in parentheses, and optional children in braces.
+
+```hypen
+ComponentName(arg1, arg2: value) {
+    ChildComponent()
+}
+```
+
+## Arguments
+
+### Positional Arguments
+
+```hypen
+Text("Hello")
+Image("photo.jpg")
+```
+
+### Named Arguments
+
+```hypen
+Input(placeholder: "Enter text")
+    .value(@{state.text})
+```
+
+### Argument Types
+
+| Type | Example |
+|------|---------|
+| String | `"hello"` or `'hello'` |
+| Number | `42`, `3.14` |
+| Boolean | `true`, `false` |
+| List | `["a", "b", "c"]` |
+| Map | `{ key: "value" }` |
+| State binding | `@{state.value}` |
+| Action | `@actions.name` |
+| Resource | `@resources.name` |
+
+Strings can use double or single quotes. Use single quotes to embed double quotes without escaping:
+
+```hypen
+Text("Hello")
+Text('Contains "double quotes" inside')
+Text("Escaped \"quotes\" also work")
+```
+
+## State Bindings
+
+State bindings use `@{state.path}` syntax:
+
+```hypen
+Text("Hello, @{state.user.name}")
+Text("Count: @{state.count}")
+```
+
+## Actions
+
+Actions use `@actions.actionName` syntax via event applicators:
+
+```hypen
+Button { Text("Submit") }
+    .onClick(@actions.submit)
+
+Input(placeholder: "Enter text")
+    .onInput(@actions.updateText)
+```
+
+## Resources
+
+Resources reference server-registered SVG assets using `@resources.name` syntax:
+
+```hypen
+Icon(@resources.heart)
+    .size(24)
+    .color("#ed4956")
+
+Icon(@resources.plus-square)
+    .size(20)
+```
+
+Resources are registered on the server before rendering. The engine resolves
+`@resources.heart` at render time and injects the SVG path data into the patch,
+so clients receive pre-resolved data.
+
+## Applicators
+
+Applicators are chained with dot notation:
+
+```hypen
+Text("Hello")
+    .fontSize(18)
+    .fontWeight("bold")
+    .color("#3B82F6")
+    .padding(16)
+```
+
+## Comments
+
+```hypen
+// Single line comment
+
+/* Multi-line
+   comment */
+```
+
+## Modules
+
+Modules are stateful components:
+
+```hypen
+module ModuleName {
+    // UI goes here
+}
+```
+
+The module name must match a TypeScript file that defines its state and actions.

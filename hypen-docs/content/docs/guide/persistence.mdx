@@ -1,0 +1,201 @@
+---
+title: State Persistence
+description: Automatically save and restore module state across sessions with pluggable storage adapters
+---
+
+# State Persistence
+
+Modules can persist their state across sessions, reconnections, and server restarts. Add `.persist()` to your module definition and the runtime handles save/restore automatically.
+
+## Quick Start
+
+```typescript
+import { app } from "@hypen-space/core";
+import { durableObjectStore, session } from "@hypen-space/cf";
+
+export default app
+  .defineState({ count: 0 })
+  .persist(durableObjectStore(session()))
+  .onAction("increment", async ({ state }) => {
+    state.count++;
+  })
+  .build();
+```
+
+That's it. The counter's value survives page reloads, reconnections, and server restarts.
+
+## Key Strategies
+
+Every persisted module needs a **key strategy** that determines how state is scoped. There are three options:
+
+### `session()` — Per-Session
+
+Each browser session gets its own state. State is tied to an auto-generated session ID.
+
+```typescript
+import { durableObjectStore, session } from "@hypen-space/cf";
+
+app
+  .defineState({ draft: "" })
+  .persist(durableObjectStore(session()))
+  .build();
+```
+
+Use for: form drafts, in-progress work, temporary user data.
+
+### `global()` — Shared by Everyone
+
+One state instance shared across all users.
+
+```typescript
+import { durableObjectStore, global } from "@hypen-space/cf";
+
+app
+  .defineState({ messages: [], onlineCount: 0 })
+  .persist(durableObjectStore(global()))
+  .build();
+```
+
+Use for: chat rooms, shared counters, collaborative state.
+
+### `withKey(fn)` — Derived from State
+
+The storage key is computed from the current state. This enables per-user persistence where the user identity isn't known until after login.
+
+```typescript
+import { durableObjectStore, withKey } from "@hypen-space/cf";
+
+app
+  .defineState({ user: null, todos: [] })
+  .persist(durableObjectStore(withKey(state => state.user?.id)))
+  .onAction("login", async ({ state }) => {
+    const user = await authenticate();
+    state.user = user;
+    // Persistence activates now — todos are loaded from storage
+  })
+  .onAction("logout", async ({ state }) => {
+    state.user = null;
+    // Persistence deactivates — stored data is retained for next login
+  })
+  .build();
+```
+
+The key function is re-evaluated on every state change:
+
+- Returns `null` → no persistence (e.g., not logged in)
+- Returns a value → state is saved/restored for that key
+- Value changes → switches to a different stored state (e.g., account switch)
+
+## How State Restore Works
+
+When a persisted module loads, stored state is merged over the initial state:
+
+```typescript
+// Your definition
+app.defineState({ count: 0, label: "My Counter" })
+
+// Stored state (from previous session)
+{ count: 5 }
+
+// Result after restore
+{ count: 5, label: "My Counter" }
+```
+
+This means you can safely add new fields to your state — they'll get their default values from `defineState` while existing fields are restored from storage.
+
+State is restored **before** `onCreated` runs, so your lifecycle handler always sees the restored state:
+
+```typescript
+.onCreated(async (state) => {
+  console.log(state.count); // 5 (restored), not 0 (initial)
+})
+```
+
+## Multi-Module Apps
+
+Each module defines its own persistence strategy independently. Modules are flat peers — there's no inheritance:
+
+```typescript
+// User profile — per-user persistence
+app
+  .defineState({ user: null, preferences: {} }, { name: "Profile" })
+  .persist(durableObjectStore(withKey(state => state.user?.id)))
+  .build();
+
+// Chat — shared by everyone
+app
+  .defineState({ messages: [] }, { name: "Chat" })
+  .persist(durableObjectStore(global()))
+  .build();
+
+// Settings modal — ephemeral, no persistence
+app
+  .defineState({ isOpen: false }, { name: "Settings" })
+  .build();
+```
+
+## Writing a Custom Store
+
+The persistence layer is adapter-agnostic. If you're not deploying to Cloudflare, implement the `StateStore` interface:
+
+```typescript
+import type { StateStore } from "@hypen-space/core";
+
+function redisStore<T>(redisClient: RedisClient): StateStore<T> {
+  return {
+    resolveKey(state, moduleName, sessionId) {
+      return `${moduleName}:${sessionId}`;
+    },
+    async load(key) {
+      const data = await redisClient.get(key);
+      return data ? JSON.parse(data) : null;
+    },
+    async save(key, state) {
+      await redisClient.set(key, JSON.stringify(state));
+    },
+    async delete(key) {
+      await redisClient.del(key);
+    },
+  };
+}
+
+// Usage
+app
+  .defineState({ count: 0 })
+  .persist(redisStore(redis))
+  .build();
+```
+
+### StateStore Interface
+
+```typescript
+interface StateStore<T = unknown> {
+  /** Resolve the storage key. Returns null to disable persistence. */
+  resolveKey(state: T, moduleName: string, sessionId: string): string | null;
+
+  /** Load persisted state. Returns null if no stored state exists. */
+  load(key: string): Promise<T | null>;
+
+  /** Save state snapshot. Called on mutation (debounced by runtime). */
+  save(key: string, state: T): Promise<void>;
+
+  /** Delete persisted state. Called on session expiry. */
+  delete(key: string): Promise<void>;
+}
+```
+
+## Deployment
+
+When deploying to Cloudflare with `hypen deploy`, the CLI automatically provisions Durable Objects for modules that use `.persist()`. No manual configuration needed.
+
+```bash
+hypen deploy
+```
+
+See the [CLI reference](/docs/tooling/cli) for deployment options.
+
+## See Also
+
+- [State & Modules](/docs/guide/state) — State management fundamentals
+- [Modules API](/docs/modules) — Complete module API reference
+- [TypeScript SDK](/docs/servers/typescript) — Session management and RemoteServer

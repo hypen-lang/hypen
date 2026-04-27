@@ -1,0 +1,34 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "module-lifecycle-hooks",
+  "description": "Module lifecycle hooks (onCreated, onDestroyed) are called at appropriate times",
+  "category": "lifecycle",
+  "priority": "P1",
+
+  "skip": {
+    "reason": "Lifecycle hooks testing requires custom hook implementation in test runner",
+    "sdks": ["typescript", "golang"]
+  },
+
+  "input": {
+    "source": "Text(\"Module content\")",
+    "initialState": {
+      "initialized": false
+    },
+    "module": {
+      "name": "LifecycleModule",
+      "actions": [],
+      "stateKeys": ["initialized"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Module creation triggers onCreated hook",
+      "action": "initialRender",
+      "expectedState": {
+        "initialized": true
+      }
+    }
+  ]
+}

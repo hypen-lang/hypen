@@ -1,0 +1,9 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "url-encode-special",
+  "description": "Special characters percent-encode; unreserved pass through.",
+  "function": "encode_uri_component",
+  "priority": "P0",
+  "input": "hello world&foo=bar",
+  "expected": "hello%20world%26foo%3Dbar"
+}

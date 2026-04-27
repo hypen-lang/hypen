@@ -1,0 +1,50 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "foreach-dynamic-updates",
+  "description": "ForEach correctly updates when underlying list changes",
+  "category": "control-flow",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "ForEach control flow syntax not yet supported in current parser",
+    "sdks": ["typescript", "golang"]
+  },
+
+  "input": {
+    "source": "Column { ForEach(items: \"@{state.items}\") { Text(\"@{item.text}\", key: \"@{item.id}\") } }",
+    "initialState": {
+      "items": [
+        { "id": "1", "text": "First" },
+        { "id": "2", "text": "Second" }
+      ]
+    },
+    "module": {
+      "name": "DynamicForEachModule",
+      "actions": [],
+      "stateKeys": ["items"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render",
+      "action": "initialRender",
+      "expectedPatchCount": 6
+    },
+    {
+      "description": "Adding third item should create and insert",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["items"],
+        "newValues": {
+          "items": [
+            { "id": "1", "text": "First" },
+            { "id": "2", "text": "Second" },
+            { "id": "3", "text": "Third" }
+          ]
+        }
+      },
+      "expectedPatchCount": 2
+    }
+  ]
+}

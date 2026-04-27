@@ -1,0 +1,7 @@
+/build
+
+# Environment
+.env
+.env.*
+!.env.example
+.npmrc

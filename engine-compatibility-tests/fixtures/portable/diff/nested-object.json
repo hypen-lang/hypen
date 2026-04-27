@@ -1,0 +1,14 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-nested-object",
+  "description": "A change at a nested path should emit the dotted path, not the parent.",
+  "function": "diff_paths",
+  "priority": "P0",
+  "input": {
+    "old": { "user": { "name": "Alice", "age": 30 } },
+    "new": { "user": { "name": "Alice", "age": 31 } }
+  },
+  "expected": [
+    { "path": "user.age", "value": 31 }
+  ]
+}

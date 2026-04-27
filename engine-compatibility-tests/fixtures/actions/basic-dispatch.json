@@ -1,0 +1,47 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "basic-action-dispatch",
+  "description": "Dispatching an action should invoke the registered handler",
+  "category": "actions",
+  "priority": "P0",
+
+  "input": {
+    "source": "Button(text: \"Click me\", onClick: @actions.handleClick)",
+    "initialState": {
+      "clicked": false
+    },
+    "module": {
+      "name": "ActionModule",
+      "actions": ["handleClick"],
+      "stateKeys": ["clicked"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render creates button with action binding",
+      "action": "initialRender",
+      "expectedPatchCount": 2,
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Button",
+          "props": {
+            "text": "Click me"
+          }
+        },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Dispatching handleClick action (handler updates state)",
+      "action": "dispatchAction",
+      "dispatchAction": {
+        "name": "handleClick"
+      },
+      "expectedState": {
+        "clicked": true
+      }
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "state-update-minimal-patches",
+  "description": "State updates should produce minimal patches - only affected nodes should update",
+  "category": "state",
+  "priority": "P0",
+
+  "input": {
+    "source": "Column { Text(\"@{state.title}\") Text(\"@{state.subtitle}\") Text(\"Static text\") }",
+    "initialState": {
+      "title": "Initial Title",
+      "subtitle": "Initial Subtitle"
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["title", "subtitle"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render creates all elements",
+      "action": "initialRender",
+      "expectedPatchCount": 8,
+      "expectedPatchTypes": ["create", "insert", "create", "insert", "create", "insert", "create", "insert"],
+      "expectedPatches": [
+        { "type": "create", "elementType": "Column" },
+        { "type": "create", "elementType": "Text", "props": { "0": "Initial Title" } },
+        { "type": "create", "elementType": "Text", "props": { "0": "Initial Subtitle" } },
+        { "type": "create", "elementType": "Text", "props": { "0": "Static text" } },
+        { "type": "insert" },
+        { "type": "insert" },
+        { "type": "insert" },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Updating title should only patch the title Text element",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["title"],
+        "newValues": {
+          "title": "Updated Title"
+        }
+      },
+      "expectedPatchTypes": ["setProp"],
+      "expectedPatches": [
+        { "type": "setProp", "name": "0", "value": "Updated Title" }
+      ],
+      "forbiddenPatchTypes": ["create", "remove", "insert"]
+    }
+  ]
+}

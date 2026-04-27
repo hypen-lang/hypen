@@ -1,0 +1,187 @@
+---
+title: CLI
+description: Hypen command-line interface for creating and managing projects
+---
+
+# Hypen CLI
+
+The Hypen CLI (`@hypen-space/cli`) is the recommended way to create, develop, and build Hypen applications.
+
+## Installation
+
+```bash
+# Using Bun (recommended)
+bun install -g @hypen-space/cli
+
+# Using npm
+npm install -g @hypen-space/cli
+```
+
+## Commands
+
+### `hypen init`
+
+Create a new Hypen project.
+
+```bash
+hypen init my-app
+```
+
+This creates a new directory with:
+- Project structure with `src/components/`
+- TypeScript configuration
+- A `hypen.json` configuration file
+- A starter component with state and actions
+
+### `hypen dev`
+
+Start the development server with hot reload.
+
+```bash
+cd my-app
+hypen dev
+```
+
+Options:
+- `--port <number>`, `-p` - Port to run on (default: `3000`)
+- `--debug`, `-d` - Enable debug mode
+
+The dev server:
+- Watches for file changes
+- Hot reloads components
+- Shows compilation errors in the browser
+
+### `hypen build`
+
+Build the application for production.
+
+```bash
+hypen build
+```
+
+Options:
+- `--outDir <path>`, `-o` - Output directory (default: `dist`)
+- `--minify`, `-m` - Minify the output
+- `--sourcemap`, `-s` - Generate source maps
+
+Outputs optimized assets ready for deployment.
+
+### `hypen generate`
+
+Generate component imports from the components directory.
+
+```bash
+hypen generate
+```
+
+Scans `src/components/` and produces a `components.generated.ts` file that wires up all discovered component templates and modules.
+
+### `hypen run`
+
+Install and launch your app on a native device or simulator.
+
+```bash
+hypen run android
+hypen run ios
+```
+
+This command:
+1. Starts a WebSocket dev server
+2. Downloads the Hypen Runner app (cached in `~/.hypen/runners/`)
+3. Lists connected devices/simulators and prompts you to pick one
+4. Installs the runner app on the selected device
+5. Launches it with a connection back to the dev server
+
+The server stays running with hot reload until you press `Ctrl+C`.
+
+**Platforms:**
+- `android` — Requires `adb` (Android SDK platform-tools). Works with emulators and physical devices connected via USB.
+- `ios` — Requires `xcrun` (Xcode command line tools). Runs on iOS Simulator. Boots the simulator automatically if needed.
+
+Options:
+- `--port <number>`, `-p` - Dev server port (default: `3000`)
+- `--studio` - Open Hypen Studio alongside the device runner
+
+The `--studio` flag launches the Studio IDE at the same time as the device runner, so you can edit components in the browser and see changes live on the device.
+
+```bash
+# Run on Android with Studio open
+hypen run android --studio
+
+# Run on iOS Simulator on a custom port
+hypen run ios --port 8080
+```
+
+### `hypen studio`
+
+Open [Hypen Studio](/docs/tooling/studio), a full in-browser IDE for developing and debugging Hypen apps. Includes a code editor with LSP support, live preview, file browser, state inspector, action log, time-travel debugging, and an integrated terminal.
+
+```bash
+hypen studio
+```
+
+Options:
+- `--port <number>`, `-p` - Port to run on (default: `5173`)
+- `--open` - Open browser automatically (default: `true`)
+
+Studio requires the Bun runtime. See the [Studio documentation](/docs/tooling/studio) for the full feature reference.
+
+## Project Structure
+
+The CLI expects this structure:
+
+```
+my-app/
+├── src/
+│   └── components/
+│       └── App/
+│           ├── component.hypen    # UI template
+│           └── component.ts       # Module logic
+├── hypen.json
+├── package.json
+└── tsconfig.json
+```
+
+## Component Discovery
+
+The CLI automatically discovers components by recursively scanning the `components` directory. Multiple naming conventions are supported (folder-based, index-based, sibling files, and single-file).
+
+For the complete discovery reference, naming patterns, and nested component organization, see [Configuration](/docs/tooling/configuration).
+
+## Configuration
+
+Create a `hypen.json` in your project root:
+
+```json
+{
+  "components": "./src/components",
+  "entry": "App",
+  "port": 3000,
+  "outDir": "dist"
+}
+```
+
+For a full reference of all configuration options, discovery patterns, and integration with existing backends, see [Configuration](/docs/tooling/configuration).
+
+## Troubleshooting
+
+### Port already in use
+
+```bash
+hypen dev --port 3001
+```
+
+### Clear cache
+
+```bash
+rm -rf node_modules/.hypen
+hypen dev
+```
+
+## See Also
+
+- [Hypen Studio](/docs/tooling/studio) — Full Studio IDE feature reference
+- [Configuration](/docs/tooling/configuration) — Full config and discovery reference
+- [Installation Guide](/docs/getting-started/installation)
+- [Your First App](/docs/getting-started/first-app)
+- [Language Server (LSP)](/docs/tooling/lsp)

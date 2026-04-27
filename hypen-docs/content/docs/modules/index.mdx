@@ -1,0 +1,294 @@
+---
+title: Modules
+description: Stateful module system for Hypen applications
+---
+
+# Modules
+
+Modules are the stateful building blocks of Hypen applications. They combine UI templates with TypeScript state management.
+
+## Overview
+
+A module consists of:
+- **Template** (`.hypen` file) — The declarative UI
+- **Definition** (TypeScript) — State, actions, and lifecycle handlers
+
+```hypen
+module Counter {
+    Column {
+        Text("Count: @{state.count}")
+        Button { Text("+1") }
+            .onClick(@actions.increment)
+    }
+}
+```
+
+```typescript
+import { app } from "@hypen-space/core";
+
+export default app
+  .defineState({ count: 0 })
+  .onAction("increment", async ({ state }) => {
+    state.count++;
+  });
+```
+
+## API Reference
+
+### defineState
+
+Sets the initial state with TypeScript generics for type safety:
+
+```typescript
+interface MyState {
+  items: string[];
+  loading: boolean;
+}
+
+app.defineState<MyState>({
+  items: [],
+  loading: false
+})
+```
+
+### onCreated
+
+Called **once**, when the module is first constructed. Use it for one-time setup
+that shouldn't repeat on every re-entry — building caches, setting up
+long-lived listeners, or fetching data that should outlive the screen's
+visibility.
+
+```typescript
+.onCreated(async (state, context) => {
+  // Access router
+  if (context?.router) {
+    context.router.push("/home");
+  }
+})
+```
+
+> **Note:** Under `ManagedRouter`'s default (persistent) behavior, `onCreated`
+> only runs the first time a route is visited in a session. Subsequent
+> navigations to the same route reuse the cached module instance and fire
+> `onActivated` instead. If you need data refreshed on every navigation, put
+> it in `onActivated`.
+
+### onActivated
+
+Called **every time** the module becomes the active route target — once right
+after `onCreated` on first mount, and again each time the user navigates back
+to a persisted module. This is the right place for per-visit work like
+refreshing data, (re)connecting ephemeral subscriptions, or starting timers.
+
+```typescript
+.onActivated(async (state) => {
+  state.loading = true;
+  state.items = await fetchItems();
+  state.loading = false;
+})
+```
+
+### onDeactivated
+
+Called **every time** the module stops being the active route target. Runs
+before the module is cached for persistence (when the user navigates away)
+OR before `onDestroyed` if the module is being torn down. Use this to pause
+timers, tear down ephemeral subscriptions, or snapshot transient UI state.
+
+```typescript
+.onDeactivated((state) => {
+  clearInterval(state.pollHandle);
+})
+```
+
+### onDestroyed
+
+Called when the module is torn down for good (e.g. `ManagedRouter.stop()`, or
+when `persist: false` is set on the definition). Receives `(state, context?)`:
+
+```typescript
+.onDestroyed((state, context) => {
+  state.connection?.close();
+})
+```
+
+### Module Persistence & Lifecycle Order
+
+When a module is used via `ManagedRouter`, it **persists across navigations by
+default** — navigating away caches the instance so that navigating back
+restores its state (eliminating the "loading flash" you'd otherwise see on
+every re-entry). Opt out per module with `{ persist: false }`:
+
+```typescript
+app.defineState({ count: 0 }, { name: "Counter", persist: false });
+```
+
+Lifecycle order on navigation:
+
+```
+First visit:       construct → onCreated → onActivated
+Navigate away:     onDeactivated → (cached in memory)
+Revisit (cached):  onActivated
+Final teardown:    onDeactivated → onDestroyed
+```
+
+Routes that don't resolve to a module definition have nothing to persist and
+are unchanged by this behavior.
+
+### onAction
+
+Handler for UI actions. Receives a context object with action details, state, and global context:
+
+```typescript
+.onAction<PayloadType>("actionName", async ({ action, state, context }) => {
+  // action.name     - the action name
+  // action.payload  - event data (typed as PayloadType)
+  // action.sender   - component that dispatched the action
+  // state           - current state (auto-synced via Proxy)
+  // context         - GlobalContext for cross-module communication
+  // context.router  - HypenRouter for navigation
+})
+```
+
+### onError
+
+Error handler called when any action or lifecycle hook throws:
+
+```typescript
+.onError(({ error, actionName, lifecycle, state }) => {
+  console.error(`Error in ${actionName ?? lifecycle}:`, error.message);
+  return { handled: true };  // suppress error
+  // or: { rethrow: true }   // re-throw
+  // or: { retry: true }     // retry (actions only)
+  // or: void                 // default: log + emit
+})
+```
+
+See [Error Handling Guide](/docs/guide/error-handling) for details.
+
+### onDisconnect / onReconnect / onExpire
+
+Session lifecycle hooks for remote apps. These handle client disconnections and reconnections:
+
+```typescript
+.onDisconnect(({ state, session }) => {
+  // Client disconnected, but session is alive (within TTL)
+})
+.onReconnect(({ session, restore }) => {
+  // Client reconnected with existing session
+  restore(savedState);
+})
+.onExpire(({ session }) => {
+  // Session TTL expired
+})
+```
+
+See the [TypeScript SDK](/docs/servers/typescript#session-management) for details.
+
+### persist
+
+Attach a state store for automatic persistence across sessions:
+
+```typescript
+import { durableObjectStore, session, global, withKey } from "@hypen-space/cf";
+
+// Per-session persistence
+app.defineState({ draft: "" })
+  .persist(durableObjectStore(session()))
+
+// Global (shared by all users)
+app.defineState({ messages: [] })
+  .persist(durableObjectStore(global()))
+
+// Keyed to a state value (e.g., user ID after login)
+app.defineState({ user: null, todos: [] })
+  .persist(durableObjectStore(withKey(state => state.user?.id)))
+```
+
+On restore, stored state is merged over `initialState`: new fields get defaults, existing fields are restored.
+
+See the [Persistence Guide](/docs/guide/persistence) for details.
+
+### build
+
+Finalizes the module definition. Required when passing to `RemoteServer.module()` or `HypenModuleInstance`:
+
+```typescript
+const myModule = app
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .build();
+```
+
+### ui
+
+For single-file components, embed the template directly using the `hypen` tagged template literal:
+
+```typescript
+import { app, hypen, state } from "@hypen-space/core";
+
+export default app
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .ui(hypen`
+    Column {
+      Text("Count: @{state.count}")
+      Button { Text("+") }
+        .onClick(@actions.increment)
+    }
+  `);
+```
+
+The `.ui()` method calls `.build()` internally and returns the finalized module definition.
+
+## State Management
+
+State is tracked via Proxy — mutations sync automatically:
+
+```typescript
+.onAction<{ item: Item }>("addItem", async ({ action, state }) => {
+  state.items.push(action.payload!.item);
+  // UI updates automatically — no callback needed
+})
+```
+
+### Deep Nesting
+
+Nested object mutations are tracked automatically:
+
+```typescript
+.onAction("updateAddress", ({ state }) => {
+  state.user.profile.address.city = "New York";
+  // Tracked at path "user.profile.address.city"
+})
+```
+
+### Batch Updates
+
+Multiple synchronous mutations are coalesced into a single UI update. For explicit batching:
+
+```typescript
+import { batchStateUpdates } from "@hypen-space/core";
+
+.onAction("bulkUpdate", ({ state }) => {
+  batchStateUpdates(state, () => {
+    state.items = newItems;
+    state.count = newItems.length;
+  });
+})
+```
+
+## Best Practices
+
+1. **Keep state minimal** — Only store what the UI needs
+2. **Use TypeScript interfaces** — Define state shape for type safety
+3. **Handle async properly** — Show loading states during fetches
+4. **Name actions descriptively** — `saveDocument` not `handleClick`
+5. **Use `.bind()` for forms** — Two-way binding avoids boilerplate action handlers
+
+## See Also
+
+- [State & Modules Guide](/docs/guide/state) — Detailed tutorial with examples
+- [Error Handling](/docs/guide/error-handling) — Error recovery patterns
+- [TypeScript SDK](/docs/servers/typescript) — Complete SDK reference including component discovery, RemoteServer, and deployment
+- [Components](/docs/guide/components) — All built-in components

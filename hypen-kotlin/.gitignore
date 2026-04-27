@@ -1,0 +1,37 @@
+# Gradle
+.gradle/
+build/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Kotlin
+*.class
+*.jar
+*.war
+*.ear
+!gradle/wrapper/gradle-wrapper.jar
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
+
+# Test output
+out/
+
+# Local properties (may contain credentials)
+local.properties
+gradle-local.properties
+
+# Environment
+.env
+.env.*
+!.env.example
+.npmrc

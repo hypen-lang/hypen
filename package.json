@@ -1,0 +1,9 @@
+{
+  "name": "hypen-rs",
+  "private": true,
+  "workspaces": [],
+  "dependencies": {
+    "puppeteer": "^24.36.1",
+    "sharp": "^0.34.5"
+  }
+}

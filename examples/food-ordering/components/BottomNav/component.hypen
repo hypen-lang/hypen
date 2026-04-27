@@ -1,0 +1,82 @@
+Row {
+    Button {
+        Column {
+            Icon(@resources.home)
+                .size(24)
+                .color("@{state.location == '/' ? '#f97316' : '#9ca3af'}")
+            Text("Home")
+                .tw("text-xs mt-1")
+                .color("@{state.location == '/' ? '#f97316' : '#9ca3af'}")
+        }
+        .tw("items-center")
+    }
+    .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
+    .onClick(@router.push, to: "/")
+
+    Button {
+        Column {
+            Icon(@resources.search)
+                .size(24)
+                .color("@{state.location == '/search' ? '#f97316' : '#9ca3af'}")
+            Text("Search")
+                .tw("text-xs mt-1")
+                .color("@{state.location == '/search' ? '#f97316' : '#9ca3af'}")
+        }
+        .tw("items-center")
+    }
+    .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
+    .onClick(@router.push, to: "/search")
+
+    Button {
+        Stack {
+            Column {
+                Icon(@resources.bag)
+                    .size(24)
+                    .color("@{state.location == '/cart' ? '#f97316' : '#9ca3af'}")
+                Text("Cart")
+                    .tw("text-xs mt-1")
+                    .color("@{state.location == '/cart' ? '#f97316' : '#9ca3af'}")
+            }
+            .tw("items-center")
+
+            If(condition: "@{state.cartCount > 0}") {
+                Column {
+                    Text("@{state.cartCount}")
+                        .tw("text-[10px] font-bold text-white")
+                }
+                .tw("absolute -top-1 right-2 w-5 h-5 rounded-full bg-orange-500 items-center justify-center")
+            }
+        }
+    }
+    .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
+    .onClick(@router.push, to: "/cart")
+
+    Button {
+        Column {
+            Icon(@resources.receipt)
+                .size(24)
+                .color("@{state.location == '/orders' ? '#f97316' : '#9ca3af'}")
+            Text("Orders")
+                .tw("text-xs mt-1")
+                .color("@{state.location == '/orders' ? '#f97316' : '#9ca3af'}")
+        }
+        .tw("items-center")
+    }
+    .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
+    .onClick(@router.push, to: "/orders")
+
+    Button {
+        Column {
+            Icon(@resources.user)
+                .size(24)
+                .color("@{state.location == '/profile' ? '#f97316' : '#9ca3af'}")
+            Text("Profile")
+                .tw("text-xs mt-1")
+                .color("@{state.location == '/profile' ? '#f97316' : '#9ca3af'}")
+        }
+        .tw("items-center")
+    }
+    .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
+    .onClick(@router.push, to: "/profile")
+}
+.tw("px-3 pt-1 pb-6 bg-white border-t border-gray-200 items-center justify-around")

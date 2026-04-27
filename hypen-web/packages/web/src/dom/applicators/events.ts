@@ -1,0 +1,575 @@
+/**
+ * Event Applicators
+ *
+ * Handles event applicators like onClick, onPress, etc.
+ * Uses a factory pattern to reduce boilerplate and ensure consistency.
+ */
+
+import type { ApplicatorHandler } from "./types.js";
+import {
+  getElementDisposables,
+  disposableListener,
+  disposableTimeout,
+  type Disposable,
+} from "@hypen-space/core/disposable";
+import { frameworkLoggers } from "@hypen-space/core/logger";
+import {
+  type IEngine,
+  getEngine,
+  getRegisteredEvents,
+  registerEvent,
+  unregisterEvent,
+  getKeyTarget,
+  setKeyTarget,
+} from "../element-data.js";
+
+const log = frameworkLoggers.events;
+
+// ============================================================================
+// Types
+// ============================================================================
+
+interface EventHandlerOptions {
+  /** Custom payload extractor for this event type */
+  extractPayload?: (event: Event, element: HTMLElement) => Record<string, unknown>;
+  /** Throttle events to max one per N milliseconds */
+  throttleMs?: number;
+  /** Prevent default behavior */
+  preventDefault?: boolean;
+  /** Use passive listener (for scroll, touch) */
+  passive?: boolean;
+  /** Key to listen for (keyboard events) */
+  key?: string;
+}
+
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/**
+ * Convert Map or nested objects to plain objects
+ */
+function toPlainObject(value: unknown): unknown {
+  if (value instanceof Map) {
+    const obj: Record<string, unknown> = {};
+    for (const [key, val] of value.entries()) {
+      obj[key] = toPlainObject(val);
+    }
+    return obj;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => toPlainObject(item));
+  }
+
+  if (value && typeof value === "object") {
+    const obj: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value)) {
+      obj[key] = toPlainObject(val);
+    }
+    return obj;
+  }
+
+  return value;
+}
+
+/**
+ * Extract action name and custom payload from an applicator value
+ */
+function extractActionDetails(value: unknown): {
+  actionName: string | null;
+  payload: Record<string, unknown>;
+} {
+  // String format: "@actions.doSomething" or "@doSomething"
+  if (typeof value === "string") {
+    if (!value.startsWith("@")) {
+      return { actionName: null, payload: {} };
+    }
+
+    let actionName = value.substring(1);
+    if (actionName.startsWith("actions.")) {
+      actionName = actionName.substring(8);
+    }
+    return { actionName, payload: {} };
+  }
+
+  // Object format: { "0": "@actions.doSomething", "customKey": "value" }
+  if (value && typeof value === "object") {
+    const plain = toPlainObject(value) as Record<string, unknown>;
+    const payload: Record<string, unknown> = {};
+    let actionName: string | null = null;
+
+    if (plain && typeof plain === "object") {
+      const actionValue = plain["0"];
+      if (typeof actionValue === "string" && actionValue.startsWith("@")) {
+        actionName = actionValue.substring(1);
+        if (actionName.startsWith("actions.")) {
+          actionName = actionName.substring(8);
+        }
+      }
+
+      for (const [key, val] of Object.entries(plain)) {
+        if (key !== "0") {
+          // If the key is numeric (like "1", "2") and the value is an object,
+          // merge the object's keys into the payload directly.
+          // This handles: .onClick("@actions.foo", { id: "123" })
+          // where the second positional arg becomes "1": { id: "123" }
+          if (/^\d+$/.test(key) && val && typeof val === "object" && !Array.isArray(val)) {
+            for (const [innerKey, innerVal] of Object.entries(val)) {
+              payload[innerKey] = innerVal;
+            }
+          } else {
+            payload[key] = val;
+          }
+        }
+      }
+    }
+
+    return { actionName, payload };
+  }
+
+  return { actionName: null, payload: {} };
+}
+
+/**
+ * Extract relevant data from a DOM event
+ */
+function extractEventData(event: Event, element: HTMLElement): Record<string, unknown> {
+  const data: Record<string, unknown> = {
+    type: event.type,
+    timestamp: Date.now(),
+  };
+
+  // Mouse events
+  if (event instanceof MouseEvent) {
+    data.clientX = event.clientX;
+    data.clientY = event.clientY;
+    data.button = event.button;
+  }
+
+  // Keyboard events
+  if (event instanceof KeyboardEvent) {
+    data.key = event.key;
+    data.code = event.code;
+    data.ctrlKey = event.ctrlKey;
+    data.shiftKey = event.shiftKey;
+    data.altKey = event.altKey;
+    data.metaKey = event.metaKey;
+  }
+
+  // Input element values
+  if (element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement) {
+    data.value = element.value;
+  }
+
+  // Select element values
+  if (element instanceof HTMLSelectElement) {
+    data.value = element.value;
+    data.selectedIndex = element.selectedIndex;
+  }
+
+  // Form data
+  if (event.type === "submit" && element instanceof HTMLFormElement) {
+    data.formData = new FormData(element);
+  }
+
+  return data;
+}
+
+
+/**
+ * Capitalize first letter of a string
+ */
+function capitalize(str: string): string {
+  return str.charAt(0).toUpperCase() + str.slice(1);
+}
+
+// ============================================================================
+// Event Handler Factory
+// ============================================================================
+
+
+/**
+ * Create an event handler applicator with common boilerplate
+ */
+function createEventHandler(
+  eventType: string,
+  options: EventHandlerOptions = {}
+): ApplicatorHandler {
+  return (element: HTMLElement, value: unknown) => {
+    const { actionName, payload: customPayload } = extractActionDetails(value);
+
+    if (!actionName) {
+      log.warn(`${eventType} requires an action reference starting with @, got:`, value);
+      return;
+    }
+
+    const disposables = getElementDisposables(element);
+
+    // Track that we've registered this event type
+    // The disposable stack handles cleanup automatically
+    const eventKey = `${eventType}:${actionName}`;
+    if (getRegisteredEvents(element).has(eventKey)) {
+      // Already registered - skip to avoid duplicates
+      // This can happen during re-renders
+      return;
+    }
+    registerEvent(element, eventKey);
+
+    // Create throttle state if needed
+    let throttleTimer: Disposable | null = null;
+
+    // Create the event listener
+    const listener = (event: Event) => {
+      // Handle throttling
+      if (options.throttleMs && throttleTimer) {
+        return;
+      }
+
+      if (options.throttleMs) {
+        throttleTimer = disposableTimeout(() => {
+          throttleTimer = null;
+        }, options.throttleMs);
+      }
+
+      // Handle preventDefault
+      if (options.preventDefault) {
+        event.preventDefault();
+      }
+
+      // Build payload
+      const payload =
+        Object.keys(customPayload).length > 0
+          ? { ...customPayload }
+          : options.extractPayload
+            ? options.extractPayload(event, element)
+            : extractEventData(event, element);
+
+      // Dispatch to engine, catching any async rejections
+      const engine = getEngine(element);
+      if (engine) {
+        try {
+          engine.dispatchAction(actionName, payload);
+        } catch (err) {
+          log.error(`Error dispatching action "${actionName}":`, err);
+        }
+      }
+    };
+
+    // Register the listener using disposable pattern
+    disposables.add(
+      disposableListener(element, eventType, listener, {
+        passive: options.passive,
+      })
+    );
+
+    // Clean up registered events tracking on dispose
+    disposables.addCallback(() => {
+      unregisterEvent(element, eventKey);
+      if (throttleTimer) {
+        throttleTimer.dispose();
+      }
+    });
+  };
+}
+
+/**
+ * Create a keyboard event handler that filters by key
+ */
+function createKeyHandler(defaultKey: string = "Enter"): ApplicatorHandler {
+  return (element: HTMLElement, value: unknown) => {
+    const { actionName, payload: customPayload } = extractActionDetails(value);
+
+    if (!actionName) {
+      log.warn(`onKey requires an action reference starting with @, got:`, value);
+      return;
+    }
+
+    const disposables = getElementDisposables(element);
+
+    const eventKey = `keydown:${actionName}:${defaultKey}`;
+    if (getRegisteredEvents(element).has(eventKey)) {
+      return;
+    }
+    registerEvent(element, eventKey);
+
+    // Get target key from element data or use default
+    const targetKey = getKeyTarget(element) || defaultKey;
+    const keyToMatch = targetKey.toLowerCase() === "return" ? "Enter" : targetKey;
+
+    const listener = (event: Event) => {
+      const keyEvent = event as KeyboardEvent;
+      if (keyEvent.key !== keyToMatch) {
+        return;
+      }
+
+      event.preventDefault();
+
+      const target = event.target as HTMLInputElement | HTMLTextAreaElement;
+      const payload =
+        Object.keys(customPayload).length > 0
+          ? { ...customPayload }
+          : {
+              type: event.type,
+              timestamp: Date.now(),
+              key: keyEvent.key,
+              code: keyEvent.code,
+              value: target.value,
+              input: target.value,
+              ctrlKey: keyEvent.ctrlKey,
+              shiftKey: keyEvent.shiftKey,
+              altKey: keyEvent.altKey,
+              metaKey: keyEvent.metaKey,
+            };
+
+      const engine = getEngine(element);
+      if (engine) {
+        engine.dispatchAction(actionName, payload);
+      }
+    };
+
+    disposables.add(disposableListener(element, "keydown", listener));
+    disposables.addCallback(() => {
+      unregisterEvent(element, eventKey);
+    });
+  };
+}
+
+/**
+ * Create a long-click/long-press handler
+ */
+function createLongClickHandler(thresholdMs: number = 500): ApplicatorHandler {
+  return (element: HTMLElement, value: unknown) => {
+    const { actionName, payload: customPayload } = extractActionDetails(value);
+
+    if (!actionName) {
+      log.warn(`onLongClick requires an action reference starting with @, got:`, value);
+      return;
+    }
+
+    const disposables = getElementDisposables(element);
+
+    const eventKey = `longclick:${actionName}`;
+    if (getRegisteredEvents(element).has(eventKey)) {
+      return;
+    }
+    registerEvent(element, eventKey);
+
+    let longClickTimer: Disposable | null = null;
+
+    const downListener = (event: Event) => {
+      const pointerEvent = event as PointerEvent;
+
+      longClickTimer = disposableTimeout(() => {
+        const payload =
+          Object.keys(customPayload).length > 0
+            ? { ...customPayload }
+            : {
+                type: "longclick",
+                timestamp: Date.now(),
+                clientX: pointerEvent.clientX,
+                clientY: pointerEvent.clientY,
+              };
+
+        const engine = getEngine(element);
+        if (engine) {
+          engine.dispatchAction(actionName, payload);
+        }
+
+        longClickTimer = null;
+      }, thresholdMs);
+    };
+
+    const cancelListener = () => {
+      if (longClickTimer) {
+        longClickTimer.dispose();
+        longClickTimer = null;
+      }
+    };
+
+    disposables.add(disposableListener(element, "pointerdown", downListener));
+    disposables.add(disposableListener(element, "pointerup", cancelListener));
+    disposables.add(disposableListener(element, "pointerleave", cancelListener));
+    disposables.addCallback(() => {
+      unregisterEvent(element, eventKey);
+      cancelListener();
+    });
+  };
+}
+
+// ============================================================================
+// Payload Extractors
+// ============================================================================
+
+const inputPayload = (event: Event, element: HTMLElement): Record<string, unknown> => {
+  const target = element as HTMLInputElement | HTMLTextAreaElement;
+  return {
+    type: event.type,
+    timestamp: Date.now(),
+    value: target.value,
+    input: target.value,
+  };
+};
+
+const scrollPayload = (_event: Event, element: HTMLElement): Record<string, unknown> => {
+  const scrollTop = element.scrollTop;
+  const scrollHeight = element.scrollHeight;
+  const clientHeight = element.clientHeight;
+  const scrollPercentage =
+    scrollHeight - clientHeight > 0
+      ? (scrollTop / (scrollHeight - clientHeight)) * 100
+      : 0;
+
+  const nearBottom =
+    scrollHeight - scrollTop - clientHeight < 100 || scrollPercentage > 90;
+
+  return {
+    type: "scroll",
+    timestamp: Date.now(),
+    scrollTop,
+    scrollLeft: element.scrollLeft,
+    scrollHeight,
+    scrollWidth: element.scrollWidth,
+    clientHeight,
+    clientWidth: element.clientWidth,
+    scrollPercentage: Math.round(scrollPercentage),
+    nearBottom,
+    atBottom: scrollHeight - scrollTop === clientHeight,
+    atTop: scrollTop === 0,
+  };
+};
+
+const focusPayload = (event: Event, element: HTMLElement): Record<string, unknown> => ({
+  type: event.type,
+  timestamp: Date.now(),
+  value: (element as HTMLInputElement).value ?? undefined,
+});
+
+const mousePayload = (event: Event, _element: HTMLElement): Record<string, unknown> => {
+  const mouseEvent = event as MouseEvent;
+  return {
+    type: event.type,
+    timestamp: Date.now(),
+    clientX: mouseEvent.clientX,
+    clientY: mouseEvent.clientY,
+  };
+};
+
+// ============================================================================
+// Event Handlers Export
+// ============================================================================
+
+export const eventHandlers: Record<string, ApplicatorHandler> = {
+  // Basic click/press
+  onClick: createEventHandler("click"),
+  onPress: createEventHandler("click"), // Alias for mobile-style naming
+
+  // Form events
+  onChange: createEventHandler("change"),
+  onSubmit: createEventHandler("submit", { preventDefault: true }),
+  onInput: createEventHandler("input", { extractPayload: inputPayload }),
+
+  // Keyboard events
+  onKey: createKeyHandler("Enter"),
+  "onKey.key": (element: HTMLElement, value: unknown) => {
+    // Store the target key for the action handler to use
+    setKeyTarget(element, String(value));
+  },
+  "onKey.action": createKeyHandler("Enter"),
+
+  // Scroll (throttled)
+  onScroll: createEventHandler("scroll", {
+    throttleMs: 100,
+    passive: true,
+    extractPayload: scrollPayload,
+  }),
+
+  // Long click/press
+  onLongClick: createLongClickHandler(500),
+  onLongPress: createLongClickHandler(500), // Alias for mobile-style naming
+
+  // Focus events
+  onFocus: createEventHandler("focus", { extractPayload: focusPayload }),
+  onBlur: createEventHandler("blur", { extractPayload: focusPayload }),
+
+  // Mouse hover events
+  onMouseEnter: createEventHandler("mouseenter", { extractPayload: mousePayload }),
+  onMouseLeave: createEventHandler("mouseleave", { extractPayload: mousePayload }),
+
+  // Two-way binding for .bind(@state.x)
+  bind: ((element: HTMLElement, value: unknown) => {
+    const bindPath = typeof value === "string" ? value : null;
+    if (!bindPath) return;
+
+    const disposables = getElementDisposables(element);
+    const eventKey = `bind:${bindPath}`;
+    if (getRegisteredEvents(element).has(eventKey)) return;
+    registerEvent(element, eventKey);
+
+    // Determine the target element, event type, and value extractor based on component type
+    const hypenType = element.dataset?.hypenType;
+
+    if (hypenType === "checkbox" || hypenType === "switch") {
+      // Checkbox/Switch: wrapper <label> containing <input type="checkbox">
+      const input = element.querySelector('input[type="checkbox"]') as HTMLInputElement | null;
+      if (!input) return;
+
+      const listener = () => {
+        const engine = getEngine(element);
+        if (engine) {
+          engine.dispatchAction("__hypen_bind", {
+            path: bindPath,
+            value: input.checked,
+          });
+        }
+      };
+
+      disposables.add(
+        disposableListener(input, "change", listener, { passive: true })
+      );
+    } else if (element instanceof HTMLSelectElement) {
+      // Select: listen to change event, read .value
+      const listener = () => {
+        const engine = getEngine(element);
+        if (engine) {
+          engine.dispatchAction("__hypen_bind", {
+            path: bindPath,
+            value: element.value,
+          });
+        }
+      };
+
+      disposables.add(
+        disposableListener(element, "change", listener, { passive: true })
+      );
+    } else if (
+      element instanceof HTMLInputElement ||
+      element instanceof HTMLTextAreaElement
+    ) {
+      // Input/Textarea: listen to input event, read .value
+      const listener = () => {
+        const engine = getEngine(element);
+        if (engine) {
+          engine.dispatchAction("__hypen_bind", {
+            path: bindPath,
+            value: element.value,
+          });
+        }
+      };
+
+      disposables.add(
+        disposableListener(element, "input", listener, { passive: true })
+      );
+    } else {
+      log.warn(
+        `.bind() is not supported on element type "${element.dataset?.hypenType || element.tagName}". ` +
+        `Supported types: input, textarea, checkbox, switch, select.`
+      );
+      unregisterEvent(element, eventKey);
+      return;
+    }
+
+    disposables.addCallback(() => unregisterEvent(element, eventKey));
+  }) as ApplicatorHandler,
+};

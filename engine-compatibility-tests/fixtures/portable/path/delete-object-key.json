@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "path-delete-object-key",
+  "description": "Delete an object key; returns updated JSON plus removed=true.",
+  "function": "path_delete",
+  "priority": "P0",
+  "input": {
+    "value": { "a": 1, "b": 2 },
+    "path": "a"
+  },
+  "expected": { "json": { "b": 2 }, "removed": true }
+}

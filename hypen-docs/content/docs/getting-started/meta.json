@@ -1,0 +1,10 @@
+{
+  "title": "Getting Started",
+  "pages": [
+    "index",
+    "introduction",
+    "installation",
+    "first-app",
+    "remote-app"
+  ]
+}

@@ -1,0 +1,114 @@
+{
+  "name": "@hypen-space/lsp",
+  "displayName": "Hypen Language Support",
+  "description": "Language Server Protocol support for the Hypen declarative UI language",
+  "version": "0.4.956",
+  "publisher": "hypen",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "hypen",
+    "ui",
+    "declarative",
+    "rust",
+    "wasm",
+    "lsp"
+  ],
+  "main": "./out/extension.js",
+  "files": [
+    "src",
+    "out",
+    "syntaxes",
+    "icons",
+    "language-configuration.json"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "hypen",
+        "aliases": [
+          "Hypen",
+          "hypen"
+        ],
+        "extensions": [
+          ".hypen"
+        ],
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/hypen-light.png",
+          "dark": "./icons/hypen-dark.png"
+        }
+      }
+    ],
+    "grammars": [
+      {
+        "language": "hypen",
+        "scopeName": "source.hypen",
+        "path": "./syntaxes/hypen.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Hypen",
+      "properties": {
+        "hypen.trace.server": {
+          "scope": "window",
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traces the communication between VS Code and the language server."
+        },
+        "hypen.maxNumberOfProblems": {
+          "scope": "resource",
+          "type": "number",
+          "default": 100,
+          "description": "Controls the maximum number of problems produced by the server."
+        },
+        "hypen.formatting.enable": {
+          "scope": "resource",
+          "type": "boolean",
+          "default": true,
+          "description": "Enable/disable Hypen document formatting."
+        }
+      }
+    }
+  },
+  "activationEvents": [
+    "onLanguage:hypen"
+  ],
+  "scripts": {
+    "vscode:prepublish": "npm run build:wasm && npm run compile",
+    "compile": "tsc -b",
+    "watch": "tsc -b -w",
+    "lint": "eslint ./src --ext .ts",
+    "test": "node ./out/test/runTest.js",
+    "package": "vsce package",
+    "build:wasm": "cd ../parser && ./build-wasm.sh",
+    "setup:wasm": "rm -rf wasm && ln -sf ../parser/pkg/nodejs wasm"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1",
+    "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-textdocument": "^1.0.11"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.75.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "@vscode/test-electron": "^2.3.0",
+    "@vscode/vsce": "^2.22.0",
+    "eslint": "^8.50.0",
+    "typescript": "^5.2.0"
+  }
+}

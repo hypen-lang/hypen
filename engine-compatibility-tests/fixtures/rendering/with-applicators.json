@@ -1,0 +1,35 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "component-with-applicators",
+  "description": "Renders a component with applicator chain (.padding, .color, etc.)",
+  "category": "rendering",
+  "priority": "P1",
+
+  "input": {
+    "source": "Text(\"Styled\").fontSize(18).color(\"blue\").padding(16)",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "Styled",
+          "fontSize.0": 18,
+          "color.0": "blue",
+          "padding.0": 16
+        }
+      },
+      { "type": "insert" }
+    ]
+  }
+}

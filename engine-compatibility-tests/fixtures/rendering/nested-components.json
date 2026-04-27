@@ -1,0 +1,32 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "nested-components",
+  "description": "Renders nested Column > Row > Text component hierarchy",
+  "category": "rendering",
+  "priority": "P0",
+
+  "input": {
+    "source": "Column { Row { Text(\"Item 1\") Text(\"Item 2\") } }",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 8,
+    "patchTypes": ["create", "insert", "create", "insert", "create", "insert", "create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Column" },
+      { "type": "create", "elementType": "Row" },
+      { "type": "create", "elementType": "Text", "props": { "0": "Item 1" } },
+      { "type": "create", "elementType": "Text", "props": { "0": "Item 2" } },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

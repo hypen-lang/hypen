@@ -1,0 +1,238 @@
+name: Publish Swift SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. 0.2.0)"
+        required: true
+        type: string
+      dry-run:
+        description: "Dry run — build & test only, skip tagging"
+        required: false
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      dry-run:
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  # Build the Rust engine for every Apple slice the consumers care about
+  # and pack the result as `hypen_engineFFI.xcframework`. This artifact is
+  # what `Package.swift` ships as a `.binaryTarget`, so we build it once
+  # here and reuse it across `build-and-test` + `publish-to-mirrors`.
+  build-xcframework:
+    name: Build XCFramework
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-apple-ios,aarch64-apple-ios-sim,x86_64-apple-ios
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: hypen-engine-rs
+          key: xcframework
+
+      - name: Build hypen_engineFFI.xcframework
+        run: ./scripts/build-xcframework.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hypen_engineFFI.xcframework
+          path: hypen-server-swift/hypen_engineFFI.xcframework
+          retention-days: 1
+
+  build-and-test:
+    name: Build + Test ${{ matrix.name }}
+    runs-on: macos-latest
+    needs: [build-xcframework]
+    strategy:
+      matrix:
+        include:
+          - package: hypen-renderer-swift
+            name: HypenSwift
+          - package: hypen-server-swift
+            name: HypenServer
+    steps:
+      - uses: actions/checkout@v4
+
+      # HypenServer's Package.swift uses `.binaryTarget(path:)` so SPM
+      # needs the xcframework on disk. HypenSwift doesn't depend on it
+      # but the download is cheap.
+      - uses: actions/download-artifact@v4
+        if: ${{ matrix.package == 'hypen-server-swift' }}
+        with:
+          name: hypen_engineFFI.xcframework
+          path: hypen-server-swift/hypen_engineFFI.xcframework
+
+      - name: Build ${{ matrix.name }}
+        run: swift build
+        working-directory: ${{ matrix.package }}
+
+      - name: Test ${{ matrix.name }}
+        run: swift test
+        working-directory: ${{ matrix.package }}
+
+  # SPM packages are consumed from mirror repos via git URL + tag.
+  # This job syncs each subdirectory to its mirror repo and creates a version tag there.
+  #
+  # Mirror repos:
+  #   - hypen-lang/hypen-swiftui        ← hypen-renderer-swift/
+  #   - hypen-lang/hypen-server-swift ← hypen-server-swift/
+  #
+  # SPM consumers use:
+  #   .package(url: "https://github.com/hypen-lang/hypen-swiftui.git", from: "X.Y.Z")
+  #   .package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "X.Y.Z")
+  # Upload the xcframework to a GitHub release on the monorepo so the
+  # mirror's `Package.swift` can `.binaryTarget(url:, checksum:)` against
+  # a stable, versioned URL. Done once per release, before mirroring.
+  upload-xcframework-release:
+    name: Upload XCFramework to Release
+    runs-on: ubuntu-latest
+    needs: [build-and-test]
+    if: ${{ !inputs.dry-run }}
+    permissions:
+      contents: write
+    outputs:
+      url: ${{ steps.compute.outputs.url }}
+      checksum: ${{ steps.compute.outputs.checksum }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: hypen_engineFFI.xcframework
+          path: hypen_engineFFI.xcframework
+      - name: Zip xcframework
+        run: zip -r hypen_engineFFI.xcframework.zip hypen_engineFFI.xcframework
+      - id: compute
+        name: Compute checksum + URL
+        run: |
+          set -euo pipefail
+          # SwiftPM's checksum is sha256 of the zip — `swift package compute-checksum`
+          # is just a friendly wrapper, so we shell out to shasum here.
+          CHECKSUM=$(shasum -a 256 hypen_engineFFI.xcframework.zip | awk '{print $1}')
+          TAG="hypen-server-swift/${{ inputs.version }}"
+          URL="https://github.com/${{ github.repository }}/releases/download/${TAG}/hypen_engineFFI.xcframework.zip"
+          echo "url=${URL}"           >> "$GITHUB_OUTPUT"
+          echo "checksum=${CHECKSUM}" >> "$GITHUB_OUTPUT"
+      - name: Create release + upload asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="hypen-server-swift/${{ inputs.version }}"
+          gh release create "$TAG" \
+            --repo "${{ github.repository }}" \
+            --title "hypen-server-swift ${{ inputs.version }}" \
+            --notes "Auto-generated release. XCFramework attached." \
+            hypen_engineFFI.xcframework.zip \
+            || gh release upload "$TAG" hypen_engineFFI.xcframework.zip \
+                 --repo "${{ github.repository }}" --clobber
+
+  publish-to-mirrors:
+    name: Publish ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    needs: [build-and-test, upload-xcframework-release]
+    if: ${{ !inputs.dry-run }}
+    strategy:
+      matrix:
+        include:
+          - prefix: hypen-renderer-swift
+            name: HypenSwift
+            mirror: hypen-lang/hypen-swiftui
+          - prefix: hypen-server-swift
+            name: HypenServer
+            mirror: hypen-lang/hypen-server-swift
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # For HypenServer, rewrite the local-path binaryTarget into a
+      # URL-based one pointing at the asset uploaded above. The split
+      # picks up THIS commit's Package.swift, so consumers fetching the
+      # mirror tag get a self-contained package.
+      - name: Rewrite Package.swift to URL-based binaryTarget
+        if: ${{ matrix.prefix == 'hypen-server-swift' }}
+        run: |
+          set -euo pipefail
+          URL="${{ needs.upload-xcframework-release.outputs.url }}"
+          CHECKSUM="${{ needs.upload-xcframework-release.outputs.checksum }}"
+          python3 - <<PY
+          import re, pathlib
+          p = pathlib.Path("hypen-server-swift/Package.swift")
+          src = p.read_text()
+          src = re.sub(
+              r'\.binaryTarget\(\s*name:\s*"hypen_engineFFI",\s*path:\s*"[^"]+"\s*\)',
+              '.binaryTarget(name: "hypen_engineFFI", url: "$URL", checksum: "$CHECKSUM")',
+              src,
+          )
+          p.write_text(src)
+          PY
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add hypen-server-swift/Package.swift
+          git commit -m "swift: bind binaryTarget to $URL"
+
+      - name: Split, push, and tag ${{ matrix.name }}
+        env:
+          MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PREFIX="${{ matrix.prefix }}"
+          MIRROR="${{ matrix.mirror }}"
+          VERSION="${{ inputs.version }}"
+
+          # Split subdirectory into its own branch
+          SPLIT_SHA=$(git subtree split --prefix="$PREFIX" -b "split-$PREFIX")
+          echo "Split SHA: $SPLIT_SHA"
+
+          # Add mirror remote if not already configured
+          if ! git remote get-url mirror &>/dev/null; then
+            git remote add mirror "https://x-access-token:${MIRROR_TOKEN}@github.com/${MIRROR}.git"
+          fi
+
+          # Push to mirror repo
+          git push mirror "split-$PREFIX:refs/heads/main" --force
+
+          # Fail if tag already exists on the mirror (prevents silent overwrites)
+          if git ls-remote --tags mirror | grep -q "refs/tags/${VERSION}$"; then
+            echo "::error::Tag $VERSION already exists on $MIRROR. Bump the version or delete the remote tag first."
+            exit 1
+          fi
+
+          # Create and push version tag on the mirror
+          git tag "$VERSION" "$SPLIT_SHA"
+          git push mirror "$VERSION"
+
+          echo "✓ Published $PREFIX $VERSION → $MIRROR"
+
+  # Also tag the monorepo for traceability
+  tag-monorepo:
+    name: Tag Monorepo
+    runs-on: ubuntu-latest
+    needs: [publish-to-mirrors]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create monorepo tags
+        run: |
+          VERSION="${{ inputs.version }}"
+          for PKG in hypen-renderer-swift hypen-server-swift; do
+            TAG="${PKG}/${VERSION}"
+            git tag --force "$TAG"
+            git push --force origin "$TAG"
+            echo "✓ Tagged $TAG"
+          done

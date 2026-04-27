@@ -1,0 +1,50 @@
+Column {
+  Text("Our Products")
+    .fontSize(36)
+    .fontWeight("bold")
+    .color("#2d3748")
+    .marginBottom(32)
+    .alignSelf("center")
+
+  Column {
+    Text("Product Grid Goes Here")
+      .fontSize(18)
+      .color("#718096")
+      .marginBottom(16)
+
+    Text("Features coming soon:")
+      .fontSize(16)
+      .fontWeight("600")
+      .color("#4a5568")
+      .marginBottom(12)
+
+    Column {
+      Text("• Dynamic product rendering")
+        .fontSize(14)
+        .color("#718096")
+        .marginBottom(6)
+
+      Text("• Shopping cart functionality")
+        .fontSize(14)
+        .color("#718096")
+        .marginBottom(6)
+
+      Text("• Product filtering and search")
+        .fontSize(14)
+        .color("#718096")
+        .marginBottom(6)
+
+      Text("• Checkout process")
+        .fontSize(14)
+        .color("#718096")
+    }
+  }
+  .padding(32)
+  .backgroundColor("white")
+  .borderRadius(12)
+  .boxShadow("0 4px 12px rgba(0, 0, 0, 0.1)")
+}
+.padding(40)
+.maxWidth(1200)
+.width("100%")
+.alignSelf("center")

@@ -1,0 +1,43 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "document-with-state-binding",
+  "description": "Document with imports and state bindings - binding resolves after import parsing",
+  "category": "imports",
+  "priority": "P1",
+
+  "input": {
+    "source": "import { Avatar } from \"./avatar\"\n\nColumn { Text(\"@{state.name}\") }",
+    "initialState": { "name": "Alice" },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["name"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render with state binding resolved",
+      "action": "initialRender",
+      "expectedPatchTypes": ["create", "insert", "create", "insert"],
+      "expectedPatches": [
+        { "type": "create", "elementType": "Column" },
+        { "type": "create", "elementType": "Text", "props": { "0": "Alice" } },
+        { "type": "insert" },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Update state to change the binding",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["name"],
+        "newValues": { "name": "Bob" }
+      },
+      "expectedPatchTypes": ["setProp"],
+      "expectedPatches": [
+        { "type": "setProp", "name": "0", "value": "Bob" }
+      ]
+    }
+  ]
+}

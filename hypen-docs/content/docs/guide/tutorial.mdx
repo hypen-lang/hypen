@@ -1,0 +1,1035 @@
+---
+title: "Tutorial: Build a Chat App"
+description: Learn Hypen by building a real-time AI chat application with the OpenAI API, step by step
+---
+
+# Tutorial: Build a Chat App
+
+In this tutorial, you'll build a fully functional AI chat application powered by the OpenAI API. Along the way, you'll learn every core concept in Hypen — components, layout, styling, state, actions, control flow, and async operations.
+
+Here's what we'll build:
+
+```
+┌──────────────────────────────────────┐
+│  AI Chat                             │
+├──────────────────────────────────────┤
+│                                      │
+│  ┌──────────────────────────┐        │
+│  │ Hello! How can I help?   │        │
+│  └──────────────────────────┘        │
+│                                      │
+│        ┌──────────────────────────┐  │
+│        │ What is Hypen?           │  │
+│        └──────────────────────────┘  │
+│                                      │
+│  ┌──────────────────────────┐        │
+│  │ Hypen is a declarative   │        │
+│  │ UI language for building │        │
+│  │ cross-platform apps...   │        │
+│  └──────────────────────────┘        │
+│                                      │
+│  ● ● ●  (typing...)                  │
+│                                      │
+├──────────────────────────────────────┤
+│  ┌─────────────────────────┐ ┌────┐ │
+│  │ Type a message...        │ │Send│ │
+│  └─────────────────────────┘ └────┘ │
+└──────────────────────────────────────┘
+```
+
+## Prerequisites
+
+- [Bun](https://bun.sh) installed
+- The Hypen CLI installed (`bun install -g @hypen-space/cli`)
+- An OpenAI API key (get one at [platform.openai.com](https://platform.openai.com))
+
+## Step 1: Create the project
+
+Scaffold a new Hypen app:
+
+```bash
+hypen init chat-app
+cd chat-app
+```
+
+This creates a project with a starter `App` component. The structure looks like:
+
+```
+chat-app/
+├── hypen.json
+├── package.json
+├── src/
+│   └── components/
+│       └── App/
+│           ├── component.hypen    ← UI template
+│           └── component.ts       ← State & logic
+└── tsconfig.json
+```
+
+There are three ways to write a Hypen component:
+- **`.hypen` only** — a purely declarative component with no state or logic
+- **`.hypen` + `.ts`** — a stateful component: the `.hypen` file defines the UI, the `.ts` file defines state, actions, and logic
+- **`.ts` only** — define everything in TypeScript, including the UI via the `.ui()` method
+
+In this tutorial we'll use the `.hypen` + `.ts` approach since it cleanly separates UI from logic.
+
+Start the dev server to see changes live:
+
+```bash
+hypen dev
+```
+
+Open `http://localhost:3000` — you should see the starter app. Leave this running; it hot-reloads as you edit.
+
+> **Tip:** You can also run `hypen studio` to open [Hypen Studio](/docs/tooling/studio), a full in-browser IDE with live preview, state inspector, time-travel debugging, and an integrated terminal.
+
+## Step 2: Build the layout
+
+Let's start by building the chat UI structure with static content. Replace the contents of `src/components/App/component.hypen`:
+
+```hypen
+module App {
+    Column {
+        // Header
+        Text("AI Chat")
+            .fontSize(20)
+            .fontWeight("bold")
+            .color("#111827")
+            .padding(16)
+            .borderBottom(1)
+            .borderColor("#E5E7EB")
+
+        // Message area (empty for now)
+        Column {
+            Text("Messages will appear here")
+                .color("#9CA3AF")
+        }
+        .padding(16)
+        .weight(1)
+
+        // Input area
+        Row {
+            Input(placeholder: "Type a message...")
+                .padding(12)
+                .borderWidth(1)
+                .borderColor("#D1D5DB")
+                .borderRadius(8)
+                .fontSize(16)
+                .weight(1)
+
+            Button {
+                Text("Send")
+                    .color("#FFFFFF")
+                    .fontWeight("bold")
+            }
+            .backgroundColor("#3B82F6")
+            .padding(horizontal: 16, vertical: 12)
+            .borderRadius(8)
+        }
+        .gap(8)
+        .padding(16)
+        .borderTop(1)
+        .borderColor("#E5E7EB")
+    }
+    .height("100vh")
+    .backgroundColor("#FFFFFF")
+}
+```
+
+Let's break down what's new here:
+
+**Components** are the building blocks. `Column`, `Row`, `Text`, `Input`, and `Button` are all built-in components. Components can have arguments (`placeholder: "Type a message..."`) and children inside `{ }`.
+
+**Applicators** are the chained `.method()` calls. They style and configure components:
+- `.padding(16)` adds spacing inside
+- `.gap(8)` spaces out children
+- `.weight(1)` makes a component expand to fill available space (like `flex: 1`)
+- `.borderRadius(8)` rounds corners
+
+**Layout** works with `Column` (vertical) and `Row` (horizontal). Our layout is a Column with three sections: header, message area, and input — stacked top to bottom.
+
+Check your browser — you should see a header, a placeholder message area, and an input bar at the bottom.
+
+## Step 3: Add state
+
+Now let's make it interactive. We need state to track:
+- The list of messages
+- What the user is currently typing
+
+Open `src/components/App/component.ts` and update it to:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface ChatState {
+  messages: Message[];
+  input: string;
+}
+
+export default app
+  .defineState<ChatState>({
+    messages: [],
+    input: "",
+  })
+  .build();
+```
+
+**`defineState`** sets the initial state and its TypeScript type. State is reactive — when it changes, the UI updates automatically.
+
+Now wire the state into the template. Update `component.hypen`:
+
+```hypen
+module App {
+    Column {
+        // Header
+        Text("AI Chat")
+            .fontSize(20)
+            .fontWeight("bold")
+            .color("#111827")
+            .padding(16)
+            .borderBottom(1)
+            .borderColor("#E5E7EB")
+
+        // Message area
+        Column {
+            Text("No messages yet. Say hello!")
+                .color("#9CA3AF")
+                .padding(24)
+                .textAlign("center")
+        }
+        .padding(16)
+        .weight(1)
+        .gap(8)
+
+        // Input area
+        Row {
+            Input(placeholder: "Type a message...")
+                .bind(@state.input)
+                .padding(12)
+                .borderWidth(1)
+                .borderColor("#D1D5DB")
+                .borderRadius(8)
+                .fontSize(16)
+                .weight(1)
+
+            Button {
+                Text("Send")
+                    .color("#FFFFFF")
+                    .fontWeight("bold")
+            }
+            .onClick(@actions.sendMessage)
+            .backgroundColor("#3B82F6")
+            .padding(horizontal: 16, vertical: 12)
+            .borderRadius(8)
+        }
+        .gap(8)
+        .padding(16)
+        .borderTop(1)
+        .borderColor("#E5E7EB")
+    }
+    .height("100vh")
+    .backgroundColor("#FFFFFF")
+}
+```
+
+Two key additions:
+
+**`.bind(@state.input)`** creates a two-way binding. Whatever the user types goes into `state.input`, and if `state.input` changes programmatically, the input field updates too. No action handler needed.
+
+**`.onClick(@actions.sendMessage)`** triggers the `sendMessage` action when the button is clicked. We'll define that action next.
+
+## Step 4: Handle sending messages
+
+Let's add the `sendMessage` action so clicking "Send" adds the message to the list. Update `component.ts`:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface ChatState {
+  messages: Message[];
+  input: string;
+}
+
+export default app
+  .defineState<ChatState>({
+    messages: [],
+    input: "",
+  })
+  .onAction("sendMessage", async ({ state }) => {
+    const text = state.input.trim();
+    if (!text) return;
+
+    // Add the user's message
+    state.messages.push({
+      id: Date.now().toString(),
+      role: "user",
+      content: text,
+    });
+
+    // Clear the input
+    state.input = "";
+  })
+  .build();
+```
+
+**Actions** are functions that respond to user interactions. They receive a context object with `state` (the current state, which you can mutate directly) and `action` (event details including any payload).
+
+Actions can be **typed** with a generic parameter for their payload. Our `sendMessage` action doesn't need a payload (it reads from `state.input`), but if it did, it would look like:
+
+```typescript
+.onAction<{ text: string }>("sendStarter", async ({ action, state }) => {
+  // action.payload is typed as { text: string }
+  const text = action.payload!.text;
+})
+```
+
+State mutations are tracked automatically via a Proxy — just assign values and the UI updates. No `setState()` or manual sync needed.
+
+## Step 5: Render the message list
+
+Now let's display the messages. Replace the message area in `component.hypen` with a `ForEach` loop:
+
+```hypen
+module App {
+    Column {
+        // Header
+        Text("AI Chat")
+            .fontSize(20)
+            .fontWeight("bold")
+            .color("#111827")
+            .padding(16)
+            .borderBottom(1)
+            .borderColor("#E5E7EB")
+
+        // Message area
+        List {
+            ForEach(items: @state.messages, key: "id") {
+                Row {
+                    Column {
+                        Text("@{item.content}")
+                            .color("@{item.role == 'user' ? '#FFFFFF' : '#111827'}")
+                            .fontSize(15)
+                    }
+                    .backgroundColor("@{item.role == 'user' ? '#3B82F6' : '#F3F4F6'}")
+                    .padding(12)
+                    .borderRadius(12)
+                    .maxWidth("75%")
+                }
+                .horizontalAlignment("@{item.role == 'user' ? 'end' : 'start'}")
+                .fillMaxWidth(true)
+            }
+        }
+        .padding(16)
+        .weight(1)
+        .gap(8)
+
+        // Input area
+        Row {
+            Input(placeholder: "Type a message...")
+                .bind(@state.input)
+                .onKey(@actions.sendMessage)
+                .padding(12)
+                .borderWidth(1)
+                .borderColor("#D1D5DB")
+                .borderRadius(8)
+                .fontSize(16)
+                .weight(1)
+
+            Button {
+                Text("Send")
+                    .color("#FFFFFF")
+                    .fontWeight("bold")
+            }
+            .onClick(@actions.sendMessage)
+            .backgroundColor("#3B82F6")
+            .padding(horizontal: 16, vertical: 12)
+            .borderRadius(8)
+        }
+        .gap(8)
+        .padding(16)
+        .borderTop(1)
+        .borderColor("#E5E7EB")
+    }
+    .height("100vh")
+    .backgroundColor("#FFFFFF")
+}
+```
+
+Several new concepts here:
+
+**`ForEach`** iterates over an array from state. `items: @state.messages` is the data source, and `key: "id"` tells Hypen how to track each item for efficient updates (always use a unique key for dynamic lists).
+
+**`@item`** references the current element inside a ForEach. `@{item.content}` accesses the message text, `@{item.role}` its role.
+
+**Expression bindings** like `"@{item.role == 'user' ? '#3B82F6' : '#F3F4F6'}"` let you compute values inline. User messages get a blue background; assistant messages get gray.
+
+**`List`** wraps the ForEach to make the message area scrollable.
+
+**`.onKey(@actions.sendMessage)`** fires the action when Enter is pressed, so users can send messages with the keyboard too.
+
+Try it — type a message and press Enter or click Send. You should see your message appear as a blue bubble on the right side.
+
+## Step 6: Connect the OpenAI API
+
+Now for the exciting part — making the AI respond. First, install the OpenAI package:
+
+```bash
+bun add openai
+```
+
+Create a helper file at `src/ai.ts`:
+
+```typescript
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export async function chat(messages: ChatMessage[]): Promise<string> {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages,
+  });
+
+  return response.choices[0]?.message?.content ?? "";
+}
+```
+
+Now update `component.ts` to call the API after sending a message:
+
+```typescript
+import { app } from "@hypen-space/core";
+import { chat, type ChatMessage } from "../../ai";
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface ChatState {
+  messages: Message[];
+  input: string;
+  isLoading: boolean;
+}
+
+export default app
+  .defineState<ChatState>({
+    messages: [],
+    input: "",
+    isLoading: false,
+  })
+  .onAction("sendMessage", async ({ state }) => {
+    const text = state.input.trim();
+    if (!text || state.isLoading) return;
+
+    // Add the user's message
+    state.messages.push({
+      id: Date.now().toString(),
+      role: "user",
+      content: text,
+    });
+    state.input = "";
+
+    // Call the AI
+    state.isLoading = true;
+
+    const history: ChatMessage[] = state.messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    try {
+      const reply = await chat(history);
+      state.messages.push({
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: reply,
+      });
+    } catch {
+      state.messages.push({
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: "Sorry, something went wrong. Please try again.",
+      });
+    } finally {
+      state.isLoading = false;
+    }
+  })
+  .build();
+```
+
+Notice we added `isLoading` to state. Let's show a typing indicator while we wait for the AI. We'll also disable the send button.
+
+Before running, set your API key:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+hypen dev
+```
+
+## Step 7: Add a loading indicator
+
+Update the template to show a typing indicator and disable input while loading:
+
+```hypen
+module App {
+    Column {
+        // Header
+        Row {
+            Text("AI Chat")
+                .fontSize(20)
+                .fontWeight("bold")
+                .color("#111827")
+            Spacer()
+            Text("@{state.messages.length} messages")
+                .fontSize(13)
+                .color("#9CA3AF")
+        }
+        .padding(16)
+        .borderBottom(1)
+        .borderColor("#E5E7EB")
+        .verticalAlignment("center")
+
+        // Message area
+        List {
+            ForEach(items: @state.messages, key: "id") {
+                Row {
+                    Column {
+                        Text("@{item.content}")
+                            .color("@{item.role == 'user' ? '#FFFFFF' : '#111827'}")
+                            .fontSize(15)
+                    }
+                    .backgroundColor("@{item.role == 'user' ? '#3B82F6' : '#F3F4F6'}")
+                    .padding(12)
+                    .borderRadius(12)
+                    .maxWidth("75%")
+                }
+                .horizontalAlignment("@{item.role == 'user' ? 'end' : 'start'}")
+                .fillMaxWidth(true)
+            }
+
+            // Typing indicator
+            If(condition: @state.isLoading) {
+                Row {
+                    Column {
+                        Text("Thinking...")
+                            .color("#6B7280")
+                            .fontSize(14)
+                    }
+                    .backgroundColor("#F3F4F6")
+                    .padding(12)
+                    .borderRadius(12)
+                }
+            }
+        }
+        .padding(16)
+        .weight(1)
+        .gap(8)
+
+        // Input area
+        Row {
+            Input(placeholder: "Type a message...")
+                .bind(@state.input)
+                .onKey(@actions.sendMessage)
+                .padding(12)
+                .borderWidth(1)
+                .borderColor("#D1D5DB")
+                .borderRadius(8)
+                .fontSize(16)
+                .weight(1)
+
+            Button {
+                Text("@{state.isLoading ? '...' : 'Send'}")
+                    .color("#FFFFFF")
+                    .fontWeight("bold")
+            }
+            .onClick(@actions.sendMessage)
+            .backgroundColor("@{state.isLoading ? '#93C5FD' : '#3B82F6'}")
+            .padding(horizontal: 16, vertical: 12)
+            .borderRadius(8)
+            .disabled(@{state.isLoading})
+        }
+        .gap(8)
+        .padding(16)
+        .borderTop(1)
+        .borderColor("#E5E7EB")
+    }
+    .height("100vh")
+    .backgroundColor("#FFFFFF")
+}
+```
+
+New concepts:
+
+**`If`** conditionally renders UI based on a boolean. `If(condition: @state.isLoading)` shows the "Thinking..." indicator only while waiting for the API response.
+
+**Dynamic applicators** like `.backgroundColor("@{state.isLoading ? '#93C5FD' : '#3B82F6'}")` change styles reactively. The button fades when loading.
+
+**`.disabled()`** prevents interaction while loading, so users can't spam the API.
+
+## Step 8: Add a system prompt
+
+Let's give the AI some personality. Update `src/ai.ts`:
+
+```typescript
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+const SYSTEM_PROMPT = `You are a friendly, concise assistant.
+Keep responses brief — a few sentences at most.
+Use a casual, warm tone.`;
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export async function chat(messages: ChatMessage[]): Promise<string> {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...messages,
+    ],
+  });
+
+  return response.choices[0]?.message?.content ?? "";
+}
+```
+
+## Step 9: Add a welcome message
+
+Let's show a welcome message when the chat is empty. Use the `onCreated` lifecycle hook to set it up in `component.ts`:
+
+```typescript
+import { app } from "@hypen-space/core";
+import { chat, type ChatMessage } from "../../ai";
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface ChatState {
+  messages: Message[];
+  input: string;
+  isLoading: boolean;
+}
+
+export default app
+  .defineState<ChatState>({
+    messages: [],
+    input: "",
+    isLoading: false,
+  })
+  .onCreated(async (state) => {
+    // Add a welcome message on load
+    state.messages.push({
+      id: "welcome",
+      role: "assistant",
+      content: "Hey! I'm your AI assistant. Ask me anything.",
+    });
+  })
+  .onAction("sendMessage", async ({ state }) => {
+    const text = state.input.trim();
+    if (!text || state.isLoading) return;
+
+    state.messages.push({
+      id: Date.now().toString(),
+      role: "user",
+      content: text,
+    });
+    state.input = "";
+
+    state.isLoading = true;
+
+    const history: ChatMessage[] = state.messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    try {
+      const reply = await chat(history);
+      state.messages.push({
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: reply,
+      });
+    } catch {
+      state.messages.push({
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: "Sorry, something went wrong. Please try again.",
+      });
+    } finally {
+      state.isLoading = false;
+    }
+  })
+  .build();
+```
+
+**`onCreated`** is a lifecycle hook that runs once when the module first mounts. It receives `state` and an optional `context`. Great for fetching initial data or setting up defaults.
+
+There's also **`onDestroyed`** for cleanup (clearing timers, closing connections, etc.) when a module is unmounted.
+
+## Step 10: Add a clear button
+
+Let's add a button to clear the conversation. Add a `clearChat` action in `component.ts`:
+
+```typescript
+  .onAction("clearChat", async ({ state }) => {
+    state.messages = [{
+      id: "welcome",
+      role: "assistant",
+      content: "Hey! I'm your AI assistant. Ask me anything.",
+    }];
+  })
+```
+
+Add it to the header in `component.hypen`, replacing the existing header Row:
+
+```hypen
+        // Header
+        Row {
+            Text("AI Chat")
+                .fontSize(20)
+                .fontWeight("bold")
+                .color("#111827")
+            Spacer()
+            Button {
+                Text("Clear")
+                    .color("#6B7280")
+                    .fontSize(14)
+            }
+            .onClick(@actions.clearChat)
+            .backgroundColor("transparent")
+            .padding(horizontal: 12, vertical: 6)
+            .borderRadius(6)
+            .borderWidth(1)
+            .borderColor("#E5E7EB")
+        }
+        .padding(16)
+        .borderBottom(1)
+        .borderColor("#E5E7EB")
+        .verticalAlignment("center")
+```
+
+## The final code
+
+Here's everything together.
+
+### `src/ai.ts`
+
+```typescript
+import OpenAI from "openai";
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+const SYSTEM_PROMPT = `You are a friendly, concise assistant.
+Keep responses brief — a few sentences at most.
+Use a casual, warm tone.`;
+
+export interface ChatMessage {
+  role: "user" | "assistant" | "system";
+  content: string;
+}
+
+export async function chat(messages: ChatMessage[]): Promise<string> {
+  const response = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    messages: [
+      { role: "system", content: SYSTEM_PROMPT },
+      ...messages,
+    ],
+  });
+
+  return response.choices[0]?.message?.content ?? "";
+}
+```
+
+### `src/components/App/component.ts`
+
+```typescript
+import { app } from "@hypen-space/core";
+import { chat, type ChatMessage } from "../../ai";
+
+interface Message {
+  id: string;
+  role: "user" | "assistant";
+  content: string;
+}
+
+interface ChatState {
+  messages: Message[];
+  input: string;
+  isLoading: boolean;
+}
+
+export default app
+  .defineState<ChatState>({
+    messages: [],
+    input: "",
+    isLoading: false,
+  })
+  .onCreated(async (state) => {
+    state.messages.push({
+      id: "welcome",
+      role: "assistant",
+      content: "Hey! I'm your AI assistant. Ask me anything.",
+    });
+  })
+  .onAction("sendMessage", async ({ state }) => {
+    const text = state.input.trim();
+    if (!text || state.isLoading) return;
+
+    state.messages.push({
+      id: Date.now().toString(),
+      role: "user",
+      content: text,
+    });
+    state.input = "";
+
+    state.isLoading = true;
+
+    const history: ChatMessage[] = state.messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
+    try {
+      const reply = await chat(history);
+      state.messages.push({
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: reply,
+      });
+    } catch {
+      state.messages.push({
+        id: (Date.now() + 1).toString(),
+        role: "assistant",
+        content: "Sorry, something went wrong. Please try again.",
+      });
+    } finally {
+      state.isLoading = false;
+    }
+  })
+  .onAction("clearChat", async ({ state }) => {
+    state.messages = [{
+      id: "welcome",
+      role: "assistant",
+      content: "Hey! I'm your AI assistant. Ask me anything.",
+    }];
+  })
+  .build();
+```
+
+### `src/components/App/component.hypen`
+
+```hypen
+module App {
+    Column {
+        // Header
+        Row {
+            Text("AI Chat")
+                .fontSize(20)
+                .fontWeight("bold")
+                .color("#111827")
+            Spacer()
+            Button {
+                Text("Clear")
+                    .color("#6B7280")
+                    .fontSize(14)
+            }
+            .onClick(@actions.clearChat)
+            .backgroundColor("transparent")
+            .padding(horizontal: 12, vertical: 6)
+            .borderRadius(6)
+            .borderWidth(1)
+            .borderColor("#E5E7EB")
+        }
+        .padding(16)
+        .borderBottom(1)
+        .borderColor("#E5E7EB")
+        .verticalAlignment("center")
+
+        // Message area
+        List {
+            ForEach(items: @state.messages, key: "id") {
+                Row {
+                    Column {
+                        Text("@{item.content}")
+                            .color("@{item.role == 'user' ? '#FFFFFF' : '#111827'}")
+                            .fontSize(15)
+                    }
+                    .backgroundColor("@{item.role == 'user' ? '#3B82F6' : '#F3F4F6'}")
+                    .padding(12)
+                    .borderRadius(12)
+                    .maxWidth("75%")
+                }
+                .horizontalAlignment("@{item.role == 'user' ? 'end' : 'start'}")
+                .fillMaxWidth(true)
+            }
+
+            // Typing indicator
+            If(condition: @state.isLoading) {
+                Row {
+                    Column {
+                        Text("Thinking...")
+                            .color("#6B7280")
+                            .fontSize(14)
+                    }
+                    .backgroundColor("#F3F4F6")
+                    .padding(12)
+                    .borderRadius(12)
+                }
+            }
+        }
+        .padding(16)
+        .weight(1)
+        .gap(8)
+
+        // Input area
+        Row {
+            Input(placeholder: "Type a message...")
+                .bind(@state.input)
+                .onKey(@actions.sendMessage)
+                .padding(12)
+                .borderWidth(1)
+                .borderColor("#D1D5DB")
+                .borderRadius(8)
+                .fontSize(16)
+                .weight(1)
+
+            Button {
+                Text("@{state.isLoading ? '...' : 'Send'}")
+                    .color("#FFFFFF")
+                    .fontWeight("bold")
+            }
+            .onClick(@actions.sendMessage)
+            .backgroundColor("@{state.isLoading ? '#93C5FD' : '#3B82F6'}")
+            .padding(horizontal: 16, vertical: 12)
+            .borderRadius(8)
+            .disabled(@{state.isLoading})
+        }
+        .gap(8)
+        .padding(16)
+        .borderTop(1)
+        .borderColor("#E5E7EB")
+    }
+    .height("100vh")
+    .backgroundColor("#FFFFFF")
+}
+```
+
+## What you've learned
+
+Here's a recap of every Hypen concept covered in this tutorial:
+
+| Concept | What it does | Example |
+|---|---|---|
+| **Components** | UI building blocks | `Text("Hello")`, `Column { }`, `Button { }` |
+| **Applicators** | Style and configure components | `.fontSize(18)`, `.padding(16)`, `.borderRadius(8)` |
+| **Layout** | Arrange components | `Column` (vertical), `Row` (horizontal), `List` (scrollable) |
+| **Modules** | Components with state and logic | `module App { ... }` |
+| **State** | Reactive data | `.defineState({ count: 0 })`, `@{state.count}` |
+| **`.bind()`** | Two-way data binding | `Input().bind(@state.input)` |
+| **Actions** | Handle events | `.onClick(@actions.send)`, `.onAction("send", ...)` |
+| **ForEach** | Render lists | `ForEach(items: @state.messages, key: "id") { ... }` |
+| **If** | Conditional rendering | `If(condition: @state.isLoading) { ... }` |
+| **Expression bindings** | Compute values inline | `"@{item.role == 'user' ? 'blue' : 'gray'}"` |
+| **Lifecycle hooks** | Setup and cleanup | `.onCreated(...)`, `.onDestroyed(...)` |
+| **Async actions** | API calls, async work | `async ({ state }) => { await fetch(...) }` |
+
+## Challenges
+
+Want to keep going? Try extending the app:
+
+### 1. Add timestamps
+
+Add a `timestamp` field to each message and display it:
+
+```hypen
+Text("@{item.timestamp}")
+    .fontSize(11)
+    .color("#9CA3AF")
+    .marginTop(4)
+```
+
+### 2. Add conversation starters
+
+Show quick-action buttons when there are no user messages:
+
+```hypen
+If(condition: @state.showStarters) {
+    Row {
+        Button { Text("Tell me a joke") }
+            .onClick(@actions.sendStarter, text: "Tell me a joke")
+        Button { Text("Write a haiku") }
+            .onClick(@actions.sendStarter, text: "Write a haiku")
+    }
+    .gap(8)
+}
+```
+
+Use a typed action to handle the payload:
+
+```typescript
+.onAction<{ text: string }>("sendStarter", async ({ action, state }) => {
+  state.input = action.payload!.text;
+  // then trigger sendMessage...
+})
+```
+
+### 3. Add error handling with retry
+
+Use `When` to show different states:
+
+```hypen
+When(value: @state.status) {
+    Case(match: "error") {
+        Row {
+            Text("Failed to send")
+                .color("#EF4444")
+            Button { Text("Retry") }
+                .onClick(@actions.retry)
+        }
+    }
+}
+```
+
+### 4. Multiple conversations
+
+Add a sidebar with conversation history using state for a list of conversations and ForEach to render them.
+
+## Next steps
+
+- [Components](/docs/guide/components) — Full list of built-in components
+- [Control Flow](/docs/guide/control-flow) — Deep dive into ForEach, When, If
+- [Styling](/docs/guide/styling) — Complete applicator reference
+- [State & Modules](/docs/guide/state) — Advanced state patterns
+- [Error Handling](/docs/guide/error-handling) — Catching and recovering from errors

@@ -1,0 +1,398 @@
+---
+title: Building a Remote App
+description: Build a cross-platform counter app that runs on a server and streams to Web and Android clients
+---
+
+# Building a Remote App
+
+In this tutorial, you'll build a cross-platform counter app that runs on a server and streams to Web and Android clients. This is the recommended approach for production Hypen apps.
+
+## Why Remote Apps?
+
+With remote apps, your server runs the WASM engine and streams UI patches to clients:
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Your Server (Bun/Node.js)                          │
+│  • Runs Hypen WASM engine                           │
+│  • Manages state and business logic                 │
+│  • Streams UI patches over WebSocket                │
+└─────────────────────────────────────────────────────┘
+                      │ WebSocket
+        ┌─────────────┼─────────────┐
+        ↓             ↓             ↓
+   ┌─────────┐   ┌─────────┐   ┌─────────┐
+   │   Web   │   │ Android │   │   iOS   │
+   │ Browser │   │   App   │   │   App   │
+   └─────────┘   └─────────┘   └─────────┘
+```
+
+**Benefits:**
+- **One codebase** - Write once, run on all platforms
+- **Thin clients** - Clients just render patches, no WASM needed
+- **Server-side state** - Easy to persist, sync, and secure
+- **Hot updates** - Change UI without app store updates
+
+## What We're Building
+
+The same counter from the [first app tutorial](/docs/getting-started/first-app), but streaming to any client:
+
+```
+┌─────────────────────────┐
+│                         │
+│       Count: 0          │
+│                         │
+│    [ - ]     [ + ]      │
+│                         │
+└─────────────────────────┘
+```
+
+## Step 1: Create the Server
+
+Create a new project:
+
+```bash
+mkdir counter-server
+cd counter-server
+bun init -y
+bun add @hypen-space/core @hypen-space/server
+```
+
+Create `server.ts`:
+
+```typescript
+import { HypenApp } from "@hypen-space/core";
+import { RemoteServer } from "@hypen-space/server";
+
+// 1. Define the state
+interface CounterState {
+  count: number;
+}
+
+// 2. Create an app registry and attach the Counter module.
+const myApp = new HypenApp();
+
+myApp.module("Counter")
+  .defineState<CounterState>({ count: 0 })
+  .onAction("increment", async ({ state }) => { state.count++; })
+  .onAction("decrement", async ({ state }) => { state.count--; })
+  .onAction("reset", async ({ state }) => { state.count = 0; })
+  .ui(`
+  Column {
+    Text("Count: @{state.count}")
+      .fontSize(48)
+      .fontWeight("bold")
+      .color("#1F2937")
+
+    Row {
+      Button {
+        Text("-")
+          .fontSize(24)
+          .color("#FFFFFF")
+      }
+      .onClick(@actions.decrement)
+      .backgroundColor("#EF4444")
+      .padding(16)
+      .borderRadius(8)
+
+      Spacer()
+        .width(24)
+
+      Button {
+        Text("Reset")
+          .color("#FFFFFF")
+      }
+      .onClick(@actions.reset)
+      .backgroundColor("#6B7280")
+      .padding(16)
+      .borderRadius(8)
+
+      Spacer()
+        .width(24)
+
+      Button {
+        Text("+")
+          .fontSize(24)
+          .color("#FFFFFF")
+      }
+      .onClick(@actions.increment)
+      .backgroundColor("#22C55E")
+      .padding(16)
+      .borderRadius(8)
+    }
+  }
+  .padding(32)
+    .gap(24)
+  `)
+  .build();
+
+// 3. Serve the whole app — every registered module is streamed.
+new RemoteServer()
+  .app(myApp)
+  .onConnection((client) => {
+    console.log(`Client connected: ${client.id}`);
+  })
+  .onDisconnection((client) => {
+    console.log(`Client disconnected: ${client.id}`);
+  })
+  .listen(3000);
+
+console.log("Counter server running on ws://localhost:3000");
+```
+
+Run the server:
+
+```bash
+bun run server.ts
+```
+
+## Step 2: Connect a Web Client
+
+### Option A: Using the HypenApp Component
+
+The easiest way is to use the `HypenApp` component directly in your Hypen DSL:
+
+```hypen
+Column {
+  Text("My Counter App")
+    .fontSize(24)
+
+  HypenApp("ws://localhost:3000")
+}
+```
+
+### Option B: Programmatic Connection
+
+For more control, use `RemoteEngine` directly:
+
+Create `client.html`:
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Counter Client</title>
+  <script type="module">
+    import { RemoteEngine } from "https://unpkg.com/@hypen-space/core/dist/remote/client.js";
+
+    const container = document.getElementById("app");
+    const engine = new RemoteEngine("ws://localhost:3000");
+
+    // Simple patch renderer
+    const nodes = new Map();
+
+    engine.onPatches((patches) => {
+      for (const patch of patches) {
+        // Handle each patch type...
+        console.log("Patch:", patch);
+      }
+    });
+
+    engine.connect();
+  </script>
+</head>
+<body>
+  <div id="app"></div>
+</body>
+</html>
+```
+
+Or with the full DOM renderer:
+
+```typescript
+import { RemoteEngine } from "@hypen-space/core";
+import { createHypenClient } from "@hypen-space/web/dom";
+
+async function main() {
+  const container = document.getElementById("app")!;
+  const engine = new RemoteEngine("ws://localhost:3000");
+
+  // `createHypenClient` is the recommended one-call wiring — it builds the
+  // renderer and subscribes to engine patches. `DOMRenderer` is still
+  // exported for advanced setups.
+  createHypenClient(container, engine);
+
+  await engine.connect();
+  console.log("Connected to server!");
+}
+
+main();
+```
+
+## Step 3: Connect an Android Client
+
+In your Android project, add the Hypen dependency:
+
+```kotlin
+// build.gradle.kts
+dependencies {
+    implementation("space.hypen:hypen-renderer:0.4.80")
+}
+```
+
+In your Composable:
+
+```kotlin
+import space.hypen.renderer.HypenApp
+
+@Composable
+fun CounterScreen() {
+    // For emulator, use 10.0.2.2 to reach host machine
+    // For physical device, use your machine's IP address
+    HypenApp(
+        url = "ws://10.0.2.2:3000",
+        modifier = Modifier.fillMaxSize()
+    )
+}
+```
+
+That's it! The Android app will connect to your server and render the counter.
+
+## How It Works
+
+1. **Client connects** - WebSocket connection to server
+2. **Server sends initial tree** - Full UI tree as patches
+3. **Client renders** - Applies patches to native UI (DOM, Compose, etc.)
+4. **User interacts** - Clicks a button
+5. **Client sends action** - `{ type: "dispatchAction", action: "increment" }`
+6. **Server updates state** - `state.count++`
+7. **Server sends patch** - Only the changed text node
+8. **Client updates** - Applies minimal patch to UI
+
+## Server API Reference
+
+### RemoteServer
+
+```typescript
+new RemoteServer()
+  .app(hypenApp)            // Serve every module registered on a HypenApp (preferred)
+  // or .module(name, def).ui(dslString)   // Single-module shortcut
+  .config({                 // Optional configuration
+    port: 3000,
+    hostname: "0.0.0.0"
+  })
+  .onConnection(callback)   // Called when client connects
+  .onDisconnection(callback)// Called when client disconnects
+  .listen(port?)            // Start the server
+```
+
+### serve() Helper
+
+For simpler cases:
+
+```typescript
+import { app } from "@hypen-space/core";
+import { serve } from "@hypen-space/server";
+
+serve({
+  module: myModule,
+  ui: myUI,
+  port: 3000,
+  onConnection: (client) => console.log("Connected:", client.id),
+});
+```
+
+## Client API Reference
+
+### HypenApp (Web)
+
+In Hypen DSL:
+```hypen
+HypenApp("ws://localhost:3000")
+
+// Or with options:
+HypenApp(
+  url: "ws://localhost:3000",
+  autoReconnect: true,
+  reconnectInterval: 3000
+)
+```
+
+### HypenApp (Android)
+
+```kotlin
+@Composable
+fun HypenApp(
+    url: String,
+    modifier: Modifier = Modifier,
+    config: RemoteEngineConfig = RemoteEngineConfig.DEFAULT,
+    loadingContent: @Composable () -> Unit = { DefaultLoading() },
+    errorContent: @Composable (String) -> Unit = { DefaultError(it) }
+)
+```
+
+### RemoteEngine (Programmatic)
+
+```typescript
+const engine = new RemoteEngine(url, {
+  autoReconnect: true,        // Auto-reconnect on disconnect
+  reconnectInterval: 3000,    // Wait 3s before reconnecting
+  maxReconnectAttempts: 10    // Give up after 10 attempts
+});
+
+engine.onPatches((patches) => { /* handle patches */ });
+engine.onStateUpdate((state) => { /* handle state */ });
+engine.onConnect(() => { /* connected */ });
+engine.onDisconnect(() => { /* disconnected */ });
+engine.onError((error) => { /* handle error */ });
+
+await engine.connect();
+engine.dispatchAction("increment", { amount: 5 });
+engine.disconnect();
+```
+
+## Production Considerations
+
+### Scaling
+
+Each client gets its own module instance. For shared state across clients:
+
+```typescript
+// Shared state outside module
+const globalState = { viewers: 0 };
+
+const module = app
+  .defineState({ count: 0 })
+  .onCreated(async ({ state }) => {
+    globalState.viewers++;
+    // Broadcast to other clients...
+  })
+  .build();
+```
+
+### Security
+
+Add authentication before the WebSocket upgrade:
+
+```typescript
+// Custom server with auth
+Bun.serve({
+  port: 3000,
+  fetch(req, server) {
+    const token = req.headers.get("Authorization");
+    if (!validateToken(token)) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+    server.upgrade(req);
+  },
+  websocket: {
+    // ... RemoteServer handlers
+  }
+});
+```
+
+### Deployment
+
+Deploy your server to any platform that supports WebSockets:
+- Fly.io
+- Railway
+- Render
+- AWS/GCP/Azure
+- Your own VPS
+
+## Next Steps
+
+- [Modules Guide](/docs/guide/state) - Advanced state management
+- [Components](/docs/guide/components) - All built-in components
+- [Styling](/docs/guide/styling) - Master applicators
+- [Android Adapter](/docs/adapters/android) - Android-specific features

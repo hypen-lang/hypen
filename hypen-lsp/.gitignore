@@ -1,0 +1,14 @@
+node_modules
+out
+dist
+*.vsix
+.vscode-test/
+.DS_Store
+
+# Environment
+.env
+.env.*
+!.env.example
+.npmrc
+
+

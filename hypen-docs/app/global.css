@@ -1,0 +1,68 @@
+@import 'tailwindcss';
+@import 'fumadocs-ui/css/neutral.css';
+@import 'fumadocs-ui/css/preset.css';
+
+@source "../**/*.{ts,tsx}";
+
+:root {
+  /* Hypen brand colors */
+  --hypen-pink: #FFA7E1;
+  --hypen-yellow: #ffe874;
+  --hypen-dark: #09090b;
+
+  /* Override Fumadocs primary color with Hypen pink */
+  --fd-primary: 322 100% 82%;
+
+  /* Center the docs layout like Hazel docs */
+  --fd-layout-width: 1400px;
+
+  /* Force dark mode */
+  color-scheme: dark;
+}
+
+/* Dark theme overrides for Fumadocs */
+:root, .dark {
+  --fd-primary: 322 100% 82%;
+  --fd-background: 0 0% 3.9%;
+  --fd-foreground: 0 0% 98%;
+  --fd-muted: 240 3.7% 15.9%;
+  --fd-muted-foreground: 240 5% 64.9%;
+  --fd-card: 240 10% 3.9%;
+  --fd-card-foreground: 0 0% 98%;
+  --fd-border: 240 3.7% 15.9%;
+  --fd-accent: 240 3.7% 15.9%;
+  --fd-accent-foreground: 0 0% 98%;
+}
+
+html {
+  background-color: var(--hypen-dark);
+}
+
+body {
+  background-color: var(--hypen-dark);
+  background-image: radial-gradient(900px 420px at 50% 0px, rgba(255, 167, 225, 0.08) 0%, rgba(255, 167, 225, 0.04) 35%, rgba(0,0,0,0) 70%);
+  background-repeat: no-repeat;
+  background-attachment: fixed;
+}
+
+/* Custom gradient for hero section */
+.hypen-gradient {
+  background: linear-gradient(-45deg, var(--hypen-pink) 50%, var(--hypen-yellow) 50%);
+}
+
+.hypen-text-gradient {
+  background: linear-gradient(120deg, var(--hypen-pink) 30%, var(--hypen-yellow));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Glow effect for buttons */
+.hypen-glow {
+  box-shadow: 0 0 30px -5px var(--hypen-pink);
+}
+
+/* Custom nav styling */
+nav {
+  backdrop-filter: blur(12px);
+}

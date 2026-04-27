@@ -1,0 +1,14 @@
+/target
+/pkg
+Cargo.lock
+*.wasm
+*.js
+node_modules
+CHILD_SLOTS.md
+
+# Environment
+.env
+.env.*
+!.env.example
+.npmrc
+**/swift/.build/**

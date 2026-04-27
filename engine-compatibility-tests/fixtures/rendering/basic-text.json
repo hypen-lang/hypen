@@ -1,0 +1,26 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "basic-text-rendering",
+  "description": "Renders a simple Text component with static content",
+  "category": "rendering",
+  "priority": "P0",
+
+  "input": {
+    "source": "Text(\"Hello, World!\")",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Text", "props": { "0": "Hello, World!" } },
+      { "type": "insert" }
+    ]
+  }
+}

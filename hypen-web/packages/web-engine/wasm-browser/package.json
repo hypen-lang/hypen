@@ -1,0 +1,31 @@
+{
+  "name": "hypen-engine",
+  "type": "module",
+  "collaborators": [
+    "Hypen Contributors"
+  ],
+  "description": "A Rust implementation of the Hypen engine",
+  "version": "0.4.956",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen"
+  },
+  "files": [
+    "hypen_engine_bg.wasm",
+    "hypen_engine.js",
+    "hypen_engine.d.ts"
+  ],
+  "main": "hypen_engine.js",
+  "types": "hypen_engine.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "ui",
+    "reactive",
+    "engine",
+    "wasm",
+    "hypen"
+  ]
+}

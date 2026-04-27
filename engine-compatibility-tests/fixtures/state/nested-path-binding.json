@@ -1,0 +1,32 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "nested-path-binding",
+  "description": "Renders a Text component with a nested state path binding (user.profile.name)",
+  "category": "state",
+  "priority": "P0",
+
+  "input": {
+    "source": "Text(\"@{state.user.profile.name}\")",
+    "initialState": {
+      "user": {
+        "profile": {
+          "name": "Alice"
+        }
+      }
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["user"]
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Text", "props": { "0": "Alice" } },
+      { "type": "insert" }
+    ]
+  }
+}

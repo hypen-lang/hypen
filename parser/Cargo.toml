@@ -1,0 +1,36 @@
+[package]
+name = "hypen-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "A Rust implementation of the Hypen DSL parser using Chumsky"
+keywords = ["parser", "ui", "declarative", "dsl", "hypen"]
+categories = ["parsing", "gui"]
+readme = "README.md"
+
+[lib]
+name = "hypen_parser"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "hypen-parser"
+path = "src/main.rs"
+
+[features]
+default = ["cli"]
+cli = ["ariadne"]
+wasm = ["wasm-bindgen", "serde-wasm-bindgen", "console_error_panic_hook"]
+
+[dependencies]
+chumsky = { version = "1.0.0-alpha.7", default-features = false }
+ariadne = { version = "0.4", optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+wasm-bindgen = { version = "0.2", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+
+[dev-dependencies]

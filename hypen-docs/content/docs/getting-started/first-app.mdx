@@ -1,0 +1,286 @@
+---
+title: Your First App
+description: Build a simple counter app to learn the basics of Hypen
+---
+
+# Your First App
+
+Let's build a simple counter app to learn the basics of Hypen. By the end of this tutorial, you'll understand:
+
+- How to create components
+- How to style with applicators
+- How to manage state with modules
+- How to handle user interactions
+
+## What We're Building
+
+A counter with increment and decrement buttons:
+
+```
+┌─────────────────────────┐
+│                         │
+│       Count: 0          │
+│                         │
+│    [ - ]     [ + ]      │
+│                         │
+└─────────────────────────┘
+```
+
+## Step 1: Create the Project
+
+Use the Hypen CLI to scaffold a new project:
+
+```bash
+# Install the CLI if you haven't already
+bun install -g @hypen-space/cli
+
+# Create a new project
+hypen init counter-app
+cd counter-app
+```
+
+The CLI creates a project structure with a starter `App` component. Let's replace it with our counter.
+
+## Step 2: Create the Template
+
+Create `src/components/Counter/component.hypen`:
+
+```hypen
+module Counter {
+    Column {
+        Text("Count: @{state.count}")
+            .fontSize(48)
+            .fontWeight("bold")
+            .color("#1F2937")
+
+        Row {
+            Button {
+                Text("-")
+                    .fontSize(24)
+                    .color("#FFFFFF")
+            }
+            .onClick(@actions.decrement)
+            .backgroundColor("#EF4444")
+            .padding(horizontal: 24, vertical: 12)
+            .borderRadius(8)
+
+            Spacer()
+                .width(24)
+
+            Button {
+                Text("+")
+                    .fontSize(24)
+                    .color("#FFFFFF")
+            }
+            .onClick(@actions.increment)
+            .backgroundColor("#22C55E")
+            .padding(horizontal: 24, vertical: 12)
+            .borderRadius(8)
+        }
+    }
+    .padding(32)
+    .gap(24)
+    .horizontalAlignment("center")
+}
+```
+
+Let's break this down:
+
+### The Module Declaration
+
+```hypen
+module Counter {
+    // ... UI goes here
+}
+```
+
+`module` tells Hypen this component has state. The name `Counter` must match the TypeScript module file.
+
+### State Bindings
+
+```hypen
+Text("Count: @{state.count}")
+```
+
+`@{state.count}` is a **state binding**. It automatically updates when `state.count` changes.
+
+### Actions
+
+```hypen
+Button { Text("+") }
+    .onClick(@actions.increment)
+```
+
+`.onClick(@actions.increment)` is an event applicator that triggers the `increment` action defined in the module.
+
+### Applicators
+
+```hypen
+.fontSize(48)
+.fontWeight("bold")
+.backgroundColor("#EF4444")
+```
+
+Applicators style the component. They're chained with dots and applied in order.
+
+## Step 3: Create the Module
+
+Create `src/components/Counter/component.ts`:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+// Define the state shape
+interface CounterState {
+  count: number;
+}
+
+// Create the module
+export default app
+  // Set initial state
+  .defineState<CounterState>({ count: 0 })
+
+  // Handle increment action - receives context object
+  .onAction("increment", ({ state }) => {
+    state.count++;
+    // State changes sync automatically via Proxy
+  })
+
+  // Handle decrement action
+  .onAction("decrement", ({ state }) => {
+    state.count--;
+  })
+  .build();
+```
+
+Let's break this down:
+
+### Defining State
+
+```typescript
+.defineState<CounterState>({ count: 0 })
+```
+
+Sets the initial state. The generic `<CounterState>` provides TypeScript type checking.
+
+### Handling Actions
+
+```typescript
+.onAction("increment", async ({ action, state, context }) => {
+  state.count++;
+})
+```
+
+- `action` - Contains event name, payload, and sender
+- `state` - The current state (mutable, auto-synced via Proxy)
+- `context` - GlobalContext for cross-module communication
+- `context.router` - HypenRouter for programmatic navigation
+
+## Step 4: Run It!
+
+Start the development server using the CLI:
+
+```bash
+hypen dev
+```
+
+Open `http://localhost:3000` in your browser and you should see the counter. Click the buttons to increment and decrement!
+
+### Preview with Hypen Studio
+
+For a richer development experience, launch [Hypen Studio](/docs/tooling/studio) — a full in-browser IDE with a code editor, live preview, state inspector, action log, and time-travel debugging:
+
+```bash
+hypen studio
+```
+
+Studio opens at `http://localhost:5173`. You can edit your component and module files directly in the editor and see changes reflected in the live preview instantly. Use the state inspector to watch `state.count` update as you click buttons, and the action log to verify each `increment` and `decrement` action fires correctly.
+
+### Preview on Android and iOS
+
+Run your counter app on a real device or simulator:
+
+```bash
+# Android (requires adb)
+hypen run android
+
+# iOS Simulator (requires Xcode)
+hypen run ios
+```
+
+The CLI downloads a lightweight runner app, detects your connected devices, and launches your counter with hot reload. The same Hypen code renders natively on each platform — DOM elements on Web, Jetpack Compose on Android, SwiftUI on iOS.
+
+Combine device preview with Studio to edit in the browser and see changes live on the device:
+
+```bash
+hypen run android --studio
+hypen run ios --studio
+```
+
+## What's Happening
+
+1. **Discovery** - The CLI discovers the Counter component in `src/components/`
+2. **Parse** - The Hypen engine parses the `.hypen` template
+3. **Initial Render** - Creates DOM elements with `count: 0`
+4. **Click** - User clicks "+" button
+5. **Action** - `@actions.increment` triggers the action handler
+6. **State Update** - `state.count++` modifies the state
+7. **Auto-Sync** - State changes are tracked via Proxy and sync automatically
+8. **Re-render** - Engine diffs and updates only the text "Count: 1"
+
+## Challenges
+
+Try extending the counter:
+
+### 1. Add a Reset Button
+
+Add a button that sets count back to 0:
+
+```hypen
+Button { Text("Reset") }
+    .onClick(@actions.reset)
+```
+
+```typescript
+.onAction("reset", async ({ state }) => {
+  state.count = 0;
+})
+```
+
+### 2. Add a Step Size
+
+Let users increment by different amounts:
+
+```hypen
+Row {
+    Button { Text("+1") }.onClick(@actions.increment, step: 1)
+    Button { Text("+5") }.onClick(@actions.increment, step: 5)
+    Button { Text("+10") }.onClick(@actions.increment, step: 10)
+}
+```
+
+```typescript
+.onAction<{ step: number }>("increment", async ({ action, state }) => {
+  const step = action.payload!.step || 1;
+  state.count += step;
+})
+```
+
+### 3. Prevent Negative Numbers
+
+```typescript
+.onAction("decrement", async ({ state }) => {
+  if (state.count > 0) {
+    state.count--;
+  }
+})
+```
+
+## Next Steps
+
+You've built your first Hypen app! Continue learning:
+
+- [Basics Guide](/docs/guide/basics) - Learn the syntax in depth
+- [Components](/docs/guide/components) - All built-in components
+- [Styling](/docs/guide/styling) - Master applicators
+- [State & Modules](/docs/guide/state) - Advanced state management

@@ -1,0 +1,271 @@
+Column {
+  Column {
+    Column {
+      Text("Premium Products")
+        .fontSize(48)
+        .fontWeight("700")
+        .color("#e0e0e0")
+        .marginBottom(12)
+        .alignSelf("center")
+        .textAlign("center")
+
+      Text("Discover our curated collection of quality items")
+        .fontSize(18)
+        .color("#888888")
+        .marginBottom(40)
+        .alignSelf("center")
+        .textAlign("center")
+
+      Row {
+        Button {
+          Text("Shop Now")
+            .fontSize(16)
+            .fontWeight("600")
+            .color("#0a0a0a")
+        }
+          .onClick("@actions.navigateProducts")
+          .padding(16)
+          .paddingLeft(40)
+          .paddingRight(40)
+          .backgroundColor("#00ff88")
+          .borderRadius(8)
+          .border("none")
+          .cursor("pointer")
+          .transition("all 0.2s ease")
+
+        Button {
+          Text("Learn More")
+            .fontSize(16)
+            .fontWeight("600")
+            .color("#e0e0e0")
+        }
+          .onClick("@actions.navigateAbout")
+          .padding(16)
+          .paddingLeft(40)
+          .paddingRight(40)
+          .backgroundColor("transparent")
+          .borderRadius(8)
+          .border("1px solid #3a3a3a")
+          .cursor("pointer")
+          .transition("all 0.2s ease")
+      }
+      .gap(16)
+      .horizontalAlignment("center")
+    }
+    .padding(80)
+    .paddingTop(60)
+    .paddingBottom(60)
+    .backgroundColor("#0a0a0a")
+    .marginBottom(40)
+
+    Text("Why Shop With Us")
+      .fontSize(32)
+      .fontWeight("600")
+      .color("#e0e0e0")
+      .marginBottom(32)
+      .alignSelf("center")
+
+    Row {
+      Column {
+        Text("⚡")
+          .fontSize(40)
+          .marginBottom(16)
+          .alignSelf("center")
+
+        Text("Fast Delivery")
+          .fontSize(18)
+          .fontWeight("600")
+          .color("#e0e0e0")
+          .marginBottom(8)
+          .alignSelf("center")
+
+        Text("Quick shipping on all orders")
+          .fontSize(14)
+          .color("#888888")
+          .textAlign("center")
+          .lineHeight(1.5)
+      }
+      .padding(32)
+      .backgroundColor("#1a1a1a")
+      .borderRadius(8)
+      .border("1px solid #2a2a2a")
+      .flex(1)
+
+      Column {
+        Text("✓")
+          .fontSize(40)
+          .marginBottom(16)
+          .alignSelf("center")
+
+        Text("Quality Guaranteed")
+          .fontSize(18)
+          .fontWeight("600")
+          .color("#e0e0e0")
+          .marginBottom(8)
+          .alignSelf("center")
+
+        Text("100% authentic products")
+          .fontSize(14)
+          .color("#888888")
+          .textAlign("center")
+          .lineHeight(1.5)
+      }
+      .padding(32)
+      .backgroundColor("#1a1a1a")
+      .borderRadius(8)
+      .border("1px solid #2a2a2a")
+      .flex(1)
+
+      Column {
+        Text("↻")
+          .fontSize(40)
+          .marginBottom(16)
+          .alignSelf("center")
+
+        Text("Easy Returns")
+          .fontSize(18)
+          .fontWeight("600")
+          .color("#e0e0e0")
+          .marginBottom(8)
+          .alignSelf("center")
+
+        Text("30-day return policy")
+          .fontSize(14)
+          .color("#888888")
+          .textAlign("center")
+          .lineHeight(1.5)
+      }
+      .padding(32)
+      .backgroundColor("#1a1a1a")
+      .borderRadius(8)
+      .border("1px solid #2a2a2a")
+      .flex(1)
+    }
+    .gap(24)
+    .marginBottom(60)
+
+    Column {
+      Text("Interactive Demo")
+        .fontSize(24)
+        .fontWeight("600")
+        .color("#e0e0e0")
+        .marginBottom(16)
+        .alignSelf("center")
+
+      Text("Counter: @{state.counter}")
+        .fontSize(36)
+        .fontWeight("700")
+        .color("#00ff88")
+        .marginBottom(24)
+        .alignSelf("center")
+
+      Row {
+        Button {
+          Text("−")
+            .fontSize(24)
+            .fontWeight("600")
+            .color("#e0e0e0")
+        }
+          .onClick("@actions.decrement")
+          .padding(12)
+          .paddingLeft(24)
+          .paddingRight(24)
+          .backgroundColor("#2a2a2a")
+          .borderRadius(8)
+          .border("1px solid #3a3a3a")
+          .cursor("pointer")
+          .transition("all 0.2s ease")
+
+        Button {
+          Text("Reset")
+            .fontSize(14)
+            .fontWeight("600")
+            .color("#e0e0e0")
+        }
+          .onClick("@actions.reset")
+          .padding(12)
+          .paddingLeft(24)
+          .paddingRight(24)
+          .backgroundColor("#2a2a2a")
+          .borderRadius(8)
+          .border("1px solid #3a3a3a")
+          .cursor("pointer")
+          .transition("all 0.2s ease")
+
+        Button {
+          Text("+")
+            .fontSize(24)
+            .fontWeight("600")
+            .color("#0a0a0a")
+        }
+          .onClick("@actions.increment")
+          .padding(12)
+          .paddingLeft(24)
+          .paddingRight(24)
+          .backgroundColor("#00ff88")
+          .borderRadius(8)
+          .border("none")
+          .cursor("pointer")
+          .transition("all 0.2s ease")
+      }
+      .gap(12)
+      .horizontalAlignment("center")
+      .marginBottom(16)
+
+      Text("@{state.message}")
+        .fontSize(14)
+        .color("#888888")
+        .fontStyle("italic")
+        .alignSelf("center")
+    }
+    .padding(40)
+    .backgroundColor("#1a1a1a")
+    .borderRadius(8)
+    .border("1px solid #2a2a2a")
+    .marginBottom(60)
+    .maxWidth(600)
+    .alignSelf("center")
+
+    Column {
+      Text("Ready to Start Shopping?")
+        .fontSize(28)
+        .fontWeight("600")
+        .color("#e0e0e0")
+        .marginBottom(12)
+        .alignSelf("center")
+
+      Text("Browse our full collection")
+        .fontSize(16)
+        .color("#888888")
+        .marginBottom(28)
+        .alignSelf("center")
+
+      Button {
+        Text("View All Products")
+          .fontSize(16)
+          .fontWeight("600")
+          .color("#0a0a0a")
+      }
+        .onClick("@actions.navigateProducts")
+        .padding(16)
+        .paddingLeft(48)
+        .paddingRight(48)
+        .backgroundColor("#00ff88")
+        .borderRadius(8)
+        .border("none")
+        .cursor("pointer")
+        .transition("all 0.2s ease")
+        .alignSelf("center")
+    }
+    .padding(50)
+    .backgroundColor("#0f0f0f")
+    .borderRadius(8)
+    .border("1px solid #1a1a1a")
+  }
+  .padding(40)
+  .maxWidth(1200)
+  .width("100%")
+}
+.alignSelf("center")
+.width("100%")
+.backgroundColor("#0a0a0a")

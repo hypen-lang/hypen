@@ -1,0 +1,87 @@
+module Comments {
+    Column {
+        Row {
+            Button {
+                Text("←")
+                    .tw("text-xl")
+            }
+            .onClick(@router.push, to: "/")
+            .tw("bg-transparent p-2")
+
+            Text("Comments")
+                .tw("text-base font-semibold flex-1 text-center")
+
+            Column {}
+                .tw("w-10")
+        }
+        .tw("py-2 px-2 items-center bg-white border-b border-gray-200")
+
+        Column {
+            ForEach(items: @state.comments, key: "id") {
+                Row {
+                    Image(src: "@{item.user.avatarUrl}")
+                        .width(32)
+                        .height(32)
+                        .borderRadius(16)
+
+                    Column {
+                        Row {
+                            Text("@{item.user.username}")
+                                .fontSize(13)
+                                .fontWeight("600")
+                            Text(" @{item.text}")
+                                .fontSize(13)
+                        }
+                        Text("@{item.timeAgo}")
+                            .fontSize(11)
+                            .color("#8e8e8e")
+                            .marginTop(4)
+                    }
+                    .paddingLeft(10)
+                    .flex(1)
+
+                    Button {
+                        Icon(@resources.heart)
+                            .size(12)
+                            .color("#8e8e8e")
+                    }
+                    .backgroundColor("transparent")
+                    .border("none")
+                    .onClick(@actions.likeComment, commentId: "@{item.id}")
+                }
+                .padding(10, 16)
+                .verticalAlignment("top")
+            }
+        }
+        .flex(1)
+        .scrollable(true)
+
+        Row {
+            Image(src: "@{state.currentUser.avatarUrl}")
+                .width(28)
+                .height(28)
+                .borderRadius(14)
+
+            Input(placeholder: "Add a comment...")
+                .bind(@state.commentText)
+                .flex(1)
+                .marginLeft(10)
+                .border("none")
+                .fontSize(14)
+
+            Button {
+                Text("Post")
+                    .fontSize(14)
+                    .fontWeight("600")
+                    .color("#0095f6")
+            }
+            .backgroundColor("transparent")
+            .border("none")
+            .onClick(@actions.postComment)
+        }
+        .padding(12, 16)
+        .borderTop("1px solid #efefef")
+        .verticalAlignment("center")
+    }
+    .tw("flex-1 w-full bg-white")
+}

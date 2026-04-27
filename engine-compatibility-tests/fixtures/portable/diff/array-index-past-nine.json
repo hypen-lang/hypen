@@ -1,0 +1,28 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-array-index-past-nine",
+  "description": "An index >= 10 must serialise as its full decimal ('10', '11', ...), never as a single character. Every host must pass this.",
+  "function": "diff_paths",
+  "priority": "P0",
+  "input": {
+    "old": {
+      "items": [
+        { "title": "t0" }, { "title": "t1" }, { "title": "t2" },
+        { "title": "t3" }, { "title": "t4" }, { "title": "t5" },
+        { "title": "t6" }, { "title": "t7" }, { "title": "t8" },
+        { "title": "t9" }, { "title": "OLD" }, { "title": "t11" }
+      ]
+    },
+    "new": {
+      "items": [
+        { "title": "t0" }, { "title": "t1" }, { "title": "t2" },
+        { "title": "t3" }, { "title": "t4" }, { "title": "t5" },
+        { "title": "t6" }, { "title": "t7" }, { "title": "t8" },
+        { "title": "t9" }, { "title": "t10" }, { "title": "t11" }
+      ]
+    }
+  },
+  "expected": [
+    { "path": "items.10.title", "value": "t10" }
+  ]
+}

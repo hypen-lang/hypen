@@ -1,0 +1,9 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "route-multiple-params",
+  "description": "Multiple :name segments all extracted.",
+  "function": "match_path",
+  "priority": "P0",
+  "input": { "pattern": "/users/:id/posts/:postId", "path": "/users/42/posts/99" },
+  "expected": { "matched": true, "params": { "id": "42", "postId": "99" } }
+}

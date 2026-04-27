@@ -1,0 +1,59 @@
+{
+  "name": "@hypen-space/ios-streamer",
+  "version": "0.1.1",
+  "description": "Stream and control iOS Simulators over HTTP/WebSocket. MJPEG video, tap/swipe/text input via xcrun simctl + idb.",
+  "type": "module",
+  "bin": {
+    "hypen-ios-streamer": "./bin/ios-streamer.ts"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "import": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./server": {
+      "bun": "./src/server.ts",
+      "import": "./src/server.ts",
+      "default": "./src/server.ts"
+    }
+  },
+  "files": [
+    "src",
+    "bin",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "bun bin/ios-streamer.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "keywords": [
+    "ios",
+    "simulator",
+    "xcrun",
+    "simctl",
+    "idb",
+    "mjpeg",
+    "streaming",
+    "hypen"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
+  "os": [
+    "darwin"
+  ],
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-ios-streamer"
+  }
+}

@@ -1,0 +1,160 @@
+---
+title: Application Reference
+description: Application-level features and configuration
+---
+
+# Application Reference
+
+Application-level features for building complete Hypen applications.
+
+## Routing
+
+Use Router and Route for navigation:
+
+```hypen
+Router {
+    Route(path: "/") {
+        HomePage()
+    }
+    Route(path: "/about") {
+        AboutPage()
+    }
+    Route(path: "/users/:id") {
+        UserPage()
+    }
+}
+```
+
+### Link Component
+
+```hypen
+Link(href: "/about") {
+    Text("About Us")
+}
+```
+
+### Programmatic Navigation
+
+In your module:
+
+```typescript
+.onAction("navigate", async ({ context }) => {
+  context.router?.push("/about");
+})
+```
+
+## HypenApp
+
+Embed a remote Hypen app:
+
+```hypen
+HypenApp("ws://localhost:3000")
+```
+
+With options:
+
+```hypen
+HypenApp(
+    url: "ws://localhost:3000",
+    autoReconnect: true,
+    reconnectInterval: 3000
+)
+```
+
+## Control Flow
+
+### ForEach
+
+Iterate over collections:
+
+```hypen
+ForEach(items: @state.items) {
+    Text(@item.name)
+}
+```
+
+With key for efficient updates:
+
+```hypen
+ForEach(items: @state.items, key: "id") {
+    ListItem(item: @item)
+}
+```
+
+### When
+
+Pattern matching:
+
+```hypen
+When(value: @state.status) {
+    Case(match: "loading") {
+        Spinner()
+    }
+    Case(match: "error") {
+        ErrorMessage()
+    }
+    Case(match: "success") {
+        Content()
+    }
+    Else {
+        Text("Unknown")
+    }
+}
+```
+
+### If
+
+Boolean conditional:
+
+```hypen
+If(condition: @state.isVisible) {
+    VisibleContent()
+    Else {
+        HiddenContent()
+    }
+}
+```
+
+## Module System
+
+### Module Definition
+
+```hypen
+module ModuleName {
+    // UI here
+}
+```
+
+### TypeScript Module
+
+```typescript
+import { app } from "@hypen-space/core";
+
+interface State {
+  // state shape
+}
+
+export default app
+  .defineState<State>({ /* initial state */ })
+  .onCreated(async (state, context) => { /* setup */ })
+  .onAction<PayloadType>("actionName", async ({ action, state, context }) => { /* handle */ })
+  .onDestroyed((state, context) => { /* cleanup */ });
+```
+
+## Platform Detection
+
+Handle platform-specific rendering:
+
+```hypen
+When(value: @platform) {
+    Case(match: "web") {
+        WebSpecificComponent()
+    }
+    Case(match: "android") {
+        AndroidSpecificComponent()
+    }
+    Case(match: "ios") {
+        IOSSpecificComponent()
+    }
+}
+```

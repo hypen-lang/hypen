@@ -1,0 +1,29 @@
+Column {
+  Header
+
+  Router {
+    Route("/") {
+      HomePage
+    }
+
+    Route("/products") {
+      ProductsPage
+    }
+
+    Route("/about") {
+      AboutPage
+    }
+
+    Route("/cart") {
+      CartPage
+    }
+  }
+  .flex(1)
+
+  Footer
+}
+.width("100%")
+.minHeight("100vh")
+.backgroundColor("#0a0a0a")
+.display("flex")
+.flexDirection("column")

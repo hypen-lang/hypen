@@ -1,0 +1,16 @@
+# Copy this file to local.properties and fill in your credentials.
+# local.properties is gitignored — never commit real credentials.
+#
+# The Vanniktech Maven Publish plugin reads these as Gradle project properties.
+# Alternatively, set them as environment variables prefixed with ORG_GRADLE_PROJECT_
+# (e.g. ORG_GRADLE_PROJECT_mavenCentralUsername=...)
+
+# Sonatype Central Portal credentials
+mavenCentralUsername=
+mavenCentralPassword=
+
+# GPG signing key (ASCII-armored, newlines replaced with \n)
+# Generate: gpg --full-generate-key (RSA 4096)
+# Export:   gpg --export-secret-keys --armor <KEY_ID> | grep -v '\-\-' | tr -d '\n'
+signingInMemoryKey=
+signingInMemoryKeyPassword=

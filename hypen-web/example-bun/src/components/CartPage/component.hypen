@@ -1,0 +1,167 @@
+Column {
+  Text("Shopping Cart")
+    .fontSize(32)
+    .fontWeight("bold")
+    .color("#00ff88")
+    .marginBottom(32)
+    .alignSelf("center")
+
+  Column {
+    Text("Your cart is empty")
+      .fontSize(18)
+      .color("#888888")
+      .display("@{state.cart.length > 0 ? 'none' : 'block'}")
+  }
+
+  List(@state.cart) {
+    Row {
+      Image("@{item.image}")
+        .width(100)
+        .height(100)
+        .objectFit("cover")
+        .borderRadius(8)
+        .marginRight(20)
+
+      Column {
+        Text("@{item.title}")
+          .fontSize(18)
+          .fontWeight("600")
+          .color("#e0e0e0")
+          .marginBottom(8)
+
+        Text("@{item.price}")
+          .fontSize(16)
+          .color("#00ff88")
+          .marginBottom(8)
+
+        Row {
+          Button {
+            Text("-")
+              .color("#0a0a0a")
+              .fontWeight("bold")
+          }
+          .onClick("@actions.decrementQuantity", id: "@{item.id}")
+          .padding(8)
+          .paddingLeft(12)
+          .paddingRight(12)
+          .backgroundColor("#ff006e")
+          .border("none")
+          .borderRadius(8)
+          .cursor("pointer")
+          .transition("all 0.3s ease")
+
+          Text("@{item.quantity}")
+            .fontSize(16)
+            .fontWeight("600")
+            .color("#e0e0e0")
+            .marginLeft(16)
+            .marginRight(16)
+
+          Button {
+            Text("+")
+              .color("#0a0a0a")
+              .fontWeight("bold")
+          }
+          .onClick("@actions.incrementQuantity", id: "@{item.id}")
+          .padding(8)
+          .paddingLeft(12)
+          .paddingRight(12)
+          .backgroundColor("#00ff88")
+          .border("none")
+          .borderRadius(8)
+          .cursor("pointer")
+          .transition("all 0.3s ease")
+        }
+        .verticalAlignment("center")
+      }
+      .flex(1)
+
+      Column {
+        Text("@{item.itemTotal}")
+          .fontSize(20)
+          .fontWeight("bold")
+          .color("#00ff88")
+          .marginBottom(12)
+
+        Button {
+          Text("Remove")
+            .color("#e0e0e0")
+            .fontWeight("600")
+        }
+        .onClick("@actions.removeFromCart", id: "@{item.id}")
+        .padding(10)
+        .backgroundColor("#2a2a2a")
+        .border("1px solid #3a3a3a")
+        .borderRadius(8)
+        .cursor("pointer")
+        .transition("all 0.3s ease")
+      }
+      .horizontalAlignment("flex-end")
+    }
+    .backgroundColor("#1a1a1a")
+    .borderRadius(16)
+    .padding(20)
+    .border("1px solid #2a2a2a")
+    .marginBottom(16)
+    .transition("all 0.3s ease")
+  }
+  .width("100%")
+  .display("@{state.cart.length > 0 ? 'flex' : 'none'}")
+
+  Column {
+    Row {
+      Text("Total:")
+        .fontSize(24)
+        .fontWeight("600")
+        .color("#e0e0e0")
+
+      Text("@{state.cartTotalFormatted}")
+        .fontSize(24)
+        .fontWeight("bold")
+        .color("#00ff88")
+    }
+    .horizontalAlignment("space-between")
+    .marginBottom(20)
+
+    Row {
+      Button {
+        Text("Clear Cart")
+          .color("#e0e0e0")
+          .fontWeight("600")
+      }
+      .onClick("@actions.clearCart")
+      .padding(16)
+      .backgroundColor("#2a2a2a")
+      .border("1px solid #3a3a3a")
+      .borderRadius(8)
+      .cursor("pointer")
+      .marginRight(16)
+      .transition("all 0.3s ease")
+
+      Button {
+        Text("Checkout")
+          .color("#0a0a0a")
+          .fontWeight("700")
+      }
+      .onClick("@actions.checkout")
+      .padding(16)
+      .flex(1)
+      .backgroundColor("#00ff88")
+      .border("none")
+      .borderRadius(8)
+      .cursor("pointer")
+      .transition("all 0.3s ease")
+    }
+  }
+  .backgroundColor("#1a1a1a")
+  .borderRadius(16)
+  .padding(24)
+  .border("1px solid #2a2a2a")
+  .marginTop(20)
+  .display("@{state.cart.length > 0 ? 'flex' : 'none'}")
+}
+.padding(40)
+.maxWidth(900)
+.width("100%")
+.alignSelf("center")
+.flex(1)

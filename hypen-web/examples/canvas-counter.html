@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Canvas Counter - Hypen Example</title>
+  <style>
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    #app {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      overflow: hidden;
+    }
+    
+    .info {
+      background: rgba(255, 255, 255, 0.95);
+      border-radius: 8px;
+      padding: 20px;
+      margin-top: 20px;
+      max-width: 600px;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+    }
+    
+    .info h1 {
+      margin: 0 0 10px 0;
+      color: #333;
+      font-size: 24px;
+    }
+    
+    .info p {
+      margin: 5px 0;
+      color: #666;
+      line-height: 1.6;
+    }
+    
+    .badge {
+      display: inline-block;
+      background: #667eea;
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: bold;
+      margin: 2px;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="app" width="400" height="300"></canvas>
+  
+  <div class="info">
+    <h1>🎨 Canvas Renderer Demo</h1>
+    <p>
+      <span class="badge">Canvas 2D</span>
+      <span class="badge">No DOM</span>
+      <span class="badge">Hypen Framework</span>
+    </p>
+    <p>
+      This counter is rendered entirely on a <code>&lt;canvas&gt;</code> element using the Canvas 2D API.
+      No DOM elements are created for the buttons or text - everything is drawn pixel by pixel!
+    </p>
+    <p>
+      <strong>Features:</strong>
+    </p>
+    <ul>
+      <li>✅ Flexbox-like layout system</li>
+      <li>✅ Hit testing for mouse events</li>
+      <li>✅ Hover states and cursor changes</li>
+      <li>✅ Text rendering with wrapping</li>
+      <li>✅ Accessibility via shadow DOM</li>
+    </ul>
+  </div>
+  
+  <script type="module" src="./canvas-counter.js"></script>
+</body>
+</html>
+

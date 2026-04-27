@@ -1,0 +1,78 @@
+name: Cross-Platform SDKs
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "hypen-golang/**"
+      - "hypen-kotlin/**"
+      - ".github/workflows/cross-platform.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "hypen-golang/**"
+      - "hypen-kotlin/**"
+      - ".github/workflows/cross-platform.yml"
+
+jobs:
+  golang:
+    name: Go Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache-dependency-path: hypen-golang/go.sum
+
+      # Go SDK uses wazero to run WASI WASM — build it first
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            parser
+            tailwind-parse
+            hypen-engine-rs
+
+      - name: Build WASI WASM
+        run: |
+          cargo build --target wasm32-wasip1 --release --features wasi
+          mkdir -p pkg/wasi
+          cp ../target/wasm32-wasip1/release/hypen_engine.wasm pkg/wasi/
+        working-directory: hypen-engine-rs
+
+      - name: Run Go tests
+        run: go test -v ./...
+        working-directory: hypen-golang
+
+  kotlin:
+    name: Kotlin Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # The Kotlin SDK loads the engine via UniFFI/JNA, which requires
+      # `libhypen_engine.so` to be present at the path
+      # `<repo>/target/release/`. The build.gradle.kts test config sets
+      # `jna.library.path` and `LD_LIBRARY_PATH` to that directory.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build native engine library (uniffi)
+        run: cargo build --release --features uniffi --manifest-path hypen-engine-rs/Cargo.toml
+
+      - name: Run Kotlin tests
+        run: ./gradlew test
+        working-directory: hypen-kotlin

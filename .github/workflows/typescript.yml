@@ -1,0 +1,185 @@
+name: TypeScript
+
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "hypen-web/**"
+      - "hypen-cli/**"
+      - "hypen-lsp/**"
+      - "engine-compatibility-tests/runners/typescript/**"
+      - ".github/workflows/typescript.yml"
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - "hypen-web/**"
+      - "hypen-cli/**"
+      - "hypen-lsp/**"
+      - "engine-compatibility-tests/runners/typescript/**"
+      - ".github/workflows/typescript.yml"
+
+jobs:
+  # ── Build WASM once, share via artifact ──────────────────────────
+  build-wasm:
+    name: Build WASM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            parser
+            tailwind-parse
+            hypen-engine-rs
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM (nodejs)
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js
+        working-directory: hypen-engine-rs
+
+      - name: Upload WASM artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-nodejs
+          path: hypen-engine-rs/pkg/nodejs/
+          retention-days: 1
+
+  web-sdk:
+    name: Web SDK Tests
+    runs-on: ubuntu-latest
+    needs: [build-wasm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-nodejs
+          path: hypen-engine-rs/pkg/nodejs
+
+      - name: Setup WASM
+        run: |
+          # Copy the freshly-built WASM into the committed wasm-node directories
+          # (avoids symlinks which can cause __dirname resolution issues in Bun)
+          for dir in hypen-web/packages/core/wasm-node hypen-web/packages/server/wasm-node; do
+            mkdir -p $dir
+            cp hypen-engine-rs/pkg/nodejs/hypen_engine_bg.wasm $dir/
+            cp hypen-engine-rs/pkg/nodejs/hypen_engine.js $dir/
+            cp hypen-engine-rs/pkg/nodejs/hypen_engine.d.ts $dir/
+            cp hypen-engine-rs/pkg/nodejs/hypen_engine_bg.wasm.d.ts $dir/
+          done
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: hypen-web
+
+      - name: Run tests
+        run: bun test
+        working-directory: hypen-web
+
+  cli:
+    name: CLI Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: hypen-cli
+
+      - name: Run tests
+        run: bun test
+        working-directory: hypen-cli
+
+  lsp:
+    name: LSP Build
+    runs-on: ubuntu-latest
+    needs: [build-wasm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: parser
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build parser WASM
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features wasm
+        working-directory: parser
+
+      - name: Setup WASM symlink
+        run: |
+          cd hypen-lsp
+          rm -rf wasm
+          ln -sf ../parser/pkg/nodejs wasm
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: hypen-lsp
+
+      - name: Compile
+        run: npx tsc -b
+        working-directory: hypen-lsp
+
+      - name: Lint
+        run: npx eslint ./src --ext .ts
+        working-directory: hypen-lsp
+        continue-on-error: true
+
+  compatibility:
+    name: Compatibility Tests
+    runs-on: ubuntu-latest
+    needs: [build-wasm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-nodejs
+          path: hypen-engine-rs/pkg/nodejs
+
+      - name: Setup WASM
+        run: |
+          for dir in hypen-web/packages/core/wasm-node hypen-web/packages/server/wasm-node; do
+            mkdir -p $dir
+            cp hypen-engine-rs/pkg/nodejs/hypen_engine_bg.wasm $dir/
+            cp hypen-engine-rs/pkg/nodejs/hypen_engine.js $dir/
+            cp hypen-engine-rs/pkg/nodejs/hypen_engine.d.ts $dir/
+            cp hypen-engine-rs/pkg/nodejs/hypen_engine_bg.wasm.d.ts $dir/
+          done
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: engine-compatibility-tests/runners/typescript
+
+      - name: Run compatibility tests
+        run: bun test
+        working-directory: engine-compatibility-tests/runners/typescript

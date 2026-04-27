@@ -1,0 +1,82 @@
+{
+  "name": "@hypen-space/cli",
+  "version": "0.4.956",
+  "description": "Hypen CLI - Create and manage Hypen applications",
+  "type": "module",
+  "bin": {
+    "hypen": "./dist/bin/hypen.js"
+  },
+  "main": "./dist/src/index.js",
+  "exports": {
+    ".": {
+      "bun": "./src/index.ts",
+      "import": "./dist/src/index.js",
+      "default": "./dist/src/index.js"
+    },
+    "./dev": {
+      "bun": "./src/dev.ts",
+      "import": "./dist/src/dev.js",
+      "default": "./dist/src/dev.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "studio-ui"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "prepublishOnly": "bun run build",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@babel/runtime": "^7.24.0",
+    "@hypen-space/core": "^0.4.956",
+    "@hypen-space/lsp": "^0.4.956",
+    "@hypen-space/server": "^0.4.956",
+    "@hypen-space/web": "^0.4.956",
+    "@hypen-space/web-engine": "^0.4.956",
+    "@radix-ui/react-label": "^2.1.7",
+    "@radix-ui/react-select": "^2.2.6",
+    "@radix-ui/react-slot": "^1.2.3",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "android-emulator-webrtc": "^1.0.13",
+    "bun-plugin-tailwind": "^0.1.2",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "esbuild": "^0.20.0",
+    "json-edit-react": "^1.27.0",
+    "lucide-react": "^0.545.0",
+    "react": "^19",
+    "react-dom": "^19",
+    "tailwind-merge": "^3.3.1",
+    "tailwindcss": "^4.1.11",
+    "tw-animate-css": "^1.4.0"
+  },
+  "optionalDependencies": {
+    "@hypen-space/ios-streamer": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/node": "^20",
+    "typescript": "^5"
+  },
+  "keywords": [
+    "hypen",
+    "cli",
+    "ui",
+    "declarative"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-cli"
+  }
+}

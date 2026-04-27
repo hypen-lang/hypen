@@ -1,0 +1,51 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "keyed-list-reorder",
+  "description": "Reordering keyed list items should produce Move patches, not Remove+Create",
+  "category": "reconciliation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "ForEach syntax not yet supported in current parser - requires control flow implementation",
+    "sdks": ["typescript", "golang"]
+  },
+
+  "input": {
+    "source": "Column { ForEach(items: \"@{state.items}\") { Text(\"@{item.name}\", key: \"@{item.id}\") } }",
+    "initialState": {
+      "items": [
+        { "id": "a", "name": "Alice" },
+        { "id": "b", "name": "Bob" },
+        { "id": "c", "name": "Carol" }
+      ]
+    },
+    "module": {
+      "name": "ListModule",
+      "actions": [],
+      "stateKeys": ["items"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render creates Column with three Text children",
+      "action": "initialRender",
+      "expectedPatchCount": 8
+    },
+    {
+      "description": "Moving Carol to the front should produce Move patch only",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["items"],
+        "newValues": {
+          "items": [
+            { "id": "c", "name": "Carol" },
+            { "id": "a", "name": "Alice" },
+            { "id": "b", "name": "Bob" }
+          ]
+        }
+      },
+      "forbiddenPatchTypes": ["create", "remove"]
+    }
+  ]
+}

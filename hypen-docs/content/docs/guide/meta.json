@@ -1,0 +1,17 @@
+{
+  "title": "Guide",
+  "pages": [
+    "index",
+    "tutorial",
+    "basics",
+    "components",
+    "layout",
+    "styling",
+    "inputs",
+    "state",
+    "routing",
+    "persistence",
+    "data-sources",
+    "error-handling"
+  ]
+}

@@ -1,0 +1,5 @@
+# Hypen Clippy configuration
+# Run: cargo clippy --workspace --all-targets
+
+# Allow slightly longer type complexity for IR/AST types
+type-complexity-threshold = 350

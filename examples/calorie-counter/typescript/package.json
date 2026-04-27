@@ -1,0 +1,14 @@
+{
+  "name": "hypen-calorie-counter-ts",
+  "type": "module",
+  "scripts": {
+    "dev": "bun run server/index.ts",
+    "web": "bun --hot web/serve.ts",
+    "db:reset": "rm -f calorie-counter.db && bun run dev"
+  },
+  "dependencies": {
+    "@hypen-space/core": "file:../../../hypen-web/packages/core",
+    "@hypen-space/server": "file:../../../hypen-web/packages/server",
+    "@hypen-space/web": "file:../../../hypen-web/packages/web"
+  }
+}

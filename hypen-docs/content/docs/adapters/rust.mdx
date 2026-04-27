@@ -1,0 +1,489 @@
+---
+title: Rust Adapter
+description: Build Hypen applications natively in Rust with the hypen-server SDK
+---
+
+# Rust Adapter
+
+The Rust adapter (`hypen-server`) lets you build Hypen applications natively in Rust. It embeds the Hypen engine directly (no WASM) and provides a type-safe, idiomatic API for defining modules with state, actions, lifecycle hooks, routing, and remote server support.
+
+## Installation
+
+Add the crate to your project:
+
+```bash
+cargo add hypen-server
+```
+
+Or add it manually to your `Cargo.toml`:
+
+```toml
+[dependencies]
+hypen-server = "0.4.80"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+For async action and lifecycle handlers, enable the `async` feature:
+
+```toml
+[dependencies]
+hypen-server = { version = "0.4.80", features = ["async"] }
+tokio = { version = "1", features = ["rt", "macros"] }
+```
+
+## Quick Start
+
+A minimal counter module:
+
+```rust
+use hypen_server::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct CounterState {
+    count: i32,
+}
+
+fn main() {
+    let counter = HypenApp::module::<CounterState>("Counter")
+        .state(CounterState { count: 0 })
+        .ui(r#"
+            Column {
+                Text("Count: @{state.count}")
+                Button("@actions.increment") { Text("+") }
+                Button("@actions.decrement") { Text("-") }
+            }
+        "#)
+        .on_action::<()>("increment", |state, _, _ctx| {
+            state.count += 1;
+        })
+        .on_action::<()>("decrement", |state, _, _ctx| {
+            state.count -= 1;
+        })
+        .build();
+
+    let app = HypenApp::builder()
+        .route("/", counter)
+        .build();
+
+    // Instantiate and interact with the module
+    let def = Arc::new(
+        HypenApp::module::<CounterState>("Counter")
+            .state(CounterState { count: 0 })
+            .on_action::<()>("increment", |s, _, _| s.count += 1)
+            .build(),
+    );
+
+    let instance = app.instantiate(def).unwrap();
+    instance.mount();
+    instance.dispatch_action("increment", None).unwrap();
+    assert_eq!(instance.get_state().count, 1);
+}
+```
+
+## Modules
+
+Modules are the core building block. Each module has typed state, action handlers, and optional lifecycle hooks. Define them with the fluent `ModuleBuilder` API.
+
+### State
+
+State must implement `Clone`, `Default`, `Serialize`, and `Deserialize`:
+
+```rust
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct ProfileState {
+    name: String,
+    bio: String,
+    followers: u32,
+}
+```
+
+### Actions
+
+Actions are dispatched from the UI via `@actions.name`. Each handler receives mutable state, a typed payload, and an optional `GlobalContext` reference.
+
+Use `()` for actions with no payload:
+
+```rust
+.on_action::<()>("increment", |state, _, _ctx| {
+    state.count += 1;
+})
+```
+
+Use a typed payload for actions that carry data:
+
+```rust
+#[derive(Deserialize)]
+struct SetValue {
+    value: i32,
+}
+
+.on_action::<SetValue>("set_value", |state, payload, _ctx| {
+    state.count = payload.value;
+})
+```
+
+Use `serde_json::Value` for raw JSON access:
+
+```rust
+.on_action::<serde_json::Value>("raw", |state, raw, _ctx| {
+    if let Some(n) = raw.as_i64() {
+        state.count = n as i32;
+    }
+})
+```
+
+### Lifecycle Hooks
+
+Register callbacks for module mount and unmount:
+
+```rust
+let module = HypenApp::module::<CounterState>("Counter")
+    .state(CounterState { count: 0 })
+    .on_created(|state, _ctx| {
+        println!("Module created with count: {}", state.count);
+    })
+    .on_destroyed(|state, _ctx| {
+        println!("Module destroyed at count: {}", state.count);
+    })
+    .on_action::<()>("increment", |state, _, _ctx| {
+        state.count += 1;
+    })
+    .build();
+```
+
+### Async Handlers
+
+With the `async` feature enabled, you can use async action and lifecycle handlers. Async handlers take **owned** state and return it after awaiting:
+
+```rust
+use std::sync::Arc;
+
+let module = HypenApp::module::<ProfileState>("Profile")
+    .state(ProfileState::default())
+    .on_created_async(|mut state, _ctx| {
+        Box::pin(async move {
+            // Fetch data, initialize, etc.
+            state.name = "Alice".into();
+            state
+        })
+    })
+    .on_action_async::<()>("refresh", |mut state, _, _ctx| {
+        Box::pin(async move {
+            state.followers += 1;
+            state
+        })
+    })
+    .on_destroyed_async(|state, _ctx| {
+        Box::pin(async move {
+            // Cleanup, flush logs, etc.
+            state
+        })
+    })
+    .build();
+```
+
+### UI Templates
+
+Provide the Hypen DSL template inline or from a file:
+
+```rust
+// Inline
+.ui(r#"
+    Column {
+        Text("Hello, @{state.name}")
+    }
+"#)
+
+// From a file
+.ui_file("./components/counter.hypen")
+```
+
+### Error Handling
+
+Register an error handler to intercept and optionally suppress errors:
+
+```rust
+.on_error(|err_ctx| {
+    eprintln!("Error in action {:?}: {}", err_ctx.action_name, err_ctx.error);
+    ErrorResult { handled: true }
+})
+```
+
+### Resources
+
+Register SVG icon resources for use with `Icon(@resources.name)` in templates:
+
+```rust
+let module = HypenApp::module::<MyState>("App")
+    .state(MyState::default())
+    // Single resource
+    .resource("heart", r#"<svg viewBox="0 0 24 24"><path d="M20.84..."/></svg>"#)
+    // From a directory of .svg files
+    .resources_dir("./icons")
+    // From a JSON map file
+    .resources_file("./icons.json")
+    .build();
+```
+
+## HypenApp and Routing
+
+`HypenApp` provides top-level app configuration with routing and component management:
+
+```rust
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct HomeState { title: String }
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct AboutState { content: String }
+
+let app = HypenApp::builder()
+    .route("/", HypenApp::module::<HomeState>("Home")
+        .state(HomeState { title: "Welcome".into() })
+        .ui(r#"Column { Text("@{state.title}") }"#)
+        .build())
+    .route("/about", HypenApp::module::<AboutState>("About")
+        .state(AboutState { content: "About us".into() })
+        .ui(r#"Column { Text("@{state.content}") }"#)
+        .build())
+    .component("Card", r#"Box { Text("Card content") }"#)
+    .components_dir("./components")
+    .build();
+
+// Navigate
+app.navigate("/about");
+
+// Match a route
+if let Some((pattern, module_name)) = app.match_route("/about") {
+    println!("Matched {pattern} -> {module_name}");
+}
+```
+
+## Component Discovery
+
+The `ComponentRegistry` auto-discovers `.hypen` component files from the filesystem. Component names are derived from filenames using PascalCase conversion:
+
+- `button.hypen` becomes `"Button"`
+- `user-card.hypen` becomes `"UserCard"`
+- `my_component.hypen` becomes `"MyComponent"`
+
+Folder-based components are also supported (`Feed/component.hypen` or `Feed/index.hypen` becomes `"Feed"`).
+
+```rust
+use hypen_server::discovery::ComponentRegistry;
+
+let mut registry = ComponentRegistry::new();
+
+// Register inline
+registry.register("Button", r#"Button { Text("Click") }"#, None);
+
+// Load all .hypen files from a directory
+let loaded = registry.load_dir("./components").unwrap();
+println!("Loaded: {:?}", loaded);
+
+// Load a single file
+registry.load_file("./components/header.hypen").unwrap();
+
+// Query
+if registry.has("Button") {
+    let entry = registry.get("Button").unwrap();
+    println!("{}: {}", entry.name, entry.source);
+}
+```
+
+When using `HypenApp::builder()`, pass the directory directly:
+
+```rust
+let app = HypenApp::builder()
+    .components_dir("./components")
+    .build();
+
+assert!(app.components().has("MyWidget"));
+```
+
+## Remote Server
+
+The `remote` module provides `RemoteSession` for server-driven rendering over WebSocket. It is framework-agnostic -- plug it into Axum, Actix, Warp, or any async server.
+
+### Protocol
+
+```text
+Client                          Server
+  |-- connect ----------------->|
+  |-- hello {sessionId?} ------>|
+  |<-- sessionAck --------------|
+  |<-- initialTree {patches} ---|
+  |                              |
+  |-- dispatchAction ---------->|  (user interaction)
+  |<-- patch {patches} ---------|  (engine re-renders)
+  |<-- stateUpdate {state} -----|  (optional)
+  |                              |
+  |-- close ------------------->|
+```
+
+### Setup with Axum
+
+```rust
+use hypen_server::prelude::*;
+use hypen_server::remote::{RemoteSession, SessionConfig};
+
+fn create_session() -> RemoteSession {
+    let config = SessionConfig {
+        module_name: "Counter".into(),
+        ui_source: r#"
+            Column {
+                Text("Count: @{state.count}")
+                Button("@actions.increment") { Text("+") }
+            }
+        "#.into(),
+        initial_state: serde_json::json!({"count": 0}),
+        action_names: vec!["increment".into()],
+        ..Default::default()
+    };
+
+    let session = RemoteSession::new(config);
+    session.set_action_handler(|action, payload, state| {
+        let mut s = state.clone();
+        match action {
+            "increment" => {
+                if let Some(count) = s["count"].as_i64() {
+                    s["count"] = serde_json::json!(count + 1);
+                }
+            }
+            _ => {}
+        }
+        s
+    });
+    session
+}
+
+// In your WebSocket handler:
+async fn ws_handler(ws: WebSocket, session: RemoteSession) {
+    let (mut sender, mut receiver) = ws.split();
+
+    // Send initial messages on connect
+    let hello_response = session.handle_hello(None);
+    for msg in hello_response {
+        sender.send(Message::Text(msg)).await.unwrap();
+    }
+
+    // Message loop
+    while let Some(Ok(msg)) = receiver.next().await {
+        let responses = session.handle_message(msg.to_text().unwrap());
+        for resp in responses {
+            sender.send(Message::Text(resp)).await.unwrap();
+        }
+    }
+}
+```
+
+### SessionConfig Options
+
+| Field | Type | Description |
+|---|---|---|
+| `module_name` | `String` | Module name (e.g., `"App"`) |
+| `ui_source` | `String` | Hypen DSL source for the root UI |
+| `components` | `ComponentRegistry` | Discovered components for template imports |
+| `initial_state` | `serde_json::Value` | Initial state as JSON |
+| `action_names` | `Vec<String>` | Registered action names |
+| `resources` | `IndexMap<String, String>` | SVG resources (name to raw SVG string) |
+| `modules` | `Vec<(String, Value)>` | Additional nested modules to register |
+
+## Cross-Module Communication
+
+The `GlobalContext` is shared across all module instances in an application. It provides a module state registry and a global event emitter.
+
+### Sharing State
+
+```rust
+use hypen_server::context::GlobalContext;
+use serde_json::json;
+
+let ctx = GlobalContext::new();
+
+// Register a module's state
+ctx.register_module_state("counter", json!({"count": 0}));
+ctx.register_module_state("user", json!({"name": "Alice"}));
+
+// Read another module's state
+let counter = ctx.get_module_state("counter").unwrap();
+assert_eq!(counter["count"], 0);
+
+// Merged view of all modules
+let global = ctx.global_state();
+assert_eq!(global["user"]["name"], "Alice");
+```
+
+### Events
+
+The `EventEmitter` provides pub/sub messaging between modules:
+
+```rust
+use hypen_server::events::EventEmitter;
+use serde_json::json;
+use std::sync::{Arc, Mutex};
+
+let emitter = EventEmitter::new();
+
+let received = Arc::new(Mutex::new(Vec::new()));
+let received_clone = received.clone();
+
+// Subscribe
+let sub_id = emitter.on("user:login", move |payload| {
+    received_clone.lock().unwrap().push(payload.clone());
+});
+
+// Emit
+emitter.emit("user:login", &json!({"name": "Alice"}));
+
+// One-shot listener
+emitter.once("init", |payload| {
+    println!("Initialized: {payload}");
+});
+
+// Unsubscribe
+emitter.off(sub_id);
+```
+
+Built-in framework events are available in `events::framework`:
+
+- `module:created` -- a module was mounted
+- `module:destroyed` -- a module was unmounted
+- `route:changed` -- navigation occurred
+- `state:updated` -- module state changed
+- `action:dispatched` -- an action was dispatched
+- `error` -- an error occurred
+
+### Nested Module Instances
+
+Use `instantiate_nested` to register a child module in the global context automatically:
+
+```rust
+let app = HypenApp::default();
+
+let def = Arc::new(
+    HypenApp::module::<FeedState>("Feed")
+        .state(FeedState::default())
+        .build(),
+);
+
+let instance = app.instantiate_nested(def).unwrap();
+assert!(app.context().has_module("feed"));
+```
+
+## Requirements
+
+- Rust 1.70+ (2021 edition)
+- `serde` and `serde_json` for state serialization
+- `tokio` (optional, for async handlers via the `async` feature)
+
+## See Also
+
+- [TypeScript SDK](/docs/servers/typescript) -- Server-side module and state API
+- [Remote App Tutorial](/docs/getting-started/remote-app) -- Build a cross-platform remote app
+- [Web Adapter](/docs/adapters/web) -- Browser DOM and Canvas adapter
+- [iOS Adapter](/docs/adapters/ios) -- iOS/SwiftUI adapter
+- [Android Adapter](/docs/adapters/android) -- Android/Jetpack Compose adapter
+- [Components Guide](/docs/guide/components) -- All built-in components

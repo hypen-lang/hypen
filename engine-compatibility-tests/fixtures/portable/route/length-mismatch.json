@@ -1,0 +1,9 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "route-length-mismatch",
+  "description": "A pattern without a trailing wildcard must not match a path with extra segments.",
+  "function": "match_path",
+  "priority": "P0",
+  "input": { "pattern": "/users/:id", "path": "/users/42/extra" },
+  "expected": { "matched": false, "params": {} }
+}

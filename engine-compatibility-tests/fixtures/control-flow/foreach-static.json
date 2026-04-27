@@ -1,0 +1,38 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "foreach-static-list",
+  "description": "ForEach renders each item in a static list",
+  "category": "control-flow",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "ForEach control flow syntax not yet supported in current parser",
+    "sdks": ["typescript", "golang"]
+  },
+
+  "input": {
+    "source": "Column { ForEach(items: \"@{state.fruits}\") { Text(\"@{item}\") } }",
+    "initialState": {
+      "fruits": ["Apple", "Banana", "Cherry"]
+    },
+    "module": {
+      "name": "ForEachModule",
+      "actions": [],
+      "stateKeys": ["fruits"]
+    }
+  },
+
+  "expected": {
+    "patchCount": 8,
+    "patches": [
+      { "type": "create", "elementType": "Column" },
+      { "type": "create", "elementType": "Text", "props": { "0": "Apple" } },
+      { "type": "create", "elementType": "Text", "props": { "0": "Banana" } },
+      { "type": "create", "elementType": "Text", "props": { "0": "Cherry" } },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

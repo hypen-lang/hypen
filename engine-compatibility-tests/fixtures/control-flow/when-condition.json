@@ -1,0 +1,43 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "when-conditional-rendering",
+  "description": "When conditionally renders content based on state",
+  "category": "control-flow",
+  "priority": "P1",
+
+  "skip": {
+    "reason": "When control flow syntax not yet supported in current parser",
+    "sdks": ["typescript", "golang"]
+  },
+
+  "input": {
+    "source": "Column { When(\"@{state.isLoggedIn}\") { Text(\"Welcome back!\") } }",
+    "initialState": {
+      "isLoggedIn": false
+    },
+    "module": {
+      "name": "WhenModule",
+      "actions": [],
+      "stateKeys": ["isLoggedIn"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render shows nothing (logged out)",
+      "action": "initialRender",
+      "expectedPatchCount": 2
+    },
+    {
+      "description": "Setting isLoggedIn to true should show welcome message",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["isLoggedIn"],
+        "newValues": {
+          "isLoggedIn": true
+        }
+      },
+      "expectedPatchCount": 2
+    }
+  ]
+}

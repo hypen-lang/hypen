@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hypen.space/schemas/test-case.schema.json",
+  "title": "CompatibilityTestCase",
+  "description": "A test case for the Hypen engine compatibility test suite",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique identifier for the test case (kebab-case)"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what this test verifies"
+    },
+    "category": {
+      "type": "string",
+      "enum": ["rendering", "state", "reconciliation", "actions", "control-flow", "lifecycle"],
+      "description": "Test category for organization"
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["P0", "P1", "P2"],
+      "default": "P1",
+      "description": "Test priority (P0 = critical, P1 = important, P2 = nice-to-have)"
+    },
+    "input": {
+      "type": "object",
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "Hypen DSL source code to render"
+        },
+        "initialState": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Initial state for the module"
+        },
+        "module": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string",
+              "description": "Module name"
+            },
+            "actions": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "List of action names this module handles"
+            },
+            "stateKeys": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "List of top-level state keys"
+            }
+          },
+          "required": ["name"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["source"],
+      "additionalProperties": false
+    },
+    "expected": {
+      "type": "object",
+      "properties": {
+        "patches": {
+          "type": "array",
+          "items": { "$ref": "patch.schema.json" },
+          "description": "Expected patches from initial render"
+        },
+        "patchCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Expected number of patches (alternative to exact match)"
+        }
+      },
+      "additionalProperties": false
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "description": {
+            "type": "string",
+            "description": "Description of this step"
+          },
+          "action": {
+            "type": "string",
+            "enum": ["initialRender", "updateState", "dispatchAction"],
+            "description": "Type of action to perform"
+          },
+          "stateChange": {
+            "$ref": "state-change.schema.json",
+            "description": "State change to apply (for updateState action)"
+          },
+          "dispatchAction": {
+            "$ref": "action.schema.json",
+            "description": "Action to dispatch (for dispatchAction action)"
+          },
+          "expectedPatches": {
+            "type": "array",
+            "items": { "$ref": "patch.schema.json" },
+            "description": "Expected patches after this step"
+          },
+          "expectedPatchCount": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Expected number of patches (alternative to exact match)"
+          },
+          "forbiddenPatches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": {
+                  "type": "string",
+                  "enum": ["create", "setProp", "setText", "insert", "move", "remove", "attachEvent", "detachEvent"]
+                }
+              },
+              "additionalProperties": true
+            },
+            "description": "Patch types that must NOT appear"
+          },
+          "expectedState": {
+            "type": "object",
+            "additionalProperties": true,
+            "description": "Expected state after this step"
+          }
+        },
+        "required": ["action"],
+        "additionalProperties": false
+      },
+      "description": "Multi-step test sequence"
+    },
+    "skip": {
+      "type": "object",
+      "properties": {
+        "reason": { "type": "string" },
+        "sdks": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "SDKs to skip this test for (e.g., ['golang'] if not yet implemented)"
+        }
+      },
+      "additionalProperties": false,
+      "description": "Skip configuration for this test"
+    }
+  },
+  "required": ["name", "description", "category", "input"],
+  "additionalProperties": false
+}

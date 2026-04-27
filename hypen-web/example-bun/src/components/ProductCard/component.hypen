@@ -1,0 +1,54 @@
+Column {
+  Column {
+    Text("📦")
+      .fontSize(48)
+      .marginBottom(16)
+  }
+  .horizontalAlignment("center")
+  .verticalAlignment("center")
+  .height(200)
+  .backgroundColor("#f7fafc")
+  .borderRadius("8px 8px 0 0")
+
+  Column {
+    Text("@{state.name}")
+      .fontSize(18)
+      .fontWeight("600")
+      .color("#2d3748")
+      .marginBottom(8)
+
+    Text("@{state.description}")
+      .fontSize(14)
+      .color("#718096")
+      .marginBottom(16)
+      .lineHeight(1.5)
+
+    Row {
+      Text("$@{state.price}")
+        .fontSize(24)
+        .fontWeight("bold")
+        .color("#667eea")
+
+      Button {
+        Text("Add to Cart")
+          .fontSize(14)
+          .fontWeight("600")
+          .color("white")
+      }
+        .onClick("@actions.addToCart")
+        .padding(10)
+        .backgroundColor("#667eea")
+        .borderRadius(6)
+        .border("none")
+        .cursor("pointer")
+    }
+    .horizontalAlignment("space-between")
+    .verticalAlignment("center")
+  }
+  .padding(20)
+}
+.backgroundColor("white")
+.borderRadius(12)
+.boxShadow("0 4px 12px rgba(0, 0, 0, 0.1)")
+.cursor("pointer")
+.transition("transform 0.2s, box-shadow 0.2s")

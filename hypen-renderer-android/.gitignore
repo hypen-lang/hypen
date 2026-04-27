@@ -1,0 +1,35 @@
+# Gradle
+.gradle/
+**/build/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Local properties (may contain credentials)
+local.properties
+gradle-local.properties
+
+# Kotlin/Java
+*.class
+*.jar
+*.war
+*.ear
+!gradle/wrapper/gradle-wrapper.jar
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Native build
+.externalNativeBuild
+.cxx
+/captures
+
+# Environment
+.env
+.env.*
+!.env.example
+.npmrc

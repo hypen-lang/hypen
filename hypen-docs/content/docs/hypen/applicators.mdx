@@ -1,0 +1,109 @@
+---
+title: Applicators Reference
+description: Complete reference for Hypen applicators
+---
+
+# Applicators Reference
+
+Complete reference for all applicators in Hypen.
+
+## Spacing
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| padding | Internal spacing | `.padding(16)` |
+| padding(top, right, bottom, left) | Per-side padding | `.padding(top: 16, left: 8)` |
+| padding(horizontal, vertical) | Axis padding | `.padding(horizontal: 16, vertical: 8)` |
+| margin | External spacing | `.margin(8)` |
+| gap | Child spacing | `.gap(12)` |
+| rowGap | Row gap in grid | `.rowGap(16)` |
+| columnGap | Column gap in grid | `.columnGap(8)` |
+
+## Size
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| width | Fixed width | `.width(200)` |
+| height | Fixed height | `.height(100)` |
+| size | Both dimensions | `.size(48)` |
+| minWidth | Minimum width | `.minWidth(100)` |
+| maxWidth | Maximum width | `.maxWidth(500)` |
+| minHeight | Minimum height | `.minHeight(50)` |
+| maxHeight | Maximum height | `.maxHeight(300)` |
+| fillMaxWidth | Fill width | `.fillMaxWidth(true)` |
+| fillMaxHeight | Fill height | `.fillMaxHeight(true)` |
+| fillMaxSize | Fill both | `.fillMaxSize(true)` |
+| aspectRatio | Aspect ratio | `.aspectRatio(16/9)` |
+
+## Colors
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| color | Text color | `.color("#333")` |
+| backgroundColor | Background | `.backgroundColor("#fff")` |
+| opacity | Transparency | `.opacity(0.5)` |
+
+## Typography
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| fontSize | Text size | `.fontSize(16)` |
+| fontWeight | Weight/boldness | `.fontWeight("bold")` |
+| fontFamily | Font family | `.fontFamily("Inter")` |
+| fontStyle | Style (italic) | `.fontStyle("italic")` |
+| textAlign | Alignment | `.textAlign("center")` |
+| lineHeight | Line height | `.lineHeight(1.5)` |
+| textDecoration | Decoration | `.textDecoration("underline")` |
+
+## Borders
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| borderRadius | Corner radius | `.borderRadius(8)` |
+| borderWidth | Border thickness | `.borderWidth(1)` |
+| borderColor | Border color | `.borderColor("#ccc")` |
+
+## Effects
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| shadow | Shadow effect | `.shadow(blur: 8)` |
+| elevation | Android elevation | `.elevation(4)` |
+
+## Layout
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| horizontalAlignment | Horizontal align | `.horizontalAlignment("center")` |
+| verticalAlignment | Vertical align | `.verticalAlignment("center")` |
+| weight | Flex weight | `.weight(1)` |
+| flex | Flex shorthand | `.flex(1)` |
+| flexGrow | Grow factor | `.flexGrow(1)` |
+| flexShrink | Shrink factor | `.flexShrink(0)` |
+
+## Grid
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| gridColumns | Number of columns | `.gridColumns(3)` |
+| gridTemplateColumns | Column template | `.gridTemplateColumns("1fr 2fr 1fr")` |
+
+## Data Binding
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| bind | Two-way state binding | `.bind(@state.name)` |
+
+The `.bind()` applicator provides two-way data binding for form elements. It maps to the correct property per element type:
+
+- **Input / Textarea**: Binds `value` (String)
+- **Checkbox**: Binds `checked` (Boolean)
+- **Switch**: Binds `on` (Boolean)
+- **Select**: Binds `value` (String)
+
+```hypen
+Input(placeholder: "Name").bind(@state.name)
+Checkbox {}.bind(@state.agreed)
+Switch {}.bind(@state.darkMode)
+Select {}.bind(@state.country)
+```

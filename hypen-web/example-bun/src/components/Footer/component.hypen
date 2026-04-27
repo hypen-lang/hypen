@@ -1,0 +1,26 @@
+Column {
+  Row {
+    Text("HYPEN")
+      .fontSize(18)
+      .fontWeight("900")
+      .color("#00ff88")
+      .letterSpacing("2px")
+      .marginBottom(8)
+  }
+
+  Text("Built with Hypen + Bun + WebAssembly")
+    .fontSize(14)
+    .color("#888888")
+    .marginBottom(8)
+
+  Row {
+    Text("© 2025 Hypen Shop")
+      .fontSize(12)
+      .color("#666666")
+  }
+}
+.horizontalAlignment("center")
+.padding(32)
+.backgroundColor("#0a0a0a")
+.borderTop("1px solid #2a2a2a")
+.marginTop("auto")

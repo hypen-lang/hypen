@@ -1,0 +1,588 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		FDB578312F2E3811005254BF /* HypenSwift in Frameworks */ = {isa = PBXBuildFile; productRef = FDB578302F2E3811005254BF /* HypenSwift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		FDB578112F2E36FE005254BF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FDB577F82F2E36FC005254BF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FDB577FF2F2E36FD005254BF;
+			remoteInfo = HypenGallery;
+		};
+		FDB5781B2F2E36FE005254BF /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = FDB577F82F2E36FC005254BF /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = FDB577FF2F2E36FD005254BF;
+			remoteInfo = HypenGallery;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		FDB578002F2E36FD005254BF /* HypenGallery.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = HypenGallery.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		FDB578102F2E36FE005254BF /* HypenGalleryTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HypenGalleryTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		FDB5781A2F2E36FE005254BF /* HypenGalleryUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = HypenGalleryUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFileSystemSynchronizedRootGroup section */
+		FDB578022F2E36FD005254BF /* HypenGallery */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = HypenGallery;
+			sourceTree = "<group>";
+		};
+		FDB578132F2E36FE005254BF /* HypenGalleryTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = HypenGalleryTests;
+			sourceTree = "<group>";
+		};
+		FDB5781D2F2E36FE005254BF /* HypenGalleryUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = HypenGalleryUITests;
+			sourceTree = "<group>";
+		};
+/* End PBXFileSystemSynchronizedRootGroup section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		FDB577FD2F2E36FD005254BF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				FDB578312F2E3811005254BF /* HypenSwift in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FDB5780D2F2E36FE005254BF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FDB578172F2E36FE005254BF /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		FDB577F72F2E36FC005254BF = {
+			isa = PBXGroup;
+			children = (
+				FDB578022F2E36FD005254BF /* HypenGallery */,
+				FDB578132F2E36FE005254BF /* HypenGalleryTests */,
+				FDB5781D2F2E36FE005254BF /* HypenGalleryUITests */,
+				FDB578012F2E36FD005254BF /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		FDB578012F2E36FD005254BF /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				FDB578002F2E36FD005254BF /* HypenGallery.app */,
+				FDB578102F2E36FE005254BF /* HypenGalleryTests.xctest */,
+				FDB5781A2F2E36FE005254BF /* HypenGalleryUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		FDB577FF2F2E36FD005254BF /* HypenGallery */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FDB578242F2E36FE005254BF /* Build configuration list for PBXNativeTarget "HypenGallery" */;
+			buildPhases = (
+				FDB577FC2F2E36FD005254BF /* Sources */,
+				FDB577FD2F2E36FD005254BF /* Frameworks */,
+				FDB577FE2F2E36FD005254BF /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				FDB578022F2E36FD005254BF /* HypenGallery */,
+			);
+			name = HypenGallery;
+			packageProductDependencies = (
+				FDB578302F2E3811005254BF /* HypenSwift */,
+			);
+			productName = HypenGallery;
+			productReference = FDB578002F2E36FD005254BF /* HypenGallery.app */;
+			productType = "com.apple.product-type.application";
+		};
+		FDB5780F2F2E36FE005254BF /* HypenGalleryTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FDB578272F2E36FE005254BF /* Build configuration list for PBXNativeTarget "HypenGalleryTests" */;
+			buildPhases = (
+				FDB5780C2F2E36FE005254BF /* Sources */,
+				FDB5780D2F2E36FE005254BF /* Frameworks */,
+				FDB5780E2F2E36FE005254BF /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FDB578122F2E36FE005254BF /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				FDB578132F2E36FE005254BF /* HypenGalleryTests */,
+			);
+			name = HypenGalleryTests;
+			packageProductDependencies = (
+			);
+			productName = HypenGalleryTests;
+			productReference = FDB578102F2E36FE005254BF /* HypenGalleryTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+		FDB578192F2E36FE005254BF /* HypenGalleryUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = FDB5782A2F2E36FE005254BF /* Build configuration list for PBXNativeTarget "HypenGalleryUITests" */;
+			buildPhases = (
+				FDB578162F2E36FE005254BF /* Sources */,
+				FDB578172F2E36FE005254BF /* Frameworks */,
+				FDB578182F2E36FE005254BF /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				FDB5781C2F2E36FE005254BF /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				FDB5781D2F2E36FE005254BF /* HypenGalleryUITests */,
+			);
+			name = HypenGalleryUITests;
+			packageProductDependencies = (
+			);
+			productName = HypenGalleryUITests;
+			productReference = FDB5781A2F2E36FE005254BF /* HypenGalleryUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		FDB577F82F2E36FC005254BF /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 1620;
+				LastUpgradeCheck = 1620;
+				TargetAttributes = {
+					FDB577FF2F2E36FD005254BF = {
+						CreatedOnToolsVersion = 16.2;
+					};
+					FDB5780F2F2E36FE005254BF = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = FDB577FF2F2E36FD005254BF;
+					};
+					FDB578192F2E36FE005254BF = {
+						CreatedOnToolsVersion = 16.2;
+						TestTargetID = FDB577FF2F2E36FD005254BF;
+					};
+				};
+			};
+			buildConfigurationList = FDB577FB2F2E36FC005254BF /* Build configuration list for PBXProject "HypenGallery" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = FDB577F72F2E36FC005254BF;
+			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				FDB5782F2F2E3811005254BF /* XCLocalSwiftPackageReference "../../../hypen-renderer-swift" */,
+			);
+			preferredProjectObjectVersion = 77;
+			productRefGroup = FDB578012F2E36FD005254BF /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				FDB577FF2F2E36FD005254BF /* HypenGallery */,
+				FDB5780F2F2E36FE005254BF /* HypenGalleryTests */,
+				FDB578192F2E36FE005254BF /* HypenGalleryUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		FDB577FE2F2E36FD005254BF /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FDB5780E2F2E36FE005254BF /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FDB578182F2E36FE005254BF /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		FDB577FC2F2E36FD005254BF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FDB5780C2F2E36FE005254BF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		FDB578162F2E36FE005254BF /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		FDB578122F2E36FE005254BF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = FDB577FF2F2E36FD005254BF /* HypenGallery */;
+			targetProxy = FDB578112F2E36FE005254BF /* PBXContainerItemProxy */;
+		};
+		FDB5781C2F2E36FE005254BF /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = FDB577FF2F2E36FD005254BF /* HypenGallery */;
+			targetProxy = FDB5781B2F2E36FE005254BF /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		FDB578222F2E36FE005254BF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"DEBUG=1",
+					"$(inherited)",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG $(inherited)";
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		FDB578232F2E36FE005254BF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				COPY_PHASE_STRIP = NO;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_USER_SCRIPT_SANDBOXING = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu17;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				LOCALIZATION_PREFERS_STRING_CATALOGS = YES;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		FDB578252F2E36FE005254BF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"HypenGallery/Preview Content\"";
+				DEVELOPMENT_TEAM = 972YH7NUU7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = space.hypen.gallery.HypenGallery;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		FDB578262F2E36FE005254BF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_ASSET_PATHS = "\"HypenGallery/Preview Content\"";
+				DEVELOPMENT_TEAM = 972YH7NUU7;
+				ENABLE_PREVIEWS = YES;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Info.plist;
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = space.hypen.gallery.HypenGallery;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		FDB578282F2E36FE005254BF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 972YH7NUU7;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = space.hypen.gallery.HypenGalleryTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/HypenGallery.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/HypenGallery";
+			};
+			name = Debug;
+		};
+		FDB578292F2E36FE005254BF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 972YH7NUU7;
+				GENERATE_INFOPLIST_FILE = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = space.hypen.gallery.HypenGalleryTests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/HypenGallery.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/HypenGallery";
+			};
+			name = Release;
+		};
+		FDB5782B2F2E36FE005254BF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 972YH7NUU7;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = space.hypen.gallery.HypenGalleryUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = HypenGallery;
+			};
+			name = Debug;
+		};
+		FDB5782C2F2E36FE005254BF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 972YH7NUU7;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = space.hypen.gallery.HypenGalleryUITests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = HypenGallery;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		FDB577FB2F2E36FC005254BF /* Build configuration list for PBXProject "HypenGallery" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FDB578222F2E36FE005254BF /* Debug */,
+				FDB578232F2E36FE005254BF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FDB578242F2E36FE005254BF /* Build configuration list for PBXNativeTarget "HypenGallery" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FDB578252F2E36FE005254BF /* Debug */,
+				FDB578262F2E36FE005254BF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FDB578272F2E36FE005254BF /* Build configuration list for PBXNativeTarget "HypenGalleryTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FDB578282F2E36FE005254BF /* Debug */,
+				FDB578292F2E36FE005254BF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		FDB5782A2F2E36FE005254BF /* Build configuration list for PBXNativeTarget "HypenGalleryUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				FDB5782B2F2E36FE005254BF /* Debug */,
+				FDB5782C2F2E36FE005254BF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		FDB5782F2F2E3811005254BF /* XCLocalSwiftPackageReference "../../../hypen-renderer-swift" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = "../../../hypen-renderer-swift";
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		FDB578302F2E3811005254BF /* HypenSwift */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = HypenSwift;
+		};
+/* End XCSwiftPackageProductDependency section */
+	};
+	rootObject = FDB577F82F2E36FC005254BF /* Project object */;
+}

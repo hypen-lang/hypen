@@ -1,0 +1,24 @@
+// Simple Hypen example
+component Column {
+  Text("Hello, Hypen!")
+    .fontSize(24)
+    .color("blue")
+    .padding(16)
+
+  Text("This is a simple example")
+    .fontSize(16)
+    .color("gray")
+
+  Button {
+    Text("Click Me")
+      .color("white")
+  }
+    .onClick(@actions.handleClick)
+    .backgroundColor("#667eea")
+    .borderRadius(8)
+    .padding(12)
+}
+  .horizontalAlignment("center")
+  .verticalAlignment("center")
+  .width("100%")
+  .height("100%")

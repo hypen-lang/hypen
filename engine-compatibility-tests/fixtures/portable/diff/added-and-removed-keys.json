@@ -1,0 +1,15 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-added-and-removed-keys",
+  "description": "Keys present in only one side should appear with the appropriate value (new value for additions, null for removals).",
+  "function": "diff_paths",
+  "priority": "P0",
+  "input": {
+    "old": { "a": 1, "b": 2 },
+    "new": { "a": 1, "c": 3 }
+  },
+  "expected": [
+    { "path": "b", "value": null },
+    { "path": "c", "value": 3 }
+  ]
+}

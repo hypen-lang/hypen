@@ -1,0 +1,5 @@
+{
+  "components": "./components",
+  "entry": "Counter",
+  "port": 3001
+}

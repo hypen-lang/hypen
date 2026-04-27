@@ -1,0 +1,69 @@
+module App {
+    Column {
+    Router {
+        Route(path: "/") {
+            Column {
+                HomePage()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-white")
+        }
+
+        Route(path: "/search") {
+            Column {
+                Search()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-white")
+        }
+
+        Route(path: "/notifications") {
+            Column {
+                Notifications()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-white")
+        }
+
+        Route(path: "/messages") {
+            Column {
+                Messages()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-white")
+        }
+
+        Route(path: "/profile") {
+            Column {
+                Profile()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-white")
+        }
+
+        Route(path: "/user-profile/:id") {
+            Column {
+                UserProfile()
+                    .tw("flex-1")
+                BottomNav()
+            }
+            .tw("flex-1 bg-white")
+        }
+
+        Route(path: "/comments/:postId") {
+            Comments()
+        }
+
+        Route(path: "/story/:id") {
+            Story()
+        }
+    }
+    .tw("flex-1 w-full h-full")
+    }
+    .tw("flex-1 w-full h-full min-h-screen bg-white")
+}

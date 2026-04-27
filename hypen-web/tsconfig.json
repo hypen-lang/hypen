@@ -1,0 +1,58 @@
+{
+  "compilerOptions": {
+    // Environment setup & latest features
+    "lib": ["ESNext", "DOM"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleDetection": "force",
+    "jsx": "react-jsx",
+    "allowJs": true,
+
+    // Bundler mode
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+
+    // Path aliases — redirect workspace packages to their src/ trees.
+    //
+    // Without these, tsc resolves `@hypen-space/core/foo` via the
+    // `exports` field in packages/core/package.json, which points to
+    // `./dist/*.d.ts`. The dist directory is a gitignored build
+    // artifact that drifts from src the moment anyone edits a core
+    // file, producing "Types have separate declarations" cascades all
+    // over the repo (same type seen from src/ and dist/ isn't
+    // nominally equal). Every per-package tsconfig already has an
+    // equivalent paths map — this mirrors it at the root so
+    // `bun run typecheck` resolves from src too.
+    "baseUrl": ".",
+    "paths": {
+      "@hypen-space/core": ["./packages/core/src/index.ts"],
+      // Non-standard export: core/package.json maps "./components" to
+      // src/components/builtin.ts (there's no index.ts in components/),
+      // so the wildcard substitution below would resolve to a directory
+      // with no entry point and fall back to the dist/ exports. Keep
+      // this explicit override before the wildcard.
+      "@hypen-space/core/components": ["./packages/core/src/components/builtin.ts"],
+      "@hypen-space/core/*": ["./packages/core/src/*"],
+      "@hypen-space/web": ["./packages/web/src/index.ts"],
+      "@hypen-space/web/*": ["./packages/web/src/*"],
+      "@hypen-space/server": ["./packages/server/src/index.ts"],
+      "@hypen-space/server/*": ["./packages/server/src/*"],
+      "@hypen-space/web-engine": ["./packages/web-engine/src/index.ts"],
+      "@hypen-space/web-engine/*": ["./packages/web-engine/src/*"]
+    },
+
+    // Best practices
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+
+    // Some stricter flags (disabled by default)
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noPropertyAccessFromIndexSignature": false
+  }
+}

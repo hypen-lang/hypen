@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hypen.space/schemas/action.schema.json",
+  "title": "Action",
+  "description": "An action dispatched to the engine",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Action name (e.g., 'increment', 'signIn')"
+    },
+    "payload": {
+      "description": "Optional payload data for the action"
+    },
+    "sender": {
+      "type": ["string", "null"],
+      "description": "Optional identifier for the action sender"
+    }
+  },
+  "required": ["name"],
+  "additionalProperties": false
+}

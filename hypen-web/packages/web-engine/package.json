@@ -1,0 +1,73 @@
+{
+  "name": "@hypen-space/web-engine",
+  "version": "0.4.956",
+  "description": "Hypen browser engine - WASM engine + orchestrator for browser SPAs",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "browser": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/index.js",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./engine": {
+      "types": "./dist/engine.d.ts",
+      "browser": "./dist/engine.js",
+      "bun": "./src/engine.ts",
+      "import": "./dist/engine.js",
+      "default": "./dist/engine.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "wasm-browser"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "build:types": "tsc --emitDeclarationOnly",
+    "prepublishOnly": "test -d wasm-browser || (echo 'wasm-browser/ missing — run build-wasm.sh first' && exit 1) && bun run build",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hypen-space/core": "^0.4.956",
+    "@hypen-space/web": "^0.4.956"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "hypen",
+    "ui",
+    "browser",
+    "wasm",
+    "engine",
+    "spa"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "sideEffects": false,
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-web/packages/web-engine"
+  }
+}

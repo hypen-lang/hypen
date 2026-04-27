@@ -1,0 +1,872 @@
+---
+title: TypeScript SDK
+description: Complete guide to building Hypen servers with TypeScript, Bun, and Node.js
+---
+
+# TypeScript SDK
+
+The TypeScript SDK (`@hypen-space/core` + `@hypen-space/server`) is the primary way to build Hypen applications. `@hypen-space/core` provides the module system and reactive state management. `@hypen-space/server` provides the WASM engine, component discovery, and the remote server for streaming UI to any client.
+
+## Installation
+
+```bash
+# Using Bun (recommended)
+bun add @hypen-space/core @hypen-space/server
+
+# Using npm
+npm install @hypen-space/core @hypen-space/server
+```
+
+For web client rendering, also install the web adapter:
+
+```bash
+bun add @hypen-space/web
+```
+
+## Quick Start
+
+Create a server that streams a counter UI over WebSocket:
+
+```typescript
+import { HypenApp } from "@hypen-space/core";
+import { RemoteServer } from "@hypen-space/server";
+
+// 1. Create an app registry and define modules on it.
+const myApp = new HypenApp();
+
+myApp.module("Counter")
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .onAction("decrement", ({ state }) => { state.count--; })
+  .ui(`
+    Column {
+      Text("Count: @{state.count}")
+        .fontSize(32)
+        .fontWeight("bold")
+
+      Row {
+        Button { Text("-") }
+          .onClick(@actions.decrement)
+          .padding(16)
+
+        Button { Text("+") }
+          .onClick(@actions.increment)
+          .padding(16)
+      }
+      .gap(16)
+    }
+    .padding(32)
+  `)
+  .build();
+
+// 2. Serve the whole app — every registered module is streamed.
+new RemoteServer()
+  .app(myApp)
+  .onConnection((client) => console.log(`Connected: ${client.id}`))
+  .onDisconnection((client) => console.log(`Disconnected: ${client.id}`))
+  .listen(3000);
+
+console.log("Server running on ws://localhost:3000");
+```
+
+> **Single-module demo?** For a one-off counter you can skip `HypenApp` and chain `.module(name, def).ui(template)` directly on `RemoteServer`. Prefer the registry form once you have more than one module or want routing/nesting.
+
+Run it:
+
+```bash
+bun run server.ts
+```
+
+Any Hypen client (web, Android, iOS) can connect and render this UI. See the [Remote App Tutorial](/docs/getting-started/remote-app) for connecting clients.
+
+### serve() Helper
+
+For simpler cases, use the `serve()` function:
+
+```typescript
+import { app } from "@hypen-space/core";
+import { serve } from "@hypen-space/server";
+
+const counter = app
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => {
+    state.count++;
+  });
+
+await serve({
+  module: counter,
+  ui: `
+    Column {
+      Text("Count: @{state.count}")
+      Button { Text("+1") }
+        .onClick(@actions.increment)
+    }
+  `,
+  port: 3000,
+});
+```
+
+## App Builder API
+
+Modules are defined using the chainable `app` builder. Every method returns the builder, so calls can be chained:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+export default app
+  .defineState<MyState>(initialState)
+  .onCreated(handler)
+  .onAction("name", handler)
+  .onDestroyed(handler)
+  .onError(handler)
+  .build();
+```
+
+### defineState
+
+Sets the initial state with TypeScript generics for type safety:
+
+```typescript
+interface TodoState {
+  todos: Array<{ id: string; text: string; done: boolean }>;
+  newTodo: string;
+  filter: "all" | "active" | "completed";
+}
+
+app.defineState<TodoState>({
+  todos: [],
+  newTodo: "",
+  filter: "all",
+});
+```
+
+### onCreated
+
+Lifecycle hook called when the module is initialized. Receives the state and an optional global context:
+
+```typescript
+.onCreated(async (state, context) => {
+  // Fetch initial data
+  const response = await fetch("/api/todos");
+  state.todos = await response.json();
+
+  // Access router for navigation
+  if (context?.router) {
+    console.log("Current path:", context.router.getCurrentPath());
+  }
+})
+```
+
+### onAction
+
+Registers a handler for a named action. The handler receives a context object:
+
+```typescript
+.onAction<PayloadType>("actionName", async ({ action, state, context }) => {
+  // action.name     - the action name
+  // action.payload  - data from the UI (typed as PayloadType)
+  // action.sender   - the component that dispatched the action
+  // state           - the current state (mutable, auto-synced)
+  // context         - GlobalContext for cross-module access
+  // context.router  - HypenRouter for navigation
+})
+```
+
+Example with typed payload:
+
+```typescript
+.onAction<{ id: string }>("deleteTodo", ({ action, state }) => {
+  state.todos = state.todos.filter(t => t.id !== action.payload!.id);
+})
+```
+
+### onDestroyed
+
+Lifecycle hook called when the module is unmounted. Use it for cleanup:
+
+```typescript
+.onDestroyed((state, context) => {
+  clearInterval(state.pollTimer);
+})
+```
+
+### onError
+
+Catches errors from action handlers and lifecycle hooks. See [Error Handling](/docs/guide/error-handling) for details:
+
+```typescript
+.onError(({ error, actionName, lifecycle, state }) => {
+  if (actionName) {
+    console.error(`Action "${actionName}" failed:`, error.message);
+    state.error = error.message;
+    return { handled: true }; // suppress error
+  }
+  // return void for default behavior (log + emit)
+})
+```
+
+Return values:
+
+| Return | Effect |
+|--------|--------|
+| `void` | Default: log and emit global error event |
+| `{ handled: true }` | Suppress the error |
+| `{ rethrow: true }` | Re-throw to the caller |
+| `{ retry: true }` | Retry the operation (actions only) |
+
+### build
+
+Finalizes the module definition. Required when passing to `RemoteServer.module()`:
+
+```typescript
+const myModule = app
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .build();
+
+new RemoteServer()
+  .module("Counter", myModule)
+  .ui(ui)
+  .listen(3000);
+```
+
+## State Management
+
+State uses a Proxy-based system that tracks mutations automatically. Assign values directly and changes propagate to the UI:
+
+```typescript
+.onAction("updateProfile", ({ state, action }) => {
+  // Direct mutation - tracked automatically
+  state.user.name = action.payload!.name;
+  state.user.email = action.payload!.email;
+
+  // Array mutations work too
+  state.tags.push("updated");
+
+  // No sync callback needed - changes propagate automatically
+})
+```
+
+### Deep Nesting
+
+Nested objects are automatically wrapped in proxies:
+
+```typescript
+.onAction("setAddress", ({ state, action }) => {
+  // Deep nested paths tracked automatically
+  state.user.profile.address.city = "New York";
+  state.user.profile.address.zip = "10001";
+})
+```
+
+### Batch Updates
+
+When multiple state changes happen in the same synchronous block, they are coalesced into a single notification via microtask batching. For explicit batching:
+
+```typescript
+import { batchStateUpdates } from "@hypen-space/core";
+
+.onAction("bulkUpdate", ({ state }) => {
+  batchStateUpdates(state, () => {
+    state.items = newItems;
+    state.count = newItems.length;
+    state.lastUpdated = Date.now();
+  });
+  // Single notification with all changes
+})
+```
+
+### State Snapshots
+
+Get a deep clone of the current state:
+
+```typescript
+import { getStateSnapshot } from "@hypen-space/core";
+
+.onAction("save", ({ state }) => {
+  const snapshot = getStateSnapshot(state);
+  localStorage.setItem("backup", JSON.stringify(snapshot));
+})
+```
+
+## Component Patterns
+
+Hypen components pair a `.hypen` template with a TypeScript module. There are four patterns for organizing files:
+
+### Folder-Based (Recommended)
+
+```
+src/components/
+  Counter/
+    component.hypen    # UI template
+    component.ts       # Module logic
+```
+
+### Sibling Files
+
+```
+src/components/
+  Counter.hypen        # UI template
+  Counter.ts           # Module logic
+```
+
+### Index Pattern
+
+```
+src/components/
+  Counter/
+    index.hypen        # UI template
+    index.ts           # Module logic
+```
+
+### Single-File Component
+
+Embed the template directly in TypeScript using the `hypen` tagged template and `.ui()`:
+
+```typescript
+import { app, hypen, state } from "@hypen-space/core";
+
+export default app
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .ui(hypen`
+    Column {
+      Text("Count: @{state.count}")
+      Button { Text("+") }
+        .onClick(@actions.increment)
+    }
+  `);
+```
+
+The `hypen` tag preserves `@{state.*}` and `@{item.*}` expressions as literal bindings instead of interpolating them.
+
+## Component Discovery
+
+Automatically discover components from a directory:
+
+```typescript
+import { discoverComponents, loadDiscoveredComponents } from "@hypen-space/server";
+
+// Discover all components
+const components = await discoverComponents("./src/components", {
+  patterns: ["folder", "sibling", "single-file", "index"], // default: all
+  recursive: true,   // default: true
+});
+
+// Load them into a usable map
+const loaded = await loadDiscoveredComponents(components);
+// Map<string, { name, module, template }>
+```
+
+### ComponentLoader
+
+A singleton loader for registering and retrieving components:
+
+```typescript
+import { componentLoader } from "@hypen-space/server";
+
+// Register manually
+componentLoader.register("Counter", counterModule, counterTemplate);
+
+// Load from directory
+await componentLoader.loadFromComponentsDir("./src/components");
+
+// Query
+componentLoader.has("Counter");       // true
+componentLoader.getNames();           // ["Counter"]
+const def = componentLoader.get("Counter");
+// { name, module, template, path }
+```
+
+### File Watching
+
+Watch for component changes during development:
+
+```typescript
+import { watchComponents } from "@hypen-space/server";
+
+const watcher = watchComponents("./src/components", {
+  onChange: (components) => console.log("Components changed:", components.length),
+  onAdd: (component) => console.log("Added:", component.name),
+  onRemove: (name) => console.log("Removed:", name),
+  onUpdate: (component) => console.log("Updated:", component.name),
+});
+
+// Stop watching
+watcher.stop();
+```
+
+## RemoteServer API
+
+`RemoteServer` streams UI over WebSocket to any Hypen client. It uses a fluent builder pattern:
+
+```typescript
+import { RemoteServer } from "@hypen-space/server";
+
+const server = new RemoteServer()
+  .app(myApp)
+  .config({ port: 3000, hostname: "0.0.0.0" })
+  .session({ ttl: 3600, concurrent: "kick-old" })
+  .onConnection((client) => { /* ... */ })
+  .onDisconnection((client) => { /* ... */ });
+
+await server.listen(3000);
+```
+
+### Methods
+
+| Method | Description |
+|--------|-------------|
+| `.app(hypenApp)` | Serve every module registered on a `HypenApp` (preferred) |
+| `.module(name, module)` | Single-module shortcut — skip `HypenApp` for demos |
+| `.ui(dsl)` | Top-level UI template string (pairs with `.module()`) |
+| `.source(dir)` | Discover `.hypen` + module files from a directory |
+| `.config({ port, hostname })` | Server configuration |
+| `.session(config)` | Session management configuration |
+| `.onConnection(callback)` | Called when a client connects |
+| `.onDisconnection(callback)` | Called when a client disconnects |
+| `.listen(port?)` | Start the WebSocket server |
+| `.stop()` | Stop the server |
+| `.getClientCount()` | Get number of active connections |
+| `.getSessionStats()` | Get session statistics |
+| `.broadcast(message)` | Broadcast a message to all clients |
+| `.url` | Get the server WebSocket URL |
+
+### Component Directory Mode
+
+Instead of passing a UI string, point the server at a components directory:
+
+```typescript
+new RemoteServer()
+  .app(myApp)
+  .source("./src/components")  // Discovers and loads components
+  .listen(3000);
+```
+
+This uses the component discovery system to find templates and resolve imports automatically.
+
+### Configuration
+
+```typescript
+new RemoteServer()
+  .config({
+    port: 3000,          // default: 3000
+    hostname: "0.0.0.0", // default: "0.0.0.0"
+  })
+```
+
+## Session Management
+
+Sessions allow clients to reconnect and restore state after disconnections.
+
+### Session Configuration
+
+```typescript
+new RemoteServer()
+  .session({
+    ttl: 3600,                    // Session TTL in seconds (default: 3600)
+    concurrent: "kick-old",       // Concurrent connection policy
+    generateId: () => crypto.randomUUID(), // Custom ID generator
+  })
+```
+
+Concurrent connection policies:
+
+| Policy | Behavior |
+|--------|----------|
+| `"kick-old"` (default) | New connection replaces existing connection on same session |
+| `"reject-new"` | Rejects new connection if one already exists |
+| `"allow-multiple"` | Multiple connections share the same session |
+
+### Session Lifecycle Hooks
+
+Register session hooks on the module definition:
+
+```typescript
+const myModule = app
+  .defineState({ count: 0, draft: "" })
+
+  .onDisconnect(({ state, session }) => {
+    // Client disconnected, but session is still alive (within TTL)
+    console.log(`Session ${session.id} disconnected`);
+    // State is automatically preserved for reconnection
+  })
+
+  .onReconnect(({ session, restore }) => {
+    // Client reconnected with existing session ID
+    console.log(`Session ${session.id} reconnected`);
+    // Optionally restore custom state
+    restore(savedState);
+  })
+
+  .onExpire(({ session }) => {
+    // Session TTL expired — no reconnection happened
+    console.log(`Session ${session.id} expired`);
+    // Clean up any persisted data
+  })
+
+  .build();
+```
+
+### Session Object
+
+Available in session lifecycle hooks:
+
+```typescript
+interface Session {
+  id: string;              // Unique session ID
+  ttl: number;             // TTL in seconds
+  createdAt: Date;         // When the session was created
+  lastConnectedAt: Date;   // Last connection time
+  props?: Record<string, any>; // Client metadata
+}
+```
+
+### Connection Flow
+
+1. Client opens WebSocket
+2. Client sends a `hello` message with optional `sessionId` to resume
+3. Server creates or resumes the session
+4. Server sends the initial UI tree as patches
+5. Client renders the UI
+6. User interactions send `dispatchAction` messages
+7. Server processes actions, updates state, streams patches back
+
+## Authentication
+
+Add authentication before the WebSocket upgrade:
+
+```typescript
+Bun.serve({
+  port: 3000,
+  fetch(req, server) {
+    const url = new URL(req.url);
+
+    // Allow health checks
+    if (url.pathname === "/health") {
+      return new Response("OK");
+    }
+
+    // Validate auth
+    const token = req.headers.get("Authorization");
+    if (!validateToken(token)) {
+      return new Response("Unauthorized", { status: 401 });
+    }
+
+    // Upgrade to WebSocket
+    if (server.upgrade(req, { data: { userId: getUserId(token) } })) {
+      return;
+    }
+
+    return new Response("Not Found", { status: 404 });
+  },
+  websocket: {
+    // Wire up RemoteServer WebSocket handlers
+  },
+});
+```
+
+You can also use the client `props` sent in the `hello` message to pass metadata like auth tokens, platform info, or user preferences.
+
+## Routing
+
+The `HypenRouter` provides URL-based navigation:
+
+```typescript
+import { HypenRouter } from "@hypen-space/core";
+
+const router = new HypenRouter();
+
+// Navigation
+router.push("/users/123");
+router.replace("/login");
+router.back();
+router.forward();
+
+// Current route
+router.getCurrentPath();                    // "/users/123"
+router.getParams();                         // { id: "123" }
+router.getQuery();                          // { tab: "posts" }
+router.isActive("/users/:id");              // true
+
+// Pattern matching
+router.matchPath("/users/:id", "/users/42");
+// { params: { id: "42" }, query: {}, path: "/users/42" }
+
+// Listen for changes
+const unsubscribe = router.onNavigate((state) => {
+  console.log(`Navigated to ${state.currentPath}`);
+});
+```
+
+Use the router in action handlers via `context.router`:
+
+```typescript
+.onAction("login", async ({ state, context }) => {
+  const success = await authenticate(state.email, state.password);
+  if (success) {
+    context.router?.push("/dashboard");
+  }
+})
+```
+
+### Auto-wire + `@router.*`
+
+`RemoteServer` auto-discovers every `Router { Route ... }` block in
+the primary template (and any child component template) at session
+start and spins up a per-session `ManagedRouter`. You don't wire it
+yourself. DSL authors dispatch the reserved namespace:
+
+```hypen
+Button { Text("Search") }.onClick(@router.push, to: "/search")
+Button { Text("←") }.onClick(@router.back)
+```
+
+The session mirrors the current path into primary `state.location`
+automatically when the primary's state shape carries that field.
+
+Per-route modules load data in `onActivated` by reading route
+params off the router:
+
+```typescript
+app.module("UserProfile")
+  .defineState<{ user: User | null }>({ user: null })
+  .onActivated(async (state, ctx) => {
+    const m = ctx?.router?.matchPath("/users/:id", ctx.router.getCurrentPath());
+    const id = m?.params.id;
+    if (id) state.user = await fetchUser(id);
+  })
+  .build();
+```
+
+Nested `Router` blocks inside child components flatten into the same
+route table — see the [Routing Guide](/docs/guide/routing) for the
+full semantics (first-seen dedup, shared URL space). Opt out with
+`server.disableAutoRouter()` to wire routing manually in an
+`onSessionCreate` hook.
+
+## Global Context
+
+Cross-module communication uses the `HypenGlobalContext`:
+
+```typescript
+import { HypenGlobalContext } from "@hypen-space/core";
+
+const globalContext = new HypenGlobalContext();
+
+// Access other modules
+const auth = globalContext.getModule<AuthState>("auth");
+auth.state.isLoggedIn;
+auth.setState({ token: "abc" });
+
+// Event bus
+globalContext.emit("userLoggedIn", { userId: "123" });
+const unsub = globalContext.on("userLoggedIn", (payload) => {
+  console.log("User logged in:", payload);
+});
+
+// Query
+globalContext.hasModule("auth");       // true
+globalContext.getModuleIds();           // ["auth", "counter"]
+globalContext.getGlobalState();         // combined state snapshot
+```
+
+### Typed Events
+
+For type-safe event handling:
+
+```typescript
+import { TypedEventEmitter } from "@hypen-space/core";
+
+interface AppEvents {
+  "user:login": { userId: string; email: string };
+  "user:logout": { userId: string };
+  "notification": { message: string; type: "info" | "error" };
+}
+
+const events = new TypedEventEmitter<AppEvents>();
+
+events.on("user:login", (payload) => {
+  // payload is typed as { userId: string; email: string }
+  console.log(`${payload.email} logged in`);
+});
+
+events.emit("user:login", { userId: "1", email: "alice@example.com" });
+```
+
+### Built-in Framework Events
+
+The global context emits these events automatically:
+
+| Event | Payload | When |
+|-------|---------|------|
+| `module:created` | `{ moduleId }` | Module initialized |
+| `module:destroyed` | `{ moduleId }` | Module unmounted |
+| `route:changed` | `{ from, to }` | Navigation occurred |
+| `state:updated` | `{ moduleId, paths }` | State changed |
+| `action:dispatched` | `{ moduleId, actionName, payload? }` | Action dispatched |
+| `error` | `{ message, error?, context? }` | Error occurred |
+
+## Logging
+
+Configure logging for debugging:
+
+```typescript
+import { setLogLevel, setDebugMode, configureLogger } from "@hypen-space/core";
+
+// Set global log level
+setLogLevel("debug");    // "debug" | "info" | "warn" | "error" | "silent"
+
+// Enable debug mode (verbose output)
+setDebugMode(true);
+
+// Custom log handler
+configureLogger({
+  level: "info",
+  timestamp: true,
+  handler: (level, label, ...args) => {
+    myLogger.log(level, `[${label}]`, ...args);
+  },
+});
+```
+
+Framework subsystems have individual loggers:
+
+```typescript
+import { frameworkLoggers } from "@hypen-space/core";
+
+// Available loggers: engine, app, state, router, events,
+// context, renderer, canvas, discovery, loader, hypen
+```
+
+## Testing
+
+Test modules without a running server:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+// Build the module
+const counterDef = app
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .build();
+
+// Test the action handler directly
+import { test, expect } from "bun:test";
+
+test("increment increases count", () => {
+  const state = { count: 0 };
+
+  // Call the action handler directly
+  counterDef.actions.increment({
+    action: { name: "increment" },
+    state,
+    context: null,
+  });
+
+  expect(state.count).toBe(1);
+});
+```
+
+### Testing with HypenModuleInstance
+
+For integration tests with the full module lifecycle:
+
+```typescript
+import { Engine } from "@hypen-space/server";
+import { HypenModuleInstance } from "@hypen-space/core";
+
+test("module lifecycle", async () => {
+  const engine = new Engine();
+  await engine.init();
+
+  const instance = new HypenModuleInstance(engine, counterDef);
+  const state = instance.getLiveState();
+
+  expect(state.count).toBe(0);
+
+  // Dispatch action through the engine
+  engine.dispatchAction("increment");
+  expect(state.count).toBe(1);
+
+  await instance.destroy();
+});
+```
+
+## Health & Stats
+
+The `RemoteServer` exposes HTTP endpoints alongside the WebSocket:
+
+- **`GET /health`** — Returns `"OK"` for load balancer health checks
+- **`GET /stats`** — Returns session statistics as JSON
+
+```typescript
+const server = new RemoteServer()
+  .module("App", appModule)
+  .ui(ui)
+  .listen(3000);
+
+// Programmatic access
+server.getClientCount();     // number of active connections
+server.getSessionStats();    // { activeSessions, pendingSessions, totalConnections }
+```
+
+## Deployment
+
+Deploy your server to any platform that supports WebSockets:
+
+### Fly.io
+
+```toml
+# fly.toml
+[build]
+  builder = "heroku/buildpacks:20"
+
+[env]
+  PORT = "3000"
+
+[[services]]
+  internal_port = 3000
+  protocol = "tcp"
+
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+```
+
+### Docker
+
+```dockerfile
+FROM oven/bun:1
+WORKDIR /app
+COPY package.json bun.lock ./
+RUN bun install --production
+COPY . .
+EXPOSE 3000
+CMD ["bun", "run", "server.ts"]
+```
+
+### Production Checklist
+
+- Set appropriate session TTL for your use case
+- Add authentication before WebSocket upgrade
+- Use the `/health` endpoint for load balancer checks
+- Monitor active connections via `/stats` or `getSessionStats()`
+- Each client gets its own module instance — plan memory accordingly
+- Consider `concurrent: "kick-old"` (default) to prevent stale connections
+
+## Requirements
+
+- **Bun 1.0+** or **Node.js 18+**
+- TypeScript 5.0+ recommended
+
+## See Also
+
+- [Remote App Tutorial](/docs/getting-started/remote-app) — Step-by-step guide to building a remote app
+- [Your First App](/docs/getting-started/first-app) — Counter app tutorial
+- [State & Modules Guide](/docs/guide/state) — Deep dive into state management
+- [Error Handling](/docs/guide/error-handling) — Error recovery patterns
+- [Routing Guide](/docs/guide/routing) — Declarative navigation
+- [Web Adapter](/docs/adapters/web) — Client-side DOM and Canvas renderers
+- [Go SDK](/docs/servers/golang) — Alternative server SDK in Go

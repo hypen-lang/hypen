@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "document-with-imports",
+  "description": "Renders a document that has import statements - imports are parsed but components render from source",
+  "category": "imports",
+  "priority": "P0",
+
+  "input": {
+    "source": "import { Button } from \"./ui\"\n\nColumn { Text(\"Hello\") }",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 4,
+    "patchTypes": ["create", "insert", "create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Column" },
+      { "type": "create", "elementType": "Text", "props": { "0": "Hello" } },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

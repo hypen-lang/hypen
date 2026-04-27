@@ -1,0 +1,95 @@
+Column {
+    Stack {
+        Image(src: "@{state.restaurant.imageUrl}")
+            .width("100%")
+            .height(220)
+            .objectFit("cover")
+
+        Button {
+            Icon(@resources.arrow-left)
+                .size(22)
+                .color("#111827")
+        }
+        .tw("absolute top-4 left-4 w-10 h-10 rounded-full bg-white items-center justify-center shadow")
+        .onClick(@router.push, to: "/")
+
+        Button {
+            Icon(@resources.heart)
+                .size(22)
+                .color("@{state.isFavorite ? '#ef4444' : '#111827'}")
+        }
+        .tw("absolute top-4 right-4 w-10 h-10 rounded-full bg-white items-center justify-center shadow")
+        .onClick(@actions.toggleFavorite)
+    }
+
+    Column {
+        Text("@{state.restaurant.name}")
+            .tw("text-xl font-bold")
+
+        Text("@{state.restaurant.cuisine} · @{state.restaurant.description}")
+            .tw("text-sm text-gray-500 mt-1")
+
+        Row {
+            Row {
+                Icon(@resources.star)
+                    .size(14)
+                    .color("#f59e0b")
+                Text("@{state.restaurant.rating} (@{state.restaurant.ratingCount})")
+                    .tw("text-sm font-semibold ml-1")
+            }
+            .tw("items-center")
+
+            Text(" · ")
+                .tw("text-sm text-gray-300 px-2")
+
+            Row {
+                Icon(@resources.clock)
+                    .size(14)
+                    .color("#6b7280")
+                Text("@{state.restaurant.deliveryTimeMin}-@{state.restaurant.deliveryTimeMax} min")
+                    .tw("text-sm text-gray-600 ml-1")
+            }
+            .tw("items-center")
+
+            Text(" · ")
+                .tw("text-sm text-gray-300 px-2")
+
+            Text("$@{state.restaurant.deliveryFee} fee")
+                .tw("text-sm text-gray-600")
+        }
+        .tw("mt-2 items-center")
+    }
+    .tw("px-4 py-4 bg-white border-b border-gray-100")
+
+    Column {
+        Text("Menu")
+            .tw("text-lg font-bold px-4 pt-4 pb-2")
+
+        ForEach(items: @state.menuItems, key: "id") {
+            MenuItem()
+        }
+    }
+    .tw("bg-white")
+
+    If(condition: "@{state.cartCount > 0}") {
+        Button {
+            Row {
+                Column {
+                    Text("@{state.cartCount} item@{state.cartCount > 1 ? 's' : ''} in cart")
+                        .tw("text-xs text-white opacity-90")
+                    Text("View cart")
+                        .tw("text-base font-bold text-white")
+                }
+                .tw("flex-1")
+
+                Text("$@{state.cartSubtotal}")
+                    .tw("text-base font-bold text-white")
+            }
+            .tw("items-center")
+        }
+        .tw("mx-4 my-4 py-3 px-5 bg-orange-500 rounded-full")
+        .onClick(@router.push, to: "/cart")
+    }
+}
+.scrollable(true)
+.tw("flex-1 bg-white")

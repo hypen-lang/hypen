@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "simple-state-binding",
+  "description": "Renders a Text component with a simple state binding that resolves to a value",
+  "category": "state",
+  "priority": "P0",
+
+  "input": {
+    "source": "Text(\"@{state.message}\")",
+    "initialState": {
+      "message": "Hello from state!"
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["message"]
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Text", "props": { "0": "Hello from state!" } },
+      { "type": "insert" }
+    ]
+  }
+}

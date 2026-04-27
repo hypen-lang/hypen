@@ -1,0 +1,1125 @@
+---
+title: Go SDK
+description: Complete guide to building Hypen servers with Go
+---
+
+# Go SDK
+
+The Go SDK (`github.com/hypen-space/core`) provides a server-side Hypen implementation for Go applications with reactive state management, routing, cross-module communication, and Remote UI streaming over WebSocket.
+
+## Installation
+
+```bash
+go get github.com/hypen-space/core
+```
+
+## Quick Start
+
+Create a server that streams a counter UI over WebSocket. Module state is a
+plain Go struct, and action handlers mutate it directly — no `any` casts, no
+string-keyed Get/Set, typos caught at compile time:
+
+```go
+package main
+
+import (
+    "fmt"
+
+    core "github.com/hypen-space/core"
+    "github.com/hypen-space/core/remote"
+)
+
+// Module state as a Go struct. json tags match the @{state.xxx}
+// references used in the Hypen DSL template.
+type CounterState struct {
+    Count int `json:"count"`
+}
+
+func main() {
+    // 1. Define the module — .Name(...).Build() auto-registers onto the
+    //    package-level core.App singleton.
+    counter := core.NewApp(CounterState{Count: 0}).
+        Name("Counter").
+        OnAction("increment", func(ctx core.TypedActionContext[CounterState]) {
+            ctx.State.Count++ // direct field mutation — type-safe
+        }).
+        OnAction("decrement", func(ctx core.TypedActionContext[CounterState]) {
+            ctx.State.Count--
+        }).
+        UI(`
+            Column {
+                Text("Count: @{state.count}")
+                    .fontSize(32)
+                    .fontWeight("bold")
+
+                Row {
+                    Button("@actions.decrement") { Text("-") }.padding(16)
+                    Button("@actions.increment") { Text("+") }.padding(16)
+                }
+                .gap(16)
+            }
+            .padding(32)
+        `).
+        Build()
+
+    // 2. Serve the app. WithDefinition picks the primary module; any other
+    //    modules you built with .Name(...).Build() are auto-discovered from
+    //    core.App as nested modules.
+    server := remote.NewRemoteServer().
+        WithDefinition(counter).
+        OnConnection(func(client *remote.Client) {
+            fmt.Printf("Connected: %s\n", client.ID)
+        }).
+        OnDisconnection(func(client *remote.Client) {
+            fmt.Printf("Disconnected: %s\n", client.ID)
+        }).
+        Listen(3000)
+
+    defer server.Stop()
+    fmt.Println("Server running on ws://localhost:3000")
+    select {} // Block forever
+}
+```
+
+> **Single-module demo?** The lower-level `RemoteServer.WithState("Name", map[string]any{...}).OnAction(...).UI(...).Listen(port)` form skips the typed builder and the registry — fine for one-off experiments.
+
+Mutations made to `ctx.State` are diffed against a pre-handler snapshot when
+the handler returns; only changed top-level keys are committed to the
+underlying `ObservableState`, so the engine still sees minimal deltas.
+
+Any Hypen client (web, Android, iOS) can connect to `ws://localhost:3000` and render this UI. See the [Remote App Tutorial](/docs/getting-started/remote-app) for connecting clients.
+
+### Serve() Helper
+
+For simpler cases, use the `Serve()` convenience function:
+
+```go
+server := remote.Serve(remote.ServeOptions{
+    ModuleName:   "Counter",
+    InitialState: map[string]any{"count": 0},
+    UI: `
+        Column {
+            Text("Count: @{state.count}")
+            Button { Text("+1") }
+                .onClick(@actions.increment)
+        }
+    `,
+    Port: 3000,
+    OnAction: func(action string, payload any, state map[string]any) map[string]any {
+        if action == "increment" {
+            state["count"] = state["count"].(int) + 1
+        }
+        return state
+    },
+})
+defer server.Stop()
+```
+
+## App Builder API
+
+The Go SDK ships two builder APIs:
+
+- **`NewApp[T]` (recommended)** — a generic, type-safe builder where module
+  state is expressed as a Go struct. Handlers receive a `*T` and mutate
+  fields directly. This is the idiomatic Go API and the right default for
+  all new code.
+- **`NewAppBuilder` (low-level)** — the original `map[string]any`-based
+  builder. Still supported for dynamic state shapes or when you don't know
+  the state keys at compile time. `NewApp[T]` is a thin wrapper on top of
+  it, so behaviour is identical.
+
+Every method on both builders returns the builder for chaining:
+
+```go
+module := core.NewApp(MyState{…}).
+    OnCreated(createdHandler).
+    OnAction("name", actionHandler).
+    OnDestroyed(destroyedHandler).
+    OnError(errorHandler).
+    UI(template)
+```
+
+### NewApp
+
+```go
+func NewApp[T any](initial T, options ...*ModuleOptions) *TypedAppBuilder[T]
+```
+
+- `initial` — initial state as a Go struct. Fields should carry `json:"…"`
+  tags matching the names referenced from the DSL (`@{state.xxx}`). The
+  struct is serialized to a `map[string]any` via `encoding/json`.
+- `options` — optional module configuration (`Name`, `Persist`, `Version`).
+
+### NewAppBuilder (low-level)
+
+```go
+func NewAppBuilder(initialState map[string]any, options *ModuleOptions, app ...*HypenApp) *AppBuilder
+```
+
+- `initialState` — initial state map (required)
+- `options` — module configuration (can be `nil`)
+- `app` — optional `HypenApp` registry for named module registration
+
+### OnCreated
+
+Lifecycle hook called when the module is initialized. Mutations made to
+`state` are committed after the handler returns:
+
+```go
+.OnCreated(func(state *MyState, ctx core.GlobalContext) {
+    // Fetch initial data
+    data, _ := fetchData()
+    state.Items = data
+
+    // Access router
+    if ctx != nil {
+        if router := ctx.GetRouter(); router != nil {
+            router.Push("/home")
+        }
+    }
+})
+```
+
+### OnAction
+
+Registers a handler for a named action dispatched from the UI:
+
+```go
+.OnAction("submit", func(ctx core.TypedActionContext[MyState]) {
+    // ctx.Action.Name    - the action name
+    // ctx.Action.Payload - data from the UI (any)
+    // ctx.Action.Sender  - component that dispatched the action
+    // ctx.State          - *MyState — mutate fields directly
+    // ctx.Context        - GlobalContext for cross-module access
+
+    if payload, ok := ctx.Action.Payload.(map[string]any); ok {
+        ctx.State.Title, _ = payload["title"].(string)
+    }
+    ctx.State.Submitted = true
+})
+```
+
+After the handler returns, the struct is diffed against a pre-handler
+snapshot and only changed top-level keys are written back to the
+underlying `ObservableState`, so the engine sees a minimal delta.
+
+### OnDestroyed
+
+Lifecycle hook called when the module is unmounted:
+
+```go
+.OnDestroyed(func(state *MyState, ctx core.GlobalContext) {
+    // Cleanup resources — mutations here are not observable,
+    // since the module is about to go away.
+    fmt.Println("Module destroyed")
+})
+```
+
+### OnError
+
+Catches errors (panics) from action handlers and lifecycle hooks:
+
+```go
+.OnError(func(ctx core.ErrorContext) *core.ErrorHandlerResult {
+    if ctx.ActionName != "" {
+        fmt.Printf("Action %q failed: %v\n", ctx.ActionName, ctx.Error)
+    } else if ctx.Lifecycle != "" {
+        fmt.Printf("Lifecycle %q failed: %v\n", ctx.Lifecycle, ctx.Error)
+    }
+    return &core.ErrorHandlerResult{Handled: true}
+})
+```
+
+The `ErrorContext` fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Error` | `error` | The error or recovered panic |
+| `State` | `*ObservableState` | Current state (for inspection) |
+| `ActionName` | `string` | Set if error came from an action handler |
+| `Lifecycle` | `string` | `"created"` or `"destroyed"` if from a lifecycle hook |
+
+Return values:
+
+| Return | Effect |
+|--------|--------|
+| `nil` | Default: log and emit global error event |
+| `{Handled: true}` | Suppress the error |
+| `{Rethrow: true}` | Re-panic the error |
+
+### UI / Build
+
+`UI(template)` sets the inline Hypen DSL template and finalizes the module
+definition in one call — the recommended way to create single-file
+components. `UIFile(path)` does the same but reads the template from
+disk. `Build()` finalizes without a template.
+
+```go
+module := core.NewApp(MyState{Count: 0}).
+    OnAction("increment", handler).
+    UI(`Column { Text("@{state.count}") }`)
+// Returns *ModuleDefinition
+```
+
+## State Management
+
+The SDK provides reactive `ObservableState` with automatic change tracking. State is accessed through dot-separated paths.
+
+### Creating State
+
+```go
+state := core.NewObservableState(map[string]any{
+    "user": map[string]any{
+        "name":  "Alice",
+        "email": "alice@example.com",
+    },
+    "items":   []any{},
+    "loading": false,
+}, &core.StateObserverOptions{
+    OnChange: func(change core.StateChange) {
+        fmt.Printf("Changed paths: %v\n", change.Paths)
+    },
+})
+```
+
+### Reading State
+
+```go
+// Get a value at a dot-separated path
+name := state.Get("user.name").(string)         // "Alice"
+email := state.Get("user.email").(string)        // "alice@example.com"
+
+// Get entire state as a deep clone
+all := state.GetAll()  // map[string]any{...}
+
+// Get a deep snapshot
+snapshot := state.Snapshot()
+```
+
+### Writing State
+
+```go
+// Set a value (triggers OnChange)
+state.Set("user.name", "Bob")
+
+// Set a nested path
+state.Set("user.profile.avatar", "https://...")
+
+// Replace entire state
+state.SetAll(map[string]any{
+    "user": map[string]any{"name": "Charlie"},
+    "items": []any{},
+})
+
+// Delete a key
+state.Delete("user.email")
+```
+
+### Batch Updates
+
+Group multiple changes into a single notification:
+
+```go
+// Using BatchUpdate helper
+core.BatchStateUpdates(state, func() {
+    state.Set("user.name", "Dave")
+    state.Set("user.email", "dave@example.com")
+    state.Set("loading", false)
+})
+// Single OnChange notification with all paths
+
+// Or manually
+state.BeginBatch()
+state.Set("a", 1)
+state.Set("b", 2)
+state.Set("c", 3)
+state.EndBatch() // Triggers single notification
+```
+
+### Change Tracking
+
+```go
+type StateChange struct {
+    Paths     []StatePath            // Changed paths (e.g., ["user.name", "loading"])
+    NewValues map[StatePath]any      // Map of path → new value
+}
+```
+
+### Utility Functions
+
+```go
+// Deep clone state
+clone := core.GetStateSnapshot(state)
+
+// Deep clone any value
+value := core.DeepCloneAny(original)
+```
+
+## Action Handlers
+
+Action handlers respond to UI interactions and modify state. With the
+typed builder, mutate `ctx.State` fields directly; the diff against a
+pre-handler snapshot is committed automatically on return.
+
+### Handler Context
+
+```go
+// Typed builder (recommended)
+type TypedActionContext[T any] struct {
+    Action  ActionContext
+    State   *T           // mutate fields directly
+    Context GlobalContext
+}
+
+// Low-level untyped builder
+type ActionHandlerContext struct {
+    Action  ActionContext
+    State   *ObservableState  // string-keyed Get/Set
+    Context GlobalContext
+}
+
+type ActionContext struct {
+    Name    string   // Action name
+    Payload any      // Data from the UI
+    Sender  string   // Component ID that dispatched the action
+}
+```
+
+### Examples
+
+Simple handler (typed):
+
+```go
+type CounterState struct {
+    Count int `json:"count"`
+}
+
+.OnAction("increment", func(ctx core.TypedActionContext[CounterState]) {
+    ctx.State.Count++
+})
+```
+
+With payload:
+
+```go
+type TodoState struct {
+    Items []TodoItem `json:"items"`
+}
+type TodoItem struct {
+    ID    string `json:"id"`
+    Title string `json:"title"`
+}
+
+.OnAction("deleteItem", func(ctx core.TypedActionContext[TodoState]) {
+    payload, _ := ctx.Action.Payload.(map[string]any)
+    itemID, _ := payload["id"].(string)
+
+    filtered := ctx.State.Items[:0]
+    for _, item := range ctx.State.Items {
+        if item.ID != itemID {
+            filtered = append(filtered, item)
+        }
+    }
+    ctx.State.Items = filtered
+})
+```
+
+With navigation:
+
+```go
+type AuthState struct {
+    IsLoggedIn bool   `json:"isLoggedIn"`
+    Error      string `json:"error"`
+}
+
+.OnAction("login", func(ctx core.TypedActionContext[AuthState]) {
+    payload, _ := ctx.Action.Payload.(map[string]any)
+    email, _ := payload["email"].(string)
+    password, _ := payload["password"].(string)
+
+    if authenticate(email, password) {
+        ctx.State.IsLoggedIn = true
+        if ctx.Context != nil {
+            ctx.Context.GetRouter().Push("/dashboard")
+        }
+    } else {
+        ctx.State.Error = "Invalid credentials"
+    }
+})
+```
+
+## Named Modules
+
+Register modules by name using `HypenApp` for component-based routing.
+The typed builder does not auto-register with an `HypenApp` (that path
+lives on the low-level `AppBuilder`), so with `NewApp[T]` you register
+the returned `*ModuleDefinition` explicitly:
+
+```go
+type HomeState struct {
+    Title string `json:"title"`
+}
+
+app := &core.HypenApp{}
+
+homePage := core.NewApp(
+    HomeState{Title: "Home"},
+    &core.ModuleOptions{Name: "HomePage"},
+).
+    OnCreated(func(state *HomeState, ctx core.GlobalContext) {
+        fmt.Println("HomePage mounted")
+    }).
+    UI(`Column { Text("@{state.title}") }`)
+
+app.Register("HomePage", homePage)
+
+// Query the registry
+app.Has("HomePage")     // true
+app.Get("HomePage")     // *ModuleDefinition
+app.GetNames()          // ["HomePage"]
+app.Size()              // 1
+
+// Manual registration
+app.Register("Settings", settingsModule)
+app.Unregister("Settings")
+app.Clear()
+```
+
+The low-level `app.Module("HomePage").DefineState(map[string]any{…}, nil)…`
+helper still exists and auto-registers when used through an `HypenApp`.
+
+## Routing
+
+The `HypenRouter` provides URL-based navigation with pattern matching.
+
+### Basic Navigation
+
+```go
+router := core.NewHypenRouter()
+
+// Navigate
+router.Push("/users/123")
+router.Replace("/login")
+router.Back()
+router.Forward()
+```
+
+### Querying Routes
+
+```go
+// Current path
+router.GetCurrentPath()  // "/users/123"
+
+// Route parameters (from pattern matching)
+router.GetParams()       // map[string]string{"id": "123"}
+
+// Query parameters
+router.GetQuery()        // map[string]string{"tab": "posts"}
+
+// Full state snapshot
+state := router.GetState()
+// state.CurrentPath, state.Params, state.Query, state.PreviousPath
+```
+
+### Pattern Matching
+
+```go
+// Exact match
+match := router.MatchPath("/users/:id", "/users/42")
+// match.Params = {"id": "42"}
+
+// Wildcard
+match = router.MatchPath("/dashboard/*", "/dashboard/settings/profile")
+// match.Path = "/dashboard/settings/profile"
+
+// Check if pattern matches current path
+router.IsActive("/users/:id")  // true
+
+// Build URL with query parameters
+url := router.BuildURL("/search", map[string]string{"q": "hello", "page": "2"})
+// "/search?page=2&q=hello"
+```
+
+### Listening for Changes
+
+```go
+unsubscribe := router.OnNavigate(func(route core.RouteState) {
+    fmt.Printf("Navigated to: %s (from: %s)\n", route.CurrentPath, route.PreviousPath)
+})
+
+// Stop listening
+unsubscribe()
+```
+
+### Auto-wire from the DSL
+
+`RemoteServer` auto-discovers every `Router { Route ... }` block in
+the primary template and child components, spins up a per-session
+`ManagedRouter`, and wires the reserved `@router.*` namespace. DSL
+authors dispatch nav directly:
+
+```hypen
+Button { Text("Search") }.onClick(@router.push, to: "/search")
+Button { Text("←") }.onClick(@router.back)
+```
+
+Per-route module handlers use `ctx.Context.GetRouter()` to read
+route params in `OnActivated`:
+
+```go
+core.NewApp(UserProfileState{}).
+    Name("UserProfile").
+    OnActivated(func(state *UserProfileState, ctx core.GlobalContext) {
+        if ctx == nil { return }
+        r := ctx.GetRouter()
+        if r == nil { return }
+        if m := r.MatchPath("/users/:id", r.GetCurrentPath()); m != nil {
+            state.User = loadUser(m.Params["id"])
+        }
+    }).
+    Build()
+```
+
+Opt out with `server.DisableAutoRouter()` to wire routing manually.
+See the [Routing Guide](/docs/guide/routing) for the DSL-level
+contract.
+
+### Managed Router (manual)
+
+For bespoke wiring, construct a `ManagedRouter` directly:
+
+```go
+managed := core.NewManagedRouter(router, engine, app, globalCtx).
+    AddRoute(core.RouteDefinition{
+        Path:      "/",
+        Component: "HomePage",
+    }).
+    AddRoute(core.RouteDefinition{
+        Path:      "/profile/:id",
+        Component: "ProfilePage",
+    }).
+    AddRoute(core.RouteDefinition{
+        Path:      "/settings",
+        Module:    settingsModule, // Direct module reference instead of registry
+    })
+
+managed.Start()
+
+// Navigate — ProfilePage module mounts automatically
+router.Push("/profile/123")
+
+active := managed.GetActiveModule()
+activeRoute := managed.GetActiveRoute()
+
+managed.Stop()
+```
+
+## Event System
+
+Pub/sub messaging for decoupled communication:
+
+```go
+emitter := core.CreateEventEmitter()
+
+// Subscribe
+unsubscribe := emitter.On("userLoggedIn", func(payload any) {
+    user := payload.(map[string]any)
+    fmt.Printf("User logged in: %s\n", user["name"])
+})
+
+// Emit
+emitter.Emit("userLoggedIn", map[string]any{"name": "Alice"})
+
+// Unsubscribe
+unsubscribe()
+
+// One-time listener (auto-unsubscribes after first call)
+emitter.Once("ready", func(payload any) {
+    fmt.Println("Ready!")
+})
+
+// Query
+emitter.ListenerCount("userLoggedIn")  // int
+emitter.EventNames()                    // []string
+
+// Cleanup
+emitter.RemoveAllListeners("userLoggedIn")
+emitter.ClearAll()
+```
+
+### Built-in Framework Events
+
+```go
+const (
+    EventModuleCreated    = "module:created"
+    EventModuleDestroyed  = "module:destroyed"
+    EventRouteChanged     = "route:changed"
+    EventStateUpdated     = "state:updated"
+    EventActionDispatched = "action:dispatched"
+    EventError            = "error"
+)
+```
+
+## Global Context
+
+Cross-module communication using `HypenGlobalContext`:
+
+```go
+globalCtx := core.NewHypenGlobalContext()
+
+// Register modules
+globalCtx.RegisterModule("counter", counterInstance)
+globalCtx.RegisterModule("auth", authInstance)
+
+// Access other modules
+counterRef := globalCtx.GetModule("counter")
+counterRef.State()                               // *ObservableState
+counterRef.GetState()                            // map[string]any (snapshot)
+counterRef.SetState(map[string]any{"count": 42}) // update state
+
+// Query
+globalCtx.HasModule("counter")   // true
+globalCtx.GetModuleIds()          // ["counter", "auth"]
+globalCtx.GetGlobalState()        // combined state from all modules
+
+// Router
+globalCtx.SetRouter(router)
+globalCtx.GetRouter()
+
+// Events (via global context)
+globalCtx.Emit("countChanged", 42)
+unsub := globalCtx.On("countChanged", func(payload any) {
+    fmt.Printf("Count: %v\n", payload)
+})
+unsub()
+
+// Typed event emitter
+globalCtx.Events()  // *TypedEventEmitter
+
+// Debug info
+info := globalCtx.Debug()
+// { ModuleCount, ModuleIDs, HasRouter, EventCount }
+```
+
+## Component Loading
+
+Discover and load `.hypen` components from the filesystem:
+
+```go
+loader := core.NewComponentLoader()
+
+// Register manually
+loader.Register("Counter", counterModule, counterTemplate, "./components/Counter")
+
+// Register with just module + template
+loader.RegisterWithModule("Counter", counterModule, template)
+
+// Load from a single component directory
+err := loader.LoadFromDirectory("Counter", "./components/Counter")
+// Expects component.hypen in the directory
+
+// Auto-discover and load all components from a base directory
+err = loader.LoadFromComponentsDir("./components")
+// Scans for subdirectories containing component.hypen files
+
+// Query
+loader.Has("Counter")      // true
+loader.Get("Counter")      // *ComponentDefinition
+loader.GetNames()          // []string
+loader.GetAll()            // []*ComponentDefinition
+
+// Global instance
+core.ComponentLoaderInstance.LoadFromComponentsDir("./components")
+```
+
+### Component Resolver
+
+Resolve imports from Hypen DSL templates:
+
+```go
+resolver := core.NewComponentResolver(&core.ResolverOptions{
+    BaseDir: "./components",
+    Cache:   true,
+    App:     app,  // HypenApp registry for lookup
+})
+
+// Parse imports from DSL
+imports := core.ParseImports(`
+    import { Header, Footer } from "./shared"
+    import MainContent from "./pages/main"
+`)
+
+// Resolve imports
+for _, stmt := range imports {
+    resolved, err := resolver.Resolve(stmt)
+    // resolved: map[string]*ResolvedComponent
+}
+
+// Remove imports from DSL (for engine rendering)
+cleanDSL := core.RemoveImports(dslWithImports)
+
+// Cache management
+resolver.ClearCache()
+resolver.GetCacheSize()
+```
+
+## RemoteServer API
+
+`RemoteServer` streams UI over WebSocket to any Hypen client using a fluent builder pattern:
+
+```go
+server := remote.NewRemoteServer().
+    Module("MyApp", moduleConfig).
+    UI(uiTemplate).
+    Config(remote.ServerConfig{Port: 3000, Hostname: "0.0.0.0"}).
+    OnConnection(connectHandler).
+    OnDisconnection(disconnectHandler).
+    Listen(3000)
+```
+
+### Builder Methods
+
+| Method | Description |
+|--------|-------------|
+| `.Module(name, config)` | Set the module to serve |
+| `.WithState(name, state)` | Quick setup with just name and state |
+| `.OnAction(handler)` | Set action handler (simple mode) |
+| `.UI(dsl)` | Set the Hypen DSL template |
+| `.Config(config)` | Server configuration (port, hostname) |
+| `.OnConnection(callback)` | Called when a client connects |
+| `.OnDisconnection(callback)` | Called when a client disconnects |
+| `.Listen(port?)` | Start the WebSocket server |
+| `.Stop()` | Stop the server |
+
+### Server Methods
+
+```go
+server.GetURL()         // WebSocket URL string
+server.GetClientCount() // number of active connections
+
+// Send to specific client
+server.SendPatches(conn, patches)
+server.UpdateClientState(conn, state)
+
+// Broadcast to all clients
+server.Broadcast(msg)
+server.BroadcastPatches(patches)
+server.BroadcastState(state)
+```
+
+### Configuration
+
+```go
+remote.ServerConfig{
+    Port:     3000,        // default: 3000
+    Hostname: "0.0.0.0",   // default: "0.0.0.0"
+}
+```
+
+## RemoteEngine (Client)
+
+Connect to a Hypen server from Go:
+
+```go
+client := remote.NewRemoteEngine("ws://localhost:3000/ws", &remote.EngineOptions{
+    AutoReconnect:        true,
+    ReconnectInterval:    3 * time.Second,
+    MaxReconnectAttempts: 10,
+}).
+    OnPatches(func(patches []remote.Patch) {
+        for _, p := range patches {
+            fmt.Printf("Patch: %s %s\n", p.Type, p.ID)
+        }
+    }).
+    OnStateUpdate(func(state any) {
+        fmt.Printf("State: %v\n", state)
+    }).
+    OnConnect(func() {
+        fmt.Println("Connected!")
+    }).
+    OnDisconnect(func() {
+        fmt.Println("Disconnected")
+    }).
+    OnError(func(err error) {
+        fmt.Printf("Error: %v\n", err)
+    })
+
+err := client.Connect()
+defer client.Disconnect()
+
+// Dispatch actions to the server
+client.DispatchAction("increment", map[string]any{"step": 5})
+
+// Query
+client.GetConnectionState()  // "connected" | "connecting" | "disconnected" | "error"
+client.GetCurrentState()     // current state from server
+client.GetRevision()         // current revision number
+```
+
+## WebSocket Protocol
+
+### Client → Server Messages
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `dispatchAction` | `module`, `action`, `payload?` | Dispatch action to module |
+
+### Server → Client Messages
+
+| Type | Fields | Description |
+|------|--------|-------------|
+| `initialTree` | `module`, `state`, `patches`, `revision` | Full UI tree on connect |
+| `patch` | `module`, `patches`, `revision` | Incremental UI updates |
+| `stateUpdate` | `module`, `state`, `revision` | Full state snapshot |
+
+## WASM Engine
+
+Use the WASM engine for server-side rendering with the full Hypen parser and reconciler:
+
+```go
+engine, err := core.NewWasmEngine(core.WasmEngineConfig{
+    WasmPath:   "./hypen_engine.wasm",
+    Primitives: []string{"Text", "Column", "Row", "Button", "Input", "Image"},
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer engine.Close()
+
+// Register a component
+engine.RegisterComponent("Header", headerDSL, "/components/Header")
+
+// Set up module
+engine.SetModule("Counter", []string{"increment"}, []string{"count"}, map[string]any{"count": 0})
+
+// Register action handler
+engine.OnAction("increment", func(action core.Action) {
+    // Handle action
+})
+
+// Set render callback
+engine.SetPatchCallback(func(patches []core.Patch) {
+    // Send patches to clients
+})
+
+// Render
+patches, err := engine.RenderSource(`
+    Column {
+        Text("Hello, world!")
+    }
+`)
+
+// Update state and get new patches
+patches, err = engine.UpdateState(map[string]any{"count": 1})
+
+// Document rendering with import resolution
+patches, err = engine.RenderDocument(source, resolver)
+
+// Debug
+jsonAST, err := engine.ParseToJSON(source)
+rev := engine.GetRevision()
+engine.ClearTree()
+```
+
+### WASM Configuration
+
+```go
+type WasmEngineConfig struct {
+    WasmPath   string   // Path to hypen_engine.wasm file
+    WasmBytes  []byte   // Alternative: raw WASM bytes (skips file read)
+    Primitives []string // Element types to register
+}
+```
+
+## Error Types
+
+The SDK provides typed error classes:
+
+```go
+// Check error type
+if core.IsEngineError(err, core.ErrParse) {
+    fmt.Println("DSL parsing failed:", err)
+}
+
+// Error codes
+core.ErrParse             // DSL parsing failed
+core.ErrComponentNotFound // Component not in registry
+core.ErrRender            // Rendering/reconciliation failed
+core.ErrActionNotFound    // No handler for action
+core.ErrState             // State operation failed
+core.ErrExpression        // Expression evaluation failed
+core.ErrNotInitialized    // Engine not initialized
+```
+
+## Testing
+
+### MockEngine
+
+Test modules without the WASM engine:
+
+```go
+type CounterState struct {
+    Count int `json:"count"`
+}
+
+func TestCounter(t *testing.T) {
+    engine := core.NewMockEngine()
+
+    counter := core.NewApp(CounterState{Count: 0}).
+        OnAction("increment", func(ctx core.TypedActionContext[CounterState]) {
+            ctx.State.Count++
+        }).
+        Build()
+
+    instance := core.NewModuleInstance(engine, counter)
+
+    // Dispatch action
+    engine.TriggerAction("increment", nil)
+
+    // Verify state — snapshot values round-trip as float64 because the
+    // underlying state is JSON-shaped map[string]any.
+    count, _ := instance.GetState()["count"].(float64)
+    if int(count) != 1 {
+        t.Errorf("Expected count=1, got %d", int(count))
+    }
+
+    // Inspect recorded changes
+    changes := engine.GetStateChanges()
+    actions := engine.GetDispatchedActions()
+
+    // Check registrations
+    engine.HasAction("increment")      // true
+    engine.GetRegisteredActions()       // ["increment"]
+
+    // Reset for next test
+    engine.Reset()
+}
+```
+
+### TestRenderer
+
+Capture render events for assertions:
+
+```go
+func TestRendering(t *testing.T) {
+    renderer := core.NewTestRenderer()
+
+    patches := []core.Patch{
+        {Type: core.PatchCreate, ID: "1", ElementType: "Column"},
+        {Type: core.PatchCreate, ID: "2", ElementType: "Text"},
+        {Type: core.PatchSetText, ID: "2", Text: "Hello"},
+        {Type: core.PatchInsert, ParentID: "1", ID: "2"},
+    }
+
+    renderer.ApplyPatches(patches)
+
+    // Inspect events
+    events := renderer.Events
+    if len(events) != 4 {
+        t.Errorf("Expected 4 events, got %d", len(events))
+    }
+
+    // Check event types
+    types := renderer.EventTypes()
+    // ["create", "create", "setText", "insert"]
+
+    // Clear for next test
+    renderer.ClearEvents()
+}
+```
+
+### ConsoleRenderer
+
+Print patches to stdout for debugging:
+
+```go
+renderer := core.NewConsoleRenderer()
+renderer.ApplyPatches(patches)
+// Prints each patch to console
+```
+
+## Logging
+
+Configure logging for debugging:
+
+```go
+// Enable debug mode (verbose output)
+core.SetDebugMode(true)
+
+// Set global log level
+core.SetLogLevel(core.LogLevelDebug)  // Debug, Info, Warn, Error, None
+
+// Custom output
+core.SetLogOutput(logFile)
+
+// Check mode
+core.IsDebugMode()
+core.GetLogLevel()
+```
+
+Framework subsystems have individual loggers:
+
+```go
+// Available loggers
+core.LogEngine     // Engine operations
+core.LogRouter     // Navigation events
+core.LogState      // State mutations
+core.LogEvents     // Event emissions
+core.LogRemote     // Remote server/client
+core.LogRenderer   // Patch application
+core.LogModule     // Module lifecycle
+core.LogLifecycle  // Lifecycle hooks
+core.LogLoader     // Component loading
+core.LogContext    // Global context
+core.LogDiscovery  // Component discovery
+
+// Per-logger level
+core.LogState.SetLevel(core.LogLevelWarn)
+
+// Child loggers
+childLog := core.LogEngine.Child("WASM")
+childLog.Debug("Initializing WASM runtime")
+```
+
+## Deployment
+
+### Docker
+
+```dockerfile
+FROM golang:1.21-alpine AS build
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -o server .
+
+FROM alpine:latest
+WORKDIR /app
+COPY --from=build /app/server .
+COPY --from=build /app/hypen_engine.wasm .
+COPY --from=build /app/components ./components
+EXPOSE 3000
+CMD ["./server"]
+```
+
+### Production Checklist
+
+- Include the `hypen_engine.wasm` file in your deployment
+- Each client gets its own module instance — plan memory accordingly
+- Use `defer server.Stop()` for graceful shutdown
+- Monitor active connections via `server.GetClientCount()`
+- Set appropriate `MaxConnections` in server options for capacity planning
+- Add authentication at the HTTP layer before WebSocket upgrade
+
+## Requirements
+
+- Go 1.21+
+- `gorilla/websocket` (WebSocket support)
+- `tetratelabs/wazero` (WASM runtime, no CGo required)
+
+## See Also
+
+- [TypeScript SDK](/docs/servers/typescript) — TypeScript server SDK with sessions and component discovery
+- [Remote App Tutorial](/docs/getting-started/remote-app) — Step-by-step guide to building a remote app
+- [Error Handling](/docs/guide/error-handling) — Error recovery patterns across SDKs
+- [Web Adapter](/docs/adapters/web) — Client-side rendering for browsers

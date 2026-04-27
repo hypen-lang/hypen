@@ -1,0 +1,99 @@
+---
+title: Guide
+description: Comprehensive guide to building applications with Hypen
+---
+
+# Guide
+
+This guide covers everything you need to know to build applications with Hypen.
+
+## Start Here
+
+**[Tutorial: Build a Chat App](/docs/guide/tutorial)** — Learn Hypen by building a real AI chat application from scratch. Covers components, layout, state, actions, control flow, and async operations step by step.
+
+## Reference
+
+- **[Basics](/docs/guide/basics)** — Fundamental syntax: components, arguments, applicators, state bindings, and actions
+
+- **[Components](/docs/guide/components)** — Complete reference of all built-in components
+
+- **[Control Flow](/docs/guide/control-flow)** — ForEach, When, and If: iteration, pattern matching, and conditionals with real-world examples
+
+- **[Routing](/docs/guide/routing)** — Navigation, route parameters, guards, and nested routing
+
+- **[Layout](/docs/guide/layout)** — Structuring your UI with Column, Row, Grid, and other layout components
+
+- **[Styling](/docs/guide/styling)** — Comprehensive applicator reference for colors, spacing, borders, typography, and effects
+
+- **[Inputs](/docs/guide/inputs)** — Form elements, buttons, and handling user interactions
+
+- **[State & Modules](/docs/guide/state)** — Managing state and defining actions with TypeScript modules
+
+- **[Data Source Plugins](/docs/guide/data-sources)** — Connect live subscription databases (SpacetimeDB, Firebase, Convex) to your UI
+
+## Quick Reference
+
+### Component Syntax
+
+```hypen
+// Basic component
+Text("Hello World")
+
+// Component with children
+Column {
+    Text("First")
+    Text("Second")
+}
+
+// Component with children and applicators
+Button { Text("Save") }
+    .onClick(@actions.save)
+```
+
+### Applicator Syntax
+
+```hypen
+Text("Styled")
+    .fontSize(18)
+    .fontWeight("bold")
+    .color("#3B82F6")
+```
+
+### State Bindings
+
+```hypen
+Text("Count: @{state.count}")
+```
+
+### Actions
+
+```hypen
+Button { Text("+1") }
+    .onClick(@actions.increment)
+```
+
+### Control Flow
+
+```hypen
+// Iteration
+ForEach(items: @state.items) {
+    Text(@item.name)
+}
+
+// Pattern matching
+When(value: @state.status) {
+    Case(match: "loading") { Spinner() }
+    Case(match: "error") { Text("Error") }
+    Else { Text("Ready") }
+}
+
+// Boolean conditional
+If(condition: @state.isVisible) {
+    Text("Visible")
+    Else { Text("Hidden") }
+}
+```
+
+## Next Steps
+
+New to Hypen? Start with the **[Tutorial](/docs/guide/tutorial)** — it teaches every core concept by building a real app. Then explore the reference sections above for deeper coverage of each topic.

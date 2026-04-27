@@ -1,0 +1,76 @@
+name: Publish Go SDK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version tag (e.g. v0.2.0) — will be pushed to the Go module repo"
+        required: true
+        type: string
+      dry-run:
+        description: "Dry run — build & test only, skip tagging"
+        required: false
+        type: boolean
+        default: true
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      dry-run:
+        required: false
+        type: boolean
+        default: true
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+          cache-dependency-path: hypen-golang/go.sum
+
+      # Build the WASI WASM the Go SDK loads at runtime
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            parser
+            tailwind-parse
+            hypen-engine-rs
+
+      - name: Build WASI WASM
+        run: |
+          cargo build --target wasm32-wasip1 --release --features wasi
+          mkdir -p pkg/wasi
+          cp ../target/wasm32-wasip1/release/hypen_engine.wasm pkg/wasi/
+        working-directory: hypen-engine-rs
+
+      - name: Copy WASM to Go SDK (embedded via go:embed)
+        run: cp hypen-engine-rs/pkg/wasi/hypen_engine.wasm hypen-golang/hypen_engine.wasm
+
+      - name: Run tests
+        run: go test -v ./...
+        working-directory: hypen-golang
+
+  # Go modules are published by pushing a tag to the repo.
+  # The Go module proxy picks it up automatically.
+  tag:
+    name: Tag Release
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: ${{ !inputs.dry-run }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create and push tag
+        run: |
+          git tag "hypen-golang/${{ inputs.version }}"
+          git push origin "hypen-golang/${{ inputs.version }}"

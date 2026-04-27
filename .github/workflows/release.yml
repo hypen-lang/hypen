@@ -1,0 +1,381 @@
+name: Release
+
+# Triggered when a PR with the "Release" label is merged to main.
+# The version is read from the PR body (expects "Version: X.Y.Z" on its own line).
+# Can also be triggered manually via workflow_dispatch.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (e.g. 0.4.80)"
+        required: true
+        type: string
+      publish-npm:
+        description: "Publish to npm"
+        required: false
+        type: boolean
+        default: false
+      publish-crates:
+        description: "Publish to crates.io"
+        required: false
+        type: boolean
+        default: false
+      publish-go:
+        description: "Publish Go SDK (tag for module proxy)"
+        required: false
+        type: boolean
+        default: false
+      publish-kotlin:
+        description: "Publish Kotlin SDK to Maven Central"
+        required: false
+        type: boolean
+        default: false
+      publish-android:
+        description: "Publish Android renderer to Maven Central"
+        required: false
+        type: boolean
+        default: false
+      publish-swift:
+        description: "Publish Swift SDK (tag for SPM)"
+        required: false
+        type: boolean
+        default: false
+      publish-lsp:
+        description: "Publish LSP extension to VS Code Marketplace"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  # ── Resolve version and publish flags from PR labels or inputs ───
+  resolve:
+    name: Resolve Release Config
+    runs-on: ubuntu-latest
+    # Only run for: merged PR with Release label, OR manual dispatch
+    if: >-
+      (github.event_name == 'workflow_dispatch') ||
+      (github.event.pull_request.merged == true &&
+       contains(github.event.pull_request.labels.*.name, 'Release'))
+    outputs:
+      version: ${{ steps.config.outputs.version }}
+      publish-npm: ${{ steps.config.outputs.publish-npm }}
+      publish-crates: ${{ steps.config.outputs.publish-crates }}
+      publish-go: ${{ steps.config.outputs.publish-go }}
+      publish-kotlin: ${{ steps.config.outputs.publish-kotlin }}
+      publish-android: ${{ steps.config.outputs.publish-android }}
+      publish-swift: ${{ steps.config.outputs.publish-swift }}
+      publish-lsp: ${{ steps.config.outputs.publish-lsp }}
+    steps:
+      - id: config
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
+            echo "publish-npm=${{ inputs.publish-npm }}" >> "$GITHUB_OUTPUT"
+            echo "publish-crates=${{ inputs.publish-crates }}" >> "$GITHUB_OUTPUT"
+            echo "publish-go=${{ inputs.publish-go }}" >> "$GITHUB_OUTPUT"
+            echo "publish-kotlin=${{ inputs.publish-kotlin }}" >> "$GITHUB_OUTPUT"
+            echo "publish-android=${{ inputs.publish-android }}" >> "$GITHUB_OUTPUT"
+            echo "publish-swift=${{ inputs.publish-swift }}" >> "$GITHUB_OUTPUT"
+            echo "publish-lsp=${{ inputs.publish-lsp }}" >> "$GITHUB_OUTPUT"
+          else
+            # Extract version from PR body: "Version: X.Y.Z"
+            VERSION=$(echo "${{ github.event.pull_request.body }}" | grep -oP 'Version:\s*\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            if [ -z "$VERSION" ]; then
+              echo "::error::PR body must contain 'Version: X.Y.Z'"
+              exit 1
+            fi
+            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+            # Extract publish targets from PR labels
+            LABELS='${{ toJSON(github.event.pull_request.labels.*.name) }}'
+            echo "publish-npm=$(echo "$LABELS" | grep -q '"publish:npm"' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+            echo "publish-crates=$(echo "$LABELS" | grep -q '"publish:crates"' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+            echo "publish-go=$(echo "$LABELS" | grep -q '"publish:go"' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+            echo "publish-kotlin=$(echo "$LABELS" | grep -q '"publish:kotlin"' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+            echo "publish-android=$(echo "$LABELS" | grep -q '"publish:android"' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+            echo "publish-swift=$(echo "$LABELS" | grep -q '"publish:swift"' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+            echo "publish-lsp=$(echo "$LABELS" | grep -q '"publish:lsp"' && echo true || echo false)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Print config
+        run: |
+          echo "Version: ${{ steps.config.outputs.version }}"
+          echo "npm: ${{ steps.config.outputs.publish-npm }}"
+          echo "crates: ${{ steps.config.outputs.publish-crates }}"
+          echo "go: ${{ steps.config.outputs.publish-go }}"
+          echo "kotlin: ${{ steps.config.outputs.publish-kotlin }}"
+          echo "android: ${{ steps.config.outputs.publish-android }}"
+          echo "swift: ${{ steps.config.outputs.publish-swift }}"
+          echo "lsp: ${{ steps.config.outputs.publish-lsp }}"
+
+  # ── Gate: all tests must pass first ──────────────────────────────
+  rust-tests:
+    name: Rust Tests
+    runs-on: ubuntu-latest
+    needs: [resolve]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            parser
+            tailwind-parse
+            hypen-engine-rs
+            hypen-sdk-rs
+      - run: cargo test
+        working-directory: parser
+      - run: cargo test
+        working-directory: tailwind-parse
+      - run: cargo test
+        working-directory: hypen-engine-rs
+      - run: cargo test
+        working-directory: hypen-sdk-rs
+
+  # ── Build all WASM artifacts ─────────────────────────────────────
+  build-wasm:
+    name: Build WASM
+    runs-on: ubuntu-latest
+    needs: [rust-tests]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            parser
+            tailwind-parse
+            hypen-engine-rs
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      # JS targets
+      - name: Build WASM (bundler)
+        run: wasm-pack build --target bundler --out-dir pkg/bundler --features js
+        working-directory: hypen-engine-rs
+
+      - name: Build WASM (nodejs)
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js
+        working-directory: hypen-engine-rs
+
+      - name: Build WASM (web)
+        run: wasm-pack build --target web --out-dir pkg/web --features js
+        working-directory: hypen-engine-rs
+
+      # WASI target
+      - name: Build WASI
+        run: |
+          cargo build --target wasm32-wasip1 --release --features wasi
+          mkdir -p pkg/wasi
+          cp ../target/wasm32-wasip1/release/hypen_engine.wasm pkg/wasi/
+          cp wit/hypen.wit pkg/wasi/
+        working-directory: hypen-engine-rs
+
+      - name: Upload WASM artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wasm-all
+          path: |
+            hypen-engine-rs/pkg/
+
+  # ── Create GitHub Release with WASM binaries ─────────────────────
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [resolve, build-wasm]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-all
+          path: pkg
+
+      - name: Create and push tag
+        run: |
+          git tag "v${{ needs.resolve.outputs.version }}"
+          git push origin "v${{ needs.resolve.outputs.version }}"
+
+      - name: Package WASM artifacts
+        run: |
+          cd pkg
+          tar czf ../hypen-engine-wasm-bundler.tar.gz bundler/
+          tar czf ../hypen-engine-wasm-nodejs.tar.gz nodejs/
+          tar czf ../hypen-engine-wasm-web.tar.gz web/
+          tar czf ../hypen-engine-wasm-wasi.tar.gz wasi/
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: "v${{ needs.resolve.outputs.version }}"
+          generate_release_notes: true
+          files: |
+            hypen-engine-wasm-bundler.tar.gz
+            hypen-engine-wasm-nodejs.tar.gz
+            hypen-engine-wasm-web.tar.gz
+            hypen-engine-wasm-wasi.tar.gz
+
+  # ── Core: npm ────────────────────────────────────────────────────
+  publish-npm:
+    name: Publish npm
+    runs-on: ubuntu-latest
+    needs: [resolve, build-wasm, github-release]
+    if: ${{ needs.resolve.outputs.publish-npm == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-all
+          path: hypen-engine-rs/pkg
+
+      - name: Install & build
+        run: |
+          cd hypen-web && bun install && bun run build
+          cd ../hypen-cli && bun install && bun run build
+
+      - name: Publish @hypen-space/core
+        run: npm publish --access public
+        working-directory: hypen-web/packages/core
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @hypen-space/web
+        run: npm publish --access public
+        working-directory: hypen-web/packages/web
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @hypen-space/server
+        run: npm publish --access public
+        working-directory: hypen-web/packages/server
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @hypen-space/web-engine
+        run: npm publish --access public
+        working-directory: hypen-web/packages/web-engine
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @hypen-space/cli
+        run: npm publish --access public
+        working-directory: hypen-cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ── Core: crates.io ──────────────────────────────────────────────
+  publish-crates:
+    name: Publish crates.io
+    runs-on: ubuntu-latest
+    needs: [resolve, rust-tests, github-release]
+    if: ${{ needs.resolve.outputs.publish-crates == 'true' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish hypen-tailwind-parse
+        run: cargo publish --allow-dirty
+        working-directory: tailwind-parse
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish hypen-parser
+        run: cargo publish --allow-dirty
+        working-directory: parser
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish hypen-engine
+        run: cargo publish --allow-dirty
+        working-directory: hypen-engine-rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish hypen-server
+        run: cargo publish --allow-dirty
+        working-directory: hypen-sdk-rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  # ── Platform: Go ─────────────────────────────────────────────────
+  publish-go:
+    name: Publish Go SDK
+    needs: [resolve, github-release]
+    if: ${{ needs.resolve.outputs.publish-go == 'true' }}
+    uses: ./.github/workflows/publish-go.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      dry-run: false
+
+  # ── Platform: Kotlin ─────────────────────────────────────────────
+  publish-kotlin:
+    name: Publish Kotlin SDK
+    needs: [resolve, github-release]
+    if: ${{ needs.resolve.outputs.publish-kotlin == 'true' }}
+    uses: ./.github/workflows/publish-kotlin.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      dry-run: false
+    secrets:
+      SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+      SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+
+  # ── Platform: Android ────────────────────────────────────────────
+  publish-android:
+    name: Publish Android Renderer
+    needs: [resolve, github-release]
+    if: ${{ needs.resolve.outputs.publish-android == 'true' }}
+    uses: ./.github/workflows/publish-android.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      dry-run: false
+    secrets:
+      SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
+      SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
+      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+
+  # ── Platform: Swift ──────────────────────────────────────────────
+  publish-swift:
+    name: Publish Swift SDK
+    needs: [resolve, github-release]
+    if: ${{ needs.resolve.outputs.publish-swift == 'true' }}
+    uses: ./.github/workflows/publish-swift.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      dry-run: false
+
+  # ── Platform: LSP ────────────────────────────────────────────────
+  publish-lsp:
+    name: Publish LSP Extension
+    needs: [resolve, github-release]
+    if: ${{ needs.resolve.outputs.publish-lsp == 'true' }}
+    uses: ./.github/workflows/publish-lsp.yml
+    with:
+      version: ${{ needs.resolve.outputs.version }}
+      dry-run: false
+    secrets:
+      VSCE_PAT: ${{ secrets.VSCE_PAT }}

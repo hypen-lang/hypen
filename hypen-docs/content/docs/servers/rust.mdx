@@ -1,0 +1,681 @@
+---
+title: Rust SDK
+description: Complete guide to building Hypen servers with Rust
+---
+
+# Rust SDK
+
+The Rust SDK (`hypen-server`) provides a server-side Hypen implementation for Rust applications. It features a fluent builder API for module definitions, typed action handlers with automatic `serde` deserialization, `Serialize + DeserializeOwned` state with automatic JSON diffing, session management, and Remote UI streaming over WebSocket.
+
+## Installation
+
+Add to your `Cargo.toml`:
+
+```toml
+[dependencies]
+hypen-server = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+```
+
+For async action handlers:
+
+```toml
+[dependencies]
+hypen-server = { version = "0.4", features = ["async"] }
+tokio = { version = "1", features = ["full"] }
+```
+
+## Quick Start
+
+Create a counter module with the fluent API and serve it over WebSocket:
+
+```rust
+use hypen_server::prelude::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct CounterState {
+    count: i32,
+}
+
+fn main() -> Result<()> {
+    // 1. Define the module.
+    let counter = HypenApp::module::<CounterState>("Counter")
+        .state(CounterState::default())
+        .on_action::<()>("increment", |state, _, _ctx| { state.count += 1; })
+        .on_action::<()>("decrement", |state, _, _ctx| { state.count -= 1; })
+        .ui(r#"
+            Column {
+                Text("Count: @{state.count}")
+                Button("@actions.increment") { Text("+") }
+                Button("@actions.decrement") { Text("-") }
+            }
+        "#)
+        .build();
+
+    // 2. Register modules on a HypenApp via route-based wiring.
+    let app = HypenApp::builder()
+        .route("/", counter)
+        // .route("/feed", feed_module)
+        .build();
+
+    // 3. Plug `app` into your HTTP framework (Axum, Actix, etc.) via the
+    //    framework integration crate. The SDK provides the module system
+    //    and state management; the transport layer is framework-specific.
+
+    Ok(())
+}
+```
+
+For quick unit testing you can also instantiate a single module without the `HypenApp` wrapper using `ModuleInstance::new(Arc::new(counter), None)?`. Real deployments should use `HypenApp::builder()` + route-based registration.
+
+The UI template uses Hypen DSL:
+
+```hypen
+Column {
+    Text("Count: @{state.count}")
+    Button("@actions.increment") { Text("+") }
+    Button("@actions.decrement") { Text("-") }
+}
+```
+
+State is any type implementing `Serialize + DeserializeOwned + Clone + Send + Sync`. Mutate directly in handlers via `&mut` — changes are automatically diffed and synced to the engine.
+
+## Module Builder API
+
+`HypenApp::module::<S>("name")` returns a `ModuleBuilder<S>` for fluent chaining. All configuration methods return `self`. Terminate with `.build()` or `.ui()`.
+
+```rust
+let module = HypenApp::module::<MyState>("MyModule")
+    .state(MyState::default())
+    .persist()
+    .on_created(|state, ctx| { /* ... */ })
+    .on_action::<()>("doSomething", |state, _, ctx| { /* ... */ })
+    .on_destroyed(|state, ctx| { /* ... */ })
+    .on_error(|ctx| ErrorResult { handled: true })
+    .ui("Column { Text(\"Hello\") }")
+    .build();
+```
+
+### Builder Methods
+
+| Method | Description |
+|--------|-------------|
+| `.state(initial)` | Set initial state (required) |
+| `.ui(template)` | Inline Hypen DSL template |
+| `.ui_file(path)` | Load UI from `.hypen` file |
+| `.on_action::<P>(name, handler)` | Register action handler with typed payload |
+| `.on_created(handler)` | Called when module is mounted |
+| `.on_destroyed(handler)` | Called when module is unmounted |
+| `.on_error(handler)` | Custom error handler |
+| `.persist()` | Module survives route navigation |
+| `.build()` | Finalize into `ModuleDefinition<S>` |
+
+### State Trait
+
+Any type that satisfies these bounds automatically implements `State`:
+
+```rust
+pub trait State: Serialize + DeserializeOwned + Clone + Send + Sync + 'static {}
+```
+
+Use `#[derive]` to satisfy this:
+
+```rust
+#[derive(Clone, Serialize, Deserialize)]
+struct AppState {
+    count: i32,
+    user: Option<User>,
+    items: Vec<String>,
+}
+```
+
+## Action Handlers
+
+### No Payload
+
+Use `()` as the type parameter for actions without payloads:
+
+```rust
+.on_action::<()>("increment", |state, _, _ctx| {
+    state.count += 1;
+})
+```
+
+### Typed Payloads
+
+Any `serde::Deserialize` type works as a payload — it's automatically deserialized from the client's JSON:
+
+```rust
+#[derive(Deserialize)]
+struct AddPayload {
+    amount: i32,
+}
+
+.on_action::<AddPayload>("add", |state, payload, _ctx| {
+    state.count += payload.amount;
+})
+```
+
+### Scalar Payloads
+
+Simple types work directly:
+
+```rust
+.on_action::<String>("setName", |state, name, _ctx| {
+    state.name = name;
+})
+
+.on_action::<i32>("setCount", |state, value, _ctx| {
+    state.count = value;
+})
+```
+
+### Raw JSON Payloads
+
+Use `serde_json::Value` for dynamic payloads:
+
+```rust
+.on_action::<serde_json::Value>("raw", |state, json, _ctx| {
+    if let Some(n) = json.as_i64() {
+        state.count = n as i32;
+    }
+})
+```
+
+### Handler Signature
+
+All action handlers have this signature:
+
+```rust
+fn(&mut S, PayloadType, Option<&GlobalContext>) + Send + Sync + 'static
+```
+
+The handler receives:
+- `&mut S` — mutable reference to state (mutate directly)
+- `PayloadType` — deserialized payload (`()` for no payload)
+- `Option<&GlobalContext>` — global context if the module was created with one
+
+## Async Action Handlers
+
+With the `async` feature, use `on_action_async` for handlers that perform async work. Async handlers receive **owned** state and must return the new state:
+
+```rust
+#[derive(Deserialize)]
+struct FetchPayload {
+    id: String,
+}
+
+let module = HypenApp::module::<AppState>("AsyncDemo")
+    .state(AppState::default())
+    .on_action_async::<FetchPayload>("fetch", |mut state, payload, _ctx| {
+        Box::pin(async move {
+            state.loading = true;
+            let result = fetch_data(&payload.id).await;
+            state.data = Some(result);
+            state.loading = false;
+            state // return modified state
+        })
+    })
+    .build();
+```
+
+Async variants are also available for lifecycle hooks:
+
+```rust
+.on_created_async(|state, ctx| {
+    Box::pin(async move { /* async init */ })
+})
+```
+
+## State Management
+
+### Automatic Diffing
+
+The SDK automatically snapshots state before each handler, then diffs after to detect changes:
+
+1. Before handler: state is snapshotted as JSON
+2. Handler mutates state via `&mut`
+3. After handler: changed paths are detected (e.g., `"count"`, `"user.name"`, `"items.0"`)
+4. Only changed paths are synced to the engine
+
+```rust
+.on_action::<()>("updateUser", |state, _, _| {
+    state.user.name = "Alice".into();  // only "user.name" is synced
+    state.user.age = 30;               // only "user.age" is synced
+    // state.count is untouched — not synced
+})
+```
+
+### JSON State Access
+
+For dynamic state inspection:
+
+```rust
+let instance = ModuleInstance::new(Arc::new(def), None)?;
+instance.mount();
+
+let state: MyState = instance.get_state();
+let json: serde_json::Value = instance.get_state_json()?;
+```
+
+## Lifecycle Hooks
+
+```rust
+let module = HypenApp::module::<CounterState>("Counter")
+    .state(CounterState { count: 0 })
+    .on_created(|state, ctx| {
+        println!("Module created with count: {}", state.count);
+    })
+    .on_action::<()>("increment", |state, _, _| {
+        state.count += 1;
+    })
+    .on_destroyed(|state, ctx| {
+        println!("Module destroyed at count: {}", state.count);
+    })
+    .build();
+```
+
+| Hook | Signature | Called When |
+|------|-----------|------------|
+| `on_created` | `Fn(&S, Option<&GlobalContext>)` | Module instance is mounted |
+| `on_destroyed` | `Fn(&S, Option<&GlobalContext>)` | Module instance is unmounted |
+
+## Error Handling
+
+Register a custom error handler to intercept failures in action handlers and lifecycle hooks:
+
+```rust
+.on_error(|ctx| {
+    if let Some(action) = &ctx.action_name {
+        eprintln!("Action '{}' failed: {:?}", action, ctx.error);
+    } else if let Some(phase) = &ctx.lifecycle {
+        eprintln!("Lifecycle '{}' failed: {:?}", phase, ctx.error);
+    }
+    ErrorResult { handled: true } // suppress the error
+})
+```
+
+### Error Types
+
+```rust
+pub enum SdkError {
+    Engine(EngineError),           // Rendering engine error
+    ModuleNotFound(String),        // Unknown module name
+    ActionPayload { action, message }, // Payload deserialization failed
+    StateSerde(String),            // State serialization error
+    Route(String),                 // Routing error
+    Component(String),             // Component loading error
+    Other(String),                 // Catch-all
+}
+```
+
+### ErrorContext Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `error` | `SdkError` | The error |
+| `action_name` | `Option<String>` | Set if error came from an action handler |
+| `lifecycle` | `Option<String>` | `"created"` or `"destroyed"` if from a lifecycle hook |
+
+## Routing
+
+### HypenRouter
+
+URL-based navigation with pattern matching:
+
+```rust
+let router = HypenRouter::new();
+
+// Navigate
+router.push("/users/123");
+router.replace("/login");
+
+// Query current state
+router.current_path();  // "/users/123"
+router.query();         // HashMap of query params
+router.state();         // RouteState { current_path, params, query, previous_path }
+
+// Pattern matching
+let m = router.match_path("/users/:id", "/users/42").unwrap();
+// m.params["id"] == "42"
+
+router.is_active("/users/:id"); // true
+
+// URL construction
+let url = HypenRouter::build_url("/search", &query_params);
+
+// Listen for navigation
+let id = router.on_navigate(|from, to| {
+    println!("{:?} → {}", from, to);
+});
+```
+
+### Pattern Syntax
+
+| Pattern | Example Match | Params |
+|---------|---------------|--------|
+| `/users/:id` | `/users/42` | `["id": "42"]` |
+| `/posts/:postId/comments/:commentId` | `/posts/1/comments/5` | `["postId": "1", "commentId": "5"]` |
+| `/files/*` | `/files/a/b/c` | wildcard match |
+| `/about` | `/about` | exact match |
+
+### App-Level Routing
+
+Register route-to-module mappings on `HypenApp`:
+
+```rust
+let app = HypenApp::builder()
+    .route("/", home_module)
+    .route("/users/:id", user_module)
+    .route("/counter", counter_module)
+    .components_dir("./components")
+    .build();
+
+// Match routes
+if let Some((pattern, module_name)) = app.match_route("/users/42") {
+    // pattern == "/users/:id"
+}
+
+// Navigate
+app.navigate("/counter");
+```
+
+### ManagedRouter
+
+For route-driven module lifecycle with LRU persistence, use
+[`ManagedRouter`](https://docs.rs/hypen-server/latest/hypen_server/managed_router/).
+Unlike TS/Go/Swift/Kotlin, Rust routes take a **factory closure**
+(`Arc<dyn Fn() -> Result<Arc<dyn ManagedModule>>>`) instead of
+looking up a typed definition from a registry — the type-erased
+`ManagedModule` trait sidesteps `ModuleInstance<S>`'s generics.
+
+```rust
+use hypen_server::managed_router::{ManagedRouter, ManagedRouterOptions, RouteDefinition};
+
+let managed = ManagedRouter::new(
+    Arc::clone(&router),
+    Arc::clone(&ctx),
+    ManagedRouterOptions::default(),  // LRU cap 10, persist=false
+);
+managed.add_route(RouteDefinition::factory("/", "Home", {
+    let app = Arc::clone(&app);
+    let def = Arc::clone(&home_def);
+    move || {
+        let inst = app.instantiate(Arc::clone(&def))?;
+        Ok(Arc::new(inst) as _)
+    }
+}).persist(true));
+managed.start();
+```
+
+### RemoteSession routing
+
+`RemoteSession` owns a per-session `HypenRouter` and installs the
+reserved `@router.push` / `@router.replace` / `@router.back` /
+`@router.forward` engine actions at construction — DSL authors write
+`.onClick(@router.push, to: "/search")` and it Just Works. The
+session also mirrors the router path into primary `state.location`
+when the primary state shape carries that field.
+
+Rust's `on_activated` lifecycle hook is **read-only** (matches
+`on_created` and `on_destroyed`). For route-param-driven data
+loading, use `session.on_route_enter`:
+
+```rust
+session.on_route_enter("/comments/:postId", move |params, state, _ctx| {
+    let post_id = params.get("postId").cloned().unwrap_or_default();
+    let comments = load_comments(&post_id);
+    if let Some(slot) = state.get_mut("comments") {
+        if let Some(obj) = slot.as_object_mut() {
+            obj.insert("postId".into(), Value::String(post_id));
+            obj.insert("comments".into(), serde_json::to_value(&comments).unwrap());
+        }
+    }
+});
+```
+
+Hooks fire after every nav (push / replace / back), receive the
+extracted params, and can mutate any scope's state slot directly.
+Mutations are flushed to the engine inside the same dispatch so
+patches ship in the same WS frame.
+
+See the [Routing guide](/docs/guide/routing) for the DSL-level
+contract and cross-SDK equivalents.
+
+## Event System
+
+Pub/sub messaging for cross-module communication:
+
+```rust
+let emitter = EventEmitter::new();
+
+// Subscribe
+let id = emitter.on("user:login", |payload: &Value| {
+    println!("User logged in: {:?}", payload);
+});
+
+// One-time listener
+emitter.once("init:complete", |payload: &Value| {
+    println!("Init done");
+});
+
+// Emit
+emitter.emit("user:login", &json!({"name": "Alice"}));
+
+// Unsubscribe
+emitter.off(id);
+
+// Cleanup
+emitter.remove_all("user:login");
+emitter.clear();
+```
+
+### Built-in Framework Events
+
+```rust
+use hypen_server::events::framework;
+
+framework::MODULE_CREATED    // "module:created"
+framework::MODULE_DESTROYED  // "module:destroyed"
+framework::ROUTE_CHANGED     // "route:changed"
+framework::STATE_UPDATED     // "state:updated"
+framework::ACTION_DISPATCHED // "action:dispatched"
+framework::ERROR             // "error"
+```
+
+## Global Context
+
+Cross-module communication hub:
+
+```rust
+use std::sync::Arc;
+
+let ctx = Arc::new(GlobalContext::new());
+
+// Register module state
+ctx.register_module_state("counter", json!({"count": 0}));
+
+// Access other modules' state
+let state = ctx.get_module_state("counter");
+
+// Query
+ctx.has_module("counter");   // true
+ctx.module_names();          // vec!["counter"]
+ctx.global_state();          // merged view of all module states
+
+// Events via context
+ctx.events().emit("custom:event", &json!({"data": "value"}));
+let id = ctx.events().on("custom:event", |payload| {
+    println!("Event: {:?}", payload);
+});
+
+// Router access
+ctx.set_router(Arc::new(HypenRouter::new()));
+let router = ctx.router();
+```
+
+### Using Context in Handlers
+
+```rust
+.on_created(|state, ctx| {
+    if let Some(ctx) = ctx {
+        // Read another module's state
+        let theme = ctx.get_module_state("theme");
+
+        // Emit events
+        ctx.events().emit("counter:ready", &json!(state));
+
+        // Access router
+        if let Some(router) = ctx.router() {
+            println!("Current route: {}", router.current_path());
+        }
+    }
+})
+```
+
+## Component Discovery
+
+Discover `.hypen` templates from the filesystem:
+
+```rust
+let mut registry = ComponentRegistry::new();
+
+// Load all components from a directory
+let names = registry.load_dir("./components")?;
+
+// Manual registration
+registry.register("Header", "<template source>", Some(path));
+
+// Load single file
+let name = registry.load_file("./components/Footer.hypen")?;
+
+// Lookup
+registry.get("Header");     // Option<&ComponentEntry>
+registry.has("Header");     // true
+registry.names();           // vec!["Header", "Footer"]
+```
+
+### Discovery Naming Conventions
+
+| File Structure | Component Name |
+|----------------|---------------|
+| `button.hypen` | `Button` |
+| `user-card.hypen` | `UserCard` |
+| `my_component.hypen` | `MyComponent` |
+| `Button/component.hypen` | `Button` |
+| `Modal/index.hypen` | `Modal` |
+
+## Remote UI Protocol
+
+The SDK includes `RemoteSession` for server-driven UI over WebSocket:
+
+```rust
+let config = SessionConfig {
+    module_name: "App".into(),
+    ui_source: r#"Column { Text("@{state.count}") }"#.into(),
+    components: ComponentRegistry::new(),
+    initial_state: json!({"count": 0}),
+    action_names: vec!["increment".into()],
+};
+
+let session = RemoteSession::new(config);
+
+session.set_action_handler(|action, payload, state| {
+    // Modify and return new state
+    let mut s = state.clone();
+    if action == "increment" {
+        if let Some(count) = s.get_mut("count") {
+            *count = json!(count.as_i64().unwrap_or(0) + 1);
+        }
+    }
+    s
+});
+
+// On WebSocket connect:
+let init_msgs = session.handle_hello(None);
+for msg in init_msgs {
+    ws.send(msg);
+}
+
+// On WebSocket message:
+let responses = session.handle_message(&incoming_json);
+for resp in responses {
+    ws.send(resp);
+}
+```
+
+### Protocol Flow
+
+```
+Client              Server
+  │─ hello ─────────>│
+  │<─ sessionAck ────│
+  │<─ initialTree ───│
+  │─ dispatchAction ─>│
+  │<─ patch ─────────│
+  │<─ stateUpdate ───│
+```
+
+### RemoteMessage Types
+
+| Message | Direction | Description |
+|---------|-----------|-------------|
+| `Hello` | Client → Server | Initial connection with optional session ID |
+| `SessionAck` | Server → Client | Confirms session with `is_new` / `is_restored` flags |
+| `InitialTree` | Server → Client | Full render tree as patches |
+| `Patch` | Server → Client | Incremental UI updates |
+| `StateUpdate` | Server → Client | Full state snapshot |
+| `DispatchAction` | Client → Server | Action with optional payload |
+| `SessionExpired` | Server → Client | Session timed out |
+
+## Module Instance Lifecycle
+
+```rust
+let def = Arc::new(counter_definition);
+let instance = ModuleInstance::new(def, Some(ctx.clone()))?;
+
+// Register patch listener
+instance.on_patches(|patches| {
+    for patch in patches {
+        println!("{:?}", patch);
+    }
+});
+
+// Mount (triggers on_created)
+instance.mount();
+assert!(instance.is_mounted());
+
+// Dispatch actions
+instance.dispatch_action("increment", None)?;
+instance.dispatch_action("add", Some(json!({"amount": 5})))?;
+
+// Read state
+let state = instance.get_state();
+let json = instance.get_state_json()?;
+
+// Unmount (triggers on_destroyed)
+instance.unmount();
+```
+
+## Feature Flags
+
+| Feature | Description |
+|---------|-------------|
+| (none) | Synchronous API only |
+| `async` | Enables `on_action_async`, `on_created_async`, `on_destroyed_async`, `mount_async`, `unmount_async`, `dispatch_action_async`, and `BoxFuture` type |
+
+## Requirements
+
+- Rust 1.70+ (2021 edition)
+- `serde` + `serde_json` for state serialization
+- `tokio` (optional, with `async` feature)
+
+## See Also
+
+- [TypeScript SDK](/docs/servers/typescript) — TypeScript server SDK with sessions and component discovery
+- [Go SDK](/docs/servers/golang) — Go server SDK reference
+- [Kotlin SDK](/docs/servers/kotlin) — Kotlin/JVM SDK with type-safe DSL and coroutine support
+- [Swift SDK](/docs/servers/swift) — Swift server SDK with typed action enums
+- [Remote App Tutorial](/docs/getting-started/remote-app) — Step-by-step guide to building a remote app

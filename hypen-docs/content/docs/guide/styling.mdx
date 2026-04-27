@@ -1,0 +1,747 @@
+---
+title: Styling
+description: Comprehensive applicator reference for styling Hypen components
+---
+
+# Styling
+
+Applicators are functions that apply visual effects, styling, and behavior to components. They are chained using dot notation after a component declaration.
+
+```hypen
+Text("Hello World")
+    .color("#FF0000")
+    .fontSize(20)
+    .fontWeight("bold")
+```
+
+## Spacing
+
+### padding
+
+Adds internal spacing between a component's content and its border.
+
+```hypen
+// Uniform padding on all sides
+Box { }.padding(16)
+
+// Named arguments for specific sides
+Box { }.padding(top: 16, right: 12, bottom: 16, left: 12)
+
+// Horizontal and vertical
+Box { }.padding(horizontal: 16, vertical: 8)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### margin
+
+Adds external spacing outside the component's border.
+
+```hypen
+// Uniform margin
+Box { }.margin(16)
+
+// Named arguments
+Box { }.margin(top: 8, bottom: 8)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### gap
+
+Sets the spacing between child elements in a layout container.
+
+```hypen
+Column {
+    Text("Item 1")
+    Text("Item 2")
+}
+.gap(12)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Colors
+
+### color
+
+Sets the text or foreground color of a component.
+
+```hypen
+Text("Red text").color("#FF0000")
+Text("Blue text").color("blue")
+Text("RGB").color("rgb(100, 150, 200)")
+Text("With alpha").color("rgba(0, 0, 0, 0.5)")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### backgroundColor
+
+Sets the background color of a component.
+
+```hypen
+Box { }
+    .backgroundColor("#3B82F6")
+
+Button { Text("Submit") }
+    .backgroundColor("rgb(59, 130, 246)")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### opacity
+
+Sets the transparency level of a component. Values range from 0 (fully transparent) to 1 (fully opaque).
+
+```hypen
+Box { }.opacity(0.5)    // 50% transparent
+Image("bg.jpg").opacity(0.3)  // Faded background
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Typography
+
+### fontSize
+
+Sets the size of text in density-independent points.
+
+```hypen
+Text("Small").fontSize(12)
+Text("Normal").fontSize(16)
+Text("Large").fontSize(24)
+Text("Heading").fontSize(32)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### fontWeight
+
+Controls the thickness/boldness of text.
+
+```hypen
+Text("Normal").fontWeight("normal")
+Text("Medium").fontWeight("500")
+Text("Bold").fontWeight("bold")
+```
+
+Accepted values:
+- Numeric: `100`, `200`, `300`, `400`, `500`, `600`, `700`, `800`, `900`
+- Named: `thin`, `light`, `normal`, `medium`, `semibold`, `bold`, `extrabold`, `black`
+
+**Platform Support:** Web, Android, iOS
+
+### fontFamily
+
+Sets the font family for text. You can specify multiple fallback fonts.
+
+```hypen
+Text("Serif").fontFamily("serif")
+Text("Sans").fontFamily("sans-serif")
+Text("Mono").fontFamily("monospace")
+Text("Custom").fontFamily("Inter, system-ui, sans-serif")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### fontStyle
+
+Sets the style of the font, primarily used for italics.
+
+```hypen
+Text("Normal text").fontStyle("normal")
+Text("Emphasized text").fontStyle("italic")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### textAlign
+
+Controls horizontal text alignment within its container.
+
+```hypen
+Text("Left aligned").textAlign("left")
+Text("Centered").textAlign("center")
+Text("Right aligned").textAlign("right")
+Text("Justified text that spans multiple lines").textAlign("justify")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### textDecoration
+
+Adds visual decorations to text like underlines or strikethroughs.
+
+```hypen
+Text("Underlined").textDecoration("underline")
+Text("Crossed out").textDecoration("line-through")
+Text("Both").textDecoration("underline line-through")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### textTransform
+
+Transforms the case of text without changing the source content.
+
+```hypen
+Text("uppercase").textTransform("uppercase")   // UPPERCASE
+Text("LOWERCASE").textTransform("lowercase")   // lowercase
+Text("capitalize this").textTransform("capitalize")  // Capitalize This
+```
+
+**Platform Support:** Web, Android, iOS
+
+### lineHeight
+
+Sets the height of each line of text, controlling vertical spacing between lines. Useful for readability in paragraphs.
+
+```hypen
+Paragraph("Long text content that spans multiple lines...")
+    .lineHeight(1.6)
+
+Text("Tight spacing").lineHeight(1.2)
+Text("Loose spacing").lineHeight(2.0)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### letterSpacing
+
+Adjusts the horizontal spacing between characters.
+
+```hypen
+Text("SPACED OUT").letterSpacing(2)
+Text("Tight").letterSpacing(-0.5)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### maxLines / textOverflow
+
+Limits text to a maximum number of lines and controls how overflow is displayed. Essential for truncating long content in cards and lists.
+
+```hypen
+Text("This is a very long text that might overflow the container...")
+    .maxLines(2)
+    .textOverflow("ellipsis")
+
+// Single line with ellipsis
+Text("Long title...").maxLines(1).textOverflow("ellipsis")
+```
+
+Values for textOverflow:
+- `ellipsis` - Shows "..." at the truncation point
+- `clip` - Simply cuts off the text
+
+**Platform Support:** Web, Android, iOS
+
+## Borders
+
+### border
+
+A shorthand applicator for setting all border properties at once.
+
+```hypen
+// Width only (uses default color and style)
+Box { }.border(1)
+
+// Full configuration
+Box { }.border(width: 2, color: "#3B82F6", style: "solid", radius: 8)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### borderWidth
+
+Sets the thickness of the border.
+
+```hypen
+Box { }.borderWidth(1)
+Box { }.borderWidth(2)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### borderColor
+
+Sets the color of the border.
+
+```hypen
+Box { }
+    .borderWidth(1)
+    .borderColor("#E5E7EB")
+
+Input(placeholder: "Email")
+    .borderWidth(1)
+    .borderColor("#3B82F6")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### borderStyle
+
+Sets the visual style of the border.
+
+```hypen
+Box { }.borderWidth(1).borderStyle("solid")
+Box { }.borderWidth(1).borderStyle("dashed")
+Box { }.borderWidth(1).borderStyle("dotted")
+```
+
+Values: `solid`, `dashed`, `dotted`
+
+**Platform Support:** Web, Android, iOS
+
+### borderRadius / cornerRadius
+
+Rounds the corners of a component. `cornerRadius` is an alias for `borderRadius`.
+
+```hypen
+// Uniform radius on all corners
+Box { }.borderRadius(8)
+
+// Fully circular (with equal width/height)
+Avatar("user.jpg").size(48).borderRadius(24)
+
+// Individual corners
+Box { }.borderRadius(topLeft: 8, topRight: 8, bottomLeft: 0, bottomRight: 0)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Visual Effects
+
+### boxShadow / shadow
+
+Adds a drop shadow effect to create depth and elevation.
+
+```hypen
+// CSS-style shadow syntax
+Card { }
+    .boxShadow("0 4px 6px rgba(0, 0, 0, 0.1)")
+
+// Named arguments
+Card { }
+    .shadow(blur: 8, spread: 2, color: "rgba(0, 0, 0, 0.1)")
+
+// Multiple shadows
+Card { }
+    .boxShadow("0 1px 3px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.24)")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### elevation
+
+Applies Material Design-style elevation with automatic shadow. Higher values create more prominent shadows.
+
+```hypen
+Card { }.elevation(1)   // Subtle lift
+Card { }.elevation(4)   // Standard card
+Card { }.elevation(8)   // Floating element
+Card { }.elevation(16)  // Modal/dialog
+```
+
+**Platform Support:** Android, iOS (Web: use boxShadow)
+
+### blur
+
+Applies a blur effect to the component's content.
+
+```hypen
+Box { }.blur(4)
+Image("background.jpg").blur(10)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### filter
+
+Applies CSS filter effects for advanced visual manipulation.
+
+```hypen
+Image("photo.jpg").filter("grayscale(100%)")
+Image("photo.jpg").filter("sepia(50%)")
+Image("photo.jpg").filter("brightness(1.2) contrast(1.1)")
+```
+
+Common filter functions: `blur()`, `brightness()`, `contrast()`, `grayscale()`, `sepia()`, `saturate()`, `hue-rotate()`, `invert()`
+
+**Platform Support:** Web only
+
+### backdropFilter
+
+Applies filter effects to the content behind the element, creating frosted glass effects.
+
+```hypen
+Box { }
+    .backdropFilter("blur(10px)")
+    .backgroundColor("rgba(255, 255, 255, 0.5)")
+
+// Frosted glass header
+Header { }
+    .backdropFilter("blur(20px) saturate(180%)")
+    .backgroundColor("rgba(255, 255, 255, 0.7)")
+```
+
+**Platform Support:** Web only
+
+## Transforms
+
+Transforms modify the visual rendering of a component without affecting layout.
+
+### rotate
+
+Rotates an element by the specified number of degrees.
+
+```hypen
+Box { }.rotate(45)       // 45 degrees clockwise
+Box { }.rotate(-90)      // 90 degrees counter-clockwise
+Icon("arrow").rotate(180)  // Flip upside down
+```
+
+**Platform Support:** Web, Android, iOS
+
+### scale / scaleX / scaleY
+
+Scales an element larger or smaller. Values greater than 1 enlarge, less than 1 shrink.
+
+```hypen
+Box { }.scale(1.5)       // 150% size
+Box { }.scale(0.5)       // 50% size
+Box { }.scaleX(2)        // Stretch horizontally
+Box { }.scaleY(0.8)      // Compress vertically
+```
+
+**Platform Support:** Web, Android, iOS
+
+### translateX / translateY
+
+Moves an element from its normal position without affecting layout.
+
+```hypen
+Box { }.translateX(20)   // Move 20 points right
+Box { }.translateY(-10)  // Move 10 points up
+
+// Combine for diagonal movement
+Badge("New")
+    .translateX(10)
+    .translateY(-10)
+```
+
+**Platform Support:** Web, Android, iOS
+
+### transform
+
+Applies CSS transform functions directly. Allows combining multiple transforms in a single declaration.
+
+```hypen
+Box { }.transform("rotate(45deg) scale(1.2)")
+Box { }.transform("translateX(20px) translateY(10px)")
+Box { }.transform("skewX(10deg)")
+```
+
+**Platform Support:** Web only
+
+## Transitions & Animation
+
+### transition
+
+Animates property changes smoothly over time. Essential for creating polished interactive experiences.
+
+```hypen
+Button { Text("Hover me") }
+    .transition("all 0.2s ease")
+
+// Specific properties
+Box { }
+    .transition("background-color 0.3s ease, transform 0.2s ease-out")
+
+// Different timing functions
+Box { }.transition("opacity 0.5s linear")
+Box { }.transition("transform 0.3s ease-in-out")
+```
+
+Common timing functions: `ease`, `linear`, `ease-in`, `ease-out`, `ease-in-out`
+
+**Platform Support:** Web only
+
+## Cursor
+
+### cursor
+
+Sets the mouse cursor style when hovering over the element.
+
+```hypen
+Button { }.cursor("pointer")
+Link { }.cursor("pointer")
+Box { }.cursor("grab")
+Input { }.cursor("text")
+```
+
+Common values: `pointer`, `default`, `text`, `grab`, `grabbing`, `not-allowed`, `crosshair`, `move`
+
+**Platform Support:** Web only
+
+## Gradients
+
+### linearGradient
+
+Applies a linear gradient background that transitions between colors along a line.
+
+```hypen
+// Horizontal gradient
+Box { }
+    .linearGradient("to right, #3B82F6, #8B5CF6")
+
+// Vertical gradient
+Box { }
+    .linearGradient("to bottom, #FF6B6B, #4ECDC4")
+
+// Diagonal with multiple colors
+Box { }
+    .linearGradient("to bottom right, #667eea, #764ba2, #f093fb")
+
+// With specific stops
+Box { }
+    .linearGradient("90deg, #FF0000 0%, #00FF00 50%, #0000FF 100%")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### radialGradient
+
+Applies a radial gradient that radiates from a center point.
+
+```hypen
+Box { }
+    .radialGradient("circle, #3B82F6, #1E40AF")
+
+Box { }
+    .radialGradient("ellipse at center, #FF6B6B 0%, #4ECDC4 100%")
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Applicator Reference Table
+
+A complete reference of all applicators and their platform support:
+
+| Category | Applicator | Web | Android | iOS |
+|----------|-----------|-----|---------|-----|
+| **Spacing** | padding, margin, gap | Yes | Yes | Yes |
+| **Colors** | color, backgroundColor, opacity | Yes | Yes | Yes |
+| **Typography** | fontSize, fontWeight, fontFamily | Yes | Yes | Yes |
+| **Typography** | fontStyle, textAlign, textDecoration | Yes | Yes | Yes |
+| **Typography** | textTransform, lineHeight, letterSpacing | Yes | Yes | Yes |
+| **Typography** | maxLines, textOverflow | Yes | Yes | Yes |
+| **Borders** | border, borderWidth, borderColor | Yes | Yes | Yes |
+| **Borders** | borderStyle, borderRadius, cornerRadius | Yes | Yes | Yes |
+| **Effects** | boxShadow, shadow, blur | Yes | Yes | Yes |
+| **Effects** | elevation | No | Yes | Yes |
+| **Effects** | filter, backdropFilter | Yes | No | No |
+| **Transforms** | rotate, scale, scaleX, scaleY | Yes | Yes | Yes |
+| **Transforms** | translateX, translateY | Yes | Yes | Yes |
+| **Transforms** | transform (CSS) | Yes | No | No |
+| **Animation** | transition | Yes | No | No |
+| **Cursor** | cursor | Yes | No | No |
+| **Gradients** | linearGradient, radialGradient | Yes | Yes | Yes |
+
+## Responsive & State Variants
+
+Hypen supports responsive breakpoints and interactive states using value maps. This allows you to define different styles for different screen sizes and interaction states.
+
+### Responsive Breakpoints
+
+Pass a map with breakpoint keys to any applicator:
+
+```hypen
+// Different padding at different screen sizes
+Box { }
+    .padding({default: 8, md: 16, lg: 24})
+
+// Responsive font sizes
+Text("Responsive")
+    .fontSize({default: 14, sm: 16, md: 18, lg: 24})
+
+// Multiple responsive properties
+Box { }
+    .width({default: "100%", md: "50%", lg: "33%"})
+    .padding({default: 8, md: 16, lg: 32})
+```
+
+| Breakpoint | Min-Width | Usage |
+|------------|-----------|-------|
+| `default` | 0px | Base/mobile styles |
+| `sm` | 640px | Small screens |
+| `md` | 768px | Medium screens (tablets) |
+| `lg` | 1024px | Large screens (laptops) |
+| `xl` | 1280px | Extra large screens |
+| `2xl` | 1536px | 2X large screens |
+
+**Platform Support:** Web, Android, iOS
+
+### State Variants
+
+Use state keys in value maps for interactive states:
+
+```hypen
+// Button with hover and active states
+Button { Text("Click me") }
+    .backgroundColor({default: "#3B82F6", hover: "#2563EB", active: "#1D4ED8"})
+
+// Input with focus styling
+Input(placeholder: "Email")
+    .borderColor({default: "#D1D5DB", focus: "#3B82F6"})
+
+// Disabled state
+Button { Text("Submit") }
+    .opacity({default: 1, disabled: 0.5})
+```
+
+| State | Description |
+|-------|-------------|
+| `hover` | Mouse hover (pointer interaction) |
+| `focus` | Element has focus |
+| `active` | Element is being pressed |
+| `disabled` | Element is disabled |
+| `focus-visible` | Keyboard focus only |
+| `focus-within` | Child has focus |
+
+**Platform Support:** Web, Android, iOS
+
+## Tailwind CSS
+
+Hypen has built-in Tailwind CSS support with responsive breakpoints and interactive state variants. Use the `.tw()` applicator to apply Tailwind utility classes directly.
+
+### Basic Usage
+
+```hypen
+// Apply Tailwind classes
+Text("Hello").tw("text-blue-500 font-bold p-4")
+
+// Combine with other applicators
+Box { }
+    .tw("rounded-lg shadow-md")
+    .backgroundColor("#F3F4F6")
+```
+
+**Platform Support:** Web, Android, iOS
+
+### Responsive Breakpoints
+
+Tailwind's responsive prefixes work across all platforms:
+
+```hypen
+// Responsive text sizing
+Text("Responsive")
+    .tw("text-sm md:text-base lg:text-xl")
+
+// Responsive padding
+Box { }
+    .tw("p-2 sm:p-4 md:p-6 lg:p-8 xl:p-12")
+
+// Responsive layout
+Box { }
+    .tw("w-full md:w-1/2 lg:w-1/3")
+```
+
+| Breakpoint | Min-Width | Usage |
+|------------|-----------|-------|
+| `sm:` | 640px | Small screens |
+| `md:` | 768px | Medium screens (tablets) |
+| `lg:` | 1024px | Large screens (laptops) |
+| `xl:` | 1280px | Extra large screens |
+| `2xl:` | 1536px | 2X large screens |
+
+### State Variants
+
+Interactive state variants for hover, focus, and other states:
+
+```hypen
+// Button with hover and active states
+Button { Text("Click me") }
+    .tw("bg-blue-500 hover:bg-blue-700 active:bg-blue-900")
+
+// Input with focus state
+Input(placeholder: "Email")
+    .tw("border-gray-300 focus:border-blue-500 focus:ring-2")
+
+// Disabled state
+Button { Text("Disabled") }
+    .tw("bg-gray-400 disabled:opacity-50 disabled:cursor-not-allowed")
+```
+
+| State | Description |
+|-------|-------------|
+| `hover:` | Mouse hover (pointer interaction) |
+| `focus:` | Element has focus |
+| `active:` | Element is being pressed |
+| `disabled:` | Element is disabled |
+| `focus-visible:` | Keyboard focus only |
+| `focus-within:` | Child has focus |
+
+### Combining with Responsive Values
+
+You can mix `.tw()` with responsive value maps for fine-grained control:
+
+```hypen
+Text("Mixed styling")
+    .tw("font-bold text-center")
+    .fontSize({default: 14, md: 18, lg: 24})
+    .padding({default: 8, md: 16})
+```
+
+### Supported Utilities
+
+The following Tailwind utility categories are supported:
+
+**Spacing:** `p-*`, `m-*`, `gap-*`, `px-*`, `py-*`, `pt-*`, `pb-*`, `pl-*`, `pr-*`, `mx-*`, `my-*`, `mt-*`, `mb-*`, `ml-*`, `mr-*`
+
+**Sizing:** `w-*`, `h-*`, `min-w-*`, `max-w-*`, `min-h-*`, `max-h-*`, `size-*`
+
+**Colors:** `text-*`, `bg-*`, `border-*`
+
+**Typography:** `text-xs`, `text-sm`, `text-base`, `text-lg`, `text-xl`, `text-2xl`, `font-thin`, `font-light`, `font-normal`, `font-medium`, `font-semibold`, `font-bold`, `leading-*`, `tracking-*`, `text-left`, `text-center`, `text-right`
+
+**Layout:** `flex`, `grid`, `justify-*`, `items-*`, `grid-cols-*`, `flex-row`, `flex-col`
+
+**Borders:** `border`, `border-*`, `rounded`, `rounded-*`
+
+**Effects:** `shadow-*`, `opacity-*`, `blur-*`
+
+### Example: Responsive Card
+
+A complete example showing Tailwind classes for a responsive product card:
+
+```hypen
+Column {
+    Image("product.jpg")
+        .tw("w-full rounded-t-lg")
+
+    Column {
+        Text("Product Name")
+            .tw("text-lg md:text-xl font-bold")
+
+        Text("$29.99")
+            .tw("text-green-600 font-semibold")
+
+        Text("A great product description that highlights the key features...")
+            .tw("text-sm text-gray-600 mt-2")
+
+        Button { Text("Add to Cart") }
+            .tw("mt-4 w-full bg-blue-500 hover:bg-blue-700 text-white py-2 px-4 rounded")
+    }
+    .tw("p-4 md:p-6")
+}
+.tw("bg-white rounded-lg shadow-md hover:shadow-lg transition-shadow max-w-sm")
+```
+
+## Next Steps
+
+- [Components](/docs/guide/components) - All built-in components
+- [Inputs](/docs/guide/inputs) - Forms and user interaction
+- [Layout](/docs/guide/layout) - Arranging components
+- [State & Modules](/docs/guide/state) - State management

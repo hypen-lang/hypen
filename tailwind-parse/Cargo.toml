@@ -1,0 +1,17 @@
+[package]
+name = "hypen-tailwind-parse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Minimal Tailwind CSS class parser for Hypen"
+keywords = ["tailwind", "css", "parser", "utility-css"]
+categories = ["parsing", "web-programming"]
+readme = "README.md"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]

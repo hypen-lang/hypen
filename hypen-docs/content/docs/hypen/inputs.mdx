@@ -1,0 +1,128 @@
+---
+title: Inputs Reference
+description: Complete reference for Hypen input components
+---
+
+# Inputs Reference
+
+Complete reference for input components in Hypen.
+
+## Button
+
+Clickable button.
+
+```hypen
+Button { Text("Submit") }
+    .onClick(@actions.submit)
+```
+
+**Applicators:**
+- `.onClick(action)`: Action to dispatch when clicked
+- `.disabled(bool)`: Disable the button
+
+## Input
+
+Single-line text input.
+
+```hypen
+// Two-way binding (recommended)
+Input(placeholder: "Enter text").bind(@state.text)
+
+// Manual binding
+Input(placeholder: "Enter text")
+    .value(@{state.text})
+    .onInput(@actions.updateText)
+```
+
+**Arguments:**
+- `placeholder`: Placeholder text
+
+**Applicators:**
+- `.bind(state)`: Two-way binding — syncs value with state automatically
+- `.value(binding)`: Current value (state binding, read-only)
+- `.onInput(action)`: Action for text changes
+- `.onFocus(action)`: Action when focused
+- `.onBlur(action)`: Action when blurred
+- `.onKey(action)`: Action when Enter pressed
+
+## Textarea
+
+Multi-line text input.
+
+```hypen
+Textarea(placeholder: "Enter message")
+    .bind(@state.message)
+    .height(120)
+```
+
+**Arguments/Applicators:** Same as Input
+
+## Checkbox
+
+Toggle checkbox.
+
+```hypen
+// Two-way binding (recommended)
+Checkbox {}.bind(@state.agreed)
+
+// Manual binding
+Checkbox {}
+    .checked(@{state.agreed})
+    .onChange(@actions.toggleAgreed)
+```
+
+**Applicators:**
+- `.bind(state)`: Two-way binding — syncs checked state automatically
+- `.checked(binding)`: Current checked state (read-only)
+- `.onChange(action)`: Action when toggled
+
+## Switch
+
+Toggle switch.
+
+```hypen
+// Two-way binding (recommended)
+Switch {}.bind(@state.enabled)
+
+// Manual binding
+Switch {}
+    .checked(@{state.enabled})
+    .onChange(@actions.toggleEnabled)
+```
+
+**Applicators:** Same as Checkbox
+
+## Select
+
+Dropdown selection.
+
+```hypen
+// Two-way binding (recommended)
+Select {}.bind(@state.selected)
+
+// Manual binding
+Select {}
+    .value(@{state.selected})
+    .onChange(@actions.updateSelected)
+```
+
+**Applicators:**
+- `.bind(state)`: Two-way binding — syncs selected value automatically
+- `.value(binding)`: Current selected value (read-only)
+- `.onChange(action)`: Action when selection changes
+
+## Slider
+
+Range slider.
+
+```hypen
+Slider {}
+    .value(@{state.volume})
+    .onChange(@actions.updateVolume)
+```
+
+**Applicators:**
+- `.value(binding)`: Current value
+- `.onChange(action)`: Action when value changes
+- `.min(number)`: Minimum value (default: 0)
+- `.max(number)`: Maximum value (default: 100)

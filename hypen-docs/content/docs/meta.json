@@ -1,0 +1,19 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "index",
+    "---Getting Started---",
+    "getting-started",
+    "---Guide---",
+    "guide",
+    "---Reference---",
+    "hypen",
+    "modules",
+    "comparison",
+    "---Platform---",
+    "adapters",
+    "servers",
+    "---Tools---",
+    "tooling"
+  ]
+}

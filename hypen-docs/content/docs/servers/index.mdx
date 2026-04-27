@@ -1,0 +1,90 @@
+---
+title: Server SDKs Overview
+description: Server-side rendering and streaming for Hypen applications
+---
+
+# Server SDKs
+
+Hypen supports server-side rendering where the WASM engine runs on your server and streams UI patches to clients over WebSocket.
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│  Your Server (Bun/Node.js/Go/Kotlin/Swift/Rust)        │
+│  • Runs Hypen WASM engine                           │
+│  • Manages state and business logic                 │
+│  • Streams UI patches over WebSocket                │
+└─────────────────────────────────────────────────────┘
+                      │ WebSocket
+        ┌─────────────┼─────────────┐
+        ↓             ↓             ↓
+   ┌─────────┐   ┌─────────┐   ┌─────────┐
+   │   Web   │   │ Android │   │   iOS   │
+   │ Browser │   │   App   │   │   App   │
+   └─────────┘   └─────────┘   └─────────┘
+```
+
+## How It Works
+
+1. **Client connects** via WebSocket
+2. **Server initializes** the WASM engine with your module and UI template
+3. **Initial render** — server sends the full UI tree as patches
+4. **User interacts** — client sends action messages to the server
+5. **State updates** — server processes actions, updates state, and diffs the UI
+6. **Patch streaming** — only the changed elements are sent to the client
+
+## Benefits
+
+- **One codebase** — Write once, render on web, Android, and iOS
+- **Thin clients** — Clients just apply patches, no WASM needed on device
+- **Server-side state** — Easy to persist, secure, and share between users
+- **Hot updates** — Change UI without app store updates
+- **Session management** — Clients can disconnect and reconnect without losing state
+
+## Available SDKs
+
+| SDK | Language | Status | Package |
+|-----|----------|--------|---------|
+| [TypeScript](/docs/servers/typescript) | TypeScript/Bun/Node.js | Primary | `@hypen-space/core`, `@hypen-space/server` |
+| [Go](/docs/servers/golang) | Go | Stable | `github.com/hypen-lang/hypen-golang` |
+| [Kotlin](/docs/servers/kotlin) | Kotlin/JVM | Stable | `space.hypen:hypen-core` |
+| [Swift](/docs/servers/swift) | Swift | Stable | `HypenServer` |
+| [Rust](/docs/servers/rust) | Rust | Stable | `hypen-server` |
+
+## Quick Start
+
+```typescript
+import { app } from "@hypen-space/core";
+import { serve } from "@hypen-space/server";
+
+const module = app
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => {
+    state.count++;
+  });
+
+await serve({
+  module,
+  ui: `
+    Column {
+      Text("Count: @{state.count}")
+      Button { Text("+1") }
+        .onClick(@actions.increment)
+    }
+  `,
+  port: 3000,
+});
+```
+
+Connect any Hypen client to `ws://localhost:3000` to render the UI.
+
+## Next Steps
+
+- [TypeScript SDK](/docs/servers/typescript) — Full guide with modules, state, components, sessions, and deployment
+- [Go SDK](/docs/servers/golang) — Go server SDK reference
+- [Kotlin SDK](/docs/servers/kotlin) — Kotlin/JVM SDK with type-safe DSL and coroutine support
+- [Swift SDK](/docs/servers/swift) — Swift SDK with fluent API, typed actions, and Codable state
+- [Rust SDK](/docs/servers/rust) — Rust SDK with typed state, serde-based action payloads, and async support
+- [Remote App Tutorial](/docs/getting-started/remote-app) — Step-by-step tutorial building a remote app
+- [Web Adapter](/docs/adapters/web) — Client-side rendering for browsers

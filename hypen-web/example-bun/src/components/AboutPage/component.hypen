@@ -1,0 +1,80 @@
+Column {
+  Text("About Hypen Shop")
+    .fontSize(36)
+    .fontWeight("bold")
+    .color("#00ff88")
+    .marginBottom(24)
+
+  Column {
+    Text("What is Hypen?")
+      .fontSize(24)
+      .fontWeight("600")
+      .color("#00e5ff")
+      .marginBottom(16)
+
+    Text("Hypen is a modern declarative UI language designed for cross-platform application development. It combines the simplicity of declarative syntax with the power of native performance.")
+      .fontSize(16)
+      .color("#e0e0e0")
+      .lineHeight(1.8)
+      .marginBottom(24)
+
+    Text("Key Technologies")
+      .fontSize(24)
+      .fontWeight("600")
+      .color("#00e5ff")
+      .marginBottom(16)
+
+    Column {
+      Text("🦀 Rust Parser")
+        .fontSize(16)
+        .fontWeight("600")
+        .color("#e0e0e0")
+        .marginBottom(8)
+
+      Text("Blazing-fast parser written in Rust, compiled to WebAssembly")
+        .fontSize(14)
+        .color("#888888")
+        .marginBottom(16)
+
+      Text("⚡ Bun Runtime")
+        .fontSize(16)
+        .fontWeight("600")
+        .color("#e0e0e0")
+        .marginBottom(8)
+
+      Text("Ultra-fast JavaScript runtime with native TypeScript support")
+        .fontSize(14)
+        .color("#888888")
+        .marginBottom(16)
+
+      Text("🎨 Reactive State")
+        .fontSize(16)
+        .fontWeight("600")
+        .color("#e0e0e0")
+        .marginBottom(8)
+
+      Text("Proxy-based reactive state management for real-time UI updates")
+        .fontSize(14)
+        .color("#888888")
+        .marginBottom(16)
+
+      Text("🚀 WebAssembly")
+        .fontSize(16)
+        .fontWeight("600")
+        .color("#e0e0e0")
+        .marginBottom(8)
+
+      Text("Native performance in the browser with WASM compilation")
+        .fontSize(14)
+        .color("#888888")
+    }
+  }
+  .padding(40)
+  .backgroundColor("#1a1a1a")
+  .borderRadius(12)
+  .border("1px solid #2a2a2a")
+}
+.padding(40)
+.maxWidth(900)
+.width("100%")
+.alignSelf("center")

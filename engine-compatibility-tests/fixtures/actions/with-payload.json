@@ -1,0 +1,38 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "action-with-payload",
+  "description": "Action dispatch with payload should pass payload to handler",
+  "category": "actions",
+  "priority": "P0",
+
+  "input": {
+    "source": "Column { Text(\"@{state.selectedId}\") Button(text: \"Select\", onClick: @actions.selectItem) }",
+    "initialState": {
+      "selectedId": "none"
+    },
+    "module": {
+      "name": "PayloadModule",
+      "actions": ["selectItem"],
+      "stateKeys": ["selectedId"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render",
+      "action": "initialRender",
+      "expectedPatchCount": 6
+    },
+    {
+      "description": "Dispatching selectItem with id payload should update state",
+      "action": "dispatchAction",
+      "dispatchAction": {
+        "name": "selectItem",
+        "payload": { "id": "item-123" }
+      },
+      "expectedState": {
+        "selectedId": "item-123"
+      }
+    }
+  ]
+}

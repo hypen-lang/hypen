@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Calorie Counter — Hypen</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      background: #FACC15;
+      color: #111827;
+    }
+    #app {
+      max-width: 430px;
+      margin: 0 auto;
+      min-height: 100vh;
+      background: #FFFFFF;
+      display: flex;
+      flex-direction: column;
+      position: relative;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+    }
+    /* Widen the phone frame on tablet+ so the responsive
+       breakpoints in the Hypen templates have room to kick in. */
+    @media (min-width: 768px) {
+      #app { max-width: 600px; }
+    }
+    @media (min-width: 1024px) {
+      #app { max-width: 780px; }
+    }
+    .status {
+      position: fixed;
+      top: 8px;
+      right: 8px;
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      z-index: 1000;
+    }
+    .status.connected { background: #e6f9e6; color: #2d8a2d; }
+    .status.disconnected { background: #ffe6e6; color: #d32f2f; }
+    .status.connecting { background: #fff3e0; color: #e65100; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="status" class="status connecting">connecting</div>
+  <script type="module" src="./client.ts"></script>
+</body>
+</html>

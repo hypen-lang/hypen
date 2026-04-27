@@ -1,0 +1,371 @@
+---
+title: Inputs
+description: Form elements, buttons, and handling user interactions in Hypen
+---
+
+# Inputs
+
+Input components allow users to interact with your application through forms, buttons, and other controls.
+
+## Button
+
+A clickable element that triggers an action when pressed.
+
+```hypen
+Button { Text("Submit") }
+    .onClick(@actions.submit)
+```
+
+### Styling Buttons
+
+```hypen
+// Primary button
+Button { Text("Primary Action") }
+    .onClick(@actions.primary)
+    .backgroundColor("#3B82F6")
+    .padding(horizontal: 24, vertical: 12)
+    .borderRadius(8)
+
+// Secondary/outline button
+Button { Text("Secondary") }
+    .onClick(@actions.secondary)
+    .backgroundColor("transparent")
+    .borderWidth(1)
+    .borderColor("#3B82F6")
+    .padding(horizontal: 24, vertical: 12)
+    .borderRadius(8)
+```
+
+### Button with Icon
+
+```hypen
+Button {
+    Row {
+        Image("cart-icon.svg").size(20)
+        Text("Add to Cart")
+    }
+    .gap(8)
+}
+.onClick(@actions.addToCart)
+```
+
+### Disabled State
+
+```hypen
+Button { Text("Submit") }
+    .onClick(@actions.submit)
+    .disabled(@{state.isSubmitting})
+    .opacity(@{state.isSubmitting} ? 0.5 : 1)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Two-Way Binding with `.bind()`
+
+The `.bind()` applicator provides two-way data binding for form elements. It automatically syncs the input value with state — no action handler needed:
+
+```hypen
+Input(placeholder: "Enter your name")
+    .bind(@state.name)
+```
+
+This is equivalent to setting `.value()` + writing an `onInput` action handler, but with zero boilerplate. `.bind()` works with all form elements:
+
+```hypen
+// Text inputs
+Input(placeholder: "Email").bind(@state.email)
+Textarea(placeholder: "Bio").bind(@state.bio)
+
+// Boolean controls
+Checkbox {}.bind(@state.agreeToTerms)
+Switch {}.bind(@state.darkMode)
+
+// Selection
+Select {}.bind(@state.country)
+```
+
+You can combine `.bind()` with other event applicators — they work independently:
+
+```hypen
+Input(placeholder: "Search")
+    .bind(@state.query)
+    .onKey(@actions.submitSearch)
+```
+
+## Input
+
+A single-line text input field.
+
+```hypen
+// With two-way binding (recommended)
+Input(placeholder: "Enter your name")
+    .bind(@state.name)
+
+// With manual event handling
+Input(placeholder: "Enter your name")
+    .onInput(@actions.updateName)
+```
+
+### Input Events
+
+```hypen
+Input(placeholder: "Email address")
+    .bind(@state.email)
+    .onFocus(@actions.emailFocused)
+    .onBlur(@actions.emailBlurred)
+```
+
+### Enter Key Handling
+
+```hypen
+Input(placeholder: "Search...")
+    .onInput(@actions.updateSearch)
+    .onKey(@actions.submitSearch)
+```
+
+The `onKey` event fires when the Enter key is pressed.
+
+### Styling Inputs
+
+```hypen
+Input(placeholder: "Username")
+    .padding(12)
+    .borderWidth(1)
+    .borderColor("#E5E7EB")
+    .borderRadius(6)
+    .fontSize(16)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Textarea
+
+A multi-line text input field for longer content.
+
+```hypen
+Textarea(placeholder: "Enter your message...")
+    .bind(@state.message)
+    .height(120)
+    .padding(12)
+    .borderRadius(8)
+```
+
+### Textarea with Character Limit
+
+```hypen
+Column {
+    Textarea(placeholder: "Bio (max 200 characters)")
+        .bind(@state.bio)
+        .height(100)
+
+    Text("@{state.bio.length}/200")
+        .fontSize(12)
+        .color("#6B7280")
+        .textAlign("right")
+}
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Checkbox
+
+A toggleable checkbox for boolean selections.
+
+```hypen
+// With two-way binding (recommended)
+Checkbox {}.bind(@state.agreeToTerms)
+
+// With manual event handling
+Checkbox {}
+    .checked(@{state.agreeToTerms})
+    .onChange(@actions.toggleTerms)
+```
+
+### Checkbox with Label
+
+```hypen
+Row {
+    Checkbox {}.bind(@state.rememberMe)
+    Text("Remember me")
+}
+.gap(8)
+.verticalAlignment("center")
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Switch
+
+A toggle switch for binary on/off settings.
+
+```hypen
+// With two-way binding (recommended)
+Switch {}.bind(@state.darkMode)
+
+// With manual event handling
+Switch {}
+    .checked(@{state.darkMode})
+    .onChange(@actions.toggleDarkMode)
+```
+
+### Switch with Label
+
+```hypen
+Row {
+    Text("Dark Mode")
+    Spacer()
+    Switch {}.bind(@state.darkMode)
+}
+.padding(16)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Select
+
+A dropdown selection component.
+
+```hypen
+// With two-way binding (recommended)
+Select {}.bind(@state.country)
+
+// With manual event handling
+Select {}
+    .value(@{state.country})
+    .onChange(@actions.updateCountry)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Slider
+
+A range slider for numeric input.
+
+```hypen
+Slider {}
+    .value(@{state.volume})
+    .onChange(@actions.updateVolume)
+```
+
+### Slider with Value Display
+
+```hypen
+Column {
+    Text("Volume: @{state.volume}%")
+    Slider {}
+        .value(@{state.volume})
+        .onChange(@actions.updateVolume)
+}
+.gap(8)
+```
+
+**Platform Support:** Web, Android, iOS
+
+## Form Example
+
+A complete form using `.bind()` for two-way binding:
+
+```hypen
+module ContactForm {
+    Column {
+        Text("Contact Us")
+            .fontSize(24)
+            .fontWeight("bold")
+
+        Input(placeholder: "Name")
+            .bind(@state.name)
+            .padding(12)
+            .borderRadius(6)
+            .borderWidth(1)
+            .borderColor("#E5E7EB")
+
+        Input(placeholder: "Email")
+            .bind(@state.email)
+            .padding(12)
+            .borderRadius(6)
+            .borderWidth(1)
+            .borderColor("#E5E7EB")
+
+        Textarea(placeholder: "Message")
+            .bind(@state.message)
+            .height(120)
+            .padding(12)
+            .borderRadius(6)
+            .borderWidth(1)
+            .borderColor("#E5E7EB")
+
+        Row {
+            Checkbox {}.bind(@state.subscribe)
+            Text("Subscribe to newsletter")
+        }
+        .gap(8)
+
+        Button { Text("Send Message") }
+            .onClick(@actions.submit)
+            .backgroundColor("#3B82F6")
+            .padding(horizontal: 24, vertical: 12)
+            .borderRadius(8)
+            .fillMaxWidth(true)
+    }
+    .gap(16)
+    .padding(24)
+    .maxWidth(500)
+}
+```
+
+## Handling Form State
+
+With `.bind()`, you don't need individual action handlers for each input field — state updates happen automatically:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+interface FormState {
+  name: string;
+  email: string;
+  message: string;
+  subscribe: boolean;
+  isSubmitting: boolean;
+}
+
+export default app
+  .defineState<FormState>({
+    name: "",
+    email: "",
+    message: "",
+    subscribe: false,
+    isSubmitting: false
+  })
+
+  // No updateName, updateEmail, updateMessage, or toggleSubscribe
+  // handlers needed — .bind() handles all of that automatically!
+
+  .onAction("submit", async ({ state }) => {
+    state.isSubmitting = true;
+
+    try {
+      await fetch("/api/contact", {
+        method: "POST",
+        body: JSON.stringify({
+          name: state.name,
+          email: state.email,
+          message: state.message,
+          subscribe: state.subscribe
+        })
+      });
+      // Reset form
+      state.name = "";
+      state.email = "";
+      state.message = "";
+      state.subscribe = false;
+    } finally {
+      state.isSubmitting = false;
+    }
+  });
+```
+
+## Next Steps
+
+- [Styling](/docs/guide/styling) - Complete applicator reference
+- [State & Modules](/docs/guide/state) - State management
+- [Components](/docs/guide/components) - All built-in components

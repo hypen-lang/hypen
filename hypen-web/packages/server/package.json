@@ -1,0 +1,92 @@
+{
+  "name": "@hypen-space/server",
+  "version": "0.4.956",
+  "description": "Hypen server runtime - Node.js WASM engine, component loader, discovery, and remote server",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./engine": {
+      "types": "./dist/engine.d.ts",
+      "bun": "./src/engine.ts",
+      "import": "./dist/engine.js",
+      "default": "./dist/engine.js"
+    },
+    "./loader": {
+      "types": "./dist/loader.d.ts",
+      "bun": "./src/loader.ts",
+      "import": "./dist/loader.js",
+      "default": "./dist/loader.js"
+    },
+    "./discovery": {
+      "types": "./dist/discovery.d.ts",
+      "bun": "./src/discovery.ts",
+      "import": "./dist/discovery.js",
+      "default": "./dist/discovery.js"
+    },
+    "./plugin": {
+      "types": "./dist/plugin.d.ts",
+      "bun": "./src/plugin.ts",
+      "import": "./dist/plugin.js",
+      "default": "./dist/plugin.js"
+    },
+    "./remote": {
+      "types": "./dist/remote/server.d.ts",
+      "bun": "./src/remote/server.ts",
+      "import": "./dist/remote/server.js",
+      "default": "./dist/remote/server.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "wasm-node"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "build:types": "tsc --emitDeclarationOnly",
+    "prepublishOnly": "bun run build",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hypen-space/core": "^0.4.956"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "hypen",
+    "server",
+    "wasm",
+    "engine",
+    "loader",
+    "discovery"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-web/packages/server"
+  }
+}

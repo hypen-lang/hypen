@@ -1,0 +1,5 @@
+preload = ["./hypen-preload.ts"]
+
+[serve.static]
+plugins = ["bun-plugin-tailwind"]
+env = "BUN_PUBLIC_*"

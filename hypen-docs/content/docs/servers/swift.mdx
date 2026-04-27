@@ -1,0 +1,721 @@
+---
+title: Swift SDK
+description: Complete guide to building Hypen servers with Swift
+---
+
+# Swift SDK
+
+The Swift SDK (`HypenServer`) provides a server-side Hypen implementation for Swift applications. It features a fluent chainable API for module definitions, typed action enums, `Codable` state with direct mutation, session management, and Remote UI streaming over WebSocket.
+
+## Installation
+
+> **Note:** Swift Package Manager requires `Package.swift` at the package root. Clone the main Hypen repository at `https://github.com/hypen-lang/hypen`, then add `hypen-server-swift` as a local package dependency.
+
+### Local dependency (monorepo)
+
+```swift
+// Package.swift
+dependencies: [
+    .package(path: "../hypen/hypen-server-swift"),
+]
+```
+
+Then add to your target:
+
+```swift
+.target(
+    name: "MyApp",
+    dependencies: [
+        .product(name: "HypenServer", package: "hypen-server-swift"),
+    ]
+)
+```
+
+## Quick Start
+
+Create a counter module with the fluent API and serve it over WebSocket:
+
+```swift
+import HypenServer
+
+struct CounterState: Codable {
+    var count: Int = 0
+}
+
+// 1. Create a HypenApp registry and attach the module with .name(...).app(myApp).
+let myApp = HypenApp()
+
+let _ = hypen(CounterState())
+    .name("Counter")
+    .app(myApp)
+    .onAction("increment") { state in state.count += 1 }
+    .onAction("decrement") { state in state.count -= 1 }
+    .ui("""
+        Column {
+            Text("Count: @{state.count}")
+            Button("@actions.increment") { Text("+") }
+            Button("@actions.decrement") { Text("-") }
+        }
+    """)
+    .build()
+
+// 2. Serve the whole app — every registered module is streamed.
+let server = RemoteServer().app(myApp)
+try server.listen(3000)
+```
+
+> **Single-module demo?** `RemoteServer(moduleDefinition: counter, config: ServerConfig(port: 3000))` is a shortcut that skips the registry — fine for one-off experiments.
+
+The UI template uses Hypen DSL:
+
+```hypen
+Column {
+    Text("Count: @{state.count}")
+    Button("@actions.increment") { Text("+") }
+    Button("@actions.decrement") { Text("-") }
+}
+```
+
+State is a `Codable` struct with `var` fields. Mutate directly in handlers — changes sync automatically.
+
+## Fluent API
+
+The `hypen()` function returns a `TypedModuleBuilder` for fluent chaining. All configuration methods return `self`. Terminate with `.build()`, `.ui()`, or `.uiFile()`.
+
+```swift
+let module = hypen(MyState())
+    .name("MyModule")
+    .persist()
+    .version(2)
+    .onCreated { state, context in /* ... */ }
+    .onAction("doSomething") { state in /* ... */ }
+    .onDestroyed { state, context in /* ... */ }
+    .ui("Column { Text(\"Hello\") }")
+```
+
+```hypen
+Column {
+    Text("Hello")
+}
+```
+
+### Terminal Methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `.build()` | `ModuleDefinition` | Finalize the builder |
+| `.ui(template)` | `ModuleDefinition` | Set UI template and finalize |
+| `.uiFile(path)` | `ModuleDefinition` | Load UI from file and finalize |
+
+### Closure API (Alternative)
+
+For complex modules, you can also use the closure-based builder:
+
+```swift
+let counter = hypen(CounterState()) { module in
+    module.onAction("increment") { state in
+        state.count += 1
+    }
+}
+```
+
+## Typed Actions
+
+Define actions as a `CaseIterable` enum for full type safety with exhaustive `switch`:
+
+```swift
+enum CounterAction: String, HypenAction, Codable, CaseIterable {
+    case increment
+    case decrement
+    case reset
+}
+
+let counter = hypen(CounterState())
+    .onAction(CounterAction.self) { state, action in
+        switch action {
+        case .increment: state.count += 1
+        case .decrement: state.count -= 1
+        case .reset: state.count = 0
+        }
+    }
+    .ui("""
+        Column {
+            Text("Count: @{state.count}")
+            Button("@actions.increment") { Text("+") }
+            Button("@actions.reset") { Text("Reset") }
+        }
+    """)
+```
+
+The action enum conforms to `String`, `HypenAction`, `Codable`, and `CaseIterable`. Each case name maps directly to the action name dispatched from the UI:
+
+```hypen
+Column {
+    Text("Count: @{state.count}")
+    Button("@actions.increment") { Text("+") }
+    Button("@actions.reset") { Text("Reset") }
+}
+```
+
+### Three Levels of Type Safety
+
+| Level | API | Use Case |
+|-------|-----|----------|
+| **String-based** | `.onAction("name") { state in ... }` | Simple, quick prototyping |
+| **Typed payload** | `.onAction("add", payload: AddPayload.self) { state, payload in ... }` | Actions with structured data |
+| **Typed action enum** | `.onAction(MyAction.self) { state, action in switch action { ... } }` | Full type safety, exhaustive matching |
+
+## Typed Payloads
+
+Action payloads are automatically deserialized from JSON into `Codable` types:
+
+```swift
+struct AddPayload: Codable {
+    let amount: Int
+}
+
+let counter = hypen(CounterState())
+    .onAction("increment") { state in
+        state.count += 1
+    }
+    .onAction("add", payload: AddPayload.self) { state, payload in
+        state.count += payload.amount
+    }
+    .build()
+```
+
+When the client sends `{"amount": 5}` with the `add` action, the handler receives a fully typed `AddPayload` instance.
+
+## Async Action Handlers
+
+Use `onActionAsync` for handlers that perform async work:
+
+```swift
+struct FetchState: Codable {
+    var data: [String: String]? = nil
+    var loading: Bool = false
+}
+
+let module = hypen(FetchState())
+    .onActionAsync("fetchData") { state in
+        state.loading = true
+        // ... async work ...
+        state.data = ["name": "Alice"]
+        state.loading = false
+    }
+    .build()
+```
+
+Async variants are available for all action types:
+
+```swift
+.onActionAsync("name") { state in ... }
+.onActionAsync("name", payload: P.self) { state, payload in ... }
+.onActionAsync(MyAction.self) { state, action in ... }
+```
+
+## State Management
+
+### Codable State
+
+State is defined as a `Codable` struct with `var` fields:
+
+```swift
+struct AppState: Codable {
+    var count: Int = 0
+    var user: User? = nil
+    var items: [String] = []
+    var loading: Bool = false
+}
+```
+
+In handlers, you mutate properties directly via `inout`:
+
+```swift
+.onAction("addItem", payload: AddItemPayload.self) { state, payload in
+    state.items.append(payload.item)
+    state.count = state.items.count
+}
+```
+
+Changes are automatically diffed against the previous state and only modified keys are synced to the reactive engine.
+
+### ObservableState (Low-Level)
+
+For advanced use cases, the underlying `ObservableState` provides path-based access:
+
+```swift
+let state = ObservableState(["count": 0, "user": ["name": "Alice"]])
+
+// Read
+state.get("count")           // 0
+state.get("user.name")       // "Alice"
+state.snapshot()             // full state copy
+
+// Write (triggers change notifications)
+state.set("count", 1)
+state.set("user.name", "Bob")
+
+// Replace entire state
+state.replace(["count": 0, "user": ["name": "New"]])
+
+// Listen for changes
+state.onChange { changedKeys in
+    print("Changed: \(changedKeys)")
+}
+```
+
+## Lifecycle Hooks
+
+```swift
+let counter = hypen(CounterState())
+    .onCreated { state, context in
+        print("Module created with count: \(state.count)")
+    }
+    .onAction("increment") { state in
+        state.count += 1
+    }
+    .onDestroyed { state, context in
+        print("Module destroyed at count: \(state.count)")
+    }
+    .build()
+```
+
+| Hook | Signature | Called When |
+|------|-----------|------------|
+| `onCreated` | `(inout S, GlobalContext?) -> Void` | Module instance is created |
+| `onDestroyed` | `(inout S, GlobalContext?) -> Void` | Module instance is destroyed |
+
+## Error Handling
+
+```swift
+let module = hypen(AppState())
+    .onAction("riskyAction") { state in
+        state.count += 1
+    }
+    .onError { ctx in
+        if let action = ctx.actionName {
+            print("Action '\(action)' failed: \(ctx.error)")
+        } else if let phase = ctx.lifecycle {
+            print("Lifecycle '\(phase)' failed: \(ctx.error)")
+        }
+        return .handled  // suppress the error
+        // or: .rethrown  // re-throw
+        // or: nil         // default: log to stderr
+    }
+    .build()
+```
+
+### ErrorContext Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `error` | `Error` | The exception |
+| `state` | `ObservableState` | Current state |
+| `actionName` | `String?` | Set if error came from an action handler |
+| `lifecycle` | `String?` | `"created"` or `"destroyed"` if from a lifecycle hook |
+
+## Named Modules
+
+Register modules by name using the `HypenApp` registry:
+
+```swift
+let app = HypenApp()
+
+// Register via hypen() with name
+let _ = hypen(CounterState(), name: "Counter", app: app)
+    .onAction("increment") { state in state.count += 1 }
+    .build()
+
+// Or register manually
+app.register("Settings", settingsDefinition)
+
+// Query the registry
+app.has("Counter")      // true
+app.get("Counter")      // ModuleDefinition?
+app.size                // 2
+
+// Unregister
+app.unregister("Settings")
+app.clear()
+```
+
+## Routing
+
+### HypenRouter
+
+URL-based navigation with pattern matching:
+
+```swift
+let router = HypenRouter()
+
+// Navigate
+router.push("/users/123")
+router.replace("/login")
+router.back()
+
+// Query current state
+router.currentPath     // "/users/123"
+router.state           // RouteState(currentPath, params, query, previousPath)
+
+// Pattern matching
+let match = router.matchPath("/users/:id", against: "/users/42")
+// match?.params = ["id": "42"]
+
+router.isActive("/users/:id")   // true
+
+// Listeners
+let unsub = router.onNavigate { from, to in
+    print("\(from ?? "/") → \(to)")
+}
+unsub()
+```
+
+### Pattern Syntax
+
+| Pattern | Example Match | Params |
+|---------|---------------|--------|
+| `/users/:id` | `/users/42` | `["id": "42"]` |
+| `/posts/:postId/comments/:commentId` | `/posts/1/comments/5` | `["postId": "1", "commentId": "5"]` |
+| `/files/*` | `/files/a/b/c` | wildcard match |
+| `/about` | `/about` | exact match |
+
+### Auto-wire from the DSL
+
+`RemoteServer` discovers every `Router { Route ... }` block in the
+primary and child templates at session start and wires a per-session
+`ManagedRouter`. DSL authors dispatch the reserved `@router.*`
+namespace:
+
+```hypen
+Button { Text("Search") }.onClick(@router.push, to: "/search")
+Button { Text("←") }.onClick(@router.back)
+```
+
+Typed lifecycle handlers use the session's router to read route
+params:
+
+```swift
+hypen(UserProfileState(), name: "UserProfile", app: app)
+    .onActivated { (state: inout UserProfileState, ctx: GlobalContext?) in
+        guard let r = ctx?.router,
+              let m = r.matchPath("/users/:id", r.getCurrentPath()),
+              let id = m.params["id"] else { return }
+        state.user = loadUser(id: id)
+    }
+    .build()
+```
+
+Opt out with `server.disableAutoRouter()`. See the [Routing Guide](/docs/guide/routing) for cross-SDK semantics (nested-router flattening, persist cache, etc).
+
+### Managed Router (manual)
+
+For bespoke wiring, construct a `ManagedRouter` directly:
+
+```swift
+let router = HypenRouter()
+let app = HypenApp()
+let ctx = HypenGlobalContext(router: router)
+
+// Register modules
+let _ = hypen(HomeState(), name: "HomePage", app: app).build()
+let _ = hypen(CounterState(), name: "Counter", app: app)
+    .onAction("increment") { state in state.count += 1 }
+    .build()
+
+// Route-driven lifecycle
+let managed = ManagedRouter(router: router, registry: app, globalContext: ctx)
+    .addRoute(RouteDefinition(path: "/", component: "HomePage"))
+    .addRoute(RouteDefinition(path: "/counter", component: "Counter"))
+
+managed.start()
+router.push("/counter")  // auto-mounts Counter, unmounts HomePage
+
+managed.activeModule      // current ModuleInstance?
+managed.activeRoute       // current RouteDefinition?
+managed.stop()
+```
+
+## Event System
+
+Type-safe pub/sub messaging:
+
+```swift
+let emitter = TypedEventEmitter()
+
+// Define typed event keys
+let userLoggedIn = EventKey<UserEvent>("user:login")
+let notification = EventKey<String>("notification")
+
+// Subscribe (type-safe)
+let unsub = emitter.on(userLoggedIn) { event in
+    print("\(event.email) logged in")
+}
+
+// Emit
+emitter.emit(userLoggedIn, payload: UserEvent(email: "alice@example.com"))
+
+// One-time listener
+emitter.once(notification) { message in
+    print("Notification: \(message)")
+}
+
+// Unsubscribe
+unsub()
+
+// Cleanup
+emitter.removeAllListeners(userLoggedIn)
+emitter.clearAll()
+```
+
+### Built-in Framework Events
+
+```swift
+emitter.on(HypenEvents.moduleCreated) { event in
+    print("Module created: \(event.moduleId)")
+}
+
+emitter.on(HypenEvents.routeChanged) { event in
+    print("Route: \(event.from ?? "/") -> \(event.to)")
+}
+
+emitter.on(HypenEvents.stateUpdated) { event in
+    print("State changed in \(event.moduleId): \(event.paths)")
+}
+
+emitter.on(HypenEvents.actionDispatched) { event in
+    print("Action \(event.actionName) dispatched in \(event.moduleId)")
+}
+```
+
+## Global Context
+
+Cross-module communication:
+
+```swift
+let ctx = HypenGlobalContext()
+
+// Register modules
+ctx.registerModule("counter", instance: counterInstance)
+ctx.registerModule("auth", instance: authInstance)
+
+// Access other modules
+let counterRef = ctx.getModule("counter")!
+counterRef.dispatchAction("increment")
+let state = counterRef.getState()  // ["count": 1]
+
+// Query
+ctx.hasModule("counter")    // true
+ctx.getModuleIds()           // ["counter", "auth"]
+ctx.getGlobalState()         // combined state snapshot
+
+// Events via global context
+ctx.emit("custom:event", payload: ["data": "value"])
+let unsub = ctx.on("custom:event") { payload in
+    print("Event: \(payload)")
+}
+unsub()
+```
+
+## Session Management
+
+### Session Lifecycle
+
+```swift
+let module = hypen(AppState())
+    .onAction("increment") { state in
+        state.count += 1
+    }
+    .onDisconnect { state, session in
+        // Client disconnected, but session is alive (within TTL)
+        print("Session \(session.id) disconnected, count was \(state.count)")
+    }
+    .onReconnect { session, restore in
+        // Client reconnected with existing session ID
+        print("Session \(session.id) reconnected")
+        restore(["count": 42])
+    }
+    .onExpire { session in
+        // Session TTL expired — no reconnection happened
+        print("Session \(session.id) expired")
+    }
+    .build()
+```
+
+### SessionManager
+
+```swift
+let sessionManager = SessionManager(config: SessionConfig(
+    ttl: 300,  // 5 minutes
+    concurrent: .kickOld
+))
+
+// Create a session
+let session = sessionManager.createSession(props: ["userId": "user-1"])
+
+// Suspend (on disconnect)
+sessionManager.suspendSession(session.id, savedState: currentState) {
+    print("Session \(session.id) expired")
+}
+
+// Resume (on reconnect)
+if let saved = sessionManager.resumeSession(session.id) {
+    // Restore saved state
+}
+
+// Stats
+let stats = sessionManager.getStats()
+// SessionStats(activeSessions, pendingSessions, totalConnections)
+```
+
+### Concurrent Connection Policies
+
+| Policy | Behavior |
+|--------|----------|
+| `.kickOld` (default) | New connection replaces existing on same session |
+| `.rejectNew` | Rejects new connection if one already exists |
+| `.allowMultiple` | Multiple connections share the same session |
+
+## Component Discovery
+
+Discover `.hypen` templates from the filesystem:
+
+```swift
+let components = try discoverComponents("./components", options: DiscoveryOptions(
+    patterns: [.folder, .sibling, .index],
+    recursive: true
+))
+
+// Load into the component loader
+loadDiscoveredComponents(components, into: componentLoader)
+```
+
+### Discovery Patterns
+
+| Pattern | Directory Structure |
+|---------|-------------------|
+| `.folder` | `Counter/component.hypen` |
+| `.sibling` | `Counter.hypen` |
+| `.index` | `Counter/index.hypen` |
+
+### Component Watcher
+
+Watch for component changes during development:
+
+```swift
+let watcher = ComponentWatcher(baseDir: "./components", options: WatchOptions(
+    pollInterval: 1.0,
+    onAdd: { print("Added: \($0.name)") },
+    onRemove: { print("Removed: \($0)") },
+    onUpdate: { print("Updated: \($0.name)") }
+))
+watcher.start()
+```
+
+### Component Resolver
+
+Resolve `import` statements from Hypen DSL:
+
+```swift
+let resolver = ComponentResolver(options: ResolverOptions(
+    baseDir: "./components",
+    app: myApp  // Check registry first
+))
+
+// Parse imports from DSL
+let imports = parseImports("""
+    import { Header, Footer } from "./shared"
+    import MainContent from "./pages/main"
+""")
+
+// Resolve each import
+for stmt in imports {
+    let resolved = try resolver.resolve(stmt)
+    // resolved["Header"] -> ResolvedComponent(module, template)
+}
+
+// Cache management
+resolver.clearCache()
+```
+
+## Native Engine Integration
+
+The Swift server SDK includes native bindings to the Rust Hypen engine via [UniFFI](https://mozilla.github.io/uniffi-rs/). This means the server doesn't just relay state — it actually parses Hypen DSL and produces the same patch format as all other Hypen SDKs.
+
+When a client connects, `RemoteServer` creates a per-client `NativeEngine` instance that:
+
+1. **Renders DSL → patches**: Parses the UI template and produces `create`, `setProp`, `setText`, `insert` patches
+2. **Handles state updates**: When state changes, the engine diffs the render tree and produces incremental patches
+3. **Dispatches actions**: Routes `@actions.*` events from the UI to your Swift handlers
+
+### Building the Native Library
+
+The Rust engine must be compiled before running the Swift server:
+
+```bash
+# Build the native library
+cd hypen-engine-rs
+cargo build --release --features uniffi
+
+# Run Swift tests (Linux)
+cd ../hypen-server-swift
+LD_LIBRARY_PATH=../hypen-engine-rs/target/release swift test
+
+# Run Swift tests (macOS)
+cd ../hypen-server-swift
+DYLD_LIBRARY_PATH=../hypen-engine-rs/target/release swift test
+```
+
+Or use the provided build script:
+
+```bash
+cd hypen-server-swift
+./build-engine.sh
+```
+
+### Regenerating Bindings
+
+After making changes to the Rust engine's UniFFI interface:
+
+```bash
+./scripts/generate-bindings.sh
+```
+
+This regenerates both Kotlin and Swift bindings from the compiled library.
+
+## WebSocket Protocol
+
+Same message protocol as all Hypen SDKs (Go, Kotlin, TypeScript, Rust). Each line is a separate JSON message (newline-delimited):
+
+**Server → Client:**
+```json
+{ "type": "initialTree", "module": "Counter", "state": { "count": 0 }, "patches": [...], "revision": 0 }
+```
+```json
+{ "type": "patch", "module": "Counter", "patches": [...], "revision": 1 }
+```
+```json
+{ "type": "stateUpdate", "module": "Counter", "state": { "count": 1 }, "revision": 1 }
+```
+
+**Client → Server:**
+```json
+{ "type": "dispatchAction", "module": "Counter", "action": "increment", "payload": null }
+```
+
+The `initialTree` message now includes actual patches from the engine (not empty arrays). On state changes, the server sends both `patch` (incremental DOM operations) and `stateUpdate` (full state snapshot) messages.
+
+## Requirements
+
+- Swift 6.0+
+- macOS 13+ / iOS 16+
+- Rust 1.70+ (for building `libhypen_engine`)
+- [WebSocketKit](https://github.com/vapor/websocket-kit) (SwiftNIO-based)
+
+## See Also
+
+- [TypeScript SDK](/docs/servers/typescript) — TypeScript server SDK with sessions and component discovery
+- [Kotlin SDK](/docs/servers/kotlin) — Kotlin/JVM SDK with type-safe DSL and coroutine support
+- [Go SDK](/docs/servers/golang) — Go server SDK reference
+- [Remote App Tutorial](/docs/getting-started/remote-app) — Step-by-step guide to building a remote app
+- [iOS Adapter](/docs/adapters/ios) — Client-side rendering for iOS/SwiftUI

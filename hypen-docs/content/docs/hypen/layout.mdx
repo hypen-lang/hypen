@@ -1,0 +1,137 @@
+---
+title: Layout Reference
+description: Complete reference for Hypen layout components
+---
+
+# Layout Reference
+
+Complete reference for layout components in Hypen.
+
+## Column
+
+Arranges children vertically.
+
+```hypen
+Column {
+    Text("Top")
+    Text("Middle")
+    Text("Bottom")
+}
+.gap(12)
+```
+
+## Row
+
+Arranges children horizontally.
+
+```hypen
+Row {
+    Text("Left")
+    Text("Right")
+}
+.gap(12)
+```
+
+## Box / Container
+
+Generic container with z-axis stacking.
+
+```hypen
+Box {
+    Image("background.jpg")
+    Text("Overlay")
+}
+```
+
+## Center
+
+Centers children both horizontally and vertically.
+
+```hypen
+Center {
+    Spinner()
+}
+.fillMaxSize(true)
+```
+
+## Stack
+
+Z-axis stacking for overlapping elements.
+
+```hypen
+Stack {
+    Card { Text("Base") }
+    Badge("New")
+}
+```
+
+## Grid
+
+Grid layout with configurable columns.
+
+```hypen
+Grid {
+    Card { Text("1") }
+    Card { Text("2") }
+    Card { Text("3") }
+    Card { Text("4") }
+}
+.gridColumns(2)
+.gap(16)
+```
+
+## List
+
+Scrollable container for items.
+
+```hypen
+List {
+    Text("Item 1")
+    Text("Item 2")
+    Text("Item 3")
+}
+.height(400)
+```
+
+## Spacer
+
+Flexible empty space.
+
+```hypen
+Row {
+    Text("Left")
+    Spacer()
+    Text("Right")
+}
+```
+
+## Divider
+
+Visual separator line.
+
+```hypen
+Column {
+    Text("Section 1")
+    Divider()
+    Text("Section 2")
+}
+```
+
+## Alignment Applicators
+
+| Applicator | Values |
+|------------|--------|
+| horizontalAlignment | start, center, end, space-between, space-around |
+| verticalAlignment | start, center, end, space-between, space-around |
+
+## Size Applicators
+
+| Applicator | Description |
+|------------|-------------|
+| width | Fixed width |
+| height | Fixed height |
+| minWidth / maxWidth | Width constraints |
+| minHeight / maxHeight | Height constraints |
+| fillMaxWidth | Fill available width |
+| fillMaxHeight | Fill available height |
+| fillMaxSize | Fill both dimensions |

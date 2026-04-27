@@ -1,0 +1,281 @@
+---
+title: Configuration
+description: Configure your Hypen project with hypen.json
+---
+
+# Configuration
+
+Every Hypen project uses a `hypen.json` file in the project root to configure the CLI, dev server, and build system.
+
+## Config File
+
+Create a `hypen.json` in your project root:
+
+```json
+{
+  "components": "./src/components",
+  "entry": "App",
+  "port": 3000,
+  "outDir": "dist"
+}
+```
+
+All fields:
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `components` | `string` | `"./src/components"` | Path to the components directory |
+| `entry` | `string` | `"App"` | Name of the entry component |
+| `port` | `number` | `3000` | Dev server port |
+| `outDir` | `string` | `"dist"` | Production build output directory |
+
+### Resolution
+
+The CLI looks for `hypen.json` in the project root. If not present, it falls back to built-in defaults. 
+
+## Component Discovery
+
+The CLI automatically discovers components by scanning the `components` directory. Discovery is **recursive by default** — components in subdirectories are found automatically.
+
+### Naming Patterns
+
+Four naming conventions are supported. All are enabled by default.
+
+#### Folder-Based (Recommended)
+
+```
+components/
+└── Counter/
+    ├── component.hypen    # UI template
+    └── component.ts       # Module (optional)
+```
+
+Component name: derived from the **folder name** → `Counter`
+
+#### Index-Based
+
+```
+components/
+└── Counter/
+    ├── index.hypen        # UI template
+    └── index.ts           # Module (optional)
+```
+
+Component name: derived from the **folder name** → `Counter`
+
+#### Sibling Files
+
+```
+components/
+├── Counter.hypen          # UI template
+└── Counter.ts             # Module (optional)
+```
+
+Component name: derived from the **filename** → `Counter`
+
+#### Single-File
+
+```
+components/
+└── Counter.ts             # Module with inline template via .ui()
+```
+
+Component name: derived from the **filename** → `Counter`
+
+The `.ts` file must export a module with an inline template:
+
+```typescript
+import { app, hypen } from "@hypen-space/core";
+
+export default app
+  .defineState<{ count: number }>({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .ui(hypen`
+    module Counter {
+      Text("Count: @{state.count}")
+      Button { Text("+") }.onClick(@actions.increment)
+    }
+  `)
+  .build();
+```
+
+### Nested Components
+
+Since discovery is recursive, you can organize components in subdirectories:
+
+```
+components/
+├── App/
+│   ├── component.hypen
+│   └── component.ts
+├── pages/
+│   ├── Home/
+│   │   ├── component.hypen
+│   │   └── component.ts
+│   └── Settings/
+│       ├── component.hypen
+│       └── component.ts
+└── shared/
+    ├── Header/
+    │   └── component.hypen
+    └── Footer/
+        └── component.hypen
+```
+
+Each component is identified by its **immediate folder name**, not the full path. So `pages/Home/component.hypen` registers as `Home`, and `shared/Header/component.hypen` registers as `Header`.
+
+### Stateless vs Stateful Components
+
+- A component **with** a `.ts` module file has state and can handle actions.
+- A component **without** a `.ts` module file is stateless — it renders pure UI.
+
+### Using Components in Templates
+
+Once discovered, components are available by name in any `.hypen` template:
+
+```hypen
+Column {
+  Header
+  Router {
+    Route(path: "/") { Home }
+    Route(path: "/settings") { Settings }
+  }
+  Footer
+}
+```
+
+You can also use explicit imports:
+
+```hypen
+import Header from "../shared/Header/component.hypen"
+
+module App {
+  Column {
+    Header()
+    Text("Welcome")
+  }
+}
+```
+
+## Integration with Existing Backends
+
+Hypen doesn't require the CLI to run. If you have an existing backend (Fastify, Express, etc.), you can use the engine directly via WebSocket with the Remote UI protocol.
+
+### Directory-Based Discovery with `.source()`
+
+The simplest way to use Hypen with an existing backend is `.source()`. It discovers all components from a directory (recursively) and auto-resolves imports in templates:
+
+```
+src/
+├── index.ts              # Your Fastify server
+└── apps/
+    └── chat/
+        ├── Chat/
+        │   ├── component.hypen    # Entry template (imports Settings, History)
+        │   └── component.ts       # Chat module
+        └── screens/
+            ├── Settings/
+            │   ├── component.hypen
+            │   └── component.ts
+            └── History/
+                ├── component.hypen
+                └── component.ts
+```
+
+```typescript
+import Fastify from "fastify";
+import { RemoteServer } from "@hypen-space/server/remote";
+import chatModule from "./apps/chat/Chat/component.js";
+
+// Your existing Fastify app
+const app = Fastify();
+app.get("/api/messages", async () => ({ messages: [] }));
+
+// Hypen discovers Chat, Settings, History automatically
+await new RemoteServer()
+  .source("./apps/chat")
+  .module("Chat", chatModule)
+  .listen(3001);
+
+await app.listen({ port: 3000 });
+```
+
+Now `Chat/component.hypen` can import and reference sub-components freely:
+
+```hypen
+import Settings from "../screens/Settings/component.hypen"
+import History from "../screens/History/component.hypen"
+
+module Chat {
+  Router {
+    Route(path: "/settings") {
+      Settings()
+    }
+    Route(path: "/history") {
+      History()
+    }
+  }
+}
+```
+
+All components under `./apps/chat` are discovered recursively and wired into the engine's component resolver. No manual registration needed.
+
+### Inline UI (Single Component)
+
+For simple single-component apps, you can skip `.source()` and pass the template directly. This is the single-module shortcut — for multi-module apps prefer `new RemoteServer().app(myApp)` with modules registered on a `HypenApp`.
+
+```typescript
+import { RemoteServer } from "@hypen-space/server/remote";
+import counterModule from "./components/Counter/component.js";
+import { readFileSync } from "fs";
+
+new RemoteServer()
+  .module("Counter", counterModule)
+  .ui(readFileSync("./components/Counter/component.hypen", "utf-8"))
+  .listen(3001);
+```
+
+Note: with inline `.ui()`, any imports or component references in the template will **not** be resolved since the server has no source directory to discover from.
+
+### Remote Client
+
+On the browser side, connect to the remote server:
+
+```typescript
+import { RemoteEngine } from "@hypen-space/core/remote";
+import { createHypenClient } from "@hypen-space/web/dom";
+
+const engine = new RemoteEngine("ws://localhost:3001", {
+  autoReconnect: true,
+});
+
+// `createHypenClient` is the recommended one-call wiring (constructs the
+// renderer and subscribes to patches). The bare `DOMRenderer` constructor
+// is still available for advanced use.
+createHypenClient(document.getElementById("app"), engine);
+await engine.connect();
+```
+
+The remote protocol supports session persistence, reconnection with state restoration, and works with any renderer (DOM, Canvas, Android, iOS).
+
+### Programmatic Discovery (No CLI)
+
+You can also use the discovery API directly in your own server code:
+
+```typescript
+import { discoverComponents, loadDiscoveredComponents } from "@hypen-space/server";
+
+const discovered = await discoverComponents("./src/components");
+const components = await loadDiscoveredComponents(discovered);
+
+// Register with your own rendering pipeline
+for (const [name, { module, template }] of components) {
+  console.log(`Found component: ${name}`);
+}
+```
+
+## See Also
+
+- [CLI Reference](/docs/tooling/cli) — CLI commands and options
+- [Remote Apps](/docs/getting-started/remote-app) — Building server-driven UIs
+- [TypeScript Server](/docs/servers/typescript) — RemoteServer API reference

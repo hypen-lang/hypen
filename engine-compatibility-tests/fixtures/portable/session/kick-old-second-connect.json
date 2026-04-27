@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "session-kick-old-second-connect",
+  "description": "Second connection under kick-old evicts the existing ones.",
+  "function": "session_step",
+  "priority": "P0",
+  "input": {
+    "state": { "policy": "kick-old" },
+    "event": { "kind": "connect", "existing_connection_count": 1 }
+  },
+  "expected": { "kind": "accept_and_kick_existing" }
+}

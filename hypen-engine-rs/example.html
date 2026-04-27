@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Hypen Engine WASM Example</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 800px;
+            margin: 40px auto;
+            padding: 20px;
+        }
+        textarea {
+            width: 100%;
+            height: 200px;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 14px;
+            padding: 10px;
+        }
+        #output {
+            background: #f5f5f5;
+            padding: 20px;
+            border-radius: 8px;
+            white-space: pre-wrap;
+            font-family: 'Monaco', 'Courier New', monospace;
+            font-size: 12px;
+        }
+        button {
+            background: #007aff;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+        }
+        button:hover {
+            background: #0051d5;
+        }
+    </style>
+</head>
+<body>
+    <h1>Hypen Engine WASM Example</h1>
+
+    <p>Enter Hypen DSL code below and click "Render" to see the patches generated:</p>
+
+    <textarea id="input">Column {
+    Text("Hello, @{state.username}")
+        .fontSize(18)
+        .color(blue)
+
+    Button("@actions.greet") {
+        Text("Greet")
+    }
+    .padding(16)
+
+    Row {
+        Text("Count: @{state.count}")
+        Button("@actions.increment") {
+            Text("+")
+        }
+    }
+}
+.backgroundColor(white)</textarea>
+
+    <div style="margin: 20px 0;">
+        <button onclick="renderCode()">Render</button>
+        <button onclick="updateState()">Update State</button>
+        <button onclick="dispatchAction()">Dispatch Action</button>
+    </div>
+
+    <h2>Output (Patches):</h2>
+    <div id="output">Click "Render" to generate patches...</div>
+
+    <script type="module">
+        import init, { WasmEngine } from './pkg/web/hypen_engine.js';
+
+        let engine;
+
+        async function initEngine() {
+            await init();
+            engine = new WasmEngine();
+
+            // Set up render callback
+            engine.setRenderCallback((patches) => {
+                const output = document.getElementById('output');
+                output.textContent = JSON.stringify(patches, null, 2);
+            });
+
+            // Register action handlers
+            engine.onAction('greet', (action) => {
+                console.log('Greet action:', action);
+                document.getElementById('output').textContent += '\n\n[Action] greet was called!';
+            });
+
+            engine.onAction('increment', (action) => {
+                console.log('Increment action:', action);
+                document.getElementById('output').textContent += '\n\n[Action] increment was called!';
+            });
+
+            // Initialize module
+            engine.setModule(
+                'ExampleModule',
+                ['greet', 'increment'],
+                ['username', 'count'],
+                { username: 'Guest', count: 0 }
+            );
+
+            console.log('Hypen Engine initialized!');
+        }
+
+        window.renderCode = () => {
+            const source = document.getElementById('input').value;
+            try {
+                engine.renderSource(source);
+            } catch (e) {
+                document.getElementById('output').textContent = 'Error: ' + e;
+            }
+        };
+
+        window.updateState = () => {
+            engine.updateState({ username: 'Alice', count: 42 });
+        };
+
+        window.dispatchAction = () => {
+            engine.dispatchAction('greet', { message: 'Hello from JavaScript!' });
+        };
+
+        // Initialize on load
+        initEngine();
+    </script>
+</body>
+</html>

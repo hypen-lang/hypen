@@ -1,0 +1,54 @@
+Row {
+    Column {
+        Row {
+            If(condition: "@{item.isVegetarian}") {
+                Icon(@resources.leaf)
+                    .size(12)
+                    .color("#16a34a")
+            }
+            Text("@{item.name}")
+                .tw("text-sm font-semibold ml-1")
+                .color("@{item.isVegetarian ? '#111827' : '#111827'}")
+        }
+        .tw("items-center")
+
+        If(condition: "@{item.isPopular}") {
+            Row {
+                Icon(@resources.fire)
+                    .size(11)
+                    .color("#f97316")
+                Text("Popular")
+                    .tw("text-xs text-orange-500 ml-1 font-medium")
+            }
+            .tw("items-center mt-1")
+        }
+
+        Text("@{item.description}")
+            .tw("text-xs text-gray-500 mt-1")
+
+        Text("$@{item.price}")
+            .tw("text-sm font-bold text-gray-900 mt-2")
+    }
+    .tw("flex-1 pr-3")
+
+    Column {
+        Image(src: "@{item.imageUrl}")
+            .tw("w-24 h-24 rounded-lg")
+            .objectFit("cover")
+
+        Button {
+            Row {
+                Icon(@resources.plus)
+                    .size(14)
+                    .color("#f97316")
+                Text("Add")
+                    .tw("text-xs font-bold text-orange-500 ml-1")
+            }
+            .tw("items-center")
+        }
+        .tw("bg-white border border-orange-500 rounded-full px-3 py-1.5 mt-[-14px] shadow-sm")
+        .onClick(@actions.addToCart, itemId: "@{item.id}")
+    }
+    .tw("items-center shrink-0")
+}
+.tw("py-4 px-4 flex-row items-start border-b border-gray-100")

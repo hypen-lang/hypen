@@ -1,0 +1,5 @@
+module hypen_engineFFI {
+    header "hypen_engineFFI.h"
+    link "hypen_engine"
+    export *
+}

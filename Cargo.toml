@@ -1,0 +1,30 @@
+[workspace]
+resolver = "2"
+members = [
+    "parser",
+    "hypen-engine-rs",
+    "tailwind-parse",
+    "hypen-sdk-rs",
+    "engine-compatibility-tests/runners/rust",
+]
+exclude = [
+    "examples/social/rust",
+    "examples/food-ordering/rust",
+]
+
+[workspace.package]
+version = "0.4.956"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/hypen-lang/hypen"
+authors = ["Hypen Contributors"]
+
+# Shared dependency versions — crates reference these via { workspace = true }
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1

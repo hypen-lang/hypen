@@ -1,0 +1,13 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "path-set-nested",
+  "description": "Set a nested key; parent objects exist already.",
+  "function": "path_set",
+  "priority": "P0",
+  "input": {
+    "value": { "user": { "name": "Alice" } },
+    "path": "user.name",
+    "new_value": "Bob"
+  },
+  "expected": { "user": { "name": "Bob" } }
+}

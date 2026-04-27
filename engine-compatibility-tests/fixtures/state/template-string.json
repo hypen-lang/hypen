@@ -1,0 +1,31 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "template-string-binding",
+  "description": "Renders a Text component with template string interpolation",
+  "category": "state",
+  "priority": "P0",
+
+  "input": {
+    "source": "Text(\"Welcome, @{state.user.name}! You have @{state.count} messages.\")",
+    "initialState": {
+      "user": {
+        "name": "Bob"
+      },
+      "count": 5
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["user", "count"]
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Text", "props": { "0": "Welcome, Bob! You have 5 messages." } },
+      { "type": "insert" }
+    ]
+  }
+}

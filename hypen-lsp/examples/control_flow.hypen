@@ -1,0 +1,89 @@
+// Control Flow Examples in Hypen
+
+// ForEach - iterate over a collection
+Column {
+    Text("Todo List")
+
+    ForEach(items: @state.todos, key: "id") {
+        Row {
+            Text(@item.name)
+            Text(@item.status)
+        }
+    }
+}
+
+// When - pattern matching on values
+Column {
+    When(value: @state.status) {
+        Case(match: "loading") {
+            Spinner()
+        }
+        Case(match: "error") {
+            Text("Something went wrong")
+        }
+        Case(match: "success") {
+            Text("Done!")
+        }
+        Else {
+            Text("Unknown status")
+        }
+    }
+}
+
+// If - boolean conditionals
+Column {
+    If(condition: @state.isLoggedIn) {
+        Text("Welcome back!")
+        Else {
+            Text("Please sign in")
+        }
+    }
+}
+
+// Nested conditionals
+Column {
+    // When with Else fallback
+    When(value: @state.httpCode) {
+        Case(match: "200") {
+            Text("Success")
+        }
+        Case(match: "404") {
+            Text("Not Found")
+        }
+        Case(match: "500") {
+            Text("Server Error")
+        }
+        Else {
+            Text("Unknown Status")
+        }
+    }
+
+    // ForEach with named item variable
+    ForEach(items: @state.users, as: "user", key: "id") {
+        Row {
+            Text(@user.name)
+                .fontWeight("bold")
+            Text(@user.email)
+                .color("gray")
+        }
+        .padding(8)
+    }
+
+    // If with nested When
+    If(condition: @state.showDetails) {
+        When(value: @state.role) {
+            Case(match: "admin") {
+                Text("Full access")
+            }
+            Case(match: "editor") {
+                Text("Edit access")
+            }
+            Else {
+                Text("Read-only")
+            }
+        }
+        Else {
+            Text("Sign in to see details")
+        }
+    }
+}

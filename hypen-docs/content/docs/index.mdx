@@ -1,0 +1,83 @@
+---
+title: Hypen Documentation
+description: Learn how to build cross-platform applications with Hypen declarative UI language
+---
+
+# Hypen Documentation
+
+Hypen is a declarative UI language designed for cross-platform application development. Write your UI once and deploy to Web, Android, and iOS with native performance.
+
+## Why Hypen?
+
+- **One Codebase, All Platforms**: Define your UI once and render natively on Web, Android, and iOS
+- **Native Performance**: Renders to platform-native components, not WebViews
+- **Simple Syntax**: Intuitive, declarative syntax that's easy to learn
+- **Reactive by Design**: Automatic UI updates when state changes
+- **Type-Safe Modules**: TypeScript-powered state management and actions
+
+## Quick Example
+
+```hypen
+module HelloWorld {
+    Column {
+        Text("Hello, @{state.name}!")
+            .fontSize(24)
+            .fontWeight("bold")
+
+        Input(placeholder: "Enter your name")
+            .value(@{state.name})
+            .onInput(@actions.updateName)
+            .padding(12)
+            .borderRadius(8)
+    }
+    .padding(24)
+    .gap(16)
+}
+```
+
+```typescript
+// HelloWorld.ts
+import { app } from "@hypen-space/core";
+
+export default app
+  .defineState({ name: "World" })
+  .onAction<{ value: string }>("updateName", async ({ action, state }) => {
+    state.name = action.payload!.value;
+  });
+```
+
+## Getting Started
+
+New to Hypen? Start here:
+
+1. [Introduction](/docs/getting-started/introduction) - What is Hypen and why use it
+2. [Installation](/docs/getting-started/installation) - Set up your development environment
+3. [Your First App](/docs/getting-started/first-app) - Build a counter app step-by-step
+
+## Guide
+
+Learn Hypen in depth:
+
+- [Basics](/docs/guide/basics) - Fundamental syntax and concepts
+- [Components](/docs/guide/components) - All built-in components
+- [Layout](/docs/guide/layout) - Arranging components with Column, Row, Grid
+- [Styling](/docs/guide/styling) - Applicators for colors, spacing, borders, and effects
+- [Inputs](/docs/guide/inputs) - Forms, buttons, and user interaction
+- [State & Modules](/docs/guide/state) - State management and actions
+
+## Tooling
+
+- [CLI](/docs/tooling/cli) - Create and run Hypen projects
+- [Language Server (LSP)](/docs/tooling/lsp) - IDE support for VS Code, Cursor, and more
+
+## Platforms
+
+Hypen renders natively on multiple platforms:
+
+- [Web](/docs/adapters/web) - Browser DOM rendering
+- [Android](/docs/adapters/android) - Jetpack Compose rendering
+- [iOS](/docs/adapters/ios) - SwiftUI rendering
+
+## Next Steps
+
+Ready to dive in? [Install the CLI](/docs/getting-started/installation) and [build your first app](/docs/getting-started/first-app)!

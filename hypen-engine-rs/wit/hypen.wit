@@ -1,0 +1,146 @@
+/// Hypen Engine WebAssembly Interface
+///
+/// This WIT (WebAssembly Interface Types) file defines the component model
+/// interface for the Hypen rendering engine. It enables type-safe, language-agnostic
+/// integration with WASM runtimes that support the Component Model.
+///
+/// ## Supported Runtimes
+/// - wasmtime (Rust, Python, Go, C/C++)
+/// - wasmer (Rust, Python, Go, C/C++)
+/// - wazero (Go)
+/// - jco (JavaScript - for Node.js without wasm-bindgen)
+///
+/// ## Usage
+/// Generate bindings for your language using wit-bindgen:
+/// ```bash
+/// wit-bindgen rust wit/hypen.wit
+/// wit-bindgen go wit/hypen.wit
+/// wit-bindgen python wit/hypen.wit
+/// ```
+
+package hypen:engine@0.1.0;
+
+/// Core types used throughout the engine interface
+interface types {
+    /// Result type for fallible operations
+    variant result-value {
+        ok(string),
+        error(string),
+    }
+
+    /// Patch operations for updating the UI tree
+    record patch {
+        /// JSON-serialized patch operation
+        json: string,
+    }
+
+    /// Module configuration for stateful components
+    record module-config {
+        name: string,
+        actions: list<string>,
+        state-keys: list<string>,
+        initial-state: string,  // JSON
+    }
+
+    /// Action payload for event dispatch
+    record action-payload {
+        name: string,
+        payload: string,  // JSON
+    }
+
+    /// Sparse state update for efficient partial updates
+    record sparse-update {
+        paths: list<string>,
+        values: string,  // JSON object mapping paths to values
+    }
+
+    /// Component resolution result
+    record resolved-component {
+        source: string,
+        path: string,
+        passthrough: bool,
+        lazy: bool,
+    }
+}
+
+/// The main engine interface
+interface engine {
+    use types.{result-value, patch, module-config, action-payload, sparse-update, resolved-component};
+
+    /// Initialize a new engine instance
+    /// Returns an opaque handle to the engine
+    init: func() -> u64;
+
+    /// Destroy an engine instance
+    destroy: func(handle: u64);
+
+    /// Get the current revision number
+    get-revision: func(handle: u64) -> u64;
+
+    /// Render Hypen DSL source code
+    /// Returns patches as JSON array
+    render-source: func(handle: u64, source: string) -> result-value;
+
+    /// Render a component into a specific parent node
+    render-into: func(handle: u64, source: string, parent-id: string, state: string) -> result-value;
+
+    /// Update state with a JSON patch object
+    update-state: func(handle: u64, patch: string) -> result-value;
+
+    /// Update state with sparse path-value pairs (more efficient)
+    update-state-sparse: func(handle: u64, update: sparse-update) -> result-value;
+
+    /// Set the module configuration
+    set-module: func(handle: u64, config: module-config) -> result-value;
+
+    /// Dispatch an action
+    dispatch-action: func(handle: u64, action: action-payload) -> result-value;
+
+    /// Register a primitive element type
+    register-primitive: func(handle: u64, name: string);
+
+    /// Register a component from source
+    register-component: func(handle: u64, name: string, source: string, path: string) -> result-value;
+
+    /// Clear the engine tree
+    clear-tree: func(handle: u64);
+
+    /// Parse Hypen DSL and return AST as JSON
+    parse-to-json: func(source: string) -> result-value;
+
+    /// Get pending patches (returns JSON array)
+    get-patches: func(handle: u64) -> string;
+
+    /// Clear pending patches
+    clear-patches: func(handle: u64);
+}
+
+/// Callback interface for hosts to implement
+interface callbacks {
+    use types.{patch, action-payload, resolved-component};
+
+    /// Called when patches are ready to be applied
+    on-patches: func(patches: list<patch>);
+
+    /// Called when an action is dispatched from the UI
+    on-action: func(action: action-payload);
+
+    /// Resolve a component by name (optional)
+    /// Return none if the component cannot be resolved
+    resolve-component: func(name: string, context-path: option<string>) -> option<resolved-component>;
+}
+
+/// The main world that combines engine and callbacks
+world hypen-engine {
+    /// Engine functions exported to the host
+    export engine;
+
+    /// Callbacks the engine can call into the host
+    import callbacks;
+}
+
+/// Simplified world without callbacks (polling-based)
+world hypen-engine-simple {
+    /// Engine functions exported to the host
+    export engine;
+}

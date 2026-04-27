@@ -1,0 +1,12 @@
+# Databases
+*.db
+*.db-shm
+*.db-wal
+
+# Node/Bun
+node_modules/
+bun.lock
+
+# Rust
+rust/target/
+rust/Cargo.lock

@@ -1,0 +1,70 @@
+name: Sync Swift Mirror Repos
+
+# Keeps standalone SPM-compatible mirror repos in sync with the monorepo.
+# Each Swift package lives in a subdirectory here but SPM needs Package.swift
+# at the repo root — so we split each subdirectory into its own repo.
+#
+# Mirror repos (create these as empty repos on GitHub):
+#   - hypen-lang/hypen-swiftui        ← hypen-renderer-swift/
+#   - hypen-lang/hypen-server-swift ← hypen-server-swift/
+#
+# Consumers add SPM dependencies like:
+#   .package(url: "https://github.com/hypen-lang/hypen-swiftui.git", from: "1.0.0")
+#   .package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "1.0.0")
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "hypen-renderer-swift/**"
+      - "hypen-server-swift/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync-mirrors:
+    name: Sync Swift Mirrors
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - prefix: hypen-renderer-swift
+            mirror: hypen-lang/hypen-swiftui
+          - prefix: hypen-server-swift
+            mirror: hypen-lang/hypen-server-swift
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history needed for subtree split
+
+      - name: Split subtree and push to mirror
+        env:
+          MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          PREFIX="${{ matrix.prefix }}"
+          MIRROR="${{ matrix.mirror }}"
+
+          # Verify the package directory exists
+          if [ ! -d "$PREFIX" ]; then
+            echo "::error::Directory $PREFIX does not exist"
+            exit 1
+          fi
+
+          echo "::group::Splitting $PREFIX"
+          SPLIT_SHA=$(git subtree split --prefix="$PREFIX" -b "split-$PREFIX")
+          echo "Split SHA: $SPLIT_SHA"
+          echo "::endgroup::"
+
+          echo "::group::Pushing to $MIRROR"
+          if ! git remote get-url mirror &>/dev/null; then
+            git remote add mirror "https://x-access-token:${MIRROR_TOKEN}@github.com/${MIRROR}.git"
+          fi
+          git push mirror "split-$PREFIX:refs/heads/main" --force
+          echo "::endgroup::"
+
+          echo "✓ Synced $PREFIX → $MIRROR"

@@ -1,0 +1,31 @@
+{
+  "compilerOptions": {
+    "lib": ["ESNext"],
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleDetection": "force",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    // No rootDir in the dev typecheck config — it conflicts with
+    // cross-package `paths` imports (tsc pulls ../core/src/*.ts into
+    // the program via the paths map, and rootDir then rejects those
+    // files as "not under rootDir"). The build config
+    // (tsconfig.build.json) still sets rootDir for declaration emission.
+    "baseUrl": ".",
+    "paths": {
+      "@hypen-space/core": ["../core/src/index.ts"],
+      // Non-standard export: see root tsconfig.json for rationale.
+      "@hypen-space/core/components": ["../core/src/components/builtin.ts"],
+      "@hypen-space/core/*": ["../core/src/*"]
+    }
+  },
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

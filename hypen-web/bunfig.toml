@@ -1,0 +1,11 @@
+# Bun test configuration.
+#
+# `preload` runs before any test file, installing the engine-backed
+# PortableImpl into `@hypen-space/core`. This replaces the in-package
+# TypeScript fallback that used to live in `packages/core/src/portable.ts`.
+# Core is WASM-free; the engine is plugged in here for the test suite
+# exactly the way it's plugged in for real deployments via
+# `@hypen-space/server` or `@hypen-space/web-engine`.
+
+[test]
+preload = ["./tests/_preload.ts"]

@@ -1,0 +1,4 @@
+{
+  "title": "Tooling",
+  "pages": ["studio", "cli", "configuration", "lsp"]
+}

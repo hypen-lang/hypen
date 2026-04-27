@@ -1,0 +1,250 @@
+---
+title: Error Handling
+description: Catching and recovering from errors in modules with onError
+---
+
+# Error Handling
+
+Modules can register an `.onError()` handler to catch errors from action handlers and lifecycle hooks in a single place. This gives you control over logging, recovery, and error propagation.
+
+## The onError Handler
+
+Register an error handler on your module definition:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+export default app
+  .defineState({ count: 0 })
+  .onAction("increment", async ({ state }) => {
+    if (state.count >= 100) throw new Error("Count limit reached");
+    state.count++;
+  })
+  .onError(({ error, actionName, lifecycle, state }) => {
+    console.error(`Error in ${actionName ?? lifecycle}:`, error.message);
+    return { handled: true }; // suppress the error
+  });
+```
+
+Without `.onError()`, the default behavior is to log the error and emit a global `"error"` event. With it, you decide what happens.
+
+## Error Context
+
+The error handler receives an `ErrorContext` object:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `error` | `HypenError` | The error that occurred |
+| `state` | `T` | Current state (for inspection) |
+| `actionName` | `string?` | Set if the error came from an action handler |
+| `lifecycle` | `string?` | Set if the error came from a lifecycle hook (`"created"` or `"destroyed"`) |
+
+`actionName` and `lifecycle` are mutually exclusive — one will be set depending on where the error originated.
+
+## Handler Results
+
+Return a result object to control what happens next:
+
+| Return Value | Effect |
+|-------------|--------|
+| `void` / `undefined` | Default behavior (log + emit global error event) |
+| `{ handled: true }` | Error is suppressed, no further propagation |
+| `{ rethrow: true }` | Error is re-thrown to the caller |
+| `{ retry: true }` | Retry the operation (actions only) |
+
+```typescript
+.onError(({ error, actionName }) => {
+  if (error.message.includes("network")) {
+    return { retry: true }; // retry network failures
+  }
+  if (error.message.includes("limit")) {
+    return { handled: true }; // swallow known limits
+  }
+  // return nothing → default log + emit
+})
+```
+
+## What Gets Caught
+
+`.onError()` catches errors from:
+
+- **Action handlers** — exceptions thrown in `.onAction()` callbacks
+- **onCreated** — exceptions thrown in the `.onCreated()` lifecycle hook
+- **onDestroyed** — exceptions thrown in the `.onDestroyed()` lifecycle hook
+
+```typescript
+export default app
+  .defineState({ data: null, error: null })
+  .onCreated(async (state) => {
+    // If this throws, onError catches it with lifecycle: "created"
+    const res = await fetch("/api/init");
+    state.data = await res.json();
+  })
+  .onAction("refresh", async ({ state }) => {
+    // If this throws, onError catches it with actionName: "refresh"
+    const res = await fetch("/api/data");
+    state.data = await res.json();
+  })
+  .onError(({ error, actionName, lifecycle, state }) => {
+    if (lifecycle === "created") {
+      state.error = "Failed to initialize";
+    } else if (actionName) {
+      state.error = `Action "${actionName}" failed: ${error.message}`;
+    }
+    return { handled: true };
+  });
+```
+
+## Error Types
+
+The engine provides typed error classes that you can check in your handler:
+
+```typescript
+import { ParseError, RenderError, StateError, ActionError } from "@hypen-space/core";
+
+.onError(({ error }) => {
+  if (error instanceof ActionError) {
+    console.error(`Action failed: ${error.actionName}`);
+  } else if (error instanceof StateError) {
+    console.error("State mutation error:", error.message);
+  }
+})
+```
+
+| Error Class | When |
+|-------------|------|
+| `ActionError` | An action handler threw an exception |
+| `ParseError` | The engine failed to parse a component template |
+| `RenderError` | The engine failed during reconciliation/rendering |
+| `StateError` | A state mutation or notification failed |
+
+## Go SDK
+
+The Go SDK has the same `.OnError()` pattern:
+
+```go
+type CounterState struct {
+    Count int `json:"count"`
+}
+
+counter := core.NewApp(CounterState{Count: 0}).
+    OnAction("increment", func(ctx core.TypedActionContext[CounterState]) {
+        if ctx.State.Count >= 100 {
+            panic("count limit reached")
+        }
+        ctx.State.Count++
+    }).
+    OnError(func(ctx core.ErrorContext) *core.ErrorHandlerResult {
+        if ctx.ActionName != "" {
+            fmt.Printf("Action %q failed: %v\n", ctx.ActionName, ctx.Error)
+        } else if ctx.Lifecycle != "" {
+            fmt.Printf("Lifecycle %q failed: %v\n", ctx.Lifecycle, ctx.Error)
+        }
+        return &core.ErrorHandlerResult{Handled: true}
+    }).
+    Build()
+```
+
+In Go, action handler panics are recovered and routed through `OnError`. The `ErrorContext` fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `Error` | `error` | The error (or recovered panic) |
+| `State` | `*ObservableState` | Current state |
+| `ActionName` | `string` | Set if error came from an action handler |
+| `Lifecycle` | `string` | `"created"` or `"destroyed"` if from a lifecycle hook |
+
+Return `&ErrorHandlerResult{Handled: true}` to suppress, `{Rethrow: true}` to re-panic, or `nil` for default behavior (log + emit error event).
+
+## Kotlin SDK
+
+```kotlin
+val counter = app.defineState(mapOf("count" to 0))
+    .onAction("increment") { ctx ->
+        val count = ctx.state.get("count") as Int
+        if (count >= 100) error("count limit reached")
+        ctx.state.set("count", count + 1)
+    }
+    .onError { ctx ->
+        when {
+            ctx.actionName != null ->
+                println("Action '${ctx.actionName}' failed: ${ctx.error.message}")
+            ctx.lifecycle != null ->
+                println("Lifecycle '${ctx.lifecycle}' failed: ${ctx.error.message}")
+        }
+        ErrorHandlerResult.Handled // suppress the error
+    }
+    .build()
+```
+
+Return `ErrorHandlerResult.Handled` to suppress, `ErrorHandlerResult.Rethrow` to re-throw, or `null` for default behavior (log to stderr).
+
+## Best Practices
+
+### Use Error State for UI Feedback
+
+Combine `.onError()` with error state to show feedback in the UI:
+
+```typescript
+interface MyState {
+  data: Item[] | null;
+  error: string | null;
+  isLoading: boolean;
+}
+
+export default app
+  .defineState<MyState>({ data: null, error: null, isLoading: false })
+  .onAction("load", async ({ state }) => {
+    state.isLoading = true;
+    state.error = null;
+    const res = await fetch("/api/items");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    state.data = await res.json();
+    state.isLoading = false;
+  })
+  .onError(({ error, state }) => {
+    state.error = error.message;
+    state.isLoading = false;
+    return { handled: true };
+  });
+```
+
+```hypen
+module Items {
+    Column {
+        When(@{state.error}) {
+            Text("@{state.error}")
+                .color("#EF4444")
+        }
+        When(@{state.isLoading}) {
+            Text("Loading...")
+        }
+        ForEach(@{state.data}, key: "id") {
+            Text("@{item.name}")
+        }
+    }
+}
+```
+
+### Keep the Error Handler Simple
+
+The error handler should not throw. If it does, the error is logged and default behavior runs.
+
+### Don't Swallow Everything
+
+Only return `{ handled: true }` for errors you can genuinely recover from. Let unexpected errors propagate so they surface during development:
+
+```typescript
+.onError(({ error, actionName }) => {
+  if (error.message.includes("network") || error.message.includes("timeout")) {
+    return { handled: true }; // recoverable
+  }
+  // unexpected errors: fall through to default (log + emit)
+})
+```
+
+## Next Steps
+
+- [State & Modules](/docs/guide/state) - State management and actions
+- [Components](/docs/guide/components) - All built-in components
+- [Go SDK](/docs/servers/golang) - Go server SDK reference

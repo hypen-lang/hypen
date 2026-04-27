@@ -1,0 +1,11 @@
+[package]
+name = "hypen-compat-tests"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+hypen-engine = { path = "../../../hypen-engine-rs" }
+hypen-parser = { path = "../../../parser" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

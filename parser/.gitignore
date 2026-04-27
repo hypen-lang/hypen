@@ -1,0 +1,58 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock file (keep for applications, ignore for libraries)
+# Uncomment if this is a library:
+# Cargo.lock
+
+# IDE / Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Generated documentation
+/doc/
+
+# Benchmark results
+/benches/*.txt
+/benches/*.json
+
+# Test coverage
+tarpaulin-report.html
+cobertura.xml
+lcov.info
+
+# Profiling data
+*.profdata
+*.profraw
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Debugging
+*.dSYM/
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Linux
+*~
+.directory
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Environment
+.env
+.env.*
+!.env.example
+.npmrc

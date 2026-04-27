@@ -1,0 +1,550 @@
+---
+title: Control Flow
+description: Iteration, conditionals, and pattern matching in Hypen
+---
+
+# Control Flow
+
+Hypen provides three control flow components for building dynamic UIs: **ForEach** for rendering lists, **When** for pattern matching, and **If** for simple conditionals. Unlike regular components, these are first-class constructs in the engine — they don't create DOM elements themselves, and they integrate directly with the reactive system for efficient updates.
+
+## ForEach
+
+ForEach renders a block of children once for each item in an array from your module state.
+
+### Basic Usage
+
+```hypen
+ForEach(items: @state.todos) {
+    Text(@item.title)
+}
+```
+
+The `items` argument points to an array in your state. Inside the block, `@item` refers to the current element. You can access nested properties with `@item.title`, `@item.id`, etc.
+
+### Rendering a List of Cards
+
+Here's a more realistic example — a todo list that shows each item with its status:
+
+```hypen
+Column {
+    Text("My Tasks")
+        .fontSize(24)
+        .fontWeight("bold")
+        .marginBottom(16)
+
+    ForEach(items: @state.todos, key: "id") {
+        Row {
+            Checkbox {}
+                .checked(@item.completed)
+                .onChange(@actions.toggleTodo)
+
+            Text(@item.title)
+                .fontSize(16)
+                .color("@{item.completed ? '#9CA3AF' : '#111827'}")
+                .textDecoration("@{item.completed ? 'line-through' : 'none'}")
+                .flex(1)
+
+            Button { Text("Delete") }
+                .onClick(@actions.deleteTodo)
+                .color("#EF4444")
+        }
+        .padding(12)
+        .gap(12)
+        .verticalAlignment("center")
+        .backgroundColor("white")
+        .borderRadius(8)
+    }
+}
+.padding(24)
+.gap(8)
+```
+
+Paired with this module:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+type Todo = { id: string; title: string; completed: boolean };
+
+export default app
+    .defineState<{ todos: Todo[] }>({
+        todos: [
+            { id: "1", title: "Learn Hypen", completed: true },
+            { id: "2", title: "Build an app", completed: false },
+            { id: "3", title: "Ship it", completed: false },
+        ],
+    })
+    .onAction<{ id: string }>("toggleTodo", ({ state, action }) => {
+        const todo = state.todos.find((t) => t.id === action.payload!.id);
+        if (todo) todo.completed = !todo.completed;
+    })
+    .onAction<{ id: string }>("deleteTodo", ({ state, action }) => {
+        state.todos = state.todos.filter((t) => t.id !== action.payload!.id);
+    })
+    .build();
+```
+
+### Arguments
+
+| Argument | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `items` or `in` | Yes | — | Array binding from state (e.g., `@state.users`) |
+| `as` | No | `"item"` | Custom variable name for each element |
+| `key` | No | index | Property name for stable identity across re-renders |
+
+### Why Keys Matter
+
+When you add `key: "id"`, the engine tracks each item by its unique identifier instead of its position in the array. This matters when items are reordered, inserted, or removed — without keys, the engine has to guess which items moved, often getting it wrong.
+
+```hypen
+// With keys: engine knows exactly which item is which
+// Reordering/inserting only moves the affected DOM nodes
+ForEach(items: @state.messages, key: "id") {
+    MessageBubble(message: @item)
+}
+
+// Without keys: engine matches by position
+// Reordering causes ALL items to re-render
+ForEach(items: @state.messages) {
+    MessageBubble(message: @item)
+}
+```
+
+**Rule of thumb:** Always use `key` when the list can change (add, remove, reorder). Skip it only for truly static lists.
+
+### Custom Item Variable Names
+
+Use `as` to give the iteration variable a meaningful name. This is especially helpful with nested ForEach loops:
+
+```hypen
+ForEach(items: @state.categories, as: "category", key: "id") {
+    Column {
+        Text("@{category.name}")
+            .fontSize(20)
+            .fontWeight("bold")
+
+        ForEach(items: @item.products, as: "product", key: "sku") {
+            Row {
+                Text("@{product.name}")
+                Text("$@{product.price}")
+            }
+        }
+    }
+}
+```
+
+### Accessing the Whole Item
+
+You can pass the entire item object to a child component:
+
+```hypen
+ForEach(items: @state.users, key: "id") {
+    UserCard(user: @item)
+}
+```
+
+### What Happens in the DOM
+
+ForEach is a **transparent** container — it doesn't create a DOM element. Its children render directly into the parent:
+
+```hypen
+Column {
+    Text("Header")
+    ForEach(items: @state.items) {
+        Text(@item.name)
+    }
+    Text("Footer")
+}
+```
+
+Produces this DOM structure (no wrapper around the ForEach items):
+
+```
+Column
+├── Text("Header")
+├── Text("Alice")      ← directly inside Column
+├── Text("Bob")        ← directly inside Column
+├── Text("Charlie")    ← directly inside Column
+└── Text("Footer")
+```
+
+---
+
+## When
+
+When is Hypen's pattern matching component. It evaluates a value and renders the first `Case` branch that matches.
+
+### Basic Usage
+
+```hypen
+When(value: @state.status) {
+    Case(match: "loading") {
+        Spinner()
+    }
+    Case(match: "error") {
+        Text("Something went wrong")
+    }
+    Case(match: "success") {
+        Text("Done!")
+    }
+    Else {
+        Text("Unknown status")
+    }
+}
+```
+
+### A Complete Loading Pattern
+
+This is probably the most common use of When — showing different UI based on a fetch status:
+
+```hypen
+module UserProfile {
+    Column {
+        When(value: @state.loadStatus) {
+            Case(match: "loading") {
+                Center {
+                    Column {
+                        Spinner()
+                            .size(32)
+                        Text("Loading profile...")
+                            .color("#6B7280")
+                            .marginTop(12)
+                    }
+                }
+                .fillMaxSize(true)
+            }
+
+            Case(match: "error") {
+                Column {
+                    Text("Failed to load profile")
+                        .fontSize(18)
+                        .color("#EF4444")
+                    Text(@state.errorMessage)
+                        .color("#6B7280")
+                        .marginTop(4)
+                    Button { Text("Retry") }
+                        .onClick(@actions.loadProfile)
+                        .marginTop(16)
+                }
+                .padding(24)
+                .horizontalAlignment("center")
+            }
+
+            Case(match: "loaded") {
+                Column {
+                    Image(@state.user.avatar)
+                        .size(80)
+                        .borderRadius(40)
+                    Text(@state.user.name)
+                        .fontSize(24)
+                        .fontWeight("bold")
+                    Text("@{state.user.handle}")
+                        .color("#6B7280")
+                }
+                .padding(24)
+                .horizontalAlignment("center")
+                .gap(8)
+            }
+        }
+    }
+}
+```
+
+With the module:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+type UserState = {
+    loadStatus: "loading" | "error" | "loaded";
+    errorMessage: string;
+    user: { name: string; handle: string; avatar: string } | null;
+};
+
+export default app
+    .defineState<UserState>({
+        loadStatus: "loading",
+        errorMessage: "",
+        user: null,
+    })
+    .onCreated(async (state) => {
+        try {
+            const res = await fetch("/api/user/me");
+            state.user = await res.json();
+            state.loadStatus = "loaded";
+        } catch (e) {
+            state.errorMessage = e.message;
+            state.loadStatus = "error";
+        }
+    })
+    .onAction("loadProfile", async ({ state }) => {
+        state.loadStatus = "loading";
+        try {
+            const res = await fetch("/api/user/me");
+            state.user = await res.json();
+            state.loadStatus = "loaded";
+        } catch (e) {
+            state.errorMessage = e.message;
+            state.loadStatus = "error";
+        }
+    })
+    .build();
+```
+
+### Match Patterns
+
+When supports several kinds of pattern matching:
+
+```hypen
+// Exact string match
+Case(match: "loading") { ... }
+
+// Exact number match
+Case(match: 404) { ... }
+
+// Multiple values (OR match — matches any)
+Case(match: [200, 201, 204]) {
+    Text("Success")
+}
+Case(match: [400, 401, 403, 404]) {
+    Text("Client Error")
+}
+
+// Expression match
+Case(match: "@{value >= 90}") {
+    Text("Grade A")
+}
+
+// Wildcard (matches anything)
+Case(match: "_") {
+    Text("Catch-all")
+}
+```
+
+### Else (Fallback)
+
+The `Else` branch renders when no `Case` matches. It's optional but recommended — without it, nothing renders if no case matches:
+
+```hypen
+When(value: @state.role) {
+    Case(match: "admin") { AdminDashboard() }
+    Case(match: "editor") { EditorView() }
+    Else { ReadOnlyView() }  // Handles "viewer" and any other role
+}
+```
+
+---
+
+## If
+
+If is shorthand for the common case of boolean true/false branching. It's syntactic sugar over When — under the hood, they share the same engine logic.
+
+### Basic Usage
+
+```hypen
+If(condition: @state.isLoggedIn) {
+    ProfileMenu()
+    Else {
+        LoginButton()
+    }
+}
+```
+
+### With Complex Conditions
+
+```hypen
+// Expression condition
+If(condition: "@{state.cart.length > 0}") {
+    Row {
+        Text("@{state.cart.length} items in cart")
+        Button { Text("Checkout") }
+            .onClick(@actions.checkout)
+    }
+    Else {
+        Text("Your cart is empty")
+            .color("#6B7280")
+    }
+}
+```
+
+### Without Else
+
+If there's nothing to show in the false case, just omit `Else`:
+
+```hypen
+If(condition: @state.hasNewNotifications) {
+    Badge("New")
+        .backgroundColor("#EF4444")
+}
+```
+
+### Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `condition` or `when` | Yes | Boolean binding or expression |
+
+---
+
+## Combining Control Flow
+
+Control flow components compose naturally. Here's a realistic example combining ForEach, When, and If:
+
+```hypen
+module ChatView {
+    Column {
+        // Header
+        Row {
+            Text("Messages")
+                .fontSize(20)
+                .fontWeight("bold")
+        }
+        .padding(16)
+
+        // Message list with loading state
+        When(value: @state.loadStatus) {
+            Case(match: "loading") {
+                Center { Spinner() }
+                    .flex(1)
+            }
+
+            Case(match: "loaded") {
+                Column {
+                    ForEach(items: @state.messages, key: "id") {
+                        Row {
+                            // Show avatar only for other people's messages
+                            If(condition: "@{item.senderId != state.currentUserId}") {
+                                Avatar(@item.senderAvatar)
+                                    .size(32)
+                            }
+
+                            Column {
+                                Text(@item.text)
+                                    .padding(8, 12)
+                                    .backgroundColor("@{item.senderId == state.currentUserId ? '#3B82F6' : '#F3F4F6'}")
+                                    .color("@{item.senderId == state.currentUserId ? 'white' : '#111827'}")
+                                    .borderRadius(16)
+
+                                Text(@item.timestamp)
+                                    .fontSize(11)
+                                    .color("#9CA3AF")
+                            }
+                        }
+                        .gap(8)
+                        .flexDirection("@{item.senderId == state.currentUserId ? 'row-reverse' : 'row'}")
+                    }
+                }
+                .flex(1)
+                .padding(16)
+                .gap(8)
+            }
+        }
+
+        // Input bar
+        Row {
+            Input(placeholder: "Type a message...")
+                .value(@state.draft)
+                .onInput(@actions.updateDraft)
+                .flex(1)
+                .borderRadius(20)
+                .padding(10, 16)
+
+            If(condition: "@{state.draft.trim().length > 0}") {
+                Button { Text("Send") }
+                    .onClick(@actions.sendMessage)
+                    .backgroundColor("#3B82F6")
+                    .color("white")
+                    .borderRadius(20)
+                    .padding(10, 20)
+            }
+        }
+        .padding(12)
+        .gap(8)
+    }
+}
+```
+
+---
+
+## Common Patterns
+
+### Empty State
+
+Show a helpful message when a list is empty:
+
+```hypen
+If(condition: "@{state.items.length > 0}") {
+    ForEach(items: @state.items, key: "id") {
+        ItemRow(item: @item)
+    }
+    Else {
+        Center {
+            Column {
+                Text("No items yet")
+                    .fontSize(18)
+                    .color("#6B7280")
+                Button { Text("Add your first item") }
+                    .onClick(@actions.addItem)
+            }
+            .horizontalAlignment("center")
+            .gap(12)
+        }
+    }
+}
+```
+
+### Conditional Styling (Without Control Flow)
+
+For simple style changes, you don't need If/When — use expression bindings directly:
+
+```hypen
+// Change color based on state — no If needed
+Text(@state.status)
+    .color("@{state.status == 'error' ? '#EF4444' : '#10B981'}")
+    .fontWeight("@{state.isImportant ? 'bold' : 'normal'}")
+```
+
+Reserve If/When for showing/hiding entire UI sections.
+
+### Loading + Empty + Content (Three States)
+
+```hypen
+When(value: @state.pageStatus) {
+    Case(match: "loading") {
+        Center { Spinner() }
+    }
+    Case(match: "empty") {
+        Center { Text("Nothing here yet") }
+    }
+    Case(match: "loaded") {
+        ForEach(items: @state.data, key: "id") {
+            DataRow(item: @item)
+        }
+    }
+    Case(match: "error") {
+        Center {
+            Text("Failed to load")
+            Button { Text("Retry") }
+                .onClick(@actions.reload)
+        }
+    }
+}
+```
+
+---
+
+## Performance Tips
+
+1. **Always key dynamic lists** — `ForEach(items: @state.x, key: "id")` enables efficient updates. Without keys, any change to the array re-renders every item.
+
+2. **Keep state paths flat** — `@state.userName` is faster to track than `@state.user.profile.settings.display.name`. Deep nesting creates more work for the dependency graph.
+
+3. **Use expressions for style, control flow for structure** — Don't wrap a single Text in an If just to change its color. Use `"@{state.x ? 'red' : 'blue'}"` instead.
+
+4. **Control flow nodes are free** — ForEach, When, and If don't create DOM elements. Nest them freely without worrying about extra wrappers.
+
+## Next Steps
+
+- [Components](/docs/guide/components) — All built-in components
+- [State & Modules](/docs/guide/state) — State management and actions
+- [Styling](/docs/guide/styling) — Complete applicator reference

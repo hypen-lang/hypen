@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "path-has-false",
+  "description": "has returns false when the path doesn't resolve.",
+  "function": "path_has",
+  "priority": "P0",
+  "input": {
+    "value": { "user": { "name": "Alice" } },
+    "path": "user.age"
+  },
+  "expected": false
+}

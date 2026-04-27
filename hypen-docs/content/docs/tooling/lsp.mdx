@@ -1,0 +1,196 @@
+---
+title: Language Server (LSP)
+description: IDE support for VSCode, Cursor, and other LSP-compatible editors
+---
+
+# Hypen Language Server (LSP)
+
+The Hypen Language Server provides IDE support for VSCode, Cursor, and other LSP-compatible editors. It makes writing Hypen code faster and more productive with features like auto-completion, error detection, and formatting.
+
+## Features
+
+### Syntax Highlighting
+
+Beautiful color themes that highlight Hypen syntax including:
+- Component names
+- Applicators
+- State references
+- Actions
+- Strings, numbers, and other values
+
+### Real-Time Error Detection
+
+Catch errors as you type:
+- Unclosed braces, parentheses, or strings
+- Invalid syntax structures
+- Warnings for common mistakes (e.g., lowercase component names)
+
+### Auto-Completion
+
+Intelligent suggestions triggered with `Ctrl+Space` or automatically:
+
+**Components** - Type a capital letter to see component suggestions:
+```hypen
+Col  // suggests: Column, Container, Card
+```
+
+**Applicators** - Type `.` after a component to see styling options:
+```hypen
+Text("Hello")
+  .  // suggests: padding, color, fontSize, fontWeight...
+```
+
+**References** - Type `@` to see state and action completions:
+```hypen
+Button(onClick: @  // suggests: @actions, @state
+```
+
+**Argument Values** - Context-aware value suggestions:
+```hypen
+Text("Hello")
+  .color(  // suggests: red, blue, green, primary, secondary...
+```
+
+### Hover Documentation
+
+Hover over any component or applicator to see documentation:
+
+```
+Text - Hypen Component
+Displays text content with optional styling.
+```
+
+### Document Outline
+
+Navigate your component hierarchy in the outline view. See all components at a glance and jump to any location.
+
+### Code Formatting
+
+Format your Hypen files with proper indentation:
+- Right-click → Format Document
+- Or press `Shift+Alt+F` (Windows/Linux) / `Shift+Option+F` (Mac)
+
+Before:
+```hypen
+Column{
+Text("Hello")
+.fontSize(24)
+Button{Text("Click")}
+}
+```
+
+After:
+```hypen
+Column {
+  Text("Hello")
+    .fontSize(24)
+  Button {
+    Text("Click")
+  }
+}
+```
+
+## Installation
+
+### From VSIX (Recommended)
+
+1. Download the latest `.vsix` file from releases
+2. Open VSCode or Cursor
+3. Go to Extensions (`Ctrl+Shift+X`)
+4. Click the `...` menu → Install from VSIX
+5. Select the downloaded file
+6. Reload the window
+
+### From Source
+
+```bash
+cd hypen-lsp
+npm install
+npm run compile
+```
+
+Then press `F5` in VSCode to launch the extension in development mode.
+
+### Building VSIX Package
+
+```bash
+npm install -g @vscode/vsce
+cd hypen-lsp
+npm run package
+```
+
+This creates a `.vsix` file you can install or distribute.
+
+## Configuration
+
+Configure the extension in your VSCode/Cursor settings:
+
+```json
+{
+  "hypen.trace.server": "off",           // Debug LSP communication (off/messages/verbose)
+  "hypen.maxNumberOfProblems": 100,      // Max diagnostics to show
+  "hypen.formatting.enable": true        // Enable/disable auto-formatting
+}
+```
+
+## Supported Components
+
+The LSP provides completions and documentation for all built-in components:
+
+**Layout:** Column, Row, Container, Stack, Center, Grid, List, Spacer, Divider
+
+**Content:** Text, Image, Card
+
+**Input:** Button
+
+## Supported Applicators
+
+The LSP provides completions for common applicators:
+
+**Spacing:** padding, margin, marginTop, marginBottom, marginLeft, marginRight, paddingTop, paddingBottom, paddingLeft, paddingRight
+
+**Typography:** fontSize, fontWeight, fontStyle, lineHeight, textAlign, textDecoration, color
+
+**Layout:** width, height, maxWidth, maxHeight, minWidth, minHeight, horizontalAlignment, verticalAlignment, flexDirection
+
+**Visual:** backgroundColor, border, borderRadius, borderColor, borderWidth, boxShadow, opacity
+
+**Interactive:** onClick, onHover, cursor
+
+## Keyboard Shortcuts
+
+| Action | Windows/Linux | Mac |
+|--------|---------------|-----|
+| Trigger suggestions | `Ctrl+Space` | `Cmd+Space` |
+| Format document | `Shift+Alt+F` | `Shift+Option+F` |
+| Go to symbol | `Ctrl+Shift+O` | `Cmd+Shift+O` |
+| Quick fix | `Ctrl+.` | `Cmd+.` |
+
+## Troubleshooting
+
+### Extension doesn't activate
+
+- Ensure the file has a `.hypen` extension
+- Try reloading the window (`Ctrl+Shift+P` → "Reload Window")
+- Check the Output panel for errors (`View` → `Output` → select "Hypen")
+
+### Completions not appearing
+
+- Try manually triggering with `Ctrl+Space`
+- Check if you're inside a string (completions don't appear in strings)
+- Ensure the LSP server is running (check Output panel)
+
+### Syntax highlighting issues
+
+- Try changing the color theme
+- Ensure no other extension is overriding `.hypen` file association
+
+## Editor Support
+
+| Editor | Status | Notes |
+|--------|--------|-------|
+| VSCode | Supported | Full support |
+| Cursor | Supported | Full support |
+| Neovim | Planned | Via nvim-lspconfig |
+| Sublime Text | Planned | Via LSP package |
+| JetBrains IDEs | Planned | Via LSP plugin |

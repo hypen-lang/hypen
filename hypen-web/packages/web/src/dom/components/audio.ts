@@ -1,0 +1,45 @@
+/**
+ * Audio Component
+ */
+
+import type { ComponentHandler } from "./index.js";
+
+export const audioHandler: ComponentHandler = {
+  create(doc: Document): HTMLElement {
+    const el = doc.createElement("audio");
+    el.dataset.hypenType = "audio";
+    return el as any as HTMLElement;
+  },
+
+  applyProps(el: HTMLElement, props: Record<string, any>): void {
+    const audio = el as HTMLAudioElement;
+
+    // Source
+    const src = props["0"] || props.src;
+    if (src !== undefined) {
+      audio.src = String(src);
+    }
+
+    // Controls
+    if (props.controls !== undefined) {
+      audio.controls = Boolean(props.controls);
+    }
+
+    // Autoplay
+    if (props.autoplay !== undefined) {
+      audio.autoplay = Boolean(props.autoplay);
+    }
+
+    // Loop
+    if (props.loop !== undefined) {
+      audio.loop = Boolean(props.loop);
+    }
+
+    // Muted
+    if (props.muted !== undefined) {
+      audio.muted = Boolean(props.muted);
+    }
+  },
+};
+
+

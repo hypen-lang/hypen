@@ -1,0 +1,443 @@
+---
+title: State & Modules
+description: Managing state and defining actions with TypeScript modules
+---
+
+# State & Modules
+
+Modules are stateful components that manage their own state and handle actions. They are the building blocks for creating interactive, data-driven UI in Hypen.
+
+## What is a Module?
+
+A module combines:
+- **State**: Reactive data that the UI depends on
+- **Actions**: Functions that modify state in response to user interactions
+- **Template**: The Hypen UI definition that renders the state
+
+The key difference between a module and a regular component is that a module's state persists as long as the module exists, and it can respond to actions that modify that state.
+
+## Defining a Module
+
+### The UI Template
+
+In your `.hypen` file, define the module's UI:
+
+```hypen
+module Counter {
+    Column {
+        Text("Count: @{state.count}")
+            .fontSize(32)
+            .fontWeight("bold")
+
+        Row {
+            Button { Text("-") }
+                .onClick(@actions.decrement)
+                .backgroundColor("#EF4444")
+                .padding(16)
+                .borderRadius(8)
+
+            Spacer()
+
+            Button { Text("+") }
+                .onClick(@actions.increment)
+                .backgroundColor("#22C55E")
+                .padding(16)
+                .borderRadius(8)
+        }
+        .gap(24)
+    }
+    .padding(32)
+    .horizontalAlignment("center")
+}
+```
+
+### The Module Definition (TypeScript)
+
+Define the module's state and actions in TypeScript:
+
+```typescript
+// Counter.ts
+import { app } from "@hypen-space/core";
+
+interface CounterState {
+  count: number;
+}
+
+export default app
+  .defineState<CounterState>({ count: 0 })
+
+  // Lifecycle handler: receives (state, context?)
+  .onCreated(async (state, context) => {
+    console.log("Counter module created");
+  })
+
+  // Action handler: receives context object { action, state, next, context }
+  .onAction("increment", async ({ state }) => {
+    state.count++;
+  })
+
+  .onAction("decrement", async ({ state }) => {
+    state.count--;
+  })
+
+  // Lifecycle handler: receives (state, context?)
+  .onDestroyed((state, context) => {
+    console.log("Counter module destroyed");
+  });
+```
+
+## State
+
+### Defining State
+
+State is defined using `defineState<T>(initialValue)`:
+
+```typescript
+interface UserState {
+  user: {
+    name: string;
+    email: string;
+  } | null;
+  isLoading: boolean;
+  error: string | null;
+}
+
+export default app
+  .defineState<UserState>({
+    user: null,
+    isLoading: false,
+    error: null
+  });
+```
+
+### Accessing State in Templates
+
+Use the `@{state.path}` syntax to bind state values to your UI:
+
+```hypen
+module Profile {
+    Column {
+        // Simple binding
+        Text("Welcome, @{state.user.name}!")
+
+        // Nested paths
+        Text("Email: @{state.user.email}")
+
+        // In string interpolation
+        Text("Status: @{state.isLoading ? 'Loading...' : 'Ready'}")
+    }
+}
+```
+
+### Two-Way Binding with `.bind()`
+
+For form inputs, use `.bind()` to create two-way data binding — the input value stays in sync with state without any action handlers:
+
+```hypen
+module Settings {
+    Column {
+        Input(placeholder: "Username").bind(@state.username)
+        Checkbox {}.bind(@state.notifications)
+        Switch {}.bind(@state.darkMode)
+        Select {}.bind(@state.language)
+    }
+}
+```
+
+```typescript
+export default app
+  .defineState({
+    username: "",
+    notifications: true,
+    darkMode: false,
+    language: "en"
+  })
+  // No action handlers needed for these inputs!
+  // .bind() automatically updates state when the user types or toggles.
+  .build();
+```
+
+When you need additional logic (validation, side effects), use manual event handlers instead of `.bind()`:
+
+```hypen
+Input(placeholder: "Email")
+    .value(@{state.email})
+    .onInput(@actions.validateEmail)
+```
+
+See the [Inputs guide](/docs/guide/inputs) for complete details on `.bind()`.
+
+### State Updates
+
+State is automatically tracked through a Proxy. Mutate the state object and changes sync automatically:
+
+```typescript
+.onAction<{ name: string; email: string }>("updateProfile", async ({ action, state }) => {
+  state.user = {
+    name: action.payload!.name,
+    email: action.payload!.email
+  };
+  // State changes auto-sync - triggers re-render with new state
+})
+```
+
+## Actions
+
+Actions are functions that respond to user interactions and modify state.
+
+### Defining Actions
+
+```typescript
+// Action handler receives a context object with all parameters
+// Use a generic type parameter to type the payload
+.onAction<PayloadType>("actionName", async ({ action, state, context }) => {
+  // action - contains name, payload (typed as PayloadType), sender
+  // state - current state (mutable, auto-synced via Proxy)
+  // context - GlobalContext for cross-module communication
+  // context.router - HypenRouter for programmatic navigation
+})
+```
+
+### Dispatching Actions from UI
+
+Use `@actions.actionName` via event applicators in your templates:
+
+```hypen
+// Simple action
+Button { Text("Save") }
+    .onClick(@actions.save)
+
+// Action with payload
+Button { Text("Delete") }
+    .onClick(@actions.deleteItem, itemId: @{state.selectedId})
+```
+
+### Action Payloads
+
+Actions automatically receive payload data from the event and any additional arguments:
+
+```typescript
+.onAction<{ itemId: string }>("deleteItem", async ({ action, state }) => {
+  const itemId = action.payload!.itemId;
+  state.items = state.items.filter(item => item.id !== itemId);
+})
+```
+
+### Async Actions
+
+Actions support async operations like network requests:
+
+```typescript
+.onAction<{ userId: string }>("fetchUser", async ({ action, state }) => {
+  state.isLoading = true;
+  // State changes sync automatically, showing loading state
+
+  try {
+    const response = await fetch(`/api/users/${action.payload!.userId}`);
+    const user = await response.json();
+    state.user = user;
+    state.error = null;
+  } catch (error) {
+    state.error = "Failed to fetch user";
+    state.user = null;
+  } finally {
+    state.isLoading = false;
+    // Final state syncs automatically
+  }
+})
+```
+
+## Lifecycle
+
+Modules have lifecycle hooks for setup and cleanup.
+
+### onCreated
+
+Called when the module is first mounted. Receives `(state, context?)`:
+
+```typescript
+.onCreated(async (state, context) => {
+  // Initialize data
+  const savedData = localStorage.getItem('formData');
+  if (savedData) {
+    state.formData = JSON.parse(savedData);
+  }
+  // State changes sync automatically
+})
+```
+
+### onDestroyed
+
+Called when the module is unmounted. Receives `(state, context?)`:
+
+```typescript
+.onDestroyed((state, context) => {
+  // Cleanup subscriptions, timers, etc.
+  clearInterval(state.timerId);
+})
+```
+
+## Complete Example: Todo List
+
+### Template (TodoList.hypen)
+
+```hypen
+module TodoList {
+    Column {
+        Text("Todo List")
+            .fontSize(24)
+            .fontWeight("bold")
+
+        Row {
+            Input(placeholder: "Add a new todo...")
+                .bind(@state.newTodo)
+                .onKey(@actions.addTodo)
+                .weight(1)
+                .padding(12)
+                .borderRadius(8)
+
+            Button { Text("Add") }
+                .onClick(@actions.addTodo)
+                .backgroundColor("#3B82F6")
+                .padding(horizontal: 16, vertical: 12)
+                .borderRadius(8)
+        }
+        .gap(12)
+
+        List { }
+        .marginTop(16)
+    }
+    .padding(24)
+    .maxWidth(600)
+}
+```
+
+### Module (TodoList.ts)
+
+```typescript
+import { app } from "@hypen-space/core";
+
+interface Todo {
+  id: string;
+  text: string;
+  completed: boolean;
+}
+
+interface TodoState {
+  todos: Todo[];
+  newTodo: string;
+  filter: "all" | "active" | "completed";
+}
+
+export default app
+  .defineState<TodoState>({
+    todos: [],
+    newTodo: "",
+    filter: "all"
+  })
+
+  .onCreated(async (state, context) => {
+    const saved = localStorage.getItem("todos");
+    if (saved) {
+      state.todos = JSON.parse(saved);
+    }
+  })
+
+  // No "updateNewTodo" handler needed — .bind() handles it automatically
+
+  .onAction("addTodo", async ({ state }) => {
+    if (state.newTodo.trim()) {
+      state.todos.push({
+        id: Date.now().toString(),
+        text: state.newTodo.trim(),
+        completed: false
+      });
+      state.newTodo = "";
+      saveTodos(state.todos);
+    }
+  })
+
+  .onAction<{ id: string }>("toggleTodo", async ({ action, state }) => {
+    const todo = state.todos.find(t => t.id === action.payload!.id);
+    if (todo) {
+      todo.completed = !todo.completed;
+      saveTodos(state.todos);
+    }
+  })
+
+  .onAction<{ id: string }>("deleteTodo", async ({ action, state }) => {
+    state.todos = state.todos.filter(t => t.id !== action.payload!.id);
+    saveTodos(state.todos);
+  });
+
+function saveTodos(todos: Todo[]) {
+  localStorage.setItem("todos", JSON.stringify(todos));
+}
+```
+
+## Best Practices
+
+### State Changes Sync Automatically
+
+State mutations are tracked via Proxy and sync automatically:
+
+```typescript
+.onAction<{ value: string }>("update", async ({ action, state }) => {
+  state.value = action.payload!.value;
+  // Changes sync automatically - no callback needed
+})
+```
+
+### Handle Async Operations Properly
+
+Show loading states and handle errors:
+
+```typescript
+.onAction("loadData", async ({ state }) => {
+  state.isLoading = true;
+  state.error = null;
+  // Loading state syncs automatically
+
+  try {
+    const data = await fetchData();
+    state.data = data;
+  } catch (e) {
+    state.error = "Failed to load data";
+  } finally {
+    state.isLoading = false;
+    // Final state syncs automatically
+  }
+})
+```
+
+### Use Descriptive Action Names
+
+Name actions by what they do, not how they're triggered:
+
+```typescript
+// Good
+.onAction("saveDocument", ...)
+.onAction("toggleDarkMode", ...)
+
+// Avoid
+.onAction("handleClick", ...)
+.onAction("buttonPressed", ...)
+```
+
+## Platform Support
+
+Modules work identically across all platforms:
+
+- **Web**: Runs in browser with WASM engine
+- **Android**: Native Compose rendering
+- **iOS**: Native rendering
+
+The same module definition works on all platforms, with platform-specific rendering handled automatically by the Hypen runtime.
+
+## Next Steps
+
+- [State Persistence](/docs/guide/persistence) - Save state across sessions with pluggable storage
+- [Error Handling](/docs/guide/error-handling) - Catching and recovering from errors
+- [Components](/docs/guide/components) - All built-in components
+- [Styling](/docs/guide/styling) - Complete applicator reference
+- [Inputs](/docs/guide/inputs) - Forms and user interaction

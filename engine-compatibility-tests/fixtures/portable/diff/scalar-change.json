@@ -1,0 +1,14 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-scalar-change",
+  "description": "A single top-level scalar flip should produce exactly one (path, value) entry.",
+  "function": "diff_paths",
+  "priority": "P0",
+  "input": {
+    "old": { "count": 0 },
+    "new": { "count": 1 }
+  },
+  "expected": [
+    { "path": "count", "value": 1 }
+  ]
+}

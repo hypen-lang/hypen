@@ -1,0 +1,14 @@
+{
+  "name": "@hypen-space/compatibility-tests-typescript",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Engine compatibility test runner for TypeScript/WASM",
+  "scripts": {
+    "test": "bun test compatibility.test.ts",
+    "test:watch": "bun test --watch compatibility.test.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}

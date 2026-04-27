@@ -1,0 +1,50 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "keyed-list-add-remove",
+  "description": "Adding and removing items from a keyed list produces correct Create/Remove patches",
+  "category": "reconciliation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "ForEach syntax not yet supported in current parser - requires control flow implementation",
+    "sdks": ["typescript", "golang"]
+  },
+
+  "input": {
+    "source": "Column { ForEach(items: \"@{state.items}\") { Text(\"@{item.name}\", key: \"@{item.id}\") } }",
+    "initialState": {
+      "items": [
+        { "id": "a", "name": "Alice" },
+        { "id": "b", "name": "Bob" }
+      ]
+    },
+    "module": {
+      "name": "ListModule",
+      "actions": [],
+      "stateKeys": ["items"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render creates Column with two Text children",
+      "action": "initialRender",
+      "expectedPatchCount": 6
+    },
+    {
+      "description": "Adding Carol should create one new element and insert it",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["items"],
+        "newValues": {
+          "items": [
+            { "id": "a", "name": "Alice" },
+            { "id": "b", "name": "Bob" },
+            { "id": "c", "name": "Carol" }
+          ]
+        }
+      },
+      "expectedPatchCount": 2
+    }
+  ]
+}

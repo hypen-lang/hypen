@@ -1,0 +1,36 @@
+module HomePage {
+    Column {
+        Row {
+            Text("Hypengram")
+                .tw("text-2xl font-bold flex-1")
+
+            Row {
+                Button {
+                    Icon(@resources.heart)
+                        .size(24)
+                        .color("#262626")
+                }
+                .tw("bg-transparent border-0 p-2 shrink-0")
+                .onClick(@router.push, to: "/notifications")
+
+                Button {
+                    Icon(@resources.send)
+                        .size(24)
+                        .color("#262626")
+                }
+                .tw("bg-transparent border-0 p-2 shrink-0")
+                .onClick(@router.push, to: "/messages")
+            }
+            .tw("flex-row shrink-0")
+        }
+        .tw("py-3 px-4 flex-row items-center border-b border-gray-200")
+
+        Stories()
+
+        ForEach(items: @state.posts, key: "id") {
+            Post()
+        }
+    }
+    .scrollable(true)
+    .tw("flex-1 w-full")
+}

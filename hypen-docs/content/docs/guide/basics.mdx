@@ -1,0 +1,432 @@
+---
+title: Basics
+description: Fundamental concepts of the Hypen language
+---
+
+# Basics
+
+This guide covers the fundamental concepts of the Hypen language.
+
+## Components
+
+Components are the building blocks of Hypen UIs. They're declared by name followed by optional arguments and children.
+
+```hypen
+// Component with no arguments
+Spacer()
+
+// Component with arguments
+Text("Hello World")
+
+// Component with children
+Column {
+    Text("First")
+    Text("Second")
+}
+
+// Component with arguments AND children
+Button {
+    Text("Submit")
+}.onClick(@actions.submit)
+```
+
+### Component Names
+
+Component names are **PascalCase** (start with uppercase):
+
+```hypen
+// Correct
+Column { }
+Text("Hi")
+MyCustomComponent()
+
+// Wrong - will be treated as unknown
+column { }
+text("Hi")
+```
+
+## Arguments
+
+Arguments pass data to components. They can be positional or named.
+
+### Positional Arguments
+
+```hypen
+Text("Hello")           // Single positional
+Image("photo.jpg")      // URL as positional
+```
+
+### Named Arguments
+
+```hypen
+Text(text: "Hello")
+Input(placeholder: "Enter name")
+    .value(@{state.name})
+```
+
+### Argument Types
+
+```hypen
+// Strings (double or single quotes)
+Text("Hello")
+Text('Contains "double quotes" inside')
+Text("Escaped \"quotes\" also work")
+
+// Numbers
+.padding(16)
+.fontSize(24)
+.opacity(0.5)
+
+// Booleans
+Button(disabled: true)
+Input(multiline: false)
+
+// Lists
+Row(items: ["a", "b", "c"])
+
+// Maps
+Card(style: { elevation: 4, rounded: true })
+
+// State bindings
+Text("Count: @{state.count}")
+
+// Actions (via applicators)
+Button { Text("Save") }
+    .onClick(@actions.save)
+```
+
+## Applicators
+
+Applicators modify a component's appearance or behavior. They're chained with dot notation.
+
+```hypen
+Text("Styled text")
+    .fontSize(18)
+    .fontWeight("bold")
+    .color("#3B82F6")
+    .padding(16)
+```
+
+### Chaining
+
+Applicators are applied in order, from top to bottom:
+
+```hypen
+Box { }
+    .backgroundColor("blue")    // Applied first
+    .padding(16)                // Applied second
+    .borderRadius(8)            // Applied third
+```
+
+### Common Applicators
+
+```hypen
+// Spacing
+.padding(16)
+.margin(8)
+.gap(12)
+
+// Size
+.width(200)
+.height(100)
+.fillMaxWidth(true)
+
+// Colors
+.color("#333333")
+.backgroundColor("#F3F4F6")
+
+// Typography
+.fontSize(18)
+.fontWeight("bold")
+.textAlign("center")
+
+// Border
+.borderRadius(8)
+.borderWidth(1)
+.borderColor("#E5E7EB")
+
+// Layout
+.horizontalAlignment("center")
+.verticalAlignment("center")
+```
+
+## State Bindings
+
+State bindings connect your UI to reactive data using `@{state.path}` syntax.
+
+```hypen
+// Simple binding
+Text("Hello, @{state.name}!")
+
+// Nested paths
+Text("@{state.user.profile.displayName}")
+
+// In string interpolation
+Text("You have @{state.messages.length} messages")
+```
+
+When the referenced state changes, the UI automatically updates.
+
+### Expressions inside `@{…}`
+
+`@{…}` isn't just a path — it's a small expression language. You can combine paths with operators and ternaries without leaving the template:
+
+```hypen
+// Ternary
+Text("@{state.active ? 'Online' : 'Offline'}")
+
+// Comparisons
+.color("@{state.status == 'error' ? '#EF4444' : '#10B981'}")
+
+// Array length + empty check
+Text("@{state.messages.length == 0 ? 'Inbox zero' : 'You have messages'}")
+
+// Array membership
+Text("@{state.tags.includes('admin') ? 'Admin' : 'User'}")
+
+// Arithmetic & boolean ops
+Text("Total: @{state.qty * state.price}")
+.disabled("@{state.qty < 1 || state.qty > state.stock}")
+```
+
+**Supported:** identifier paths (`state.*`, `item.*`, data-source names), numeric / boolean / string operators (`+ - * / % == != < > <= >= && || !`), ternary (`a ? b : c`), string literals (`'…'` or `"…"`), the `.length` property on arrays, and the `.includes(x)` method on arrays. Reactivity tracks the root path (e.g. `state.messages`) so mutating the array re-evaluates the expression automatically — no need to keep a derived `isEmpty` boolean in state.
+
+**Not supported:** other array/string methods (`.map`, `.filter`, `.find`, `.first`, `.last`, `.at`, `.indexOf`, `.slice`, `.join`, …), bracket indexing (`foo[0]`), function calls, object / array literals, spread, optional chaining (`?.`), nullish coalescing (`??`), exponent (`**`), `typeof`, `Math.*`. When you need any of those, compute the value in the module's action handler and store the result back on state.
+
+## Actions
+
+Actions trigger handlers in your module using `@actions.actionName` syntax via event applicators.
+
+```hypen
+// Basic action
+Button { Text("Save") }
+    .onClick(@actions.save)
+
+// Action with additional data
+Button { Text("Delete") }
+    .onClick(@actions.deleteItem, id: @{state.currentId})
+
+// Multiple events
+Input(placeholder: "Type here")
+    .onInput(@actions.updateText)
+    .onFocus(@actions.inputFocused)
+    .onBlur(@actions.inputBlurred)
+```
+
+## Children
+
+Components can contain other components as children using braces `{ }`.
+
+```hypen
+Column {
+    Text("First child")
+    Text("Second child")
+    Row {
+        Text("Nested child")
+    }
+}
+```
+
+### Nesting
+
+There's no limit to nesting depth:
+
+```hypen
+Column {
+    Card {
+        Row {
+            Image("avatar.png")
+            Column {
+                Text("John Doe")
+                Text("@johndoe")
+            }
+        }
+    }
+}
+```
+
+## Control Flow
+
+Hypen provides first-class control flow components for building dynamic UIs. These don't create DOM elements — their children render directly into the parent. For a complete guide, see **[Control Flow](/docs/guide/control-flow)**.
+
+### ForEach — Rendering Lists
+
+Iterate over an array from state and render children for each item. Use `@item` to reference the current element, and provide `key` for efficient updates when the list changes.
+
+```hypen
+Column {
+    ForEach(items: @state.todos, key: "id") {
+        Row {
+            Checkbox {}
+                .checked(@item.completed)
+                .onChange(@actions.toggleTodo)
+
+            Text(@item.title)
+                .color("@{item.completed ? '#9CA3AF' : '#111827'}")
+        }
+        .padding(8)
+        .gap(8)
+    }
+}
+```
+
+**Arguments:**
+- `items`: Array binding from state (e.g., `@state.todos`)
+- `key` (optional but recommended): Property name for stable identity (e.g., `"id"`)
+- `as` (optional): Custom variable name (default is `"item"`)
+
+### When — Pattern Matching
+
+Match a value against multiple patterns and render the first matching branch.
+
+```hypen
+When(value: @state.status) {
+    Case(match: "loading") {
+        Center { Spinner() }
+    }
+    Case(match: "error") {
+        Column {
+            Text("Something went wrong")
+            Button { Text("Retry") }
+                .onClick(@actions.reload)
+        }
+    }
+    Case(match: "success") {
+        ContentView()
+    }
+    Else {
+        Text("Unknown status")
+    }
+}
+```
+
+Match patterns support exact values (`"loading"`), multiple values (`[200, 201, 204]`), wildcards (`"_"`), and expressions (`"@{value >= 90}"`).
+
+### If — Boolean Conditionals
+
+Show or hide UI sections based on a boolean condition.
+
+```hypen
+If(condition: @state.isLoggedIn) {
+    Text("Welcome back, @{state.user.name}!")
+    Else {
+        Button { Text("Sign In") }
+            .onClick(@actions.signIn)
+    }
+}
+```
+
+For simple style changes, you don't need If — use expression bindings directly:
+
+```hypen
+// No If needed — just change the color
+Text(@state.status)
+    .color("@{state.status == 'error' ? '#EF4444' : '#10B981'}")
+```
+
+## Comments
+
+```hypen
+// Single line comment
+
+/*
+   Multi-line
+   comment
+*/
+
+Column {
+    Text("Visible")
+    // Text("Hidden - commented out")
+}
+```
+
+## Modules
+
+Modules are components with state. Declare them with the `module` keyword.
+
+```hypen
+module Counter {
+    Column {
+        Text("Count: @{state.count}")
+        Button { Text("+") }
+            .onClick(@actions.increment)
+    }
+}
+```
+
+The module name must match the TypeScript file that defines its state and actions.
+
+## Complete Example
+
+```hypen
+module UserProfile {
+    Column {
+        // Header
+        Row {
+            Image(@{state.user.avatar})
+                .size(64)
+                .borderRadius(32)
+
+            Column {
+                Text(@{state.user.name})
+                    .fontSize(20)
+                    .fontWeight("bold")
+
+                Text("@{state.user.username}")
+                    .color("#6B7280")
+            }
+            .gap(4)
+        }
+        .gap(16)
+        .padding(16)
+
+        Divider()
+
+        // Stats
+        Row {
+            Column {
+                Text("@{state.user.posts}")
+                    .fontWeight("bold")
+                Text("Posts")
+                    .fontSize(12)
+            }
+
+            Column {
+                Text("@{state.user.followers}")
+                    .fontWeight("bold")
+                Text("Followers")
+                    .fontSize(12)
+            }
+
+            Column {
+                Text("@{state.user.following}")
+                    .fontWeight("bold")
+                Text("Following")
+                    .fontSize(12)
+            }
+        }
+        .horizontalAlignment("space-around")
+        .padding(16)
+
+        // Actions
+        Button {
+            Text(@{state.isFollowing} ? "Unfollow" : "Follow")
+        }
+        .onClick(@actions.follow)
+        .backgroundColor(@{state.isFollowing} ? "#E5E7EB" : "#3B82F6")
+        .padding(horizontal: 24, vertical: 12)
+        .borderRadius(8)
+        .fillMaxWidth(true)
+        .margin(16)
+    }
+}
+```
+
+## Next Steps
+
+- [Control Flow](/docs/guide/control-flow) — Deep dive into ForEach, When, If with complete examples
+- [Routing](/docs/guide/routing) — Navigation and route guards
+- [Components](/docs/guide/components) — All built-in components
+- [Layout](/docs/guide/layout) — Arranging components
+- [Styling](/docs/guide/styling) — Complete applicator reference
+- [State & Modules](/docs/guide/state) — State management

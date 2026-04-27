@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "path-get-nested",
+  "description": "Reading a nested dotted path returns the value.",
+  "function": "path_get",
+  "priority": "P0",
+  "input": {
+    "value": { "user": { "name": "Alice", "age": 30 } },
+    "path": "user.name"
+  },
+  "expected": "Alice"
+}

@@ -1,0 +1,80 @@
+{
+  "name": "@hypen-space/web",
+  "version": "0.4.956",
+  "description": "Hypen web renderers - DOM and Canvas rendering for browsers",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "browser": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "browser": "./dist/index.js",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./dom": {
+      "types": "./dist/dom/index.d.ts",
+      "browser": "./dist/dom/index.js",
+      "bun": "./src/dom/index.ts",
+      "import": "./dist/dom/index.js",
+      "default": "./dist/dom/index.js"
+    },
+    "./canvas": {
+      "types": "./dist/canvas/index.d.ts",
+      "browser": "./dist/canvas/index.js",
+      "bun": "./src/canvas/index.ts",
+      "import": "./dist/canvas/index.js",
+      "default": "./dist/canvas/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "build:types": "tsc --emitDeclarationOnly",
+    "prepublishOnly": "bun run build",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@chenglou/pretext": "^0.0.3",
+    "@hypen-space/core": "^0.4.956",
+    "taffy-layout": "^2.0.3"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "hypen",
+    "ui",
+    "dom",
+    "canvas",
+    "renderer",
+    "browser"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "sideEffects": false,
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-web/packages/web"
+  }
+}

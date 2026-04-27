@@ -1,0 +1,12 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "session-ttl-retained",
+  "description": "A TTL tick before the expiry deadline returns RetainSession.",
+  "function": "session_step",
+  "priority": "P0",
+  "input": {
+    "state": { "policy": "kick-old" },
+    "event": { "kind": "ttl_tick", "suspended_at_ms": 1000, "now_ms": 1500, "ttl_ms": 1000 }
+  },
+  "expected": { "kind": "retain_session" }
+}

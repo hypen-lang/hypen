@@ -1,0 +1,1067 @@
+---
+title: Kotlin SDK
+description: Complete guide to building Hypen servers with Kotlin and the JVM
+---
+
+# Kotlin SDK
+
+The Kotlin SDK (`space.hypen.core`) provides a server-side Hypen implementation for Kotlin/JVM applications. It features a type-safe Kotlin DSL for module definitions, sealed-class actions, coroutine support for async handlers, session management, and Remote UI streaming over WebSocket.
+
+## Installation
+
+Add the dependency to your `build.gradle.kts`:
+
+```kotlin
+dependencies {
+    implementation("space.hypen:hypen-core:0.1.0")
+}
+```
+
+Or with Maven:
+
+```xml
+<dependency>
+    <groupId>space.hypen</groupId>
+    <artifactId>hypen-core</artifactId>
+    <version>0.1.0</version>
+</dependency>
+```
+
+## Quick Start
+
+Create a counter module using the Kotlin DSL and serve it over WebSocket:
+
+```kotlin
+import space.hypen.core.*
+
+fun main() {
+    // 1. Define the module — name(...) also auto-registers it on the
+    //    global HypenApp singleton for ManagedRouter / ComponentResolver.
+    val counter = hypen(CounterState()) {
+        name("Counter")
+
+        onAction<CounterAction.Increment> { _, state, _ -> state.count++ }
+        onAction<CounterAction.Decrement> { _, state, _ -> state.count-- }
+
+        ui("""
+            Column {
+                Text("Count: @{state.count}")
+                Row {
+                    Button("@actions.decrement") { Text("-") }
+                    Button("@actions.increment") { Text("+") }
+                }
+            }
+        """.trimIndent())
+    }
+
+    // 2. Build the server DSL — register every module here. Add more with
+    //    additional module("Name", def) calls, plus route(...) entries if
+    //    you want URL-driven module routing.
+    val server = HypenServer {
+        module("Counter", counter)
+        // module("Feed", feed)
+        // route("/counter", "Counter")
+
+        session {
+            ttl = 3600
+            concurrent = ConcurrentPolicy.KICK_OLD
+        }
+
+        onConnection { client -> println("Connected: ${client.id}") }
+        onDisconnection { client -> println("Disconnected: ${client.id}") }
+    }
+
+    // server.install(ktorApplication)
+    println("Server ready")
+}
+
+// State as a data class
+@Serializable
+data class CounterState(var count: Int = 0)
+
+// Actions as sealed interface
+sealed interface CounterAction : HypenAction {
+    data object Increment : CounterAction
+    data object Decrement : CounterAction
+}
+```
+
+## Kotlin DSL
+
+The SDK provides a Kotlin-idiomatic DSL for defining modules. There are two flavors: **typed** (recommended) and **untyped**.
+
+### Typed DSL (Recommended)
+
+Define state as a data class and actions as a sealed interface for full type safety:
+
+```kotlin
+@Serializable
+data class TodoState(
+    var todos: MutableList<Todo> = mutableListOf(),
+    var newTodo: String = "",
+    var filter: String = "all",
+)
+
+@Serializable
+data class Todo(val id: String, var text: String, var done: Boolean = false)
+
+sealed interface TodoAction : HypenAction {
+    data object AddTodo : TodoAction
+    data class ToggleTodo(val id: String) : TodoAction
+    data class DeleteTodo(val id: String) : TodoAction
+}
+
+val todoModule = hypen(TodoState()) {
+    name("TodoList")
+
+    onCreated { state, context ->
+        println("TodoList created with ${state.todos.size} items")
+    }
+
+    onAction<TodoAction.AddTodo> { _, state, _ ->
+        if (state.newTodo.isNotBlank()) {
+            state.todos.add(Todo(
+                id = System.currentTimeMillis().toString(),
+                text = state.newTodo.trim(),
+            ))
+            state.newTodo = ""
+        }
+    }
+
+    onAction<TodoAction.ToggleTodo> { action, state, _ ->
+        state.todos.find { it.id == action.id }?.let {
+            it.done = !it.done
+        }
+    }
+
+    onAction<TodoAction.DeleteTodo> { action, state, _ ->
+        state.todos.removeAll { it.id == action.id }
+    }
+
+    onError { ctx ->
+        println("Error: ${ctx.error.message}")
+        ErrorHandlerResult.Handled
+    }
+
+    onDestroyed { state, _ ->
+        println("TodoList destroyed with ${state.todos.size} items")
+    }
+}
+```
+
+The typed DSL gives you:
+- **Compile-time safety** — action payloads are deserialized to their concrete type automatically
+- **Exhaustive `when`** — sealed interfaces enable exhaustive matching
+- **IDE support** — full autocompletion on state and action fields
+
+### Untyped DSL
+
+For quick prototyping or dynamic state, use the untyped `hypen { }` builder:
+
+```kotlin
+val counter = hypen {
+    name("Counter")
+
+    state {
+        "count" to 0
+        "name" to "My Counter"
+    }
+
+    onAction("increment") { ctx ->
+        val count = ctx.state.get("count") as? Int ?: 0
+        ctx.state.set("count", count + 1)
+    }
+
+    onAction("decrement") { ctx ->
+        val count = ctx.state.get("count") as? Int ?: 0
+        ctx.state.set("count", count - 1)
+    }
+
+    onCreated { state, context ->
+        println("Counter created")
+    }
+
+    onDestroyed { state, context ->
+        println("Counter destroyed")
+    }
+}
+```
+
+### Fluent Builder API
+
+For programmatic module construction:
+
+```kotlin
+val module = AppBuilder.defineState(mapOf("count" to 0))
+    .onCreated { state, context ->
+        println("Created")
+    }
+    .onAction("increment") { ctx ->
+        val count = ctx.state.get("count") as? Int ?: 0
+        ctx.state.set("count", count + 1)
+    }
+    .onError { ctx ->
+        println("Error in ${ctx.actionName}: ${ctx.error.message}")
+        ErrorHandlerResult.Handled
+    }
+    .build()
+```
+
+### Embedding UI Templates
+
+Embed the Hypen DSL template directly in the module definition:
+
+```kotlin
+val counter = hypen(CounterState()) {
+    name("Counter")
+
+    ui("""
+        Column {
+            Text("Count: @{state.count}")
+                .fontSize(32)
+                .fontWeight("bold")
+
+            Row {
+                Button { Text("-") }
+                    .onClick(@actions.Decrement)
+                    .padding(16)
+
+                Button { Text("+") }
+                    .onClick(@actions.Increment)
+                    .padding(16)
+            }
+            .gap(16)
+        }
+        .padding(32)
+    """)
+
+    onAction<CounterAction.Increment> { _, state, _ -> state.count++ }
+    onAction<CounterAction.Decrement> { _, state, _ -> state.count-- }
+}
+```
+
+## Type-Safe Actions
+
+Actions are defined as sealed interfaces implementing `HypenAction`. The action class name becomes the action name dispatched from the UI:
+
+```kotlin
+sealed interface ProfileAction : HypenAction {
+    data object Save : ProfileAction                           // @actions.Save
+    data class UpdateField(val field: String, val value: String) : ProfileAction  // @actions.UpdateField
+    data class LoadUser(val userId: String) : ProfileAction    // @actions.LoadUser
+}
+```
+
+In the handler, the action is automatically deserialized to the correct type:
+
+```kotlin
+onAction<ProfileAction.UpdateField> { action, state, _ ->
+    // action is typed as ProfileAction.UpdateField
+    when (action.field) {
+        "name" -> state.name = action.value
+        "email" -> state.email = action.value
+    }
+}
+```
+
+## Async Action Handlers
+
+Use `onActionAsync` for coroutine-based handlers:
+
+```kotlin
+val module = hypen(UserState()) {
+    onActionAsync<UserAction.FetchProfile> { action, state, _ ->
+        state.loading = true
+        try {
+            val user = httpClient.get("/api/users/${action.userId}")
+            state.user = user
+            state.error = null
+        } catch (e: Exception) {
+            state.error = "Failed to load user: ${e.message}"
+        } finally {
+            state.loading = false
+        }
+    }
+}
+```
+
+Or with the fluent API:
+
+```kotlin
+AppBuilder.defineState(initialState)
+    .onActionAsync("fetchData") { ctx ->
+        ctx.state.set("loading", true)
+        val data = fetchFromApi()
+        ctx.state.set("data", data)
+        ctx.state.set("loading", false)
+    }
+    .build()
+```
+
+## State Management
+
+### ObservableState
+
+State uses `ObservableState<T>` with automatic change tracking and thread-safe access via `ReentrantReadWriteLock`:
+
+```kotlin
+val state = ObservableState(
+    initialState = mapOf("count" to 0, "user" to mapOf("name" to "Alice")),
+    onChange = { change ->
+        println("Changed: ${change.paths}")
+    },
+)
+
+// Read
+state.get("count")          // 0
+state.get("user.name")      // "Alice"
+state.getAll()               // full state map (deep clone)
+state.getSnapshot()          // deep copy
+
+// Write (triggers onChange)
+state.set("count", 1)
+state.set("user.name", "Bob")
+state.update(mapOf("count" to 5, "user.name" to "Charlie"))
+```
+
+### Batch Updates
+
+Coalesce multiple changes into a single notification:
+
+```kotlin
+state.batch {
+    state.set("user.name", "Dave")
+    state.set("user.email", "dave@example.com")
+    state.set("loading", false)
+}
+// Single onChange notification with all paths
+```
+
+### Change Listeners
+
+```kotlin
+state.addChangeListener { change ->
+    println("Paths: ${change.paths}")
+    println("Values: ${change.newValues}")
+}
+```
+
+### Path-Based Access
+
+Dot-separated paths navigate nested objects:
+
+```kotlin
+state.set("user.profile.address.city", "New York")
+state.get("user.profile.address.city")  // "New York"
+state.get("items.0.title")              // First item's title
+```
+
+## Error Handling
+
+### onError Handler
+
+Catch errors from action handlers and lifecycle hooks:
+
+```kotlin
+onError { ctx ->
+    when {
+        ctx.actionName != null ->
+            println("Action '${ctx.actionName}' failed: ${ctx.error.message}")
+        ctx.lifecycle != null ->
+            println("Lifecycle '${ctx.lifecycle}' failed: ${ctx.error.message}")
+    }
+    ErrorHandlerResult.Handled  // suppress the error
+    // or: ErrorHandlerResult.Rethrow  // re-throw
+    // or: null  // default: log to stderr
+}
+```
+
+### ErrorContext Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `error` | `Throwable` | The exception |
+| `state` | `ObservableState<T>` | Current state (for inspection) |
+| `actionName` | `String?` | Set if error came from an action handler |
+| `lifecycle` | `String?` | `"created"` or `"destroyed"` if from a lifecycle hook |
+
+### Sealed Error Types
+
+```kotlin
+try {
+    engine.renderSource(source)
+} catch (e: EngineError) {
+    when (e) {
+        is EngineError.Parse -> println("Parse failed: ${e.detail}")
+        is EngineError.ComponentNotFound -> println("Missing: ${e.componentName}")
+        is EngineError.Render -> println("Render failed: ${e.detail}")
+        is EngineError.ActionNotFound -> println("No handler for: ${e.actionName}")
+        is EngineError.State -> println("State error: ${e.detail}")
+    }
+}
+```
+
+## Named Modules
+
+Register modules by name using the `HypenApp` singleton:
+
+```kotlin
+// Register via Module helper
+val homePage = app.module("HomePage")
+    .defineState(mapOf("title" to "Home"))
+    .onCreated { state, _ -> println("HomePage mounted") }
+    .build()
+// Auto-registered as "HomePage"
+
+// Query the registry
+app.has("HomePage")     // true
+app.get("HomePage")     // ModuleDefinition
+app.getNames()          // ["HomePage"]
+app.size                // 1
+
+// Manual registration
+app.register("Settings", settingsModule)
+app.unregister("Settings")
+app.clear()
+```
+
+## Routing
+
+### HypenRouter
+
+URL-based navigation with pattern matching:
+
+```kotlin
+val router = HypenRouter()
+
+// Navigate
+router.push("/users/123")
+router.replace("/login")
+router.back()
+
+// Query
+router.getCurrentPath()   // "/users/123"
+router.getParams()        // {id: "123"}
+router.getQuery()         // {tab: "posts"}
+router.getState()         // RouteState(currentPath, params, query, previousPath)
+
+// Pattern matching
+val match = router.matchPath("/users/:id", "/users/42")
+// match?.params = {id: "42"}
+
+router.isActive("/users/:id")   // true
+
+// URL building
+router.buildUrl("/search", mapOf("q" to "hello", "page" to "2"))
+// "/search?page=2&q=hello"
+
+// Listeners
+val unsubscribe = router.onNavigate { from, to ->
+    println("$from → $to")
+}
+unsubscribe()
+```
+
+### Pattern Syntax
+
+| Pattern | Example Match | Params |
+|---------|---------------|--------|
+| `/users/:id` | `/users/42` | `{id: "42"}` |
+| `/posts/:postId/comments/:commentId` | `/posts/1/comments/5` | `{postId: "1", commentId: "5"}` |
+| `/files/*` | `/files/a/b/c` | wildcard match |
+| `/about` | `/about` | exact match |
+
+### Auto-wire from the DSL
+
+`HypenServer` discovers every `Router { Route ... }` block in the
+primary and child templates at session start and wires a per-session
+`ManagedRouter`. DSL authors dispatch the reserved `@router.*`
+namespace:
+
+```hypen
+Button { Text("Search") }.onClick(@router.push, to: "/search")
+Button { Text("←") }.onClick(@router.back)
+```
+
+Per-route modules read route params in `onActivated` via
+`ctx?.getRouter()`:
+
+```kotlin
+hypen(UserProfileState()) {
+    name("UserProfile")
+    ui(loadTemplate("UserProfile"))
+    onActivated { state, ctx ->
+        val router = ctx?.getRouter() ?: return@onActivated
+        val id = router.matchPath("/user-profile/:id", router.getCurrentPath())
+            ?.params?.get("id") ?: return@onActivated
+        state.viewedUser = loadUser(id)
+    }
+}
+```
+
+**Kotlin-specific:** the `@router.*` handlers run synchronously (not
+via `scope.launch`). JNA has no wasm-bindgen reentrance issue, and
+deferring would land patches outside the caller's `collectPatches`
+window. Don't blindly port the defer pattern from TS/Go/Swift.
+
+Opt out with `HypenServerBuilder.disableAutoRouter()`. See the
+[Routing Guide](/docs/guide/routing) for cross-SDK semantics.
+
+### Managed Router (manual)
+
+For bespoke wiring, construct a `ManagedRouter` directly:
+
+```kotlin
+val managed = ManagedRouter(router, engine, app, globalContext)
+    .addRoute(RouteDefinition(path = "/", component = "HomePage"))
+    .addRoute(RouteDefinition(path = "/profile/:id", component = "ProfilePage"))
+    .addRoute(RouteDefinition(path = "/settings", module = settingsModule))
+
+managed.start()
+router.push("/profile/123")  // ProfilePage module mounts automatically
+
+managed.getActiveModule()     // current ModuleInstance
+managed.getActiveRoute()      // current RouteDefinition
+managed.stop()
+```
+
+## Event System
+
+Type-safe pub/sub messaging:
+
+```kotlin
+val emitter = TypedEventEmitter()
+
+// Define typed event keys
+val userLoggedIn = EventKey<UserLoggedInEvent>("user:login")
+val notification = EventKey<NotificationEvent>("notification")
+
+// Subscribe (type-safe)
+val unsub = emitter.on(userLoggedIn) { event ->
+    // event is typed as UserLoggedInEvent
+    println("${event.email} logged in")
+}
+
+// Emit
+emitter.emit(userLoggedIn, UserLoggedInEvent(userId = "1", email = "alice@example.com"))
+
+// One-time listener
+emitter.once(notification) { event ->
+    println("${event.type}: ${event.message}")
+}
+
+// Unsubscribe
+unsub()
+
+// Query
+emitter.listenerCount(userLoggedIn)  // 0
+emitter.eventNames()                  // []
+
+// Cleanup
+emitter.removeAllListeners(userLoggedIn)
+emitter.clearAll()
+```
+
+### Built-in Framework Events
+
+```kotlin
+object HypenEvents {
+    val moduleCreated = EventKey<ModuleCreated>("module:created")
+    val moduleDestroyed = EventKey<ModuleDestroyed>("module:destroyed")
+    val routeChanged = EventKey<RouteChanged>("route:changed")
+    val stateUpdated = EventKey<StateUpdated>("state:updated")
+    val actionDispatched = EventKey<ActionDispatched>("action:dispatched")
+    val error = EventKey<FrameworkError>("error")
+}
+
+// Listen for framework events
+globalContext.events().on(HypenEvents.stateUpdated) { event ->
+    println("Module ${event.moduleId} state changed: ${event.paths}")
+}
+```
+
+## Global Context
+
+Cross-module communication:
+
+```kotlin
+val globalCtx = HypenGlobalContext()
+
+// Register modules
+globalCtx.registerModule("counter", counterInstance)
+globalCtx.registerModule("auth", authInstance)
+
+// Access other modules
+val counterRef = globalCtx.getModule<CounterState>("counter")
+counterRef?.getState()                              // state snapshot
+counterRef?.setState(mapOf("count" to 42))          // update state
+
+// Query
+globalCtx.hasModule("counter")   // true
+globalCtx.getModuleIds()          // ["counter", "auth"]
+globalCtx.getGlobalState()        // combined state
+
+// Events via global context
+globalCtx.emit("custom:event", mapOf("data" to "value"))
+val unsub = globalCtx.on("custom:event") { payload ->
+    println("Event: $payload")
+}
+unsub()
+```
+
+## HypenServer
+
+The server manages WebSocket connections, session lifecycle, and module instances:
+
+```kotlin
+val server = HypenServer {
+    // Register modules
+    module("Counter", counterModule)
+    module("Profile", profileModule)
+
+    // Define routes
+    route("/", "Counter")
+    route("/profile/:id", "Profile")
+
+    // Session configuration
+    session {
+        ttl = 300                           // 5 minutes
+        concurrent = ConcurrentPolicy.KICK_OLD
+    }
+
+    // Connection callbacks
+    onConnection { client ->
+        println("Client ${client.id} connected (session: ${client.sessionId})")
+    }
+
+    onDisconnection { client ->
+        println("Client ${client.id} disconnected")
+    }
+
+    // Watch for component file changes
+    watchComponents("./src/components")
+}
+```
+
+### Integrating with Ktor
+
+```kotlin
+import io.ktor.server.websocket.*
+import io.ktor.websocket.*
+
+fun Application.configureRouting(hypenServer: HypenServer) {
+    routing {
+        webSocket("/ws") {
+            val sessionId = call.request.queryParameters["sessionId"]
+            val props = mapOf("platform" to "web")
+
+            val clientSessionId = hypenServer.handleConnect(
+                connectionKey = this,
+                sessionId = sessionId,
+                props = props,
+                sendMessage = { msg -> send(Frame.Text(msg)) },
+            )
+
+            try {
+                for (frame in incoming) {
+                    if (frame is Frame.Text) {
+                        hypenServer.handleMessage(this, frame.readText()) { msg ->
+                            send(Frame.Text(msg))
+                        }
+                    }
+                }
+            } finally {
+                hypenServer.handleDisconnect(this)
+            }
+        }
+
+        get("/health") { call.respondText("OK") }
+        get("/stats") { call.respond(hypenServer.getStats()) }
+    }
+}
+```
+
+### Session Lifecycle
+
+```kotlin
+val module = hypen(AppState()) {
+    onDisconnect { state, session ->
+        // Client disconnected, but session is alive (within TTL)
+        println("Session ${session.id} disconnected")
+    }
+
+    onReconnect { session, restore ->
+        // Client reconnected with existing session ID
+        println("Session ${session.id} reconnected")
+        // Optionally restore saved state
+        restore(savedState)
+    }
+
+    onExpire { session ->
+        // Session TTL expired — no reconnection happened
+        println("Session ${session.id} expired")
+    }
+}
+```
+
+### Concurrent Connection Policies
+
+| Policy | Behavior |
+|--------|----------|
+| `ConcurrentPolicy.KICK_OLD` (default) | New connection replaces existing on same session |
+| `ConcurrentPolicy.REJECT_NEW` | Rejects new connection if one already exists |
+| `ConcurrentPolicy.ALLOW_MULTIPLE` | Multiple connections share the same session |
+
+### Server Methods
+
+```kotlin
+server.getStats()        // { activeSessions, pendingSessions, totalConnections, ... }
+server.events()          // TypedEventEmitter for framework events
+server.getRoutes()       // registered route definitions
+server.shutdown()        // graceful shutdown
+```
+
+## Component Discovery
+
+Discover `.hypen` templates from the filesystem:
+
+```kotlin
+val engine = NativeEngine()
+val loader = ComponentLoader(engine)
+
+// Discover components
+val components = loader.discoverComponents(
+    baseDir = "./src/components",
+    patterns = listOf(DiscoveryPattern.FOLDER, DiscoveryPattern.SIBLING, DiscoveryPattern.INDEX),
+    recursive = true,
+)
+// Returns List<DiscoveredComponent>
+
+// Register discovered components with the engine
+for (component in components) {
+    loader.register(component.name, component.template, component.hypenPath)
+}
+```
+
+### Discovery Patterns
+
+| Pattern | Directory Structure |
+|---------|-------------------|
+| `FOLDER` | `Counter/component.hypen` |
+| `SIBLING` | `Counter.hypen` |
+| `INDEX` | `Counter/index.hypen` |
+
+### Component Resolver
+
+Resolve `import` statements from Hypen DSL:
+
+```kotlin
+val resolver = ComponentResolver(
+    baseDir = "./components",
+    cache = true,
+    app = app,
+)
+
+// Parse imports from DSL
+val imports = ComponentResolver.parseImports("""
+    import { Header, Footer } from "./shared"
+    import MainContent from "./pages/main"
+""")
+
+// Resolve each import
+for (stmt in imports) {
+    val resolved = resolver.resolve(stmt)
+    // resolved: Map<String, ComponentDefinition>
+}
+
+// Cache management
+resolver.clearCache()
+resolver.cacheSize
+```
+
+### File Watching
+
+Watch for component changes during development:
+
+```kotlin
+val watcher = ComponentWatcher(
+    baseDir = Path("./src/components"),
+    patterns = DiscoveryPattern.DEFAULT,
+    debounceMs = 100,
+    recursive = true,
+    onChange = { changes ->
+        for (added in changes.added) println("Added: ${added.name}")
+        for (updated in changes.updated) println("Updated: ${updated.name}")
+        for (removed in changes.removed) println("Removed: $removed")
+    },
+)
+
+watcher.start()
+// ...
+watcher.stop()
+```
+
+## WASM Engine
+
+The `NativeEngine` uses UniFFI bindings to run the Rust Hypen engine via WASI:
+
+```kotlin
+val engine = NativeEngine()
+
+// Check availability
+if (NativeEngine.isAvailable()) {
+    // Register primitives
+    engine.registerPrimitive("Text")
+    engine.registerPrimitive("Button")
+
+    // Register components
+    engine.registerComponent("Header", headerDSL, "/components/Header")
+
+    // Set up module
+    engine.setModule("Counter", listOf("increment"), listOf("count"), mapOf("count" to 0))
+
+    // Register action handler
+    engine.onAction("increment") { action ->
+        // Handle action
+    }
+
+    // Set render callback
+    engine.setRenderCallback { patches ->
+        // Send patches to clients
+    }
+
+    // Render
+    val patches = engine.renderSource("""
+        Column {
+            Text("Hello, world!")
+        }
+    """)
+
+    // Update state
+    val newPatches = engine.updateState("""{"count": 1}""")
+
+    // Document rendering with imports
+    val docPatches = engine.renderDocument(source, resolver)
+
+    // Debug
+    val ast = engine.parseToJson(source)
+    val rev = engine.getRevision()
+    engine.clearTree()
+
+    // Cleanup
+    engine.close()
+}
+```
+
+## Retry Utilities
+
+Built-in retry logic with exponential backoff for network operations:
+
+```kotlin
+import space.hypen.core.retry
+import space.hypen.core.RetryOptions
+import space.hypen.core.RetryPresets
+import space.hypen.core.BackoffStrategy
+
+// Basic retry
+val result = retry { fetchData() }
+
+// With options
+val result = retry(RetryOptions(
+    maxAttempts = 5,
+    delayMs = 1000,
+    backoff = BackoffStrategy.EXPONENTIAL,
+    maxDelayMs = 30_000,
+    jitter = 0.1,
+    onRetry = { attempt, error, nextDelay ->
+        println("Retry $attempt after ${nextDelay}ms: ${error.message}")
+    },
+    shouldRetry = RetryConditions.networkErrors,
+)) {
+    connectToServer()
+}
+
+// Presets
+val data = retry(RetryPresets.websocket) { openWebSocket(url) }
+val data = retry(RetryPresets.aggressive) { httpRequest() }   // 10 attempts, 500ms
+val data = retry(RetryPresets.conservative) { apiCall() }     // 3 attempts, 2s
+val data = retry(RetryPresets.fast) { quickCheck() }          // 5 attempts, 100ms
+
+// Result variant (returns Result<T> instead of throwing)
+val result = retryResult { fetchData() }
+result.onSuccess { data -> process(data) }
+result.onFailure { error -> log(error) }
+```
+
+## Testing
+
+### MockEngine
+
+Test modules without the WASM engine:
+
+```kotlin
+import space.hypen.core.mockEngine
+
+fun testCounter() {
+    val engine = mockEngine()
+
+    val counter = hypen(CounterState()) {
+        onAction<CounterAction.Increment> { _, state, _ ->
+            state.count++
+        }
+    }
+
+    val instance = counter.createInstance(engine)
+
+    // Dispatch action
+    engine.triggerAction("Increment")
+
+    // Verify
+    assert(instance.getState()["count"] == 1)
+
+    // Inspect
+    engine.getStateChanges()        // List<StateChange>
+    engine.getDispatchedActions()    // List<Action>
+    engine.hasAction("Increment")   // true
+    engine.getRegisteredActions()    // ["Increment"]
+
+    // Reset
+    engine.reset()
+
+    // Cleanup
+    instance.destroy()
+}
+```
+
+### Convenience Builders
+
+```kotlin
+// Create mock engine
+val engine = mockEngine {
+    // Configure if needed
+}
+
+// Create global context
+val ctx = globalContext {
+    registerModule("counter", instance)
+}
+
+// Create router
+val router = router("/home")
+```
+
+## Logging
+
+Configure logging for debugging:
+
+```kotlin
+import space.hypen.core.Logger
+import space.hypen.core.LogLevel
+import space.hypen.core.HypenLoggers
+
+// Global log level
+Logger.setLogLevel(LogLevel.DEBUG)
+
+// Enable/disable all logging
+Logger.enableLogging()
+Logger.disableLogging()
+
+// Configure
+Logger.configure(LoggerConfig(
+    level = LogLevel.INFO,
+    colors = true,
+    timestamps = true,
+    handler = customLogHandler,
+))
+```
+
+### Framework Loggers
+
+```kotlin
+HypenLoggers.engine      // Engine operations
+HypenLoggers.router      // Navigation events
+HypenLoggers.state       // State mutations
+HypenLoggers.events      // Event emissions
+HypenLoggers.remote      // Remote server/client
+HypenLoggers.module      // Module lifecycle
+HypenLoggers.lifecycle   // Lifecycle hooks
+HypenLoggers.loader      // Component loading
+HypenLoggers.context     // Global context
+HypenLoggers.session     // Session management
+HypenLoggers.server      // Server operations
+```
+
+### Logger Features
+
+```kotlin
+val log = createLogger("MyModule")
+
+log.debug("Processing item %s", itemId)
+log.info("Server started on port %d", port)
+log.warn("Slow query: %dms", elapsed)
+log.error("Failed to connect: %s", error.message)
+
+// Conditional logging
+log.debugIf(verbose, "Detailed info: %s", details)
+log.warnOnce("deprecation", "This API is deprecated")
+
+// Performance timing
+val result = log.time("render") {
+    engine.renderSource(source)
+}
+
+// Async timing
+val result = log.timeAsync("fetch") {
+    httpClient.get(url)
+}
+
+// Child loggers
+val childLog = log.child("WASM")
+childLog.debug("Initializing runtime")
+// Outputs: [MyModule:WASM] Initializing runtime
+```
+
+## Deployment
+
+### Docker
+
+```dockerfile
+FROM gradle:8-jdk17 AS build
+WORKDIR /app
+COPY . .
+RUN gradle shadowJar --no-daemon
+
+FROM eclipse-temurin:17-jre-alpine
+WORKDIR /app
+COPY --from=build /app/build/libs/*-all.jar app.jar
+COPY --from=build /app/components ./components
+EXPOSE 3000
+CMD ["java", "-jar", "app.jar"]
+```
+
+### Production Checklist
+
+- Bundle the native WASM engine library with your deployment
+- Each client gets its own module instance — plan memory accordingly
+- Use `server.shutdown()` for graceful shutdown
+- Monitor sessions via `server.getStats()`
+- Set appropriate session TTL for your use case
+- Use `ConcurrentPolicy.KICK_OLD` (default) to prevent stale connections
+- Add authentication at the HTTP layer before WebSocket upgrade
+- Use coroutine scopes for async action handlers
+
+## Requirements
+
+- Kotlin 2.0+ with JVM target 17+
+- `kotlinx-coroutines-core` 1.9+
+- `kotlinx-serialization-json` 1.7+
+- JNA 5.14+ (for UniFFI native bindings)
+- Ktor (recommended for WebSocket serving)
+
+## See Also
+
+- [TypeScript SDK](/docs/servers/typescript) — TypeScript server SDK with sessions and component discovery
+- [Go SDK](/docs/servers/golang) — Go server SDK reference
+- [Remote App Tutorial](/docs/getting-started/remote-app) — Step-by-step guide to building a remote app
+- [Error Handling](/docs/guide/error-handling) — Error recovery patterns across SDKs
+- [Web Adapter](/docs/adapters/web) — Client-side rendering for browsers
