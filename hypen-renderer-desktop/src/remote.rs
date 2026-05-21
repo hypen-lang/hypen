@@ -17,7 +17,31 @@ use hypen_engine::Patch;
 use hypen_server::remote::RemoteMessage;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
+
+/// Cap on the reconnect backoff. Beyond this we keep retrying every
+/// `MAX_BACKOFF_SECS` seconds — `RemoteServer` restarts during dev
+/// usually finish well inside this window.
+const MAX_BACKOFF_SECS: u64 = 30;
+/// Hard cap on consecutive reconnect attempts before giving up. Set
+/// generously so transient network drops don't end the session, but
+/// not so high that a permanently-down server eats infinite power.
+const MAX_RECONNECT_ATTEMPTS: u32 = 60;
+
+/// Compute the reconnect-backoff delay for a given attempt number
+/// (1-indexed: attempt 1 is the first retry after a disconnect).
+/// Doubles each attempt — 1s, 2s, 4s, 8s, 16s — and caps at
+/// `MAX_BACKOFF_SECS`. Pure function so tests can pin the curve.
+pub(crate) fn backoff_for(attempt: u32) -> Duration {
+    if attempt == 0 {
+        return Duration::ZERO;
+    }
+    // attempt-1 keeps the first retry at 1s.
+    let shift = (attempt - 1).min(5);
+    let secs = 1u64 << shift;
+    Duration::from_secs(secs.min(MAX_BACKOFF_SECS))
+}
 
 type PatchCallback = Arc<dyn Fn(&[Patch]) + Send + Sync>;
 
@@ -97,40 +121,91 @@ pub(crate) fn deliver_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
     }
 }
 
+/// Why a single session ended. Drives whether the outer loop tries
+/// again (with backoff) or exits.
+enum SessionEnd {
+    /// Caller dropped the outbound channel — clean shutdown, don't
+    /// reconnect.
+    Shutdown,
+    /// The server / network ended the session in a way that justifies
+    /// a reconnect attempt.
+    Disconnected,
+}
+
 async fn run_worker(
     url: String,
     module_name: String,
     mut outbound: mpsc::UnboundedReceiver<RemoteMessage>,
     inner: Arc<Mutex<Inner>>,
 ) {
+    let mut session_id: Option<String> = None;
+    let mut attempt: u32 = 0;
+    loop {
+        let result = run_session(
+            &url,
+            &module_name,
+            &mut session_id,
+            &mut outbound,
+            &inner,
+        )
+        .await;
+        match result {
+            Ok(SessionEnd::Shutdown) => {
+                log::info!("remote: shutdown requested; exiting worker");
+                break;
+            }
+            Ok(SessionEnd::Disconnected) | Err(_) => {
+                attempt = attempt.saturating_add(1);
+                if attempt > MAX_RECONNECT_ATTEMPTS {
+                    log::error!(
+                        "remote: giving up after {MAX_RECONNECT_ATTEMPTS} reconnect attempts",
+                    );
+                    break;
+                }
+                let delay = backoff_for(attempt);
+                log::warn!(
+                    "remote: disconnected (attempt {attempt}); retrying in {:?}",
+                    delay,
+                );
+                tokio::time::sleep(delay).await;
+            }
+        }
+    }
+}
+
+/// Run a single connect → handshake → pump cycle. Captures
+/// `session_id` from `SessionAck` so reconnects can resume. Returns
+/// `Shutdown` only when the outbound channel hangs up.
+async fn run_session(
+    url: &str,
+    module_name: &str,
+    session_id: &mut Option<String>,
+    outbound: &mut mpsc::UnboundedReceiver<RemoteMessage>,
+    inner: &Arc<Mutex<Inner>>,
+) -> Result<SessionEnd, String> {
     use futures_util::{SinkExt, StreamExt};
     use tokio_tungstenite::{
         connect_async,
         tungstenite::protocol::Message as WsMsg,
     };
 
-    log::info!("remote: connecting to {url}");
-    let (ws_stream, _resp) = match connect_async(&url).await {
-        Ok(s) => s,
-        Err(e) => {
-            log::error!("remote: WebSocket connect failed: {e}");
-            return;
-        }
-    };
+    log::info!(
+        "remote: connecting to {url} (resume session={:?})",
+        session_id.as_deref(),
+    );
+    let (ws_stream, _resp) = connect_async(url)
+        .await
+        .map_err(|e| format!("connect failed: {e}"))?;
     let (mut sink, mut stream) = ws_stream.split();
     log::info!("remote: connected (module={module_name})");
 
-    // Hello — fresh session for now; resume comes later.
-    let hello = RemoteMessage::Hello {
-        session_id: None,
-        props: None,
-    };
-    if let Ok(s) = hello.to_json() {
-        if let Err(e) = sink.send(WsMsg::Text(s)).await {
-            log::error!("remote: failed sending Hello: {e}");
-            return;
-        }
-    }
+    // Hello — replay our session_id if we have one so the server can
+    // resume; otherwise it'll mint a new one.
+    let hello = build_hello(session_id.clone());
+    let hello_text = hello.to_json().map_err(|e| format!("encode Hello: {e}"))?;
+    sink.send(WsMsg::Text(hello_text))
+        .await
+        .map_err(|e| format!("send Hello: {e}"))?;
 
     loop {
         tokio::select! {
@@ -138,42 +213,56 @@ async fn run_worker(
 
             incoming = stream.next() => match incoming {
                 Some(Ok(WsMsg::Text(text))) => {
-                    handle_incoming(text.as_ref(), &inner);
+                    handle_incoming(text.as_ref(), inner, session_id);
                 }
                 Some(Ok(WsMsg::Binary(_))) => {
-                    // Hypen's wire format is JSON text; ignore binary frames.
+                    // Hypen's wire format is JSON text; ignore binary.
                 }
                 Some(Ok(WsMsg::Close(_))) | None => {
                     log::info!("remote: server closed connection");
-                    break;
+                    return Ok(SessionEnd::Disconnected);
                 }
-                Some(Ok(_)) => {} // Ping/Pong/Frame — handled by tungstenite.
+                Some(Ok(_)) => {} // Ping/Pong — tungstenite handles.
                 Some(Err(e)) => {
                     log::warn!("remote: stream error: {e}");
-                    break;
+                    return Ok(SessionEnd::Disconnected);
                 }
             },
 
             outgoing = outbound.recv() => match outgoing {
                 Some(msg) => {
-                    if let Ok(s) = msg.to_json() {
-                        if let Err(e) = sink.send(WsMsg::Text(s)).await {
-                            log::warn!("remote: failed sending action: {e}");
-                            break;
+                    let text = match msg.to_json() {
+                        Ok(t) => t,
+                        Err(e) => {
+                            log::warn!("remote: encode action: {e}");
+                            continue;
                         }
+                    };
+                    if let Err(e) = sink.send(WsMsg::Text(text)).await {
+                        log::warn!("remote: send action: {e}");
+                        return Ok(SessionEnd::Disconnected);
                     }
                 }
-                None => {
-                    // Sender dropped — clean shutdown.
-                    log::info!("remote: outbound channel closed; shutting down");
-                    break;
-                }
+                None => return Ok(SessionEnd::Shutdown),
             }
         }
     }
 }
 
-fn handle_incoming(text: &str, inner: &Arc<Mutex<Inner>>) {
+/// Build the Hello payload. Pulled out as a free function so tests
+/// can assert the shape without spinning up a worker.
+pub(crate) fn build_hello(session_id: Option<String>) -> RemoteMessage {
+    RemoteMessage::Hello {
+        session_id,
+        props: None,
+    }
+}
+
+fn handle_incoming(
+    text: &str,
+    inner: &Arc<Mutex<Inner>>,
+    session_id: &mut Option<String>,
+) {
     let msg: RemoteMessage = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(e) => {
@@ -182,8 +271,15 @@ fn handle_incoming(text: &str, inner: &Arc<Mutex<Inner>>) {
         }
     };
     match msg {
-        RemoteMessage::SessionAck { session_id, is_new, .. } => {
-            log::info!("remote: session ack id={session_id} new={is_new}");
+        RemoteMessage::SessionAck {
+            session_id: id,
+            is_new,
+            is_restored,
+        } => {
+            log::info!(
+                "remote: session ack id={id} new={is_new} restored={is_restored}",
+            );
+            *session_id = Some(id);
         }
         RemoteMessage::InitialTree { patches, .. }
         | RemoteMessage::Patch { patches, .. } => {
@@ -197,9 +293,11 @@ fn handle_incoming(text: &str, inner: &Arc<Mutex<Inner>>) {
         }
         RemoteMessage::SessionExpired { reason, .. } => {
             log::warn!("remote: session expired: {reason}");
+            // Drop our id so the next reconnect mints a fresh one
+            // instead of failing the resume handshake again.
+            *session_id = None;
         }
-        // These are client→server messages; if the server sends one
-        // back to us, ignore.
+        // Client→server variants — ignore if they ever bounce back.
         RemoteMessage::Hello { .. }
         | RemoteMessage::DispatchAction { .. }
         | RemoteMessage::SubscribeState { .. } => {}
@@ -358,9 +456,8 @@ mod tests {
         inner.lock().unwrap().callback = Some(Arc::new(move |p: &[Patch]| {
             captured.lock().unwrap().extend_from_slice(p);
         }));
+        let mut session_id: Option<String> = None;
 
-        // Construct a wire-format InitialTree the way the TS server
-        // would emit it: type discriminator + camelCase fields.
         let initial_tree = json!({
             "type": "initialTree",
             "module": "Counter",
@@ -377,7 +474,7 @@ mod tests {
         })
         .to_string();
 
-        handle_incoming(&initial_tree, &inner);
+        handle_incoming(&initial_tree, &inner, &mut session_id);
         let got = received.lock().unwrap();
         assert_eq!(got.len(), 1);
         assert!(matches!(got[0], Patch::Create { ref id, .. } if id == "1"));
@@ -386,23 +483,80 @@ mod tests {
     #[test]
     fn handle_incoming_ignores_malformed_messages_without_panicking() {
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
-        handle_incoming("{not json}", &inner);
-        handle_incoming(r#"{"type":"unknownVariant"}"#, &inner);
-        // No callback set, no pending patches: nothing happened.
+        let mut session_id: Option<String> = None;
+        handle_incoming("{not json}", &inner, &mut session_id);
+        handle_incoming(r#"{"type":"unknownVariant"}"#, &inner, &mut session_id);
         assert!(inner.lock().unwrap().pending.is_empty());
+        assert!(session_id.is_none());
     }
 
     #[test]
-    fn handle_incoming_ignores_session_ack() {
+    fn handle_incoming_session_ack_captures_session_id_for_resume() {
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let mut session_id: Option<String> = None;
         let session_ack = json!({
             "type": "sessionAck",
-            "sessionId": "abc",
+            "sessionId": "session-abc-123",
             "isNew": true,
             "isRestored": false,
         })
         .to_string();
-        handle_incoming(&session_ack, &inner);
+        handle_incoming(&session_ack, &inner, &mut session_id);
+        assert_eq!(session_id.as_deref(), Some("session-abc-123"));
         assert!(inner.lock().unwrap().pending.is_empty());
+    }
+
+    #[test]
+    fn handle_incoming_session_expired_drops_resume_id() {
+        // After SessionAck we hold an id; SessionExpired must clear
+        // it so the next reconnect mints a fresh session instead of
+        // failing the resume handshake repeatedly.
+        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let mut session_id: Option<String> = Some("expired-id".into());
+        let expired = json!({
+            "type": "sessionExpired",
+            "sessionId": "expired-id",
+            "reason": "idle timeout"
+        })
+        .to_string();
+        handle_incoming(&expired, &inner, &mut session_id);
+        assert!(session_id.is_none());
+    }
+
+    // ---------------------------------------------------------------
+    // Reconnect backoff + Hello shape
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn backoff_doubles_then_caps_at_thirty_seconds() {
+        assert_eq!(backoff_for(0), Duration::from_secs(0));
+        assert_eq!(backoff_for(1), Duration::from_secs(1));
+        assert_eq!(backoff_for(2), Duration::from_secs(2));
+        assert_eq!(backoff_for(3), Duration::from_secs(4));
+        assert_eq!(backoff_for(4), Duration::from_secs(8));
+        assert_eq!(backoff_for(5), Duration::from_secs(16));
+        assert_eq!(backoff_for(6), Duration::from_secs(MAX_BACKOFF_SECS));
+        // Past the shift cap — stays clamped.
+        assert_eq!(backoff_for(20), Duration::from_secs(MAX_BACKOFF_SECS));
+        assert_eq!(backoff_for(u32::MAX), Duration::from_secs(MAX_BACKOFF_SECS));
+    }
+
+    #[test]
+    fn build_hello_serialises_session_id_when_present() {
+        let hello = build_hello(Some("resume-me".into()));
+        let json = serde_json::to_value(&hello).expect("encode");
+        assert_eq!(json["type"], "hello");
+        assert_eq!(json["sessionId"], "resume-me");
+    }
+
+    #[test]
+    fn build_hello_omits_session_id_for_fresh_connect() {
+        let hello = build_hello(None);
+        let json = serde_json::to_value(&hello).expect("encode");
+        assert_eq!(json["type"], "hello");
+        assert!(
+            json.get("sessionId").is_none(),
+            "fresh Hello must not carry a sessionId field, got {json:?}",
+        );
     }
 }

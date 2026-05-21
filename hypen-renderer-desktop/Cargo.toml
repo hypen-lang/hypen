@@ -37,6 +37,19 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
 
+# Phase 13: Image / Icon element decoding. PNG + JPEG cover the
+# example apps; everything else is a placeholder until we wire HTTP.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+
+# Phase 14: blocking HTTP client for the image-fetch worker thread.
+# ureq is small (no tokio dep) and lives entirely on the worker, so
+# the renderer's sync event loop is undisturbed.
+ureq = { version = "2.10", features = ["tls"] }
+
+# Phase 15: parse the `d` attribute of pre-resolved SVG icon paths
+# the engine emits for `Icon` elements. svgtypes is small + focused.
+svgtypes = "0.15"
+
 # Re-exported by winit; pinned here so we can implement raw-window-handle for
 # the wgpu surface without version-mismatch grief.
 raw-window-handle = "0.6"

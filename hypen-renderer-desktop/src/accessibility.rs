@@ -119,6 +119,30 @@ fn build_node_for(item: &LayoutItem, pass: &LayoutPass) -> Node {
             node
         }
         ItemKind::Container => Node::new(Role::GenericContainer),
+        ItemKind::Image { src } => {
+            let mut node = Node::new(Role::Image);
+            // Without a real `alt` prop the best we can do is the
+            // file name (or src tail) so screen readers say something
+            // more useful than "image". The web SDK reads `alt`; when
+            // we expose it through the engine this fallback narrows.
+            if let Some(s) = src.as_deref() {
+                let label = s
+                    .rsplit('/')
+                    .next()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or(s)
+                    .to_string();
+                node.set_label(label);
+            }
+            node
+        }
+        ItemKind::Icon { .. } => {
+            // Icons are decorative-by-default; AccessKit gets a bare
+            // Image role so screen readers don't announce them
+            // unless the host explicitly surfaces `aria-label`
+            // through the engine (Phase 16+).
+            Node::new(Role::Image)
+        }
         ItemKind::Input {
             value, placeholder, ..
         } => {

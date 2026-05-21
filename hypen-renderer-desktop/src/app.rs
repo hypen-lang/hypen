@@ -134,6 +134,10 @@ impl DesktopApp {
             .expect("event loop");
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
+
+        // Background image-fetch worker uses the same proxy to wake
+        // the renderer when an HTTP avatar finishes decoding.
+        crate::paint::image::set_waker(proxy.clone());
         let mut app = WindowApp::new(
             self.title.clone(),
             self.size,

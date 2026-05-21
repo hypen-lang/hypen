@@ -106,6 +106,64 @@ pub fn prop_str<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
     direct.or(dotted).or(kebab).and_then(Value::as_str)
 }
 
+/// Tailwind-style breakpoint thresholds (px). Matches the defaults the
+/// engine's `hypen-tailwind-parse` emits in `name@bp` keys.
+const BREAKPOINTS_DESC: &[(&str, f32)] = &[
+    ("2xl", 1536.0),
+    ("xl", 1280.0),
+    ("lg", 1024.0),
+    ("md", 768.0),
+    ("sm", 640.0),
+];
+
+/// Walk breakpoint suffixes from largest-active down to base, returning
+/// the first existing prop value. Used by [`prop_str_at`] /
+/// [`prop_f32_at`] so layout can resolve `padding@md = "2rem"` etc.
+fn lookup_breakpoint<'a>(
+    node: &'a Node,
+    name: &str,
+    viewport_w: f32,
+) -> Option<&'a Value> {
+    for (bp, threshold) in BREAKPOINTS_DESC {
+        if viewport_w >= *threshold {
+            let key = format!("{name}@{bp}");
+            if let Some(v) = node.props.get(&key) {
+                return Some(v);
+            }
+        }
+    }
+    None
+}
+
+/// Read a string prop honouring Tailwind breakpoints. Lookup order:
+/// largest-active `@bp` suffix → direct → `name.0` → kebab. The
+/// non-breakpoint variant ([`prop_str`]) is the right call for paths
+/// that don't have a viewport handy (e.g. accessibility serialisation).
+pub fn prop_str_at<'a>(
+    node: &'a Node,
+    name: &str,
+    viewport_w: f32,
+) -> Option<&'a str> {
+    if let Some(v) = lookup_breakpoint(node, name, viewport_w).and_then(Value::as_str) {
+        return Some(v);
+    }
+    prop_str(node, name)
+}
+
+/// Numeric counterpart of [`prop_str_at`].
+pub fn prop_f32_at(node: &Node, name: &str, viewport_w: f32) -> Option<f32> {
+    if let Some(v) = lookup_breakpoint(node, name, viewport_w).and_then(value_to_f32) {
+        return Some(v);
+    }
+    prop_f32(node, name)
+}
+
+/// Colour counterpart of [`prop_str_at`] — same fallback chain, then
+/// runs the result through [`parse_color`].
+pub fn prop_color_at(node: &Node, name: &str, viewport_w: f32) -> Option<Rgba> {
+    prop_str_at(node, name, viewport_w).and_then(parse_color)
+}
+
 /// Read a colour prop and parse it. Accepts CSS hex (`#rgb`, `#rgba`,
 /// `#rrggbb`, `#rrggbbaa`) and a small set of named colours.
 pub fn prop_color(node: &Node, name: &str) -> Option<Rgba> {
@@ -129,10 +187,79 @@ pub fn margin(node: &Node) -> Padding {
     read_box_props(node, "margin")
 }
 
+/// Viewport-aware [`padding`] — honours `padding@md` etc. tw classes.
+pub fn padding_at(node: &Node, viewport_w: f32) -> Padding {
+    read_box_props_at(node, "padding", viewport_w)
+}
+
+/// Viewport-aware [`margin`].
+pub fn margin_at(node: &Node, viewport_w: f32) -> Padding {
+    read_box_props_at(node, "margin", viewport_w)
+}
+
 /// Shared box-model reader for `padding` / `margin`. The Hypen DSL gives
 /// both shorthand and per-side applicators that all collapse to the same
 /// 4-edge `Padding` shape; the precedence ordering matches `padding`'s
 /// doc-comment.
+/// Viewport-aware variant of [`read_box_props`]. Mirrors the same
+/// precedence chain but every `prop_f32` lookup goes through the
+/// breakpoint-aware [`prop_f32_at`].
+fn read_box_props_at(node: &Node, prefix: &str, viewport_w: f32) -> Padding {
+    let mut p = Padding::default();
+    if let Some(v) = prop_f32_at(node, prefix, viewport_w) {
+        p = Padding::uniform(v);
+    }
+    if let Some(v) = prop_f32_at(node, &format!("{prefix}Horizontal"), viewport_w) {
+        p.left = v;
+        p.right = v;
+    }
+    if let Some(v) = prop_f32_at(node, &format!("{prefix}Vertical"), viewport_w) {
+        p.top = v;
+        p.bottom = v;
+    }
+    if let Some(v) = node
+        .props
+        .get(&format!("{prefix}.top"))
+        .and_then(value_to_f32)
+    {
+        p.top = v;
+    }
+    if let Some(v) = node
+        .props
+        .get(&format!("{prefix}.right"))
+        .and_then(value_to_f32)
+    {
+        p.right = v;
+    }
+    if let Some(v) = node
+        .props
+        .get(&format!("{prefix}.bottom"))
+        .and_then(value_to_f32)
+    {
+        p.bottom = v;
+    }
+    if let Some(v) = node
+        .props
+        .get(&format!("{prefix}.left"))
+        .and_then(value_to_f32)
+    {
+        p.left = v;
+    }
+    if let Some(v) = prop_f32_at(node, &format!("{prefix}Top"), viewport_w) {
+        p.top = v;
+    }
+    if let Some(v) = prop_f32_at(node, &format!("{prefix}Bottom"), viewport_w) {
+        p.bottom = v;
+    }
+    if let Some(v) = prop_f32_at(node, &format!("{prefix}Left"), viewport_w) {
+        p.left = v;
+    }
+    if let Some(v) = prop_f32_at(node, &format!("{prefix}Right"), viewport_w) {
+        p.right = v;
+    }
+    p
+}
+
 fn read_box_props(node: &Node, prefix: &str) -> Padding {
     let mut p = Padding::default();
 
@@ -256,6 +383,49 @@ pub fn border(node: &Node) -> Border {
         width,
         // A width without an explicit colour falls back to opaque black —
         // matches the DOM applicator's "default solid black" behaviour.
+        color: color.unwrap_or(if width > 0.0 { Rgba::BLACK } else { Rgba::TRANSPARENT }),
+        radius,
+    }
+}
+
+/// Viewport-aware [`border`] — honours `borderWidth@md` etc.
+pub fn border_at(node: &Node, viewport_w: f32) -> Border {
+    let mut width = 0.0_f32;
+    let mut radius = 0.0_f32;
+    let mut color: Option<Rgba> = None;
+
+    if let Some(v) = prop_f32_at(node, "border", viewport_w) {
+        width = v;
+    }
+    if let Some(v) = node.props.get("border.width").and_then(value_to_f32) {
+        width = v;
+    }
+    if let Some(v) = node
+        .props
+        .get("border.color")
+        .and_then(Value::as_str)
+        .and_then(parse_color)
+    {
+        color = Some(v);
+    }
+    if let Some(v) = node.props.get("border.radius").and_then(value_to_f32) {
+        radius = v;
+    }
+    if let Some(v) = prop_f32_at(node, "borderWidth", viewport_w) {
+        width = v;
+    }
+    if let Some(v) = prop_color_at(node, "borderColor", viewport_w) {
+        color = Some(v);
+    }
+    if let Some(v) = prop_f32_at(node, "borderRadius", viewport_w) {
+        radius = v;
+    }
+    if let Some(v) = prop_f32_at(node, "cornerRadius", viewport_w) {
+        radius = v;
+    }
+
+    Border {
+        width,
         color: color.unwrap_or(if width > 0.0 { Rgba::BLACK } else { Rgba::TRANSPARENT }),
         radius,
     }
@@ -732,5 +902,92 @@ mod tests {
         assert_eq!(p.right, 16.0);
         assert_eq!(p.bottom, 16.0);
         assert_eq!(p.left, 16.0);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 15: tw breakpoint resolution
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn breakpoint_at_returns_base_when_no_bp_keys_present() {
+        let node = node_with(&[("padding.0", serde_json::json!(8))]);
+        // Any viewport — without any `padding@x` overlays, falls back
+        // to the existing chain (returns base 8).
+        assert_eq!(prop_f32_at(&node, "padding", 320.0), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", 1920.0), Some(8.0));
+    }
+
+    #[test]
+    fn breakpoint_md_kicks_in_at_768_and_above() {
+        // Base 8, override at md (≥768) → 16.
+        let node = node_with(&[
+            ("padding.0", serde_json::json!(8)),
+            ("padding@md", serde_json::json!(16)),
+        ]);
+        assert_eq!(prop_f32_at(&node, "padding", 320.0), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", 767.0), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", 768.0), Some(16.0));
+        assert_eq!(prop_f32_at(&node, "padding", 1024.0), Some(16.0));
+    }
+
+    #[test]
+    fn breakpoint_largest_active_wins() {
+        // Base 8, md 16, lg 32, xl 64. At 1024px viewport (≥lg, <xl)
+        // we want lg=32 — not md, not xl.
+        let node = node_with(&[
+            ("padding.0", serde_json::json!(8)),
+            ("padding@md", serde_json::json!(16)),
+            ("padding@lg", serde_json::json!(32)),
+            ("padding@xl", serde_json::json!(64)),
+            ("padding@2xl", serde_json::json!(128)),
+        ]);
+        assert_eq!(prop_f32_at(&node, "padding", 320.0), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", 768.0), Some(16.0));
+        assert_eq!(prop_f32_at(&node, "padding", 1024.0), Some(32.0));
+        assert_eq!(prop_f32_at(&node, "padding", 1280.0), Some(64.0));
+        assert_eq!(prop_f32_at(&node, "padding", 1536.0), Some(128.0));
+    }
+
+    #[test]
+    fn breakpoint_skips_intermediate_when_only_md_set() {
+        // Base 8, only md set. lg / xl viewports still see md=16,
+        // not the base 8 (largest-active fallback).
+        let node = node_with(&[
+            ("padding.0", serde_json::json!(8)),
+            ("padding@md", serde_json::json!(16)),
+        ]);
+        assert_eq!(prop_f32_at(&node, "padding", 1024.0), Some(16.0));
+        assert_eq!(prop_f32_at(&node, "padding", 1920.0), Some(16.0));
+    }
+
+    #[test]
+    fn breakpoint_str_resolves_color_at_breakpoint() {
+        let node = node_with(&[
+            ("backgroundColor.0", serde_json::json!("white")),
+            ("backgroundColor@md", serde_json::json!("blue")),
+        ]);
+        assert_eq!(
+            prop_color_at(&node, "backgroundColor", 320.0),
+            Some(Rgba(0xff, 0xff, 0xff, 0xff))
+        );
+        assert_eq!(
+            prop_color_at(&node, "backgroundColor", 800.0),
+            Some(Rgba(0x00, 0x00, 0xff, 0xff))
+        );
+    }
+
+    #[test]
+    fn breakpoint_padding_at_routes_through_resolver() {
+        // .tw("p-4 md:p-8") → padding=1rem, padding@md=2rem.
+        // At md+ viewport, padding_at picks up the 32px breakpoint
+        // value and the kebab+rem decode lands as 32.0.
+        let node = node_with(&[
+            ("padding", serde_json::json!("1rem")),
+            ("padding@md", serde_json::json!("2rem")),
+        ]);
+        let small = padding_at(&node, 400.0);
+        assert_eq!(small.top, 16.0);
+        let medium = padding_at(&node, 800.0);
+        assert_eq!(medium.top, 32.0);
     }
 }

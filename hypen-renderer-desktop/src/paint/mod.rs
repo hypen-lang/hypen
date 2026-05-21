@@ -7,3 +7,5 @@
 //! [`Painter`]: crate::Painter
 
 pub mod cpu;
+pub mod icon;
+pub mod image;

@@ -68,12 +68,16 @@ impl Selection {
     }
 }
 
-/// User-event type carried through the winit event loop. Today this
-/// only carries AccessKit events, but a single enum keeps the door open
-/// for hot-reload pings, async-action results, etc.
+/// User-event type carried through the winit event loop.
 #[derive(Debug)]
 pub enum AppEvent {
+    /// AccessKit-originated event (focus, action requested, etc.).
     Accessibility(AkEvent),
+    /// Generic "the world changed, please redraw" wake-up sent by
+    /// background workers (image fetcher, future async actions).
+    /// We don't carry a payload because the renderer always re-reads
+    /// its caches on the next frame.
+    Wake,
 }
 
 impl From<AkEvent> for AppEvent {
@@ -163,6 +167,12 @@ pub struct App {
 
     /// Vertical page scroll offset in physical pixels.
     scroll_y: f32,
+    /// Per-scrollable-Container offsets in physical pixels, keyed by
+    /// the container's renderer `node_id`. Populated when the user
+    /// rolls the mouse wheel over a Container with `overflow: scroll`
+    /// or `overflow: auto`. Clamped against each container's
+    /// `ScrollMeta::content_h` after every layout.
+    scrollables: HashMap<String, f32>,
 }
 
 impl App {
@@ -197,6 +207,7 @@ impl App {
             ime_preedit: None,
             ime_active: false,
             scroll_y: 0.0,
+            scrollables: HashMap::new(),
         }
     }
 
@@ -261,7 +272,26 @@ impl App {
             self.scroll_y = clamp_scroll(self.scroll_y, prev.content_size.1, h as f32);
         }
 
-        self.painter.paint_with_scroll(
+        // Clamp per-Container scroll offsets against the *previous*
+        // layout's ScrollMeta (the live one isn't built yet). Stale
+        // entries get pruned when the prior layout no longer reports
+        // them as scrollable.
+        if let Some(prev) = self.layout.as_ref() {
+            self.scrollables.retain(|id, off| {
+                if let Some(item) =
+                    prev.items.iter().find(|it| &it.node_id == id)
+                {
+                    if let Some(meta) = item.scrollable {
+                        let max = (meta.content_h - item.rect.h).max(0.0);
+                        *off = off.clamp(0.0, max);
+                        return true;
+                    }
+                }
+                false
+            });
+        }
+
+        self.painter.paint_with_scrolls(
             &self.tree,
             PaintTarget {
                 pixels: &mut self.pixels,
@@ -270,13 +300,15 @@ impl App {
                 scale_factor: scale,
             },
             self.scroll_y,
+            &self.scrollables,
         );
-        let pass = LayoutPass::compute_with_scroll(
+        let pass = LayoutPass::compute_with_scrolls(
             &self.tree,
             self.painter.text_engine_mut(),
             (w, h),
             scale,
             self.scroll_y,
+            &self.scrollables,
         );
         let new_scroll = clamp_scroll(self.scroll_y, pass.content_size.1, h as f32);
         if (new_scroll - self.scroll_y).abs() > f32::EPSILON {
@@ -741,6 +773,13 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 AkWindowEvent::AccessibilityDeactivated => {}
             },
+            AppEvent::Wake => {
+                // Background worker (image fetch, future async work)
+                // finished and wants the renderer to repaint.
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
         }
     }
 
@@ -859,19 +898,44 @@ impl ApplicationHandler<AppEvent> for App {
                     MouseScrollDelta::PixelDelta(p) => -p.y as f32,
                 };
                 if dy.abs() > f32::EPSILON {
-                    let viewport_h = self
-                        .gpu
-                        .as_ref()
-                        .map(|g| g.size.1 as f32)
-                        .unwrap_or(0.0);
-                    let content_h = self
-                        .layout
-                        .as_ref()
-                        .map(|l| l.content_size.1 + self.scroll_y)
-                        .unwrap_or(0.0);
-                    let new = clamp_scroll(self.scroll_y + dy, content_h, viewport_h);
-                    if (new - self.scroll_y).abs() > f32::EPSILON {
-                        self.scroll_y = new;
+                    let cx = self.cursor.x as f32;
+                    let cy = self.cursor.y as f32;
+                    // Topmost scrollable Container under the cursor wins
+                    // — fall back to page scroll when there isn't one.
+                    let target = self.layout.as_ref().and_then(|l| {
+                        l.items.iter().rev().find(|it| {
+                            it.scrollable.is_some() && it.rect.contains(cx, cy)
+                        })
+                    });
+                    let mut scrolled = false;
+                    if let Some(item) = target {
+                        let meta = item.scrollable.unwrap();
+                        let max = (meta.content_h - item.rect.h).max(0.0);
+                        let id = item.node_id.clone();
+                        let cur = self.scrollables.get(&id).copied().unwrap_or(0.0);
+                        let new = (cur + dy).clamp(0.0, max);
+                        if (new - cur).abs() > f32::EPSILON {
+                            self.scrollables.insert(id, new);
+                            scrolled = true;
+                        }
+                    } else {
+                        let viewport_h = self
+                            .gpu
+                            .as_ref()
+                            .map(|g| g.size.1 as f32)
+                            .unwrap_or(0.0);
+                        let content_h = self
+                            .layout
+                            .as_ref()
+                            .map(|l| l.content_size.1 + self.scroll_y)
+                            .unwrap_or(0.0);
+                        let new = clamp_scroll(self.scroll_y + dy, content_h, viewport_h);
+                        if (new - self.scroll_y).abs() > f32::EPSILON {
+                            self.scroll_y = new;
+                            scrolled = true;
+                        }
+                    }
+                    if scrolled {
                         self.layout = None;
                         if let Some(w) = self.window.as_ref() {
                             w.request_redraw();

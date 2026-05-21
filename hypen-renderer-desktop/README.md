@@ -2,7 +2,7 @@
 
 Native desktop renderer for Hypen.
 
-## Status: Phase 11 (Remote WebSocket client)
+## Status: Phase 15 (tw breakpoints + SVG icon rasterisation)
 
 The renderer drives a real `hypen-server::ModuleInstance<S>` through the
 standard SDK lifecycle (`instantiate` → `on_patches` → `mount` → click →
@@ -34,6 +34,47 @@ without touching the rest of the crate.
   (the engine's resolved form of `Button("@actions.X")`).
 - Patches flushed every frame; `about_to_wait` requests a repaint whenever
   the SDK pushes patches between events (e.g. async actions).
+
+## What works (additions in Phase 15)
+
+- **Tailwind breakpoints** via `prop_*_at(node, name, viewport_w)`
+  variants. Layout threads viewport width into every prop read so
+  `padding@md`, `backgroundColor@lg`, etc. resolve against the live
+  surface size. Largest-active breakpoint wins (sm < md < lg < xl <
+  2xl); base + dotted + kebab fallback chain still applies underneath.
+- **SVG `Icon` rasterisation.** The engine pre-resolves
+  `Icon(@resources.heart)` into structured `paths` + `viewBox` props
+  (each path carries `d`, `fill`, `stroke`, `strokeWidth`,
+  `stroke{linecap,linejoin}`). The renderer reads them, parses each
+  `d` via `svgtypes`, builds a `tiny-skia` path, and fills + strokes
+  with a uniform-scale + centring transform. Lucide-style outline
+  icons (most of the bundled apps) render with crisp anti-aliased
+  strokes; filled icons honour their fill colour. `.color(red)` on
+  an Icon flows through as a global tint that overrides per-path
+  fill/stroke colours.
+
+## What works (additions in Phase 14)
+
+- **HTTP / HTTPS image loading** — Phase 13's local-only cache
+  promotes to a `Loading | Loaded | Failed` state machine. Remote
+  URLs (Instagram avatars, etc.) queue on a single dedicated
+  worker thread that fetches via `ureq` and decodes via `image`.
+  Worker fires an `AppEvent::Wake` through the renderer's
+  `EventLoopProxy` when a load lands so the next paint picks up
+  the bitmap. 10s timeout per request, 20MB body cap.
+- **Reconnect-with-backoff** for `RemoteModule`. The worker now
+  loops on disconnect with exponential backoff (1s → 2s → 4s → … →
+  capped at 30s, hard-capped at 60 attempts). `SessionAck`'s
+  `sessionId` is captured and replayed in the next `Hello`, so
+  the server can resume rather than mint a fresh session every
+  time bun's hot-reload restarts. `SessionExpired` clears the
+  stored id so the next attempt mints fresh instead of re-failing.
+
+## What works (additions in Phase 13)
+
+- **Local image loading** + `Image` / `Icon` element types,
+  `textAlign` (start / center / end), and a gray rounded
+  placeholder for missing or in-flight image sources.
 
 ## What works (additions in Phase 11)
 
@@ -151,7 +192,7 @@ without touching the rest of the crate.
 
 ## Tests
 
-131 unit tests in the renderer + 8 SDK integration tests. Run them with:
+175 unit tests in the renderer + 8 SDK integration tests. Run them with:
 
 ```bash
 cargo test -p hypen-renderer-desktop --lib

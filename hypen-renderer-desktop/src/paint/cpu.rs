@@ -80,6 +80,19 @@ impl CpuPainter {
         target: PaintTarget<'_>,
         scroll_y: f32,
     ) {
+        self.paint_with_scrolls(tree, target, scroll_y, &std::collections::HashMap::new());
+    }
+
+    /// Same as [`Self::paint_with_scroll`] but additionally honours
+    /// per-Container scroll offsets. `scrolls` maps each scrollable
+    /// container's `node_id` to its current vertical offset. Phase 16.
+    pub fn paint_with_scrolls(
+        &mut self,
+        tree: &Tree,
+        target: PaintTarget<'_>,
+        scroll_y: f32,
+        scrolls: &std::collections::HashMap<String, f32>,
+    ) {
         let PaintTarget {
             pixels,
             width,
@@ -90,12 +103,13 @@ impl CpuPainter {
         let mut pixmap = Pixmap::new(width, height).expect("pixmap alloc");
         pixmap.fill(Color::from_rgba8(0xfb, 0xfb, 0xfd, 0xff));
 
-        let layout = LayoutPass::compute_with_scroll(
+        let layout = LayoutPass::compute_with_scrolls(
             tree,
             &mut self.text,
             (width, height),
             scale_factor,
             scroll_y,
+            scrolls,
         );
 
         for item in &layout.items {
@@ -131,17 +145,55 @@ impl CpuPainter {
             }
 
             match &item.kind {
+                ItemKind::Image { src } => {
+                    crate::paint::image::paint_image(
+                        &mut pixmap,
+                        item.rect,
+                        src.as_deref(),
+                        scale_factor,
+                    );
+                }
+                ItemKind::Icon {
+                    paths,
+                    view_box,
+                    tint,
+                } => {
+                    crate::paint::icon::paint_icon(
+                        &mut pixmap,
+                        item.rect,
+                        paths,
+                        *view_box,
+                        *tint,
+                    );
+                }
                 ItemKind::Text {
                     content,
                     font_size,
                     color,
+                    align,
                 } => {
+                    // Pre-measure the line so right/center alignment
+                    // can offset within the laid-out rect. Wrap width
+                    // is the full rect for alignment purposes — long
+                    // text still wraps at the rect edge.
+                    let scaled_size = *font_size * scale_factor;
+                    let (line_w, _) =
+                        self.text.measure(content, scaled_size, Some(item.rect.w));
+                    let dx = match align {
+                        crate::layout::TextAlign::Start => 0.0,
+                        crate::layout::TextAlign::Center => {
+                            ((item.rect.w - line_w).max(0.0)) * 0.5
+                        }
+                        crate::layout::TextAlign::End => {
+                            (item.rect.w - line_w).max(0.0)
+                        }
+                    };
                     self.text.draw_text_colored(
                         &mut pixmap,
                         content,
-                        item.rect.x,
+                        item.rect.x + dx,
                         item.rect.y,
-                        *font_size * scale_factor,
+                        scaled_size,
                         *color,
                         Some(item.rect.w),
                     );
