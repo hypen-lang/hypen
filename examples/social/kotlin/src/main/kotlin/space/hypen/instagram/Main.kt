@@ -40,8 +40,10 @@ sealed interface HomePageAction : HypenAction {
 }
 
 sealed interface SearchAction : HypenAction {
-    data object Search : SearchAction {
+    @Serializable
+    data class Search(val value: String = "", val input: String = "") : SearchAction {
         override val _actionName: String get() = "search"
+        val query: String get() = value.ifEmpty { input }
     }
 }
 
@@ -128,12 +130,14 @@ fun buildSearchModule(allExplorePosts: List<PostThumbnail>): ModuleDefinition<Mu
     hypen(SearchState(explorePosts = allExplorePosts)) {
         name("Search")
         ui(loadTemplate("Search"))
-        onAction<SearchAction.Search> { _, state, _ ->
-            val query = state.searchQuery.lowercase()
+        onAction<SearchAction.Search> { action, state, _ ->
+            val query = action.query.lowercase()
             state.explorePosts = if (query.isEmpty()) {
                 allExplorePosts
             } else {
-                allExplorePosts.filter { it.imageUrl.lowercase().contains(query) }
+                allExplorePosts.filter {
+                    it.username.lowercase().contains(query) || it.caption.lowercase().contains(query)
+                }
             }
         }
     }

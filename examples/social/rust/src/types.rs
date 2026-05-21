@@ -76,6 +76,10 @@ pub struct Conversation {
 pub struct PostThumbnail {
     pub id: String,
     pub image_url: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub caption: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -180,4 +184,22 @@ pub struct PostIdPayload {
 pub struct CommentIdPayload {
     #[serde(default)]
     pub comment_id: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct InputValuePayload {
+    #[serde(default)]
+    pub value: String,
+    #[serde(default)]
+    pub input: String,
+}
+
+impl InputValuePayload {
+    pub fn text(&self) -> &str {
+        if !self.value.is_empty() {
+            &self.value
+        } else {
+            &self.input
+        }
+    }
 }

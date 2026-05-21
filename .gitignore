@@ -92,3 +92,7 @@ Thumbs.db
 
 .vercel
 .gstack/
+
+# Built Rust static libs — never commit; consumers run build-engine.sh
+**/libhypen_engine.a
+**/libhypen_engine.dylib

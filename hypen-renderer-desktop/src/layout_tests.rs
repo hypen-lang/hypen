@@ -964,6 +964,251 @@ use std::sync::Arc;
     }
 
     #[test]
+    fn absolute_overlay_paints_after_in_flow_sibling() {
+        // Story/component.hypen: header Row is `absolute` and declared
+        // before the in-flow Image. Emit order must put the Image before
+        // the header so the close button isn't covered at paint time.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        tree.apply(&create_patch(
+            "header",
+            "Row",
+            &[
+                ("position", json!("absolute")),
+                ("top", json!(0)),
+                ("left", json!(0)),
+                ("right", json!(0)),
+            ],
+        ));
+        tree.apply(&insert_patch("col", "header"));
+        add_text(&mut tree, "header", "close", "✕");
+        tree.apply(&create_patch(
+            "photo",
+            "Image",
+            &[("src", json!("/story.png")), ("flex", json!(1))],
+        ));
+        tree.apply(&insert_patch("col", "photo"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 800), 1.0);
+        let photo_idx = pass
+            .items
+            .iter()
+            .position(|it| it.node_id == "photo")
+            .expect("photo item");
+        let close_idx = pass
+            .items
+            .iter()
+            .position(|it| it.node_id == "close")
+            .expect("close text item");
+        assert!(
+            photo_idx < close_idx,
+            "in-flow image must emit before absolute overlay text; photo_idx={photo_idx} close_idx={close_idx}"
+        );
+    }
+
+    #[test]
+    fn taffy_state_apply_patches_builds_tree_incrementally() {
+        // Mirror what `App.flush_patches` does: apply patches to
+        // the renderer Tree, then to the TaffyState. The follow-up
+        // compute should skip the bulk-rebuild path and produce the
+        // same items as a from-scratch compute.
+        let patches = vec![
+            create_patch("col", "Column", &[]),
+            insert_patch("root", "col"),
+            create_patch("hdr", "Text", &[("0", json!("Header"))]),
+            insert_patch("col", "hdr"),
+            create_patch(
+                "btn",
+                "Button",
+                &[("action", json!("@actions.tap"))],
+            ),
+            insert_patch("col", "btn"),
+        ];
+        let mut tree = Tree::new();
+        tree.apply_batch(&patches);
+        let mut taffy = TaffyState::new();
+        let applied = taffy.apply_patches(&patches, &tree, 1.0, 800.0);
+        assert!(applied, "all patch types should be handled by apply_patches");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute_with_state(
+            &mut taffy,
+            &tree,
+            &mut text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            1, // tree_generation; unused now since structure_key drops it
+        );
+        // Items must include the three nodes we created.
+        assert!(pass.item_by_id("col").is_some());
+        assert!(pass.item_by_id("hdr").is_some());
+        assert!(pass.item_by_id("btn").is_some());
+    }
+
+    #[test]
+    fn taffy_state_setprop_recomputes_node_style_only() {
+        // SetProp on `padding` should re-apply the style to that
+        // single Taffy node and *not* trigger a bulk rebuild.
+        let initial = vec![
+            create_patch("box", "Container", &[]),
+            insert_patch("root", "box"),
+        ];
+        let mut tree = Tree::new();
+        tree.apply_batch(&initial);
+        let mut taffy = TaffyState::new();
+        assert!(taffy.apply_patches(&initial, &tree, 1.0, 800.0));
+
+        let setprop = vec![hypen_engine::Patch::SetProp {
+            id: "box".into(),
+            name: "padding".into(),
+            value: json!(40),
+        }];
+        tree.apply_batch(&setprop);
+        assert!(taffy.apply_patches(&setprop, &tree, 1.0, 800.0));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute_with_state(
+            &mut taffy,
+            &tree,
+            &mut text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            2,
+        );
+        // The padding showed up — the box's size reflects the
+        // declared 40-on-each-side padding (unconstrained content =
+        // ~80 wide / 80 tall minimum).
+        let item = pass.item_by_id("box").expect("box laid out");
+        assert!(
+            item.rect.w >= 80.0 && item.rect.h >= 80.0,
+            "padding(40) should produce ≥80×80 rect; got {:?}",
+            item.rect,
+        );
+    }
+
+    #[test]
+    fn scrollable_true_marks_container_as_scrollable() {
+        // `.scrollable(true)` produces a `scrollable: true` prop on
+        // the Container. The DSL form is what the social example
+        // uses on the HomePage's outer Column; it must read as a
+        // scroll container so the wheel handler routes to it and
+        // Taffy clips overflow.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "page",
+            "Container",
+            &[("scrollable", json!(true))],
+        ));
+        tree.apply(&insert_patch("root", "page"));
+        // Add some children so it has content.
+        for i in 0..10 {
+            let id = format!("c{i}");
+            add_text(&mut tree, "page", &id, &format!("row {i}"));
+        }
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 200), 1.0);
+        let item = find_item(&pass, "page");
+        assert!(
+            item.scrollable.is_some(),
+            "scrollable: true should produce a ScrollMeta — got {:?}",
+            item.scrollable,
+        );
+    }
+
+    #[test]
+    fn scrollable_horizontal_marks_container_as_scrollable() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "row",
+            "Row",
+            &[("scrollable", json!("horizontal"))],
+        ));
+        tree.apply(&insert_patch("root", "row"));
+        // Add wide content.
+        for i in 0..5 {
+            let id = format!("s{i}");
+            tree.apply(&create_patch(
+                &id,
+                "Image",
+                &[("width", json!(100)), ("height", json!(60))],
+            ));
+            tree.apply(&insert_patch("row", &id));
+        }
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 200), 1.0);
+        let item = find_item(&pass, "row");
+        // `scrollable` recognises horizontal as a scroll container —
+        // wheel routing + overflow clipping both kick in via the
+        // same is_scrollable_node check.
+        assert!(item.scrollable.is_some());
+    }
+
+    #[test]
+    fn appearance_only_setprop_does_not_dirty_taffy() {
+        // SetProp on an appearance-only prop (`color`) should leave
+        // the layout geometry unchanged and skip Taffy's set_style
+        // path entirely — verified by checking `is_layout_prop`.
+        assert!(!crate::layout::is_layout_prop("color"));
+        assert!(!crate::layout::is_layout_prop("backgroundColor"));
+        assert!(!crate::layout::is_layout_prop("background-color"));
+        assert!(!crate::layout::is_layout_prop("borderColor"));
+        assert!(!crate::layout::is_layout_prop("src"));
+        assert!(!crate::layout::is_layout_prop("textAlign"));
+        // Box-model + sizing remain layout-affecting.
+        assert!(crate::layout::is_layout_prop("padding"));
+        assert!(crate::layout::is_layout_prop("paddingTop"));
+        assert!(crate::layout::is_layout_prop("padding-top"));
+        assert!(crate::layout::is_layout_prop("borderWidth"));
+        assert!(crate::layout::is_layout_prop("borderBottomWidth"));
+        assert!(crate::layout::is_layout_prop("width"));
+        assert!(crate::layout::is_layout_prop("fontSize"));
+        assert!(crate::layout::is_layout_prop("flex"));
+        assert!(crate::layout::is_layout_prop("alignItems"));
+        // The positional Text content slot drives wrapping.
+        assert!(crate::layout::is_layout_prop("0"));
+    }
+
+    #[test]
+    fn taffy_state_remove_drops_node_from_tree_and_map() {
+        let patches = vec![
+            create_patch("col", "Column", &[]),
+            insert_patch("root", "col"),
+            create_patch("a", "Text", &[("0", json!("a"))]),
+            insert_patch("col", "a"),
+            create_patch("b", "Text", &[("0", json!("b"))]),
+            insert_patch("col", "b"),
+        ];
+        let mut tree = Tree::new();
+        tree.apply_batch(&patches);
+        let mut taffy = TaffyState::new();
+        assert!(taffy.apply_patches(&patches, &tree, 1.0, 800.0));
+
+        let remove = vec![hypen_engine::Patch::Remove { id: "a".into() }];
+        tree.apply_batch(&remove);
+        assert!(taffy.apply_patches(&remove, &tree, 1.0, 800.0));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute_with_state(
+            &mut taffy,
+            &tree,
+            &mut text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            3,
+        );
+        assert!(pass.item_by_id("a").is_none(), "removed `a` should be gone");
+        assert!(pass.item_by_id("b").is_some(), "`b` survives");
+    }
+
+    #[test]
     fn align_items_center_sizes_inner_to_content() {
         // Regression: a Column with `alignItems: "center"` was
         // ignored, so the inner border-container in StoryItem
@@ -1287,10 +1532,9 @@ use std::sync::Arc;
     }
 
     #[test]
-    fn button_without_any_border_prop_still_gets_default_stroke() {
-        // Counterpart to the regression test above: a Button with no
-        // border-related prop at all should keep the Phase 3 default
-        // look so demos and bare buttons stay visible.
+    fn button_without_any_border_prop_has_no_implicit_stroke() {
+        // Buttons no longer inject demo chrome; bare buttons stay
+        // borderless until the DSL sets `.border*` / `.tw("border-...")`.
         let mut tree = Tree::new();
         tree.apply(&create_patch(
             "btn",
@@ -1302,9 +1546,10 @@ use std::sync::Arc;
         let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
         let item = find_item(&pass, "btn");
         assert!(
-            item.border.is_visible(),
-            "Button with no border props must keep its default stroke",
+            !item.border.is_visible(),
+            "Button with no border props must not get an implicit stroke",
         );
+        assert_eq!(item.background, None);
     }
 
     // ---------------------------------------------------------------
@@ -1512,4 +1757,130 @@ use std::sync::Arc;
             }
             other => panic!("expected ItemKind::Icon, got {other:?}"),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // clip_to: scrollable-container descendants get clipped to the
+    // container's rect so they don't bleed onto siblings above /
+    // below the container when scrolled. Regression for the
+    // "input visible in the grid gaps" bug in examples/social/Search.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn scrollable_container_emits_clip_to_on_descendants() {
+        // Tree shape mirrors examples/social/Search:
+        //   Column
+        //     Input               ← outside the scrollable, no clip_to
+        //     Container .scrollable(true)   ← scrollable, no clip_to (its own rect)
+        //       Text                ← inside scrollable, clip_to = container's rect
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        tree.apply(&create_patch("input", "Input", &[("bind", json!("name"))]));
+        tree.apply(&insert_patch("col", "input"));
+        tree.apply(&create_patch(
+            "grid",
+            "Container",
+            &[("scrollable.0", json!(true))],
+        ));
+        tree.apply(&insert_patch("col", "grid"));
+        add_text(&mut tree, "grid", "post", "post body");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let input = find_item(&pass, "input");
+        assert!(
+            input.clip_to.is_none(),
+            "Input is outside the scrollable; it must have no clip_to (it shouldn't \
+             get clipped to a parent that doesn't contain it)",
+        );
+
+        let grid = find_item(&pass, "grid");
+        assert!(grid.scrollable.is_some(), "Container with scrollable.0=true must be scrollable");
+        assert!(
+            grid.clip_to.is_none(),
+            "The scrollable container itself has parent_clip_to = None (its own rect is \
+             the clip handed *down*; clipping a container to itself would crop its border)",
+        );
+
+        let post = find_item(&pass, "post");
+        let clip = post.clip_to.expect(
+            "descendant of scrollable container must carry the container's rect as clip_to",
+        );
+        // Field-by-field — `Rect` doesn't derive PartialEq (f32 NaN
+        // semantics make a blanket derive risky for a public type).
+        assert!(
+            (clip.x - grid.rect.x).abs() < 0.5
+                && (clip.y - grid.rect.y).abs() < 0.5
+                && (clip.w - grid.rect.w).abs() < 0.5
+                && (clip.h - grid.rect.h).abs() < 0.5,
+            "clip_to on a scrollable descendant must equal the container's rect; \
+             grid={:?} clip={:?}",
+            grid.rect,
+            clip,
+        );
+    }
+
+    #[test]
+    fn scrollable_clip_to_shifts_with_page_scroll() {
+        // Same shape as above; assert that when `compute_with_scroll`
+        // subtracts a page-scroll offset, *both* the container's
+        // rect AND its descendants' clip_to shift in lockstep —
+        // otherwise the clip drifts away from the items it's meant
+        // to clip.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        tree.apply(&create_patch(
+            "grid",
+            "Container",
+            &[("scrollable.0", json!(true))],
+        ));
+        tree.apply(&insert_patch("col", "grid"));
+        add_text(&mut tree, "grid", "post", "post body");
+
+        let mut text = TextEngine::new();
+        let scroll_y: f32 = 40.0;
+        let pass = LayoutPass::compute_with_scroll(&tree, &mut text, (800, 600), 1.0, scroll_y);
+
+        let grid = find_item(&pass, "grid");
+        let post = find_item(&pass, "post");
+        let clip = post.clip_to.expect("descendant must have clip_to");
+        // The container's rect AND the descendant's clip_to must
+        // have the same y-coord (both shifted by page scroll); the
+        // painter uses clip_to directly so any drift here would
+        // re-introduce the bleed.
+        assert!(
+            (clip.y - grid.rect.y).abs() < 0.5,
+            "clip_to.y must track grid.rect.y after page scroll; \
+             grid={:?} clip={:?} (scroll_y={scroll_y})",
+            grid.rect,
+            clip,
+        );
+    }
+
+    #[test]
+    fn non_scrollable_container_does_not_emit_clip_to() {
+        // A regular Container (no `.scrollable(...)`) doesn't clip
+        // its descendants. Verifies we don't over-eagerly attach
+        // `clip_to` to every Container's children — only when the
+        // ancestor is explicitly scrollable. The original cause of
+        // bleed-bug regressions like this is "I applied the fix
+        // everywhere" creating new clip layers that crop legitimate
+        // overflow (e.g. focus rings, shadows that intentionally
+        // extend past the parent).
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        add_text(&mut tree, "col", "t1", "First");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let t1 = find_item(&pass, "t1");
+        assert!(
+            t1.clip_to.is_none(),
+            "Text inside a non-scrollable Column must have no clip_to",
+        );
     }

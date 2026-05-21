@@ -11,12 +11,11 @@
 use crate::layout::Rect as LayoutRect;
 use crate::style::Rgba;
 use crate::window::AppEvent;
-use std::collections::HashMap;
-#[allow(unused_imports)]
-use std::collections::hash_map;
+use indexmap::IndexMap;
 use std::io::Read;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tiny_skia::{
     Color, FillRule, IntSize, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Rect,
@@ -30,8 +29,16 @@ pub(crate) enum CacheEntry {
     /// Worker has been told about this src; result not yet back.
     /// Painter renders the placeholder for now.
     Loading,
-    /// Source decoded successfully; bitmap ready for `draw_pixmap`.
-    Loaded(Pixmap),
+    /// Source's *encoded* bytes (JPEG / PNG / WebP). Decoded on
+    /// demand by `loaded_source`. Holding encoded keeps the global
+    /// cache 10-15× smaller than holding decoded `Pixmap`s — a
+    /// 1080×1080 JPEG is ~300 KB encoded vs ~4.6 MB premultiplied
+    /// RGBA. The painter-side tile cache (`VelloPainter::image_cache`
+    /// at 256 entries, `ImageRenderCache` at 256 tiles) absorbs the
+    /// decode cost: one decode per unique `(src, w, h, fit, radius)`
+    /// combination on cold paint, then warm-path hits never touch
+    /// the source again.
+    Loaded(Arc<Vec<u8>>),
     /// Source can't be loaded (missing file, decode error, network
     /// failure). Cache stays this way so we don't retry every frame.
     Failed,
@@ -39,8 +46,16 @@ pub(crate) enum CacheEntry {
 
 /// Process-global cache. Created on first access; the worker thread
 /// is spawned at the same time and lives for the process lifetime.
+///
+/// `entries` is an `IndexMap` for LRU semantics: insertion order
+/// doubles as recency order, and `touch_recent` moves cache hits to
+/// the back so `shift_remove_index(0)` always evicts the oldest
+/// unused entry first. A plain `HashMap` here would grow without
+/// bound — a long-running session that visits enough distinct
+/// images (HTTP CDN avatars, post bodies, etc.) would accumulate
+/// every decoded RGBA bitmap for the process lifetime.
 pub(crate) struct ImageCache {
-    pub(crate) entries: Mutex<HashMap<String, CacheEntry>>,
+    pub(crate) entries: Mutex<IndexMap<String, CacheEntry>>,
     /// URLs awaiting HTTP fetch. Local files decode synchronously on
     /// the calling thread.
     work_tx: mpsc::Sender<String>,
@@ -49,6 +64,62 @@ pub(crate) struct ImageCache {
     /// embedders — the cache still works, paints just won't refresh
     /// until the next external event triggers a redraw.
     waker: Mutex<Option<EventLoopProxy<AppEvent>>>,
+}
+
+/// Cap on the number of encoded-source entries the global cache
+/// holds. Each `Loaded` entry retains an `Arc<Vec<u8>>` of the
+/// original JPEG / PNG / WebP body — typically ~100 KB-3 MB. 256
+/// entries gives a high-watermark on the order of ~500 MB for a
+/// busy feed; far below the 12 GB runaway we saw before any cap
+/// existed, and ~10-15× smaller than holding RGBA at the same cap.
+const GLOBAL_IMAGE_CACHE_CAP: usize = 256;
+
+/// Cap on the short-term *decoded* pixmap cache (see [`DecodedCache`]).
+/// Sized to comfortably cover one screen's visible image set so a
+/// resize / scroll-out-and-back doesn't re-decode every image —
+/// JPEG decode is the dominant cost (50-200 ms per mid-sized photo)
+/// and a single resize can become a multi-second hitch without this
+/// tier. 32 entries × ~5 MB average decoded image = ~160 MB ceiling,
+/// on top of the encoded cache. Worth it for the interactive
+/// smoothness; the decoded entries get cleared on `Occluded(true)`
+/// (see `clear_decoded_cache`) so background memory still drops.
+const DECODED_CACHE_CAP: usize = 32;
+
+/// Bump `src` to the back of the LRU queue. No-op on an empty cache
+/// or when the entry is already last. Caller must already hold the
+/// cache lock. Generic over the value type so the same logic serves
+/// both the encoded-bytes cache and the decoded-pixmap cache.
+fn touch_recent<V>(entries: &mut IndexMap<String, V>, src: &str) {
+    let len = entries.len();
+    if len < 2 {
+        return;
+    }
+    if let Some(idx) = entries.get_index_of(src) {
+        if idx + 1 != len {
+            entries.move_index(idx, len - 1);
+        }
+    }
+}
+
+/// Evict the oldest entries until the cache is at or below cap.
+/// Skips `Loading` entries — their worker is still in flight and
+/// dropping them would orphan the decoded result. Caller must
+/// already hold the cache lock.
+fn evict_overflow(entries: &mut IndexMap<String, CacheEntry>) {
+    while entries.len() > GLOBAL_IMAGE_CACHE_CAP {
+        let evict_at = entries
+            .iter()
+            .position(|(_, e)| !matches!(e, CacheEntry::Loading));
+        match evict_at {
+            Some(i) => {
+                entries.shift_remove_index(i);
+            }
+            // Everything in the cache is Loading — nothing safe to
+            // evict. The worker will land results shortly and the
+            // next call gets another chance.
+            None => break,
+        }
+    }
 }
 
 fn cache() -> &'static ImageCache {
@@ -60,11 +131,119 @@ fn cache() -> &'static ImageCache {
             .spawn(move || run_image_worker(work_rx))
             .expect("spawn hypen-image-fetch worker");
         ImageCache {
-            entries: Mutex::new(HashMap::new()),
+            entries: Mutex::new(IndexMap::new()),
             work_tx,
             waker: Mutex::new(None),
         }
     })
+}
+
+/// Short-term decoded-pixmap cache, sized as the second tier on top
+/// of the encoded `ImageCache`. The encoded tier solves the long-
+/// term memory bound; this tier solves the interactive-cost bound
+/// — a window resize invalidates every painter tile-cache entry
+/// (key includes width / height), so without this tier each visible
+/// image would re-decode from JPEG on the paint thread, producing
+/// the multi-hundred-ms hitch users see post the #5 compression
+/// optimisation. Hit returns `Arc<Pixmap>` directly; miss falls
+/// through to encoded-bytes-and-decode and populates this tier for
+/// next time. LRU eviction; populated lazily so an image that was
+/// loaded but never painted doesn't claim a slot.
+struct DecodedCache {
+    entries: Mutex<IndexMap<String, Arc<Pixmap>>>,
+}
+
+fn decoded_cache() -> &'static DecodedCache {
+    static CACHE: OnceLock<DecodedCache> = OnceLock::new();
+    CACHE.get_or_init(|| DecodedCache {
+        entries: Mutex::new(IndexMap::new()),
+    })
+}
+
+/// Drop every entry in the decoded-pixmap cache. Called by the
+/// window code on `WindowEvent::Occluded(true)` (next to clearing
+/// the painter's tile cache) so a hidden window's resident set
+/// shrinks. Encoded cache survives — re-decoding on resume is
+/// cheap relative to re-fetching from the network.
+pub fn clear_decoded_cache() {
+    decoded_cache()
+        .entries
+        .lock()
+        .expect("decoded cache poisoned")
+        .clear();
+}
+
+fn lookup_decoded(src: &str) -> Option<Arc<Pixmap>> {
+    let mut entries = decoded_cache()
+        .entries
+        .lock()
+        .expect("decoded cache poisoned");
+    let pm = entries.get(src).map(Arc::clone)?;
+    touch_recent(&mut entries, src);
+    Some(pm)
+}
+
+fn store_decoded(src: &str, pm: Arc<Pixmap>) {
+    let mut entries = decoded_cache()
+        .entries
+        .lock()
+        .expect("decoded cache poisoned");
+    entries.insert(src.to_string(), pm);
+    while entries.len() > DECODED_CACHE_CAP {
+        entries.shift_remove_index(0);
+    }
+}
+
+/// Public surface for the Vello painter: queue async load (or fast-
+/// path early-return if already cached) and return the loaded
+/// `Arc<Pixmap>` if available. Used by the Vello image draw path
+/// which needs the source bitmap to build a `peniko::Image`.
+pub fn ensure_loaded_public(src: &str) {
+    ensure_loaded(src);
+}
+
+/// Test-only helper: stash a pre-decoded `Arc<Pixmap>` directly in
+/// the tier-1 decoded cache so `loaded_source(src)` returns it
+/// synchronously, without going through the async worker. Lets tests
+/// in sibling modules (e.g. `vello_painter`) exercise the draw-image
+/// path deterministically.
+#[cfg(test)]
+pub(crate) fn test_seed_decoded(src: &str, pm: Arc<Pixmap>) {
+    store_decoded(src, pm);
+}
+
+pub fn loaded_source(src: &str) -> Option<std::sync::Arc<Pixmap>> {
+    // Tier 1: decoded-pixmap cache hit. The hot path during resize
+    // / scroll-out-and-back where the painter tile cache invalidated
+    // for every visible image but the source decode is cached here.
+    // `Arc::clone` pointer-bump, no decode work, no encoded-cache
+    // contention with the worker thread.
+    if let Some(pm) = lookup_decoded(src) {
+        return Some(pm);
+    }
+
+    // Tier 2: encoded-bytes cache. Lock just long enough to clone
+    // the `Arc<Vec<u8>>` + bump LRU; release before decoding so the
+    // (potentially multi-MB JPEG) decode doesn't hold the cache
+    // mutex against the worker thread.
+    let encoded = {
+        let mut entries = cache().entries.lock().expect("image cache poisoned");
+        let result = match entries.get(src) {
+            Some(CacheEntry::Loaded(bytes)) => Some(Arc::clone(bytes)),
+            _ => None,
+        };
+        // Mark as recently used so eviction doesn't strip the avatar
+        // we're currently rendering when the cache fills up.
+        if result.is_some() {
+            touch_recent(&mut entries, src);
+        }
+        result
+    };
+    let encoded = encoded?;
+    let pm = Arc::new(decode_bytes(&encoded, src)?);
+    // Populate the decoded tier so next resize / scroll hits.
+    store_decoded(src, Arc::clone(&pm));
+    Some(pm)
 }
 
 /// Register the renderer's event-loop proxy so the worker can wake
@@ -157,21 +336,20 @@ pub fn paint_image_cached(
             return;
         }
     }
-    let bitmap_data: Option<(Vec<u8>, u32, u32)> = src.and_then(|s| {
+    // Clone the Arc handle (cheap pointer bump) instead of copying
+    // the decoded RGBA bytes. Each tile-cache miss for a different
+    // target size used to allocate + memcpy the entire source bitmap
+    // — for a 4 K post body that's ~64 MB of redundant RGBA per
+    // miss. With Arc<Pixmap>, the source stays uniquely allocated
+    // in the global image cache.
+    let source: Option<Arc<Pixmap>> = src.and_then(|s| {
         ensure_loaded(s);
-        let entries = cache().entries.lock().expect("image cache poisoned");
-        match entries.get(s) {
-            Some(CacheEntry::Loaded(pm)) => {
-                Some((pm.data().to_vec(), pm.width(), pm.height()))
-            }
-            _ => None,
-        }
+        loaded_source(s)
     });
 
-    if let Some((data, w, h)) = bitmap_data {
-        let size = IntSize::from_wh(w, h).expect("non-zero source size");
-        let pm =
-            Pixmap::from_vec(data, size).expect("source bitmap matches RGBA layout");
+    if let Some(pm) = source {
+        let w = pm.width();
+        let h = pm.height();
         // Render into a tile-sized scratch pixmap so the (scale +
         // mask) pipeline runs once per `(src, target_size, fit,
         // radius)` tuple instead of once per frame. Tile size is the
@@ -322,56 +500,106 @@ fn build_rounded_rect_mask(
 /// back.
 fn ensure_loaded(src: &str) {
     {
-        let entries = cache().entries.lock().expect("image cache poisoned");
+        let mut entries = cache().entries.lock().expect("image cache poisoned");
         if entries.contains_key(src) {
+            // Cache hit — bump to back so a re-render of the same
+            // image survives the next eviction sweep.
+            touch_recent(&mut entries, src);
             return;
         }
+        // Insert as Loading and evict the oldest non-Loading entries
+        // to keep the cache at cap. Same lock window as the
+        // contains_key check above so two concurrent ensure_loaded
+        // calls for the same src can't both queue work.
+        entries.insert(src.to_string(), CacheEntry::Loading);
+        evict_overflow(&mut entries);
     }
-    if is_http(src) {
-        // Mark Loading and ask the worker to fetch.
-        cache()
-            .entries
-            .lock()
-            .expect("image cache poisoned")
-            .insert(src.to_string(), CacheEntry::Loading);
-        // The worker channel is unbounded-ish (std mpsc); a send only
-        // fails if the receiver has dropped, which only happens at
-        // process tear-down. Log + leave the entry as Loading so the
-        // placeholder paints — we won't retry in this run.
-        if let Err(e) = cache().work_tx.send(src.to_string()) {
-            log::warn!("image: worker channel closed: {e}");
-        }
-        return;
+    // Both HTTP and local file paths queue on the worker thread now.
+    // Local-file synchronous decode used to hitch the paint thread on
+    // first paint of any post-body image (multi-MB JPEG decode +
+    // premultiply on the main loop). Worker hands the result back via
+    // the same `AppEvent::Wake` redraw nudge as HTTP fetches.
+    if let Err(e) = cache().work_tx.send(src.to_string()) {
+        log::warn!("image: worker channel closed: {e}");
     }
-    // Local file — decode synchronously.
-    let entry = match decode_local(src) {
-        Some(pm) => CacheEntry::Loaded(pm),
-        None => CacheEntry::Failed,
-    };
-    cache()
-        .entries
-        .lock()
-        .expect("image cache poisoned")
-        .insert(src.to_string(), entry);
 }
 
 fn is_http(src: &str) -> bool {
     src.starts_with("http://") || src.starts_with("https://")
 }
 
-/// Worker loop. Receives URLs on the channel, fetches + decodes each,
-/// stores the result in the cache, then nudges the event loop.
+/// Worker loop. Receives src strings on the channel, fetches the
+/// encoded source bytes (HTTP body for URLs, file read for local
+/// paths), validates them by attempting a decode (discarding the
+/// result), stores the **encoded** bytes in the cache, then nudges
+/// the event loop. Either branch off the main thread keeps the
+/// paint loop responsive — the network and IO are obvious wins; the
+/// validation decode is here so we don't cache un-decodable bytes
+/// that fail on every paint until evicted.
+/// Monotonic counter bumped every time the image worker resolves an
+/// `src` (success OR failure). The painter reads this on each
+/// `build_scene` call: if it moved since the last paint, any subtree
+/// scene cached during a frame where some image's source was still
+/// `Loading` is now potentially stale (the image is loaded and would
+/// draw differently), so the painter invalidates its subtree cache.
+///
+/// Without this, the scene cache happily replays an "image not loaded
+/// → bail out, render nothing" fragment forever — the user saw the
+/// thumbnails pop in only on viewport resize, which dropped the
+/// cache as a side effect.
+static IMAGE_LOAD_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Read the current image-load generation. The painter compares this
+/// against its last-seen value to decide whether to drop subtree
+/// caches that may have been encoded against an unloaded source.
+pub fn image_load_generation() -> u64 {
+    IMAGE_LOAD_GEN.load(Ordering::Relaxed)
+}
+
 fn run_image_worker(rx: mpsc::Receiver<String>) {
-    while let Ok(url) = rx.recv() {
-        let entry = match fetch_and_decode(&url) {
-            Some(pm) => CacheEntry::Loaded(pm),
+    while let Ok(src) = rx.recv() {
+        let bytes = if is_http(&src) {
+            fetch_http_bytes(&src)
+        } else {
+            read_local_bytes(&src)
+        };
+        let entry = match bytes {
+            Some(bytes) => {
+                // Decode + discard for validation. The paint thread
+                // re-decodes on demand via `loaded_source`; the
+                // painter-side tile cache then keeps the warm path
+                // off the encoded source.
+                if decode_bytes(&bytes, &src).is_some() {
+                    CacheEntry::Loaded(Arc::new(bytes))
+                } else {
+                    CacheEntry::Failed
+                }
+            }
             None => CacheEntry::Failed,
         };
-        cache()
-            .entries
-            .lock()
-            .expect("image cache poisoned")
-            .insert(url, entry);
+        {
+            let mut entries = cache()
+                .entries
+                .lock()
+                .expect("image cache poisoned");
+            // `IndexMap::insert` keeps an existing key in place; the
+            // entry was Loading, we want the newly-decoded result at
+            // the back so it counts as freshly used. shift_remove +
+            // insert is O(n) in the cache size but n ≤ cap (256), so
+            // ~µs per landing — negligible compared to the JPEG
+            // decode we just did.
+            entries.shift_remove(&src);
+            entries.insert(src, entry);
+            evict_overflow(&mut entries);
+        }
+        // Bump the load generation BEFORE the wake event so the next
+        // redraw sees the new value when it checks. Even Failed
+        // entries bump it: a failed src that was previously Loading
+        // would have been encoded as "skip the draw" in any cached
+        // subtree, and we want to re-encode that subtree once with
+        // the final Failed state so it stops trying to load every
+        // frame (the global cache's Failed sticks).
+        IMAGE_LOAD_GEN.fetch_add(1, Ordering::Relaxed);
         // Best-effort wake. If no proxy was registered (tests / no
         // window yet), the next external event will drive the redraw.
         if let Some(proxy) = cache()
@@ -385,9 +613,10 @@ fn run_image_worker(rx: mpsc::Receiver<String>) {
     }
 }
 
-/// Fetch + decode an HTTP / HTTPS URL via `ureq`. Returns `None` on
-/// any failure (timeout, non-2xx, decode error, oversize body).
-fn fetch_and_decode(url: &str) -> Option<Pixmap> {
+/// Fetch the *encoded* body of an HTTP / HTTPS URL via `ureq`.
+/// Returns `None` on any failure (timeout, non-2xx, oversize body).
+/// Decode validation happens in the worker loop.
+fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
     let response = match ureq::get(url)
         .timeout(Duration::from_secs(10))
         .call()
@@ -405,25 +634,25 @@ fn fetch_and_decode(url: &str) -> Option<Pixmap> {
         log::warn!("image: read failed for {url}: {e}");
         return None;
     }
-    decode_bytes(&bytes, url)
+    Some(bytes)
 }
 
-/// Decode a local file path (raw or `file://`-prefixed). HTTP URLs
-/// return `None` here so the caller routes them to the worker.
-pub(crate) fn decode_local(src: &str) -> Option<Pixmap> {
+/// Read the encoded bytes of a local file path (raw or `file://`-
+/// prefixed). HTTP URLs return `None` here so the caller routes
+/// them to `fetch_http_bytes` instead.
+pub(crate) fn read_local_bytes(src: &str) -> Option<Vec<u8>> {
     if is_http(src) {
         log::debug!("image: HTTP src queued for worker (not local): {src}");
         return None;
     }
     let path = src.strip_prefix("file://").unwrap_or(src);
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+    match std::fs::read(path) {
+        Ok(b) => Some(b),
         Err(e) => {
             log::warn!("image: failed reading {path}: {e}");
-            return None;
+            None
         }
-    };
-    decode_bytes(&bytes, path)
+    }
 }
 
 /// Shared codec path: bytes → RGBA8 → premultiplied → tiny-skia
@@ -532,16 +761,17 @@ mod tests {
     }
 
     #[test]
-    fn decode_local_skips_http_urls() {
-        // `decode_local` is the synchronous local-file path; HTTP
-        // queries return None so the worker can pick them up.
-        assert!(decode_local("http://example.com/x.png").is_none());
-        assert!(decode_local("https://example.com/x.png").is_none());
+    fn read_local_bytes_skips_http_urls() {
+        // `read_local_bytes` is the local-file fast path; HTTP URLs
+        // return None so the caller routes them to `fetch_http_bytes`
+        // instead.
+        assert!(read_local_bytes("http://example.com/x.png").is_none());
+        assert!(read_local_bytes("https://example.com/x.png").is_none());
     }
 
     #[test]
-    fn decode_local_returns_none_for_missing_file() {
-        assert!(decode_local("/tmp/__hypen_test_does_not_exist_xyz.png").is_none());
+    fn read_local_bytes_returns_none_for_missing_file() {
+        assert!(read_local_bytes("/tmp/__hypen_test_does_not_exist_xyz.png").is_none());
     }
 
     #[test]
@@ -552,7 +782,7 @@ mod tests {
         // repeated `ensure_loaded` calls (no double-queueing).
         let url = "http://hypen-test.invalid/cache-loading-state.png";
         // Clear any prior state from earlier tests.
-        cache().entries.lock().unwrap().remove(url);
+        cache().entries.lock().unwrap().shift_remove(url);
 
         ensure_loaded(url);
         {
@@ -569,11 +799,32 @@ mod tests {
 
     #[test]
     fn ensure_loaded_caches_local_miss_as_failed() {
+        // Local-file decode is async via the worker thread. The
+        // initial `ensure_loaded` flips state to `Loading` and queues
+        // the work; once the worker fails to read the missing file,
+        // it lands as `Failed`. Poll briefly to bridge the latency —
+        // the worker is single-threaded but cheap.
         let key = "/tmp/__hypen_test_local_miss_caches_failed.png";
-        cache().entries.lock().unwrap().remove(key);
+        cache().entries.lock().unwrap().shift_remove(key);
         ensure_loaded(key);
-        let entries = cache().entries.lock().unwrap();
-        assert!(matches!(entries.get(key), Some(CacheEntry::Failed)));
+        // Loading → Failed transition happens on the worker.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            {
+                let entries = cache().entries.lock().unwrap();
+                if matches!(entries.get(key), Some(CacheEntry::Failed)) {
+                    return;
+                }
+            }
+            if std::time::Instant::now() >= deadline {
+                let entries = cache().entries.lock().unwrap();
+                panic!(
+                    "local miss should land as Failed within timeout; got {:?}",
+                    entries.get(key)
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     #[test]
@@ -621,21 +872,26 @@ mod tests {
     fn paint_image_renders_loaded_bitmap_over_placeholder() {
         // Pre-seed the cache with a tiny bright-red 4×4 bitmap and
         // assert paint_image samples it (drawn pixels should match
-        // red, not the placeholder gray).
+        // red, not the placeholder gray). With compressed-bytes
+        // caching, the seed has to be a real encoded PNG — the paint
+        // path decodes via `loaded_source` on demand.
         let key = "test://seeded-red-4x4";
-        let mut data = vec![0u8; 4 * 4 * 4];
-        for px in data.chunks_exact_mut(4) {
-            px[0] = 0xff; // R
-            px[1] = 0;
-            px[2] = 0;
-            px[3] = 0xff; // A — already premultiplied (R*A/255 = R for A=255)
+        let mut img = image::RgbaImage::new(4, 4);
+        for px in img.pixels_mut() {
+            *px = image::Rgba([0xff, 0, 0, 0xff]);
         }
-        let pm = Pixmap::from_vec(data, IntSize::from_wh(4, 4).unwrap()).unwrap();
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encode 4×4 red png for seed");
         cache()
             .entries
             .lock()
             .unwrap()
-            .insert(key.to_string(), CacheEntry::Loaded(pm));
+            .insert(key.to_string(), CacheEntry::Loaded(Arc::new(png_bytes)));
 
         let mut canvas = Pixmap::new(32, 32).unwrap();
         canvas.fill(Color::WHITE);
@@ -665,5 +921,257 @@ mod tests {
             sample.green(),
             sample.blue(),
         );
+    }
+
+    // -----------------------------------------------------------------
+    // LRU cap on the global decoded-source cache
+    // -----------------------------------------------------------------
+
+    /// Build a `Loaded` entry whose payload is a tiny PNG byte buffer
+    /// — content doesn't matter for the cache-mechanics tests, only
+    /// the entry's discriminant. We use real PNG bytes (a 1×1 white
+    /// pixel) so any test path that does decode the bytes still
+    /// works; cache-mechanics tests don't bother decoding.
+    fn dummy_loaded() -> CacheEntry {
+        CacheEntry::Loaded(Arc::new(tiny_png_bytes()))
+    }
+
+    /// 1×1 white pixel encoded as PNG via the `image` crate. Generated
+    /// at test time rather than hand-frozen bytes — PNG CRCs are
+    /// fiddly enough to get wrong by hand (we tried) and the `image`
+    /// crate is already a dep with the `png` feature on, so this is
+    /// trivially available.
+    fn tiny_png_bytes() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0xff, 0xff, 0xff, 0xff]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut buf),
+                image::ImageFormat::Png,
+            )
+            .expect("encode 1×1 white png");
+        buf
+    }
+
+    #[test]
+    fn touch_recent_moves_existing_key_to_back() {
+        let mut entries: IndexMap<String, CacheEntry> = IndexMap::new();
+        entries.insert("a".into(), dummy_loaded());
+        entries.insert("b".into(), dummy_loaded());
+        entries.insert("c".into(), dummy_loaded());
+
+        touch_recent(&mut entries, "a");
+
+        let order: Vec<&str> = entries.keys().map(String::as_str).collect();
+        assert_eq!(order, vec!["b", "c", "a"], "touched key must end up last");
+    }
+
+    #[test]
+    fn touch_recent_is_noop_on_missing_key() {
+        let mut entries: IndexMap<String, CacheEntry> = IndexMap::new();
+        entries.insert("a".into(), dummy_loaded());
+        entries.insert("b".into(), dummy_loaded());
+        touch_recent(&mut entries, "missing");
+        let order: Vec<&str> = entries.keys().map(String::as_str).collect();
+        assert_eq!(order, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn evict_overflow_drops_oldest_loaded_first() {
+        let mut entries: IndexMap<String, CacheEntry> = IndexMap::new();
+        // Insert one more than the cap so eviction kicks in.
+        for i in 0..(GLOBAL_IMAGE_CACHE_CAP + 1) {
+            entries.insert(format!("k{i}"), dummy_loaded());
+        }
+        evict_overflow(&mut entries);
+        assert_eq!(entries.len(), GLOBAL_IMAGE_CACHE_CAP);
+        // The oldest insert (`k0`) should be gone; the newest still
+        // present.
+        assert!(!entries.contains_key("k0"));
+        assert!(entries.contains_key(&format!("k{}", GLOBAL_IMAGE_CACHE_CAP)));
+    }
+
+    #[test]
+    fn evict_overflow_skips_loading_entries() {
+        // Loading entries have in-flight worker decodes; evicting them
+        // orphans the decode result. The eviction sweep must skip
+        // Loading and prefer the oldest non-Loading.
+        let mut entries: IndexMap<String, CacheEntry> = IndexMap::new();
+        entries.insert("loading_old".into(), CacheEntry::Loading);
+        entries.insert("loaded_mid".into(), dummy_loaded());
+        for i in 0..(GLOBAL_IMAGE_CACHE_CAP - 1) {
+            entries.insert(format!("filler{i}"), dummy_loaded());
+        }
+        // We're now at cap + 1 with `loading_old` at the front.
+        assert_eq!(entries.len(), GLOBAL_IMAGE_CACHE_CAP + 1);
+
+        evict_overflow(&mut entries);
+        assert_eq!(entries.len(), GLOBAL_IMAGE_CACHE_CAP);
+        // `loading_old` must survive even though it's the oldest;
+        // `loaded_mid` (next-oldest non-Loading) is the casualty.
+        assert!(entries.contains_key("loading_old"));
+        assert!(!entries.contains_key("loaded_mid"));
+    }
+
+    #[test]
+    fn evict_overflow_with_all_loading_is_a_noop() {
+        // Pathological: every entry is in flight. We refuse to evict
+        // anything (would lose worker results) and live with the
+        // temporary overshoot. The worker pipeline drains and the next
+        // sweep catches up.
+        let mut entries: IndexMap<String, CacheEntry> = IndexMap::new();
+        for i in 0..(GLOBAL_IMAGE_CACHE_CAP + 4) {
+            entries.insert(format!("k{i}"), CacheEntry::Loading);
+        }
+        evict_overflow(&mut entries);
+        assert_eq!(entries.len(), GLOBAL_IMAGE_CACHE_CAP + 4);
+    }
+
+    // -----------------------------------------------------------------
+    // Decoded-pixmap LRU (the second tier — solves the resize hitch)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn loaded_source_populates_decoded_cache_on_first_call() {
+        // Hermetic test: unique key so concurrent tests can't trash
+        // each other's state via the global caches.
+        let key = "test://decoded-populate-fresh";
+        {
+            let mut entries = cache().entries.lock().unwrap();
+            entries.shift_remove(key);
+            entries.insert(key.into(), CacheEntry::Loaded(Arc::new(tiny_png_bytes())));
+        }
+        decoded_cache().entries.lock().unwrap().shift_remove(key);
+
+        let pm = loaded_source(key).expect("first load decodes successfully");
+
+        let decoded = decoded_cache().entries.lock().unwrap();
+        let stored = decoded
+            .get(key)
+            .expect("decoded cache must retain after the first decode");
+        assert!(
+            Arc::ptr_eq(&pm, stored),
+            "the Arc returned by loaded_source must be the same instance the \
+             decoded cache stored — otherwise resize will re-decode anyway",
+        );
+
+        drop(decoded);
+        cache().entries.lock().unwrap().shift_remove(key);
+        decoded_cache().entries.lock().unwrap().shift_remove(key);
+    }
+
+    #[test]
+    fn loaded_source_second_call_hits_decoded_cache() {
+        // Two `loaded_source` calls in a row should return the SAME
+        // Arc instance — proving the second one took the decoded-
+        // cache fast path rather than re-decoding from encoded bytes
+        // (which would mint a fresh `Arc<Pixmap>`).
+        let key = "test://decoded-second-call-hits";
+        {
+            let mut entries = cache().entries.lock().unwrap();
+            entries.shift_remove(key);
+            entries.insert(key.into(), CacheEntry::Loaded(Arc::new(tiny_png_bytes())));
+        }
+        decoded_cache().entries.lock().unwrap().shift_remove(key);
+
+        let first = loaded_source(key).expect("first load");
+        let second = loaded_source(key).expect("second load (decoded-cache hit)");
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "second loaded_source must return the same Arc — proves no re-decode",
+        );
+
+        cache().entries.lock().unwrap().shift_remove(key);
+        decoded_cache().entries.lock().unwrap().shift_remove(key);
+    }
+
+    #[test]
+    fn clear_decoded_cache_empties_it() {
+        let key = "test://decoded-clear";
+        {
+            let mut entries = cache().entries.lock().unwrap();
+            entries.shift_remove(key);
+            entries.insert(key.into(), CacheEntry::Loaded(Arc::new(tiny_png_bytes())));
+        }
+        let _ = loaded_source(key);
+        assert!(decoded_cache().entries.lock().unwrap().contains_key(key));
+        clear_decoded_cache();
+        assert!(
+            !decoded_cache().entries.lock().unwrap().contains_key(key),
+            "clear_decoded_cache must drop every entry",
+        );
+
+        cache().entries.lock().unwrap().shift_remove(key);
+    }
+
+    #[test]
+    fn decoded_cache_evicts_at_cap() {
+        // Stuff the decoded cache past the cap directly (skipping the
+        // encoded-tier hop), then call `store_decoded` once more and
+        // assert size + oldest-evicted.
+        let mut decoded = decoded_cache().entries.lock().unwrap();
+        decoded.clear();
+        let dummy = Arc::new(Pixmap::new(1, 1).unwrap());
+        for i in 0..DECODED_CACHE_CAP {
+            decoded.insert(format!("test://evict-fixture-{i}"), Arc::clone(&dummy));
+        }
+        assert_eq!(decoded.len(), DECODED_CACHE_CAP);
+        drop(decoded);
+
+        store_decoded("test://evict-fixture-tipover", Arc::clone(&dummy));
+        let decoded = decoded_cache().entries.lock().unwrap();
+        assert_eq!(
+            decoded.len(),
+            DECODED_CACHE_CAP,
+            "store_decoded must enforce the cap"
+        );
+        // Oldest (index 0) is gone; newest is at the back.
+        assert!(!decoded.contains_key("test://evict-fixture-0"));
+        assert!(decoded.contains_key("test://evict-fixture-tipover"));
+        drop(decoded);
+
+        // Cleanup so other tests aren't sensitive to leftovers.
+        let mut decoded = decoded_cache().entries.lock().unwrap();
+        decoded.clear();
+    }
+
+    #[test]
+    fn loaded_source_bumps_lru_on_hit() {
+        // Seed the global cache with three live entries, then read the
+        // oldest and confirm it moves to the back so a subsequent
+        // overflow doesn't evict the freshly-rendered image.
+        let keys: [&str; 3] = [
+            "test://lru-bump-old",
+            "test://lru-bump-mid",
+            "test://lru-bump-new",
+        ];
+        {
+            let mut entries = cache().entries.lock().unwrap();
+            for k in &keys {
+                entries.shift_remove(*k);
+            }
+            for k in &keys {
+                entries.insert((*k).into(), dummy_loaded());
+            }
+        }
+        // Reads must bump.
+        let _ = loaded_source(keys[0]);
+        {
+            let entries = cache().entries.lock().unwrap();
+            // The other two seeded keys should now precede `keys[0]`.
+            let idx_old = entries.get_index_of(keys[0]).unwrap();
+            let idx_mid = entries.get_index_of(keys[1]).unwrap();
+            let idx_new = entries.get_index_of(keys[2]).unwrap();
+            assert!(
+                idx_mid < idx_old && idx_new < idx_old,
+                "loaded_source hit must bump key past its prior neighbours; \
+                 got old={idx_old} mid={idx_mid} new={idx_new}",
+            );
+        }
+        // Cleanup so other tests aren't sensitive to leftovers.
+        let mut entries = cache().entries.lock().unwrap();
+        for k in &keys {
+            entries.shift_remove(*k);
+        }
     }
 }

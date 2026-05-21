@@ -278,6 +278,8 @@ impl CpuPainter {
                     font_size,
                     color,
                     align,
+                    max_lines: _,
+                    padding: _,
                 } => {
                     // Pre-measure the line so right/center alignment
                     // can offset within the laid-out rect. Wrap width

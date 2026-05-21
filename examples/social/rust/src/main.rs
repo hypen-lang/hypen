@@ -30,7 +30,7 @@ use queries::{
 };
 use types::{
     AppState, CommentIdPayload, CommentsState, Comment, Conversation, HomePageState,
-    MessagesState, Notification, NotificationsState, PostIdPayload, PostThumbnail, ProfileState,
+    InputValuePayload, MessagesState, Notification, NotificationsState, PostIdPayload, PostThumbnail, ProfileState,
     SearchState, StoryState, User, UserProfileState, ViewedStory, ViewedUser,
 };
 
@@ -144,14 +144,17 @@ fn build_search_module(
                 search_query: String::new(),
                 explore_posts: (*all_explore_posts).clone(),
             })
-            .on_action::<()>("search", move |state, _, _| {
-                let query = state.search_query.to_lowercase();
+            .on_action::<InputValuePayload>("search", move |state, payload, _| {
+                let query = payload.text().to_lowercase();
                 state.explore_posts = if query.is_empty() {
                     (*all_explore_posts).clone()
                 } else {
                     all_explore_posts
                         .iter()
-                        .filter(|p| p.image_url.to_lowercase().contains(&query))
+                        .filter(|p| {
+                            p.username.to_lowercase().contains(&query)
+                                || p.caption.to_lowercase().contains(&query)
+                        })
                         .cloned()
                         .collect()
                 };

@@ -9,3 +9,4 @@
 pub mod cpu;
 pub mod icon;
 pub mod image;
+pub mod vello_painter;

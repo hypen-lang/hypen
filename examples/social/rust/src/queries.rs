@@ -166,13 +166,19 @@ pub fn get_user_posts(conn: &Connection, user_id: &str) -> Vec<PostThumbnail> {
 
 pub fn get_explore_posts(conn: &Connection) -> Vec<PostThumbnail> {
     let mut stmt = conn
-        .prepare("SELECT id, image_url FROM posts ORDER BY likes_count DESC")
+        .prepare(
+            "SELECT p.id, p.image_url, u.username, p.caption \
+             FROM posts p JOIN users u ON p.user_id = u.id \
+             ORDER BY p.likes_count DESC",
+        )
         .unwrap();
 
     stmt.query_map([], |row| {
         Ok(PostThumbnail {
             id: row.get(0)?,
             image_url: row.get(1)?,
+            username: row.get(2)?,
+            caption: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
         })
     })
     .unwrap()

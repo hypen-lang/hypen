@@ -6,7 +6,7 @@
 
 use crate::style::Rgba;
 use cosmic_text::{
-    Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight,
+    Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight, Wrap,
 };
 use indexmap::IndexMap;
 use tiny_skia::Pixmap;
@@ -43,7 +43,7 @@ pub struct TextEngine {
 impl TextEngine {
     pub fn new() -> Self {
         Self {
-            fonts: FontSystem::new(),
+            fonts: build_slim_font_system(),
             swash: SwashCache::new(),
             measure_cache: IndexMap::new(),
             raster_cache: IndexMap::new(),
@@ -100,6 +100,15 @@ impl TextEngine {
         let attrs = Attrs::new().family(Family::SansSerif).weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
+        // Match CSS `overflow-wrap: normal`: only break at word
+        // boundaries (whitespace). A single word longer than the
+        // wrap width overflows the parent instead of being chopped
+        // mid-glyph — chopping was breaking usernames like
+        // "charlie_eats" into "charlie_eat\ns" inside the Post Row
+        // where flex shrink had squeezed the username column below
+        // the word's intrinsic width. Cosmic-text defaults to
+        // `WordOrGlyph`, which is what produced the broken render.
+        buffer.set_wrap(Wrap::Word);
         buffer.shape_until_scroll(&mut self.fonts, false);
 
         let mut max_w: f32 = 0.0;
@@ -215,6 +224,11 @@ impl TextEngine {
         let attrs = Attrs::new().family(Family::SansSerif).weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
+        // Mirror the wrap policy in `measure_weighted` — without
+        // matching the two paths, the draw could emit lines the
+        // measure cache didn't account for (or vice versa) and the
+        // raster cache key would diverge from the actual layout.
+        buffer.set_wrap(Wrap::Word);
 
         // cosmic-text's Color is stored straight-alpha and multiplied
         // into the per-pixel coverage. Premultiply happens in our blit
@@ -271,6 +285,85 @@ impl TextEngine {
                 }
             },
         );
+    }
+
+    /// Render `text` into a pre-rasterised tile and append it to a
+    /// `vello::Scene` as a `draw_image`. Bridges cosmic-text's CPU
+    /// glyph rasterisation to Vello's GPU compositor for the
+    /// duration of the migration — when we ship a native vello
+    /// `draw_glyphs` path (extracting font bytes from cosmic-text's
+    /// fontdb), this becomes a fallback for unusual paths only.
+    ///
+    /// Reuses the existing `raster_cache` so repeated draws of the
+    /// same `(text, font_size, color, wrap, weight)` tuple share
+    /// the cached pixmap — only the per-call conversion to
+    /// `peniko::Image` (a `Vec<u8>` clone of the tile) costs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_into_scene(
+        &mut self,
+        scene: &mut vello::Scene,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        color: Rgba,
+        wrap_width: Option<f32>,
+        weight: u16,
+    ) {
+        if color.3 == 0 || text.is_empty() {
+            return;
+        }
+        let (mw, mh) = self.measure_weighted(text, font_size, wrap_width, weight);
+        let cw = mw.ceil().max(1.0) as u32;
+        let ch = mh.ceil().max(1.0) as u32;
+
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        font_size.to_bits().hash(&mut hasher);
+        let color_u32 = u32::from_le_bytes([color.0, color.1, color.2, color.3]);
+        color_u32.hash(&mut hasher);
+        wrap_width.map(f32::to_bits).hash(&mut hasher);
+        weight.hash(&mut hasher);
+        cw.hash(&mut hasher);
+        ch.hash(&mut hasher);
+        let key = hasher.finish();
+
+        if !self.raster_cache.contains_key(&key) {
+            let mut tile = match Pixmap::new(cw, ch) {
+                Some(p) => p,
+                None => return,
+            };
+            self.draw_text_weighted(
+                &mut tile, text, 0.0, 0.0, font_size, color, wrap_width, weight,
+            );
+            if self.raster_cache.len() >= RASTER_CACHE_CAP {
+                self.raster_cache.shift_remove_index(0);
+            }
+            self.raster_cache.insert(key, tile);
+        }
+        let tile = self.raster_cache.get(&key).expect("inserted above");
+        // peniko::Image wraps the byte buffer in a Blob<Arc<Vec<u8>>>;
+        // the `to_vec` here is the tile's bytes (~few KB for normal
+        // text spans).
+        let blob = vello::peniko::Blob::new(std::sync::Arc::new(tile.data().to_vec()));
+        let img = vello::peniko::ImageData {
+            data: blob,
+            format: vello::peniko::ImageFormat::Rgba8,
+            alpha_type: vello::peniko::ImageAlphaType::AlphaPremultiplied,
+            width: tile.width(),
+            height: tile.height(),
+        };
+        // Pixmap is already physical-pixel sized and our translate is
+        // integer-aligned (`x.round()`), so nearest-neighbor sampling
+        // produces a 1:1 unblurred blit. Vello's default
+        // `ImageQuality::Medium` (bilinear) re-samples the already-AA
+        // glyph coverage and visibly softens every line of body text.
+        let brush = vello::peniko::ImageBrush::from(img).with_quality(
+            vello::peniko::ImageQuality::Low,
+        );
+        let transform = vello::kurbo::Affine::translate((x.round() as f64, y.round() as f64));
+        scene.draw_image(&brush, transform);
     }
 
     /// Same surface as [`Self::draw_text_colored`], but composites a
@@ -376,6 +469,83 @@ impl Default for TextEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Build a `FontSystem` whose `fontdb::Database` is restricted to
+/// platform-provided system font directories — explicitly *not*
+/// walking user-installed font dirs.
+///
+/// `cosmic_text::FontSystem::new()` calls `fontdb::Database::load_system_fonts()`,
+/// which on macOS recurses into `/Library/Fonts`, `/System/Library/Fonts`,
+/// AND `~/Library/Fonts` (and `/Network/Library/Fonts`). The user-fonts
+/// directory often carries tens of MB worth of resident font metadata
+/// + mmapped file pages once we touch them — power users with design
+/// software installed have 200+ fonts indexed for no benefit to a
+/// dev-tooling / chat / feed renderer that asks for `sans-serif` and
+/// gets it from the system default.
+///
+/// We load only the OS-vendor directories and skip user / network /
+/// third-party (`/Library/Fonts/` on macOS — App Store font installers
+/// drop here) sources. `sys_locale` matches what cosmic-text would
+/// have set internally. The family aliases mirror cosmic-text's own
+/// defaults logic so `Family::SansSerif` etc. resolve to a real font
+/// on every supported platform.
+fn build_slim_font_system() -> FontSystem {
+    let locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string());
+    let mut db = fontdb::Database::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        // Core San-Francisco system fonts + emoji live here.
+        db.load_fonts_dir("/System/Library/Fonts/");
+        // CJK + accented-Latin alternates live here. Metadata-only
+        // index pass; the actual font bytes only get mmapped when a
+        // glyph from the face is shaped.
+        db.load_fonts_dir("/System/Library/Fonts/Supplemental/");
+        db.set_sans_serif_family("Helvetica");
+        db.set_serif_family("Times New Roman");
+        db.set_monospace_family("Menlo");
+        db.set_cursive_family("Apple Chancery");
+        db.set_fantasy_family("Papyrus");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        db.load_fonts_dir("/usr/share/fonts/");
+        db.load_fonts_dir("/usr/local/share/fonts/");
+        db.set_sans_serif_family("DejaVu Sans");
+        db.set_serif_family("DejaVu Serif");
+        db.set_monospace_family("DejaVu Sans Mono");
+        db.set_cursive_family("Comic Sans MS");
+        db.set_fantasy_family("Impact");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let dir = std::env::var("SYSTEMROOT")
+            .map(|d| format!("{d}\\Fonts"))
+            .unwrap_or_else(|_| "C:\\Windows\\Fonts".to_string());
+        db.load_fonts_dir(dir);
+        db.set_sans_serif_family("Segoe UI");
+        db.set_serif_family("Times New Roman");
+        db.set_monospace_family("Consolas");
+        db.set_cursive_family("Comic Sans MS");
+        db.set_fantasy_family("Impact");
+    }
+
+    // Defensive: an empty index means cosmic-text's PlatformFallback
+    // has nothing to fall back to — every render would log a missing-
+    // font warning. Fall back to the full system load so the
+    // renderer keeps painting (and we surface the path mismatch in
+    // logs for a future fix).
+    if db.is_empty() {
+        log::warn!(
+            "slim font db: no fonts found in OS-vendor dirs; falling back to full system load"
+        );
+        db.load_system_fonts();
+    }
+
+    log::debug!("slim font db: indexed {} font faces", db.len());
+
+    FontSystem::new_with_locale_and_db(locale, db)
 }
 
 #[cfg(test)]

@@ -28,7 +28,14 @@ use std::collections::HashMap;
 use taffy::prelude::*;
 use taffy::style::Overflow;
 
-const DEFAULT_GAP_PX: f32 = 8.0;
+/// Default gap between flex children. Zero, matching CSS / iOS /
+/// Android — implicit chrome here turns every Column into a
+/// 8px-spaced stack regardless of what the layout actually asks
+/// for, which is the exact "weird padding between sections" people
+/// report (e.g. the social example's title → Stories → Posts gap).
+/// Components that want spacing set it explicitly via `.gap(N)` or
+/// tw `gap-N`.
+const DEFAULT_GAP_PX: f32 = 0.0;
 const DEFAULT_PADDING_PX: f32 = 24.0;
 const DEFAULT_BUTTON_PAD_X: f32 = 16.0;
 const DEFAULT_BUTTON_PAD_Y: f32 = 10.0;
@@ -53,7 +60,7 @@ pub const IMAGE_TYPES: &[&str] = &["Image", "Icon"];
 /// Default text alignment when `textAlign` isn't set on a `Text`.
 pub const DEFAULT_IMAGE_SIZE_PX: f32 = 60.0;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
     pub x: f32,
     pub y: f32,
@@ -74,6 +81,19 @@ pub enum ItemKind {
         font_size: f32,
         color: Rgba,
         align: TextAlign,
+        /// `Some(n)` clamps the text to at most `n` rendered lines —
+        /// the `truncate` Tailwind utility maps to `maxLines: 1` and
+        /// is the common case. `None` means "wrap to whatever fits".
+        /// Measure ignores wrap when `Some(1)` so width grows naturally;
+        /// the painter clips overflow to the laid-out rect so the
+        /// extra glyphs disappear instead of overflowing siblings.
+        max_lines: Option<u32>,
+        /// `(left, top, right, bottom)` padding in *physical* pixels.
+        /// `LayoutItem.rect` stays the outer (border-box) rect so
+        /// background fills and borders draw the full padded box;
+        /// the painter uses this inset to shift the glyph origin and
+        /// shrink the wrap width to the content area.
+        padding: (f32, f32, f32, f32),
     },
     Button,
     Container,
@@ -179,9 +199,16 @@ pub struct LayoutItem {
     pub kind: ItemKind,
     pub rect: Rect,
     pub action: Option<String>,
+    /// Optional JSON payload attached to the action via the named
+    /// applicator arguments — e.g. `.onClick(@router.push, to: "/x")`
+    /// → `Some({"to": "/x"})`. Forwarded to
+    /// `HypenModule::dispatch_action` so the SDK / action handler
+    /// can react. `None` when the action has no extra arguments.
+    pub action_payload: Option<serde_json::Value>,
     /// Optional fill. Painted under everything else for the same item.
-    /// Buttons resolve to a sensible default if no `backgroundColor` was
-    /// supplied; containers and text leave it `None` by default.
+    /// Optional fill from `backgroundColor` / tw `bg-*`. Buttons no
+    /// longer get implicit chrome — set `.backgroundColor(...)` or
+    /// `.tw("bg-...")` explicitly. Containers and text default to `None`.
     pub background: Option<Rgba>,
     /// Border stroke (width + colour + radius). `Border::is_visible()`
     /// is the painter's gate.
@@ -195,6 +222,27 @@ pub struct LayoutItem {
     /// Input items; defaults to 400 ("normal") on every item, with
     /// the painter reading it only when it draws glyphs.
     pub font_weight: u16,
+    /// `Some(rect)` when this item lives inside a `.scrollable(...)`
+    /// container and the painter must clip its draw to that
+    /// container's rect. Without this clip, descendants of a
+    /// scrollable container that have scrolled past the container's
+    /// top / bottom edge would paint at their absolute screen
+    /// position — overlapping content above / below the container
+    /// (the "input visible in the grid gaps" bug). The rect is in
+    /// the same coordinate space as `rect`, so page-scroll passes
+    /// shift both together. `None` for items whose scrollable
+    /// ancestor is the synthetic page root (or with no scrollable
+    /// ancestor at all).
+    pub clip_to: Option<Rect>,
+    /// Renderer-tree id of the "direct child of the nearest
+    /// scrollable ancestor" this item belongs to. Items with the
+    /// same `subtree_root` form one painter-side cache unit — each
+    /// Post in HomePage's feed, each cell of Search's Grid. `None`
+    /// when the item has no scrollable ancestor (no caching needed;
+    /// it gets repainted normally). The painter uses this to slice
+    /// the items list into contiguous subtrees that can be re-used
+    /// across frames as encoded `vello::Scene` fragments.
+    pub subtree_root: Option<String>,
 }
 
 pub struct LayoutPass {
@@ -207,25 +255,31 @@ pub struct LayoutPass {
     /// click / IME / damage path that needs an item by id do an O(1)
     /// lookup instead of scanning the full vec. Built once at the end
     /// of `compute_inner_state`.
-    by_node_id: HashMap<String, usize>,
+    pub(crate) by_node_id: HashMap<String, usize>,
     /// Indexes of `items` whose `action` is `Some(_)` — Buttons /
     /// Cards / Links. `actionables()` and `hit()` iterate this.
-    actionable_ids: Vec<usize>,
+    pub(crate) actionable_ids: Vec<usize>,
     /// Indexes of focusable items (actionables + Inputs) in document
     /// order. `focus_next` / `focus_prev` walk this directly.
-    focusable_ids: Vec<usize>,
+    pub(crate) focusable_ids: Vec<usize>,
     /// Indexes of items whose `scrollable` is `Some(_)`. Wheel
     /// routing iterates these (in reverse for topmost-first) instead
     /// of the full items vec.
-    scrollable_ids: Vec<usize>,
+    pub(crate) scrollable_ids: Vec<usize>,
 }
 
 /// Per-Taffy-node sidecar so the measure callback can look up text
 /// content and font size without a back-channel into the renderer tree.
 #[derive(Debug, Default)]
-struct NodeContext {
+pub(crate) struct NodeContext {
     text: Option<String>,
     font_size: f32,
+    /// `Some(1)` when the node has `truncate` (or otherwise
+    /// `maxLines: 1`) — the measurer ignores parent wrap_width and
+    /// returns a single-line natural-width measure so Taffy doesn't
+    /// reflow the text onto two lines. The painter still clips the
+    /// drawn glyphs to the laid-out rect.
+    max_lines: Option<u32>,
 }
 
 /// Retained Taffy structure across frames. The App holds one of
@@ -243,22 +297,395 @@ pub struct TaffyState {
     tree: TaffyTree<NodeContext>,
     root: NodeId,
     renderer_for_taffy: HashMap<NodeId, String>,
+    /// renderer_id → Taffy `NodeId` lookup for incremental patch
+    /// application. Maintained by `apply_patches` and consulted by
+    /// `set_parent_children` / Move / Remove handlers.
+    node_map: HashMap<String, NodeId>,
     structure_key: u64,
+    /// `true` once the root has been initialised with the page-level
+    /// padding / gap style for the current viewport. Reset when
+    /// viewport / scale changes so the root style refreshes too.
+    root_initialised: bool,
+    /// `true` when the Taffy tree is out of sync with the renderer
+    /// Tree (cold start, or an unhandled patch fell through). The
+    /// next compute runs a bulk rebuild and clears the flag.
+    needs_bulk_rebuild: bool,
 }
 
 impl TaffyState {
     pub fn new() -> Self {
         let mut tree: TaffyTree<NodeContext> = TaffyTree::new();
-        // Dummy root; replaced on first structure rebuild.
+        // Container so `set_children` works for the very first
+        // Insert(parent_id == ROOT) patch we receive; the proper
+        // outer-wrapper style + size lands in `restyle_all` once the
+        // viewport is known.
         let root = tree
-            .new_leaf(Style::default())
-            .expect("taffy root placeholder");
+            .new_with_children(Style::default(), &[])
+            .expect("taffy root container");
         Self {
             tree,
             root,
             renderer_for_taffy: HashMap::new(),
+            node_map: HashMap::new(),
             structure_key: 0,
+            root_initialised: false,
+            needs_bulk_rebuild: true,
         }
+    }
+
+    /// Force a full rebuild on the next compute. Called when an
+    /// unhandled patch path falls through `apply_patches`, or when
+    /// the renderer Tree gets out of sync with the Taffy mirror for
+    /// any other reason.
+    pub fn mark_needs_rebuild(&mut self) {
+        self.needs_bulk_rebuild = true;
+    }
+
+    /// Apply patches incrementally so the Taffy tree stays mirrored
+    /// with the renderer Tree across frames. Must be called *after*
+    /// `tree.apply_batch(&patches)` so renderer-node lookups inside
+    /// reflect the post-patch state. Returns `true` if every patch
+    /// was applied; `false` if anything fell through that the caller
+    /// should treat as an unhandled case (forces a structural
+    /// rebuild on the next compute).
+    pub fn apply_patches(
+        &mut self,
+        patches: &[hypen_engine::Patch],
+        tree: &Tree,
+        scale: f32,
+        viewport_w: f32,
+    ) -> bool {
+        let mut all_applied = true;
+        for patch in patches {
+            if !self.apply_patch(patch, tree, scale, viewport_w) {
+                all_applied = false;
+            }
+        }
+        if all_applied {
+            // Taffy is now mirrored to the renderer Tree post-batch.
+            // Skip the bulk rebuild on the next compute and let
+            // `restyle_all` (cheap) handle any viewport / scale shift.
+            self.needs_bulk_rebuild = false;
+        }
+        all_applied
+    }
+
+    fn apply_patch(
+        &mut self,
+        patch: &hypen_engine::Patch,
+        tree: &Tree,
+        scale: f32,
+        viewport_w: f32,
+    ) -> bool {
+        use hypen_engine::Patch;
+        match patch {
+            Patch::Create { id, .. } => {
+                if let Some(node) = tree.get(id) {
+                    let style = node_style(node, scale, viewport_w);
+                    let ctx = node_context(node, scale, viewport_w);
+                    let taffy_id = self
+                        .tree
+                        .new_leaf_with_context(style, ctx)
+                        .ok();
+                    if let Some(tid) = taffy_id {
+                        self.node_map.insert(id.clone(), tid);
+                        self.renderer_for_taffy.insert(tid, id.clone());
+                        return true;
+                    }
+                    return false;
+                }
+                true
+            }
+            Patch::SetProp { id, name, .. } | Patch::RemoveProp { id, name } => {
+                let Some(&tid) = self.node_map.get(id) else { return true };
+                // Appearance-only props (color / backgroundColor /
+                // src / icon paths / etc.) don't change Taffy
+                // geometry. Skip `set_style` so Taffy's per-node
+                // dirty bit stays clean — the next `compute_layout`
+                // becomes a no-op walk, and the painter picks up the
+                // new prop value on the next `emit_items` pass that
+                // re-reads from the renderer Tree directly.
+                if is_layout_prop(name) {
+                    if let Some(node) = tree.get(id) {
+                        let style = node_style(node, scale, viewport_w);
+                        let _ = self.tree.set_style(tid, style);
+                        if node.element_type == "Text" {
+                            let ctx = node_context(node, scale, viewport_w);
+                            let _ = self.tree.set_node_context(tid, Some(ctx));
+                        }
+                    }
+                }
+                true
+            }
+            Patch::SetText { id, .. } => {
+                // SetText is reserved + always layout-affecting on
+                // Text nodes (changes measured width/height).
+                let Some(&tid) = self.node_map.get(id) else { return true };
+                if let Some(node) = tree.get(id) {
+                    let style = node_style(node, scale, viewport_w);
+                    let _ = self.tree.set_style(tid, style);
+                    if node.element_type == "Text" {
+                        let ctx = node_context(node, scale, viewport_w);
+                        let _ = self.tree.set_node_context(tid, Some(ctx));
+                    }
+                }
+                true
+            }
+            Patch::Insert { parent_id, id, before_id }
+            | Patch::Attach { parent_id, id, before_id } => {
+                self.set_parent_children(
+                    parent_id,
+                    id,
+                    before_id.as_deref(),
+                    tree,
+                );
+                true
+            }
+            Patch::Move { parent_id, id, before_id } => {
+                if let Some(&child) = self.node_map.get(id) {
+                    if let Some(old_parent) = self.tree.parent(child) {
+                        let mut old: Vec<NodeId> = self
+                            .tree
+                            .children(old_parent)
+                            .unwrap_or_default();
+                        old.retain(|c| *c != child);
+                        let _ = self.tree.set_children(old_parent, &old);
+                    }
+                }
+                self.set_parent_children(parent_id, id, before_id.as_deref(), tree);
+                true
+            }
+            Patch::Remove { id } => {
+                if let Some(tid) = self.node_map.remove(id) {
+                    if let Some(parent) = self.tree.parent(tid) {
+                        let mut children: Vec<NodeId> =
+                            self.tree.children(parent).unwrap_or_default();
+                        children.retain(|c| *c != tid);
+                        let _ = self.tree.set_children(parent, &children);
+                    }
+                    let _ = self.tree.remove(tid);
+                    self.renderer_for_taffy.remove(&tid);
+                }
+                true
+            }
+            Patch::Detach { id } => {
+                if let Some(&tid) = self.node_map.get(id) {
+                    if let Some(parent) = self.tree.parent(tid) {
+                        let mut children: Vec<NodeId> =
+                            self.tree.children(parent).unwrap_or_default();
+                        children.retain(|c| *c != tid);
+                        let _ = self.tree.set_children(parent, &children);
+                    }
+                }
+                true
+            }
+        }
+    }
+
+    fn set_parent_children(
+        &mut self,
+        parent_id: &str,
+        child_id: &str,
+        before_id: Option<&str>,
+        tree: &Tree,
+    ) {
+        let Some(&child_tid) = self.node_map.get(child_id) else { return };
+        let parent_tid = if parent_id == ROOT_ID {
+            self.root
+        } else if let Some(&t) = self.node_map.get(parent_id) {
+            t
+        } else {
+            return;
+        };
+        let mut children: Vec<NodeId> = self.tree.children(parent_tid).unwrap_or_default();
+        children.retain(|c| *c != child_tid);
+        let pos = before_id
+            .and_then(|bid| self.node_map.get(bid))
+            .and_then(|t| children.iter().position(|c| c == t))
+            .unwrap_or(children.len());
+        children.insert(pos, child_tid);
+        let _ = self.tree.set_children(parent_tid, &children);
+
+        // Stack: every child past the first picks up `position:
+        // absolute` + margin → inset so it overlays the base. This
+        // runs whenever a Stack's children change so newly-inserted
+        // children get the right styling and reordering doesn't
+        // strand absolute settings on the wrong child.
+        if parent_tid != self.root {
+            if let Some(parent_node) = tree.get(parent_id) {
+                if parent_node.element_type.eq_ignore_ascii_case("Stack") {
+                    self.apply_stack_overlay_styles(parent_tid);
+                }
+            }
+        }
+    }
+
+    fn apply_stack_overlay_styles(&mut self, parent_tid: NodeId) {
+        let children: Vec<NodeId> = self.tree.children(parent_tid).unwrap_or_default();
+        for (idx, &child) in children.iter().enumerate() {
+            let Ok(mut s) = self.tree.style(child).cloned() else { continue };
+            if idx == 0 {
+                s.position = Position::Relative;
+                s.inset = Rect_ {
+                    top: LengthPercentageAuto::auto(),
+                    right: LengthPercentageAuto::auto(),
+                    bottom: LengthPercentageAuto::auto(),
+                    left: LengthPercentageAuto::auto(),
+                };
+            } else {
+                s.position = Position::Absolute;
+                let m = s.margin;
+                s.inset = Rect_ {
+                    top: length_or_zero_lpa(m.top),
+                    right: LengthPercentageAuto::auto(),
+                    bottom: LengthPercentageAuto::auto(),
+                    left: length_or_zero_lpa(m.left),
+                };
+                s.margin = Rect_ {
+                    top: LengthPercentageAuto::length(0.0),
+                    right: LengthPercentageAuto::length(0.0),
+                    bottom: LengthPercentageAuto::length(0.0),
+                    left: LengthPercentageAuto::length(0.0),
+                };
+            }
+            let _ = self.tree.set_style(child, s);
+        }
+    }
+
+    /// Re-apply styles to every node and refresh the root style.
+    /// Called when the structure key flipped on viewport / scale —
+    /// breakpoint resolution and HiDPI scaling are baked into
+    /// per-node styles at build time, so we have to recompute them.
+    pub fn restyle_all(&mut self, tree: &Tree, scale: f32, viewport: (u32, u32)) {
+        let viewport_w = viewport.0 as f32;
+        // Re-style every existing node.
+        let entries: Vec<(NodeId, String)> = self
+            .renderer_for_taffy
+            .iter()
+            .map(|(t, r)| (*t, r.clone()))
+            .collect();
+        for (tid, rid) in entries {
+            if let Some(node) = tree.get(&rid) {
+                let style = node_style(node, scale, viewport_w);
+                let _ = self.tree.set_style(tid, style);
+                if node.element_type == "Text" {
+                    let ctx = node_context(node, scale, viewport_w);
+                    let _ = self.tree.set_node_context(tid, Some(ctx));
+                }
+            }
+        }
+        // Refresh the synthetic outer wrapper's style too.
+        // No implicit padding / gap on the synthetic outer wrapper.
+        // iOS / Android / web all give the app's root component edge-
+        // to-edge access to the viewport — implicit page chrome here
+        // turns every `border-b` divider into a 3-sided box and makes
+        // it impossible to do a full-bleed status bar or hero image.
+        // Trivial demos that want breathing room set it themselves
+        // (e.g. `.tw("p-6")` on their root Column).
+        let outer_style = Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            // Width is fixed to the viewport (so children with
+            // `width: 100%` resolve correctly). Height grows to
+            // content — `min_size.height = viewport.h` keeps the
+            // wrapper at least viewport-tall so empty pages still
+            // fill the surface, but content taller than the viewport
+            // overflows freely. Without this, every flex child got
+            // squeezed to fit and `content_size.1` capped at
+            // viewport.h → `clamp_scroll` pinned scroll to 0.
+            // Outer wrapper is exactly viewport-sized. Children that
+            // need to scroll declare `.scrollable(...)` and get their
+            // own `overflow: scroll` via `apply_overflow_props`; that
+            // per-container scroll path (see `hit_scrollable` in
+            // window.rs) is the supported route to scroll any content
+            // taller than the viewport. Keeping the root sized to the
+            // viewport is what lets a `flex-1 + bottom-bar` page (e.g.
+            // social App.hypen) actually leave the bottom bar on
+            // screen — when the root was `height: auto` it grew to
+            // child content and pushed the bottom bar off the bottom
+            // edge.
+            size: Size {
+                width: length(viewport.0 as f32),
+                height: length(viewport.1 as f32),
+            },
+            min_size: Size {
+                width: length(viewport.0 as f32),
+                height: length(viewport.1 as f32),
+            },
+            ..Default::default()
+        };
+        let _ = self.tree.set_style(self.root, outer_style);
+        self.root_initialised = true;
+
+        // `node_style` is parent-agnostic, so it can't apply the
+        // Stack-children-after-first-go-absolute overlay. Without
+        // this re-walk, restyle_all silently strips the absolute
+        // positioning every Stack child past the first received from
+        // `build_subtree` / `apply_stack_overlay_styles` — that's why
+        // the "Your story" badge rendered next to the avatar instead
+        // of overlapping it after a viewport-driven restyle.
+        let stack_parents: Vec<NodeId> = self
+            .renderer_for_taffy
+            .iter()
+            .filter_map(|(tid, rid)| {
+                let n = tree.get(rid)?;
+                if n.element_type.eq_ignore_ascii_case("Stack") {
+                    Some(*tid)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for tid in stack_parents {
+            self.apply_stack_overlay_styles(tid);
+        }
+    }
+
+    /// Cheap root-only refresh. Updates the synthetic outer wrapper's
+    /// style with the current viewport size without re-walking every
+    /// node. Called on every viewport change (including height-only)
+    /// so the root's `min_size.height = viewport.h` stays accurate
+    /// even when `restyle_all` is skipped because the structure_key
+    /// (width + scale) didn't move. Without this, a window-height
+    /// drag left the root pinned to the *old* height — the surface
+    /// shows the page at its old size and the freshly-uncovered area
+    /// reads back as grey base_color.
+    pub fn refresh_root_size(&mut self, scale: f32, viewport: (u32, u32)) {
+        if !self.root_initialised {
+            return;
+        }
+        // No implicit padding / gap on the synthetic outer wrapper.
+        // iOS / Android / web all give the app's root component edge-
+        // to-edge access to the viewport — implicit page chrome here
+        // turns every `border-b` divider into a 3-sided box and makes
+        // it impossible to do a full-bleed status bar or hero image.
+        // Trivial demos that want breathing room set it themselves
+        // (e.g. `.tw("p-6")` on their root Column).
+        let outer_style = Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Column,
+            // Outer wrapper is exactly viewport-sized. Children that
+            // need to scroll declare `.scrollable(...)` and get their
+            // own `overflow: scroll` via `apply_overflow_props`; that
+            // per-container scroll path (see `hit_scrollable` in
+            // window.rs) is the supported route to scroll any content
+            // taller than the viewport. Keeping the root sized to the
+            // viewport is what lets a `flex-1 + bottom-bar` page (e.g.
+            // social App.hypen) actually leave the bottom bar on
+            // screen — when the root was `height: auto` it grew to
+            // child content and pushed the bottom bar off the bottom
+            // edge.
+            size: Size {
+                width: length(viewport.0 as f32),
+                height: length(viewport.1 as f32),
+            },
+            min_size: Size {
+                width: length(viewport.0 as f32),
+                height: length(viewport.1 as f32),
+            },
+            ..Default::default()
+        };
+        let _ = self.tree.set_style(self.root, outer_style);
     }
 }
 
@@ -268,12 +695,24 @@ impl Default for TaffyState {
     }
 }
 
-fn taffy_structure_key(tree_generation: u64, viewport: (u32, u32), scale: f32) -> u64 {
+/// Structure key for `TaffyState`. Drives the *restyle* decision:
+/// when this changes, every node gets re-styled (breakpoint + HiDPI
+/// scaling are baked into per-node Style at build time). Patch-driven
+/// structural changes flow through `apply_patches` and don't bump
+/// this key — the renderer's `tree_generation` is decoupled from
+/// Taffy's structure key on purpose so a typing keystroke (one
+/// `SetProp` patch) doesn't force a full Taffy restyle.
+fn taffy_structure_key(viewport: (u32, u32), scale: f32) -> u64 {
     use std::hash::{Hash, Hasher};
+    // Width and scale change resolved Style values: tw breakpoints
+    // (`md:`, `lg:`) gate on width, and HiDPI scaling multiplies every
+    // length token. Height does NOT — no token resolves against it —
+    // so we deliberately exclude it. That turns a window-height drag
+    // into a Taffy compute-layout-only pass instead of a full
+    // restyle_all walk over every node, ~10× cheaper for any
+    // non-trivial page during a live resize.
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    tree_generation.hash(&mut h);
     viewport.0.hash(&mut h);
-    viewport.1.hash(&mut h);
     scale.to_bits().hash(&mut h);
     h.finish()
 }
@@ -377,16 +816,18 @@ impl LayoutPass {
         tree_generation: u64,
         cull: bool,
     ) -> Self {
-        let key = taffy_structure_key(tree_generation, viewport, scale);
+        let _ = tree_generation; // tree generation no longer in key
+        let key = taffy_structure_key(viewport, scale);
         let viewport_w_px = viewport.0 as f32;
+        let style_changed = state.structure_key != key;
+        let needs_rebuild = state.needs_bulk_rebuild;
 
-        if state.structure_key != key {
-            // Rebuild structure. Reuse the `TaffyState` allocation
-            // by replacing the inner `TaffyTree` (`TaffyTree::new()`
-            // re-allocates the slotmap; the held HashMap clears in
-            // place).
+        if needs_rebuild {
+            // Cold start or out-of-sync after an unhandled patch.
+            // Wipe and rebuild from the renderer Tree.
             state.tree = TaffyTree::new();
             state.renderer_for_taffy.clear();
+            state.node_map.clear();
             let mut root_children = Vec::new();
             for child_id in tree.root_children() {
                 if let Some(node_id) = build_subtree(
@@ -400,16 +841,22 @@ impl LayoutPass {
                     root_children.push(node_id);
                 }
             }
-            let pad = DEFAULT_PADDING_PX * scale;
+            // Rebuild node_map from renderer_for_taffy.
+            state.node_map.clear();
+            for (tid, rid) in &state.renderer_for_taffy {
+                state.node_map.insert(rid.clone(), *tid);
+            }
+            // No implicit padding / gap on the outer wrapper — see
+            // `restyle_all` for the rationale (edge-to-edge content
+            // matching iOS / Android / web).
             let outer_style = Style {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
-                padding: Rect_::length(pad),
-                gap: Size {
-                    width: length(DEFAULT_GAP_PX * scale),
-                    height: length(DEFAULT_GAP_PX * scale),
-                },
                 size: Size {
+                    width: length(viewport.0 as f32),
+                    height: length(viewport.1 as f32),
+                },
+                min_size: Size {
                     width: length(viewport.0 as f32),
                     height: length(viewport.1 as f32),
                 },
@@ -420,14 +867,34 @@ impl LayoutPass {
                 .new_with_children(outer_style, &root_children)
                 .expect("taffy root node");
             state.structure_key = key;
+            state.root_initialised = true;
+            state.needs_bulk_rebuild = false;
+        } else if style_changed || !state.root_initialised {
+            // Viewport / scale changed but the structure (renderer
+            // Tree) is intact — just refresh styles + root size.
+            state.restyle_all(tree, scale, viewport);
+            state.structure_key = key;
+        } else {
+            // Structure key matched (width + scale unchanged), but
+            // viewport.height may still have moved — height alone
+            // doesn't invalidate any per-node Style, but the root's
+            // `min_size.height = viewport.h` does need to follow.
+            state.refresh_root_size(scale, viewport);
         }
         let root = state.root;
         let taffy = &mut state.tree;
         let renderer_for_taffy = &state.renderer_for_taffy;
 
+        // Width is bounded by the viewport so percent / flex math
+        // resolves; height is `MaxContent` so the synthetic outer
+        // wrapper grows to content rather than capping at the
+        // viewport. The wrapper's `min_size.height = viewport.h`
+        // keeps an empty page filling the surface; taller content
+        // produces a `content_size.1` > `viewport.h` so the page
+        // can actually scroll.
         let available = Size {
             width: AvailableSpace::Definite(viewport.0 as f32),
-            height: AvailableSpace::Definite(viewport.1 as f32),
+            height: AvailableSpace::MaxContent,
         };
         let measure = |known: Size<Option<f32>>,
                        avail: Size<AvailableSpace>,
@@ -444,10 +911,17 @@ impl LayoutPass {
             // Wrap to whatever width the parent has told us about. Prefer
             // a known/definite constraint; fall back to the available
             // space if it's bounded; if both are unknown, no wrap.
-            let wrap_width = known.width.or(match avail.width {
-                AvailableSpace::Definite(w) => Some(w),
-                AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
-            });
+            // `truncate` (max_lines = Some(1)) also disables wrap so
+            // the text stays one line — overflow is the painter's
+            // problem (clipped to the laid-out rect).
+            let wrap_width = if matches!(ctx.max_lines, Some(1)) {
+                None
+            } else {
+                known.width.or(match avail.width {
+                    AvailableSpace::Definite(w) => Some(w),
+                    AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
+                })
+            };
             let (w, h) = text.measure(text_content, ctx.font_size, wrap_width);
             Size {
                 width: known.width.unwrap_or(w),
@@ -494,17 +968,27 @@ impl LayoutPass {
             tree,
             &renderer_for_taffy,
             viewport_w_px,
+            scale,
             scrolls,
             &mut items,
             &mut content_size,
             cull_viewport,
+            None,
+            None,
         );
 
         // Apply scroll. Phase 8 only scrolls the page vertically;
         // horizontal can come when we expose Container::overflow.
+        // `clip_to` rides along with `rect` — both live in the same
+        // coordinate space, so the page-scroll subtraction has to
+        // hit both, otherwise the clip stays at its natural y and
+        // drifts away from the items it's supposed to clip.
         if scroll_y != 0.0 {
             for it in items.iter_mut() {
                 it.rect.y -= scroll_y;
+                if let Some(clip) = it.clip_to.as_mut() {
+                    clip.y -= scroll_y;
+                }
             }
         }
 
@@ -651,7 +1135,7 @@ fn build_subtree(
             let size_fallback = prop_f32_at(node, "size", viewport_w);
             let w_dim = prop_dim_at(node, "width", viewport_w);
             let h_dim = prop_dim_at(node, "height", viewport_w);
-            let aspect_ratio = prop_f32_at(node, "aspectRatio", viewport_w);
+            let aspect_ratio = crate::style::prop_aspect_ratio_at(node, "aspectRatio", viewport_w);
 
             // When neither axis is set, fall back to .size or default.
             let default_len = size_fallback.unwrap_or(DEFAULT_IMAGE_SIZE_PX);
@@ -719,7 +1203,7 @@ fn build_subtree(
             let font_size = prop_f32_at(node, "fontSize", viewport_w)
                 .map(|v| v * scale)
                 .unwrap_or(DEFAULT_FONT_SIZE_PX * scale);
-            let content = node.text_content().unwrap_or("").to_string();
+            let content = node.text_content().map(|c| c.into_owned()).unwrap_or_default();
             // Text leaves DO take padding / margin / border like any
             // other flex node — `tw("text-sm font-semibold px-4")` on
             // a Text was being silently dropped because the Text
@@ -748,6 +1232,7 @@ fn build_subtree(
                     NodeContext {
                         text: Some(content),
                         font_size,
+                        max_lines: resolve_max_lines(node, viewport_w),
                     },
                 )
                 .ok()?;
@@ -867,6 +1352,51 @@ fn build_subtree(
             renderer_for_taffy.insert(id, node_id.to_string());
             Some(id)
         }
+        et if et.eq_ignore_ascii_case("Grid") => {
+            // CSS-grid container. `.gridColumns(N)` sets the number of
+            // equal-fraction tracks; `.gap(N)` applies to both axes.
+            // Used by Search's explore feed which laid out as a single
+            // column under the flex catchall, stretching each post
+            // image edge-to-edge.
+            let cols = prop_f32_at(node, "gridColumns", viewport_w)
+                .map(|v| v.max(1.0) as u16)
+                .unwrap_or(1);
+            let pad = padding_at(node, viewport_w);
+            let gap_v = prop_f32_at(node, "gap", viewport_w).unwrap_or(DEFAULT_GAP_PX) * scale;
+            let mut style = Style {
+                display: Display::Grid,
+                grid_template_columns: (0..cols)
+                    .map(|_| taffy::style_helpers::fr::<f32, _>(1.0))
+                    .collect(),
+                padding: Rect_ {
+                    left: length(pad.left * scale),
+                    right: length(pad.right * scale),
+                    top: length(pad.top * scale),
+                    bottom: length(pad.bottom * scale),
+                },
+                margin: margin_to_taffy(margin_at(node, viewport_w), scale),
+                border: border_to_taffy(border_at(node, viewport_w), scale),
+                gap: Size {
+                    width: length(gap_v),
+                    height: length(gap_v),
+                },
+                ..Default::default()
+            };
+            apply_flex_props(&mut style, node, viewport_w, scale);
+            apply_alignment_props(&mut style, node, viewport_w);
+            apply_size_props(&mut style, node, viewport_w, scale);
+            apply_overflow_props(&mut style, node, viewport_w);
+            apply_position_props(&mut style, node, viewport_w, scale);
+            let mut children = Vec::new();
+            for child_id in tree.children_of(node_id) {
+                if let Some(c) = build_subtree(taffy, tree, child_id, scale, viewport_w, renderer_for_taffy) {
+                    children.push(c);
+                }
+            }
+            let id = taffy.new_with_children(style, &children).ok()?;
+            renderer_for_taffy.insert(id, node_id.to_string());
+            Some(id)
+        }
         et => {
             let dir = if et.eq_ignore_ascii_case("Row") {
                 FlexDirection::Row
@@ -895,6 +1425,17 @@ fn build_subtree(
             apply_flex_props(&mut style, node, viewport_w, scale);
             apply_alignment_props(&mut style, node, viewport_w);
             apply_size_props(&mut style, node, viewport_w, scale);
+            // Critical: `apply_overflow_props` here is what turns
+            // `.scrollable(true)` into Taffy `overflow: scroll` on
+            // first build. Without it, the bulk-build path produces
+            // a HomePage that grows to its full content height and
+            // wheel events bottom out at `max=0`. `node_style()` (used
+            // by patches / restyle_all) had these — `build_subtree`
+            // didn't. Same goes for `apply_position_props` (Story's
+            // `absolute top-0 left-0 right-0` overlay would have been
+            // silently re-stacked under the post image otherwise).
+            apply_overflow_props(&mut style, node, viewport_w);
+            apply_position_props(&mut style, node, viewport_w, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(taffy, tree, child_id, scale, viewport_w, renderer_for_taffy) {
@@ -905,6 +1446,436 @@ fn build_subtree(
             renderer_for_taffy.insert(id, node_id.to_string());
             Some(id)
         }
+    }
+}
+
+/// Whether changing a prop with this name (or its kebab variant)
+/// requires Taffy to re-flow the layout. Appearance-only props
+/// (`color`, `backgroundColor`, `src`, icon paths, etc.) skip
+/// Taffy's dirty bit — the painter picks them up on the next
+/// `emit_items` pass that re-reads from the renderer Tree, and
+/// `compute_layout` short-circuits when nothing is dirty.
+pub(crate) fn is_layout_prop(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if lower.starts_with("padding") || lower.starts_with("margin") {
+        return true;
+    }
+    if lower.starts_with("border") {
+        // borderColor / border-color are appearance only; everything
+        // else (border / borderWidth / borderRadius / per-side
+        // widths) feeds the layout's box model.
+        return !lower.contains("color");
+    }
+    matches!(
+        lower.as_str(),
+        "width"
+            | "height"
+            | "size"
+            | "minwidth" | "min-width"
+            | "minheight" | "min-height"
+            | "maxwidth" | "max-width"
+            | "maxheight" | "max-height"
+            | "aspectratio" | "aspect-ratio"
+            | "fontsize" | "font-size"
+            | "fontweight" | "font-weight"
+            | "gap"
+            | "flex"
+            | "flexgrow" | "flex-grow"
+            | "flexshrink" | "flex-shrink"
+            | "flexbasis" | "flex-basis"
+            | "alignitems" | "align-items"
+            | "alignself" | "align-self"
+            | "alignContent" | "align-content"
+            | "justifycontent" | "justify-content"
+            | "justifyself" | "justify-self"
+            | "display"
+            | "overflow" | "overflowx" | "overflow-x" | "overflowy" | "overflow-y"
+            | "position"
+            | "top" | "right" | "bottom" | "left"
+            | "0" // positional Text content — re-shapes the line
+    )
+}
+
+/// Compute the Taffy `Style` for a renderer node based on its
+/// element type + props. Pure function: no Taffy mutations, no
+/// recursion. Used both by `build_subtree` (for the initial bulk
+/// build path) and `TaffyState::apply_patch` (per-node Create /
+/// SetProp updates).
+pub(crate) fn node_style(
+    node: &crate::tree::Node,
+    scale: f32,
+    viewport_w: f32,
+) -> Style {
+    let et = node.element_type.as_str();
+    let mut style = if IMAGE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
+        let size_fallback = prop_f32_at(node, "size", viewport_w);
+        let w_dim = prop_dim_at(node, "width", viewport_w);
+        let h_dim = prop_dim_at(node, "height", viewport_w);
+        let aspect_ratio = crate::style::prop_aspect_ratio_at(node, "aspectRatio", viewport_w);
+        let default_len = size_fallback.unwrap_or(DEFAULT_IMAGE_SIZE_PX);
+        let width = match w_dim {
+            Some(Dim::Length(v)) => Dimension::length(v * scale),
+            Some(Dim::Percent(p)) => Dimension::percent(p),
+            None => Dimension::length(default_len * scale),
+        };
+        let height = match h_dim {
+            Some(Dim::Length(v)) => Dimension::length(v * scale),
+            Some(Dim::Percent(p)) => Dimension::percent(p),
+            None if aspect_ratio.is_some() => Dimension::auto(),
+            None => Dimension::length(default_len * scale),
+        };
+        Style {
+            display: Display::Flex,
+            size: Size { width, height },
+            aspect_ratio,
+            flex_shrink: 0.0,
+            margin: margin_to_taffy(margin_at(node, viewport_w), scale),
+            border: border_to_taffy(border_at(node, viewport_w), scale),
+            ..Default::default()
+        }
+    } else if TEXT_INPUT_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
+        let pad_x = DEFAULT_INPUT_PAD_X * scale;
+        let pad_y = DEFAULT_INPUT_PAD_Y * scale;
+        Style {
+            display: Display::Flex,
+            min_size: Size {
+                width: length(DEFAULT_INPUT_MIN_W_PX * scale),
+                height: length((DEFAULT_FONT_SIZE_PX * 1.3) * scale + 2.0 * pad_y),
+            },
+            padding: Rect_ {
+                left: length(pad_x),
+                right: length(pad_x),
+                top: length(pad_y),
+                bottom: length(pad_y),
+            },
+            margin: margin_to_taffy(margin_at(node, viewport_w), scale),
+            border: border_to_taffy(border_at(node, viewport_w), scale),
+            ..Default::default()
+        }
+    } else if et == "Text" {
+        let pad = padding_at(node, viewport_w);
+        Style {
+            display: Display::Flex,
+            padding: Rect_ {
+                left: length(pad.left * scale),
+                right: length(pad.right * scale),
+                top: length(pad.top * scale),
+                bottom: length(pad.bottom * scale),
+            },
+            margin: margin_to_taffy(margin_at(node, viewport_w), scale),
+            border: border_to_taffy(border_at(node, viewport_w), scale),
+            ..Default::default()
+        }
+    } else if ACTIONABLE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
+        let pad = padding_at(node, viewport_w);
+        let pad_x = if pad.left == 0.0 && pad.right == 0.0 {
+            DEFAULT_BUTTON_PAD_X
+        } else {
+            (pad.left + pad.right) * 0.5
+        };
+        let pad_y = if pad.top == 0.0 && pad.bottom == 0.0 {
+            DEFAULT_BUTTON_PAD_Y
+        } else {
+            (pad.top + pad.bottom) * 0.5
+        };
+        Style {
+            display: Display::Flex,
+            flex_direction: FlexDirection::Row,
+            align_items: Some(AlignItems::Center),
+            justify_content: Some(JustifyContent::Center),
+            padding: Rect_ {
+                left: length(pad.left.max(pad_x) * scale),
+                right: length(pad.right.max(pad_x) * scale),
+                top: length(pad.top.max(pad_y) * scale),
+                bottom: length(pad.bottom.max(pad_y) * scale),
+            },
+            margin: margin_to_taffy(margin_at(node, viewport_w), scale),
+            border: border_to_taffy(border_at(node, viewport_w), scale),
+            gap: Size {
+                width: length(prop_f32_at(node, "gap", viewport_w).unwrap_or(4.0) * scale),
+                height: length(0.0),
+            },
+            overflow: taffy::Point {
+                x: Overflow::Visible,
+                y: Overflow::Visible,
+            },
+            ..Default::default()
+        }
+    } else if et.eq_ignore_ascii_case("Stack") {
+        let pad = padding_at(node, viewport_w);
+        Style {
+            display: Display::Flex,
+            padding: Rect_ {
+                left: length(pad.left * scale),
+                right: length(pad.right * scale),
+                top: length(pad.top * scale),
+                bottom: length(pad.bottom * scale),
+            },
+            margin: margin_to_taffy(margin_at(node, viewport_w), scale),
+            border: border_to_taffy(border_at(node, viewport_w), scale),
+            ..Default::default()
+        }
+    } else if et.eq_ignore_ascii_case("Grid") {
+        // Mirror of `build_subtree`'s Grid branch — see that comment
+        // for the rationale (Search's explore feed needs N equal
+        // tracks instead of falling through to a 1-column flex).
+        let cols = prop_f32_at(node, "gridColumns", viewport_w)
+            .map(|v| v.max(1.0) as u16)
+            .unwrap_or(1);
+        let pad = padding_at(node, viewport_w);
+        let gap_v = prop_f32_at(node, "gap", viewport_w).unwrap_or(DEFAULT_GAP_PX) * scale;
+        Style {
+            display: Display::Grid,
+            // `flex(1)` is Taffy's `minmax(0, 1fr)` helper — "exactly
+            // evenly sized tracks." Plain `fr(1)` is `minmax(auto, 1fr)`
+            // which lets each track grow past its fr share to fit
+            // children's max-content. With `aspect-square w-full`
+            // images, each image's max-content resolves to 100% of the
+            // grid width, so the `auto` minimum pushed every track to
+            // the full container width — three 960-px-wide cells per
+            // row instead of three 320-px cells.
+            grid_template_columns: (0..cols)
+                .map(|_| taffy::style_helpers::flex::<f32, _>(1.0))
+                .collect(),
+            // Same percent-resolution gotcha on the row axis: the
+            // default `auto` row track sizing asks each child for its
+            // max-content height. A child with `width: Percent(1.0)`
+            // + `aspect_ratio: 1` reports `max_content_h = 1 ×
+            // container_w` (because the percent isn't resolved
+            // against the column track yet during the row sizing
+            // pass), so each row ended up reserving `container_w`
+            // of height regardless of the actual rendered cell.
+            // `min_content` reduces each auto-row's intrinsic size
+            // to 0 + whatever the LAID-OUT child geometry pushes,
+            // which after column tracks are resolved is the correct
+            // aspect-ratio square height.
+            grid_auto_rows: vec![taffy::style_helpers::min_content()],
+            padding: Rect_ {
+                left: length(pad.left * scale),
+                right: length(pad.right * scale),
+                top: length(pad.top * scale),
+                bottom: length(pad.bottom * scale),
+            },
+            margin: margin_to_taffy(margin_at(node, viewport_w), scale),
+            border: border_to_taffy(border_at(node, viewport_w), scale),
+            gap: Size {
+                width: length(gap_v),
+                height: length(gap_v),
+            },
+            ..Default::default()
+        }
+    } else {
+        let dir = if et.eq_ignore_ascii_case("Row") {
+            FlexDirection::Row
+        } else {
+            FlexDirection::Column
+        };
+        let pad = padding_at(node, viewport_w);
+        let gap_v = prop_f32_at(node, "gap", viewport_w).unwrap_or(DEFAULT_GAP_PX) * scale;
+        Style {
+            display: Display::Flex,
+            flex_direction: dir,
+            padding: Rect_ {
+                left: length(pad.left * scale),
+                right: length(pad.right * scale),
+                top: length(pad.top * scale),
+                bottom: length(pad.bottom * scale),
+            },
+            margin: margin_to_taffy(margin_at(node, viewport_w), scale),
+            border: border_to_taffy(border_at(node, viewport_w), scale),
+            gap: Size {
+                width: length(gap_v),
+                height: length(gap_v),
+            },
+            ..Default::default()
+        }
+    };
+    apply_flex_props(&mut style, node, viewport_w, scale);
+    apply_alignment_props(&mut style, node, viewport_w);
+    apply_size_props(&mut style, node, viewport_w, scale);
+    apply_overflow_props(&mut style, node, viewport_w);
+    apply_position_props(&mut style, node, viewport_w, scale);
+    style
+}
+
+/// Apply `position` + `top` / `right` / `bottom` / `left` / `inset`
+/// props. Without this, tw `absolute top-0 left-0 right-0` (used by
+/// e.g. Story overlay headers, modal close buttons) was silently
+/// dropped and the overlay rendered in normal flex flow under its
+/// siblings.
+fn apply_position_props(
+    style: &mut Style,
+    node: &crate::tree::Node,
+    viewport_w: f32,
+    scale: f32,
+) {
+    use crate::style::{prop_dim_at, prop_str_at, Dim};
+    if let Some(s) = prop_str_at(node, "position", viewport_w) {
+        match s.trim().to_ascii_lowercase().as_str() {
+            // Taffy 0.10 only models Absolute vs Relative; `fixed` /
+            // `sticky` collapse to Absolute (relative to nearest
+            // positioned ancestor) which is the right default for a
+            // single-viewport native app.
+            "absolute" | "fixed" | "sticky" => style.position = Position::Absolute,
+            "relative" | "static" => style.position = Position::Relative,
+            _ => {}
+        }
+    }
+    fn dim_to_lpa(d: Dim, scale: f32) -> LengthPercentageAuto {
+        match d {
+            Dim::Length(v) => LengthPercentageAuto::length(v * scale),
+            Dim::Percent(p) => LengthPercentageAuto::percent(p),
+        }
+    }
+    if let Some(d) = prop_dim_at(node, "inset", viewport_w) {
+        let v = dim_to_lpa(d, scale);
+        style.inset = Rect_ { top: v, right: v, bottom: v, left: v };
+    }
+    if let Some(d) = prop_dim_at(node, "top", viewport_w) {
+        style.inset.top = dim_to_lpa(d, scale);
+    }
+    if let Some(d) = prop_dim_at(node, "right", viewport_w) {
+        style.inset.right = dim_to_lpa(d, scale);
+    }
+    if let Some(d) = prop_dim_at(node, "bottom", viewport_w) {
+        style.inset.bottom = dim_to_lpa(d, scale);
+    }
+    if let Some(d) = prop_dim_at(node, "left", viewport_w) {
+        style.inset.left = dim_to_lpa(d, scale);
+    }
+}
+
+/// Apply CSS-style overflow props (`overflow`, `overflowX`,
+/// `overflowY`) and the Hypen-DSL `.scrollable(...)` applicator to
+/// `style.overflow`. Without this, scrollable containers' children
+/// painted past the parent's bounds — e.g. a horizontal Stories row
+/// with five items at `w-20` apiece overflowing into the viewport
+/// margin instead of clipping at the row's right edge.
+fn apply_overflow_props(
+    style: &mut Style,
+    node: &crate::tree::Node,
+    viewport_w: f32,
+) {
+    use crate::style::prop_str_at;
+
+    fn parse(s: &str) -> Option<Overflow> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "visible" => Some(Overflow::Visible),
+            "hidden" | "clip" => Some(Overflow::Hidden),
+            // Taffy 0.10 has Scroll behave like Hidden for layout
+            // purposes (we handle the scroll offset ourselves);
+            // either way the parent clips overflow.
+            "scroll" | "auto" => Some(Overflow::Scroll),
+            _ => None,
+        }
+    }
+
+    // Hypen-DSL `.scrollable(...)` applicator. Sets the *axis* the
+    // container scrolls on (and therefore clips on); the orthogonal
+    // axis stays `Visible` so legitimately overflowing content (e.g.
+    // a focus-ring stroke from a child) stays painted.
+    let scrollable_axes = match crate::style::prop_str_at(node, "scrollable", viewport_w)
+        .map(|s| s.trim().to_ascii_lowercase())
+    {
+        Some(s) if s == "horizontal" => Some((Overflow::Scroll, Overflow::Visible)),
+        Some(s) if s == "vertical" || s == "true" || s == "scroll" || s == "auto" => {
+            Some((Overflow::Visible, Overflow::Scroll))
+        }
+        Some(s) if s == "both" => Some((Overflow::Scroll, Overflow::Scroll)),
+        _ => None,
+    };
+    // `.scrollable(true)` lands as a *bool* under either `scrollable`
+    // or the engine-flattened `scrollable.0` key. `prop_str_at` above
+    // only picks it up when the value happens to be a string; without
+    // checking both bare + dotted bool here, `overflow: scroll`
+    // never gets onto Taffy and the container's `layout.size.height`
+    // grows to its full content extent (defeating the whole point of
+    // per-container scroll — `rect.h >= content_h` makes max=0 and
+    // wheel events go nowhere). Same shape of fix as
+    // `is_scrollable_node`.
+    let bool_is_true = |v: &serde_json::Value| {
+        v.as_bool() == Some(true) || v.as_str().map(str::trim) == Some("true")
+    };
+    if scrollable_axes.is_none()
+        && (node.props.get("scrollable").is_some_and(bool_is_true)
+            || node.props.get("scrollable.0").is_some_and(bool_is_true))
+    {
+        style.overflow = taffy::Point {
+            x: Overflow::Visible,
+            y: Overflow::Scroll,
+        };
+    }
+    if let Some((x, y)) = scrollable_axes {
+        style.overflow = taffy::Point { x, y };
+    }
+
+    // CSS-style props win when explicitly set.
+    if let Some(o) = prop_str_at(node, "overflow", viewport_w).and_then(parse) {
+        style.overflow = taffy::Point { x: o, y: o };
+    }
+    if let Some(o) = prop_str_at(node, "overflowX", viewport_w).and_then(parse) {
+        style.overflow.x = o;
+    }
+    if let Some(o) = prop_str_at(node, "overflowY", viewport_w).and_then(parse) {
+        style.overflow.y = o;
+    }
+
+    // Classic flexbox-overflow gotcha: Taffy (like CSS) defaults
+    // `min-height: auto` on flex items, which expands to the item's
+    // content size. A `flex-1` child with `overflow: scroll` whose
+    // content is taller than its flex allocation still won't shrink
+    // — the auto min-size pins it to content height and `max =
+    // content_h - rect_h` ends up at zero. Force `min_size` to 0 on
+    // the scroll axis so the parent's flex distribution can actually
+    // clip the frame to its allocation. Only zero the side we
+    // scroll on; the cross-axis keeps its content-based min so a
+    // narrow scrollable still sizes correctly.
+    if style.overflow.x == Overflow::Scroll {
+        style.min_size.width = length(0.0);
+    }
+    if style.overflow.y == Overflow::Scroll {
+        style.min_size.height = length(0.0);
+    }
+}
+
+/// Compute the Taffy `NodeContext` for a renderer node. Only Text
+/// leaves carry a non-empty context (text content + scaled font
+/// size); every other element returns `Default::default()` so the
+/// measure callback short-circuits.
+pub(crate) fn node_context(
+    node: &crate::tree::Node,
+    scale: f32,
+    viewport_w: f32,
+) -> NodeContext {
+    if node.element_type == "Text" {
+        let font_size = prop_f32_at(node, "fontSize", viewport_w)
+            .map(|v| v * scale)
+            .unwrap_or(DEFAULT_FONT_SIZE_PX * scale);
+        NodeContext {
+            text: Some(node.text_content().map(|c| c.into_owned()).unwrap_or_default()),
+            font_size,
+            max_lines: resolve_max_lines(node, viewport_w),
+        }
+    } else {
+        NodeContext::default()
+    }
+}
+
+/// Read `maxLines` (or `max-lines`, the CSS-property form emitted by
+/// the `truncate` Tailwind utility) off a Text node. `Some(n)` means
+/// the renderer should keep at most `n` rendered lines; `None` means
+/// "wrap freely". Falls back to `None` when the value isn't a positive
+/// integer.
+pub(crate) fn resolve_max_lines(
+    node: &crate::tree::Node,
+    viewport_w: f32,
+) -> Option<u32> {
+    let v = prop_f32_at(node, "maxLines", viewport_w)
+        .or_else(|| prop_f32_at(node, "max-lines", viewport_w))?;
+    if v >= 1.0 {
+        Some(v as u32)
+    } else {
+        None
     }
 }
 
@@ -1046,7 +2017,24 @@ fn apply_flex_props(style: &mut Style, node: &crate::tree::Node, viewport_w: f32
                 if let Ok(num) = n.parse::<f32>() {
                     style.flex_grow = num;
                     style.flex_shrink = 1.0;
-                    style.flex_basis = Dimension::percent(0.0);
+                    // CSS `flex: 1` is shorthand for `1 1 0%`, but the
+                    // spec specially-cases `flex-basis: 0%` to resolve
+                    // to 0 *unconditionally* — it does NOT require a
+                    // definite parent. Taffy 0.10's percent resolution
+                    // is not specially cased here; with an indefinite-
+                    // height ancestor anywhere up the chain, every
+                    // level's `flex-basis: 0%` falls back to content
+                    // sizing and the whole flex distribution collapses.
+                    // That's exactly the bug behind HomePage's
+                    // `rect_h ≈ content_h` despite `flex-1` + `min_size
+                    // = 0` + `overflow: scroll`: Route's Column,
+                    // Router, and App outer all have `flex-1`, so the
+                    // chain back to the synthetic-root's definite
+                    // height collapses to indefinite at every step.
+                    // Emitting `Length(0)` instead of `Percent(0)`
+                    // makes the basis unconditionally zero, which is
+                    // what every browser actually does in practice.
+                    style.flex_basis = Dimension::length(0.0);
                 }
             }
         }
@@ -1089,6 +2077,7 @@ fn border_to_taffy(b: Border, scale: f32) -> Rect_<LengthPercentage> {
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn emit_items(
     taffy: &TaffyTree<NodeContext>,
     node_id: NodeId,
@@ -1098,10 +2087,29 @@ fn emit_items(
     tree: &Tree,
     renderer_for_taffy: &HashMap<NodeId, String>,
     viewport_w: f32,
+    scale: f32,
     scrolls: &HashMap<String, f32>,
     out: &mut Vec<LayoutItem>,
     natural_bounds: &mut (f32, f32),
     cull_viewport: Option<Rect>,
+    // `parent_clip_to`: rect of the nearest scrollable ancestor
+    // (post-shift, same coord space as the `rect` we're about to
+    // emit). `Some` means this item lives inside a `.scrollable(...)`
+    // container and the painter must clip it; `None` means there's
+    // no scrollable ancestor, or this *is* the scrollable container
+    // (whose own bg/border isn't clipped — only its descendants are).
+    parent_clip_to: Option<Rect>,
+    // `subtree_root`: renderer-tree id of the direct child of the
+    // nearest scrollable ancestor that this item belongs to. Threaded
+    // through so each emitted LayoutItem can carry its painter-side
+    // cache-unit identity (one Post in the feed, one cell in a Grid).
+    // `None` outside any scrollable. When recursing into the children
+    // of a scrollable, each child becomes a fresh subtree root —
+    // descendants of that child propagate the same value. The
+    // scrollable container's own row inherits the *outer* root (i.e.
+    // typically `None`) so its bg/border doesn't get bundled into
+    // any single child's cache entry.
+    subtree_root: Option<&str>,
 ) {
     let layout = taffy.layout(node_id).expect("taffy layout");
     let x = parent_x + layout.location.x;
@@ -1112,8 +2120,17 @@ fn emit_items(
         w: layout.size.width,
         h: layout.size.height,
     };
-    natural_bounds.0 = natural_bounds.0.max(x + layout.size.width);
-    natural_bounds.1 = natural_bounds.1.max(y_natural + layout.size.height);
+    // Use `content_size` (natural extent including overflowing
+    // children) rather than the parent's constrained `size`. With a
+    // viewport-pinned root + page-level scroll, the outer Column
+    // reports `size.height = viewport.h` (clipped to fit) while its
+    // children flex naturally to their full content extent — using
+    // `size` here would have `natural_bounds.1` stop at viewport.h,
+    // collapsing `content_size` and snapping page scroll to 0.
+    let extent_h = layout.content_size.height.max(layout.size.height);
+    let extent_w = layout.content_size.width.max(layout.size.width);
+    natural_bounds.0 = natural_bounds.0.max(x + extent_w);
+    natural_bounds.1 = natural_bounds.1.max(y_natural + extent_h);
 
     // Viewport cull. When `cull_viewport` is `Some`, subtrees whose
     // rect ends one full viewport above the visible region OR starts
@@ -1125,8 +2142,20 @@ fn emit_items(
     // disappears for any page taller than the viewport.
     let renderer_id = renderer_for_taffy.get(&node_id).cloned();
     if let (Some(v), Some(_)) = (cull_viewport, renderer_id.as_deref()) {
-        let buffer = v.h;
-        let bottom = rect.y + rect.h;
+        // Two viewport-heights of slack on each side. Pairs with the
+        // half-viewport recompute threshold in `App::redraw`: gives
+        // the user 1.5 viewports of pre-emitted content to scroll
+        // through before the next emit lands, comfortably absorbing
+        // wheel bursts on fast trackpads.
+        let buffer = v.h * 2.0;
+        // Cull against the natural content extent, not the
+        // constrained box: a parent whose children overflow past
+        // its `size.height` still hosts visible content past that
+        // edge. Without this, an outer Column pinned to viewport.h
+        // would cull the entire tree the moment page scroll exceeded
+        // viewport.h + buffer, collapsing `natural_bounds.1` and
+        // forcing scroll to 0.
+        let bottom = rect.y + extent_h;
         let top = rect.y;
         if bottom < v.y - buffer || top > v.y + v.h + buffer {
             return;
@@ -1139,10 +2168,17 @@ fn emit_items(
     // children so the App can clamp the offset.
     let mut child_scroll_shift_y = parent_scroll_shift_y;
     let mut scrollable_idx: Option<usize> = None;
+    // Clip rect handed down to children. Inherits `parent_clip_to`
+    // by default; replaced with this node's own rect when the node
+    // is itself scrollable, so descendants clip to *this* container.
+    // The container's own row (bg / border) keeps `parent_clip_to`
+    // — only its scrolling content gets clipped.
+    let mut child_clip_to = parent_clip_to;
 
     if let Some(rid) = renderer_id.as_deref() {
         if let Some(node) = tree.get(rid) {
             let action = resolve_action(node);
+            let action_payload = action.as_ref().and_then(|_| resolve_action_payload(node));
             let mut item_border = border_at(node, viewport_w);
             // The DSL says `.borderRadius(8)` even when there's no
             // border line — round the fill anyway. The painter checks
@@ -1152,6 +2188,15 @@ fn emit_items(
             if scrollable {
                 let off = scrolls.get(rid).copied().unwrap_or(0.0);
                 child_scroll_shift_y = parent_scroll_shift_y + off;
+                // Anchor descendant clipping to this container's
+                // own rect. Even if the container itself is inside
+                // a larger scrollable, the painter clips to the
+                // innermost — Vello's nested push_layer composes,
+                // but the engine emit only needs the immediate
+                // ancestor: nested scrollables aren't a real use
+                // case in the social example and would need their
+                // own scroll-routing rework anyway.
+                child_clip_to = Some(rect);
             }
             match node.element_type.as_str() {
                 et if TEXT_INPUT_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
@@ -1198,10 +2243,13 @@ fn emit_items(
                         },
                         rect,
                         action: None,
+                        action_payload: None,
                         background,
                         border: item_border,
                         scrollable: None,
                         font_weight,
+                        clip_to: parent_clip_to,
+                        subtree_root: subtree_root.map(str::to_string),
                     });
                 }
                 "Text" => {
@@ -1209,8 +2257,20 @@ fn emit_items(
                         prop_f32_at(node, "fontSize", viewport_w).unwrap_or(DEFAULT_FONT_SIZE_PX);
                     let font_weight = resolve_font_weight(node, viewport_w);
                     let color = prop_color_at(node, "color", viewport_w).unwrap_or(Rgba::BLACK);
-                    let content = node.text_content().unwrap_or("").to_string();
+                    let content = node.text_content().map(|c| c.into_owned()).unwrap_or_default();
                     let align = parse_text_align(crate::style::prop_str_at(node, "textAlign", viewport_w));
+                    let max_lines = resolve_max_lines(node, viewport_w);
+                    // Pass padding to the painter so it can shift the
+                    // glyph origin / shrink the wrap width without
+                    // losing the outer rect (which still drives bg /
+                    // border rendering and hit-testing).
+                    let pad = padding_at(node, viewport_w);
+                    let padding_phys = (
+                        pad.left * scale,
+                        pad.top * scale,
+                        pad.right * scale,
+                        pad.bottom * scale,
+                    );
                     out.push(LayoutItem {
                         node_id: rid.to_string(),
                         kind: ItemKind::Text {
@@ -1218,13 +2278,18 @@ fn emit_items(
                             font_size,
                             color,
                             align,
+                            max_lines,
+                            padding: padding_phys,
                         },
                         rect,
                         action,
+                        action_payload: action_payload.clone(),
                         background: background_explicit,
                         border: item_border,
                         scrollable: None,
                         font_weight,
+                        clip_to: parent_clip_to,
+                        subtree_root: subtree_root.map(str::to_string),
                     });
                 }
                 et if IMAGE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
@@ -1264,10 +2329,13 @@ fn emit_items(
                             },
                             rect,
                             action,
+                            action_payload: action_payload.clone(),
                             background: background_explicit,
                             border: item_border,
                             scrollable: None,
                             font_weight: 400,
+                            clip_to: parent_clip_to,
+                        subtree_root: subtree_root.map(str::to_string),
                         });
                     } else {
                         let src = crate::style::prop_str_at(node, "src", viewport_w)
@@ -1282,44 +2350,31 @@ fn emit_items(
                             kind: ItemKind::Image { src, fit },
                             rect,
                             action,
+                            action_payload: action_payload.clone(),
                             background: background_explicit,
                             border: item_border,
                             scrollable: None,
                             font_weight: 400,
+                            clip_to: parent_clip_to,
+                        subtree_root: subtree_root.map(str::to_string),
                         });
                     }
                 }
                 et if ACTIONABLE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
-                    // Default Button bg + stroke kick in only when the
-                    // user didn't override either with `.tw(...)` or
-                    // explicit applicators. `bg-transparent` and
-                    // `border-0` disable them respectively.
-                    let bg_explicit_present =
-                        node.props.contains_key("backgroundColor")
-                            || node.props.contains_key("backgroundColor.0")
-                            || node.props.contains_key("background-color");
-                    let background = if bg_explicit_present {
-                        background_explicit
-                    } else {
-                        Some(Rgba(0xe7, 0xee, 0xff, 0xff))
-                    };
-                    if !item_border.is_visible() && !has_explicit_border(node) {
-                        item_border = Border {
-                            width: 1.0,
-                            color: Rgba(0x4a, 0x6a, 0xd6, 0xff),
-                            radius: 8.0,
-                            sides: crate::style::BORDER_SIDES_ALL,
-                        };
-                    }
+                    // No implicit Button chrome — ghost/icon controls
+                    // (e.g. Story close ✕) only paint what the DSL sets.
                     out.push(LayoutItem {
                         node_id: rid.to_string(),
                         kind: ItemKind::Button,
                         rect,
                         action,
-                        background,
+                        action_payload: action_payload.clone(),
+                        background: background_explicit,
                         border: item_border,
                         scrollable: None,
                         font_weight: 400,
+                        clip_to: parent_clip_to,
+                        subtree_root: subtree_root.map(str::to_string),
                     });
                 }
                 _ => {
@@ -1331,6 +2386,7 @@ fn emit_items(
                         kind: ItemKind::Container,
                         rect,
                         action,
+                        action_payload,
                         background: background_explicit,
                         border: item_border,
                         // Filled in after children walk. content_h
@@ -1342,6 +2398,8 @@ fn emit_items(
                             None
                         },
                         font_weight: 400,
+                        clip_to: parent_clip_to,
+                        subtree_root: subtree_root.map(str::to_string),
                     });
                 }
             }
@@ -1349,7 +2407,38 @@ fn emit_items(
     }
 
     let mut max_child_bottom_natural = y_natural;
-    for child in taffy.children(node_id).unwrap_or_default() {
+    // Paint flow children before absolutely-positioned overlays so an
+    // in-flow sibling (e.g. Story's full-bleed Image) doesn't cover a
+    // header declared earlier in the tree. Matches the canvas renderer
+    // and CSS stacking: absolute overlays land on top of in-flow content.
+    let children = taffy.children(node_id).unwrap_or_default();
+    let mut flow_children = Vec::new();
+    let mut overlay_children = Vec::new();
+    for child in children {
+        let is_absolute = taffy
+            .style(child)
+            .map(|s| s.position == Position::Absolute)
+            .unwrap_or(false);
+        if is_absolute {
+            overlay_children.push(child);
+        } else {
+            flow_children.push(child);
+        }
+    }
+    for child in flow_children
+        .iter()
+        .chain(overlay_children.iter())
+        .copied()
+    {
+        // If THIS node is a scrollable container, each of its direct
+        // children becomes a fresh painter-side cache unit (each Post
+        // / each Grid cell). Otherwise the child inherits whatever
+        // subtree-root the current node belongs to.
+        let child_subtree_root: Option<String> = if scrollable_idx.is_some() {
+            renderer_for_taffy.get(&child).cloned()
+        } else {
+            subtree_root.map(str::to_string)
+        };
         emit_items(
             taffy,
             child,
@@ -1359,10 +2448,13 @@ fn emit_items(
             tree,
             renderer_for_taffy,
             viewport_w,
+            scale,
             scrolls,
             out,
             natural_bounds,
             cull_viewport,
+            child_clip_to,
+            child_subtree_root.as_deref(),
         );
         if scrollable_idx.is_some() {
             if let Ok(cl) = taffy.layout(child) {
@@ -1385,13 +2477,42 @@ fn emit_items(
     }
 }
 
-/// Scrollable container detection. A Container is scrollable if its
-/// `overflow` or `overflowY` prop resolves to `"scroll"` or `"auto"`.
-/// `"hidden"` and `"visible"` are explicitly non-scrollable; missing
-/// props default to non-scrollable.
+/// Scrollable container detection. Marks the container as scrollable
+/// if any of:
+/// - `.scrollable(true)` / `.scrollable("vertical" | "horizontal" |
+///   "both" | "scroll" | "auto")` — the Hypen-DSL applicator the
+///   social example actually uses.
+/// - `overflow` / `overflowY` prop resolves to `"scroll"` / `"auto"`
+///   (CSS-style fallback used by tw classes).
 fn is_scrollable_node(node: &crate::tree::Node, viewport_w: f32) -> bool {
+    if let Some(s) = crate::style::prop_str_at(node, "scrollable", viewport_w) {
+        let lower = s.trim().to_ascii_lowercase();
+        if matches!(
+            lower.as_str(),
+            "true" | "vertical" | "horizontal" | "both" | "scroll" | "auto"
+        ) {
+            return true;
+        }
+    }
+    // `.scrollable(true)` — single positional bool. The engine
+    // flattens applicators into namespaced props, so this lands as
+    // `scrollable.0 = bool(true)`. `prop_str_at` above only finds it
+    // when the value happens to be a *string* "true"; a real
+    // JSON-bool slipped past every check below and HomePage never
+    // became scrollable — every wheel event fell through to page
+    // scroll. Check both bare and `.0` for completeness, and accept
+    // the string form as well to mirror `prop_str_at`'s arm above.
+    let bool_is_true = |v: &serde_json::Value| {
+        v.as_bool() == Some(true) || v.as_str().map(str::trim) == Some("true")
+    };
+    if node.props.get("scrollable").is_some_and(bool_is_true)
+        || node.props.get("scrollable.0").is_some_and(bool_is_true)
+    {
+        return true;
+    }
     let v = crate::style::prop_str_at(node, "overflowY", viewport_w)
-        .or_else(|| crate::style::prop_str_at(node, "overflow", viewport_w));
+        .or_else(|| crate::style::prop_str_at(node, "overflow", viewport_w))
+        .or_else(|| crate::style::prop_str_at(node, "overflowX", viewport_w));
     matches!(
         v.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("scroll") | Some("auto"),
@@ -1404,6 +2525,34 @@ fn is_scrollable_node(node: &crate::tree::Node, viewport_w: f32) -> bool {
 /// `props.action`, so we never need to look at `props["0"]` (and doing
 /// so would treat any positional Text content as an action name).
 fn resolve_action(node: &crate::tree::Node) -> Option<String> {
+    // The engine flattens applicator arguments into namespaced props:
+    // `.onClick(@router.push, to: "/x")` becomes
+    //   onClick.0 = "@router.push"
+    //   onClick.to = "/x"
+    // and `Button("@actions.foo")` becomes `action.0 = "@actions.foo"`.
+    // Older paths also sometimes set bare `onClick` / `action` strings,
+    // so check both.
+    //
+    // `props.onClick*` is set explicitly via the `.onClick(...)`
+    // applicator — accept it on ANY element so arbitrary containers
+    // (Column / Row / Card) can be made clickable. `props.action*`
+    // only exists because the engine resolves Button positional
+    // syntax into it; gate that path to ACTIONABLE_TYPES so plain
+    // `Text("X")` doesn't accidentally become an action handler.
+    let click_raw = node
+        .props
+        .get("onClick.0")
+        .or_else(|| node.props.get("onClick"))
+        .and_then(|v| v.as_str());
+    if let Some(raw) = click_raw {
+        let stripped = raw.strip_prefix('@').unwrap_or(raw);
+        return Some(
+            stripped
+                .strip_prefix("actions.")
+                .unwrap_or(stripped)
+                .to_string(),
+        );
+    }
     if !ACTIONABLE_TYPES
         .iter()
         .any(|t| t.eq_ignore_ascii_case(&node.element_type))
@@ -1412,11 +2561,79 @@ fn resolve_action(node: &crate::tree::Node) -> Option<String> {
     }
     let raw = node
         .props
-        .get("action")
-        .or_else(|| node.props.get("onClick"))
+        .get("action.0")
+        .or_else(|| node.props.get("action"))
         .and_then(|v| v.as_str())?;
     let stripped = raw.strip_prefix('@').unwrap_or(raw);
     Some(stripped.strip_prefix("actions.").unwrap_or(stripped).to_string())
+}
+
+/// Collect the named arguments of `onClick(...)` (or `action(...)`)
+/// into a payload object. `.onClick(@router.push, to: "/x", id: 42)`
+/// → `{"to": "/x", "id": 42}`; the positional action ref at `.0` is
+/// excluded. Returns `None` when no payload args were attached. The
+/// payload is forwarded verbatim to `module.dispatch_action`, which
+/// the SDK plumbs to the action handler (`router.push` reads
+/// `payload.to`, user handlers read whatever they like).
+pub(crate) fn resolve_action_payload(
+    node: &crate::tree::Node,
+) -> Option<serde_json::Value> {
+    let mut obj = serde_json::Map::new();
+    for prefix in ["onClick.", "action."] {
+        for (key, value) in node.props.iter() {
+            let Some(suffix) = key.strip_prefix(prefix) else {
+                continue;
+            };
+            // Skip the positional action-ref slot (`.0`).
+            if suffix == "0" {
+                continue;
+            }
+            obj.insert(suffix.to_string(), value.clone());
+        }
+        if !obj.is_empty() {
+            break;
+        }
+    }
+    if obj.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(obj))
+    }
+}
+
+/// Generic event-applicator reader. Looks up `<event>.0` (or bare `<event>`)
+/// on `node` and returns `(action_name, payload)` where `payload` is built
+/// from any `<event>.<key>` siblings (e.g. `.onInput(@actions.search,
+/// scope: "explore")` → action `"search"`, payload `{"scope": "explore"}`).
+/// Returns `None` if no action ref is wired for that event.
+pub(crate) fn resolve_named_event_action(
+    node: &crate::tree::Node,
+    event: &str,
+) -> Option<(String, serde_json::Value)> {
+    let zero_key = format!("{event}.0");
+    let raw = node
+        .props
+        .get(&zero_key)
+        .or_else(|| node.props.get(event))
+        .and_then(|v| v.as_str())?;
+    let stripped = raw.strip_prefix('@').unwrap_or(raw);
+    let action = stripped
+        .strip_prefix("actions.")
+        .unwrap_or(stripped)
+        .to_string();
+
+    let prefix = format!("{event}.");
+    let mut obj = serde_json::Map::new();
+    for (key, value) in node.props.iter() {
+        let Some(suffix) = key.strip_prefix(&prefix) else {
+            continue;
+        };
+        if suffix == "0" {
+            continue;
+        }
+        obj.insert(suffix.to_string(), value.clone());
+    }
+    Some((action, serde_json::Value::Object(obj)))
 }
 
 // Suppress warning on imports used only in helper paths.

@@ -120,13 +120,6 @@ impl DesktopApp {
             .module
             .expect("DesktopApp::run() requires either .module(...) or .source(...)");
 
-        // Wire the patch callback BEFORE mount so the SDK's deferred
-        // initial render lands in our queue. (See hypen-sdk-rs commit
-        // that moved render_ir_node from new() to mount().)
-        let q_for_cb = Arc::clone(&queue);
-        module.on_patches(Arc::new(move |patches| q_for_cb.push(patches)));
-        module.mount();
-
         // AccessKit pipes events back to us through the winit user
         // event channel, so we need a typed event loop.
         let event_loop = EventLoop::<AppEvent>::with_user_event()
@@ -134,6 +127,32 @@ impl DesktopApp {
             .expect("event loop");
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
+
+        // Wire the patch callback BEFORE mount so the SDK's deferred
+        // initial render lands in our queue. (See hypen-sdk-rs commit
+        // that moved render_ir_node from new() to mount().) Patches
+        // can arrive on a worker thread (async action handlers); we
+        // also need to wake the event loop so `flush_patches` runs —
+        // otherwise the loop sits in `Wait` forever and the UI never
+        // reflects the dispatched action.
+        let q_for_cb = Arc::clone(&queue);
+        let proxy_for_cb = proxy.clone();
+        module.on_patches(Arc::new(move |patches| {
+            // `push` returns true only on the empty → non-empty
+            // transition. Without this gate, an engine that fires a
+            // patch batch per frame (or worse, mid-frame) floods
+            // winit's user-event queue with redundant Wake events
+            // that pile up faster than we drain them — a sneaky
+            // memory leak when the window is occluded or macOS
+            // app-napped and RedrawRequested isn't being delivered.
+            // Once the loop processes one Wake it drains *all*
+            // pending patches via `flush_patches` anyway, so a
+            // single Wake per batch-burst is sufficient.
+            if q_for_cb.push(patches) {
+                let _ = proxy_for_cb.send_event(AppEvent::Wake);
+            }
+        }));
+        module.mount();
 
         // Background image-fetch worker uses the same proxy to wake
         // the renderer when an HTTP avatar finishes decoding.

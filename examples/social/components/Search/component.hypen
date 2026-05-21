@@ -4,6 +4,7 @@ module Search {
             Input(placeholder: "Search")
                 .tw("flex-1 bg-gray-100 rounded-lg px-4 py-2 text-sm")
                 .bind(@state.searchQuery)
+                .onInput(@actions.search)
         }
         .tw("px-4 py-2 bg-white border-b border-gray-200")
 

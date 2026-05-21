@@ -14,6 +14,21 @@ interface IEngine {
   dispatchAction(name: string, payload?: any): void;
 }
 
+// Maps a DOM event type to the applicator prop names the engine may have set
+// on a node, in priority order. Multi-word events (`mouseenter`) need their
+// proper camelCase form (`onMouseEnter`) since the engine emits applicator
+// names verbatim. `mouseenter` also accepts `onHover` as an alias.
+const CANVAS_EVENT_PROP_NAMES: Record<string, string[]> = {
+  mouseenter: ["onMouseEnter", "onHover", "onmouseenter", "mouseenter"],
+  mouseleave: ["onMouseLeave", "onmouseleave", "mouseleave"],
+  mousedown: ["onMouseDown", "onmousedown", "mousedown"],
+  mouseup: ["onMouseUp", "onmouseup", "mouseup"],
+  dblclick: ["onDblClick", "onDoubleClick", "ondblclick", "dblclick"],
+  contextmenu: ["onContextMenu", "oncontextmenu", "contextmenu"],
+  keydown: ["onKeyDown", "onkeydown", "keydown"],
+  keyup: ["onKeyUp", "onkeyup", "keyup"],
+};
+
 /**
  * Canvas Event Manager
  */
@@ -383,13 +398,25 @@ export class CanvasEventManager {
    * Dispatch event to engine
    */
   private dispatchNodeEvent(node: VirtualNode, eventType: string, data: any): void {
-    // Engine emits event applicators in camelCase (`onClick`, `onChange`). The
-    // older flat form `onclick` is still accepted. After prop normalisation the
-    // value is either a string (action name) or an object carrying an action
-    // name at `"0"` plus an auxiliary payload (e.g. `{ "0": "@router.push",
-    // to: "/notifications" }` for `@router.push(to: "/notifications")`).
-    const camel = `on${eventType.charAt(0).toUpperCase()}${eventType.slice(1)}`;
-    let spec: unknown = node.props[camel] ?? node.props[`on${eventType}`] ?? node.props[eventType];
+    // Engine emits event applicators in camelCase (`onClick`, `onMouseEnter`).
+    // Multi-word DOM events like `mouseenter` must map to `onMouseEnter`, not
+    // the naive `onMouseenter` that `on${capitalize(eventType)}` would produce.
+    // The older flat form `onclick`/`onmouseenter` is still accepted. After
+    // prop normalisation the value is either a string (action name) or an
+    // object carrying an action name at `"0"` plus an auxiliary payload.
+    const propNames = CANVAS_EVENT_PROP_NAMES[eventType] ?? [
+      `on${eventType.charAt(0).toUpperCase()}${eventType.slice(1)}`,
+      `on${eventType}`,
+      eventType,
+    ];
+
+    let spec: unknown;
+    for (const name of propNames) {
+      if (node.props[name] != null) {
+        spec = node.props[name];
+        break;
+      }
+    }
 
     // Actionable components fall back to the bare `action` prop on click.
     if (spec == null && eventType === "click") {

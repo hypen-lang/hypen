@@ -26,6 +26,8 @@ pub mod app;
 pub(crate) mod damage;
 pub mod gpu;
 pub(crate) mod ime;
+#[cfg(target_os = "macos")]
+pub(crate) mod macos;
 pub mod layout;
 pub mod module;
 pub mod paint;
@@ -46,3 +48,35 @@ pub use tree::{Node, Tree};
 /// Re-exported for convenience so callers don't need to depend on the
 /// engine crate directly to inspect patches.
 pub use hypen_engine::Patch;
+
+/// `mimalloc::MiMalloc`, re-exported behind the `mimalloc` Cargo
+/// feature so downstream binaries can wire it as the global
+/// allocator in one line:
+///
+/// ```ignore
+/// // In your binary's main.rs:
+/// #[global_allocator]
+/// static GLOBAL: hypen_renderer_desktop::MiMalloc = hypen_renderer_desktop::MiMalloc;
+///
+/// fn main() {
+///     hypen_renderer_desktop::DesktopApp::new()
+///         .source(r#"Text("Hello")"#)
+///         .run();
+/// }
+/// ```
+///
+/// Why: the macOS / glibc system allocators are RSS-greedy with
+/// churny workloads — patch processing in particular allocates and
+/// frees small-to-medium objects continuously, and the system
+/// allocator holds pages in process address space rather than
+/// returning them to the OS. `mimalloc` returns pages aggressively
+/// and typically reduces RSS by 20-40 MB on a long-running
+/// renderer session, for the cost of one extra dep on the final
+/// binary. Off by default — apps that don't enable the feature
+/// pay no binary cost.
+///
+/// Only a final binary can set `#[global_allocator]`; libraries
+/// can't. That's why we re-export the type and let the binary do
+/// the wiring rather than installing it ourselves.
+#[cfg(feature = "mimalloc")]
+pub use mimalloc::MiMalloc;

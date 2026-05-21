@@ -23,8 +23,26 @@ pub struct Node {
 
 impl Node {
     /// Convenience: positional text content lives at prop key `"0"`.
-    pub fn text_content(&self) -> Option<&str> {
-        self.props.get("0").and_then(Value::as_str)
+    /// Returns the value as a string for any JSON scalar — strings
+    /// pass through verbatim, numbers / booleans get stringified.
+    /// Without the scalar fallback, bindings like
+    /// `Text("@{state.user.postsCount}")` (where the engine resolves
+    /// the path to a `Number(42)`) silently rendered nothing because
+    /// `Value::as_str()` only matches `String`. Profile's "42 Posts /
+    /// 1.2k Followers / 3 Following" labels were the visible victim.
+    pub fn text_content(&self) -> Option<std::borrow::Cow<'_, str>> {
+        let v = self.props.get("0")?;
+        match v {
+            Value::String(s) => Some(std::borrow::Cow::Borrowed(s.as_str())),
+            Value::Number(n) => Some(std::borrow::Cow::Owned(n.to_string())),
+            Value::Bool(b) => Some(std::borrow::Cow::Owned(b.to_string())),
+            Value::Null => None,
+            // Arrays / objects don't have a sensible scalar form;
+            // upstream binding resolution should never produce one
+            // for a Text content, but if it does we render nothing
+            // rather than dumping JSON into the UI.
+            _ => None,
+        }
     }
 }
 
@@ -38,6 +56,11 @@ pub struct Tree {
     /// `parent_id → ordered child ids`. The synthetic `"root"` parent is
     /// included here.
     children: HashMap<String, Vec<String>>,
+    /// Reverse index: `child_id → parent_id`. Lets `Remove` /
+    /// `Detach` look up the affected parent in O(1) instead of
+    /// scanning every children list. Maintained in lockstep with
+    /// `children` by every patch handler.
+    parent_by_child: HashMap<String, String>,
 }
 
 impl Tree {
@@ -47,7 +70,14 @@ impl Tree {
         Self {
             nodes: HashMap::new(),
             children,
+            parent_by_child: HashMap::new(),
         }
+    }
+
+    /// O(1) parent lookup. Returns `None` for the synthetic root,
+    /// detached subtrees, and unknown ids.
+    pub fn parent_of(&self, id: &str) -> Option<&str> {
+        self.parent_by_child.get(id).map(String::as_str)
     }
 
     pub fn root_children(&self) -> &[String] {
@@ -116,30 +146,61 @@ impl Tree {
                 id,
                 before_id,
             } => {
+                // Detach from any prior parent in case the host
+                // re-inserts without an explicit Move (defensive).
+                if let Some(prev_parent) = self.parent_by_child.get(id).cloned() {
+                    if let Some(siblings) = self.children.get_mut(&prev_parent) {
+                        siblings.retain(|c| c != id);
+                    }
+                }
                 let siblings = self.children.entry(parent_id.clone()).or_default();
                 Self::insert_at(siblings, id.clone(), before_id.as_deref());
+                self.parent_by_child.insert(id.clone(), parent_id.clone());
             }
             Patch::Move {
                 parent_id,
                 id,
                 before_id,
             } => {
-                if let Some(siblings) = self.children.get_mut(parent_id) {
-                    siblings.retain(|c| c != id);
-                    Self::insert_at(siblings, id.clone(), before_id.as_deref());
+                // Unlink from old parent (O(1) parent lookup, then
+                // O(n_siblings) retain on just that one parent).
+                if let Some(prev_parent) = self.parent_by_child.get(id).cloned() {
+                    if let Some(siblings) = self.children.get_mut(&prev_parent) {
+                        siblings.retain(|c| c != id);
+                    }
                 }
+                let siblings = self.children.entry(parent_id.clone()).or_default();
+                Self::insert_at(siblings, id.clone(), before_id.as_deref());
+                self.parent_by_child.insert(id.clone(), parent_id.clone());
             }
             Patch::Remove { id } => {
+                // O(1) parent lookup replaces the previous full
+                // children-map scan to find the affected list.
+                if let Some(prev_parent) = self.parent_by_child.remove(id) {
+                    if let Some(siblings) = self.children.get_mut(&prev_parent) {
+                        siblings.retain(|c| c != id);
+                    }
+                }
                 self.remove_subtree(id);
-                // Also detach from any parent children list.
-                for siblings in self.children.values_mut() {
-                    siblings.retain(|c| c != id);
+            }
+            Patch::Detach { id } => {
+                // Unlink from parent without dropping the node — the
+                // engine's Router subtree cache reattaches later via
+                // Attach.
+                if let Some(prev_parent) = self.parent_by_child.remove(id) {
+                    if let Some(siblings) = self.children.get_mut(&prev_parent) {
+                        siblings.retain(|c| c != id);
+                    }
                 }
             }
-            Patch::Detach { id: _ } | Patch::Attach { .. } => {
-                // Phase 1: Router cache support is a Phase 4+ concern.
-                // Treat as no-ops for now; once routing is exercised in an
-                // example, we'll implement keep-alive subtrees.
+            Patch::Attach {
+                parent_id,
+                id,
+                before_id,
+            } => {
+                let siblings = self.children.entry(parent_id.clone()).or_default();
+                Self::insert_at(siblings, id.clone(), before_id.as_deref());
+                self.parent_by_child.insert(id.clone(), parent_id.clone());
             }
         }
     }
@@ -158,6 +219,7 @@ impl Tree {
     fn remove_subtree(&mut self, id: &str) {
         if let Some(children) = self.children.remove(id) {
             for child in &children {
+                self.parent_by_child.remove(child);
                 self.remove_subtree(child);
             }
         }
@@ -413,16 +475,66 @@ mod tests {
         let mut tree = Tree::new();
         tree.apply(&create("a", "Text", &[("0", json!("hello world"))]));
         let node = tree.get("a").expect("node a should exist");
-        assert_eq!(node.text_content(), Some("hello world"));
+        assert_eq!(node.text_content().as_deref(), Some("hello world"));
 
-        // Non-string prop "0" should not parse as text.
+        // Numeric prop "0" now stringifies for display — Profile-page
+        // counts (`postsCount = Number(42)`) and any other scalar
+        // bindings render their string form rather than nothing.
         tree.apply(&create("b", "Text", &[("0", json!(42))]));
         let node_b = tree.get("b").expect("node b should exist");
-        assert_eq!(node_b.text_content(), None);
+        assert_eq!(node_b.text_content().as_deref(), Some("42"));
 
         // Missing prop "0" should return None.
         tree.apply(&create("c", "Text", &[]));
         let node_c = tree.get("c").expect("node c should exist");
-        assert_eq!(node_c.text_content(), None);
+        assert!(node_c.text_content().is_none());
+    }
+
+    #[test]
+    fn parent_of_tracks_inserts_moves_and_removes() {
+        let mut tree = Tree::new();
+        tree.apply(&create("col", "Column", &[]));
+        tree.apply(&insert("root", "col", None));
+        tree.apply(&create("a", "Text", &[("0", json!("a"))]));
+        tree.apply(&insert("col", "a", None));
+        assert_eq!(tree.parent_of("col"), Some("root"));
+        assert_eq!(tree.parent_of("a"), Some("col"));
+
+        // Move `a` under `root` directly.
+        tree.apply(&Patch::Move {
+            parent_id: "root".into(),
+            id: "a".into(),
+            before_id: None,
+        });
+        assert_eq!(tree.parent_of("a"), Some("root"));
+        assert!(!tree.children_of("col").contains(&"a".to_string()));
+
+        // Remove drops the parent_by_child entry.
+        tree.apply(&Patch::Remove { id: "a".into() });
+        assert_eq!(tree.parent_of("a"), None);
+    }
+
+    #[test]
+    fn detach_attach_round_trips_parent_index() {
+        let mut tree = Tree::new();
+        tree.apply(&create("col", "Column", &[]));
+        tree.apply(&insert("root", "col", None));
+        tree.apply(&create("post", "Container", &[]));
+        tree.apply(&insert("col", "post", None));
+        assert_eq!(tree.parent_of("post"), Some("col"));
+
+        tree.apply(&Patch::Detach { id: "post".into() });
+        assert_eq!(tree.parent_of("post"), None);
+        assert!(!tree.children_of("col").contains(&"post".to_string()));
+        // Node itself stays alive — Router cache keeps the subtree.
+        assert!(tree.get("post").is_some());
+
+        tree.apply(&Patch::Attach {
+            parent_id: "col".into(),
+            id: "post".into(),
+            before_id: None,
+        });
+        assert_eq!(tree.parent_of("post"), Some("col"));
+        assert!(tree.children_of("col").contains(&"post".to_string()));
     }
 }

@@ -1,463 +1,260 @@
-//! wgpu surface management + CPU-pixmap → surface blit.
+//! wgpu surface management + Vello scene compositor.
 //!
-//! The painter writes RGBA8 (premultiplied) pixels into a CPU buffer; we
-//! upload those bytes into a `Texture`, then run a fullscreen-quad render
-//! pass that samples the texture into the swapchain image. A WGSL swizzle
-//! handles surfaces whose preferred format is BGRA.
+//! Replaces the Phase 1 hand-rolled CPU-pixmap upload + fullscreen
+//! blit with [`vello`], which encodes a 2D [`Scene`](vello::Scene)
+//! into wgpu compute + render passes and rasterises directly on the
+//! GPU. The painter side now emits Vello scene commands instead of
+//! per-pixel writes; on a modern GPU per-frame paint cost moves off
+//! the main thread entirely.
+//!
+//! Vello 0.8 is pinned to wgpu 28; that's what we depend on too.
+//! Vello's compute pipeline writes to an intermediate
+//! `Rgba8Unorm + STORAGE_BINDING` texture; a `TextureBlitter` then
+//! copies that intermediate into the real surface texture (which
+//! may be BGRA / sRGB / whatever the platform prefers).
+//! [`vello::util::RenderContext`] does this bookkeeping for us — we
+//! own one per `Gpu` instance.
 
+use std::path::PathBuf;
 use std::sync::Arc;
-use wgpu::util::DeviceExt;
+use vello::util::{RenderContext, RenderSurface};
+use vello::{AaConfig, AaSupport, Renderer, RendererOptions, Scene};
 use winit::window::Window;
 
-const BLIT_SHADER: &str = r#"
-struct VsOut {
-    @builtin(position) pos: vec4<f32>,
-    @location(0) uv: vec2<f32>,
-};
-
-@vertex
-fn vs(@builtin(vertex_index) vid: u32) -> VsOut {
-    // Two triangles covering the viewport in clip-space.
-    var positions = array<vec2<f32>, 6>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>(-1.0,  1.0),
-        vec2<f32>( 1.0, -1.0),
-        vec2<f32>( 1.0,  1.0),
-        vec2<f32>(-1.0,  1.0),
-    );
-    var uvs = array<vec2<f32>, 6>(
-        vec2<f32>(0.0, 1.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(0.0, 0.0),
-        vec2<f32>(1.0, 1.0),
-        vec2<f32>(1.0, 0.0),
-        vec2<f32>(0.0, 0.0),
-    );
-    var out: VsOut;
-    out.pos = vec4<f32>(positions[vid], 0.0, 1.0);
-    out.uv = uvs[vid];
-    return out;
-}
-
-@group(0) @binding(0) var src_tex: texture_2d<f32>;
-@group(0) @binding(1) var src_smp: sampler;
-
-struct Params {
-    swap_rb: u32,
-    _pad0: u32,
-    _pad1: u32,
-    _pad2: u32,
-};
-@group(0) @binding(2) var<uniform> params: Params;
-
-@fragment
-fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    let c = textureSample(src_tex, src_smp, in.uv);
-    if (params.swap_rb == 1u) {
-        return vec4<f32>(c.b, c.g, c.r, c.a);
-    }
-    return c;
-}
-"#;
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
-struct Params {
-    swap_rb: u32,
-    _pad: [u32; 3],
-}
-
 pub struct Gpu {
-    pub device: wgpu::Device,
-    pub queue: wgpu::Queue,
-    pub surface: wgpu::Surface<'static>,
-    pub config: wgpu::SurfaceConfiguration,
+    /// Vello's render-context owns the wgpu device / queue / adapter
+    /// used for the surface. We borrow them out via `device()` /
+    /// `queue()` for the painter.
+    pub render_ctx: RenderContext,
+    pub surface: RenderSurface<'static>,
     pub size: (u32, u32),
-
-    // Blit pipeline + per-frame texture.
-    pipeline: wgpu::RenderPipeline,
-    sampler: wgpu::Sampler,
-    bind_layout: wgpu::BindGroupLayout,
-    params_buf: wgpu::Buffer,
-    /// Texture matching the current surface size; rebuilt on resize.
-    upload_tex: wgpu::Texture,
-    upload_view: wgpu::TextureView,
-    bind_group: wgpu::BindGroup,
-    /// Whether the surface format is BGRA. Folded into the shader's
-    /// `swap_rb` uniform at construction time; kept on the struct for
-    /// debugging and future re-uploads on format changes.
-    #[allow(dead_code)]
-    swap_rb: bool,
+    /// One Vello renderer per device. Reused across `present`.
+    renderer: Renderer,
+    /// Page background — clears the surface each frame. Matches the
+    /// `0xfb fbfd` the CPU painter used.
+    base_color: vello::peniko::Color,
+    /// Persistent wgpu pipeline cache. Initialised from disk in
+    /// `new()` and written back in `Drop` so cold-start shader
+    /// compilation reuses prior work across launches. `None` if the
+    /// platform cache directory can't be resolved or the backend
+    /// doesn't support pipeline caches (Metal: no-op, Vulkan / D3D12:
+    /// real win). Held as `Option` so callers can drop it via
+    /// `Drop` without panicking on the no-op case.
+    pipeline_cache: Option<wgpu::PipelineCache>,
 }
 
 impl Gpu {
-    /// Async constructor — call from inside a `pollster::block_on(...)`.
     pub async fn new(window: Arc<Window>) -> Self {
-        let size = window.inner_size();
-        let size = (size.width.max(1), size.height.max(1));
-
-        let mut instance_desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        instance_desc.backends = wgpu::Backends::PRIMARY;
-        let instance = wgpu::Instance::new(instance_desc);
-
-        // Surface borrows from the window; we keep the Arc alive for the
-        // surface's 'static lifetime.
-        let surface = instance
-            .create_surface(window)
-            .expect("create wgpu surface");
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
+        let inner = window.inner_size();
+        let size = (inner.width.max(1), inner.height.max(1));
+        let mut render_ctx = RenderContext::new();
+        let surface = render_ctx
+            .create_surface(window.clone(), size.0, size.1, wgpu::PresentMode::Fifo)
             .await
-            .expect("request adapter");
-
-        // Adopt the adapter's actual limits rather than wgpu's
-        // `downlevel_defaults`, which caps `max_texture_dimension_2d`
-        // at 2048 — too low for HiDPI external displays (a 1440p Mac
-        // display at 2x is 2880×1620 physical pixels). Falls back to
-        // the conservative default if the adapter limits look smaller
-        // than the platform default for some reason.
-        let adapter_limits = adapter.limits();
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("hypen-desktop device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: adapter_limits,
-                ..Default::default()
-            })
-            .await
-            .expect("request device");
-
-        let caps = surface.get_capabilities(&adapter);
-        let format = caps.formats[0];
-        // wgpu maps shader's logical `@location(0)` output components
-        // to the surface format's storage layout automatically — a
-        // BGRA surface stores `vec4(r, g, b, a)` shader output with
-        // the R component at the R-position regardless of byte order.
-        // The previous manual `swap_rb` was double-swapping on BGRA
-        // surfaces (the macOS default), turning warm skin tones blue
-        // because the texture-side data was rotated relative to where
-        // wgpu expected it. Forcing `false` lets wgpu handle the
-        // mapping in both directions.
-        let swap_rb = false;
-
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.0,
-            height: size.1,
-            present_mode: caps
-                .present_modes
-                .iter()
-                .copied()
-                .find(|m| matches!(m, wgpu::PresentMode::Fifo))
-                .unwrap_or(caps.present_modes[0]),
-            desired_maximum_frame_latency: 2,
-            alpha_mode: caps.alpha_modes[0],
-            view_formats: vec![],
-        };
-        surface.configure(&device, &config);
-
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("blit shader"),
-            source: wgpu::ShaderSource::Wgsl(BLIT_SHADER.into()),
-        });
-
-        let bind_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("blit bind layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("blit pipeline layout"),
-            bind_group_layouts: &[Some(&bind_layout)],
-            immediate_size: 0,
-        });
-
-        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("blit pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("blit sampler"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            address_mode_w: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("blit params"),
-            contents: bytemuck::bytes_of(&Params {
-                swap_rb: u32::from(swap_rb),
-                _pad: [0; 3],
-            }),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-
-        let (upload_tex, upload_view, bind_group) =
-            create_upload(&device, &bind_layout, &sampler, &params_buf, size);
-
-        Self {
+            .expect("create vello surface");
+        // macOS: tell the CAMetalLayer to commit presents inside a
+        // CATransaction (eliminates the live-resize stretch flash —
+        // see `crate::macos`). When the flag is set, wgpu-hal-metal's
+        // present already calls `waitUntilScheduled` internally before
+        // `[drawable present]`, so we don't add our own GPU sync.
+        // No-op on other platforms / non-Metal backends.
+        #[cfg(target_os = "macos")]
+        crate::macos::configure_window_layer(&window);
+        let dev_id = surface.dev_id;
+        let device = &render_ctx.devices[dev_id].device;
+        // The on-screen painter only uses `AaConfig::Area` (see
+        // `present()` below). `AaSupport::all()` would also compile
+        // Vello's MSAA8 + MSAA16 pipelines and allocate their
+        // intermediate buffers — ~15-25 MB of permanent overhead for
+        // shaders + buffers that never run. `area_only()` is the
+        // smallest pipeline footprint Vello supports.
+        let pipeline_cache = load_pipeline_cache(device);
+        let renderer = Renderer::new(
             device,
-            queue,
+            RendererOptions {
+                use_cpu: false,
+                antialiasing_support: AaSupport::area_only(),
+                num_init_threads: std::num::NonZeroUsize::new(1),
+                pipeline_cache: pipeline_cache.clone(),
+            },
+        )
+        .expect("vello renderer");
+        Self {
+            render_ctx,
             surface,
-            config,
             size,
-            pipeline,
-            sampler,
-            bind_layout,
-            params_buf,
-            upload_tex,
-            upload_view,
-            bind_group,
-            swap_rb,
+            renderer,
+            base_color: vello::peniko::Color::from_rgba8(0xfb, 0xfb, 0xfd, 0xff),
+            pipeline_cache,
         }
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.render_ctx.devices[self.surface.dev_id].device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.render_ctx.devices[self.surface.dev_id].queue
     }
 
     pub fn resize(&mut self, w: u32, h: u32) {
-        let w = w.max(1);
-        let h = h.max(1);
-        if (w, h) == self.size {
+        if w == 0 || h == 0 {
             return;
         }
         self.size = (w, h);
-        self.config.width = w;
-        self.config.height = h;
-        self.surface.configure(&self.device, &self.config);
-        let (tex, view, bg) = create_upload(
-            &self.device,
-            &self.bind_layout,
-            &self.sampler,
-            &self.params_buf,
-            (w, h),
-        );
-        self.upload_tex = tex;
-        self.upload_view = view;
-        self.bind_group = bg;
+        self.render_ctx.resize_surface(&mut self.surface, w, h);
     }
 
-    /// Upload a CPU pixmap and present to the surface.
-    /// `pixels` must be `width * height * 4` RGBA8 (premultiplied) bytes.
-    /// Returns `Err` only on unrecoverable surface failures; transient
-    /// states (Outdated / Lost / Timeout / Occluded) are handled internally
-    /// and the frame is silently skipped.
-    pub fn present(&mut self, pixels: &[u8]) -> Result<(), &'static str> {
-        self.present_region(pixels, None)
-    }
+    /// Render `scene` to the next surface texture and present it.
+    /// `scene` is owned by the caller (the painter); the painter
+    /// rebuilds it per frame from `LayoutPass.items`.
+    pub fn present(&mut self, scene: &Scene) -> Result<(), &'static str> {
+        let device_handle = &self.render_ctx.devices[self.surface.dev_id];
+        let device = &device_handle.device;
+        let queue = &device_handle.queue;
 
-    /// Same as [`Self::present`] but uploads only the rectangular
-    /// sub-region `(x, y, w, h)` from the source `pixels` buffer to
-    /// the same coordinates in the upload texture. Used by the
-    /// damage-tracking redraw path so a hover transition pushes a
-    /// few-KB rect across PCIe instead of a full ~10MB framebuffer.
-    /// `None` uploads the whole surface.
-    pub fn present_region(
-        &mut self,
-        pixels: &[u8],
-        region: Option<(u32, u32, u32, u32)>,
-    ) -> Result<(), &'static str> {
-        let (w, h) = self.size;
-        debug_assert_eq!(pixels.len(), (w as usize) * (h as usize) * 4);
-
-        let (rx, ry, rw, rh) = match region {
-            Some((x, y, rw, rh)) => {
-                // Clamp to surface to avoid undefined behaviour on
-                // out-of-bounds writes (damage rects can extend
-                // slightly past the surface during resize / scroll).
-                let x = x.min(w.saturating_sub(1));
-                let y = y.min(h.saturating_sub(1));
-                let rw = rw.min(w - x);
-                let rh = rh.min(h - y);
-                (x, y, rw, rh)
-            }
-            None => (0, 0, w, h),
-        };
-        if rw == 0 || rh == 0 {
-            // Nothing to upload — still need to redraw the surface
-            // from the existing texture below.
-        } else {
-            // Source byte offset = (y * full_w + x) * 4. The full
-            // bytes_per_row stays as `w * 4` so wgpu keeps stepping
-            // by one full source row.
-            let offset = (ry as u64 * w as u64 + rx as u64) * 4;
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.upload_tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: rx, y: ry, z: 0 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                pixels,
-                wgpu::TexelCopyBufferLayout {
-                    offset,
-                    bytes_per_row: Some(w * 4),
-                    rows_per_image: Some(rh),
-                },
-                wgpu::Extent3d {
-                    width: rw,
-                    height: rh,
-                    depth_or_array_layers: 1,
-                },
-            );
-        }
-
-        let surface_tex = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(t)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
-            wgpu::CurrentSurfaceTexture::Outdated => {
-                self.surface.configure(&self.device, &self.config);
+        let surface_texture = match self.surface.surface.get_current_texture() {
+            Ok(t) => t,
+            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+                self.surface.surface.configure(device, &self.surface.config);
                 return Ok(());
             }
-            wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.config);
-                return Err("surface lost; reconfigured");
-            }
-            wgpu::CurrentSurfaceTexture::Timeout
-            | wgpu::CurrentSurfaceTexture::Occluded => return Ok(()),
-            wgpu::CurrentSurfaceTexture::Validation => {
-                return Err("surface validation error");
-            }
+            Err(_) => return Err("surface unavailable"),
         };
-        let view = surface_tex
+        let params = vello::RenderParams {
+            base_color: self.base_color,
+            width: self.size.0,
+            height: self.size.1,
+            antialiasing_method: AaConfig::Area,
+        };
+        // 1. Vello renders into the intermediate Rgba8Unorm texture.
+        self.renderer
+            .render_to_texture(device, queue, scene, &self.surface.target_view, &params)
+            .map_err(|_| "vello render failed")?;
+        // 2. Blit the intermediate into the real swapchain image.
+        let surface_view = surface_texture
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("blit encoder"),
-            });
-        {
-            let mut rp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("blit pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    depth_slice: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            rp.set_pipeline(&self.pipeline);
-            rp.set_bind_group(0, Some(&self.bind_group), &[]);
-            rp.draw(0..6, 0..1);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("hypen-desktop blit"),
+        });
+        self.surface.blitter.copy(
+            device,
+            &mut encoder,
+            &self.surface.target_view,
+            &surface_view,
+        );
+        queue.submit(Some(encoder.finish()));
+        // On macOS with `presentsWithTransaction = YES`, wgpu-hal-metal
+        // calls `commandBuffer.waitUntilScheduled` then `[drawable
+        // present]` inside this call — that's the synchronisation we
+        // need with AppKit's compositor. No additional GPU sync.
+        surface_texture.present();
+        // Drive wgpu's internal resource tracker. Without this, each
+        // frame's command encoder, bind groups, and Vello's intermediate
+        // compute buffers stay alive in the device's pending-work list
+        // until *something* polls — long-running sessions accumulate
+        // hundreds of MB → GB of dead-but-tracked GPU and CPU shadow
+        // memory. `PollType::Poll` returns immediately if the GPU is
+        // still busy; we don't need to wait.
+        if let Err(e) = device.poll(wgpu::PollType::Poll) {
+            log::warn!("device poll failed: {e:?}");
         }
-        self.queue.submit(Some(encoder.finish()));
-        surface_tex.present();
         Ok(())
     }
 }
 
-fn create_upload(
-    device: &wgpu::Device,
-    layout: &wgpu::BindGroupLayout,
-    sampler: &wgpu::Sampler,
-    params_buf: &wgpu::Buffer,
-    (w, h): (u32, u32),
-) -> (wgpu::Texture, wgpu::TextureView, wgpu::BindGroup) {
-    let tex = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("hypen-desktop upload"),
-        size: wgpu::Extent3d {
-            width: w,
-            height: h,
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        // sRGB-encoded RGBA. Pixmap data from `tiny-skia` /
-        // `image::to_rgba8()` is already sRGB-encoded (the standard
-        // for image files and CSS colours), so the upload texture
-        // must declare sRGB too. With `Rgba8Unorm` (linear), wgpu
-        // would treat sRGB byte values as if they were linear and
-        // re-encode on write to the sRGB surface — washing out
-        // mid-tones and producing the colour-cast that made bitmap
-        // avatars look bluish next to correctly-rendered UI chrome.
-        format: wgpu::TextureFormat::Rgba8UnormSrgb,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
-    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("hypen-desktop blit bind group"),
-        layout,
-        entries: &[
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: params_buf.as_entire_binding(),
-            },
-        ],
-    });
-    (tex, view, bind_group)
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        if let Some(cache) = self.pipeline_cache.take() {
+            save_pipeline_cache(&cache);
+        }
+    }
+}
+
+/// Cache file the wgpu pipeline cache is serialised to and loaded from
+/// on the next launch. wgpu's `fallback: true` flag means a stale
+/// file (driver update, wgpu version bump, GPU swap) downgrades
+/// gracefully to "start empty" instead of erroring — we don't need
+/// version stamps or invalidation logic of our own. Per-app path
+/// keeps multiple Hypen-based binaries from stomping on each other.
+const PIPELINE_CACHE_FILE: &str = "vello-pipeline.bin";
+
+fn pipeline_cache_path() -> Option<PathBuf> {
+    let mut path = dirs::cache_dir()?;
+    path.push("hypen");
+    path.push(PIPELINE_CACHE_FILE);
+    Some(path)
+}
+
+fn load_pipeline_cache(device: &wgpu::Device) -> Option<wgpu::PipelineCache> {
+    // `create_pipeline_cache` is *fatally* unsafe when the device
+    // wasn't created with the `PIPELINE_CACHE` feature — wgpu hits a
+    // validation error and panics out through winit's app delegate.
+    // The `fallback: true` flag on the descriptor only handles
+    // invalid *data*; a missing feature is a hard panic. So gate on
+    // the feature being present *before* we ever touch the API.
+    //
+    // Today this is a no-op everywhere: Vello's `RenderContext`
+    // doesn't request `PIPELINE_CACHE` from the adapter on any
+    // backend, so the feature is never present at the device level.
+    // The cache file machinery is wired and waiting — the day we
+    // bypass `RenderContext` to request the feature on Vulkan / D3D12
+    // (Metal doesn't have it; CoreGraphics caches at the driver
+    // level), launches will start populating the file.
+    if !device
+        .features()
+        .contains(wgpu::Features::PIPELINE_CACHE)
+    {
+        log::debug!(
+            "pipeline cache: device lacks PIPELINE_CACHE feature (backend doesn't \
+             support it, or feature not requested at device creation) — skipping"
+        );
+        return None;
+    }
+    let path = pipeline_cache_path()?;
+    let data = std::fs::read(&path).ok();
+    // SAFETY: the unsafe-ness here is wgpu's: it can't fully validate
+    // that an opaque blob of driver bytecode is safe to feed back into
+    // a driver. Risks if the bytes were tampered with externally are
+    // on the caller. We feed bytes from a file we wrote ourselves
+    // last session, and `fallback: true` makes wgpu downgrade to an
+    // empty cache when the *data* fails validation (different driver
+    // / GPU / wgpu version) so the worst case is "as if the cache
+    // wasn't there" — never UB. The feature-availability check above
+    // covers the panic path.
+    let cache = unsafe {
+        device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+            label: Some("hypen-vello-pipeline-cache"),
+            data: data.as_deref(),
+            fallback: true,
+        })
+    };
+    Some(cache)
+}
+
+fn save_pipeline_cache(cache: &wgpu::PipelineCache) {
+    let Some(path) = pipeline_cache_path() else {
+        return;
+    };
+    // Backends without pipeline-cache support (Metal, WebGPU) return
+    // `None` here — just skip writing rather than overwrite a real
+    // cache from another backend that ran on the same machine.
+    let Some(bytes) = cache.get_data() else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("pipeline cache: create dir failed: {e}");
+            return;
+        }
+    }
+    match std::fs::write(&path, &bytes) {
+        Ok(()) => log::debug!(
+            "pipeline cache: saved {} bytes to {}",
+            bytes.len(),
+            path.display()
+        ),
+        Err(e) => log::warn!("pipeline cache: write failed: {e}"),
+    }
 }

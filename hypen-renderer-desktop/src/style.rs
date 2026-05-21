@@ -510,10 +510,9 @@ pub fn border_at(node: &Node, viewport_w: f32) -> Border {
 }
 
 /// True if the user supplied any border-* prop on this node — even
-/// if it resolved to `width: 0` (e.g. `.tw("border-0")`). Lets the
-/// layout's default-border fallback distinguish "user opted out" from
-/// "user didn't say anything", so `border-0` actually clears the
-/// default Button stroke instead of being shadowed by it.
+/// if it resolved to `width: 0` (e.g. `.tw("border-0")`). Used by
+/// Input's default frame logic to distinguish "user opted out" from
+/// "user didn't say anything".
 pub fn has_explicit_border(node: &Node) -> bool {
     const KEYS: &[&str] = &[
         "border",
@@ -576,6 +575,45 @@ pub(crate) fn parse_percent(s: &str) -> Option<f32> {
     num.trim().parse::<f32>().ok().map(|v| v * 0.01)
 }
 
+/// Parse a CSS-style aspect-ratio value: `"1 / 1"`, `"16 / 9"`, or a
+/// bare `"1.5"`. Returns the numeric ratio (`width / height`). Tailwind
+/// `aspect-square` expands to `aspect-ratio: "1 / 1"`, which
+/// `parse_length` can't handle (the slash trips it up) — so without
+/// this helper every `aspect-square` Image silently dropped its
+/// aspect-ratio and fell back to the default 60px square.
+pub fn parse_aspect_ratio(s: &str) -> Option<f32> {
+    let s = s.trim();
+    if let Some((num, den)) = s.split_once('/') {
+        let num = num.trim().parse::<f32>().ok()?;
+        let den = den.trim().parse::<f32>().ok()?;
+        if den > 0.0 {
+            return Some(num / den);
+        }
+        return None;
+    }
+    s.parse::<f32>().ok()
+}
+
+/// Read an aspect-ratio prop the same way `prop_f32_at` reads other
+/// numerics, but with the CSS slash form (`"1 / 1"`) accepted on
+/// strings. Falls back to the bare-number reader so explicit
+/// `.aspectRatio(1.5)` still works.
+pub fn prop_aspect_ratio_at(
+    node: &Node,
+    name: &str,
+    viewport_w: f32,
+) -> Option<f32> {
+    // String form (the kebab path that tw emits) — try every key
+    // variant `prop_f32_at` would check, but route through
+    // `parse_aspect_ratio` so `"X / Y"` resolves.
+    if let Some(s) = prop_str_at(node, name, viewport_w) {
+        if let Some(v) = parse_aspect_ratio(s) {
+            return Some(v);
+        }
+    }
+    prop_f32_at(node, name, viewport_w)
+}
+
 /// Read `name` (with viewport-aware tw breakpoint resolution) as a
 /// `Dim`. Strings carrying `%` resolve to `Dim::Percent`; everything
 /// else (numbers, `"16px"`, `"1rem"`) resolves to `Dim::Length`.
@@ -595,6 +633,19 @@ pub fn prop_dim_at(node: &Node, name: &str, viewport_w: f32) -> Option<Dim> {
     if let Some(s) = node.props.get(&dotted).and_then(|v| v.as_str()) {
         if let Some(pct) = parse_percent(s) {
             return Some(Dim::Percent(pct));
+        }
+    }
+    // Kebab-case fallback: tw("w-1/2") emits `width: "50%"` and the
+    // engine flattens that under the kebab key for CSS-style props.
+    // Without this branch, percent dimensions from Tailwind silently
+    // fell through to prop_f32_at → parse_length, which rejects `%`,
+    // and the width/height was dropped.
+    let kebab_name = camel_to_kebab(name);
+    if kebab_name != name {
+        if let Some(s) = node.props.get(&kebab_name).and_then(|v| v.as_str()) {
+            if let Some(pct) = parse_percent(s) {
+                return Some(Dim::Percent(pct));
+            }
         }
     }
     prop_f32_at(node, name, viewport_w).map(Dim::Length)

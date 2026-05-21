@@ -122,7 +122,7 @@ fun getUserPosts(conn: Connection, userId: String): List<PostThumbnail> {
 
 fun getExplorePosts(conn: Connection): List<PostThumbnail> {
     val rs = conn.prepareStatement(
-        "SELECT id, image_url FROM posts ORDER BY likes_count DESC"
+        "SELECT p.id, p.image_url, p.caption, u.username FROM posts p JOIN users u ON p.user_id = u.id ORDER BY p.likes_count DESC"
     ).executeQuery()
 
     val posts = mutableListOf<PostThumbnail>()
@@ -130,6 +130,8 @@ fun getExplorePosts(conn: Connection): List<PostThumbnail> {
         posts.add(PostThumbnail(
             id = rs.getString("id"),
             imageUrl = rs.getString("image_url"),
+            username = rs.getString("username") ?: "",
+            caption = rs.getString("caption") ?: "",
         ))
     }
     return posts

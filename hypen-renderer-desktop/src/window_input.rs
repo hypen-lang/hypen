@@ -13,25 +13,22 @@ impl App {
         let layout = self.layout.as_ref()?;
         let item = layout.item_by_id(&id)?;
         match &item.kind {
-            ItemKind::Input { value, bind_path, .. } => bind_path
-                .as_ref()
-                .map(|p| (id, value.clone(), p.clone())),
+            ItemKind::Input {
+                value, bind_path, ..
+            } => bind_path.as_ref().map(|p| (id, value.clone(), p.clone())),
             _ => None,
         }
     }
 
     /// Look up an Input's `(value, font_size, rect)` by node id. Used
     /// by mouse-driven cursor positioning + drag-select.
-    pub(super) fn lookup_input(
-        &self,
-        id: &str,
-    ) -> Option<(String, f32, crate::layout::Rect)> {
+    pub(super) fn lookup_input(&self, id: &str) -> Option<(String, f32, crate::layout::Rect)> {
         let layout = self.layout.as_ref()?;
         let item = layout.item_by_id(id)?;
         match &item.kind {
-            ItemKind::Input { value, font_size, .. } => {
-                Some((value.clone(), *font_size, item.rect))
-            }
+            ItemKind::Input {
+                value, font_size, ..
+            } => Some((value.clone(), *font_size, item.rect)),
             _ => None,
         }
     }
@@ -65,10 +62,59 @@ impl App {
         }
         self.input_selections.insert(id.clone(), new_sel);
         if new_value != value {
+            // Optimistic local update: stamp the Input's `value` prop
+            // directly into the Tree before dispatching to the engine.
+            // The engine will eventually echo back a SetProp patch with
+            // the same value (a full state → reconcile → patch round-
+            // trip), but that's slow over WebSocket — long enough that
+            // every keystroke would visibly lag the displayed text.
+            // Synthesise the same `SetProp` patch locally and apply it
+            // so the next layout pass picks up the new value. The
+            // engine's echo is then a no-op (same value already in
+            // place), which is the same pattern every web framework
+            // uses for controlled inputs.
+            let patch = hypen_engine::Patch::SetProp {
+                id: id.clone(),
+                name: "value".to_string(),
+                value: serde_json::Value::String(new_value.clone()),
+            };
+            self.tree.apply(&patch);
+            self.tree_generation = self.tree_generation.wrapping_add(1);
+            self.layout = None;
+            // Same reason as `flush_patches`: the focused Input's
+            // cached scene fragment now has the wrong text and needs
+            // re-encoding. Bulk-clear; the next paint rebuilds only
+            // the visible subtrees.
+            self.painter.invalidate_subtree_cache();
+            self.damage.add_full();
+            if let Some(w) = self.window.as_ref() {
+                w.request_redraw();
+            }
             self.module.dispatch_action(
                 "__hypen_bind",
                 Some(json!({ "path": bind_path, "value": new_value })),
             );
+            // Also forward an `onInput` action if the focused Input has one
+            // wired via `.onInput(@actions.foo)`. Web renderers attach a
+            // separate `input` listener for this; the desktop path edits the
+            // value directly, so we dispatch the action manually with the
+            // same payload shape (`value` / `input`) other renderers use.
+            if let Some(node) = self.tree.get(&id) {
+                if let Some((action, mut payload_args)) =
+                    crate::layout::resolve_named_event_action(node, "onInput")
+                {
+                    let payload_obj = payload_args.as_object_mut();
+                    let mut obj = match payload_obj {
+                        Some(o) => std::mem::take(o),
+                        None => serde_json::Map::new(),
+                    };
+                    obj.insert("type".to_string(), json!("input"));
+                    obj.insert("value".to_string(), json!(new_value.clone()));
+                    obj.insert("input".to_string(), json!(new_value.clone()));
+                    self.module
+                        .dispatch_action(&action, Some(serde_json::Value::Object(obj)));
+                }
+            }
         }
         true
     }
@@ -150,9 +196,7 @@ impl App {
             // Insertion goes through the same primitive typing uses,
             // so a non-empty selection is replaced and the caret
             // advances to the end of the inserted text.
-            self.edit_focused_input(|val, sel| {
-                Self::replace_selection_with(val, sel, &text)
-            });
+            self.edit_focused_input(|val, sel| Self::replace_selection_with(val, sel, &text));
         }
     }
 
@@ -162,7 +206,9 @@ impl App {
     /// caret instead of in the corner.
     pub(super) fn sync_ime_to_focus(&mut self) {
         let want_ime = self.focused_input().is_some();
-        let Some(window) = self.window.as_ref() else { return };
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
         if want_ime != self.ime_active {
             window.set_ime_allowed(want_ime);
             self.ime_active = want_ime;
@@ -198,15 +244,17 @@ impl App {
     }
 
     pub(super) fn dispatch_focused(&mut self) -> bool {
-        let action = (|| -> Option<String> {
+        let resolved = (|| -> Option<(String, Option<serde_json::Value>)> {
             let id = self.focused.as_deref()?;
             let layout = self.layout.as_ref()?;
             let item = layout.item_by_id(id)?;
-            item.action.clone()
+            item.action
+                .clone()
+                .map(|a| (a, item.action_payload.clone()))
         })();
-        if let Some(action) = action {
-            log::debug!("dispatch (kbd): {action}");
-            self.module.dispatch_action(&action, None);
+        if let Some((action, payload)) = resolved {
+            log::debug!("dispatch (kbd): {action} payload={payload:?}");
+            self.module.dispatch_action(&action, payload);
             true
         } else {
             false
@@ -298,8 +346,7 @@ impl App {
             Key::Named(NamedKey::ArrowLeft) if editing_focused => {
                 // Word-step modifier: Ctrl on Win/Linux, Option (Alt)
                 // on macOS — both common conventions, both supported.
-                let word_step =
-                    self.modifiers.control_key() || self.modifiers.alt_key();
+                let word_step = self.modifiers.control_key() || self.modifiers.alt_key();
                 self.edit_focused_input(move |val, sel| {
                     let new_head = if word_step {
                         crate::text_nav::word_start(val, sel.head)
@@ -313,8 +360,7 @@ impl App {
                 })
             }
             Key::Named(NamedKey::ArrowRight) if editing_focused => {
-                let word_step =
-                    self.modifiers.control_key() || self.modifiers.alt_key();
+                let word_step = self.modifiers.control_key() || self.modifiers.alt_key();
                 self.edit_focused_input(move |val, sel| {
                     let new_head = if word_step {
                         crate::text_nav::word_end(val, sel.head)
@@ -340,16 +386,13 @@ impl App {
                     (val.to_string(), Selection::range(anchor, len))
                 })
             }
-            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space)
-                if !editing_focused =>
-            {
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space) if !editing_focused => {
                 self.dispatch_focused()
             }
             _ => {
                 if editing_focused {
                     if let Some(text) = ev.text.as_deref() {
-                        let clean: String =
-                            text.chars().filter(|c| !c.is_control()).collect();
+                        let clean: String = text.chars().filter(|c| !c.is_control()).collect();
                         if !clean.is_empty() {
                             return self.edit_focused_input(|val, sel| {
                                 Self::replace_selection_with(val, sel, &clean)
@@ -377,19 +420,34 @@ impl App {
         }
         if let Some(layout) = self.layout.as_ref() {
             if let Some(item) = layout.hit(px, py) {
+                // A click only fires when the press AND release land on
+                // the same actionable. `unwrap_or(false)` rejects the
+                // case where nothing was pressed (e.g. press landed on
+                // an inert area, but layout reflowed an actionable
+                // under the cursor before release) — without this,
+                // mid-frame patches arriving via `AppEvent::Wake` could
+                // dispatch actions the user never aimed at.
                 let same_target = pressed_id
                     .as_deref()
                     .map(|id| id == item.node_id)
-                    .unwrap_or(true);
+                    .unwrap_or(false);
                 if same_target {
                     if let Some(action) = item.action.clone() {
-                        log::debug!("dispatch action: {action}");
-                        self.module.dispatch_action(&action, None);
+                        let payload = item.action_payload.clone();
+                        log::debug!("dispatch action: {action} payload={payload:?}");
+                        self.module.dispatch_action(&action, payload);
                     }
                 }
             }
         }
         self.dragging_input = None;
-        self.request_redraw_full();
+        // Press release: the only pixels that have changed are the
+        // pressed button's rect (tint cleared) and possibly the
+        // dispatched action's downstream effect (which arrives via
+        // patches and does its own damage). Don't blow up to full
+        // damage just because a click happened.
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
     }
 }

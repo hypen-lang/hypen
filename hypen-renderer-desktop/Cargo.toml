@@ -10,6 +10,15 @@ keywords = ["hypen", "ui", "desktop", "renderer", "native"]
 categories = ["gui", "rendering"]
 readme = "README.md"
 
+[features]
+default = []
+# Enable to re-export `mimalloc::MiMalloc` from `hypen_renderer_desktop`.
+# Wire it in your binary as:
+#   #[global_allocator]
+#   static GLOBAL: hypen_renderer_desktop::MiMalloc = hypen_renderer_desktop::MiMalloc;
+# Typical RSS reduction: 20-40 MB versus system malloc.
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
 hypen-engine = { version = "0.4.949", path = "../hypen-engine-rs" }
 hypen-parser = { version = "0.4.949", path = "../parser" }
@@ -18,10 +27,17 @@ hypen-server = { version = "0.4.949", path = "../hypen-sdk-rs" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Phase 1: windowing + GPU surface (compositing only) + CPU raster + text
+# Phase 1: windowing + GPU surface + GPU raster + text
 winit = "0.30.13"
-wgpu = "29.0.1"
+# Pinned to 28 to match Vello 0.8's pinned wgpu. When Vello 0.9+
+# (which targets wgpu 29 / 30) lands as stable, bump both.
+wgpu = "28"
+# Kept for the rounded-rect / icon mask + the image render cache's
+# off-screen tiles. The on-screen scene goes through Vello.
 tiny-skia = "0.12.0"
+# Vello 0.8 — GPU compute-shader 2D rasteriser. Replaces the CPU
+# blit pipeline for the on-screen surface.
+vello = "0.8"
 cosmic-text = "0.19.0"
 taffy = "0.10.1"
 
@@ -64,6 +80,40 @@ bytemuck = { version = "1.16", features = ["derive"] }
 
 # Insertion-ordered map for the image render-tile cache (FIFO eviction).
 indexmap = "2.0"
+
+# Cross-platform cache directory for the on-disk wgpu pipeline cache
+# (~/Library/Caches on macOS, $XDG_CACHE_HOME on Linux, %LOCALAPPDATA%
+# on Windows). Tiny crate, stable, no transitive heavyweights.
+dirs = "5"
+
+# Direct dep so we can build a slim fontdb without going through
+# cosmic-text's default `FontSystem::new()` (which indexes every font
+# discoverable on the host). Same version cosmic-text 0.19 pulls in.
+fontdb = "0.23"
+
+# Resolve the user's locale so the slim font db matches what cosmic-
+# text would have set internally. Already a transitive dep of cosmic-
+# text 0.19; pinned here for direct use.
+sys-locale = "0.3"
+
+# Faster heap allocator opt-in. Library can't set the global allocator
+# itself (only the final binary can); we re-export the type behind the
+# `mimalloc` feature so downstream binaries can wire it with a single
+# `#[global_allocator]` line. Off by default — apps that don't enable
+# it pay zero binary cost.
+mimalloc = { version = "0.1", optional = true, default-features = false }
+
+# macOS-only: reach into the CAMetalLayer wgpu/raw-window-metal create
+# under the NSView so we can set `presentsWithTransaction = YES`. That
+# property is what eliminates the live-resize "flash with diff sizing"
+# — `[CAMetalDrawable present]` then synchronises with the next
+# CATransaction commit instead of firing-and-forgetting, so the OS
+# never composites the previous swapchain image stretched to the new
+# window size. wgpu-hal-metal reads this flag but never sets it.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-foundation = { version = "0.2", features = ["NSString", "NSArray"] }
+objc2-quartz-core = { version = "0.2", features = ["all"] }
 
 [dev-dependencies]
 env_logger = "0.11"
