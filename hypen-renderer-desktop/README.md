@@ -2,7 +2,7 @@
 
 Native desktop renderer for Hypen.
 
-## Status: Phase 4 (text wrapping + keyboard nav + focus ring + tests)
+## Status: Phase 8 (page scrolling + overflow indicator)
 
 The renderer drives a real `hypen-server::ModuleInstance<S>` through the
 standard SDK lifecycle (`instantiate` → `on_patches` → `mount` → click →
@@ -35,7 +35,52 @@ without touching the rest of the crate.
 - Patches flushed every frame; `about_to_wait` requests a repaint whenever
   the SDK pushes patches between events (e.g. async actions).
 
-## What works (additions in Phase 4)
+## What works (additions in Phase 8)
+
+- **Page scrolling.** Mouse wheel (line + pixel deltas — trackpads
+  work) scrolls the whole page vertically.
+- `LayoutPass::compute_with_scroll(.., scroll_y)` subtracts the offset
+  from every emitted item; hit-test, paint, and AccessKit see a single
+  consistent set of rects without needing extra translation logic.
+- Scroll offset is clamped against the live content size (auto-corrects
+  when the page shrinks under you due to a state change).
+- Thin gray indicator bar on the right edge tracks position and is
+  proportional to the visible fraction. Hidden when content fits.
+
+## What works (additions in Phase 7)
+
+- **`Input` element** with two-way state binding via `.bind(@state.x)`:
+  - Click an Input to focus it; Tab walks Inputs alongside Buttons.
+  - Printable characters insert at the caret (cross-layout via
+    `KeyEvent.text` so dead keys + alt-graph layouts work).
+  - Backspace / Delete remove around the caret; ArrowLeft / ArrowRight
+    move it; Home / End jump; Escape blurs.
+  - Each mutation dispatches `__hypen_bind { path, value }` — the SDK's
+    reserved action — which writes back into module state. The engine
+    re-renders, the Input's `value` prop updates via `SetProp`, and the
+    layout shows the new text. Round-trip is synchronous.
+  - Caret is a 1.5-px accent-blue bar; placeholder paints muted gray.
+  - UTF-8-safe cursor stepping (multi-byte codepoints + emoji walk as
+    units, never split mid-codepoint).
+  - Inputs announce as `Role::TextInput` to AccessKit with their value
+    + placeholder as the accessible label.
+
+## What works (additions in Phase 6)
+
+- **AccessKit integration** — full accessibility tree published via
+  `accesskit_winit`. NVDA / VoiceOver / Orca read every Text, Button,
+  and Input; Buttons can be triggered through `Action::Click`, which
+  routes through the same `instance.dispatch_action(...)` path mouse
+  and keyboard use.
+
+## What works (additions in Phase 5)
+
+- **Borders + margins** as full applicators (`.border`, `.borderWidth`,
+  `.borderColor`, `.borderRadius`, `.cornerRadius` alias; `.margin` +
+  all the directional variants padding has).
+- Background + border apply to every element type, not just `Button`.
+
+## What works (kept from earlier phases)
 
 - **Text wrapping** — cosmic-text reshapes against the rect width Taffy
   hands it; long Text inside a narrow Column wraps and the Column grows
@@ -48,7 +93,7 @@ without touching the rest of the crate.
 
 ## Tests
 
-53 unit tests in the renderer + 8 SDK integration tests. Run them with:
+88 unit tests in the renderer + 8 SDK integration tests. Run them with:
 
 ```bash
 cargo test -p hypen-renderer-desktop --lib
@@ -63,10 +108,17 @@ to `LayoutPass::hit` / `focus_next` / `focus_prev`, which are covered.
 
 ## What does **not** work yet
 
-- Borders, margins, gradients, transforms, `.tw` classes — Phase 5.
-- IME / text input — Phase 5.
-- AccessKit (screen readers, voice control) — Phase 5.
-- Custom titlebar + `.hypen` file loader + bundling story — Phase 6.
+- IME composition (CJK, dead keys with combining marks).
+- `Textarea`, `Checkbox`, `Switch`, `Select` (only `Input` so far).
+- Selection (mouse drag, Shift+arrows) + clipboard (Ctrl+C / V / X) +
+  word-wise navigation (Ctrl+arrows).
+- Per-Container scroll (only the whole page scrolls today). Inner
+  scrollables — a list inside a sidebar — land later when we expose
+  Taffy's overflow style.
+- Image / Icon elements; gradients; transforms; `.tw` tailwind classes.
+- AccessKit focus tracking inside the window (kbd Tab focus is
+  rendered locally; we don't yet sync it to AccessKit's `focus` field).
+- Custom titlebar + `.hypen` file loader + bundling story.
 
 ## Run the demos
 

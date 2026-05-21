@@ -13,7 +13,7 @@
 //! builds a stateless module behind the scenes.
 
 use crate::module::HypenModule;
-use crate::window::{App as WindowApp, PatchQueue};
+use crate::window::{App as WindowApp, AppEvent, PatchQueue};
 use hypen_server::app::HypenApp;
 use hypen_server::module::ModuleBuilder;
 use std::sync::Arc;
@@ -99,9 +99,20 @@ impl DesktopApp {
         module.on_patches(Arc::new(move |patches| q_for_cb.push(patches)));
         module.mount();
 
-        let event_loop = EventLoop::new().expect("event loop");
+        // AccessKit pipes events back to us through the winit user
+        // event channel, so we need a typed event loop.
+        let event_loop = EventLoop::<AppEvent>::with_user_event()
+            .build()
+            .expect("event loop");
         event_loop.set_control_flow(ControlFlow::Wait);
-        let mut app = WindowApp::new(self.title.clone(), self.size, queue, Arc::clone(&module));
+        let proxy = event_loop.create_proxy();
+        let mut app = WindowApp::new(
+            self.title.clone(),
+            self.size,
+            queue,
+            Arc::clone(&module),
+            proxy,
+        );
         event_loop.run_app(&mut app).expect("event loop run");
     }
 }

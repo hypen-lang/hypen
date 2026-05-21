@@ -1,7 +1,8 @@
-//! Phase 3 demo: clicks → action → state → repaint, with style applicators.
+//! Counter demo (Phase 3 → Phase 5 polish).
 //!
-//! Exercises: `.padding`, `.gap`, `.fontSize`, `.color`, `.backgroundColor`
-//! and the renderer's hover / press tints on `Button`.
+//! Exercises: `.padding`, `.margin`, `.gap`, `.fontSize`, `.color`,
+//! `.backgroundColor`, `.borderWidth`, `.borderColor`, `.borderRadius`
+//! and the renderer's hover / press / focus states on `Button`.
 //!
 //! ```bash
 //! cargo run -p hypen-renderer-desktop --example counter
@@ -29,26 +30,38 @@ fn main() {
                 Text("Hypen Desktop")
                     .fontSize(28)
                     .color("#1a1a1f")
-                Text("Click + or - to change the count")
+                Text("Click +/- or use Tab and Enter / Space to change the count")
                     .fontSize(14)
                     .color("gray")
-                Text("Count: @{state.count}")
-                    .fontSize(48)
-                    .color("#3554d1")
+                Container {
+                    Text("Count: @{state.count}")
+                        .fontSize(48)
+                        .color("#3554d1")
+                }
+                    .backgroundColor("white")
+                    .borderWidth(1)
+                    .borderColor("#dde3f0")
+                    .borderRadius(12)
+                    .padding(20)
+                    .marginTop(8)
                 Row {
                     Button("@actions.decrement")
                         .backgroundColor("#fde7e7")
+                        .borderWidth(2)
                         .borderColor("#c0392b")
+                        .borderRadius(10)
                         .padding(14) {
                             Text("-").fontSize(22).color("#c0392b")
                         }
                     Button("@actions.increment")
                         .backgroundColor("#e7f6ec")
+                        .borderWidth(2)
                         .borderColor("#2e7d32")
+                        .borderRadius(10)
                         .padding(14) {
                             Text("+").fontSize(22).color("#2e7d32")
                         }
-                }.gap(12)
+                }.gap(12).marginTop(8)
             }.gap(16)
         "##)
         .on_action::<()>("increment", |state, _payload, _ctx| {

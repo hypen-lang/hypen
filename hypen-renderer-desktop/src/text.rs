@@ -52,6 +52,39 @@ impl TextEngine {
         (max_w.ceil(), total_h.ceil())
     }
 
+    /// Return the byte offset within `text` whose leading-substring
+    /// width is closest to `target_x` (physical pixels). Used by the
+    /// window's click-to-position-cursor path on Inputs.
+    ///
+    /// Walks every char-boundary plus end-of-string and picks the
+    /// minimum `|measure(prefix).w - target_x|`. cosmic-text caches
+    /// glyphs internally so per-prefix measure is O(n) amortised —
+    /// fine for sub-second Input strings, worth tightening when
+    /// `Textarea` (multi-line) editing lands.
+    pub fn byte_offset_at_x(&mut self, text: &str, target_x: f32, font_size: f32) -> usize {
+        if text.is_empty() {
+            return 0;
+        }
+        let mut best = 0usize;
+        let mut best_dx = target_x.abs();
+        for (i, _) in text.char_indices() {
+            if i == 0 {
+                continue;
+            }
+            let (w, _) = self.measure(&text[..i], font_size, None);
+            let dx = (w - target_x).abs();
+            if dx < best_dx {
+                best = i;
+                best_dx = dx;
+            }
+        }
+        let (full_w, _) = self.measure(text, font_size, None);
+        if (full_w - target_x).abs() < best_dx {
+            best = text.len();
+        }
+        best
+    }
+
     /// Lay out `text` and rasterise it into `pixmap` in black at `(x, y)`.
     /// Convenience over [`Self::draw_text_colored`] for callers that don't
     /// need a custom colour.
@@ -81,6 +114,14 @@ impl TextEngine {
         color: Rgba,
         wrap_width: Option<f32>,
     ) {
+        // cosmic-text's swash glyph path overwrites the source colour's
+        // alpha byte with the per-pixel coverage byte, so the inner
+        // `if a == 0` guard never sees a zero source. Short-circuit
+        // here so a fully-transparent draw is a true no-op — without
+        // this, drawing in `Rgba::TRANSPARENT` still mutates pixels.
+        if color.3 == 0 {
+            return;
+        }
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new().family(Family::SansSerif);
@@ -154,6 +195,8 @@ impl Default for TextEngine {
 #[cfg(test)]
 mod tests {
     use super::TextEngine;
+    use crate::style::Rgba;
+    use tiny_skia::Pixmap;
 
     #[test]
     fn measure_unwrapped_returns_single_line_height() {
@@ -178,6 +221,144 @@ mod tests {
         assert!(
             w_wrapped <= 80.0 + 1.0,
             "wrapped width ({w_wrapped}) should fit within ~80px",
+        );
+    }
+
+    #[test]
+    fn measure_empty_string_has_minimum_height() {
+        let mut t = TextEngine::new();
+        let (w, h) = t.measure("", 18.0, None);
+        assert_eq!(w, 0.0, "empty string should have zero width, got {w}");
+        // Empty text still produces a non-degenerate line so layout doesn't
+        // collapse Inputs / wrap-targets to zero height. cosmic-text reports
+        // a smaller-than-font-size descender slice for the empty buffer, so
+        // we just require the height to be at least the font-size itself
+        // (≥ 18px in this case) — far above zero, conservative against
+        // future metric tweaks.
+        assert!(
+            h >= 18.0,
+            "empty string height ({h}) should be at least font_size (18.0)",
+        );
+    }
+
+    #[test]
+    fn measure_single_char() {
+        let mut t = TextEngine::new();
+        let (w, h) = t.measure("x", 18.0, None);
+        assert!(w > 0.0, "single char should have positive width, got {w}");
+        // Still single-line — generously bound at 2x font-size.
+        assert!(
+            h <= 18.0 * 2.6,
+            "single-char height ({h}) should not exceed 2x font-size",
+        );
+    }
+
+    #[test]
+    fn measure_with_newlines_grows_height() {
+        let mut t = TextEngine::new();
+        let (_w_one, h_one) = t.measure("line1", 18.0, None);
+        let (_w_two, h_two) = t.measure("line1\nline2", 18.0, None);
+        // Two lines should be roughly twice the height of one. Allow
+        // generous slop for ascender/descender adjustments.
+        assert!(
+            h_two > h_one * 1.6,
+            "two-line height ({h_two}) should be ~2x one-line ({h_one})",
+        );
+        assert!(
+            h_two < h_one * 2.6,
+            "two-line height ({h_two}) should not exceed ~2.5x one-line ({h_one})",
+        );
+    }
+
+    #[test]
+    fn measure_larger_font_grows_proportionally() {
+        let mut t = TextEngine::new();
+        let s = "Hello world";
+        let (w_small, h_small) = t.measure(s, 18.0, None);
+        let (w_big, h_big) = t.measure(s, 36.0, None);
+        // Scaling 18 → 36 should roughly double both axes. Fonts aren't
+        // perfectly linear, so allow 30% tolerance.
+        let w_ratio = w_big / w_small;
+        let h_ratio = h_big / h_small;
+        assert!(
+            (1.4..=2.6).contains(&w_ratio),
+            "width should ~2x with font size; got ratio {w_ratio} ({w_small} → {w_big})",
+        );
+        assert!(
+            (1.4..=2.6).contains(&h_ratio),
+            "height should ~2x with font size; got ratio {h_ratio} ({h_small} → {h_big})",
+        );
+    }
+
+    /// Helper: scan a window of the pixmap looking for any pixel that is
+    /// detectably darker (any channel < 250) than the white background.
+    fn has_dark_pixel(pixmap: &Pixmap, x0: u32, y0: u32, w: u32, h: u32) -> bool {
+        for py in y0..(y0 + h).min(pixmap.height()) {
+            for px in x0..(x0 + w).min(pixmap.width()) {
+                if let Some(p) = pixmap.pixel(px, py) {
+                    if p.red() < 250 || p.green() < 250 || p.blue() < 250 {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn draw_text_into_pixmap_writes_pixels() {
+        let mut t = TextEngine::new();
+        let mut pixmap = Pixmap::new(120, 40).expect("pixmap alloc");
+        // Fill white so any glyph blends visibly darker than background.
+        pixmap.fill(tiny_skia::Color::from_rgba8(0xff, 0xff, 0xff, 0xff));
+
+        // Render in pure black.
+        t.draw_text_colored(&mut pixmap, "hi", 4.0, 4.0, 18.0, Rgba::BLACK, None);
+
+        // Search the rectangle the glyphs should occupy. Use a generous
+        // window since exact metrics depend on the loaded sans-serif.
+        assert!(
+            has_dark_pixel(&pixmap, 0, 0, 120, 40),
+            "expected at least one non-white pixel after drawing 'hi'",
+        );
+    }
+
+    #[test]
+    fn draw_text_colored_respects_color_alpha() {
+        // Regression: cosmic-text's swash glyph path used to replace
+        // the source colour's alpha with the per-pixel coverage byte,
+        // so drawing in `Rgba::TRANSPARENT` still mutated the pixmap.
+        // We now short-circuit at the source — a transparent draw is
+        // a true no-op (byte-identical pre/post). Opaque renders
+        // continue to mutate as expected.
+        let mut t = TextEngine::new();
+
+        let mut red = Pixmap::new(120, 40).expect("red alloc");
+        red.fill(tiny_skia::Color::from_rgba8(0xff, 0xff, 0xff, 0xff));
+        let red_before = red.data().to_vec();
+        t.draw_text_colored(&mut red, "hi", 4.0, 4.0, 18.0, Rgba(0xff, 0, 0, 0xff), None);
+        assert_ne!(
+            red.data(),
+            red_before.as_slice(),
+            "opaque-red render should differ from the pre-render snapshot",
+        );
+
+        let mut transparent = Pixmap::new(120, 40).expect("transparent alloc");
+        transparent.fill(tiny_skia::Color::from_rgba8(0xff, 0xff, 0xff, 0xff));
+        let before = transparent.data().to_vec();
+        t.draw_text_colored(
+            &mut transparent,
+            "hi",
+            4.0,
+            4.0,
+            18.0,
+            Rgba::TRANSPARENT,
+            None,
+        );
+        assert_eq!(
+            transparent.data(),
+            before.as_slice(),
+            "transparent draw must leave the pixmap byte-identical",
         );
     }
 }

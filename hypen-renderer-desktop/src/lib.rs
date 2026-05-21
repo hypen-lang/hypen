@@ -21,6 +21,7 @@
 //!     .run();
 //! ```
 
+pub mod accessibility;
 pub mod app;
 pub mod gpu;
 pub mod layout;

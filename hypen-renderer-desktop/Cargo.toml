@@ -25,6 +25,13 @@ tiny-skia = "0.12.0"
 cosmic-text = "0.19.0"
 taffy = "0.10.1"
 
+# Phase 6: cross-platform accessibility (NVDA / VoiceOver / Orca).
+accesskit = "0.24.0"
+accesskit_winit = "0.32.2"
+
+# Phase 9: system clipboard for copy / cut / paste in Input.
+arboard = "3"
+
 # Re-exported by winit; pinned here so we can implement raw-window-handle for
 # the wgpu surface without version-mismatch grief.
 raw-window-handle = "0.6"
@@ -48,3 +55,11 @@ path = "examples/hello.rs"
 [[example]]
 name = "counter"
 path = "examples/counter.rs"
+
+[[example]]
+name = "input"
+path = "examples/input.rs"
+
+[[example]]
+name = "scroll"
+path = "examples/scroll.rs"

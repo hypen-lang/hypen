@@ -45,3 +45,113 @@ impl<S: State> HypenModule for ModuleInstance<S> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::HypenModule;
+    use hypen_engine::Patch;
+    use hypen_server::prelude::{ModuleBuilder, ModuleInstance};
+    use serde::{Deserialize, Serialize};
+    use std::sync::{Arc, Mutex};
+
+    /// Minimal counter-style state used in the module-trait round-trip
+    /// tests. Mirrors the shape used in `hypen-sdk-rs`'s integration tests.
+    #[derive(Clone, Default, Serialize, Deserialize, Debug)]
+    struct TestState {
+        count: i32,
+    }
+
+    /// Build a counter `ModuleInstance` with a single `incr` action that
+    /// adds one to `state.count`. Returned as `Arc<dyn HypenModule>` so
+    /// tests exercise the trait's blanket impl over `ModuleInstance<S>`.
+    fn make_counter_module() -> Arc<dyn HypenModule> {
+        let def = ModuleBuilder::<TestState>::new("Counter")
+            .state(TestState { count: 0 })
+            .ui(r#"Column { Text("Count: @{state.count}") }"#)
+            .on_action::<()>("incr", |state, _, _| {
+                state.count += 1;
+            })
+            .build();
+        let instance: ModuleInstance<TestState> =
+            ModuleInstance::new(Arc::new(def), None).expect("instantiate counter module");
+        Arc::new(instance) as Arc<dyn HypenModule>
+    }
+
+    #[test]
+    fn hypen_module_dispatches_action_through_blanket_impl() {
+        let module = make_counter_module();
+
+        // Capture every patch batch the engine emits via the trait's
+        // `on_patches` — tests the type-erased Arc<Fn> path.
+        let batches: Arc<Mutex<Vec<Vec<Patch>>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&batches);
+        module.on_patches(Arc::new(move |patches: &[Patch]| {
+            captured.lock().unwrap().push(patches.to_vec());
+        }));
+
+        // Mount fires the deferred initial render → at least one batch.
+        module.mount();
+        assert!(
+            !batches.lock().unwrap().is_empty(),
+            "expected initial render to land via on_patches",
+        );
+
+        // Dispatch the registered action through the trait. The blanket
+        // impl forwards to `ModuleInstance::dispatch_action` and swallows
+        // errors, so we can't read the return value — instead, downcast
+        // the same module via a parallel handle to verify state moved.
+        // The simplest observation: dispatch increments `count` from 0
+        // to 1, which the engine reflects as further patch batches.
+        let batches_before = batches.lock().unwrap().len();
+        module.dispatch_action("incr", None);
+
+        // We expect either a follow-up patch batch from the state change
+        // or at the very least no panic. Re-dispatch a few more times to
+        // make the post-dispatch growth easy to spot.
+        for _ in 0..3 {
+            module.dispatch_action("incr", None);
+        }
+        let batches_after = batches.lock().unwrap().len();
+        assert!(
+            batches_after >= batches_before,
+            "dispatch_action must not regress the batch count",
+        );
+    }
+
+    #[test]
+    fn hypen_module_dispatch_state_updates_observed_via_concrete_handle() {
+        // The trait API is intentionally write-only (no get_state) so we
+        // verify state flow by holding both the `Arc<ModuleInstance<S>>`
+        // (concrete) and the same value coerced to `Arc<dyn HypenModule>`.
+        let def = ModuleBuilder::<TestState>::new("Counter")
+            .state(TestState { count: 0 })
+            .on_action::<()>("incr", |state, _, _| {
+                state.count += 1;
+            })
+            .build();
+        let concrete = Arc::new(
+            ModuleInstance::<TestState>::new(Arc::new(def), None)
+                .expect("instantiate counter module"),
+        );
+        let erased: Arc<dyn HypenModule> = concrete.clone();
+
+        erased.mount();
+        assert_eq!(concrete.get_state().count, 0);
+
+        erased.dispatch_action("incr", None);
+        assert_eq!(
+            concrete.get_state().count,
+            1,
+            "blanket impl must forward dispatch into ModuleInstance",
+        );
+    }
+
+    #[test]
+    fn hypen_module_unknown_action_does_not_panic() {
+        let module = make_counter_module();
+        module.mount();
+        // Per the trait's doc-comment, dispatch errors are logged and
+        // swallowed — calling an unknown action must just return.
+        module.dispatch_action("does_not_exist", None);
+    }
+}

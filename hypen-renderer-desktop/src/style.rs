@@ -14,8 +14,9 @@ use crate::tree::Node;
 use serde_json::Value;
 
 /// RGBA, premultiplied-friendly straight-alpha at the source. Used as
-/// input to tiny-skia's `PremultipliedColorU8`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// input to tiny-skia's `PremultipliedColorU8`. The `Default` is
+/// fully transparent black.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Rgba(pub u8, pub u8, pub u8, pub u8);
 
 impl Rgba {
@@ -85,45 +86,145 @@ pub fn prop_color(node: &Node, name: &str) -> Option<Rgba> {
 ///    / `.paddingHorizontal(N)` → `paddingHorizontal.0` (left + right)
 /// 4. `.padding(N)` → `padding.0` (all sides)
 pub fn padding(node: &Node) -> Padding {
+    read_box_props(node, "padding")
+}
+
+/// Margin counterpart of [`padding`] — same precedence and key
+/// conventions, just with a `margin` prefix.
+pub fn margin(node: &Node) -> Padding {
+    read_box_props(node, "margin")
+}
+
+/// Shared box-model reader for `padding` / `margin`. The Hypen DSL gives
+/// both shorthand and per-side applicators that all collapse to the same
+/// 4-edge `Padding` shape; the precedence ordering matches `padding`'s
+/// doc-comment.
+fn read_box_props(node: &Node, prefix: &str) -> Padding {
     let mut p = Padding::default();
 
-    if let Some(v) = prop_f32(node, "padding") {
+    if let Some(v) = prop_f32(node, prefix) {
         p = Padding::uniform(v);
     }
-    if let Some(v) = prop_f32(node, "paddingHorizontal") {
+    if let Some(v) = prop_f32(node, &format!("{prefix}Horizontal")) {
         p.left = v;
         p.right = v;
     }
-    if let Some(v) = prop_f32(node, "paddingVertical") {
+    if let Some(v) = prop_f32(node, &format!("{prefix}Vertical")) {
         p.top = v;
         p.bottom = v;
     }
-    if let Some(v) = node.props.get("padding.top").and_then(value_to_f32) {
+    if let Some(v) = node
+        .props
+        .get(&format!("{prefix}.top"))
+        .and_then(value_to_f32)
+    {
         p.top = v;
     }
-    if let Some(v) = node.props.get("padding.right").and_then(value_to_f32) {
+    if let Some(v) = node
+        .props
+        .get(&format!("{prefix}.right"))
+        .and_then(value_to_f32)
+    {
         p.right = v;
     }
-    if let Some(v) = node.props.get("padding.bottom").and_then(value_to_f32) {
+    if let Some(v) = node
+        .props
+        .get(&format!("{prefix}.bottom"))
+        .and_then(value_to_f32)
+    {
         p.bottom = v;
     }
-    if let Some(v) = node.props.get("padding.left").and_then(value_to_f32) {
+    if let Some(v) = node
+        .props
+        .get(&format!("{prefix}.left"))
+        .and_then(value_to_f32)
+    {
         p.left = v;
     }
-    if let Some(v) = prop_f32(node, "paddingTop") {
+    if let Some(v) = prop_f32(node, &format!("{prefix}Top")) {
         p.top = v;
     }
-    if let Some(v) = prop_f32(node, "paddingBottom") {
+    if let Some(v) = prop_f32(node, &format!("{prefix}Bottom")) {
         p.bottom = v;
     }
-    if let Some(v) = prop_f32(node, "paddingLeft") {
+    if let Some(v) = prop_f32(node, &format!("{prefix}Left")) {
         p.left = v;
     }
-    if let Some(v) = prop_f32(node, "paddingRight") {
+    if let Some(v) = prop_f32(node, &format!("{prefix}Right")) {
         p.right = v;
     }
 
     p
+}
+
+/// Resolved border style for a node.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Border {
+    pub width: f32,
+    pub color: Rgba,
+    pub radius: f32,
+}
+
+impl Border {
+    pub fn is_visible(&self) -> bool {
+        self.width > 0.0 && self.color.3 > 0
+    }
+}
+
+/// Resolve border / borderWidth / borderColor / borderRadius / cornerRadius.
+///
+/// Precedence (per attribute):
+/// 1. `.borderWidth(N)` / `.borderColor(...)` / `.borderRadius(N)` /
+///    `.cornerRadius(N)` (highest — explicit per-attribute setter).
+/// 2. `.border(width: N, color: ..., radius: N)` (named-object form).
+/// 3. `.border(N)` (single positional → width only).
+pub fn border(node: &Node) -> Border {
+    let mut width = 0.0_f32;
+    let mut radius = 0.0_f32;
+    // Track colour explicitly so an opaque-black default only kicks in
+    // when no `.borderColor(...)` / `.border(color: ...)` was set —
+    // otherwise an explicit `.borderColor("transparent")` would be
+    // silently rewritten to black (Rgba::TRANSPARENT == Rgba::default()).
+    let mut color: Option<Rgba> = None;
+
+    if let Some(v) = prop_f32(node, "border") {
+        width = v;
+    }
+    if let Some(v) = node.props.get("border.width").and_then(value_to_f32) {
+        width = v;
+    }
+    if let Some(v) = node
+        .props
+        .get("border.color")
+        .and_then(Value::as_str)
+        .and_then(parse_color)
+    {
+        color = Some(v);
+    }
+    if let Some(v) = node.props.get("border.radius").and_then(value_to_f32) {
+        radius = v;
+    }
+    if let Some(v) = prop_f32(node, "borderWidth") {
+        width = v;
+    }
+    if let Some(v) = prop_color(node, "borderColor") {
+        color = Some(v);
+    }
+    if let Some(v) = prop_f32(node, "borderRadius") {
+        radius = v;
+    }
+    // Compose-flavoured alias for borderRadius.
+    if let Some(v) = prop_f32(node, "cornerRadius") {
+        radius = v;
+    }
+
+    Border {
+        width,
+        // A width without an explicit colour falls back to opaque black —
+        // matches the DOM applicator's "default solid black" behaviour.
+        color: color.unwrap_or(if width > 0.0 { Rgba::BLACK } else { Rgba::TRANSPARENT }),
+        radius,
+    }
 }
 
 fn value_to_f32(v: &Value) -> Option<f32> {
@@ -363,5 +464,142 @@ mod tests {
         let p = Rgba(0xff, 0, 0, 0x80).premultiplied();
         assert!((p[0] as i32 - 0x80).abs() <= 1);
         assert_eq!(p[3], 0x80);
+    }
+
+    // ---------------------------------------------------------------
+    // margin: mirrors the padding precedence tests above.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn margin_uniform_from_margin_zero() {
+        let node = node_with(&[("margin.0", serde_json::json!(12))]);
+        let m = margin(&node);
+        assert_eq!(m.top, 12.0);
+        assert_eq!(m.right, 12.0);
+        assert_eq!(m.bottom, 12.0);
+        assert_eq!(m.left, 12.0);
+    }
+
+    #[test]
+    fn margin_horizontal_overrides_uniform() {
+        let node = node_with(&[
+            ("margin.0", serde_json::json!(12)),
+            ("marginHorizontal.0", serde_json::json!(4)),
+        ]);
+        let m = margin(&node);
+        assert_eq!(m.left, 4.0);
+        assert_eq!(m.right, 4.0);
+        assert_eq!(m.top, 12.0);
+        assert_eq!(m.bottom, 12.0);
+    }
+
+    #[test]
+    fn margin_top_named_overrides_uniform() {
+        let node = node_with(&[
+            ("margin.0", serde_json::json!(12)),
+            ("margin.top", serde_json::json!(2)),
+        ]);
+        let m = margin(&node);
+        assert_eq!(m.top, 2.0);
+        assert_eq!(m.right, 12.0);
+        assert_eq!(m.bottom, 12.0);
+        assert_eq!(m.left, 12.0);
+    }
+
+    #[test]
+    fn margin_top_applicator_overrides_named() {
+        let node = node_with(&[
+            ("margin.0", serde_json::json!(12)),
+            ("margin.top", serde_json::json!(2)),
+            ("marginTop.0", serde_json::json!(1)),
+        ]);
+        let m = margin(&node);
+        assert_eq!(m.top, 1.0);
+        assert_eq!(m.right, 12.0);
+        assert_eq!(m.bottom, 12.0);
+        assert_eq!(m.left, 12.0);
+    }
+
+    #[test]
+    fn margin_zero_when_no_props() {
+        let node = node_with(&[]);
+        let m = margin(&node);
+        assert_eq!(m.top, 0.0);
+        assert_eq!(m.right, 0.0);
+        assert_eq!(m.bottom, 0.0);
+        assert_eq!(m.left, 0.0);
+    }
+
+    // ---------------------------------------------------------------
+    // border: width/colour/radius resolution + visibility gate.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn border_width_only() {
+        let node = node_with(&[("border.0", serde_json::json!(2))]);
+        let b = border(&node);
+        assert_eq!(b.width, 2.0);
+        assert_eq!(b.color, Rgba::BLACK);
+        assert_eq!(b.radius, 0.0);
+        assert!(b.is_visible());
+    }
+
+    #[test]
+    fn border_named_object_form() {
+        let node = node_with(&[
+            ("border.width", serde_json::json!(2)),
+            ("border.color", serde_json::json!("red")),
+            ("border.radius", serde_json::json!(6)),
+        ]);
+        let b = border(&node);
+        assert_eq!(b.width, 2.0);
+        assert_eq!(b.color, Rgba(0xff, 0, 0, 0xff));
+        assert_eq!(b.radius, 6.0);
+    }
+
+    #[test]
+    fn border_width_color_radius_setters_override_object() {
+        let node = node_with(&[
+            ("border.width", serde_json::json!(1)),
+            ("border.color", serde_json::json!("red")),
+            ("border.radius", serde_json::json!(4)),
+            ("borderWidth.0", serde_json::json!(3)),
+            ("borderColor.0", serde_json::json!("blue")),
+            ("borderRadius.0", serde_json::json!(8)),
+        ]);
+        let b = border(&node);
+        assert_eq!(b.width, 3.0);
+        assert_eq!(b.color, Rgba(0, 0, 0xff, 0xff));
+        assert_eq!(b.radius, 8.0);
+    }
+
+    #[test]
+    fn border_corner_radius_alias() {
+        let node = node_with(&[("cornerRadius.0", serde_json::json!(12))]);
+        let b = border(&node);
+        assert_eq!(b.radius, 12.0);
+    }
+
+    #[test]
+    fn border_zero_width_is_not_visible() {
+        let node = node_with(&[]);
+        let b = border(&node);
+        assert!(!b.is_visible());
+    }
+
+    #[test]
+    fn border_with_transparent_colour_is_not_visible() {
+        // Regression: `Rgba::TRANSPARENT == Rgba::default()`, so the
+        // earlier "default to black when colour unset" branch couldn't
+        // tell `borderColor("transparent")` from "no colour set". Fixed
+        // by tracking an `Option<Rgba>` during resolution.
+        let node = node_with(&[
+            ("border.0", serde_json::json!(2)),
+            ("border.color", serde_json::json!("transparent")),
+        ]);
+        let b = border(&node);
+        assert_eq!(b.width, 2.0);
+        assert_eq!(b.color.3, 0);
+        assert!(!b.is_visible());
     }
 }
