@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.runtime.Composable
@@ -102,43 +101,19 @@ class GridComponent : ComponentHandler {
             ?: false
 
         if (!scrollable) {
-            // Pack children into rows respecting per-child gridColumn spans.
-            // A child whose span would overflow the current row's remaining
-            // capacity wraps to the next row (CSS-grid auto-placement).
-            val rows = mutableListOf<MutableList<Pair<HypenElement, Int>>>()
-            var current = mutableListOf<Pair<HypenElement, Int>>()
-            var used = 0
-            for (child in children) {
-                val span = gridColumnSpan(child).coerceIn(1, columns)
-                if (used + span > columns) {
-                    rows.add(current)
-                    current = mutableListOf()
-                    used = 0
-                }
-                current.add(child to span)
-                used += span
-                if (used == columns) {
-                    rows.add(current)
-                    current = mutableListOf()
-                    used = 0
-                }
-            }
-            if (current.isNotEmpty()) rows.add(current)
-
             Column(
                 modifier = modifier,
                 verticalArrangement = Arrangement.spacedBy(rowGap),
             ) {
-                rows.forEach { rowChildren ->
-                    val rowSpan = rowChildren.sumOf { it.second }
+                children.chunked(columns).forEach { rowChildren ->
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(columnGap),
                     ) {
-                        rowChildren.forEach { (child, span) ->
+                        rowChildren.forEach { child ->
                             key(child.id) {
                                 Box(
-                                    modifier = Modifier.weight(span.toFloat()),
+                                    modifier = Modifier.weight(1f),
                                 ) {
                                     GridItemRenderer(
                                         element = child,
@@ -147,10 +122,11 @@ class GridComponent : ComponentHandler {
                                 }
                             }
                         }
-                        // Pad partial rows so cells stay column-aligned with
-                        // fully-populated rows instead of stretching to fill.
-                        if (rowSpan < columns) {
-                            Spacer(modifier = Modifier.weight((columns - rowSpan).toFloat()))
+                        // Pad the final row so partial rows align with a
+                        // fully-populated row instead of stretching the
+                        // last cell across the remaining columns.
+                        repeat(columns - rowChildren.size) {
+                            Spacer(modifier = Modifier.weight(1f))
                         }
                     }
                 }
@@ -166,7 +142,6 @@ class GridComponent : ComponentHandler {
         ) {
             items(
                 items = children,
-                span = { child -> GridItemSpan(gridColumnSpan(child).coerceIn(1, columns)) },
                 key = { child -> child.id }
             ) { child ->
                 key(child.id) {
@@ -177,38 +152,6 @@ class GridComponent : ComponentHandler {
                 }
             }
         }
-    }
-
-    private fun gridColumnSpan(child: HypenElement): Int {
-        val raw = child.props["gridColumn.0"] ?: child.props["gridColumn"] ?: return 1
-        return when (raw) {
-            is Number -> raw.toInt().coerceAtLeast(1)
-            is String -> parseSpan(raw)
-            else -> 1
-        }
-    }
-
-    private fun parseSpan(value: String): Int {
-        val v = value.trim()
-        // "span N"
-        if (v.startsWith("span ", ignoreCase = true)) {
-            return v.substring(5).trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
-        }
-        // "a / b" — column-start / column-end (1-indexed, end is exclusive). "1 / 3" => span 2.
-        val slash = v.indexOf('/')
-        if (slash >= 0) {
-            val start = v.substring(0, slash).trim().toIntOrNull()
-            val endTok = v.substring(slash + 1).trim()
-            if (start != null) {
-                if (endTok.startsWith("span ", ignoreCase = true)) {
-                    return endTok.substring(5).trim().toIntOrNull()?.coerceAtLeast(1) ?: 1
-                }
-                val end = endTok.toIntOrNull()
-                if (end != null) return (end - start).coerceAtLeast(1)
-            }
-        }
-        // Bare integer — treat as span N.
-        return v.toIntOrNull()?.coerceAtLeast(1) ?: 1
     }
 
     companion object {

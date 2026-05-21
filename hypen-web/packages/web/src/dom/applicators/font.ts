@@ -5,17 +5,8 @@
 import type { ApplicatorHandler } from "./types.js";
 import { toCssLength } from "./size.js";
 
-// Track loaded Google Fonts per-document to avoid duplicate link tags
-const loadedGoogleFonts = new WeakMap<Document, Set<string>>();
-
-function getLoadedSet(doc: Document): Set<string> {
-  let set = loadedGoogleFonts.get(doc);
-  if (!set) {
-    set = new Set<string>();
-    loadedGoogleFonts.set(doc, set);
-  }
-  return set;
-}
+// Track loaded Google Fonts to avoid duplicate link tags
+const loadedGoogleFonts = new Set<string>();
 
 // System font keywords that shouldn't be loaded from Google Fonts
 const systemFontKeywords = new Set([
@@ -36,42 +27,40 @@ function isSystemFont(fontName: string): boolean {
 }
 
 /**
- * Load a Google Font by injecting a link tag into the given document.
+ * Load a Google Font by injecting a link tag.
  * @param fontName - The Google Font name (e.g., "Roboto", "Open Sans")
- * @param doc - The Document to inject into.
  */
-function loadGoogleFont(fontName: string, doc: Document): void {
+function loadGoogleFont(fontName: string): void {
   const normalized = fontName.trim();
-  const loaded = getLoadedSet(doc);
 
   // Skip if already loaded or is a system font
-  if (loaded.has(normalized) || isSystemFont(normalized)) {
+  if (loadedGoogleFonts.has(normalized) || isSystemFont(normalized)) {
     return;
   }
 
   // Mark as loading to avoid duplicates
-  loaded.add(normalized);
+  loadedGoogleFonts.add(normalized);
 
   // Create link element for Google Fonts
-  const link = doc.createElement("link");
+  const link = document.createElement("link");
   link.rel = "stylesheet";
   link.href = `https://fonts.googleapis.com/css2?family=${encodeURIComponent(normalized)}:wght@100;200;300;400;500;600;700;800;900&display=swap`;
 
   // Add to document head
-  doc.head.appendChild(link);
+  document.head.appendChild(link);
 }
 
 /**
  * Parse a fontFamily value and load any Google Fonts.
  * Returns a CSS-safe font-family string.
  */
-function processFontFamily(value: string, doc: Document): string {
+function processFontFamily(value: string): string {
   // Split by comma to handle font stacks
   const fonts = value.split(",").map(f => f.trim().replace(/["']/g, ""));
 
   for (const font of fonts) {
     if (!isSystemFont(font)) {
-      loadGoogleFont(font, doc);
+      loadGoogleFont(font);
     }
   }
 
@@ -97,7 +86,7 @@ export const fontHandlers: Record<string, ApplicatorHandler> = {
   fontFamily: (el, value) => {
     const fontValue = String(value);
     // Process font family and load Google Fonts as needed
-    el.style.fontFamily = processFontFamily(fontValue, el.ownerDocument as Document);
+    el.style.fontFamily = processFontFamily(fontValue);
   },
 
   textAlign: (el, value) => {
@@ -138,20 +127,18 @@ export const fontHandlers: Record<string, ApplicatorHandler> = {
 export const GoogleFonts = {
   /**
    * Preload a Google Font before it's used.
-   * Defaults to the global `document` if no doc is provided.
    */
-  preload: (fontName: string, doc: Document = document) => loadGoogleFont(fontName, doc),
+  preload: loadGoogleFont,
 
   /**
-   * Check if a font has been loaded in the given document (defaults to global).
+   * Check if a font has been loaded.
    */
-  isLoaded: (fontName: string, doc: Document = document) =>
-    getLoadedSet(doc).has(fontName.trim()),
+  isLoaded: (fontName: string) => loadedGoogleFonts.has(fontName.trim()),
 
   /**
-   * Get list of loaded fonts for the given document (defaults to global).
+   * Get list of loaded fonts.
    */
-  getLoadedFonts: (doc: Document = document) => Array.from(getLoadedSet(doc)),
+  getLoadedFonts: () => Array.from(loadedGoogleFonts),
 
   /**
    * Popular Google Fonts for reference.

@@ -2,7 +2,7 @@
 set -e
 
 # Master script to build, test, bump, and publish everything.
-# Usage: ./scripts/publish-all.sh [patch|minor|major|<x.y.z>] [--ios-streamer <ver>]
+# Usage: ./scripts/publish-all.sh [patch|minor|major|<x.y.z>]
 #
 # Pass an explicit semver (e.g. 0.5.0) to pin the release to that version
 # instead of auto-incrementing from the current one. Anything containing a
@@ -10,28 +10,21 @@ set -e
 # both the Rust and npm version.
 #
 # Pipeline:
-#   1. Bump versions (Rust + npm; ios-streamer only when --ios-streamer is passed)
+#   1. Bump versions (Rust + npm)
 #   2. Run tests (parser, engine, web SDK, CLI)
 #   3. Build WASM (+ auto-copy to SDK locations)
 #   4. Build npm packages (core, web, server, web-engine, lsp, cli) with type declarations
 #   5. Publish Rust crates (parser -> tailwind-parse -> engine)
-#   6. Publish npm packages (core -> web -> server -> web-engine -> lsp -> cli -> ios-streamer)
-#   7. Publish Gradle packages (Android renderer + Kotlin SDK)
-#   8. Reminders for the GitHub-Actions-only release lanes (hypen-server-swift)
+#   6. Publish npm packages (core -> web -> server -> web-engine -> lsp -> cli)
 #
 # Flags:
-#   --skip-tests        Skip test step
-#   --skip-crates       Skip Rust crate publishing
-#   --skip-bump         Skip version bump (resume after a failed run)
-#   --skip-wasm         Skip WASM build (resume after a failed run)
-#   --skip-gradle       Skip Gradle (Android renderer + Kotlin SDK) publishing
-#   --gradle-host-only  Acknowledge that local Kotlin publish ships a host-only
-#                       JAR (no Linux/Windows/x86 native libs). Without this
-#                       flag, --skip-gradle is forced and a reminder prints.
-#   --ios-streamer <v>  Bump + publish @hypen-space/ios-streamer at version <v>.
-#                       The streamer is on an independent version track.
-#   --npm-only          Shortcut for --skip-bump --skip-tests --skip-wasm --skip-crates --skip-gradle
-#   --allow-dirty       Allow dirty git working tree
+#   --skip-tests     Skip test step
+#   --skip-crates    Skip Rust crate publishing
+#   --skip-bump      Skip version bump (resume after a failed run)
+#   --skip-wasm      Skip WASM build (resume after a failed run)
+#   --skip-gradle    Skip Gradle (Android renderer + Kotlin SDK) publishing
+#   --npm-only       Shortcut for --skip-bump --skip-tests --skip-wasm --skip-crates --skip-gradle
+#   --allow-dirty    Allow dirty git working tree
 #
 # Gradle publishing requires Maven Central credentials. The vanniktech plugin
 # reads them from Gradle properties (e.g. ~/.gradle/gradle.properties):
@@ -51,6 +44,8 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+BUMP_ARG=${1:-patch}
+
 # Flags
 SKIP_TESTS=false
 SKIP_RUST_TESTS=false
@@ -58,28 +53,7 @@ SKIP_CRATES=false
 SKIP_BUMP=false
 SKIP_WASM=false
 SKIP_GRADLE=false
-GRADLE_HOST_ONLY=false
 ALLOW_DIRTY=false
-IOS_STREAMER_VERSION=""
-
-# Parse --ios-streamer <v> separately so it can land anywhere in argv. The
-# remaining args still flow through the simple case below.
-parsed=()
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --ios-streamer)
-      IOS_STREAMER_VERSION="$2"
-      shift 2
-      ;;
-    *)
-      parsed+=("$1")
-      shift
-      ;;
-  esac
-done
-set -- "${parsed[@]}"
-
-BUMP_ARG=${1:-patch}
 
 for arg in "$@"; do
   case $arg in
@@ -88,23 +62,10 @@ for arg in "$@"; do
     --skip-bump) SKIP_BUMP=true ;;
     --skip-wasm) SKIP_WASM=true ;;
     --skip-gradle) SKIP_GRADLE=true ;;
-    --gradle-host-only) GRADLE_HOST_ONLY=true ;;
     --npm-only) SKIP_BUMP=true; SKIP_WASM=true; SKIP_CRATES=true; SKIP_RUST_TESTS=true; SKIP_GRADLE=true ;;
     --allow-dirty) ALLOW_DIRTY=true ;;
   esac
 done
-
-# Local Kotlin publish only stages the host arch's native lib. Refuse to ship
-# that to Maven Central by default — non-mac consumers would get a JAR with
-# no usable libhypen_engine and crash at first WS connect.
-if [ "$SKIP_GRADLE" = false ] && [ "$GRADLE_HOST_ONLY" = false ]; then
-  echo -e "${YELLOW}⚠ Forcing --skip-gradle: local publish would ship a host-only JAR.${NC}"
-  echo -e "  Use the GitHub Actions workflow .github/workflows/publish-kotlin.yml"
-  echo -e "  for a multi-arch (linux x86_64+aarch64, mac arm64+x86_64, win x86_64) build."
-  echo -e "  To bypass on purpose, pass ${BLUE}--gradle-host-only${NC} (not recommended)."
-  echo ""
-  SKIP_GRADLE=true
-fi
 
 # Resolve the bump arg. A dot in the value means "explicit semver" — forward
 # it to bump-versions.sh as both the Rust and npm version. Otherwise treat it
@@ -183,11 +144,7 @@ if [ "$SKIP_BUMP" = true ]; then
   echo -e "${YELLOW}[Step 1/7] Skipping version bump (--skip-bump)${NC}"
 else
   echo -e "${YELLOW}[Step 1/7] Bumping versions ($BUMP_LABEL)...${NC}"
-  bump_extra_args=()
-  if [ -n "$IOS_STREAMER_VERSION" ]; then
-    bump_extra_args+=(--ios-streamer "$IOS_STREAMER_VERSION")
-  fi
-  "$SCRIPT_DIR/bump-versions.sh" "${BUMP_ARGS[@]}" "${bump_extra_args[@]}"
+  "$SCRIPT_DIR/bump-versions.sh" "${BUMP_ARGS[@]}"
 fi
 echo ""
 
@@ -342,19 +299,6 @@ echo -e "  Publishing @hypen-space/cli..."
 cd "$ROOT_DIR/hypen-cli" && npm publish --access public
 echo -e "  ${GREEN}✓ @hypen-space/cli published${NC}"
 
-# @hypen-space/ios-streamer is on an independent version track and may be
-# unchanged from the previous release. A failure here (e.g. version already
-# on npm) should not abort the whole pipeline — print and continue.
-echo -e "  Publishing @hypen-space/ios-streamer (independent track, fail-soft)..."
-cd "$ROOT_DIR/hypen-ios-streamer"
-IOS_STREAMER_PUBLISHED_VERSION=$(node -p "require('./package.json').version")
-if npm publish --access public 2>&1; then
-  echo -e "  ${GREEN}✓ @hypen-space/ios-streamer@${IOS_STREAMER_PUBLISHED_VERSION} published${NC}"
-else
-  echo -e "  ${YELLOW}⚠ @hypen-space/ios-streamer publish failed (ignored — independent track)${NC}"
-  echo -e "  ${YELLOW}  Likely: version ${IOS_STREAMER_PUBLISHED_VERSION} already on npm, or no bump since last release.${NC}"
-fi
-
 echo ""
 
 # ============================================================================
@@ -372,64 +316,17 @@ else
   cd "$ROOT_DIR/hypen-engine-rs" && cargo build --release --features uniffi --quiet
   echo -e "  ${GREEN}✓ UniFFI native library built${NC}"
 
-  # Export Maven Central + signing credentials from gradle-local.properties as
-  # ORG_GRADLE_PROJECT_* env vars. The vanniktech plugin's providers.gradleProperty()
-  # lookup does not see properties injected from settings.gradle.kts, but it does
-  # read these env vars. We grep specific keys (rather than `source`-ing the file)
-  # because gradle-local.properties contains non-shell lines like `org.gradle.jvmargs=...`.
-  load_gradle_creds() {
-    local props=$1
-    if [ ! -f "$props" ]; then
-      echo -e "${RED}✗ Missing $props — cannot configure signing${NC}"
-      exit 1
-    fi
-    export ORG_GRADLE_PROJECT_mavenCentralUsername="$(grep '^mavenCentralUsername=' "$props" | cut -d= -f2-)"
-    export ORG_GRADLE_PROJECT_mavenCentralPassword="$(grep '^mavenCentralPassword=' "$props" | cut -d= -f2-)"
-    export ORG_GRADLE_PROJECT_signingInMemoryKey="$(grep '^signingInMemoryKey=' "$props" | cut -d= -f2-)"
-    export ORG_GRADLE_PROJECT_signingInMemoryKeyPassword="$(grep '^signingInMemoryKeyPassword=' "$props" | cut -d= -f2-)"
-    if [ -z "$ORG_GRADLE_PROJECT_signingInMemoryKey" ] || [ -z "$ORG_GRADLE_PROJECT_mavenCentralUsername" ]; then
-      echo -e "${RED}✗ $props is missing mavenCentralUsername or signingInMemoryKey${NC}"
-      exit 1
-    fi
-  }
-
   echo -e "  Publishing hypen-renderer (Android)..."
-  cd "$ROOT_DIR/hypen-renderer-android" && \
-    load_gradle_creds "$ROOT_DIR/hypen-renderer-android/gradle-local.properties" && \
-    ./gradlew :renderer:publishAndReleaseToMavenCentral --quiet
+  cd "$ROOT_DIR/hypen-renderer-android" && ./gradlew :renderer:publishAndReleaseToMavenCentral --quiet
   echo -e "  ${GREEN}✓ hypen-renderer published${NC}"
 
   echo -e "  Publishing hypen-kotlin..."
-  cd "$ROOT_DIR/hypen-kotlin" && \
-    load_gradle_creds "$ROOT_DIR/hypen-kotlin/gradle-local.properties" && \
-    ./gradlew publishAndReleaseToMavenCentral --quiet
+  cd "$ROOT_DIR/hypen-kotlin" && ./gradlew publishAndReleaseToMavenCentral --quiet
   echo -e "  ${GREEN}✓ hypen-kotlin published${NC}"
 
   echo -e "${GREEN}✓ Gradle packages published${NC}"
 fi
 echo ""
-
-# ============================================================================
-# Reminders for release lanes that publish-all.sh does NOT drive
-# ============================================================================
-#
-# Swift mirroring + xcframework upload is GitHub-Actions-only because it
-# needs macOS runners for cross-compilation, lipo, and xcodebuild. Print
-# the trigger command so the human knows to fire that workflow next.
-
-NEW_RUST_VERSION=$(grep '"version"' "$ROOT_DIR/hypen-web/packages/core/package.json" | head -1 | sed 's/.*: *"\(.*\)".*/\1/')
-echo -e "${YELLOW}Reminder — Swift release runs via GitHub Actions:${NC}"
-echo -e "  gh workflow run publish-swift.yml \\"
-echo -e "    --field version=${NEW_RUST_VERSION} \\"
-echo -e "    --field dry-run=false"
-echo ""
-if [ "$SKIP_GRADLE" = true ] && [ "$GRADLE_HOST_ONLY" = false ]; then
-  echo -e "${YELLOW}Reminder — Kotlin release runs via GitHub Actions:${NC}"
-  echo -e "  gh workflow run publish-kotlin.yml \\"
-  echo -e "    --field version=${NEW_RUST_VERSION} \\"
-  echo -e "    --field dry-run=false"
-  echo ""
-fi
 
 # ============================================================================
 # Done

@@ -285,14 +285,13 @@ export class DOMRenderer {
   private onCreate(id: string, elementType: string, props: Record<string, any> | Map<string, any>): void {
     const propsObj = props instanceof Map ? Object.fromEntries(props) : props;
 
-    const doc = this.container.ownerDocument as Document;
-    let element = this.components.createElement(elementType, propsObj, doc);
+    let element = this.components.createElement(elementType, propsObj);
 
     if (!element) {
       // For unknown component types, create a transparent container (div).
       // This handles module wrappers (like "App") and custom components
       // that aren't registered but should act as layout containers.
-      const fallback = doc.createElement("div");
+      const fallback = document.createElement("div");
       fallback.dataset.hypenType = elementType.toLowerCase();
       fallback.style.display = "contents"; // Make container transparent in layout
       element = fallback;

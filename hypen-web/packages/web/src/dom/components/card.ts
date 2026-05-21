@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const cardHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("div");
+  create(): HTMLElement {
+    const el = document.createElement("div");
     el.dataset.hypenType = "card";
     el.style.backgroundColor = "#ffffff";
     el.style.borderRadius = "8px";

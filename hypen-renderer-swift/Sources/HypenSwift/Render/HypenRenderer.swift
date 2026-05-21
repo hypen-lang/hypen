@@ -126,6 +126,10 @@ public final class HypenRenderer: ObservableObject {
             props: patch.props ?? [:]
         )
 
+        if elementType.lowercased() == "grid" || elementType.lowercased() == "image" {
+            print("[HypenRenderer] CREATE type=\(elementType) id=\(id) props=\(element.props.keys.sorted())")
+        }
+
         elements[id] = element
 
         // Set as root if this is the first element

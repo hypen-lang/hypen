@@ -18,11 +18,12 @@ type ToolbarProps = {
   panels: PanelState;
   togglePanel: (panel: keyof PanelState) => void;
   connected: boolean;
-  onOpenTestMode: () => void;
+  testMode: boolean;
+  onToggleTestMode: () => void;
   onCommandPalette: () => void;
 };
 
-export function Toolbar({ panels, togglePanel, connected, onOpenTestMode, onCommandPalette }: ToolbarProps) {
+export function Toolbar({ panels, togglePanel, connected, testMode, onToggleTestMode, onCommandPalette }: ToolbarProps) {
   const iconBtn = "h-8 w-8 p-0";
   return (
     <div className="h-12 border-b border-border bg-card flex items-center px-4 gap-2 shrink-0">
@@ -134,11 +135,11 @@ export function Toolbar({ panels, togglePanel, connected, onOpenTestMode, onComm
         </Button>
 
         <Button
-          variant="ghost"
+          variant={testMode ? "secondary" : "ghost"}
           size="sm"
-          onClick={onOpenTestMode}
+          onClick={onToggleTestMode}
           className="gap-1.5"
-          title="Test Mode — opens in a new window: tile multiple previews and device mirrors"
+          title="Test Mode — tile multiple previews and device mirrors"
         >
           <LayoutGrid className="w-4 h-4" />
           <span className="hidden sm:inline">Test</span>

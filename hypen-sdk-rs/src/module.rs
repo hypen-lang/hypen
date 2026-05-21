@@ -601,6 +601,12 @@ pub struct ModuleInstance<S: State> {
     state: Arc<Mutex<StateContainer<S>>>,
     engine: Mutex<hypen_engine::Engine>,
     mounted: Mutex<bool>,
+    /// IR parsed from the module's UI source at construction time, held
+    /// until the first `mount()` / `mount_async()` call. Rendering on
+    /// `mount()` rather than `new()` lets callers wire `on_patches(cb)`
+    /// in between and so capture the initial Create batch — without it
+    /// renderers must re-implement the parse/render dance themselves.
+    pending_ir: Mutex<Option<hypen_engine::ir::IRNode>>,
     global_context: Option<Arc<GlobalContext>>,
 }
 
@@ -627,15 +633,17 @@ impl<S: State> ModuleInstance<S> {
             engine.register_resource(name, svg);
         }
 
-        // Parse and load UI if provided
-        if let Some(ref source) = definition.ui_source {
-            Self::load_ui_source(&mut engine, source)?;
+        // Parse UI now so any syntax errors surface at construction;
+        // defer the actual `render_ir_node` to `mount()` so callers can
+        // wire `on_patches` and capture the initial Create batch.
+        let pending_ir = if let Some(ref source) = definition.ui_source {
+            Some(Self::parse_ui_source(source)?)
         } else if let Some(ref path) = definition.ui_file {
-            let source = std::fs::read_to_string(path).map_err(|e| {
-                SdkError::Component(format!("Failed to read UI file '{path}': {e}"))
-            })?;
-            Self::load_ui_source(&mut engine, &source)?;
-        }
+            let source = Self::read_ui_file(path)?;
+            Some(Self::parse_ui_source(&source)?)
+        } else {
+            None
+        };
 
         let state = Arc::new(Mutex::new(state_container));
         Self::register_action_handlers_with_engine(
@@ -650,6 +658,7 @@ impl<S: State> ModuleInstance<S> {
             state,
             engine: Mutex::new(engine),
             mounted: Mutex::new(false),
+            pending_ir: Mutex::new(pending_ir),
             global_context,
         })
     }
@@ -725,15 +734,16 @@ impl<S: State> ModuleInstance<S> {
             )
         });
 
-        // Parse and load UI if provided
-        if let Some(ref source) = definition.ui_source {
-            Self::load_ui_source(&mut engine, source)?;
+        // Parse UI now so any syntax errors surface at construction;
+        // defer the actual `render_ir_node` to `mount()`.
+        let pending_ir = if let Some(ref source) = definition.ui_source {
+            Some(Self::parse_ui_source(source)?)
         } else if let Some(ref path) = definition.ui_file {
-            let source = std::fs::read_to_string(path).map_err(|e| {
-                SdkError::Component(format!("Failed to read UI file '{path}': {e}"))
-            })?;
-            Self::load_ui_source(&mut engine, &source)?;
-        }
+            let source = Self::read_ui_file(path)?;
+            Some(Self::parse_ui_source(&source)?)
+        } else {
+            None
+        };
 
         let state = Arc::new(Mutex::new(state_container));
         Self::register_action_handlers_with_engine(
@@ -748,6 +758,7 @@ impl<S: State> ModuleInstance<S> {
             state,
             engine: Mutex::new(engine),
             mounted: Mutex::new(false),
+            pending_ir: Mutex::new(pending_ir),
             global_context,
         })
     }
@@ -795,7 +806,11 @@ impl<S: State> ModuleInstance<S> {
         }
     }
 
-    fn load_ui_source(engine: &mut hypen_engine::Engine, source: &str) -> Result<()> {
+    /// Parse `source` into an `IRNode`. Used by `new` / `new_with_components`
+    /// to prepare the initial render at construction time without firing it
+    /// — the actual `engine.render_ir_node` call is deferred to `mount()`
+    /// so callers can wire `on_patches` first.
+    fn parse_ui_source(source: &str) -> Result<hypen_engine::ir::IRNode> {
         let doc = hypen_parser::parse_document(source).map_err(|e| {
             SdkError::Engine(hypen_engine::EngineError::ParseError {
                 source: source.chars().take(80).collect(),
@@ -806,12 +821,36 @@ impl<S: State> ModuleInstance<S> {
             .components
             .first()
             .ok_or_else(|| SdkError::Component("No component found in UI source".to_string()))?;
-        let ir_node = hypen_engine::ast_to_ir_node(component);
-        engine.render_ir_node(&ir_node);
-        Ok(())
+        Ok(hypen_engine::ast_to_ir_node(component))
     }
 
-    /// Mount the module (triggers `on_created` if it was registered as sync).
+    /// Read a UI file from disk into source text.
+    fn read_ui_file(path: &str) -> Result<String> {
+        std::fs::read_to_string(path)
+            .map_err(|e| SdkError::Component(format!("Failed to read UI file '{path}': {e}")))
+    }
+
+    /// Take whatever IR was parsed at construction time and feed it to the
+    /// engine. Idempotent — once consumed the slot is empty, so subsequent
+    /// `mount()` calls don't double-render.
+    fn flush_initial_render(&self) {
+        let ir = {
+            let mut slot = self.pending_ir.lock().unwrap();
+            slot.take()
+        };
+        if let Some(ir) = ir {
+            let mut engine = self.engine.lock().unwrap();
+            engine.render_ir_node(&ir);
+        }
+    }
+
+    /// Mount the module: fire the initial render, then run `on_created`
+    /// (sync only).
+    ///
+    /// The initial render is deferred from construction to `mount()` so
+    /// callers can wire `on_patches(cb)` in between and capture the
+    /// initial Create batch. Subsequent `mount()` calls are no-ops; the
+    /// pending IR slot is consumed on the first call.
     ///
     /// Async-only lifecycle handlers are silently skipped here — call
     /// [`mount_async`](Self::mount_async) to invoke them.
@@ -819,6 +858,7 @@ impl<S: State> ModuleInstance<S> {
         let mut mounted = self.mounted.lock().unwrap();
         if !*mounted {
             *mounted = true;
+            self.flush_initial_render();
             if let Some(LifecycleHandler::Sync(ref handler)) = self.definition.on_created {
                 let state = self.state.lock().unwrap();
                 let ctx = self.global_context.as_deref();
@@ -974,6 +1014,11 @@ impl<S: State> ModuleInstance<S> {
             }
             *mounted = true;
         }
+
+        // Same deferred-render contract as `mount()`: callers wire
+        // `on_patches` between `instantiate` and `mount_async` so the
+        // initial Create batch isn't dropped.
+        self.flush_initial_render();
 
         match &self.definition.on_created {
             Some(LifecycleHandler::Async(handler)) => {

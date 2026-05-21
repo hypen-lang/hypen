@@ -16,9 +16,6 @@
 <p align="center">
   An open-source cross-platform language and engine for building universal software that runs natively on all platforms via UI streaming. Fastest dev experience ever with out of the box reactivity, routing, hot reload, preview studio, Tailwind shorthands and all kinds of niceties.
 </p>
-> [!WARNING]
-> Hypen is under development and in early alpha stages. While API is mostly locked in, it might still change before 1.0 release.
-> Currently support exists only for server<>client streaming, with local app support on the way.
 
 ## Why Hypen?
 - **Native UI Streaming and portable (coming soon)** - Hypen supports native UI streaming from different languages - Rust, TS, Go, Kotlin, Swift and more coming soon
@@ -97,11 +94,16 @@ And create a simple DOM client that will connect to the server:
 
 <script type="module">
   import { RemoteEngine } from "@hypen-space/core";
-  import { createHypenClient } from "@hypen-space/web/dom";
+  import { DOMRenderer } from "@hypen-space/web";
 
   const app = document.getElementById("app");
+  const renderer = new DOMRenderer(app);
+
   const remote = new RemoteEngine("ws://localhost:3000");
-  createHypenClient(app, remote);
+
+  remote.onPatches((patches) => {
+    renderer.applyPatches(patches);
+  });
 
   await remote.connect();
 </script>
@@ -111,14 +113,16 @@ Or attach it to a web canvas:
 
 ```html
 <canvas id="app" width="800" height="600"></canvas>
-<script type="module">
+<script>
 import { RemoteEngine } from "@hypen-space/core";
-import { createHypenClient } from "@hypen-space/web/canvas";
+import { CanvasRenderer } from "@hypen-space/web/canvas";
+
+const canvas = document.getElementById("app") as HTMLCanvasElement;
+const renderer = new CanvasRenderer(canvas);
 
 const engine = new RemoteEngine("ws://localhost:3000");
-const canvas = document.getElementById("app");
-createHypenClient(canvas, engine);
 
+engine.onPatches((patches) => renderer.applyPatches(patches));
 await engine.connect();
 </script>
 

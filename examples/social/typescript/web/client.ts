@@ -1,5 +1,5 @@
 import { RemoteEngine } from "@hypen-space/core/remote/client";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
 const SESSION_KEY = "hypen-instagram-session";
 const WS_URL = "ws://localhost:3000";
@@ -33,13 +33,17 @@ const engine = new RemoteEngine(WS_URL, {
   },
 });
 
-createHypenClient(appContainer, engine);
+const renderer = new DOMRenderer(appContainer, engine);
 
 engine.onConnect(() => updateStatus("connecting"));
 
 engine.onSessionEstablished(({ sessionId }) => {
   localStorage.setItem(SESSION_KEY, sessionId);
   updateStatus("connected");
+});
+
+engine.onPatches((patches) => {
+  renderer.applyPatches(patches);
 });
 
 engine.onDisconnect(() => updateStatus("disconnected"));

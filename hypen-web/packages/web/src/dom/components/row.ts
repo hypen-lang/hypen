@@ -6,13 +6,13 @@
 
 import type { ComponentHandler } from "./index.js";
 
-// Inject global styles for Row with flex/weighted children (per-document)
-const injectedDocs = new WeakSet<Document>();
-function ensureRowStyles(doc: Document): void {
-  if (injectedDocs.has(doc)) return;
-  injectedDocs.add(doc);
+// Inject global styles for Row with flex/weighted children
+let rowStylesInjected = false;
+function ensureRowStyles(): void {
+  if (rowStylesInjected) return;
+  rowStylesInjected = true;
 
-  const style = doc.createElement("style");
+  const style = document.createElement("style");
   style.id = "hypen-row-styles";
   style.textContent = `
     /* Row expands to fill width when it has children with flex/weight */
@@ -21,14 +21,14 @@ function ensureRowStyles(doc: Document): void {
       width: 100%;
     }
   `;
-  doc.head.appendChild(style);
+  document.head.appendChild(style);
 }
 
 export const rowHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    ensureRowStyles(doc);
+  create(): HTMLElement {
+    ensureRowStyles();
 
-    const el = doc.createElement("div");
+    const el = document.createElement("div");
     el.style.display = "flex";
     el.style.flexDirection = "row";
     // Wrap to content by default (match iOS/Android behavior)

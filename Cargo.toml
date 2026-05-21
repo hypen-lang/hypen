@@ -5,6 +5,7 @@ members = [
     "hypen-engine-rs",
     "tailwind-parse",
     "hypen-sdk-rs",
+    "hypen-renderer-desktop",
     "engine-compatibility-tests/runners/rust",
 ]
 exclude = [
@@ -13,7 +14,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "0.4.980"
+version = "0.4.949"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/hypen-lang/hypen"

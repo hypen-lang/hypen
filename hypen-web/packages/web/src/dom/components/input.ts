@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const inputHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("input");
+  create(): HTMLElement {
+    const el = document.createElement("input");
     el.dataset.hypenType = "input";
     // Reset the default user-agent chrome so `.tw("bg-gray-100 rounded-lg")`
     // on an Input reads the same as any other styled element. Without

@@ -18,7 +18,7 @@
 import { Engine } from "../packages/web-engine/src/engine.js";
 import { app } from "../packages/core/src/app.js";
 import { HypenModuleInstance } from "../packages/core/src/app.js";
-import { createHypenClient } from "../packages/web/src/dom/index.js";
+import { DOMRenderer } from "../packages/web/src/dom/renderer.js";
 
 // ---------------------------------------------------------------------------
 // Mock data
@@ -241,7 +241,12 @@ async function main() {
 
   // Create DOM renderer — it will see the Canvas component in the DSL
   // and auto-route all descendants to a CanvasRenderer.
-  createHypenClient(container, engine);
+  const renderer = new DOMRenderer(container, engine);
+
+  engine.setRenderCallback((patches) => {
+    console.log(`Applying ${patches.length} patches`);
+    renderer.applyPatches(patches);
+  });
 
   // Create module instance
   new HypenModuleInstance(engine, socialModule);

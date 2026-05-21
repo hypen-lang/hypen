@@ -274,7 +274,7 @@ Row().gap(16) {
   }
   
   Link(
-    href: "https://github.com/hypen-lang/hypen",
+    href: "https://github.com/company",
     target: "_blank",
     rel: "noopener noreferrer"
   )
@@ -381,4 +381,5 @@ The `Link` component creates standard HTML anchor tags without routing logic. Fo
 - [Typography Applicators](../applicators/typography.md) - Text styling
 - [Color Applicators](../applicators/color.md) - Link colors
 - [Event Applicators](../applicators/events.md) - Click handlers
+
 

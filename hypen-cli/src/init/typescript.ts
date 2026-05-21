@@ -14,8 +14,9 @@
  *     files are written.
  *
  * Both layouts share the same demo surface:
- *   - `App`   minimal root module that mounts `Home`
- *   - `Home`  list of items with a typed `toggleBookmark` action
+ *   - `App`      root module, owns routing state and `navigate` action
+ *   - `Home`     greeting screen with typed `updateGreeting` action
+ *   - `Counter`  counter with typed increment/decrement/reset actions
  */
 
 import { mkdirSync, writeFileSync } from "fs";
@@ -113,27 +114,9 @@ function tsconfigJson(): string {
   );
 }
 
-/**
- * `file-based` projects scan a folder of .hypen files; `server-based`
- * projects boot a single TS entry script and register modules inline.
- * The CLI reads `layout` to dispatch `hypen dev` correctly.
- */
-function hypenConfig(layout: ModuleLayout = "file-based"): string {
-  if (layout === "server-based") {
-    return JSON.stringify(
-      {
-        layout: "server-based",
-        entry: "src/app.ts",
-        port: 3000,
-        outDir: "dist",
-      },
-      null,
-      2,
-    ) + "\n";
-  }
+function hypenConfig(): string {
   return JSON.stringify(
     {
-      layout: "file-based",
       components: "./src/components",
       entry: "App",
       port: 3000,
@@ -180,109 +163,183 @@ Thumbs.db
 // ---------------------------------------------------------------------------
 
 /**
- * Root module — minimal shell. The scaffold is intentionally a single
- * screen so you can clone, run, and start hacking without unpacking a
- * router and a navigation state machine first.
+ * Root module. Holds routing state (`location`) plus a typed `navigate`
+ * action dispatched from child screens. `.onAction<NavigatePayload>` gives
+ * `action.payload` full TS inference inside the handler.
  */
 const APP_MODULE_TS = `import { app } from "@hypen-space/core";
 
+type AppState = {
+  /** Current route path — drives the Router in the template. */
+  location: string;
+  /** Previous route path, used by \`navigateBack\`. */
+  previousLocation: string;
+};
+
+type NavigatePayload = { to: string };
+
 export default app
-  .defineState({})
+  .defineState<AppState>({
+    location: "/",
+    previousLocation: "/",
+  })
+  .onAction<NavigatePayload>("navigate", ({ action, state }) => {
+    const to = action.payload?.to;
+    if (!to || to === state.location) return;
+    state.previousLocation = state.location;
+    state.location = to;
+  })
+  .onAction("navigateBack", ({ state }) => {
+    const back = state.previousLocation || "/";
+    state.previousLocation = state.location;
+    state.location = back;
+  })
   .build();
 `;
 
 const APP_TEMPLATE_HYPEN = `module App {
-  Home()
+  Router {
+    Route(path: "/") {
+      Home()
+    }
+    Route(path: "/counter") {
+      Counter()
+    }
+  }
+  .tw("flex-1 w-full h-full")
 }
-.tw("flex-1 w-full min-h-screen bg-gray-50")
+.tw("flex-1 w-full h-full bg-white")
 `;
 
 /**
  * Home screen — demonstrates typed actions with a string payload and
- * dispatches a typed action to toggle a bookmark on a list item.
+ * dispatches the parent's \`navigate\` action to move to the counter.
  */
 const HOME_MODULE_TS = `import { app } from "@hypen-space/core";
 
-type Item = {
-  id: string;
-  title: string;
-  description: string;
-  bookmarked: boolean;
-};
-
 type HomeState = {
-  items: Item[];
+  greeting: string;
+  taps: number;
 };
 
-type ToggleBookmarkPayload = { id: string };
+type UpdateGreetingPayload = { greeting: string };
 
 export default app
   .module("Home")
   .defineState<HomeState>({
-    items: [
-      { id: "1", title: "Declarative UI",  description: "Describe screens; Hypen handles the diffing.",       bookmarked: false },
-      { id: "2", title: "Reactive state",  description: "Mutate plain objects. Dependencies tracked for you.", bookmarked: false },
-      { id: "3", title: "Cross-platform",  description: "Same .hypen file renders on Web, iOS, and Android.",  bookmarked: false },
-      { id: "4", title: "Typed modules",   description: "State, actions, and UI in one typed unit.",            bookmarked: false },
-    ],
+    greeting: "Welcome to Hypen",
+    taps: 0,
   })
-  .onAction<ToggleBookmarkPayload>("toggleBookmark", ({ action, state }) => {
-    const id = action.payload?.id;
-    if (!id) return;
-    const item = state.items.find((it) => it.id === id);
-    if (item) item.bookmarked = !item.bookmarked;
+  .onAction<UpdateGreetingPayload>("updateGreeting", ({ action, state }) => {
+    if (action.payload?.greeting) {
+      state.greeting = action.payload.greeting;
+    }
+  })
+  .onAction("tap", ({ state }) => {
+    state.taps += 1;
   })
   .build();
 `;
 
 const HOME_TEMPLATE_HYPEN = `module Home {
   Column {
-    // ── Header card ─────────────────────────────────────────
-    Column {
-      Text("My Library")
-        .tw("text-2xl md:text-3xl font-bold text-gray-900")
+    Text("@{state.greeting}")
+      .tw("text-3xl font-bold text-gray-900")
 
-      Text("A starter list. Tap Save to bookmark an item.")
-        .tw("text-sm md:text-base text-gray-500 mt-2")
-    }
-    .tw("bg-white rounded-2xl shadow-sm border border-gray-200 p-6 md:p-8")
+    Text("You have tapped @{state.taps} time(s).")
+      .tw("text-base text-gray-600 mt-2")
 
-    // ── Item list ───────────────────────────────────────────
-    Column {
-      ForEach(items: @state.items, key: "id") {
-        Row {
-          Column {
-            Text("@{item.title}")
-              .tw("font-semibold text-gray-900")
-            Text("@{item.description}")
-              .tw("text-sm text-gray-600 mt-1")
-          }
-          .tw("flex-1")
-
-          If(condition: "@{item.bookmarked}") {
-            Button {
-              Text("Saved")
-                .tw("text-green-700 font-semibold")
-            }
-            .tw("bg-green-50 border border-green-200 rounded-lg px-3 py-2 active:bg-green-100")
-            .onClick(@actions.toggleBookmark, id: item.id)
-          }
-
-          If(condition: "@{!item.bookmarked}") {
-            Button {
-              Text("Save")
-                .tw("text-blue-600 font-semibold")
-            }
-            .tw("bg-white border border-blue-200 rounded-lg px-3 py-2 active:bg-blue-50")
-            .onClick(@actions.toggleBookmark, id: item.id)
-          }
-        }
-        .tw("flex-row items-center gap-4 bg-white rounded-xl border border-gray-200 px-4 py-3")
+    Row {
+      Button {
+        Text("Tap me")
+          .tw("text-white font-semibold")
       }
+      .tw("bg-blue-600 rounded-lg px-4 py-2 active:bg-blue-700")
+      .onClick(@actions.tap)
+
+      Button {
+        Text("Go to Counter →")
+          .tw("text-blue-600 font-semibold")
+      }
+      .tw("bg-white border border-blue-600 rounded-lg px-4 py-2")
+      .onClick(@actions.navigate, to: "/counter")
     }
-    .tw("gap-3 mt-6")
+    .tw("flex-row gap-3 mt-6")
   }
-  .tw("flex-1 w-full max-w-2xl mx-auto p-4 md:p-8")
+  .tw("flex-1 items-center justify-center p-8 bg-gray-50")
+}
+`;
+
+/**
+ * Counter screen — canonical "basic state mutation" demo plus a
+ * navigation button back to Home.
+ */
+const COUNTER_MODULE_TS = `import { app } from "@hypen-space/core";
+
+type CounterState = {
+  count: number;
+};
+
+type StepPayload = { by: number };
+
+export default app
+  .module("Counter")
+  .defineState<CounterState>({ count: 0 })
+  .onAction("increment", ({ state }) => {
+    state.count += 1;
+  })
+  .onAction("decrement", ({ state }) => {
+    state.count -= 1;
+  })
+  .onAction("reset", ({ state }) => {
+    state.count = 0;
+  })
+  .onAction<StepPayload>("step", ({ action, state }) => {
+    state.count += action.payload?.by ?? 1;
+  })
+  .build();
+`;
+
+const COUNTER_TEMPLATE_HYPEN = `module Counter {
+  Column {
+    Text("Hypen Counter")
+      .tw("text-2xl font-bold text-gray-900")
+
+    Text("@{state.count}")
+      .tw("text-6xl font-bold text-blue-600 my-8")
+
+    Row {
+      Button {
+        Text("-")
+          .tw("text-white text-xl font-bold")
+      }
+      .tw("bg-red-600 rounded-lg px-6 py-3 active:bg-red-700")
+      .onClick(@actions.decrement)
+
+      Button {
+        Text("Reset")
+          .tw("text-white font-semibold")
+      }
+      .tw("bg-gray-600 rounded-lg px-6 py-3 active:bg-gray-700")
+      .onClick(@actions.reset)
+
+      Button {
+        Text("+")
+          .tw("text-white text-xl font-bold")
+      }
+      .tw("bg-green-600 rounded-lg px-6 py-3 active:bg-green-700")
+      .onClick(@actions.increment)
+    }
+    .tw("flex-row gap-4")
+
+    Button {
+      Text("← Back to Home")
+        .tw("text-blue-600 font-semibold")
+    }
+    .tw("mt-8 bg-transparent p-3")
+    .onClick(@actions.navigate, to: "/")
+  }
+  .tw("flex-1 items-center justify-center p-8 bg-white gap-3")
 }
 `;
 
@@ -298,6 +355,7 @@ function generateFileBased(opts: Options): void {
     "src/components",
     "src/components/App",
     "src/components/Home",
+    "src/components/Counter",
   ]) {
     ensureDir(projectDir, rel);
   }
@@ -306,6 +364,8 @@ function generateFileBased(opts: Options): void {
   write(projectDir, "src/components/App/component.hypen", APP_TEMPLATE_HYPEN);
   write(projectDir, "src/components/Home/component.ts", HOME_MODULE_TS);
   write(projectDir, "src/components/Home/component.hypen", HOME_TEMPLATE_HYPEN);
+  write(projectDir, "src/components/Counter/component.ts", COUNTER_MODULE_TS);
+  write(projectDir, "src/components/Counter/component.hypen", COUNTER_TEMPLATE_HYPEN);
 
   const appEntry = `/**
  * Hypen application entry point (file-based layout).
@@ -322,6 +382,7 @@ import App from "./components/App/component";
 // Ensure child modules register with the shared \`app\` registry before
 // the server walks it.
 import "./components/Home/component";
+import "./components/Counter/component";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const componentsDir = resolve(__dirname, "./components");
@@ -357,99 +418,160 @@ function generateServerBased(opts: Options): void {
 
   const appModule = `import { app, hypen } from "@hypen-space/core";
 
+type AppState = {
+  location: string;
+  previousLocation: string;
+};
+
+type NavigatePayload = { to: string };
+
 // Keep the DSL string as a named export so \`src/app.ts\` can pass it to
 // \`RemoteServer.ui(...)\` without reaching into a built module definition.
 export const AppTemplate = hypen\`module App {
-  Home()
+  Router {
+    Route(path: "/") {
+      Home()
+    }
+    Route(path: "/counter") {
+      Counter()
+    }
+  }
+  .tw("flex-1 w-full h-full")
 }
-.tw("flex-1 w-full min-h-screen bg-gray-50")
+.tw("flex-1 w-full h-full bg-white")
 \`;
 
 export const AppModule = app
-  .defineState({})
+  .defineState<AppState>({ location: "/", previousLocation: "/" })
+  .onAction<NavigatePayload>("navigate", ({ action, state }) => {
+    const to = action.payload?.to;
+    if (!to || to === state.location) return;
+    state.previousLocation = state.location;
+    state.location = to;
+  })
+  .onAction("navigateBack", ({ state }) => {
+    const back = state.previousLocation || "/";
+    state.previousLocation = state.location;
+    state.location = back;
+  })
   .ui(AppTemplate);
 `;
 
   const homeModule = `import { app, hypen } from "@hypen-space/core";
 
-type Item = {
-  id: string;
-  title: string;
-  description: string;
-  bookmarked: boolean;
+type HomeState = {
+  greeting: string;
+  taps: number;
 };
 
-type HomeState = { items: Item[] };
-type ToggleBookmarkPayload = { id: string };
+type UpdateGreetingPayload = { greeting: string };
 
 export const HomeModule = app
   .module("Home")
-  .defineState<HomeState>({
-    items: [
-      { id: "1", title: "Declarative UI",  description: "Describe screens; Hypen handles the diffing.",       bookmarked: false },
-      { id: "2", title: "Reactive state",  description: "Mutate plain objects. Dependencies tracked for you.", bookmarked: false },
-      { id: "3", title: "Cross-platform",  description: "Same .hypen file renders on Web, iOS, and Android.",  bookmarked: false },
-      { id: "4", title: "Typed modules",   description: "State, actions, and UI in one typed unit.",            bookmarked: false },
-    ],
+  .defineState<HomeState>({ greeting: "Welcome to Hypen", taps: 0 })
+  .onAction<UpdateGreetingPayload>("updateGreeting", ({ action, state }) => {
+    if (action.payload?.greeting) state.greeting = action.payload.greeting;
   })
-  .onAction<ToggleBookmarkPayload>("toggleBookmark", ({ action, state }) => {
-    const id = action.payload?.id;
-    if (!id) return;
-    const item = state.items.find((it) => it.id === id);
-    if (item) item.bookmarked = !item.bookmarked;
+  .onAction("tap", ({ state }) => {
+    state.taps += 1;
   })
   .ui(hypen\`module Home {
   Column {
-    Column {
-      Text("My Library")
-        .tw("text-2xl md:text-3xl font-bold text-gray-900")
+    Text("@{state.greeting}")
+      .tw("text-3xl font-bold text-gray-900")
 
-      Text("A starter list. Tap Save to bookmark an item.")
-        .tw("text-sm md:text-base text-gray-500 mt-2")
-    }
-    .tw("bg-white rounded-2xl shadow-sm border border-gray-200 p-6 md:p-8")
+    Text("You have tapped @{state.taps} time(s).")
+      .tw("text-base text-gray-600 mt-2")
 
-    Column {
-      ForEach(items: @state.items, key: "id") {
-        Row {
-          Column {
-            Text("@{item.title}")
-              .tw("font-semibold text-gray-900")
-            Text("@{item.description}")
-              .tw("text-sm text-gray-600 mt-1")
-          }
-          .tw("flex-1")
-
-          If(condition: "@{item.bookmarked}") {
-            Button {
-              Text("Saved")
-                .tw("text-green-700 font-semibold")
-            }
-            .tw("bg-green-50 border border-green-200 rounded-lg px-3 py-2 active:bg-green-100")
-            .onClick(@actions.toggleBookmark, id: item.id)
-          }
-
-          If(condition: "@{!item.bookmarked}") {
-            Button {
-              Text("Save")
-                .tw("text-blue-600 font-semibold")
-            }
-            .tw("bg-white border border-blue-200 rounded-lg px-3 py-2 active:bg-blue-50")
-            .onClick(@actions.toggleBookmark, id: item.id)
-          }
-        }
-        .tw("flex-row items-center gap-4 bg-white rounded-xl border border-gray-200 px-4 py-3")
+    Row {
+      Button {
+        Text("Tap me")
+          .tw("text-white font-semibold")
       }
+      .tw("bg-blue-600 rounded-lg px-4 py-2")
+      .onClick(@actions.tap)
+
+      Button {
+        Text("Go to Counter →")
+          .tw("text-blue-600 font-semibold")
+      }
+      .tw("bg-white border border-blue-600 rounded-lg px-4 py-2")
+      .onClick(@actions.navigate, to: "/counter")
     }
-    .tw("gap-3 mt-6")
+    .tw("flex-row gap-3 mt-6")
   }
-  .tw("flex-1 w-full max-w-2xl mx-auto p-4 md:p-8")
+  .tw("flex-1 items-center justify-center p-8 bg-gray-50")
+}
+\`);
+`;
+
+  const counterModule = `import { app, hypen } from "@hypen-space/core";
+
+type CounterState = { count: number };
+type StepPayload = { by: number };
+
+export const CounterModule = app
+  .module("Counter")
+  .defineState<CounterState>({ count: 0 })
+  .onAction("increment", ({ state }) => {
+    state.count += 1;
+  })
+  .onAction("decrement", ({ state }) => {
+    state.count -= 1;
+  })
+  .onAction("reset", ({ state }) => {
+    state.count = 0;
+  })
+  .onAction<StepPayload>("step", ({ action, state }) => {
+    state.count += action.payload?.by ?? 1;
+  })
+  .ui(hypen\`module Counter {
+  Column {
+    Text("Hypen Counter")
+      .tw("text-2xl font-bold text-gray-900")
+
+    Text("@{state.count}")
+      .tw("text-6xl font-bold text-blue-600 my-8")
+
+    Row {
+      Button {
+        Text("-")
+          .tw("text-white text-xl font-bold")
+      }
+      .tw("bg-red-600 rounded-lg px-6 py-3")
+      .onClick(@actions.decrement)
+
+      Button {
+        Text("Reset")
+          .tw("text-white font-semibold")
+      }
+      .tw("bg-gray-600 rounded-lg px-6 py-3")
+      .onClick(@actions.reset)
+
+      Button {
+        Text("+")
+          .tw("text-white text-xl font-bold")
+      }
+      .tw("bg-green-600 rounded-lg px-6 py-3")
+      .onClick(@actions.increment)
+    }
+    .tw("flex-row gap-4")
+
+    Button {
+      Text("← Back to Home")
+        .tw("text-blue-600 font-semibold")
+    }
+    .tw("mt-8 bg-transparent p-3")
+    .onClick(@actions.navigate, to: "/")
+  }
+  .tw("flex-1 items-center justify-center p-8 bg-white gap-3")
 }
 \`);
 `;
 
   write(projectDir, "src/modules/App.ts", appModule);
   write(projectDir, "src/modules/Home.ts", homeModule);
+  write(projectDir, "src/modules/Counter.ts", counterModule);
 
   const appEntry = `/**
  * Hypen application entry point (server-based layout).
@@ -466,6 +588,7 @@ import { AppModule, AppTemplate } from "./modules/App";
 // Importing for side effects: each module self-registers in the shared
 // \`app\` registry so \`.app(app)\` below can hand them to the server.
 import "./modules/Home";
+import "./modules/Counter";
 
 const port = Number(process.env.PORT) || 3000;
 
@@ -489,7 +612,7 @@ export function generateTypescriptProject(opts: Options): void {
   const { projectDir, projectName, layout } = opts;
 
   write(projectDir, "package.json", packageJson(projectName));
-  write(projectDir, "hypen.json", hypenConfig(layout));
+  write(projectDir, "hypen.json", hypenConfig());
   write(projectDir, "tsconfig.json", tsconfigJson());
   write(projectDir, ".gitignore", gitignore());
 

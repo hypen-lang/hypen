@@ -4,7 +4,7 @@
 [![VS Code](https://img.shields.io/badge/VS%20Code-Extension-007ACC?logo=visualstudiocode)](https://code.visualstudio.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](../LICENSE)
 
-A Language Server Protocol implementation for the [Hypen](https://github.com/hypen-lang/hypen) declarative UI language, providing rich IDE support in VSCode, Cursor, and other LSP-compatible editors.
+A Language Server Protocol implementation for the [Hypen](https://github.com/hypen) declarative UI language, providing rich IDE support in VSCode, Cursor, and other LSP-compatible editors.
 
 ## Features
 
@@ -171,7 +171,7 @@ The LSP consists of three main components:
 
 ### Parser Integration
 
-The current implementation uses a TypeScript-based parser for quick validation. For production use, it can be integrated with the Rust WASM parser from `parser/` in the main Hypen repository for full-fidelity parsing:
+The current implementation uses a TypeScript-based parser for quick validation. For production use, it can be integrated with the Rust WASM parser from `hypen-rs/parser` for full-fidelity parsing:
 
 ```typescript
 // Future integration (commented in parser.ts)
@@ -266,11 +266,12 @@ Same as the parent Hypen project.
 
 ## Links
 
-- [Hypen Repository](https://github.com/hypen-lang/hypen)
+- [Hypen Repository](https://github.com/hypen)
 - [VSCode LSP Guide](https://code.visualstudio.com/api/language-extensions/language-server-extension-guide)
 - [Language Server Protocol](https://microsoft.github.io/language-server-protocol/)
 
 ## Support
 
 For issues, questions, or feature requests, please open an issue in the Hypen monorepo.
+
 

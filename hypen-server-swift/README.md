@@ -10,9 +10,8 @@ Server-driven UI module system for Swift. Build reactive, cross-platform UIs wit
 
 ```swift
 // Package.swift
-// Clone https://github.com/hypen-lang/hypen
 dependencies: [
-    .package(path: "../hypen/hypen-server-swift"),
+    .package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "0.4.42"),
 ]
 ```
 

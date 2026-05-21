@@ -55,18 +55,19 @@ Column {
 
 **Option A: DOM Renderer** (standard web apps)
 
-`createHypenClient` is the recommended one-call helper — it constructs the renderer and subscribes to engine patches in one go. The bare `DOMRenderer` constructor is still exported for advanced wiring.
-
 ```typescript
 import { HypenModuleInstance } from "@hypen-space/core";
 import { Engine } from "@hypen-space/web-engine";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
 const engine = new Engine();
 await engine.init();
 
-// Set up DOM renderer + patch subscription in one call
-createHypenClient(document.body, engine);
+// Set up DOM renderer
+const renderer = new DOMRenderer(document.body, engine);
+engine.setRenderCallback((patches) => {
+  renderer.applyPatches(patches);
+});
 
 // Create module instance
 const instance = new HypenModuleInstance(engine, counterModule);
@@ -81,14 +82,17 @@ engine.renderSource(ui);
 ```typescript
 import { HypenModuleInstance } from "@hypen-space/core";
 import { Engine } from "@hypen-space/web-engine";
-import { createHypenClient } from "@hypen-space/web/canvas";
+import { CanvasRenderer } from "@hypen-space/web/canvas";
 
 const engine = new Engine();
 await engine.init();
 
-// Set up canvas renderer + patch subscription in one call
+// Set up canvas renderer
 const canvas = document.getElementById("app");
-createHypenClient(canvas, engine);
+const renderer = new CanvasRenderer(canvas, engine);
+engine.setRenderCallback((patches) => {
+  renderer.applyPatches(patches);
+});
 
 // Create module instance
 const instance = new HypenModuleInstance(engine, counterModule);
@@ -145,11 +149,12 @@ Or connect programmatically:
 
 ```typescript
 import { RemoteEngine } from "@hypen-space/core";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
 const engine = new RemoteEngine("ws://localhost:3000");
-createHypenClient(document.body, engine);
+const renderer = new DOMRenderer(document.body);
 
+engine.onPatches((patches) => renderer.applyPatches(patches));
 await engine.connect();
 ```
 

@@ -7,7 +7,7 @@
  *
  * A left sidebar lists all detected devices with run/stop controls.
  */
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { AndroidWebRTCCell } from "./AndroidWebRTCCell";
@@ -34,29 +34,6 @@ import {
 } from "lucide-react";
 import { DeviceLogs } from "./DeviceLogs";
 import { RunNativeMenu } from "./RunNativeMenu";
-import { ResizeHandle } from "./ResizeHandle";
-
-const CELL_WEIGHTS_STORAGE_KEY = "hypen.testmode.cellWeights";
-const MIN_CELL_WEIGHT = 0.15; // each cell keeps at least ~15% of total width
-
-function loadStoredWeights(): Record<string, number> {
-  try {
-    const raw = localStorage.getItem(CELL_WEIGHTS_STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === "object" ? parsed : {};
-  } catch {
-    return {};
-  }
-}
-
-function persistWeights(weights: Record<string, number>): void {
-  try {
-    localStorage.setItem(CELL_WEIGHTS_STORAGE_KEY, JSON.stringify(weights));
-  } catch {
-    /* storage unavailable */
-  }
-}
 
 type StudioDevice = {
   id: string;
@@ -191,32 +168,6 @@ export function TestMode({ activeFile, onClose }: TestModeProps) {
     return () => clearInterval(t);
   }, [refreshDevices]);
 
-  // `?device=<platform>:<id>` (passed by RunNativeMenu after a successful
-  // launch) auto-attaches that device cell as soon as the device shows up
-  // in the next /api/devices snapshot. Stays as a one-shot — once added,
-  // we don't keep re-adding it on subsequent refreshes.
-  const requestedDeviceKey = useMemo(() => {
-    if (typeof window === "undefined") return null;
-    const params = new URLSearchParams(window.location.search);
-    return params.get("device");
-  }, []);
-  const requestedDeviceAddedRef = useRef(false);
-  useEffect(() => {
-    if (!requestedDeviceKey || requestedDeviceAddedRef.current) return;
-    const [platform, ...idParts] = requestedDeviceKey.split(":");
-    const id = idParts.join(":");
-    if (platform !== "android" && platform !== "ios") return;
-    const pool = platform === "android" ? devices.android : devices.ios;
-    const found = pool.find((d) => d.id === id);
-    if (!found) return;
-    requestedDeviceAddedRef.current = true;
-    setCells((prev) => {
-      const key = `${platform}:${id}`;
-      if (prev.some((c) => cellKey(c) === key)) return prev;
-      return [...prev, { kind: "device", device: found }];
-    });
-  }, [requestedDeviceKey, devices]);
-
   const toggleCell = useCallback((cell: Cell) => {
     setCells((prev) => {
       const key = cellKey(cell);
@@ -329,45 +280,7 @@ export function TestMode({ activeFile, onClose }: TestModeProps) {
     [cells]
   );
 
-  // Per-cell flex weights, keyed by cellKey. New cells default to 1.
-  // Stored as a stable record so a cell that's added/removed/re-added
-  // remembers its previous size within a session.
-  const [cellWeights, setCellWeights] = useState<Record<string, number>>(loadStoredWeights);
-  useEffect(() => { persistWeights(cellWeights); }, [cellWeights]);
-
-  const gridContainerRef = useRef<HTMLDivElement | null>(null);
-
-  const handleDividerResize = useCallback((leftKey: string, rightKey: string, deltaPx: number) => {
-    const container = gridContainerRef.current;
-    if (!container) return;
-    const containerWidth = container.clientWidth;
-    if (containerWidth <= 0) return;
-
-    setCellWeights((prev) => {
-      const left = prev[leftKey] ?? 1;
-      const right = prev[rightKey] ?? 1;
-      const totalForPair = left + right;
-      // Convert px delta into a weight delta proportional to this pair's
-      // share of the row, so dragging feels 1:1 with on-screen pixels
-      // regardless of how many other cells exist.
-      const pairShare = totalForPair / Object.values(prev).reduce((a, b) => a + b, 0) || 1;
-      const pairPxWidth = containerWidth * pairShare;
-      const weightDelta = (deltaPx / pairPxWidth) * totalForPair;
-
-      let nextLeft = left + weightDelta;
-      let nextRight = right - weightDelta;
-      const minWeight = totalForPair * MIN_CELL_WEIGHT;
-      if (nextLeft < minWeight) {
-        nextRight -= minWeight - nextLeft;
-        nextLeft = minWeight;
-      }
-      if (nextRight < minWeight) {
-        nextLeft -= minWeight - nextRight;
-        nextRight = minWeight;
-      }
-      return { ...prev, [leftKey]: nextLeft, [rightKey]: nextRight };
-    });
-  }, []);
+  const gridCols = Math.max(1, Math.min(cells.length, 3));
 
   return (
     <div className="fixed inset-0 z-50 bg-background text-foreground flex flex-col">
@@ -527,34 +440,19 @@ export function TestMode({ activeFile, onClose }: TestModeProps) {
             {cells.length === 0 ? (
               <EmptyState />
             ) : (
-              <div ref={gridContainerRef} className="flex h-full gap-0 items-stretch">
-                {cells.map((cell, i) => {
-                  const key = cellKey(cell);
-                  const weight = cellWeights[key] ?? 1;
-                  const isLast = i === cells.length - 1;
-                  const nextKey = !isLast ? cellKey(cells[i + 1]!) : null;
-                  return (
-                    <Fragment key={key}>
-                      <div
-                        className="min-w-0 h-full"
-                        style={{ flex: `${weight} ${weight} 0`, marginRight: isLast ? 0 : 8, marginLeft: i === 0 ? 0 : 8 }}
-                      >
-                        <CellView
-                          cell={cell}
-                          activeFile={activeFile}
-                          remoteUrl={remoteUrl}
-                          onRemove={() => removeCell(key)}
-                        />
-                      </div>
-                      {!isLast && nextKey && (
-                        <ResizeHandle
-                          direction="vertical"
-                          onResize={(d) => handleDividerResize(key, nextKey, d)}
-                        />
-                      )}
-                    </Fragment>
-                  );
-                })}
+              <div
+                className="grid gap-4 h-full auto-rows-fr"
+                style={{ gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))` }}
+              >
+                {cells.map((cell) => (
+                  <CellView
+                    key={cellKey(cell)}
+                    cell={cell}
+                    activeFile={activeFile}
+                    remoteUrl={remoteUrl}
+                    onRemove={() => removeCell(cellKey(cell))}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -887,7 +785,7 @@ function CellView({
     window.open(popOutUrl, `hypen-cell-${cellKey(cell)}`, "popup,width=420,height=820");
   };
   return (
-    <div className="rounded-xl overflow-hidden border border-border bg-black flex flex-col h-full">
+    <div className="rounded-xl overflow-hidden border border-border bg-black flex flex-col">
       <div className="h-8 px-3 flex items-center gap-2 border-b border-border bg-card/50 shrink-0">
         <span className="text-[11px] text-muted-foreground truncate">{cellTitle(cell)}</span>
         <div className="flex-1" />

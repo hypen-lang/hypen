@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const linkHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("a");
+  create(): HTMLElement {
+    const el = document.createElement("a");
     el.dataset.hypenType = "link";
     return el;
   },

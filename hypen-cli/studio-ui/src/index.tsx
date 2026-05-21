@@ -26,49 +26,18 @@ import {
 } from "../../src/studio/run-scripts.ts";
 import { StudioEngineHost } from "./server/engine-host.ts";
 
-// CSS strategy: prefer a prebuilt bundle that ships in `studio-ui/dist/`,
-// produced at npm publish time by the CLI's `build.ts`. We can't run Tailwind
-// at runtime from an installed npm package because Tailwind v4's oxide
-// scanner refuses to scan files under `node_modules` — which is exactly
-// where studio-ui lives once installed. Every `.tsx` source is dropped,
-// every utility class is missing, the page loads unstyled. So: do all the
-// Tailwind work at publish time, serve the static output at runtime, and
-// never invoke Tailwind from a node_modules location.
-//
-// `STUDIO_DEV=1` opts into Bun's HTML import + --hot for live reload while
-// iterating on studio-ui itself — only useful from inside the monorepo.
-//
-// Regression guards:
-//   - `build.ts` asserts the publish-time CSS contains sentinel utilities
-//     before allowing the build to succeed (catches it at the right place).
-//   - `tests/studio.test.ts` boots studio-ui exactly the way `hypen studio`
-//     does and verifies utility classes reach the served CSS.
-const useHmrDevServer = process.env.STUDIO_DEV === "1";
-
-const prebuiltDist = join(import.meta.dir, "..", "dist");
-const prebuiltIndex = join(prebuiltDist, "index.html");
-const hasPrebuilt = !useHmrDevServer && existsSync(prebuiltIndex);
+// The `hypen studio` CLI hosts us as a subprocess and passes HYPEN_PROJECT_DIR;
+// standalone dev (`bun run dev` inside studio-ui/) doesn't. When the CLI owns
+// us we need the Bun.build + tailwindPlugin path — Bun's HTML-import path runs
+// without plugins under `bun --hot`, producing zero utility CSS regardless of
+// whether we live under node_modules. The earlier `/node_modules/` probe
+// caught the bunx case but silently broke monorepo/teleport launches.
+const isHostedByCli = Boolean(process.env.HYPEN_PROJECT_DIR);
 
 let serveIndex: any;
 let buildAssetsDir: string | null = null;
 
-if (hasPrebuilt) {
-  buildAssetsDir = prebuiltDist;
-} else if (useHmrDevServer) {
-  // STUDIO_DEV=1 — Bun's HTML import + --hot for live reload while editing
-  // studio-ui itself. No Tailwind plugin runs through this path; styles
-  // come from a separately-compiled CSS chunk if any.
-  serveIndex = (await import("./index.html")).default;
-} else {
-  // No prebuilt bundle and no HMR opt-in — usually means a monorepo checkout
-  // before `bun run build` has been run. Do a one-shot Bun.build with the
-  // Tailwind plugin: works fine when CWD is outside node_modules (monorepo
-  // dev), produces empty utility CSS when running from inside an installed
-  // package (Tailwind v4's oxide scanner refuses to look in node_modules).
-  // We log a single-line warning in the empty case rather than crashing,
-  // so the studio still loads — even unstyled, file browser / editor /
-  // terminal remain usable. The build-time guard in `build.ts` is what
-  // prevents this state from shipping in the first place.
+if (isHostedByCli) {
   const tailwindPlugin = (await import("bun-plugin-tailwind")).default;
   buildAssetsDir = join(tmpdir(), `hypen-studio-${process.pid}`);
 
@@ -84,21 +53,12 @@ if (hasPrebuilt) {
     process.exit(1);
   }
 
-  const cssOutputs = result.outputs.filter((o) => o.path.endsWith(".css"));
-  const cssText = (await Promise.all(cssOutputs.map((o) => o.text()))).join("\n");
-  const hasUtilities = /\.bg-card\b/.test(cssText) && /\.text-foreground\b/.test(cssText);
-  if (!hasUtilities) {
-    // Soft warning — don't kill the process. Most studio surfaces don't
-    // need utility CSS to function; the user can still read files, edit,
-    // and run the terminal even with bare theme defaults.
-    console.warn(
-      "[studio] runtime Tailwind build emitted no utility classes — UI may render unstyled. " +
-        "Reinstall @hypen-space/cli to pick up the prebuilt bundle.",
-    );
-  }
-
+  // Clean up temp build on exit
   const dir = buildAssetsDir;
   process.on("exit", () => { try { rmSync(dir, { recursive: true }); } catch {} });
+} else {
+  // Dev mode: use Bun's HTML import for HMR support
+  serveIndex = (await import("./index.html")).default;
 }
 
 // Get the project directory from environment or use cwd

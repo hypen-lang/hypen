@@ -5,7 +5,7 @@
  */
 
 export interface ComponentHandler {
-  create(doc: Document): HTMLElement;
+  create(): HTMLElement;
   applyProps?(element: HTMLElement, props: Record<string, any>): void;
 }
 
@@ -34,12 +34,12 @@ export class ComponentRegistry {
   /**
    * Create element for a component type
    */
-  createElement(type: string, props: Record<string, any> = {}, doc: Document = document): HTMLElement | null {
+  createElement(type: string, props: Record<string, any> = {}): HTMLElement | null {
     if (!type) return null;
     const handler = this.get(type);
     if (!handler) return null;
 
-    const element = handler.create(doc);
+    const element = handler.create();
     if (handler.applyProps) {
       handler.applyProps(element, props);
     }

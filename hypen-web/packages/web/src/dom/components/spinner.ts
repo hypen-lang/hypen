@@ -5,12 +5,12 @@
 import type { ComponentHandler } from "./index.js";
 
 export const spinnerHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const wrapper = doc.createElement("div");
+  create(): HTMLElement {
+    const wrapper = document.createElement("div");
     wrapper.dataset.hypenType = "spinner";
     wrapper.style.display = "inline-block";
 
-    const spinner = doc.createElement("div");
+    const spinner = document.createElement("div");
     spinner.style.width = "40px";
     spinner.style.height = "40px";
     spinner.style.border = "4px solid #f3f3f3";
@@ -19,7 +19,7 @@ export const spinnerHandler: ComponentHandler = {
     spinner.style.animation = "spin 1s linear infinite";
 
     // Add keyframe animation
-    const style = doc.createElement("style");
+    const style = document.createElement("style");
     style.textContent = `
       @keyframes spin {
         0% { transform: rotate(0deg); }

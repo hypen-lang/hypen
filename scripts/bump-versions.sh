@@ -14,11 +14,11 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Current versions (edit these as the source of truth)
-CURRENT_RUST_VERSION="0.4.980"
-CURRENT_NPM_VERSION="0.4.980"
-CURRENT_LSP_VERSION="0.4.980"
-CURRENT_GRADLE_VERSION="0.4.980"
-CURRENT_SWIFT_SERVER_VERSION="0.4.980"
+CURRENT_RUST_VERSION="0.4.949"
+CURRENT_NPM_VERSION="0.4.949"
+CURRENT_LSP_VERSION="0.4.949"
+CURRENT_GRADLE_VERSION="0.4.949"
+CURRENT_SWIFT_SERVER_VERSION="0.4.949"
 # @hypen-space/ios-streamer is versioned independently (macOS-only, optional
 # CLI dep). Bump it via --ios-streamer <version>; otherwise it's left alone.
 CURRENT_IOS_STREAMER_VERSION="0.1.0"

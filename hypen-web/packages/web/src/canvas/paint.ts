@@ -9,7 +9,7 @@ import { renderText } from "./text.js";
 import { ScrollManager, isScrollable } from "./scroll.js";
 import { getVisibleChildren, VIRTUALIZE_THRESHOLD } from "./virtualize.js";
 import type { SelectionManager } from "./selection.js";
-import { cssLengthToPx, resolveLineHeight } from "./utils.js";
+import { cssLengthToPx } from "./utils.js";
 
 /**
  * Module-level reference to the active SelectionManager so paintText
@@ -271,14 +271,13 @@ function paintText(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const layout = node.layout!;
   const props = node.props;
 
-  // `??` (not `||`) so a bound `0`, `false`, or `""` still renders.
-  let text = String(props[0] ?? props.text ?? "");
+  let text = String(props[0] || props.text || "");
   const color = props.color || "#000000";
   const fontSize = cssLengthToPx(props.fontSize) ?? 16;
   const fontWeight = props.fontWeight || "normal";
   const fontFamily = props.fontFamily || "system-ui, sans-serif";
   const textAlign = props.textAlign || "left";
-  const lineHeight = resolveLineHeight(props.lineHeight, fontSize) ?? fontSize * 1.2;
+  const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
   const textDecoration = props.textDecoration || "none";
   const textTransform = props.textTransform || "none";
   const letterSpacing = cssLengthToPx(props.letterSpacing) ?? 0;
@@ -384,7 +383,7 @@ function paintButton(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const y = layout.y;
   const width = layout.width;
   const height = layout.height;
-  const radius = layout.border.radius;
+  const radius = layout.border.radius || 4;
 
   // Apply shadow if specified
   const shadow = props.shadow || props.boxShadow;
@@ -450,7 +449,7 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const y = layout.y;
   const width = layout.width;
   const height = layout.height;
-  const radius = layout.border.radius;
+  const radius = layout.border.radius || 4;
 
   // Background
   ctx.fillStyle = props.backgroundColor || "#ffffff";
@@ -475,7 +474,7 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     const fontSize = cssLengthToPx(props.fontSize) ?? 16;
     const fontWeight = props.fontWeight || "normal";
     const fontFamily = props.fontFamily || "system-ui, sans-serif";
-    const lineHeight = resolveLineHeight(props.lineHeight, fontSize) ?? fontSize * 1.2;
+    const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
 
     renderText(
       ctx,
@@ -725,14 +724,6 @@ function drawRoundedRect(
   radius: number
 ): void {
   if (radius <= 0 || width <= 0 || height <= 0) {
-    // beginPath is critical here — without it, this rect appends to the
-    // existing path and the next `ctx.fill()` re-fills every previously
-    // queued rect with the current fillStyle. That manifested as a
-    // calculator grid where every button painted in the last button's
-    // colour and only the last button's child text survived (each
-    // subsequent fill repainted over earlier children). Mirrors the
-    // beginPath() the rounded branch already does below.
-    ctx.beginPath();
     ctx.rect(x, y, width, height);
     return;
   }
@@ -1277,7 +1268,7 @@ function paintCard(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const y = layout.y;
   const width = layout.width;
   const height = layout.height;
-  const radius = layout.border.radius;
+  const radius = layout.border.radius || 8;
 
   // Default card shadow
   const shadow = props.shadow || props.boxShadow || "0 2 8 rgba(0,0,0,0.1)";
@@ -1333,8 +1324,8 @@ function paintBadge(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   drawRoundedRect(ctx, x, y, width, height, radius);
   ctx.fill();
 
-  // `??` so a literal `0`/`false`/`""` value still renders.
-  const text = String(props[0] ?? props.text ?? "");
+  // Text content
+  const text = String(props[0] || props.text || "");
   if (text) {
     ctx.fillStyle = props.color || "#ffffff";
     ctx.font = `${props.fontWeight || "bold"} ${props.fontSize || 10}px ${props.fontFamily || "sans-serif"}`;
@@ -1369,8 +1360,8 @@ function paintAvatar(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
   ctx.fill();
 
-  // `??` so a literal `0`/`false`/`""` value still renders.
-  const text = String(props[0] ?? props.text ?? props.initials ?? "");
+  // Text initials if provided
+  const text = String(props[0] || props.text || props.initials || "");
   if (text) {
     ctx.fillStyle = props.color || "#ffffff";
     ctx.font = `${props.fontWeight || "bold"} ${props.fontSize || size / 2.5}px ${props.fontFamily || "sans-serif"}`;
@@ -1510,8 +1501,7 @@ function paintLink(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const layout = node.layout!;
   const props = node.props;
 
-  // `??` so a literal `0`/`false`/`""` value still renders.
-  const text = String(props[0] ?? props.text ?? "");
+  const text = String(props[0] || props.text || "");
   const color = node.hovered ? (props.hoverColor || "#0056b3") : (props.color || "#007bff");
   const fontSize = cssLengthToPx(props.fontSize) ?? 16;
   const fontWeight = props.fontWeight || "normal";

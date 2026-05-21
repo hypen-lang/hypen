@@ -47,17 +47,18 @@ bun run server.ts
 ```typescript
 // client.ts
 import { RemoteEngine } from "@hypen-space/core/remote/client";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
 const app = document.getElementById("app");
+const renderer = new DOMRenderer(app);
 
 const remoteEngine = new RemoteEngine("ws://localhost:3000")
+  .onPatches((patches) => {
+    renderer.applyPatches(patches);
+  })
   .onConnect(() => {
     console.log("Connected!");
   });
-
-// `createHypenClient` builds the renderer and subscribes to patches in one call.
-createHypenClient(app, remoteEngine);
 
 await remoteEngine.connect();
 ```

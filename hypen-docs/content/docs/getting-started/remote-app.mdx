@@ -201,16 +201,16 @@ Or with the full DOM renderer:
 
 ```typescript
 import { RemoteEngine } from "@hypen-space/core";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
 async function main() {
   const container = document.getElementById("app")!;
+  const renderer = new DOMRenderer(container);
   const engine = new RemoteEngine("ws://localhost:3000");
 
-  // `createHypenClient` is the recommended one-call wiring — it builds the
-  // renderer and subscribes to engine patches. `DOMRenderer` is still
-  // exported for advanced setups.
-  createHypenClient(container, engine);
+  engine.onPatches((patches) => {
+    renderer.applyPatches(patches);
+  });
 
   await engine.connect();
   console.log("Connected to server!");

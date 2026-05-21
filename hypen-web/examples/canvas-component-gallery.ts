@@ -13,7 +13,7 @@
 import { Engine } from "../packages/web-engine/src/engine.js";
 import { app } from "../packages/core/src/app.js";
 import { HypenModuleInstance } from "../packages/core/src/app.js";
-import { createHypenClient } from "../packages/web/src/dom/index.js";
+import { DOMRenderer } from "../packages/web/src/dom/renderer.js";
 
 // ---------------------------------------------------------------------------
 // Module
@@ -477,7 +477,11 @@ async function main() {
   const engine = new Engine();
   await engine.init();
 
-  createHypenClient(container, engine);
+  const renderer = new DOMRenderer(container, engine);
+
+  engine.setRenderCallback((patches) => {
+    renderer.applyPatches(patches);
+  });
 
   new HypenModuleInstance(engine, galleryModule);
 

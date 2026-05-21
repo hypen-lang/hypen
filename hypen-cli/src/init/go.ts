@@ -66,17 +66,8 @@ vendor/
 `;
 }
 
-function hypenConfig(layout: ModuleLayout): string {
-  if (layout === "server-based") {
-    return `{
-  "layout": "server-based",
-  "entry": "main.go",
-  "port": 3000
-}
-`;
-  }
+function hypenConfig(): string {
   return `{
-  "layout": "file-based",
   "components": "./components",
   "entry": "App",
   "port": 3000
@@ -85,57 +76,116 @@ function hypenConfig(layout: ModuleLayout): string {
 }
 
 const APP_HYPEN = `module App {
-  Home()
+  Router {
+    Route(path: "/") {
+      Home()
+    }
+    Route(path: "/counter") {
+      Counter()
+    }
+  }
+  .tw("flex-1 w-full h-full")
 }
-.tw("flex-1 w-full min-h-screen bg-gray-50")
+.tw("flex-1 w-full h-full bg-white")
 `;
 
 const HOME_HYPEN = `module Home {
   Column {
-    Column {
-      Text("My Library")
-        .tw("text-2xl md:text-3xl font-bold text-gray-900")
+    Text("@{state.greeting}")
+      .tw("text-3xl font-bold text-gray-900")
+      .fontSize(32)
+      .color("#111827")
 
-      Text("A starter list. Tap Save to bookmark an item.")
-        .tw("text-sm md:text-base text-gray-500 mt-2")
-    }
-    .tw("bg-white rounded-2xl shadow-sm border border-gray-200 p-6 md:p-8")
+    Text("You have tapped @{state.taps} time(s).")
+      .tw("text-base text-gray-600 mt-2")
+      .fontSize(16)
 
-    Column {
-      ForEach(items: @state.items, key: "id") {
-        Row {
-          Column {
-            Text("@{item.title}")
-              .tw("font-semibold text-gray-900")
-            Text("@{item.description}")
-              .tw("text-sm text-gray-600 mt-1")
-          }
-          .tw("flex-1")
-
-          If(condition: "@{item.bookmarked}") {
-            Button {
-              Text("Saved")
-                .tw("text-green-700 font-semibold")
-            }
-            .tw("bg-green-50 border border-green-200 rounded-lg px-3 py-2 active:bg-green-100")
-            .onClick(@actions.toggleBookmark, id: item.id)
-          }
-
-          If(condition: "@{!item.bookmarked}") {
-            Button {
-              Text("Save")
-                .tw("text-blue-600 font-semibold")
-            }
-            .tw("bg-white border border-blue-200 rounded-lg px-3 py-2 active:bg-blue-50")
-            .onClick(@actions.toggleBookmark, id: item.id)
-          }
-        }
-        .tw("flex-row items-center gap-4 bg-white rounded-xl border border-gray-200 px-4 py-3")
+    Row {
+      Button {
+        Text("Tap me")
+          .tw("text-white font-semibold")
       }
+      .tw("bg-blue-600 rounded-lg px-4 py-2")
+      .backgroundColor("#2563eb")
+      .borderRadius(8)
+      .padding(12)
+      .onClick(@actions.tap)
+
+      Button {
+        Text("Go to Counter →")
+          .tw("text-blue-600 font-semibold")
+      }
+      .tw("bg-white border border-blue-600 rounded-lg px-4 py-2")
+      .borderRadius(8)
+      .padding(12)
+      .onClick(@actions.navigate, to: "/counter")
     }
-    .tw("gap-3 mt-6")
+    .tw("flex-row gap-3 mt-6")
+    .gap(12)
   }
-  .tw("flex-1 w-full max-w-2xl mx-auto p-4 md:p-8")
+  .tw("flex-1 items-center justify-center p-8 bg-gray-50")
+  .padding(32)
+  .gap(8)
+}
+`;
+
+const COUNTER_HYPEN = `module Counter {
+  Column {
+    Text("Hypen Counter")
+      .tw("text-2xl font-bold text-gray-900")
+      .fontSize(24)
+
+    Text("@{state.count}")
+      .tw("text-6xl font-bold text-blue-600 my-8")
+      .fontSize(64)
+      .color("#2563eb")
+      .marginVertical(32)
+
+    Row {
+      Button {
+        Text("-")
+          .tw("text-white text-xl font-bold")
+      }
+      .tw("bg-red-600 rounded-lg px-6 py-3")
+      .backgroundColor("#dc2626")
+      .borderRadius(8)
+      .padding(16)
+      .onClick(@actions.decrement)
+
+      Button {
+        Text("Reset")
+          .tw("text-white font-semibold")
+      }
+      .tw("bg-gray-600 rounded-lg px-6 py-3")
+      .backgroundColor("#4b5563")
+      .borderRadius(8)
+      .padding(16)
+      .onClick(@actions.reset)
+
+      Button {
+        Text("+")
+          .tw("text-white text-xl font-bold")
+      }
+      .tw("bg-green-600 rounded-lg px-6 py-3")
+      .backgroundColor("#16a34a")
+      .borderRadius(8)
+      .padding(16)
+      .onClick(@actions.increment)
+    }
+    .tw("flex-row gap-4")
+    .gap(16)
+
+    Button {
+      Text("← Back to Home")
+        .tw("text-blue-600 font-semibold")
+    }
+    .tw("mt-8 bg-transparent")
+    .padding(12)
+    .onClick(@actions.navigate, to: "/")
+  }
+  .tw("flex-1 items-center justify-center p-8 bg-white")
+  .padding(32)
+  .gap(12)
 }
 `;
 
@@ -169,49 +219,83 @@ func loadTemplate(name string) string {
 \treturn string(data)
 }
 
-// ---------- App (no state) ----------
+// ---------- App (routing) ----------
 
-type AppState struct{}
+type AppState struct {
+\tLocation         string \`json:"location"\`
+\tPreviousLocation string \`json:"previousLocation"\`
+}
+
+type NavigatePayload struct {
+\tTo string \`json:"to"\`
+}
 
 // ---------- Home ----------
 
-type Item struct {
-\tID          string \`json:"id"\`
-\tTitle       string \`json:"title"\`
-\tDescription string \`json:"description"\`
-\tBookmarked  bool   \`json:"bookmarked"\`
-}
-
 type HomeState struct {
-\tItems []Item \`json:"items"\`
+\tGreeting string \`json:"greeting"\`
+\tTaps     int    \`json:"taps"\`
 }
 
-func seedItems() []Item {
-\treturn []Item{
-\t\t{ID: "1", Title: "Declarative UI",  Description: "Describe screens; Hypen handles the diffing.",       Bookmarked: false},
-\t\t{ID: "2", Title: "Reactive state",  Description: "Mutate plain objects. Dependencies tracked for you.", Bookmarked: false},
-\t\t{ID: "3", Title: "Cross-platform",  Description: "Same .hypen file renders on Web, iOS, and Android.",  Bookmarked: false},
-\t\t{ID: "4", Title: "Typed modules",   Description: "State, actions, and UI in one typed unit.",            Bookmarked: false},
-\t}
+// ---------- Counter ----------
+
+type CounterState struct {
+\tCount int \`json:"count"\`
 }
 
 func main() {
-\tappDef := core.NewApp(AppState{}).Name("App").Build()
-
-\tcore.NewApp(HomeState{Items: seedItems()}).
-\t\tName("Home").
-\t\tOnAction("toggleBookmark", func(ctx core.TypedActionContext[HomeState]) {
+\tappDef := core.NewApp(AppState{Location: "/", PreviousLocation: "/"}).
+\t\tName("App").
+\t\tOnAction("navigate", func(ctx core.TypedActionContext[AppState]) {
 \t\t\tpayload, _ := ctx.Action.Payload.(map[string]any)
-\t\t\tid, _ := payload["id"].(string)
-\t\t\tif id == "" {
+\t\t\tto, _ := payload["to"].(string)
+\t\t\tif to == "" || to == ctx.State.Location {
 \t\t\t\treturn
 \t\t\t}
-\t\t\tfor i := range ctx.State.Items {
-\t\t\t\tif ctx.State.Items[i].ID == id {
-\t\t\t\t\tctx.State.Items[i].Bookmarked = !ctx.State.Items[i].Bookmarked
-\t\t\t\t\treturn
-\t\t\t\t}
+\t\t\tctx.State.PreviousLocation = ctx.State.Location
+\t\t\tctx.State.Location = to
+\t\t}).
+\t\tOnAction("navigateBack", func(ctx core.TypedActionContext[AppState]) {
+\t\t\tback := ctx.State.PreviousLocation
+\t\t\tif back == "" {
+\t\t\t\tback = "/"
 \t\t\t}
+\t\t\tctx.State.PreviousLocation = ctx.State.Location
+\t\t\tctx.State.Location = back
+\t\t}).
+\t\tBuild()
+
+\tcore.NewApp(HomeState{Greeting: "Welcome to Hypen", Taps: 0}).
+\t\tName("Home").
+\t\tOnAction("tap", func(ctx core.TypedActionContext[HomeState]) {
+\t\t\tctx.State.Taps++
+\t\t}).
+\t\tOnAction("updateGreeting", func(ctx core.TypedActionContext[HomeState]) {
+\t\t\tpayload, _ := ctx.Action.Payload.(map[string]any)
+\t\t\tif g, ok := payload["greeting"].(string); ok && g != "" {
+\t\t\t\tctx.State.Greeting = g
+\t\t\t}
+\t\t}).
+\t\tBuild()
+
+\tcore.NewApp(CounterState{Count: 0}).
+\t\tName("Counter").
+\t\tOnAction("increment", func(ctx core.TypedActionContext[CounterState]) {
+\t\t\tctx.State.Count++
+\t\t}).
+\t\tOnAction("decrement", func(ctx core.TypedActionContext[CounterState]) {
+\t\t\tctx.State.Count--
+\t\t}).
+\t\tOnAction("reset", func(ctx core.TypedActionContext[CounterState]) {
+\t\t\tctx.State.Count = 0
+\t\t}).
+\t\tOnAction("step", func(ctx core.TypedActionContext[CounterState]) {
+\t\t\tpayload, _ := ctx.Action.Payload.(map[string]any)
+\t\t\tby := 1
+\t\t\tif v, ok := payload["by"].(float64); ok {
+\t\t\t\tby = int(v)
+\t\t\t}
+\t\t\tctx.State.Count += by
 \t\t}).
 \t\tBuild()
 
@@ -250,53 +334,82 @@ import (
 \t"github.com/hypen-space/core/remote"
 )
 
-type AppState struct{}
-
-type Item struct {
-\tID          string \`json:"id"\`
-\tTitle       string \`json:"title"\`
-\tDescription string \`json:"description"\`
-\tBookmarked  bool   \`json:"bookmarked"\`
+type AppState struct {
+\tLocation         string \`json:"location"\`
+\tPreviousLocation string \`json:"previousLocation"\`
 }
 
 type HomeState struct {
-\tItems []Item \`json:"items"\`
+\tGreeting string \`json:"greeting"\`
+\tTaps     int    \`json:"taps"\`
+}
+
+type CounterState struct {
+\tCount int \`json:"count"\`
 }
 
 const appTemplate = \`${APP_HYPEN.replace(/`/g, "\\`")}\`
 const homeTemplate = \`${HOME_HYPEN.replace(/`/g, "\\`")}\`
-
-func seedItems() []Item {
-\treturn []Item{
-\t\t{ID: "1", Title: "Declarative UI",  Description: "Describe screens; Hypen handles the diffing.",       Bookmarked: false},
-\t\t{ID: "2", Title: "Reactive state",  Description: "Mutate plain objects. Dependencies tracked for you.", Bookmarked: false},
-\t\t{ID: "3", Title: "Cross-platform",  Description: "Same .hypen file renders on Web, iOS, and Android.",  Bookmarked: false},
-\t\t{ID: "4", Title: "Typed modules",   Description: "State, actions, and UI in one typed unit.",            Bookmarked: false},
-\t}
-}
+const counterTemplate = \`${COUNTER_HYPEN.replace(/`/g, "\\`")}\`
 
 func main() {
-\tappDef := core.NewApp(AppState{}).Name("App").UI(appTemplate)
+\tappDef := core.NewApp(AppState{Location: "/", PreviousLocation: "/"}).
+\t\tName("App").
+\t\tOnAction("navigate", func(ctx core.TypedActionContext[AppState]) {
+\t\t\tpayload, _ := ctx.Action.Payload.(map[string]any)
+\t\t\tto, _ := payload["to"].(string)
+\t\t\tif to == "" || to == ctx.State.Location {
+\t\t\t\treturn
+\t\t\t}
+\t\t\tctx.State.PreviousLocation = ctx.State.Location
+\t\t\tctx.State.Location = to
+\t\t}).
+\t\tOnAction("navigateBack", func(ctx core.TypedActionContext[AppState]) {
+\t\t\tback := ctx.State.PreviousLocation
+\t\t\tif back == "" {
+\t\t\t\tback = "/"
+\t\t\t}
+\t\t\tctx.State.PreviousLocation = ctx.State.Location
+\t\t\tctx.State.Location = back
+\t\t}).
+\t\tUI(appTemplate)
 
 \t// \`UI()\` already returns the built \`*ModuleDefinition\`, so no
 \t// trailing \`.Build()\` is needed here. Naming the module via
 \t// \`.Name(...)\` registers it in the shared registry.
-\tcore.NewApp(HomeState{Items: seedItems()}).
+\tcore.NewApp(HomeState{Greeting: "Welcome to Hypen", Taps: 0}).
 \t\tName("Home").
-\t\tOnAction("toggleBookmark", func(ctx core.TypedActionContext[HomeState]) {
+\t\tOnAction("tap", func(ctx core.TypedActionContext[HomeState]) {
+\t\t\tctx.State.Taps++
+\t\t}).
+\t\tOnAction("updateGreeting", func(ctx core.TypedActionContext[HomeState]) {
 \t\t\tpayload, _ := ctx.Action.Payload.(map[string]any)
-\t\t\tid, _ := payload["id"].(string)
-\t\t\tif id == "" {
-\t\t\t\treturn
-\t\t\t}
-\t\t\tfor i := range ctx.State.Items {
-\t\t\t\tif ctx.State.Items[i].ID == id {
-\t\t\t\t\tctx.State.Items[i].Bookmarked = !ctx.State.Items[i].Bookmarked
-\t\t\t\t\treturn
-\t\t\t\t}
+\t\t\tif g, ok := payload["greeting"].(string); ok && g != "" {
+\t\t\t\tctx.State.Greeting = g
 \t\t\t}
 \t\t}).
 \t\tUI(homeTemplate)
+
+\tcore.NewApp(CounterState{Count: 0}).
+\t\tName("Counter").
+\t\tOnAction("increment", func(ctx core.TypedActionContext[CounterState]) {
+\t\t\tctx.State.Count++
+\t\t}).
+\t\tOnAction("decrement", func(ctx core.TypedActionContext[CounterState]) {
+\t\t\tctx.State.Count--
+\t\t}).
+\t\tOnAction("reset", func(ctx core.TypedActionContext[CounterState]) {
+\t\t\tctx.State.Count = 0
+\t\t}).
+\t\tOnAction("step", func(ctx core.TypedActionContext[CounterState]) {
+\t\t\tpayload, _ := ctx.Action.Payload.(map[string]any)
+\t\t\tby := 1
+\t\t\tif v, ok := payload["by"].(float64); ok {
+\t\t\t\tby = int(v)
+\t\t\t}
+\t\t\tctx.State.Count += by
+\t\t}).
+\t\tUI(counterTemplate)
 
 \tport := 3000
 \tif envPort := os.Getenv("PORT"); envPort != "" {
@@ -347,7 +460,7 @@ export function generateGoProject(opts: Options): void {
 
   write(projectDir, "go.mod", goMod(projectName));
   write(projectDir, ".gitignore", gitignore());
-  write(projectDir, "hypen.json", hypenConfig(layout));
+  write(projectDir, "hypen.json", hypenConfig());
   write(projectDir, "README.md", readme(projectName, layout));
 
   if (layout === "file-based") {
@@ -355,11 +468,13 @@ export function generateGoProject(opts: Options): void {
       "components",
       "components/App",
       "components/Home",
+      "components/Counter",
     ]) {
       ensureDir(projectDir, rel);
     }
     write(projectDir, "components/App/App.hypen", APP_HYPEN);
     write(projectDir, "components/Home/Home.hypen", HOME_HYPEN);
+    write(projectDir, "components/Counter/Counter.hypen", COUNTER_HYPEN);
     write(projectDir, "main.go", mainFileBased(projectName));
   } else {
     write(projectDir, "main.go", mainServerBased(projectName));

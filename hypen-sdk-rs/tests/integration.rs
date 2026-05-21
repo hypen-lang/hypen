@@ -210,17 +210,27 @@ fn test_patches_emitted_on_state_change() {
 
     let instance = ModuleInstance::new(Arc::new(def), None).unwrap();
 
-    // Register patch callback (after construction, so initial render is not captured)
+    // Initial render is deferred from `new` to `mount`, so a callback
+    // wired here captures the initial Create batch.
     instance.on_patches(move |p| {
         patches_clone.lock().unwrap().push(p.to_vec());
     });
 
     instance.mount();
+    let after_mount = patches.lock().unwrap().len();
+    assert!(
+        after_mount > 0,
+        "mount() should flush the initial render through on_patches"
+    );
 
-    // Dispatch action — this should produce patches (setProp for updated text)
+    // Dispatch action — this should produce additional patches
+    // (SetProp for the updated text).
     instance.dispatch_action("increment", None).unwrap();
     let after_dispatch = patches.lock().unwrap().len();
-    assert!(after_dispatch > 0, "State change should produce patches");
+    assert!(
+        after_dispatch > after_mount,
+        "state change after mount should produce more patches"
+    );
 }
 
 // ---------------------------------------------------------------------------

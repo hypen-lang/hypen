@@ -127,21 +127,24 @@ await hypen.unmount();
 
 ## DOM Renderer (Low-Level)
 
-For custom integrations, use the `createHypenClient` helper to wire a renderer and patch subscription in one call. The bare `DOMRenderer` constructor is still exported for advanced cases.
+For custom integrations:
 
 ```typescript
 import { app } from "@hypen-space/core";
 import { Engine } from "@hypen-space/web-engine";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
 const engine = new Engine();
 await engine.init({ wasmUrl: "/hypen_engine_bg.wasm" });
 
-const { renderer } = createHypenClient(
-  document.getElementById("app")!,
-  engine,
-  { debug: { enabled: true, showHeatmap: true } },
-);
+const renderer = new DOMRenderer(document.getElementById("app")!, engine, {
+  enabled: true,
+  showHeatmap: true,
+});
+
+engine.setRenderCallback((patches) => {
+  renderer.applyPatches(patches);
+});
 
 engine.renderSource(`Column { Text("Hello!") }`);
 ```
@@ -237,16 +240,20 @@ Text("Hello")
 
 ## Canvas Renderer
 
-Hardware-accelerated rendering. `createHypenClient` is the recommended one-call wiring; `CanvasRenderer` remains exported for advanced use.
+Hardware-accelerated rendering:
 
 ```typescript
-import { createHypenClient } from "@hypen-space/web/canvas";
+import { CanvasRenderer } from "@hypen-space/web";
 
 const canvas = document.querySelector("canvas")!;
-const { renderer } = createHypenClient(canvas, engine, {
+const renderer = new CanvasRenderer(canvas, engine, {
   devicePixelRatio: window.devicePixelRatio,
   enableAccessibility: true,
   enableHitTesting: true,
+});
+
+engine.setRenderCallback((patches) => {
+  renderer.applyPatches(patches);
 });
 ```
 
@@ -256,15 +263,15 @@ Connect to a server-driven UI:
 
 ```typescript
 import { RemoteEngine } from "@hypen-space/core";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
+const renderer = new DOMRenderer(document.getElementById("app")!, engine);
 const remote = new RemoteEngine("ws://localhost:3000", {
   autoReconnect: true,
 });
 
-const { renderer } = createHypenClient(document.getElementById("app")!, remote);
-
 remote
+  .onPatches((patches) => renderer.applyPatches(patches))
   .onStateUpdate((state) => renderer.updateState(state))
   .onConnect(() => console.log("Connected"));
 

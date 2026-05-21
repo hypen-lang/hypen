@@ -132,17 +132,15 @@ interface HypenConfig {
 
 The default renderer creates native HTML elements for each Hypen component:
 
-`createHypenClient` is the recommended one-call wiring (renderer + patch subscription in one go). The bare `DOMRenderer` constructor is still exported for advanced setups (custom subscription, multi-listener fan-out).
-
 ```typescript
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web/dom";
 import { Engine } from "@hypen-space/web-engine";
 
 const engine = new Engine();
 await engine.init(); // Loads WASM from CDN
 
 const container = document.getElementById("app")!;
-const { renderer } = createHypenClient(container, engine);
+const renderer = new DOMRenderer(container, engine);
 ```
 
 ### Debug Heatmap
@@ -150,14 +148,12 @@ const { renderer } = createHypenClient(container, engine);
 The DOM renderer includes a re-render heatmap for performance debugging. Elements that re-render frequently glow red:
 
 ```typescript
-const { renderer } = createHypenClient(container, engine, {
-  debug: {
-    enabled: true,
-    showHeatmap: true,
-    heatmapIncrement: 5,    // +5% opacity per re-render
-    fadeOutDuration: 2000,  // Fade out over 2 seconds
-    maxOpacity: 0.8,
-  },
+const renderer = new DOMRenderer(container, engine, {
+  enabled: true,
+  showHeatmap: true,
+  heatmapIncrement: 5,    // +5% opacity per re-render
+  fadeOutDuration: 2000,   // Fade out over 2 seconds
+  maxOpacity: 0.8,
 });
 
 // Or toggle at runtime
@@ -221,14 +217,14 @@ Text("Highlighted")
 For canvas-based rendering (useful for games, data visualizations, or pixel-perfect control):
 
 ```typescript
-import { createHypenClient } from "@hypen-space/web/canvas";
+import { CanvasRenderer } from "@hypen-space/web/canvas";
 import { Engine } from "@hypen-space/web-engine";
 
 const engine = new Engine();
 await engine.init();
 
 const canvas = document.getElementById("canvas") as HTMLCanvasElement;
-const { renderer } = createHypenClient(canvas, engine, {
+const renderer = new CanvasRenderer(canvas, engine, {
   devicePixelRatio: window.devicePixelRatio,
   backgroundColor: "#ffffff",
   enableAccessibility: true,
@@ -310,9 +306,12 @@ For programmatic control over the remote connection:
 
 ```typescript
 import { RemoteEngine } from "@hypen-space/core";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web/dom";
 
 const container = document.getElementById("app")!;
+const engine = new Engine();
+await engine.init();
+const renderer = new DOMRenderer(container, engine);
 
 const remote = new RemoteEngine("ws://localhost:3000", {
   autoReconnect: true,
@@ -320,8 +319,10 @@ const remote = new RemoteEngine("ws://localhost:3000", {
   maxReconnectAttempts: 10,
 });
 
-// One-call wiring: renderer + patch subscription
-const { renderer } = createHypenClient(container, remote);
+// Handle UI patches
+remote.onPatches((patches) => {
+  renderer.applyPatches(patches);
+});
 
 // Handle state updates
 remote.onStateUpdate((state) => {
@@ -366,9 +367,7 @@ The Node.js engine (`@hypen-space/server`) initializes WASM automatically.
 
 ## Engine API
 
-The engine provides low-level control over parsing and rendering. Most apps
-should use `createHypenClient` (above) to mount a renderer; the methods below
-are the underlying primitives it wraps:
+The engine provides low-level control over parsing and rendering:
 
 ```typescript
 // Render a Hypen DSL string
@@ -378,7 +377,7 @@ engine.renderSource(`
   }
 `);
 
-// Subscribe to patches (createHypenClient does this for you)
+// Set a render callback to receive patches
 engine.setRenderCallback((patches) => {
   renderer.applyPatches(patches);
 });

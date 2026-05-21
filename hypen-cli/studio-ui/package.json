@@ -4,16 +4,16 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "STUDIO_DEV=1 bun --hot src/index.tsx",
+    "dev": "bun --hot src/index.tsx",
     "start": "NODE_ENV=production bun src/index.tsx",
     "build": "bun run build.ts",
     "test": "bun test"
   },
   "dependencies": {
-    "@hypen-space/core": "0.4.980",
-    "@hypen-space/server": "0.4.980",
-    "@hypen-space/web": "0.4.980",
-    "@hypen-space/web-engine": "0.4.980",
+    "@hypen-space/core": "0.4.949",
+    "@hypen-space/server": "0.4.949",
+    "@hypen-space/web": "0.4.949",
+    "@hypen-space/web-engine": "0.4.949",
     "@radix-ui/react-label": "^2.1.7",
     "@radix-ui/react-select": "^2.2.6",
     "@babel/runtime": "^7.24.0",

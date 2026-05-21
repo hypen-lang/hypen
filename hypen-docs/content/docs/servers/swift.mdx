@@ -9,14 +9,25 @@ The Swift SDK (`HypenServer`) provides a server-side Hypen implementation for Sw
 
 ## Installation
 
-> **Note:** Swift Package Manager requires `Package.swift` at the package root. Clone the main Hypen repository at `https://github.com/hypen-lang/hypen`, then add `hypen-server-swift` as a local package dependency.
+> **Note:** Swift Package Manager requires `Package.swift` at the repository root. Since `hypen-server-swift` lives inside the `hypen-engine-rs` monorepo, you cannot reference it directly via the monorepo URL. Use one of these approaches:
 
 ### Local dependency (monorepo)
 
 ```swift
 // Package.swift
 dependencies: [
-    .package(path: "../hypen/hypen-server-swift"),
+    .package(path: "../hypen-engine-rs/hypen-server-swift"),
+]
+```
+
+### Separate published package (coming soon)
+
+> **Note:** The standalone `hypen-server-swift` package is not yet published. For now, use the local dependency approach above.
+
+```swift
+// Package.swift
+dependencies: [
+    .package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "0.4.27"),
 ]
 ```
 

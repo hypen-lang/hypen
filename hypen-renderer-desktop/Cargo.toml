@@ -1,0 +1,50 @@
+[package]
+name = "hypen-renderer-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+description = "Native desktop renderer for Hypen (winit + wgpu + tiny-skia + cosmic-text)"
+keywords = ["hypen", "ui", "desktop", "renderer", "native"]
+categories = ["gui", "rendering"]
+readme = "README.md"
+
+[dependencies]
+hypen-engine = { version = "0.4.949", path = "../hypen-engine-rs" }
+hypen-parser = { version = "0.4.949", path = "../parser" }
+hypen-server = { version = "0.4.949", path = "../hypen-sdk-rs" }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Phase 1: windowing + GPU surface (compositing only) + CPU raster + text
+winit = "0.30.13"
+wgpu = "29.0.1"
+tiny-skia = "0.12.0"
+cosmic-text = "0.19.0"
+taffy = "0.10.1"
+
+# Re-exported by winit; pinned here so we can implement raw-window-handle for
+# the wgpu surface without version-mismatch grief.
+raw-window-handle = "0.6"
+
+# Async wgpu init runs on a tiny pollster executor — avoids pulling tokio.
+pollster = "0.4"
+
+# Logging surface for diagnostics. Examples wire env_logger.
+log = "0.4"
+
+bytemuck = { version = "1.16", features = ["derive"] }
+
+[dev-dependencies]
+env_logger = "0.11"
+indexmap = { version = "2.0", features = ["serde"] }
+
+[[example]]
+name = "hello"
+path = "examples/hello.rs"
+
+[[example]]
+name = "counter"
+path = "examples/counter.rs"

@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const textHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("span");
+  create(): HTMLElement {
+    const el = document.createElement("span");
     // Use inline-block for proper flex child behavior
     el.style.display = "inline-block";
     // Tight line-height to match iOS/Android
@@ -20,11 +20,8 @@ export const textHandler: ComponentHandler = {
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    // Text content from first positional arg or "text" prop. Use `??` (not
-    // `||`) so the literal number `0`, `false`, and the empty string still
-    // render — `||` falls through on falsy values and a bound `0` was
-    // disappearing entirely on web while iOS rendered it correctly.
-    const text = props["0"] ?? props.text;
+    // Text content from first positional arg or "text" prop
+    const text = props["0"] || props.text;
     if (text !== undefined) {
       // Store the original text template for state interpolation
       el.dataset.textTemplate = String(text);

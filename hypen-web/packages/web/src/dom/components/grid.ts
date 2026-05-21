@@ -6,13 +6,13 @@
 
 import type { ComponentHandler } from "./index.js";
 
-// Inject global styles for grid children (per-document)
-const injectedDocs = new WeakSet<Document>();
-function ensureGridStyles(doc: Document): void {
-  if (injectedDocs.has(doc)) return;
-  injectedDocs.add(doc);
+// Inject global styles for grid children
+let gridStylesInjected = false;
+function ensureGridStyles(): void {
+  if (gridStylesInjected) return;
+  gridStylesInjected = true;
 
-  const style = doc.createElement("style");
+  const style = document.createElement("style");
   style.id = "hypen-grid-styles";
   style.textContent = `
     /* Grid children stretch to fill cells by default (matches Android behavior) */
@@ -21,14 +21,14 @@ function ensureGridStyles(doc: Document): void {
       align-self: stretch;
     }
   `;
-  doc.head.appendChild(style);
+  document.head.appendChild(style);
 }
 
 export const gridHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    ensureGridStyles(doc);
+  create(): HTMLElement {
+    ensureGridStyles();
 
-    const el = doc.createElement("div");
+    const el = document.createElement("div");
     el.style.display = "grid";
     el.dataset.hypenType = "grid";
     return el;

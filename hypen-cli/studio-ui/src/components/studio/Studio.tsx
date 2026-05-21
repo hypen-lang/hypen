@@ -6,18 +6,8 @@ import { BottomPanel } from "./BottomPanel";
 import { Toolbar } from "./Toolbar";
 import { CommandPalette } from "./CommandPalette";
 import { ResizeHandle } from "./ResizeHandle";
+import { TestMode } from "./TestMode";
 import { cn } from "@/lib/utils";
-
-// Test Mode is always opened in a detached window so its iframe cells get
-// their own viewport (panel-resize observers, vh/vw, devicePixelRatio) and
-// don't have to fight studio's main layout for space.
-function openTestMode(activeFile: string | null, extraParams?: Record<string, string>): void {
-  const qs = new URLSearchParams();
-  if (activeFile?.endsWith(".hypen")) qs.set("file", activeFile);
-  if (extraParams) for (const [k, v] of Object.entries(extraParams)) qs.set(k, v);
-  const url = `/test-mode${qs.size ? `?${qs.toString()}` : ""}`;
-  window.open(url, "_blank", "noopener,noreferrer");
-}
 
 export type PanelState = {
   files: boolean;
@@ -74,6 +64,7 @@ export function Studio() {
   });
 
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [testMode, setTestMode] = useState(false);
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
   const [activeFile, setActiveFile] = useState<string | null>(null);
@@ -646,9 +637,14 @@ export function Studio() {
         panels={panels}
         togglePanel={togglePanel}
         connected={connected}
-        onOpenTestMode={() => openTestMode(activeFile)}
+        testMode={testMode}
+        onToggleTestMode={() => setTestMode((v) => !v)}
         onCommandPalette={() => setCommandPaletteOpen(true)}
       />
+
+      {testMode && (
+        <TestMode activeFile={activeFile} onClose={() => setTestMode(false)} />
+      )}
 
       <div className="flex-1 flex flex-col overflow-hidden">
         <div className="flex-1 flex overflow-hidden">
@@ -768,7 +764,7 @@ export function Studio() {
         panels={panels}
         togglePanel={togglePanel}
         onSave={() => activeFile && saveFile(activeFile)}
-        onOpenTestMode={() => openTestMode(activeFile)}
+        onToggleTestMode={() => setTestMode((v) => !v)}
         onRun={() => window.dispatchEvent(new CustomEvent("hypen:run-menu:open"))}
       />
 

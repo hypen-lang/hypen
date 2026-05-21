@@ -6,4 +6,3 @@ DerivedData/
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
 Package.resolved
-hypen_engineFFI.xcframework/

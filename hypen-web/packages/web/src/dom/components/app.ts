@@ -8,8 +8,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const appHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("div");
+  create(): HTMLElement {
+    const el = document.createElement("div");
     el.style.display = "flex";
     el.style.flexDirection = "column";
     el.style.minHeight = "100vh";

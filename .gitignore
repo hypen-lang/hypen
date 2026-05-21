@@ -52,7 +52,6 @@ logs/
 
 # npm configuration (may contain auth tokens)
 .npmrc
-**/.npmrc
 
 # Caches
 .cache/
@@ -74,8 +73,6 @@ logs/
 **/.claude/settings.json
 **/.claude/settings.local.json
 **/.claude/projects/
-.claude/
-CLAUDE.md
 
 # Agent skills (local dev tooling, not project content)
 .agents/

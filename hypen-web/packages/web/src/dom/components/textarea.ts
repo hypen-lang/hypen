@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const textareaHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("textarea");
+  create(): HTMLElement {
+    const el = document.createElement("textarea");
     el.dataset.hypenType = "textarea";
     // Same user-agent reset as Input — otherwise `.tw(...)` styling draws
     // over a native dark border and inset shadow.

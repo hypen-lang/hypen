@@ -1,3 +1,5 @@
+import java.util.Properties
+
 pluginManagement {
     repositories {
         google {
@@ -23,7 +25,17 @@ rootProject.name = "hypen-renderer-android"
 include(":app")
 include(":renderer")
 
-// Publishing secrets live in gradle-local.properties (gitignored). They are exported
-// as ORG_GRADLE_PROJECT_* env vars by scripts/publish-all.sh before invoking gradle —
-// vanniktech's providers.gradleProperty() lookup reads env vars but does not see
-// properties injected from this file via gradle.startParameter.setProjectProperties.
+// Load optional local publishing secrets from gradle-local.properties (ignored by git)
+val localPropertiesFile = File(rootDir, "gradle-local.properties")
+if (localPropertiesFile.exists()) {
+    val localProps = Properties().apply {
+        load(localPropertiesFile.inputStream())
+    }
+    gradle.beforeProject {
+        localProps.forEach { key, value ->
+            if (key is String && value is String && !extensions.extraProperties.has(key)) {
+                extensions.extraProperties.set(key, value)
+            }
+        }
+    }
+}

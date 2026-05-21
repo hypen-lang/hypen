@@ -1,5 +1,5 @@
 import { RemoteEngine } from "@hypen-space/core/remote/client";
-import { createHypenClient } from "@hypen-space/web/canvas";
+import { CanvasRenderer } from "@hypen-space/web/canvas";
 
 const SESSION_KEY = "hypen-instagram-session-canvas";
 const WS_URL = "ws://localhost:3000";
@@ -22,13 +22,17 @@ const engine = new RemoteEngine(WS_URL, {
   },
 });
 
-createHypenClient(canvas, engine, {
+const renderer = new CanvasRenderer(canvas, engine, {
   devicePixelRatio: window.devicePixelRatio,
   backgroundColor: "#ffffff",
 });
 
 engine.onSessionEstablished(({ sessionId }) => {
   localStorage.setItem(SESSION_KEY, sessionId);
+});
+
+engine.onPatches((patches) => {
+  renderer.applyPatches(patches);
 });
 
 engine.connect();

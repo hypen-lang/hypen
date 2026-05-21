@@ -30,7 +30,7 @@ bun add @hypen-space/core @hypen-space/web @hypen-space/web-engine
 ```typescript
 import { app, HypenModuleInstance } from "@hypen-space/core";
 import { Engine } from "@hypen-space/web-engine";
-import { createHypenClient } from "@hypen-space/web/canvas";
+import { CanvasRenderer } from "@hypen-space/web/canvas";
 
 // Define state
 type AppState = {
@@ -54,10 +54,15 @@ async function main() {
   const engine = new Engine();
   await engine.init();
 
-  // Create renderer + patch subscription in one call
-  createHypenClient(canvas, engine, {
+  // Create renderer
+  const renderer = new CanvasRenderer(canvas, engine, {
     devicePixelRatio: window.devicePixelRatio,
     backgroundColor: "#ffffff",
+  });
+
+  // Connect renderer
+  engine.setRenderCallback((patches) => {
+    renderer.applyPatches(patches);
   });
 
   // Create module
@@ -244,7 +249,7 @@ Container {
 ## Configuration Options
 
 ```typescript
-const { renderer } = createHypenClient(canvas, engine, {
+const renderer = new CanvasRenderer(canvas, engine, {
   // Display
   devicePixelRatio: window.devicePixelRatio,  // HiDPI support
   backgroundColor: "#ffffff",                  // Canvas background
@@ -349,7 +354,7 @@ let timeoutId: number;
 ### 3. Measure Performance
 
 ```typescript
-const { renderer } = createHypenClient(canvas, engine, {
+const renderer = new CanvasRenderer(canvas, engine, {
   logPerformance: true,  // Logs FPS and frame times
 });
 ```
@@ -361,7 +366,7 @@ const { renderer } = createHypenClient(canvas, engine, {
 Make sure to set `devicePixelRatio`:
 
 ```typescript
-const { renderer } = createHypenClient(canvas, engine, {
+const renderer = new CanvasRenderer(canvas, engine, {
   devicePixelRatio: window.devicePixelRatio,
 });
 ```
@@ -371,7 +376,7 @@ const { renderer } = createHypenClient(canvas, engine, {
 Ensure `enableInputOverlay` is true:
 
 ```typescript
-const { renderer } = createHypenClient(canvas, engine, {
+const renderer = new CanvasRenderer(canvas, engine, {
   enableInputOverlay: true,
 });
 ```

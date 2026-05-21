@@ -196,6 +196,6 @@ Input("@state.text")
 
 ## Learn More
 
-- [Hypen Repository](https://github.com/hypen-lang/hypen)
+- [Hypen Documentation](https://github.com/your-org/hypen)
 - [Bun Documentation](https://bun.sh/docs)
 - [TypeScript Documentation](https://www.typescriptlang.org/docs/)

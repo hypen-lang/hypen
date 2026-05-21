@@ -104,7 +104,7 @@ mavenPublishing {
     pom {
         name.set("Hypen Compose Renderer")
         description.set("Jetpack Compose renderer for Hypen server-driven UIs.")
-        url.set("https://github.com/hypen-lang/hypen")
+        url.set("https://github.com/hypenlang/hypen-rs")
 
         licenses {
             license {
@@ -121,9 +121,9 @@ mavenPublishing {
             }
         }
         scm {
-            url.set("https://github.com/hypen-lang/hypen")
-            connection.set("scm:git:git://github.com/hypen-lang/hypen.git")
-            developerConnection.set("scm:git:ssh://git@github.com:hypen-lang/hypen.git")
+            url.set("https://github.com/hypenlang/hypen-rs")
+            connection.set("scm:git:git://github.com/hypenlang/hypen-rs.git")
+            developerConnection.set("scm:git:ssh://git@github.com:hypenlang/hypen-rs.git")
         }
     }
 }

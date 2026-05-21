@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const badgeHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("span");
+  create(): HTMLElement {
+    const el = document.createElement("span");
     el.dataset.hypenType = "badge";
     el.style.display = "inline-block";
     el.style.padding = "4px 8px";
@@ -35,8 +35,7 @@ export const badgeHandler: ComponentHandler = {
     }
 
     // Text content
-    // `??` (not `||`) so the literal `0`, `false`, `""` still render.
-    const text = props["0"] ?? props.text;
+    const text = props["0"] || props.text;
     if (text !== undefined) {
       el.textContent = String(text);
     }

@@ -65,48 +65,10 @@ jobs:
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/hypen-engine-rs/target/release
 
-  build-natives:
-    name: Build native engine — ${{ matrix.target }}
-    needs: [build-and-test]
-    if: ${{ !inputs.dry-run }}
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          - { os: macos-14,      target: aarch64-apple-darwin,         jna_prefix: darwin-aarch64,  lib: libhypen_engine.dylib }
-          - { os: macos-13,      target: x86_64-apple-darwin,          jna_prefix: darwin-x86-64,   lib: libhypen_engine.dylib }
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,     jna_prefix: linux-x86-64,    lib: libhypen_engine.so }
-          - { os: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu, jna_prefix: linux-aarch64,   lib: libhypen_engine.so }
-          - { os: windows-latest,target: x86_64-pc-windows-msvc,       jna_prefix: win32-x86-64,    lib: hypen_engine.dll }
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: hypen-engine-rs
-          key: ${{ matrix.target }}
-      - name: Build engine (UniFFI)
-        run: cargo build --release --features uniffi --target ${{ matrix.target }}
-        working-directory: hypen-engine-rs
-      - name: Stage native lib
-        shell: bash
-        run: |
-          mkdir -p hypen-kotlin/build/native-libs/${{ matrix.jna_prefix }}
-          cp target/${{ matrix.target }}/release/${{ matrix.lib }} \
-             hypen-kotlin/build/native-libs/${{ matrix.jna_prefix }}/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: hypen-engine-${{ matrix.jna_prefix }}
-          path: hypen-kotlin/build/native-libs/${{ matrix.jna_prefix }}/${{ matrix.lib }}
-          retention-days: 1
-
   publish:
     name: Publish to Maven Central
     runs-on: ubuntu-latest
-    needs: [build-and-test, build-natives]
+    needs: [build-and-test]
     if: ${{ !inputs.dry-run }}
     steps:
       - uses: actions/checkout@v4
@@ -127,30 +89,7 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
-      # Pull every per-platform dylib/so/dll back into one staging tree
-      # under build/native-libs/<jna-prefix>/, which the build script
-      # picks up as a resources srcDir before the JAR is assembled.
-      - uses: actions/download-artifact@v4
-        with:
-          path: hypen-kotlin/build/native-libs
-          pattern: hypen-engine-*
-          merge-multiple: false
-      - name: Flatten artifact dirs
-        run: |
-          set -e
-          cd hypen-kotlin/build/native-libs
-          for d in hypen-engine-*; do
-            prefix="${d#hypen-engine-}"
-            mkdir -p "$prefix"
-            mv "$d"/* "$prefix"/
-            rmdir "$d"
-          done
-          find . -type f
-
-      # Build engine for the publish runner too — `:bundleNativeLib`
-      # rebuilds for the host arch unconditionally; staging the
-      # downloaded libs first prevents that step from clobbering them.
-      - name: Build engine (host, for tooling)
+      - name: Build engine (UniFFI)
         run: cargo build --release --features uniffi
         working-directory: hypen-engine-rs
 
@@ -159,7 +98,7 @@ jobs:
         working-directory: hypen-kotlin
 
       - name: Publish
-        run: ./gradlew publishAllPublicationsToMavenCentralRepository -x bundleNativeLib
+        run: ./gradlew publishAllPublicationsToMavenCentralRepository
         working-directory: hypen-kotlin
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/hypen-engine-rs/target/release

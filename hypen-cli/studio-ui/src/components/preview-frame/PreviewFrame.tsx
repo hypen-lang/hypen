@@ -16,8 +16,8 @@
 import { useEffect, useRef, useState } from "react";
 import { Engine } from "@hypen-space/web-engine";
 import { app, HypenModuleInstance } from "@hypen-space/core";
-import { createHypenClient as createDomClient } from "@hypen-space/web/dom";
-import { createHypenClient as createCanvasClient } from "@hypen-space/web/canvas";
+import { DOMRenderer } from "@hypen-space/web/dom";
+import { CanvasRenderer } from "@hypen-space/web/canvas";
 import { RemoteEngine } from "@hypen-space/core/remote/client";
 
 type RendererKind = "dom" | "canvas";
@@ -108,12 +108,20 @@ export function PreviewFrame() {
 
     const remote = new RemoteEngine(wsUrl, { session: { props: { platform: "studio" } } });
 
-    const client = rendererKind === "canvas"
-      ? createCanvasClient(target as HTMLCanvasElement, remote as any)
-      : createDomClient(target as HTMLDivElement, remote as any);
-    const rendererInstance: any = client.renderer;
+    const adapter = {
+      dispatchAction: (name: string, payload?: unknown) => remote.dispatchAction(name, payload),
+    } as any; // DOMRenderer / CanvasRenderer only need dispatchAction from the engine
+
+    const rendererInstance: any = rendererKind === "canvas"
+      ? new CanvasRenderer(target as HTMLCanvasElement, adapter)
+      : new DOMRenderer(target as HTMLDivElement, adapter);
 
     remote
+      .onPatches((patches) => {
+        try { rendererInstance.applyPatches(patches); } catch (e) {
+          console.warn("[PreviewFrame remote] applyPatches failed", e);
+        }
+      })
       .onStateUpdate((state) => {
         try { rendererInstance.updateState?.(state); } catch { /* optional */ }
       })
@@ -164,10 +172,15 @@ export function PreviewFrame() {
         if (disposed) return;
 
         const target = mountTarget(hostRef.current!, rendererKind);
-        const client = rendererKind === "canvas"
-          ? createCanvasClient(target as HTMLCanvasElement, engine)
-          : createDomClient(target as HTMLDivElement, engine);
-        rendererInstance = client.renderer;
+        rendererInstance = rendererKind === "canvas"
+          ? new CanvasRenderer(target as HTMLCanvasElement, engine)
+          : new DOMRenderer(target as HTMLDivElement, engine);
+
+        engine.setRenderCallback((patches: any[]) => {
+          try { rendererInstance?.applyPatches(patches); } catch (e) {
+            console.warn("[PreviewFrame local] applyPatches failed", e);
+          }
+        });
 
         if (moduleContent) {
           const ts = await import("https://esm.sh/typescript@5.3.3");

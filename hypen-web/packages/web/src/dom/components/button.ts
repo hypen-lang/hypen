@@ -9,8 +9,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const buttonHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("button");
+  create(): HTMLElement {
+    const el = document.createElement("button");
     // Reset default button styles for cross-platform consistency
     el.style.border = "none";
     el.style.background = "none";

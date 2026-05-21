@@ -7,15 +7,7 @@
  */
 
 import type { VirtualNode, Layout, BoxSpacing } from "./types.js";
-import {
-  parseSpacing,
-  parseSize,
-  cssLengthToPx,
-  cssLengthToDimension,
-  resolveLineHeight,
-  setCurrentViewport,
-  getCurrentViewport,
-} from "./utils.js";
+import { parseSpacing, parseSize, cssLengthToPx, cssLengthToDimension } from "./utils.js";
 import { measureText } from "./text.js";
 import { getImageNaturalAspect } from "./paint.js";
 
@@ -180,22 +172,9 @@ function buildTaffyStyle(
   // `List` is the DSL's vertical-stack iterator (see dom/components/list.ts
   // — `flex-direction: column` is its default). Match that here so feeds
   // like Notifications stack their rows vertically instead of flowing
-  // sideways. The legacy `direction` prop can flip it to row, and so can
-  // a Tailwind `flex-row` class which lands on `props.flexDirection`
-  // (without this, top-tab strips built as `List.flex-row` stacked
-  // vertically because the List default won the tie-break).
-  const isListColumn =
-    type === "list" &&
-    props.direction !== "horizontal" &&
-    props.flexDirection !== "row";
-  // Button defaults to `flex-direction: column` to match the DOM renderer
-  // (see dom/components/button.ts). With Taffy's default `align-items:
-  // stretch`, treating Button as a row caused inner `Column { Icon, Text }`
-  // children to collapse onto each other (icon overlapping label). Only
-  // apply the column default when no explicit `flexDirection` is set so a
-  // Tailwind `flex-row` on a button still wins.
-  const isButtonColumn = type === "button" && props.flexDirection === undefined;
-  const isColumn = !isStack && (type === "column" || isListColumn || isButtonColumn || props.flexDirection === "column");
+  // sideways. The `direction` prop can still flip it to row.
+  const isListColumn = type === "list" && props.direction !== "horizontal";
+  const isColumn = !isStack && (type === "column" || isListColumn || props.flexDirection === "column");
   const isGrid = !isStack && (type === "grid" || props.display === "grid");
 
   if (isStack) {
@@ -386,7 +365,7 @@ function buildTaffyStyle(
     // Taffy defaults to `box-sizing: border-box`, so we add the
     // padding/border ourselves into `size.height`.
     const fontSize = cssLengthToPx(props.fontSize) ?? 16;
-    const lineHeight = resolveLineHeight(props.lineHeight, fontSize) ?? fontSize * 1.5;
+    const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.5;
     const minRows = type === "textarea" ? Math.max(1, Number(props.rows) || 3) : 1;
     const padTop = cssLengthToPx(props.paddingTop ?? props.padding) ?? 0;
     const padBottom = cssLengthToPx(props.paddingBottom ?? props.padding) ?? 0;
@@ -408,30 +387,7 @@ function buildTaffyStyle(
       (parent.type.toLowerCase() === "grid" || parent.props.display === "grid");
     const widthIn = parentIsGridLayout && props.width === "100%" ? undefined : props.width;
     const heightIn = parentIsGridLayout && props.height === "100%" ? undefined : props.height;
-
-    // Mirror the DOM rule `[data-hypen-type="row"]:has(> [data-hypen-flex])
-    // { width: 100% }` (and the symmetric column case). When a flex
-    // container has no explicit main-axis size and any child opts into
-    // weighted growth (`flex` / `flexGrow > 0`), Taffy would otherwise
-    // size the container to its min-content — so a Row of `flex-1`
-    // segmented-control buttons stayed pill-sized instead of stretching
-    // across the parent. Only do this when at least one child explicitly
-    // asks for flex, matching the DOM `:has(> [data-hypen-flex])` guard.
-    const isRowContainer = !isStack && !isGrid && !isColumn;
-    const isColumnContainer = !isStack && !isGrid && isColumn;
-    const childAsksFlex = node.children.some((c) => {
-      const fg = parseFloat(c.props.flexGrow);
-      if (Number.isFinite(fg) && fg > 0) return true;
-      const f = parseFloat(c.props.flex);
-      return Number.isFinite(f) && f > 0;
-    });
-    let resolvedWidth = toDimension(widthIn);
-    let resolvedHeight = toDimension(heightIn);
-    if (childAsksFlex) {
-      if (isRowContainer && widthIn === undefined) resolvedWidth = "100%";
-      if (isColumnContainer && heightIn === undefined) resolvedHeight = "100%";
-    }
-    style.size = { width: resolvedWidth, height: resolvedHeight };
+    style.size = { width: toDimension(widthIn), height: toDimension(heightIn) };
   }
 
   // --- Min / Max constraints -------------------------------------------------
@@ -806,17 +762,12 @@ function buildTree(
   // container with size 0×0, and downstream siblings were placed on top of
   // each other ("1,431 likes" overlapping the caption row was the visible
   // symptom).
-  // `props[0] != null` — not `props[0]` truthy. The number `0`, the empty
-  // string, and `false` are valid text content; falsy guards here let
-  // those cases skip the measurement leaf and inherit a 0-height container,
-  // which made siblings stack on top of each other (a bound `0` overlapping
-  // the next line was the visible symptom in calorie-counter's hero).
-  if (node.type.toLowerCase() === "text" && props[0] != null && node.children.length === 0) {
-    const text = String(props[0]);
+  if (node.type.toLowerCase() === "text" && props[0] && node.children.length === 0) {
+    const text = String(props[0] || "");
     const fontSize = cssLengthToPx(props.fontSize) ?? 16;
     const fontWeight = props.fontWeight || "normal";
     const fontFamily = props.fontFamily || "system-ui, sans-serif";
-    const lineHeight = resolveLineHeight(props.lineHeight, fontSize) ?? fontSize * 1.2;
+    const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
 
     const p = parseSpacing(props.padding || 0);
     if (props.paddingTop !== undefined) p.top = cssLengthToPx(props.paddingTop) ?? 0;
@@ -1130,30 +1081,18 @@ export function computeLayout(
   x: number = 0,
   y: number = 0,
 ): void {
-  // Publish the active viewport so `cssLengthToPx` can resolve `vw` / `vh`
-  // against the actual canvas dimensions during this layout pass. Without
-  // this, `vh` falls back to `window.innerHeight` (wrong inside an iframe
-  // or scaled preview pane) or, worse, to a unitless pixel value that
-  // collapses entire layouts. Layout is synchronous, so a try/finally
-  // restoring the previous slot is safe under nested or re-entrant calls.
-  const prevViewport = getCurrentViewport();
-  setCurrentViewport({ width: availableWidth, height: availableHeight });
-  try {
-    if (taffyReady && taffy) {
+  if (taffyReady && taffy) {
+    computeLayoutTaffy(ctx, node, availableWidth, availableHeight, x, y);
+    // After the first pass, Taffy's grid auto-row sizing for aspect-ratio
+    // image leaves can collapse rows (the leaf's max-content height is 0
+    // before column widths are known). Detect that pattern and re-run
+    // with explicit `gridAutoRows` derived from the now-known column
+    // width — see `annotateCollapsedAspectGrids`.
+    if (annotateCollapsedAspectGrids(node)) {
       computeLayoutTaffy(ctx, node, availableWidth, availableHeight, x, y);
-      // After the first pass, Taffy's grid auto-row sizing for aspect-ratio
-      // image leaves can collapse rows (the leaf's max-content height is 0
-      // before column widths are known). Detect that pattern and re-run
-      // with explicit `gridAutoRows` derived from the now-known column
-      // width — see `annotateCollapsedAspectGrids`.
-      if (annotateCollapsedAspectGrids(node)) {
-        computeLayoutTaffy(ctx, node, availableWidth, availableHeight, x, y);
-      }
-    } else {
-      computeLayoutFallback(ctx, node, availableWidth, availableHeight, x, y);
     }
-  } finally {
-    setCurrentViewport(prevViewport);
+  } else {
+    computeLayoutFallback(ctx, node, availableWidth, availableHeight, x, y);
   }
 }
 
@@ -1243,13 +1182,12 @@ function computeLayoutFallback(
     if (height === null) height = size;
   }
 
-  // Same `!= null` rule as above — `0` / `""` / `false` are valid text.
-  if (node.type.toLowerCase() === "text" && node.props[0] != null) {
-    const text = String(node.props[0]);
+  if (node.type.toLowerCase() === "text" && node.props[0]) {
+    const text = String(node.props[0] || "");
     const fontSize = cssLengthToPx(props.fontSize) ?? 16;
     const fontWeight = props.fontWeight || "normal";
     const fontFamily = props.fontFamily || "system-ui, sans-serif";
-    const lineHeight = resolveLineHeight(props.lineHeight, fontSize) ?? fontSize * 1.2;
+    const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
 
     const maxWidth = width || availableAfterMargin.width - padding.left - padding.right;
     const maxLinesRaw = props.maxLines;

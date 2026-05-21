@@ -65,20 +65,27 @@ public struct HypenElementView: View {
         let hasResponsiveVariants = !applicatorResult.variants.responsive.isEmpty
         let hasStateVariants = !applicatorResult.variants.states.isEmpty
 
+        // Get component handler or use fallback
+        let _ = {
+            let handler = componentRegistry.getHandler(for: element.elementType)
+            if handler == nil || element.elementType.lowercased() == "grid" || element.elementType.lowercased() == "image" {
+                print("[HypenElementView] type=\(element.elementType) id=\(element.id) handler=\(handler?.typeName ?? "nil") props=\(element.props.keys.sorted()) children=\(element.children)")
+            }
+        }()
         if let handler = componentRegistry.getHandler(for: element.elementType) {
             if hasResponsiveVariants || hasStateVariants {
                 // Use variant-aware rendering
                 VariantAwareView(
                     baseModifier: applicatorResult.baseModifier,
                     variants: applicatorResult.variants,
-                    applyHypenModifier: false
-                ) { effectiveModifier in
-                    handler.render(
-                        context: context,
-                        modifier: effectiveModifier,
-                        children: { AnyView(renderChildren(element)) }
-                    )
-                }
+                    content: {
+                        handler.render(
+                            context: context,
+                            modifier: applicatorResult.baseModifier,
+                            children: { AnyView(renderChildren(element)) }
+                        )
+                    }
+                )
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
@@ -98,12 +105,13 @@ public struct HypenElementView: View {
             if hasResponsiveVariants || hasStateVariants {
                 VariantAwareView(
                     baseModifier: applicatorResult.baseModifier,
-                    variants: applicatorResult.variants
-                ) { _ in
-                    ZStack(alignment: .topLeading) {
-                        renderChildren(element)
+                    variants: applicatorResult.variants,
+                    content: {
+                        ZStack(alignment: .topLeading) {
+                            renderChildren(element)
+                        }
                     }
-                }
+                )
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
@@ -140,63 +148,30 @@ public struct HypenElementView: View {
 // MARK: - Variant Aware View
 
 /// A view that applies responsive and state-based modifiers
-///
-/// `applyHypenModifier`: when true (fallback path), this view wraps `content()`
-/// with `.hypenModifier(effectiveModifier)`. When false (handler path), the
-/// handler is expected to apply the modifier itself using the value passed to
-/// the content closure. Component handlers (Column/Row/Box/Text/Button/...) all
-/// call `.hypenModifier(modifier)` internally; if we also applied it here we'd
-/// stack padding, border, frame, margin, etc. twice — producing double borders,
-/// doubled negative margins (`+` button clipped), offset backgrounds, and
-/// collapsed labels in any subtree that uses responsive (`md:`) variants.
 struct VariantAwareView<Content: View>: View {
     let baseModifier: HypenModifier
     let variants: VariantModifiers
-    let applyHypenModifier: Bool
-    let content: (HypenModifier) -> Content
+    let content: () -> Content
 
     @State private var isPressed = false
     @State private var isHovered = false
     @FocusState private var isFocused: Bool
     @Environment(\.screenWidth) private var screenWidth
 
-    init(
-        baseModifier: HypenModifier,
-        variants: VariantModifiers,
-        applyHypenModifier: Bool = true,
-        @ViewBuilder content: @escaping (HypenModifier) -> Content
-    ) {
-        self.baseModifier = baseModifier
-        self.variants = variants
-        self.applyHypenModifier = applyHypenModifier
-        self.content = content
-    }
-
     var body: some View {
         let effectiveModifier = computeEffectiveModifier(screenWidth: screenWidth)
 
-        Group {
-            if applyHypenModifier {
-                content(effectiveModifier)
-                    .hypenModifier(effectiveModifier)
-            } else {
-                content(effectiveModifier)
-            }
-        }
+        content()
+            .hypenModifier(effectiveModifier)
             .focused($isFocused)
             #if os(macOS) || targetEnvironment(macCatalyst)
             .onHover { hovering in
                 isHovered = hovering
             }
             #endif
-            // Press-tracking for `:active` state variants used to live
-            // here as `.onLongPressGesture(minimumDuration: .infinity, ...)`.
-            // That gesture never resolved (`.infinity` duration), and
-            // SwiftUI kept waiting on it before dispatching to the outer
-            // `.onTapGesture` we install via `applyTapGestures` —
-            // silently swallowing every onClick. Re-add via
-            // `DragGesture(minimumDistance: 0)` only when `:active`
-            // variants are actually wired; until then, taps must work.
+            .onLongPressGesture(minimumDuration: .infinity, pressing: { pressing in
+                isPressed = pressing
+            }, perform: {})
     }
 
     private func computeEffectiveModifier(screenWidth: CGFloat) -> HypenModifier {
@@ -279,6 +254,11 @@ extension View {
     /// Proportional widths from flex distribution override other width calculations.
     @ViewBuilder
     func applyWeightExpansion(modifier: HypenModifier, allowsHorizontal: Bool, allowsVertical: Bool, parentHeight: CGFloat? = nil, parentWidth: CGFloat? = nil, proportionalWidth: CGFloat? = nil) -> some View {
+        let _ = {
+            if modifier.fillMaxWidth || modifier.aspectRatio != nil {
+                print("[WeightExpansion] fillMaxWidth=\(modifier.fillMaxWidth) fillMaxWidthFraction=\(modifier.fillMaxWidthFraction) allowsHorizontal=\(allowsHorizontal) parentWidth=\(String(describing: parentWidth)) proportionalWidth=\(String(describing: proportionalWidth)) aspectRatio=\(String(describing: modifier.aspectRatio)) weight=\(String(describing: modifier.weight))")
+            }
+        }()
         // Proportional width from Row's flex distribution takes precedence
         // This handles flex(1), flex(2), etc. proportional distribution
         let effectiveWidth: CGFloat? = proportionalWidth ?? {
@@ -310,13 +290,6 @@ extension View {
         // by setting minWidth (flex-shrink: 0 + width: 200px means "don't shrink below 200px")
         let explicitWidthWithNoShrink = preventShrink && modifier.width != nil
 
-        // When the element's own alignment is set (e.g. `items-center` on a
-        // Column), respect it on the expansion frame. Otherwise the inner
-        // content (which is sized to its children) gets pinned to topLeading
-        // inside the proportionally-allocated slot, making `flex-1 items-center`
-        // siblings of a fixed-width element visually hug the outer edges.
-        let expansionAlignment: Alignment = modifier.alignment ?? .topLeading
-
         // Apply width and height sizing
         if let width = effectiveWidth {
             // Exact width (from proportional flex or percentage)
@@ -325,7 +298,7 @@ extension View {
                     .applyPercentageHeight(height, backgroundColor: modifier.backgroundColor, cornerRadius: modifier.cornerRadius)
             } else if shouldExpandVertical {
                 self.applyProportionalWidth(width, preventShrink: preventShrink)
-                    .frame(maxHeight: .infinity, alignment: expansionAlignment)
+                    .frame(maxHeight: .infinity, alignment: .topLeading)
             } else {
                 self.applyProportionalWidth(width, preventShrink: preventShrink)
             }
@@ -337,19 +310,19 @@ extension View {
                         .applyPercentageHeight(height, backgroundColor: modifier.backgroundColor, cornerRadius: modifier.cornerRadius)
                 } else if shouldExpandVertical {
                     self.applyFillMaxWidthFraction(modifier.fillMaxWidthFraction, parentWidth: parentWidth)
-                        .frame(maxHeight: .infinity, alignment: expansionAlignment)
+                        .frame(maxHeight: .infinity, alignment: .topLeading)
                 } else {
                     self.applyFillMaxWidthFraction(modifier.fillMaxWidthFraction, parentWidth: parentWidth)
                 }
             } else {
                 // Full width or weight expansion
                 if let height = calculatedHeight {
-                    self.frame(maxWidth: .infinity, alignment: expansionAlignment)
+                    self.frame(maxWidth: .infinity, alignment: .topLeading)
                         .applyPercentageHeight(height, backgroundColor: modifier.backgroundColor, cornerRadius: modifier.cornerRadius)
                 } else if shouldExpandVertical {
-                    self.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: expansionAlignment)
+                    self.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 } else {
-                    self.frame(maxWidth: .infinity, alignment: expansionAlignment)
+                    self.frame(maxWidth: .infinity, alignment: .topLeading)
                 }
             }
         } else {
@@ -432,28 +405,19 @@ extension View {
             )
     }
 
-    /// Apply fillMaxWidth with a fraction (e.g., 0.5 for 50% of parent width).
-    ///
-    /// Previously used `containerRelativeFrame(.horizontal)` on iOS 17+, but
-    /// that hangs the main thread on heavy nested layouts (e.g. calorie-counter
-    /// progress bars: 3 % -width Boxes nested inside flex Columns inside a
-    /// scrollable Column). SwiftUI thrashes the layout pass trying to resolve
-    /// the container size against the deep ancestor chain.
-    ///
-    /// Use a bounded GeometryReader sized to the parent's offered width
-    /// uniformly across all OS versions. Reading width via a non-nested GR
-    /// is stable; the `.frame(maxWidth: .infinity, ...)` outside ensures
-    /// the GR fills its parent's offered space and reports back.
+    /// Apply fillMaxWidth with a fraction (e.g., 0.5 for 50% of parent width)
     @ViewBuilder
     func applyFillMaxWidthFraction(_ fraction: CGFloat, parentWidth: CGFloat? = nil) -> some View {
         if let parentWidth = parentWidth {
+            // Use explicit parent width if available
             self.frame(width: parentWidth * fraction)
-        } else if fraction <= 0 {
-            self.frame(width: 0)
+        } else if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, *) {
+            self.containerRelativeFrame(.horizontal) { length, _ in length * fraction }
         } else {
+            // Fallback for older iOS
             GeometryReader { geometry in
-                self.frame(width: fraction * geometry.size.width, alignment: .leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                self.frame(width: fraction * geometry.size.width)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
             }
         }
     }

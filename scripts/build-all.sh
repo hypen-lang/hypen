@@ -2,15 +2,14 @@
 set -e
 
 # Build and test everything without publishing.
-# Usage: ./scripts/build-all.sh [--skip-tests] [--skip-gradle] [--skip-swift]
+# Usage: ./scripts/build-all.sh [--skip-tests] [--skip-gradle]
 #
 # Pipeline:
-#   1. Run tests (parser, engine, server, web SDK, ios-streamer typecheck)
+#   1. Run tests (parser, engine, server, web SDK)
 #   2. Build WASM (+ auto-copy to SDK locations)
-#   3. Build npm packages (core, web, server, web-engine, lsp, cli) with type declarations
+#   3. Build npm packages (core, web, lsp, cli) with type declarations
 #   4. Build UniFFI native library (release, needed by hypen-kotlin)
 #   5. Build Gradle packages (hypen-renderer-android, hypen-kotlin)
-#   6. Build hypen_engineFFI.xcframework (macOS only; needed for `swift build`)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -25,20 +24,13 @@ NC='\033[0m'
 # Flags
 SKIP_TESTS=false
 SKIP_GRADLE=false
-SKIP_SWIFT=false
 
 for arg in "$@"; do
   case $arg in
     --skip-tests) SKIP_TESTS=true ;;
     --skip-gradle) SKIP_GRADLE=true ;;
-    --skip-swift) SKIP_SWIFT=true ;;
   esac
 done
-
-# Swift xcframework needs xcodebuild + lipo, both macOS-only.
-if [ "$SKIP_SWIFT" = false ] && [[ "$OSTYPE" != "darwin"* ]]; then
-  SKIP_SWIFT=true
-fi
 
 echo -e "${BLUE}=====================================${NC}"
 echo -e "${BLUE}   Hypen Full Build${NC}"
@@ -99,12 +91,6 @@ else
   echo -e "  Testing web SDK..."
   cd "$ROOT_DIR/hypen-web" && bun test 2>&1 | tail -3
   echo -e "  ${GREEN}✓ web SDK${NC}"
-
-  if [ -d "$ROOT_DIR/hypen-ios-streamer" ]; then
-    echo -e "  Testing hypen-ios-streamer..."
-    cd "$ROOT_DIR/hypen-ios-streamer" && bun test 2>&1 | tail -3 && bun run typecheck
-    echo -e "  ${GREEN}✓ hypen-ios-streamer${NC}"
-  fi
 
   echo -e "${GREEN}✓ All tests passed${NC}"
 fi
@@ -196,27 +182,6 @@ else
     echo -e "  ${GREEN}✓ hypen-kotlin built${NC}"
 
     echo -e "${GREEN}✓ All Gradle packages built${NC}"
-  fi
-fi
-echo ""
-
-# ============================================================================
-# Step 6: Build hypen_engineFFI.xcframework (macOS-only)
-# ============================================================================
-
-if [ "$SKIP_SWIFT" = true ]; then
-  echo -e "${YELLOW}[Step 6/6] Skipping Swift xcframework (--skip-swift or non-macOS host)${NC}"
-else
-  if ! command -v xcodebuild &>/dev/null; then
-    echo -e "${YELLOW}[Step 6/6] xcodebuild not found; skipping (install Xcode CLT or pass --skip-swift)${NC}"
-  else
-    echo -e "${YELLOW}[Step 6/6] Building hypen_engineFFI.xcframework...${NC}"
-    "$SCRIPT_DIR/build-xcframework.sh"
-    if [ ! -d "$ROOT_DIR/hypen-server-swift/hypen_engineFFI.xcframework" ]; then
-      echo -e "${RED}✗ xcframework not produced where Package.swift expects it${NC}"
-      exit 1
-    fi
-    echo -e "${GREEN}✓ xcframework staged at hypen-server-swift/hypen_engineFFI.xcframework${NC}"
   fi
 fi
 echo ""

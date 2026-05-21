@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const progressBarHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const wrapper = doc.createElement("div");
+  create(): HTMLElement {
+    const wrapper = document.createElement("div");
     wrapper.dataset.hypenType = "progressbar";
     wrapper.style.width = "100%";
     wrapper.style.height = "8px";
@@ -14,7 +14,7 @@ export const progressBarHandler: ComponentHandler = {
     wrapper.style.borderRadius = "4px";
     wrapper.style.overflow = "hidden";
 
-    const bar = doc.createElement("div");
+    const bar = document.createElement("div");
     bar.dataset.hypenBar = "true";
     bar.style.height = "100%";
     bar.style.backgroundColor = "#2196F3";

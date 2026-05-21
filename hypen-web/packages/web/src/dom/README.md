@@ -37,17 +37,18 @@ src/dom/
 
 ### Browser Import
 
-The recommended one-call wiring is `createHypenClient`. The bare `DOMRenderer` constructor is still exported for advanced cases (custom subscription, multi-listener fan-out, etc.).
-
 ```typescript
 import { app, HypenModuleInstance } from "@hypen-space/core";
 import { Engine } from "@hypen-space/web-engine";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
 const engine = new Engine();
 await engine.init();
 
-createHypenClient(document.body, engine);
+const renderer = new DOMRenderer(document.body, engine);
+engine.setRenderCallback((patches) => {
+  renderer.applyPatches(patches);
+});
 ```
 
 ### Server Import
@@ -78,7 +79,7 @@ All components are registered by default:
 ### Custom Components
 
 ```typescript
-const { renderer } = createHypenClient(document.body, engine);
+const renderer = new DOMRenderer(document.body, engine);
 const registry = renderer.getComponentRegistry();
 
 registry.register("mycomponent", {
@@ -140,7 +141,7 @@ Style applicators are registered by default:
 ### Custom Applicators
 
 ```typescript
-const { renderer } = createHypenClient(document.body, engine);
+const renderer = new DOMRenderer(document.body, engine);
 const applicators = renderer.getApplicatorRegistry();
 
 applicators.register("shadow", (el, value) => {
@@ -182,7 +183,7 @@ Canvas components have special applicators for drawing:
 
 ```typescript
 // Register canvas applicators
-const { renderer } = createHypenClient(document.body, engine);
+const renderer = new DOMRenderer(document.body, engine);
 const applicators = renderer.getApplicatorRegistry();
 
 // Canvas-specific applicators
