@@ -85,27 +85,38 @@ impl<S: State> StateContainer<S> {
         serde_json::to_value(&self.value).map_err(|e| SdkError::StateSerde(e.to_string()))
     }
 
-    /// Build a JSON patch object containing only the changed key-value pairs.
+    /// Build a JSON patch object that the engine's `update_state`
+    /// (object-merge semantics) can apply correctly.
     ///
-    /// For root-level fields, the full new subtree is included (matching
-    /// the pre-existing SDK contract). Deeper changes are serialized as
-    /// flat dotted paths in the same object.
+    /// We roll every changed path up to its **root** segment and emit
+    /// the whole new subtree under that root. The engine's `merge_json`
+    /// only understands literal top-level keys — emitting a dotted key
+    /// like `"tabs.0"` would create a sibling field, not write through
+    /// to `state.tabs[0]`, which silently left arrays unchanged on
+    /// growth/replace. Rolling up to `"tabs": [...]` makes the engine
+    /// state actually reflect what the SDK-side state holds.
+    ///
+    /// (Sparse path-level updates exist as
+    /// `Engine::update_state_sparse`; this method is for the
+    /// object-merge variant used by `sync_state_to_engine`.)
     pub fn diff_patch(&self) -> Result<Value> {
         let current =
             serde_json::to_value(&self.value).map_err(|e| SdkError::StateSerde(e.to_string()))?;
         let mut patch = serde_json::Map::new();
+        let Value::Object(current_map) = &current else {
+            return Ok(Value::Object(patch));
+        };
         for entry in hypen_engine::diff_paths(&self.snapshot, &current) {
-            // Top-level field: include the whole new subtree under that
-            // key so the engine can replace it atomically.
-            if !entry.path.contains('.') {
-                if let Value::Object(current_map) = &current {
-                    if let Some(new_subtree) = current_map.get(&entry.path) {
-                        patch.insert(entry.path, new_subtree.clone());
-                        continue;
-                    }
-                }
+            let root = match entry.path.split_once('.') {
+                Some((head, _)) => head,
+                None => entry.path.as_str(),
+            };
+            if patch.contains_key(root) {
+                continue;
             }
-            patch.insert(entry.path, entry.new_value);
+            if let Some(new_subtree) = current_map.get(root) {
+                patch.insert(root.to_string(), new_subtree.clone());
+            }
         }
         Ok(Value::Object(patch))
     }
@@ -286,6 +297,71 @@ mod tests {
 
         let patch = container.diff_patch().unwrap();
         assert_eq!(patch, json!({"count": 5}));
+    }
+
+    #[test]
+    fn diff_patch_rolls_up_growing_vec_to_root_subtree() {
+        // Regression: when a Vec field grew from [] → [item], the diff
+        // produced path "items.0" and the old diff_patch emitted a
+        // literal `"items.0"` key. The engine's merge_json then inserted
+        // that key as a SIBLING of `items`, leaving `state.items` as
+        // `[]` from the engine's perspective — ForEach iterating over
+        // `@state.items` rendered nothing and `length(state.items)` was
+        // 0 despite the SDK-side Vec being populated.
+        let mut container = StateContainer::new(TestState {
+            count: 0,
+            name: "x".into(),
+            items: vec![],
+        })
+        .unwrap();
+        container.take_snapshot().unwrap();
+        container.get_mut().items.push("first".into());
+
+        let patch = container.diff_patch().unwrap();
+        assert_eq!(
+            patch,
+            json!({"items": ["first"]}),
+            "growing vec must emit whole `items` subtree, not `items.0`",
+        );
+    }
+
+    #[test]
+    fn diff_patch_rolls_up_nested_object_change_to_root() {
+        // Same principle: a deep object change like `user.profile.name`
+        // becomes `{"user": <whole user subtree>}` rather than
+        // `{"user.profile.name": "..."}`, because merge_json only
+        // honours literal top-level keys.
+        #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+        struct Profile {
+            name: String,
+        }
+        #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+        struct User {
+            profile: Profile,
+            age: i32,
+        }
+        #[derive(Clone, Default, Serialize, Deserialize, PartialEq, Debug)]
+        struct S {
+            user: User,
+        }
+
+        let mut container = StateContainer::new(S {
+            user: User {
+                profile: Profile {
+                    name: "old".into(),
+                },
+                age: 30,
+            },
+        })
+        .unwrap();
+        container.take_snapshot().unwrap();
+        container.get_mut().user.profile.name = "new".into();
+
+        let patch = container.diff_patch().unwrap();
+        assert_eq!(
+            patch,
+            json!({"user": {"profile": {"name": "new"}, "age": 30}}),
+        );
     }
 
     #[test]

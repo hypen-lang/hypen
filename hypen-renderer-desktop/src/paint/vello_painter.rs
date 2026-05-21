@@ -495,7 +495,18 @@ impl VelloPainter {
         }
 
         let radius = item.border.radius * scale_factor;
-        if let Some(bg) = background {
+        if let Some(grad) = item.background_gradient.as_ref() {
+            // Gradient takes precedence over solid `background` when
+            // the DSL declared one (`bg-gradient-to-br from-* to-*` or
+            // an explicit `linear-gradient(...)`). CSS layers solid
+            // colour beneath the gradient image; with opaque-stop
+            // gradients (the common case) the solid is occluded, and
+            // we don't bother painting it underneath. Translucent
+            // stops still show the parent background through —
+            // matching standard CSS behaviour for `background:
+            // <color> linear-gradient(...)` minus the stack.
+            fill_gradient_rect(&mut self.scene, item.rect, grad, radius);
+        } else if let Some(bg) = background {
             fill_rect(&mut self.scene, item.rect, bg, radius);
         }
         if item.border.is_visible() {
@@ -878,6 +889,58 @@ impl Default for VelloPainter {
 // ---------------------------------------------------------------------------
 // Drawing primitives.
 // ---------------------------------------------------------------------------
+
+/// Paint a rounded (or square) rect filled with a linear gradient.
+/// The DSL produces these via `bg-gradient-to-* from-* via-* to-*`
+/// Tailwind utilities; `style::prop_linear_gradient` resolves the
+/// var-indirection. Stops are passed to Vello's
+/// `peniko::Gradient::new_linear` which renders them on the GPU.
+fn fill_gradient_rect(
+    scene: &mut Scene,
+    rect: LayoutRect,
+    grad: &crate::style::LinearGradient,
+    radius: f32,
+) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || grad.stops.is_empty() {
+        return;
+    }
+    let ((sx, sy), (ex, ey)) = grad.direction.axis(rect.x, rect.y, rect.w, rect.h);
+    let mut gradient = vello::peniko::Gradient::new_linear(
+        vello::kurbo::Point::new(sx as f64, sy as f64),
+        vello::kurbo::Point::new(ex as f64, ey as f64),
+    );
+    let stops = grad.resolved_offsets();
+    let color_stops: Vec<vello::peniko::ColorStop> = stops
+        .into_iter()
+        .map(|(off, c)| vello::peniko::ColorStop {
+            offset: off,
+            color: vello::peniko::color::DynamicColor::from_alpha_color(
+                vello::peniko::Color::from_rgba8(c.0, c.1, c.2, c.3),
+            ),
+        })
+        .collect();
+    gradient.stops = vello::peniko::ColorStops(color_stops.into());
+    let brush = Brush::Gradient(gradient);
+    if radius > 0.0 {
+        let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
+        let kr = RoundedRect::new(
+            rect.x as f64,
+            rect.y as f64,
+            (rect.x + rect.w) as f64,
+            (rect.y + rect.h) as f64,
+            r as f64,
+        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, &brush, None, &kr);
+    } else {
+        let kr = KRect::new(
+            rect.x as f64,
+            rect.y as f64,
+            (rect.x + rect.w) as f64,
+            (rect.y + rect.h) as f64,
+        );
+        scene.fill(Fill::NonZero, Affine::IDENTITY, &brush, None, &kr);
+    }
+}
 
 fn fill_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32) {
     if rect.w <= 0.0 || rect.h <= 0.0 || color.3 == 0 {
@@ -1383,6 +1446,7 @@ mod tests {
             font_weight: 400,
             clip_to: None,
             subtree_root: None,
+            background_gradient: None,
         }
     }
 

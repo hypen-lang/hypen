@@ -256,6 +256,12 @@ pub struct LayoutItem {
     /// the items list into contiguous subtrees that can be re-used
     /// across frames as encoded `vello::Scene` fragments.
     pub subtree_root: Option<String>,
+    /// Resolved linear gradient for this item's background, when the
+    /// DSL applied a `bg-gradient-to-* from-* to-*` (or explicit
+    /// `linear-gradient(...)`) — overrides `background` solid fill
+    /// at paint time. `None` for the common solid-colour case so
+    /// the existing `fill_rect` fast path stays untouched.
+    pub background_gradient: Option<crate::style::LinearGradient>,
 }
 
 pub struct LayoutPass {
@@ -1289,11 +1295,14 @@ fn build_subtree(
             } else {
                 (pad.top + pad.bottom) * 0.5
             };
+            // Column-direction Button + no implicit centring — see
+            // the matching comment in `node_style`'s actionable
+            // branch for the full rationale (single-child stretch
+            // via cross-axis default, multi-child users wrap in a
+            // Row explicitly).
             let mut style = Style {
                 display: Display::Flex,
-                flex_direction: FlexDirection::Row,
-                align_items: Some(AlignItems::Center),
-                justify_content: Some(JustifyContent::Center),
+                flex_direction: FlexDirection::Column,
                 padding: Rect_ {
                     left: length(pad.left.max(pad_x) * scale),
                     right: length(pad.right.max(pad_x) * scale),
@@ -1616,9 +1625,23 @@ pub(crate) fn node_style(
         };
         Style {
             display: Display::Flex,
-            flex_direction: FlexDirection::Row,
-            align_items: Some(AlignItems::Center),
-            justify_content: Some(JustifyContent::Center),
+            // `Column` direction (not Row) so the Button's single
+            // child stretches to fill the Button's width through
+            // flex's default `align-items: stretch` (cross axis =
+            // horizontal in Column direction). With Row direction,
+            // stretch only fills height — the meal-card Button's
+            // inner `Row { icon, Column.flex-1, arrow }` would stay
+            // content-sized and the `flex-1` Column inside would
+            // have no room to grow. Every Button in the social /
+            // calorie examples has exactly one direct child (an
+            // Icon, Image, or a wrapping Row); multi-child layouts
+            // wrap in an explicit `Row {}`.
+            //
+            // No implicit `align-items: center` / `justify-content:
+            // center` either — users opt in via
+            // `tw("items-center justify-center")`, which all the
+            // genuinely-icon-centred Buttons already do.
+            flex_direction: FlexDirection::Column,
             padding: Rect_ {
                 left: length(pad.left.max(pad_x) * scale),
                 right: length(pad.right.max(pad_x) * scale),
@@ -2087,6 +2110,24 @@ fn apply_flex_props(style: &mut Style, node: &crate::tree::Node, viewport_w: f32
             Dim::Percent(p) => Dimension::percent(p),
         };
     }
+    // CSS `flex-direction: row | column | row-reverse | column-reverse`.
+    // Without this, every non-`Row` element type (`List`, `Grid`,
+    // `Container`, etc.) renders as a flex Column regardless of what
+    // the user wrote in `.tw("flex-row")` — the AddFood category tabs
+    // are the visible victim: they stack vertically because the
+    // wrapping `List` defaults to Column and ignores its
+    // `flex-direction: row` prop. Element-type still seeds the
+    // default (so a `Row` declared without any tw still works), but
+    // any explicit `flex-direction` overrides.
+    if let Some(s) = prop_str_at(node, "flexDirection", viewport_w) {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "row" => style.flex_direction = FlexDirection::Row,
+            "row-reverse" => style.flex_direction = FlexDirection::RowReverse,
+            "column" => style.flex_direction = FlexDirection::Column,
+            "column-reverse" => style.flex_direction = FlexDirection::ColumnReverse,
+            _ => {}
+        }
+    }
 }
 
 fn margin_to_taffy(m: crate::style::Padding, scale: f32) -> Rect_<LengthPercentageAuto> {
@@ -2222,6 +2263,16 @@ fn emit_items(
             // border line — round the fill anyway. The painter checks
             // `is_visible()` independently before stroking.
             let background_explicit = prop_color_at(node, "backgroundColor", viewport_w);
+            // Tailwind `bg-gradient-to-* from-* via-* to-*` emits a
+            // `background-image: linear-gradient(...)` plus the
+            // `--tw-gradient-*` custom props; `prop_linear_gradient`
+            // resolves the var-indirection and parses to our
+            // painter-side type. Returns `None` for the typical
+            // solid-fill case → painter takes its existing fast
+            // path. Only the `Container` push reads this today, but
+            // we resolve it once here to avoid repeating work.
+            let background_gradient =
+                crate::style::prop_linear_gradient(node, viewport_w);
             let scrollable = is_scrollable_node(node, viewport_w);
             if scrollable {
                 let off = scrolls.get(rid).copied().unwrap_or(0.0);
@@ -2290,6 +2341,7 @@ fn emit_items(
                         font_weight,
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
+                        background_gradient: background_gradient.clone(),
                     });
                 }
                 "Text" => {
@@ -2332,6 +2384,7 @@ fn emit_items(
                         font_weight,
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
+                        background_gradient: background_gradient.clone(),
                     });
                 }
                 et if IMAGE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
@@ -2380,6 +2433,7 @@ fn emit_items(
                             font_weight: 400,
                             clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
+                        background_gradient: background_gradient.clone(),
                         });
                     } else {
                         let src = crate::style::prop_str_at(node, "src", viewport_w)
@@ -2403,6 +2457,7 @@ fn emit_items(
                             font_weight: 400,
                             clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
+                        background_gradient: background_gradient.clone(),
                         });
                     }
                 }
@@ -2423,6 +2478,7 @@ fn emit_items(
                         font_weight: 400,
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
+                        background_gradient: background_gradient.clone(),
                     });
                 }
                 _ => {
@@ -2450,6 +2506,7 @@ fn emit_items(
                         font_weight: 400,
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
+                        background_gradient: background_gradient.clone(),
                     });
                 }
             }

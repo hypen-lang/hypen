@@ -52,6 +52,23 @@ pub struct ShellState {
     pub tabs: Vec<TabInfo>,
     /// The currently-visible tab's id. `None` when `tabs` is empty.
     pub active_tab_id: String,
+    /// Derived: `true` iff `tabs` is non-empty.
+    pub has_tabs: bool,
+    /// Derived: `true` iff `active_tab_id` resolves to a tab.
+    /// Gates the home / loading / error overlays — they replace
+    /// the active tab's content, and we want the home page back
+    /// when the user clicks `+` (which clears `active_tab_id`
+    /// without dropping the background tabs).
+    pub has_active_tab: bool,
+    /// Derived: connection status of the active tab — one of
+    /// `""`, `"connecting"`, `"reconnecting"`, `"connected"`,
+    /// `"failed"`, `"closed"`. Drives the loading / error overlay.
+    pub active_status: String,
+    /// Derived: detail line shown under the spinner / error
+    /// (e.g. `"attempt 3"` or `"could not connect to ws://..."`).
+    pub active_status_message: String,
+    /// Derived: the active tab's URL — shown in the loading screen.
+    pub active_url: String,
 }
 
 impl ShellState {
@@ -62,6 +79,11 @@ impl ShellState {
             recents,
             tabs: Vec::new(),
             active_tab_id: String::new(),
+            has_tabs: false,
+            has_active_tab: false,
+            active_status: String::new(),
+            active_status_message: String::new(),
+            active_url: String::new(),
         }
     }
 }
@@ -76,6 +98,14 @@ pub enum ShellCommand {
     /// tab id and call back into the shell via `__add_tab` once the
     /// `RemoteModule` exists.
     OpenTab { url: String, name: String },
+    /// Navigate the currently-active tab to `url` — drops its
+    /// connection and reconnects to the new URL in the same tab
+    /// slot. Acts like `Refresh` but with a new destination.
+    NavigateActive { url: String, name: String },
+    /// Deselect the active tab so the home / address bar surfaces.
+    /// Existing background tabs stay open; the next `OpenTab` will
+    /// append a fresh slot. This is what the `+` button does.
+    NewTab,
     /// Drop the active tab's connection and start a fresh one to the
     /// same URL — what Cmd+R / the refresh button do.
     Refresh,
@@ -104,7 +134,8 @@ pub fn build_shell_module(
     let tx_refresh = cmd_tx.clone();
     let tx_close = cmd_tx.clone();
     let tx_switch = cmd_tx.clone();
-    let tx_delete = cmd_tx;
+    let tx_delete = cmd_tx.clone();
+    let tx_new_tab = cmd_tx;
 
     HypenApp::module::<ShellState>("Shell")
         .state(ShellState::home(recents))
@@ -116,27 +147,54 @@ pub fn build_shell_module(
             }
             let normalized = crate::storage::normalize_url(&raw);
             let name = pretty_name(&normalized);
-            state.island_expanded = false;
-            // Optimistic clear — once the tab exists the user can type
-            // a new URL in for the next tab.
-            state.url_input.clear();
-            let _ = tx_connect.send(ShellCommand::OpenTab {
-                url: normalized,
-                name,
-            });
+            // If a tab is currently active, reuse it — pressing →
+            // navigates the existing slot. The user opens a fresh
+            // tab by clicking the `+` first (which clears
+            // `active_tab_id`).
+            let cmd = if state.has_active_tab {
+                ShellCommand::NavigateActive {
+                    url: normalized,
+                    name,
+                }
+            } else {
+                ShellCommand::OpenTab {
+                    url: normalized,
+                    name,
+                }
+            };
+            let _ = tx_connect.send(cmd);
         })
         .on_action::<ConnectRecentPayload>("connect_recent", move |state, payload, _ctx| {
             let url = crate::storage::normalize_url(&payload.url);
             let display = payload.name.unwrap_or_else(|| pretty_name(&url));
-            state.island_expanded = false;
+            state.url_input = url.clone();
+            let cmd = if state.has_active_tab {
+                ShellCommand::NavigateActive {
+                    url,
+                    name: display,
+                }
+            } else {
+                ShellCommand::OpenTab {
+                    url,
+                    name: display,
+                }
+            };
+            let _ = tx_recent.send(cmd);
+        })
+        .on_action::<()>("new_tab", move |state, _payload, _ctx| {
+            // Surface the home / address bar so the next `connect`
+            // appends a new tab instead of navigating the active one.
+            // Background tabs stay around in `state.tabs`.
+            state.active_tab_id.clear();
+            state.has_active_tab = false;
+            state.active_status.clear();
+            state.active_status_message.clear();
+            state.active_url.clear();
             state.url_input.clear();
-            let _ = tx_recent.send(ShellCommand::OpenTab {
-                url,
-                name: display,
-            });
+            let _ = tx_new_tab.send(ShellCommand::NewTab);
         })
         .on_action::<()>("go_home", move |state, _payload, _ctx| {
-            state.island_expanded = true;
+            state.url_input.clear();
             let _ = tx_home.send(ShellCommand::GoHome);
         })
         .on_action::<()>("refresh", move |_state, _payload, _ctx| {
@@ -190,7 +248,22 @@ pub fn build_shell_module(
         // without the shell having to know about RemoteModules.
         .on_action::<TabsUpdatePayload>("__set_tabs", |state, payload, _ctx| {
             state.tabs = payload.tabs;
-            state.active_tab_id = payload.active_tab_id;
+            state.active_tab_id = payload.active_tab_id.clone();
+            state.has_tabs = !state.tabs.is_empty();
+            let active = state
+                .tabs
+                .iter()
+                .find(|t| t.id == state.active_tab_id);
+            state.has_active_tab = active.is_some();
+            state.active_status = active
+                .map(|t| t.status.clone())
+                .unwrap_or_default();
+            state.active_status_message = active
+                .map(|t| t.status_message.clone())
+                .unwrap_or_default();
+            state.active_url = active
+                .map(|t| t.url.clone())
+                .unwrap_or_default();
         })
         .build()
 }
@@ -270,57 +343,40 @@ pub struct TabsUpdatePayload {
 ///
 /// Structure:
 /// ```text
-/// Stack {                       // root — children-after-first overlay
-///     Container { viewport }    // BASE: home screen (no tabs) or empty
-///                               // pad for the active tab's remote app
-///     Column { island }         // OVERLAY: floating chrome bar; hides
-///                               // entirely when no tabs are open
+/// Stack {                       // root — fills the window
+///     Container { viewport }    // BASE: full-bleed; renders home
+///                               // when no tabs, hosts active tab's
+///                               // app subtree otherwise. The wrapper
+///                               // finds this node (first child of
+///                               // root) as the `viewport_id`.
+///     Row { chrome }            // OVERLAY: pinned to top:0/left:0,
+///                               // full window width, fixed height.
 /// }
 /// ```
+///
+/// The home content is padded so it doesn't sit under the chrome bar.
 const SHELL_UI: &str = r##"
 Stack {
     Container {
-        If(condition: "@{length(state.tabs) == 0}") {
+        If(condition: "@{!state.has_active_tab}") {
             Column {
                 Text("Hypen Browser")
                     .fontSize(40)
                     .color("#0f172a")
                 Text("Open any Hypen app over WebSocket — no installs, no servers.")
                     .fontSize(15)
-                    .color("#475569")
+                    .color("#64748b")
                     .marginTop(8)
-                Row {
-                    Input(placeholder: "ws://localhost:3000")
-                        .bind(@state.url_input)
-                        .backgroundColor("white")
-                        .borderWidth(1)
-                        .borderColor("#cbd5f5")
-                        .borderRadius(10)
-                        .padding(14)
-                        .fontSize(15)
-                        .width(440)
-                    Button("@actions.connect") {
-                        Text("Open")
-                            .color("white")
-                            .fontSize(15)
-                    }
-                        .backgroundColor("#3554d1")
-                        .borderWidth(0)
-                        .borderRadius(10)
-                        .padding(14)
-                }
-                    .gap(8)
-                    .marginTop(20)
 
                 Text("Last opened")
-                    .fontSize(18)
-                    .color("#0f172a")
-                    .marginTop(36)
+                    .fontSize(13)
+                    .color("#94a3b8")
+                    .marginTop(40)
 
                 If(condition: "@{length(state.recents) == 0}") {
-                    Text("No apps opened yet. Paste a Hypen RemoteServer URL above and press Open.")
+                    Text("No apps opened yet. Type a URL above and press →.")
                         .fontSize(13)
-                        .color("#64748b")
+                        .color("#94a3b8")
                         .marginTop(8)
                 }
 
@@ -331,166 +387,323 @@ Stack {
                                 Button {
                                     Column {
                                         Text("@{item.name}")
-                                            .fontSize(15)
+                                            .fontSize(14)
                                             .color("#0f172a")
                                         Text("@{item.url}")
                                             .fontSize(12)
-                                            .color("#64748b")
-                                            .marginTop(4)
+                                            .color("#94a3b8")
+                                            .marginTop(2)
                                     }
                                 }
                                     .backgroundColor("white")
                                     .borderWidth(0)
-                                    .padding(16)
-                                    .width(500)
+                                    .padding(14)
+                                    .flex(1)
                                     .onClick(@actions.connect_recent, url: "@{item.url}", name: "@{item.name}")
                                 Button {
                                     Text("×")
-                                        .color("#94a3b8")
-                                        .fontSize(18)
+                                        .color("#cbd5e1")
+                                        .fontSize(16)
                                 }
                                     .backgroundColor("white")
                                     .borderWidth(0)
-                                    .padding(16)
+                                    .padding(14)
                                     .onClick(@actions.delete_recent, url: "@{item.url}")
                             }
                                 .backgroundColor("white")
                                 .borderWidth(1)
                                 .borderColor("#e2e8f0")
-                                .borderRadius(12)
-                                .marginTop(10)
+                                .borderRadius(10)
+                                .marginTop(8)
                         }
                     }
                         .marginTop(8)
+                        .width("100%")
+                        .maxWidth(640)
                 }
             }
                 .padding(56)
+                .paddingTop(96)
+                .width("100%")
+                .height("100%")
+                .alignItems("center")
+                .justifyContent("center")
+        }
+
+        If(condition: "@{state.has_active_tab && (state.active_status == 'connecting' || state.active_status == 'reconnecting')}") {
+            Column {
+                Text("●")
+                    .fontSize(28)
+                    .color("#3554d1")
+                Text("Connecting…")
+                    .fontSize(15)
+                    .color("#0f172a")
+                    .marginTop(12)
+                Text("@{state.active_url}")
+                    .fontSize(13)
+                    .color("#64748b")
+                    .marginTop(6)
+                If(condition: "@{state.active_status_message != ''}") {
+                    Text("@{state.active_status_message}")
+                        .fontSize(12)
+                        .color("#94a3b8")
+                        .marginTop(8)
+                }
+            }
+                .width("100%")
+                .height("100%")
+                .padding(56)
+                .paddingTop(120)
+                .alignItems("center")
+                .backgroundColor("#f8fafc")
+        }
+
+        If(condition: "@{state.has_active_tab && state.active_status == 'failed'}") {
+            Column {
+                Text("⚠")
+                    .fontSize(36)
+                    .color("#ef4444")
+                Text("Couldn't connect")
+                    .fontSize(16)
+                    .color("#0f172a")
+                    .marginTop(12)
+                Text("@{state.active_url}")
+                    .fontSize(13)
+                    .color("#64748b")
+                    .marginTop(6)
+                Text("@{state.active_status_message}")
+                    .fontSize(12)
+                    .color("#94a3b8")
+                    .marginTop(8)
+                Row {
+                    Button("@actions.refresh") {
+                        Text("Try again")
+                            .color("white")
+                            .fontSize(13)
+                    }
+                        .backgroundColor("#3554d1")
+                        .borderWidth(0)
+                        .borderRadius(8)
+                        .padding(10)
+                    Button("@actions.go_home") {
+                        Text("Home")
+                            .color("#475569")
+                            .fontSize(13)
+                    }
+                        .backgroundColor("#e2e8f0")
+                        .borderWidth(0)
+                        .borderRadius(8)
+                        .padding(10)
+                }
+                    .gap(8)
+                    .marginTop(16)
+            }
+                .width("100%")
+                .height("100%")
+                .padding(56)
+                .paddingTop(120)
+                .alignItems("center")
+                .backgroundColor("#f8fafc")
         }
     }
+        .width("100%")
+        .height("100%")
         .backgroundColor("#f1f5f9")
 
     Column {
-        If(condition: "@{length(state.tabs) > 0}") {
-            If(condition: "@{!state.island_expanded}") {
+        // Toolbar is expanded when (a) there's no tab open (so the
+        // user can always type a URL) or (b) the user hasn't
+        // collapsed it. Collapsing without an open tab leaves an
+        // empty pill that's confusing — gate it on `has_tabs`.
+        If(condition: "@{state.island_expanded || !state.has_tabs}") {
+            Column {
                 Row {
                     Button {
-                        Row {
-                            Text("●")
-                                .color("#34d399")
-                                .fontSize(10)
-                            Text("@{length(state.tabs)} tab(s)")
-                                .color("white")
-                                .fontSize(13)
-                                .marginLeft(8)
-                            Text("▾")
-                                .color("#cbd5f5")
-                                .fontSize(11)
-                                .marginLeft(8)
-                        }
+                        Text("⌂")
+                            .color("#475569")
+                            .fontSize(13)
                     }
-                        .backgroundColor("#0f172a")
-                        .borderWidth(0)
+                        .backgroundColor("#ffffff")
+                        .borderWidth(1)
+                        .borderColor("#e2e8f0")
+                        .borderRadius(8)
+                        .padding(6)
+                        .onClick(@actions.go_home)
+                    Button {
+                        Text("⟳")
+                            .color("#475569")
+                            .fontSize(13)
+                    }
+                        .backgroundColor("#ffffff")
+                        .borderWidth(1)
+                        .borderColor("#e2e8f0")
+                        .borderRadius(8)
+                        .padding(6)
+                        .onClick(@actions.refresh)
+
+                    Row {
+                        Input(placeholder: "Enter a URL — e.g. localhost:3000")
+                            .bind(@state.url_input)
+                            .backgroundColor("transparent")
+                            .color("#0f172a")
+                            .borderWidth(0)
+                            .padding(6)
+                            .fontSize(13)
+                            .flex(1)
+                        Button("@actions.connect") {
+                            Text("→")
+                                .color("white")
+                                .fontSize(14)
+                        }
+                            .backgroundColor("#3554d1")
+                            .borderWidth(0)
+                            .borderRadius(999)
+                            .padding(6)
+                    }
+                        .flex(1)
+                        .backgroundColor("#ffffff")
+                        .borderWidth(1)
+                        .borderColor("#e2e8f0")
                         .borderRadius(999)
-                        .padding(10)
+                        .padding(2)
+                        .alignItems("center")
+
+                    Button {
+                        Text("—")
+                            .color("#94a3b8")
+                            .fontSize(13)
+                    }
+                        .backgroundColor("transparent")
+                        .borderWidth(0)
+                        .borderRadius(8)
+                        .padding(6)
                         .onClick(@actions.toggle_island)
-                        .onHover(@actions.island_hover)
                 }
+                    .width("100%")
+                    .padding(8)
                     .gap(8)
-            }
-            If(condition: "@{state.island_expanded}") {
-                Column {
+                    .alignItems("center")
+
+                If(condition: "@{state.has_tabs}") {
                     Row {
                         ForEach(items: @state.tabs, key: "id") {
                             Row {
                                 Button {
                                     Row {
+                                        If(condition: "@{item.status == 'connecting' || item.status == 'reconnecting'}") {
+                                            Text("◐")
+                                                .color("#94a3b8")
+                                                .fontSize(11)
+                                        }
+                                        If(condition: "@{item.status == 'connected'}") {
+                                            Text("●")
+                                                .color("#22c55e")
+                                                .fontSize(10)
+                                        }
+                                        If(condition: "@{item.status == 'failed' || item.status == 'closed'}") {
+                                            Text("●")
+                                                .color("#ef4444")
+                                                .fontSize(10)
+                                        }
                                         Text("@{item.name}")
-                                            .color("white")
+                                            .color("#0f172a")
                                             .fontSize(12)
+                                            .marginLeft(6)
                                     }
+                                        .alignItems("center")
                                 }
-                                    .backgroundColor("#1e293b")
+                                    .backgroundColor("transparent")
                                     .borderWidth(0)
-                                    .borderRadius(8)
-                                    .padding(8)
+                                    .padding(6)
                                     .onClick(@actions.switch_tab, tabId: "@{item.id}")
                                 Button {
                                     Text("×")
                                         .color("#94a3b8")
-                                        .fontSize(12)
+                                        .fontSize(13)
                                 }
-                                    .backgroundColor("#1e293b")
+                                    .backgroundColor("transparent")
                                     .borderWidth(0)
-                                    .borderRadius(8)
-                                    .padding(8)
+                                    .padding(6)
                                     .onClick(@actions.close_tab, tabId: "@{item.id}")
                             }
-                                .gap(2)
+                                .backgroundColor("#ffffff")
+                                .borderWidth(1)
+                                .borderColor("#e2e8f0")
+                                .borderRadius(8)
+                                .gap(0)
                         }
+
+                        Button {
+                            Text("+")
+                                .color("#475569")
+                                .fontSize(14)
+                        }
+                            .backgroundColor("transparent")
+                            .borderWidth(0)
+                            .borderRadius(8)
+                            .padding(6)
+                            .onClick(@actions.new_tab)
                     }
-                        .gap(6)
-                    Row {
-                        Button {
-                            Text("⌂")
-                                .color("white")
-                                .fontSize(15)
-                        }
-                            .backgroundColor("#1e293b")
-                            .borderWidth(0)
-                            .borderRadius(999)
-                            .padding(10)
-                            .onClick(@actions.go_home)
-                        Button {
-                            Text("⟳")
-                                .color("white")
-                                .fontSize(15)
-                        }
-                            .backgroundColor("#1e293b")
-                            .borderWidth(0)
-                            .borderRadius(999)
-                            .padding(10)
-                            .onClick(@actions.refresh)
-                        Input(placeholder: "ws://…")
-                            .bind(@state.url_input)
-                            .backgroundColor("#1e293b")
-                            .color("white")
-                            .borderWidth(0)
-                            .borderRadius(10)
-                            .padding(10)
-                            .fontSize(13)
-                            .width(320)
-                        Button("@actions.connect") {
-                            Text("Go")
-                                .color("white")
-                                .fontSize(13)
-                        }
-                            .backgroundColor("#3554d1")
-                            .borderWidth(0)
-                            .borderRadius(10)
-                            .padding(10)
-                        Button {
-                            Text("—")
-                                .color("white")
-                                .fontSize(13)
-                        }
-                            .backgroundColor("#1e293b")
-                            .borderWidth(0)
-                            .borderRadius(999)
-                            .padding(10)
-                            .onClick(@actions.toggle_island)
-                    }
-                        .gap(6)
-                        .marginTop(8)
+                        .width("100%")
+                        .gap(4)
+                        .padding(6)
+                        .paddingTop(0)
+                        .alignItems("center")
                 }
+            }
+                .width("100%")
+                .linearGradient("to bottom", ["#fbfcfd", "#e9ebef"])
+                .borderWidth(1)
+                .borderColor("#d8dade")
+                .onHover(@actions.island_hover)
+        }
+
+        // Collapsed pill — only shown when a tab is open, so the
+        // pill always has a meaningful label (active URL + status).
+        If(condition: "@{!state.island_expanded && state.has_tabs}") {
+            Row {
+                Row {
+                    If(condition: "@{state.active_status == 'connecting' || state.active_status == 'reconnecting'}") {
+                        Text("◐")
+                            .color("#94a3b8")
+                            .fontSize(10)
+                    }
+                    If(condition: "@{state.active_status == 'connected'}") {
+                        Text("●")
+                            .color("#22c55e")
+                            .fontSize(10)
+                    }
+                    If(condition: "@{state.active_status == 'failed' || state.active_status == 'closed'}") {
+                        Text("●")
+                            .color("#ef4444")
+                            .fontSize(10)
+                    }
+                    Text("@{state.active_url}")
+                        .color("#0f172a")
+                        .fontSize(12)
+                        .marginLeft(8)
+                    Text("▾")
+                        .color("#94a3b8")
+                        .fontSize(10)
+                        .marginLeft(8)
+                }
+                    .alignItems("center")
+                    .backgroundColor("#ffffff")
+                    .borderWidth(1)
+                    .borderColor("#d8dade")
+                    .borderRadius(999)
                     .padding(8)
-                    .backgroundColor("#0f172a")
-                    .borderRadius(14)
+                    .onClick(@actions.toggle_island)
                     .onHover(@actions.island_hover)
             }
+                .width("100%")
+                .padding(8)
         }
     }
-        .marginTop(14)
+        .width("100%")
 }
+    .width("100%")
+    .height("100%")
 "##;
 
 /// Action names the shell handles. Used by the BrowserModule to
@@ -499,6 +712,7 @@ Stack {
 pub const SHELL_ACTIONS: &[&str] = &[
     "connect",
     "connect_recent",
+    "new_tab",
     "go_home",
     "refresh",
     "close_tab",
@@ -520,6 +734,11 @@ pub const SHELL_BIND_PATHS: &[&str] = &[
     "recents",
     "tabs",
     "active_tab_id",
+    "has_tabs",
+    "has_active_tab",
+    "active_status",
+    "active_status_message",
+    "active_url",
 ];
 
 #[cfg(test)]
@@ -572,10 +791,10 @@ mod tests {
             }
             other => panic!("expected OpenTab, got {other:?}"),
         }
-        // url_input cleared so the next tab starts fresh.
+        // url_input is preserved so the address bar still reflects
+        // the opened URL — the user can edit it for the next nav.
         let state = instance.get_state();
-        assert!(state.url_input.is_empty(), "url_input must clear after Open");
-        assert!(!state.island_expanded);
+        assert_eq!(state.url_input, "localhost:3000");
     }
 
     #[test]

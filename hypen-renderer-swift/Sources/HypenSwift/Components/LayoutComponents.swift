@@ -921,8 +921,17 @@ public struct ListComponent: ComponentHandler {
         let direction = context.element.getStringProp("direction.0")
             ?? context.element.getStringProp("1")
             ?? "vertical"
+        // CSS-style `flex-direction` from `tw("flex flex-row")` —
+        // emitted as the kebab key `flex-direction: row`. Without
+        // this, Lists declared via Tailwind classes (e.g. AddFood's
+        // horizontal category-tab list) stacked vertically because
+        // only the `direction.0` applicator path was checked.
+        let flexDirection = context.element.getStringProp("flex-direction")
+            ?? context.element.getStringProp("flexDirection")
         let gap = modifier.gap ?? context.element.getCGFloatProp("gap.0") ?? 0
         let isHorizontal = direction.lowercased() == "horizontal"
+            || flexDirection?.lowercased() == "row"
+            || flexDirection?.lowercased() == "row-reverse"
 
         // Propagate expansion permissions to children, like Column/Row do
         let allowsHorizontalExpansion = modifier.fillMaxWidth || modifier.width != nil

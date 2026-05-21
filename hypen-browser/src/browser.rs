@@ -16,18 +16,22 @@
 //!    1 can never collide with a same-id node in tab 2 or the shell.
 //! 2. **Re-rooting the active tab.** A tab's `Insert { parent_id:
 //!    "root" }` is rewritten to point at the shell's viewport
-//!    Container. Inactive tabs' patches don't reach the renderer at
-//!    all — they're discarded until the user switches to that tab
-//!    (which closes + reopens the tab's WebSocket).
-//! 3. **Routing actions.** Action names in `SHELL_ACTIONS` (plus
+//!    Container.
+//! 3. **Background tabs stay alive.** Inactive tabs' workers keep
+//!    streaming patches; we apply them to the renderer's `Tree`
+//!    anyway but immediately follow each root `Insert` with a
+//!    `Detach` so the subtree doesn't appear in the viewport. On
+//!    switch-back the wrapper emits `Attach` for every tracked root —
+//!    no WebSocket round-trip, no spinner, no lost session state.
+//! 4. **Routing actions.** Action names in `SHELL_ACTIONS` (plus
 //!    `__hypen_bind` for shell-owned paths) go to the shell; the
 //!    rest go to the active tab's remote.
 //!
-//! Switching tabs is implemented as
-//! `stop_remote(old_tab) → start_remote(new_tab)` — the new tab
-//! reconnects rather than being kept alive in the background. This
-//! keeps the implementation small in v1; per-tab patch journaling for
-//! suspend / resume can land later.
+//! Detach / Attach are the same patches the engine's Router subtree
+//! cache uses — the renderer's `Tree` already supports them
+//! (`Tree::apply` matches both arms; `parent_by_child` and the
+//! `nodes` map are decoupled so a detached subtree keeps its
+//! `Node` entries and reconnect with `Attach` doesn't rebuild).
 
 use crate::shell::{
     build_shell_module, push_recents, push_tabs, ShellCommand, ShellState, TabInfo,
@@ -57,17 +61,26 @@ struct Tab {
     /// tab so its NodeIds don't collide with the shell's or any other
     /// tab's.
     id_prefix: String,
-    /// `Some(_)` while the tab is the active one — patches from this
-    /// tab's remote get rewritten and forwarded. `None` while
-    /// inactive: the remote is torn down on switch-away in v1.
+    /// The tab's WebSocket worker. Held for every open tab regardless
+    /// of whether the tab is currently visible — background tabs keep
+    /// receiving patches and updating their (detached) subtree in the
+    /// renderer's `Tree`. Dropped only on `close_tab` / `go_home`.
     remote: Option<Arc<RemoteModule>>,
-    /// Renderer-visible IDs the tab created at the root (rewritten to
-    /// be children of the shell's viewport). Used to emit `Remove`
-    /// patches when the tab is closed or switched away from.
+    /// Renderer-visible IDs the tab inserted at root level (rewritten
+    /// to be children of the shell's viewport). Drives the
+    /// `Detach` / `Attach` patch pairs the wrapper emits on tab
+    /// switch and the `Remove` patches it emits on close.
     app_root_ids: Vec<String>,
     /// Patches buffered while the shell's viewport hadn't been
     /// discovered yet. Replayed once the viewport is known.
     queued: Vec<Patch>,
+    /// `true` when this tab's roots are currently children of the
+    /// shell viewport (visible). `false` when its roots have been
+    /// `Detach`'d — the subtree is still in the renderer's `Tree`
+    /// (and the worker keeps applying patches to it) but it isn't
+    /// linked into the visible tree. Flipped by `attach_tab` /
+    /// `detach_tab`.
+    attached: bool,
 }
 
 pub struct BrowserModule {
@@ -167,6 +180,10 @@ impl BrowserModule {
         for cmd in cmds {
             match cmd {
                 ShellCommand::OpenTab { url, name } => self.open_tab(url, name),
+                ShellCommand::NavigateActive { url, name } => {
+                    self.navigate_active_tab(url, name)
+                }
+                ShellCommand::NewTab => self.new_tab(),
                 ShellCommand::Refresh => self.refresh_active_tab(),
                 ShellCommand::CloseTab { tab_id } => self.close_tab(&tab_id),
                 ShellCommand::SwitchTab { tab_id } => self.switch_tab(&tab_id),
@@ -176,21 +193,76 @@ impl BrowserModule {
         }
     }
 
+    /// Reuse the active tab's slot for a different URL. Drops the
+    /// current connection (so we don't leak a WebSocket to the old
+    /// destination) and opens a fresh one. From the user's POV the
+    /// address bar just navigated like a browser. If no tab is
+    /// active, falls back to `open_tab`.
+    fn navigate_active_tab(&self, url: String, name: String) {
+        let active = self
+            .inner
+            .lock()
+            .expect("inner poisoned")
+            .active_tab_id
+            .clone();
+        if let Some(id) = active {
+            self.close_tab_silent(&id);
+        }
+        self.open_tab(url, name);
+    }
+
+    /// Detach the active tab so the home / address bar resurfaces;
+    /// existing background tabs stay open and `+` simply creates a
+    /// fresh slot the next `OpenTab` will fill.
+    fn new_tab(&self) {
+        let active = self
+            .inner
+            .lock()
+            .expect("inner poisoned")
+            .active_tab_id
+            .clone();
+        if let Some(id) = active {
+            self.detach_tab(&id);
+        }
+        {
+            let mut inner = self.inner.lock().expect("inner poisoned");
+            inner.active_tab_id = None;
+        }
+        self.publish_tabs();
+    }
+
     /// Open a new tab connected to `url` and make it the active one.
-    /// Steps:
-    /// 1. Tear down the currently-active tab's remote (its tree
-    ///    leaves the viewport via `Remove`).
+    /// The previously-active tab is *detached*, not closed — its
+    /// WebSocket and subtree stay live in the background so switching
+    /// back is instant. Steps:
+    /// 1. `Detach` the currently-active tab's roots from the viewport.
     /// 2. Record the visit in storage so it shows up under "Last
     ///    opened" even if the connection fails.
     /// 3. Allocate a new `Tab` (with a fresh `a<n>:` prefix) and a
     ///    `RemoteModule`; wire its patches + status callbacks.
     /// 4. Publish the updated tab list to the shell.
     fn open_tab(&self, url: String, name: String) {
-        self.suspend_active_tab();
+        log::debug!("hypen-browser: open_tab({url}) ENTER — locking inner to read active_tab_id");
+        let prev_active = self
+            .inner
+            .lock()
+            .expect("inner poisoned")
+            .active_tab_id
+            .clone();
+        log::debug!("hypen-browser: open_tab({url}) released inner; prev_active={prev_active:?}");
+        if let Some(old_id) = prev_active {
+            log::debug!("hypen-browser: open_tab detaching prev {old_id}");
+            self.detach_tab(&old_id);
+            log::debug!("hypen-browser: open_tab detach({old_id}) returned");
+        }
 
+        log::debug!("hypen-browser: open_tab locking storage");
         if let Ok(mut s) = self.storage.lock() {
+            log::debug!("hypen-browser: open_tab storage locked; recording visit");
             s.record_visit(&name, &url);
+            log::debug!("hypen-browser: open_tab pushing recents to shell");
             push_recents(&self.shell, s.recent().to_vec());
+            log::debug!("hypen-browser: open_tab push_recents returned");
         }
 
         let prefix_n = self.next_tab_prefix_id.fetch_add(1, Ordering::Relaxed);
@@ -209,6 +281,10 @@ impl BrowserModule {
             remote: None,
             app_root_ids: Vec::new(),
             queued: Vec::new(),
+            // Brand-new tab is active and its patches go straight to
+            // the viewport — no Detach needed for incoming root
+            // inserts.
+            attached: true,
         };
 
         log::info!("hypen-browser: opening {url} in {tab_id}");
@@ -222,10 +298,18 @@ impl BrowserModule {
         let inner_for_remote = Arc::clone(&self.inner);
         let tab_id_for_remote = tab_id.clone();
         remote.on_patches(Arc::new(move |patches: &[Patch]| {
+            log::debug!(
+                "hypen-browser: tab {tab_id_for_remote} on_patches: {} patches in",
+                patches.len(),
+            );
             let rewritten = process_tab_patches(
                 &inner_for_remote,
                 &tab_id_for_remote,
                 patches,
+            );
+            log::debug!(
+                "hypen-browser: tab {tab_id_for_remote} rewritten {} → forwarding",
+                rewritten.len(),
             );
             if !rewritten.is_empty() {
                 forward(&inner_for_remote, &rewritten);
@@ -239,30 +323,52 @@ impl BrowserModule {
         let shell_for_status = Arc::clone(&self.shell);
         let tab_id_for_status = tab_id.clone();
         remote.on_status(move |status| {
+            log::info!(
+                "hypen-browser: tab {tab_id_for_status} status -> {status:?} \
+                 (thread={:?})",
+                std::thread::current().name().unwrap_or("?"),
+            );
             let snapshot = update_tab_status(
                 &inner_for_status,
                 &tab_id_for_status,
                 status,
             );
             if let Some((tabs, active)) = snapshot {
+                log::debug!(
+                    "hypen-browser: tab {tab_id_for_status} pushing tabs \
+                     snapshot ({} tabs)",
+                    tabs.len(),
+                );
                 push_tabs(&shell_for_status, tabs, active);
+                log::debug!(
+                    "hypen-browser: tab {tab_id_for_status} push_tabs done",
+                );
             }
         });
 
+        log::debug!("hypen-browser: {tab_id} mounting remote");
         remote.mount();
+        log::debug!("hypen-browser: {tab_id} remote.mount() returned");
         tab.remote = Some(remote);
 
         {
+            log::debug!("hypen-browser: {tab_id} taking inner lock to insert tab");
             let mut inner = self.inner.lock().expect("inner poisoned");
             inner.tabs.insert(tab_id.clone(), tab);
-            inner.active_tab_id = Some(tab_id);
+            inner.active_tab_id = Some(tab_id.clone());
+            log::debug!("hypen-browser: {tab_id} inserted, releasing inner lock");
         }
+        log::debug!("hypen-browser: {tab_id} publishing tabs to shell");
         self.publish_tabs();
+        log::info!("hypen-browser: open_tab({tab_id}) returned");
     }
 
-    /// Refresh the active tab by tearing down its WebSocket and
-    /// re-opening with the same URL. The tab id is preserved so the
-    /// strip doesn't lose focus.
+    /// Refresh the active tab by closing it and opening a new one to
+    /// the same URL. Refresh deliberately *doesn't* use the Detach
+    /// path — the user explicitly asked for a fresh session, so we
+    /// drop the WebSocket and let the new tab handshake anew. The
+    /// tab id changes; tabs after it in the strip don't move because
+    /// `open_tab` always appends.
     fn refresh_active_tab(&self) {
         let (active_id, url, name) = {
             let inner = self.inner.lock().expect("inner poisoned");
@@ -277,130 +383,170 @@ impl BrowserModule {
             (id, tab.info.url.clone(), tab.info.name.clone())
         };
         log::info!("hypen-browser: refreshing {active_id} ({url})");
-        // Close + reopen under a fresh tab id is simpler than
-        // surgically replacing the RemoteModule in place. The user
-        // sees the tab disappear / reappear for one frame, which is
-        // acceptable for an explicit refresh action.
-        self.close_tab(&active_id);
+        self.close_tab_silent(&active_id);
         self.open_tab(url, name);
     }
 
-    /// Close a tab by id. If it was the active one, the next tab in
-    /// insertion order becomes active; if there are no more tabs, the
-    /// home screen takes over.
+    /// Close a tab by id. Tears down its WebSocket (drop the
+    /// `RemoteModule` `Arc`) and emits `Remove` for every tracked
+    /// root so the renderer's `Tree` reclaims the nodes. If the
+    /// closed tab was the active one, the most recently-opened
+    /// remaining tab is `Attach`ed in its place; if it was the last
+    /// tab, the home screen returns.
     fn close_tab(&self, tab_id: &str) {
-        let (removed_tab, next_active) = {
-            let mut inner = self.inner.lock().expect("inner poisoned");
-            let tab = match inner.tabs.shift_remove(tab_id) {
-                Some(t) => t,
-                None => return,
-            };
-            let next = if inner.active_tab_id.as_deref() == Some(tab_id) {
-                inner
-                    .tabs
-                    .keys()
-                    .last()
-                    .cloned()
-                    .inspect(|id| inner.active_tab_id = Some(id.clone()))
-                    .or_else(|| {
-                        inner.active_tab_id = None;
-                        None
-                    })
-            } else {
-                None
-            };
-            (tab, next)
-        };
+        let was_active = self
+            .inner
+            .lock()
+            .expect("inner poisoned")
+            .active_tab_id
+            .as_deref()
+            == Some(tab_id);
+        self.close_tab_silent(tab_id);
+        if !was_active {
+            self.publish_tabs();
+            return;
+        }
+        // Promote the most recently-opened survivor.
+        let next = self
+            .inner
+            .lock()
+            .expect("inner poisoned")
+            .tabs
+            .keys()
+            .last()
+            .cloned();
+        if let Some(id) = next {
+            {
+                let mut inner = self.inner.lock().expect("inner poisoned");
+                inner.active_tab_id = Some(id.clone());
+            }
+            self.attach_tab(&id);
+        } else {
+            self.inner.lock().expect("inner poisoned").active_tab_id = None;
+        }
+        self.publish_tabs();
+    }
 
-        // Emit Remove patches for everything the tab pinned to the
-        // viewport — without this the home screen / next tab would
-        // be painted on top of stale nodes.
-        let removes: Vec<Patch> = removed_tab
+    /// Close a tab without promoting a successor or re-publishing the
+    /// strip. Used by `close_tab` (which handles those itself),
+    /// `refresh_active_tab` (which immediately opens a replacement),
+    /// and `go_home` (which closes the lot in one pass).
+    fn close_tab_silent(&self, tab_id: &str) {
+        let removed = {
+            let mut inner = self.inner.lock().expect("inner poisoned");
+            inner.tabs.shift_remove(tab_id)
+        };
+        let Some(tab) = removed else {
+            return;
+        };
+        // Only attached tabs have nodes linked into the viewport;
+        // detached tabs' nodes still live in `Tree.nodes` but aren't
+        // children of anything, so `Remove` still tears them down via
+        // `remove_subtree`. Either way we send Remove for each id.
+        let removes: Vec<Patch> = tab
             .app_root_ids
-            .into_iter()
-            .map(|id| Patch::Remove { id })
+            .iter()
+            .map(|id| Patch::Remove { id: id.clone() })
             .collect();
         if !removes.is_empty() {
             forward(&self.inner, &removes);
         }
         // Dropping the RemoteModule's Arc shuts down its worker.
-        drop(removed_tab.remote);
-
-        if let Some(id) = next_active {
-            // Switch-away replays the new active tab's content. In v1
-            // that means re-opening — same UX as a "refresh" of the
-            // tab we just promoted.
-            let (url, name) = {
-                let inner = self.inner.lock().expect("inner poisoned");
-                let tab = match inner.tabs.get(&id) {
-                    Some(t) => t,
-                    None => {
-                        // Vanished between close and lookup; just
-                        // re-publish without re-opening.
-                        drop(inner);
-                        self.publish_tabs();
-                        return;
-                    }
-                };
-                (tab.info.url.clone(), tab.info.name.clone())
-            };
-            self.close_tab(&id); // remove the inactive placeholder
-            self.open_tab(url, name);
-        } else {
-            self.publish_tabs();
-        }
+        drop(tab.remote);
     }
 
-    /// Make `tab_id` the active tab. In v1, switching closes the old
-    /// active tab's remote and re-opens the target tab so the user
-    /// sees the freshest patch stream. (Background-keeping tabs alive
-    /// across switches is a future enhancement.)
+    /// Make `tab_id` the active tab. Detach-then-attach — no
+    /// reconnect, no spinner, the new tab's tree pops back in
+    /// exactly where it was. No-op if `tab_id` is already active or
+    /// doesn't exist.
     fn switch_tab(&self, tab_id: &str) {
-        let already_active = {
+        let (already_active, exists) = {
             let inner = self.inner.lock().expect("inner poisoned");
-            inner.active_tab_id.as_deref() == Some(tab_id)
-                && inner
-                    .tabs
-                    .get(tab_id)
-                    .map(|t| t.remote.is_some())
-                    .unwrap_or(false)
+            (
+                inner.active_tab_id.as_deref() == Some(tab_id),
+                inner.tabs.contains_key(tab_id),
+            )
         };
-        if already_active {
+        if already_active || !exists {
             return;
         }
 
-        let target = {
-            let inner = self.inner.lock().expect("inner poisoned");
-            inner
-                .tabs
-                .get(tab_id)
-                .map(|t| (t.info.url.clone(), t.info.name.clone()))
-        };
-        let (url, name) = match target {
-            Some(t) => t,
-            None => return,
-        };
-
-        // Drop the existing entry for the same id so open_tab's
-        // suspend-then-open logic doesn't see a stale placeholder.
+        let old_id = self
+            .inner
+            .lock()
+            .expect("inner poisoned")
+            .active_tab_id
+            .clone();
+        if let Some(old) = old_id {
+            self.detach_tab(&old);
+        }
         {
             let mut inner = self.inner.lock().expect("inner poisoned");
-            if let Some(prev) = inner.tabs.shift_remove(tab_id) {
-                drop(prev.remote);
-                // Emit removes for the dropped tab's content; the new
-                // tab's tree will land in its place.
-                let removes: Vec<Patch> = prev
-                    .app_root_ids
-                    .into_iter()
-                    .map(|id| Patch::Remove { id })
-                    .collect();
-                if !removes.is_empty() {
-                    drop(inner);
-                    forward(&self.inner, &removes);
-                }
-            }
+            inner.active_tab_id = Some(tab_id.to_string());
         }
-        self.open_tab(url, name);
+        self.attach_tab(tab_id);
+        self.publish_tabs();
+    }
+
+    /// Detach the tab's root subtrees from the viewport. The nodes
+    /// stay alive in the renderer's `Tree`; the tab's worker keeps
+    /// applying patches to them; on `attach_tab` they pop back
+    /// instantly. No-op when the tab is already detached or unknown.
+    fn detach_tab(&self, tab_id: &str) {
+        let patches: Vec<Patch> = {
+            let mut inner = self.inner.lock().expect("inner poisoned");
+            let Some(tab) = inner.tabs.get_mut(tab_id) else {
+                return;
+            };
+            if !tab.attached {
+                return;
+            }
+            tab.attached = false;
+            tab.app_root_ids
+                .iter()
+                .map(|id| Patch::Detach { id: id.clone() })
+                .collect()
+        };
+        if !patches.is_empty() {
+            forward(&self.inner, &patches);
+        }
+    }
+
+    /// Re-attach a previously-detached tab's roots to the viewport.
+    /// No-op if the tab is already attached, unknown, or the
+    /// viewport id hasn't been resolved yet (the patches will be
+    /// flushed from `tab.queued` once the shell's first child
+    /// renders).
+    fn attach_tab(&self, tab_id: &str) {
+        let patches: Vec<Patch> = {
+            let mut inner = self.inner.lock().expect("inner poisoned");
+            let Some(viewport) = inner.viewport_id.clone() else {
+                if let Some(tab) = inner.tabs.get_mut(tab_id) {
+                    // Mark intent so the eventual viewport-discovery
+                    // flush forwards this tab's patches as attached.
+                    tab.attached = true;
+                }
+                return;
+            };
+            let Some(tab) = inner.tabs.get_mut(tab_id) else {
+                return;
+            };
+            if tab.attached {
+                return;
+            }
+            tab.attached = true;
+            tab.app_root_ids
+                .iter()
+                .map(|id| Patch::Attach {
+                    parent_id: viewport.clone(),
+                    id: id.clone(),
+                    before_id: None,
+                })
+                .collect()
+        };
+        if !patches.is_empty() {
+            forward(&self.inner, &patches);
+        }
     }
 
     /// Close every tab and return to the home screen. Equivalent to
@@ -414,60 +560,13 @@ impl BrowserModule {
             // Each close drops its own RemoteModule + emits Removes.
             // We accept the O(n^2) shift_remove cost — `tabs` is
             // user-driven and won't exceed a handful of entries.
-            self.close_tab_no_promote(&id);
+            self.close_tab_silent(&id);
         }
         {
             let mut inner = self.inner.lock().expect("inner poisoned");
             inner.active_tab_id = None;
         }
         self.publish_tabs();
-    }
-
-    /// Same as [`Self::close_tab`] but doesn't promote a successor.
-    /// Used by [`Self::go_home`] which closes every tab in one go.
-    fn close_tab_no_promote(&self, tab_id: &str) {
-        let removed = {
-            let mut inner = self.inner.lock().expect("inner poisoned");
-            inner.tabs.shift_remove(tab_id)
-        };
-        if let Some(tab) = removed {
-            let removes: Vec<Patch> = tab
-                .app_root_ids
-                .into_iter()
-                .map(|id| Patch::Remove { id })
-                .collect();
-            if !removes.is_empty() {
-                forward(&self.inner, &removes);
-            }
-            drop(tab.remote);
-        }
-    }
-
-    /// Drop the active tab's remote without removing it from the tab
-    /// list. Used by [`Self::open_tab`] right before it allocates the
-    /// new active tab — keeps `app_root_ids` cleared so the next
-    /// tab's tree replaces the previous one cleanly.
-    fn suspend_active_tab(&self) {
-        let removes = {
-            let mut inner = self.inner.lock().expect("inner poisoned");
-            let id = match inner.active_tab_id.clone() {
-                Some(id) => id,
-                None => return,
-            };
-            let Some(tab) = inner.tabs.get_mut(&id) else {
-                return;
-            };
-            let removes: Vec<Patch> = std::mem::take(&mut tab.app_root_ids)
-                .into_iter()
-                .map(|id| Patch::Remove { id })
-                .collect();
-            tab.queued.clear();
-            tab.remote = None;
-            removes
-        };
-        if !removes.is_empty() {
-            forward(&self.inner, &removes);
-        }
     }
 
     fn delete_recent(&self, url: &str) {
@@ -508,6 +607,15 @@ impl HypenModule for BrowserModule {
 
     fn dispatch_action(&self, name: &str, payload: Option<Value>) {
         let target = classify_dispatch(name, payload.as_ref());
+        log::debug!(
+            "hypen-browser: dispatch_action name={name} target={} \
+             (thread={:?})",
+            match target {
+                DispatchTarget::Shell => "shell",
+                DispatchTarget::Remote => "remote",
+            },
+            std::thread::current().name().unwrap_or("?"),
+        );
         match target {
             DispatchTarget::Shell => {
                 if let Err(e) = self.shell.dispatch_action(name, payload) {
@@ -535,7 +643,9 @@ impl HypenModule for BrowserModule {
         // Drain any `ShellCommand`s the shell's handler enqueued
         // during the dispatch — this is what swaps the active tab
         // when the user opens / closes / switches.
+        log::debug!("hypen-browser: draining shell commands after {name}");
         self.drain_commands();
+        log::debug!("hypen-browser: dispatch_action {name} done");
     }
 }
 
@@ -576,17 +686,29 @@ fn forward(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
     if patches.is_empty() {
         return;
     }
+    log::trace!(
+        "hypen-browser: forward({} patches, thread={:?}) — locking inner",
+        patches.len(),
+        std::thread::current().name().unwrap_or("?"),
+    );
     let cb = {
         let mut g = inner.lock().expect("inner poisoned");
         if let Some(cb) = g.callback.as_ref() {
             Some(Arc::clone(cb))
         } else {
+            log::debug!(
+                "hypen-browser: forward buffered {} patches (no callback yet)",
+                patches.len(),
+            );
             g.pending.extend_from_slice(patches);
             None
         }
     };
+    log::trace!("hypen-browser: forward released inner lock");
     if let Some(cb) = cb {
+        log::trace!("hypen-browser: forward firing renderer callback");
         cb(patches);
+        log::trace!("hypen-browser: forward renderer callback returned");
     }
 }
 
@@ -596,9 +718,15 @@ fn forward(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
 /// we can learn the viewport's renderer ID. Also flushes any per-tab
 /// queued patches that were waiting on the viewport id.
 fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Patch> {
+    log::trace!(
+        "hypen-browser: process_shell_patches({} in, thread={:?}) — locking inner",
+        patches.len(),
+        std::thread::current().name().unwrap_or("?"),
+    );
     let mut queued_flush: Vec<Patch> = Vec::new();
     {
         let mut g = inner.lock().expect("inner poisoned");
+        log::trace!("hypen-browser: process_shell_patches inner locked");
         for patch in patches {
             if let Patch::Insert { parent_id, id, .. } = patch {
                 if parent_id == ROOT_ID && g.shell_root_id.is_none() {
@@ -609,18 +737,47 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
                             let viewport = id.clone();
                             g.viewport_id = Some(viewport.clone());
                             g.seen_first_root_child = true;
-                            // Drain every tab's queued patches.
-                            for tab in g.tabs.values_mut() {
-                                let drained = std::mem::take(&mut tab.queued);
+                            // Drain every tab's queued patches into
+                            // the outbound stream. We can't know each
+                            // tab's `attached` from outside the loop
+                            // without a second borrow, so capture it
+                            // up front and append per-tab.
+                            let tab_ids: Vec<String> = g.tabs.keys().cloned().collect();
+                            for tid in tab_ids {
+                                let (prefix, attached) = match g.tabs.get(&tid) {
+                                    Some(t) => (t.id_prefix.clone(), t.attached),
+                                    None => continue,
+                                };
+                                let drained: Vec<Patch> = match g.tabs.get_mut(&tid) {
+                                    Some(t) => std::mem::take(&mut t.queued),
+                                    None => continue,
+                                };
                                 let mut local_roots = Vec::new();
                                 let rewritten = rewrite_tab_batch(
                                     drained,
-                                    &tab.id_prefix,
+                                    &prefix,
                                     &viewport,
                                     &mut local_roots,
                                 );
-                                tab.app_root_ids.extend(local_roots);
+                                if let Some(t) = g.tabs.get_mut(&tid) {
+                                    t.app_root_ids.extend(local_roots.iter().cloned());
+                                    // Filter out roots that were
+                                    // Removed in the same drain.
+                                    for p in &rewritten {
+                                        if let Patch::Remove { id } = p {
+                                            t.app_root_ids.retain(|tr| tr != id);
+                                        }
+                                    }
+                                }
                                 queued_flush.extend(rewritten);
+                                // Background tabs: detach the freshly
+                                // inserted roots so they don't flash
+                                // into the viewport.
+                                if !attached {
+                                    for root in local_roots {
+                                        queued_flush.push(Patch::Detach { id: root });
+                                    }
+                                }
                             }
                         }
                     }
@@ -633,21 +790,25 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
     out
 }
 
-/// Translate a tab's patches into the merged stream. Returns the
-/// rewritten patches; if the tab is inactive or unknown, returns
-/// empty so the worker's output is silently dropped.
+/// Translate a tab's patches into the merged stream. The tab's
+/// `attached` flag decides whether new root inserts stay linked to
+/// the viewport or are immediately detached — inactive (background)
+/// tabs apply their patches to the renderer's `Tree` so the subtree
+/// stays current, but the subtree itself is unlinked so it isn't
+/// drawn.
+///
+/// Returns the rewritten patches; returns empty when the tab isn't
+/// known (worker fired after a close, for instance).
 fn process_tab_patches(
     inner: &Arc<Mutex<Inner>>,
     tab_id: &str,
     patches: &[Patch],
 ) -> Vec<Patch> {
     let mut g = inner.lock().expect("inner poisoned");
-    // Only the active tab forwards. Inactive tabs (none in v1, but
-    // future-proof) keep their patches in the per-tab queue.
-    let is_active = g.active_tab_id.as_deref() == Some(tab_id);
-    if !is_active {
-        return Vec::new();
-    }
+    let (prefix, attached) = match g.tabs.get(tab_id) {
+        Some(t) => (t.id_prefix.clone(), t.attached),
+        None => return Vec::new(),
+    };
     let viewport = match g.viewport_id.clone() {
         Some(v) => v,
         None => {
@@ -659,21 +820,31 @@ fn process_tab_patches(
             return Vec::new();
         }
     };
-    let prefix = match g.tabs.get(tab_id) {
-        Some(t) => t.id_prefix.clone(),
-        None => return Vec::new(),
-    };
     let mut new_roots: Vec<String> = Vec::new();
-    let rewritten = rewrite_tab_batch(patches.to_vec(), &prefix, &viewport, &mut new_roots);
+    let mut rewritten = rewrite_tab_batch(patches.to_vec(), &prefix, &viewport, &mut new_roots);
     if let Some(tab) = g.tabs.get_mut(tab_id) {
-        // Track new root ids so close-tab can `Remove` them.
-        tab.app_root_ids.extend(new_roots);
+        // Track new root ids so future Detach / Attach / Remove
+        // patches know which ids to operate on.
+        tab.app_root_ids.extend(new_roots.iter().cloned());
         // Filter out any roots that were just removed by the same
         // batch.
         for p in &rewritten {
             if let Patch::Remove { id } = p {
                 tab.app_root_ids.retain(|tracked| tracked != id);
+                // Also drop the matching pending new_root if the
+                // worker emitted Create + Insert + Remove all in the
+                // same batch (rare but possible).
+                new_roots.retain(|nr| nr != id);
             }
+        }
+    }
+    // Background tab: detach every fresh root so the user only sees
+    // the active tab's tree. The renderer's Tree keeps the nodes
+    // around; an Attach on switch-back puts them right back where
+    // they were.
+    if !attached {
+        for id in new_roots {
+            rewritten.push(Patch::Detach { id });
         }
     }
     rewritten
@@ -815,7 +986,12 @@ fn update_tab_status(
     tab_id: &str,
     status: &ConnectionStatus,
 ) -> Option<(Vec<TabInfo>, Option<String>)> {
+    log::debug!(
+        "hypen-browser: update_tab_status({tab_id}) locking inner (thread={:?})",
+        std::thread::current().name().unwrap_or("?"),
+    );
     let mut g = inner.lock().expect("inner poisoned");
+    log::debug!("hypen-browser: update_tab_status({tab_id}) inner locked");
     let tab = g.tabs.get_mut(tab_id)?;
     let (s, m) = status_strings(status);
     tab.info.status = s;
@@ -971,6 +1147,7 @@ mod tests {
                     remote: None,
                     app_root_ids: vec!["a99:1".into(), "a99:2".into()],
                     queued: Vec::new(),
+                    attached: true,
                 },
             );
             inner.active_tab_id = Some(tab_id.into());
@@ -1016,6 +1193,7 @@ mod tests {
                         remote: None,
                         app_root_ids: vec![format!("a{n}:1")],
                         queued: Vec::new(),
+                        attached: n == 3,
                     },
                 );
             }
@@ -1084,6 +1262,331 @@ mod tests {
         assert_eq!(shell_urls, vec!["ws://b".to_string()]);
 
         let _ = std::fs::remove_file(path);
+    }
+
+    /// Helper: directly insert a `Tab` into a freshly-built
+    /// `BrowserModule` without spinning up a real `RemoteModule`.
+    /// Used by every Detach/Attach test below — we never need a real
+    /// WebSocket to exercise the patch-routing logic.
+    fn install_tab(
+        module: &Arc<BrowserModule>,
+        id: &str,
+        prefix: &str,
+        roots: &[&str],
+        attached: bool,
+    ) {
+        let mut inner = module.inner.lock().unwrap();
+        inner.tabs.insert(
+            id.into(),
+            Tab {
+                info: TabInfo {
+                    id: id.into(),
+                    url: format!("ws://{id}"),
+                    name: id.into(),
+                    status: "connected".into(),
+                    status_message: String::new(),
+                },
+                id_prefix: prefix.into(),
+                remote: None,
+                app_root_ids: roots.iter().map(|s| (*s).to_string()).collect(),
+                queued: Vec::new(),
+                attached,
+            },
+        );
+    }
+
+    #[test]
+    fn switch_tab_emits_detach_for_old_and_attach_for_new() {
+        // Two tabs installed (no real RemoteModules). One active +
+        // attached, one inactive + detached. Switching must Detach
+        // the first and Attach the second — no Remove, no spinner.
+        let (module, captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-A", "a1:", &["a1:1", "a1:2"], true);
+        install_tab(&module, "tab-B", "a2:", &["a2:1"], false);
+        module.inner.lock().unwrap().active_tab_id = Some("tab-A".into());
+        let viewport = module
+            .inner
+            .lock()
+            .unwrap()
+            .viewport_id
+            .clone()
+            .expect("viewport must be known after mount");
+        let before = captured.lock().unwrap().len();
+
+        module.dispatch_action(
+            "switch_tab",
+            Some(json!({"tabId": "tab-B"})),
+        );
+
+        let after = captured.lock().unwrap();
+        let new_patches = &after[before..];
+        let detaches: Vec<&str> = new_patches
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Detach { id } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let attaches: Vec<(&str, &str)> = new_patches
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Attach { parent_id, id, .. } => {
+                    Some((parent_id.as_str(), id.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        // Filter to Removes for the tabs' app subtrees (prefixed
+        // `a1:` / `a2:`). The shell may legitimately Remove its own
+        // overlay nodes when state-derived conditionals re-evaluate
+        // (e.g. swapping the loading overlay for the connected app);
+        // those aren't what this test guards against.
+        let app_removes: Vec<&str> = new_patches
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Remove { id }
+                    if id.starts_with("a1:") || id.starts_with("a2:") =>
+                {
+                    Some(id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            detaches.contains(&"a1:1") && detaches.contains(&"a1:2"),
+            "old active tab's roots must be Detach'd; got {detaches:?}",
+        );
+        assert!(
+            attaches.iter().any(|(p, i)| *p == viewport && *i == "a2:1"),
+            "new tab's roots must be Attach'd under viewport; got {attaches:?}",
+        );
+        assert!(
+            app_removes.is_empty(),
+            "Detach/Attach swap must NOT Remove any tab app subtree; got {app_removes:?}",
+        );
+
+        // Active state flipped; both tabs still in the list.
+        let inner = module.inner.lock().unwrap();
+        assert_eq!(inner.active_tab_id.as_deref(), Some("tab-B"));
+        assert_eq!(inner.tabs.len(), 2);
+        assert!(!inner.tabs["tab-A"].attached);
+        assert!(inner.tabs["tab-B"].attached);
+    }
+
+    #[test]
+    fn switch_tab_to_already_active_is_a_noop() {
+        let (module, captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-A", "a1:", &["a1:1"], true);
+        module.inner.lock().unwrap().active_tab_id = Some("tab-A".into());
+        let before = captured.lock().unwrap().len();
+        module.dispatch_action(
+            "switch_tab",
+            Some(json!({"tabId": "tab-A"})),
+        );
+        let after = captured.lock().unwrap();
+        // Only the shell's own state-change patches (from the
+        // optimistic `state.active_tab_id` assignment in
+        // shell::switch_tab handler + the publish_tabs refresh) —
+        // no Detach / Attach / Remove for the app subtree.
+        let app_patches: usize = after[before..]
+            .iter()
+            .filter(|p| {
+                matches!(
+                    p,
+                    Patch::Detach { id } if id.starts_with("a1:")
+                ) || matches!(
+                    p,
+                    Patch::Attach { id, .. } if id.starts_with("a1:")
+                ) || matches!(
+                    p,
+                    Patch::Remove { id } if id.starts_with("a1:")
+                )
+            })
+            .count();
+        assert_eq!(app_patches, 0, "self-switch must not touch app roots");
+    }
+
+    #[test]
+    fn process_tab_patches_detaches_new_roots_for_inactive_tabs() {
+        // An inactive tab receives an Insert(parent=root) from its
+        // worker. The renderer must end up with the node created +
+        // tracked but NOT linked to the viewport — implemented as
+        // Insert(viewport) immediately followed by Detach.
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-bg", "a7:", &[], false);
+        let viewport = module
+            .inner
+            .lock()
+            .unwrap()
+            .viewport_id
+            .clone()
+            .unwrap();
+
+        let in_patches = vec![
+            Patch::Create {
+                id: "1".into(),
+                element_type: "Column".into(),
+                props: Arc::new(IndexMap::new()),
+            },
+            Patch::Insert {
+                parent_id: "root".into(),
+                id: "1".into(),
+                before_id: None,
+            },
+        ];
+        let out = process_tab_patches(&module.inner, "tab-bg", &in_patches);
+
+        // Expect: Create(a7:1), Insert(parent=viewport, id=a7:1), Detach(a7:1).
+        assert_eq!(out.len(), 3, "got {out:?}");
+        match &out[0] {
+            Patch::Create { id, .. } => assert_eq!(id, "a7:1"),
+            _ => panic!("expected Create, got {:?}", out[0]),
+        }
+        match &out[1] {
+            Patch::Insert { parent_id, id, .. } => {
+                assert_eq!(parent_id, &viewport);
+                assert_eq!(id, "a7:1");
+            }
+            _ => panic!("expected Insert, got {:?}", out[1]),
+        }
+        match &out[2] {
+            Patch::Detach { id } => assert_eq!(id, "a7:1"),
+            _ => panic!("expected trailing Detach for background tab; got {:?}", out[2]),
+        }
+
+        // The id is tracked so future Attach (on switch-to) targets it.
+        assert_eq!(
+            module.inner.lock().unwrap().tabs["tab-bg"].app_root_ids,
+            vec!["a7:1".to_string()],
+        );
+    }
+
+    #[test]
+    fn process_tab_patches_does_not_detach_active_tab_roots() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-fg", "a3:", &[], true);
+        module.inner.lock().unwrap().active_tab_id = Some("tab-fg".into());
+
+        let in_patches = vec![
+            Patch::Create {
+                id: "1".into(),
+                element_type: "Text".into(),
+                props: Arc::new(IndexMap::new()),
+            },
+            Patch::Insert {
+                parent_id: "root".into(),
+                id: "1".into(),
+                before_id: None,
+            },
+        ];
+        let out = process_tab_patches(&module.inner, "tab-fg", &in_patches);
+        assert!(
+            !out.iter().any(|p| matches!(p, Patch::Detach { .. })),
+            "active tab's roots must NOT be Detach'd; got {out:?}",
+        );
+    }
+
+    #[test]
+    fn close_active_tab_attaches_next_survivor() {
+        // Two tabs; close the active one; the surviving tab should
+        // be promoted and re-attached so its tree comes back into
+        // view (no reconnect).
+        let (module, captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-A", "a1:", &["a1:1"], true);
+        install_tab(&module, "tab-B", "a2:", &["a2:1"], false);
+        module.inner.lock().unwrap().active_tab_id = Some("tab-A".into());
+        let viewport = module
+            .inner
+            .lock()
+            .unwrap()
+            .viewport_id
+            .clone()
+            .unwrap();
+        let before = captured.lock().unwrap().len();
+
+        module.dispatch_action(
+            "close_tab",
+            Some(json!({"tabId": "tab-A"})),
+        );
+
+        let after = captured.lock().unwrap();
+        let new_patches = &after[before..];
+        // Removed roots are the closed tab's; attaches are the survivor's.
+        let removed: Vec<&str> = new_patches
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Remove { id } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let attached_under_viewport: Vec<&str> = new_patches
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Attach { parent_id, id, .. } if *parent_id == viewport => {
+                    Some(id.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(removed.contains(&"a1:1"), "closed tab's root must be Removed; got {removed:?}");
+        assert!(
+            attached_under_viewport.contains(&"a2:1"),
+            "survivor's root must be Attach'd to viewport; got {attached_under_viewport:?}",
+        );
+
+        let inner = module.inner.lock().unwrap();
+        assert_eq!(inner.active_tab_id.as_deref(), Some("tab-B"));
+        assert!(inner.tabs["tab-B"].attached);
+    }
+
+    #[test]
+    fn open_tab_detaches_previous_active_without_closing_it() {
+        // The currently-active tab must keep its RemoteModule + node
+        // tree when the user opens a fresh URL — switching back
+        // (close the new tab) should restore it via Attach.
+        let (module, captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-A", "a1:", &["a1:1"], true);
+        module.inner.lock().unwrap().active_tab_id = Some("tab-A".into());
+
+        let before = captured.lock().unwrap().len();
+        // We can't actually `open_tab` without spinning up a worker;
+        // exercise just the detach side that open_tab calls.
+        module.detach_tab("tab-A");
+
+        let after = captured.lock().unwrap();
+        let detaches: Vec<&str> = after[before..]
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Detach { id } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(detaches, vec!["a1:1"], "must Detach (not Remove)");
+
+        // Tab still in the list, just not attached anymore.
+        let inner = module.inner.lock().unwrap();
+        assert!(inner.tabs.contains_key("tab-A"));
+        assert!(!inner.tabs["tab-A"].attached);
+        // And app_root_ids preserved so a later Attach can reuse them.
+        assert_eq!(inner.tabs["tab-A"].app_root_ids, vec!["a1:1".to_string()]);
+    }
+
+    #[test]
+    fn detach_then_attach_is_idempotent_when_already_in_state() {
+        let (module, captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-A", "a1:", &["a1:1"], false);
+        let before = captured.lock().unwrap().len();
+        // Already detached — must not emit a duplicate Detach.
+        module.detach_tab("tab-A");
+        assert_eq!(captured.lock().unwrap().len(), before);
+
+        // Attaching for the first time emits one Attach; second call
+        // is a no-op.
+        module.attach_tab("tab-A");
+        let after_first = captured.lock().unwrap().len();
+        assert!(after_first > before);
+        module.attach_tab("tab-A");
+        assert_eq!(captured.lock().unwrap().len(), after_first);
     }
 
     #[test]

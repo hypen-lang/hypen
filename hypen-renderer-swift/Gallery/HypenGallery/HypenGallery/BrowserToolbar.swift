@@ -95,7 +95,16 @@ struct BrowserToolbar: View {
             )
         }
         .padding(.horizontal, 8)
-        .padding(.vertical, 8)
+        // Extra top padding on top of vertical 8 so the URL pill
+        // clears the Dynamic Island's curved bottom edge on iPhone
+        // 14 Pro and later. SwiftUI's default safe-area-top inset
+        // clears the status-bar text baseline but not the Island's
+        // pill shape, which extends a few points further down — the
+        // result was a visible overlap between the toolbar's URL
+        // capsule and the Island. Older devices (no Island) just
+        // get a slightly taller toolbar, no visual regression.
+        .padding(.top, 6)
+        .padding(.bottom, 8)
         .background(Color(.systemBackground))
         .overlay(alignment: .bottom) {
             Divider().opacity(0.5)

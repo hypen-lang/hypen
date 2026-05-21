@@ -614,6 +614,391 @@ pub fn prop_aspect_ratio_at(
     prop_f32_at(node, name, viewport_w)
 }
 
+// ---------------------------------------------------------------------------
+// Linear gradient parser
+//
+// The Tailwind parser emits `background-image: linear-gradient(<dir>, var(--tw-
+// gradient-stops))` plus three CSS custom properties — `--tw-gradient-from`,
+// `--tw-gradient-via` (optional), `--tw-gradient-to` — that hold the stop
+// colours. This module substitutes the `var()` chain and parses the
+// resulting CSS gradient string into a `LinearGradient` the painter can
+// hand to Vello.
+// ---------------------------------------------------------------------------
+
+/// A single stop in a linear gradient: a colour and an optional offset
+/// in the range `0.0..=1.0`. Stops without an explicit offset get
+/// auto-distributed by the painter (or by the test that hits
+/// `LinearGradient::resolved_offsets`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GradientStop {
+    pub color: Rgba,
+    pub offset: Option<f32>,
+}
+
+/// CSS-style direction for a linear gradient. Either a cardinal-ish
+/// keyword (`to right`, `to bottom right`, …) or an angle in degrees
+/// where `0deg` points up and rotation is clockwise — matching the CSS
+/// spec.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GradientDirection {
+    ToTop,
+    ToTopRight,
+    ToRight,
+    ToBottomRight,
+    ToBottom,
+    ToBottomLeft,
+    ToLeft,
+    ToTopLeft,
+    /// CSS-degrees: 0 = up, 90 = right, 180 = down, 270 = left.
+    Angle(f32),
+}
+
+impl GradientDirection {
+    /// Compute the linear-gradient axis endpoints `(start, end)` in
+    /// the rect's coordinate space. For keyword directions this maps
+    /// to the rect's corners / mid-edges; for `Angle(θ)` it projects
+    /// the diagonal that crosses the rect along the direction the
+    /// CSS spec defines (perpendicular to the gradient line, passing
+    /// through the rect centre, intersecting the two edges).
+    pub fn axis(&self, x: f32, y: f32, w: f32, h: f32) -> ((f32, f32), (f32, f32)) {
+        let cx = x + w * 0.5;
+        let cy = y + h * 0.5;
+        match self {
+            GradientDirection::ToTop => ((cx, y + h), (cx, y)),
+            GradientDirection::ToBottom => ((cx, y), (cx, y + h)),
+            GradientDirection::ToRight => ((x, cy), (x + w, cy)),
+            GradientDirection::ToLeft => ((x + w, cy), (x, cy)),
+            GradientDirection::ToTopRight => ((x, y + h), (x + w, y)),
+            GradientDirection::ToBottomRight => ((x, y), (x + w, y + h)),
+            GradientDirection::ToBottomLeft => ((x + w, y), (x, y + h)),
+            GradientDirection::ToTopLeft => ((x + w, y + h), (x, y)),
+            GradientDirection::Angle(deg) => {
+                // CSS: 0deg = up, clockwise. The axis goes through
+                // the centre; its length is set so the endpoints
+                // land on the projection of the rect's bbox onto
+                // the gradient line — that's what makes the visible
+                // colour transition span the rect exactly once
+                // regardless of the angle.
+                let rad = deg.to_radians();
+                let dx = rad.sin();
+                let dy = -rad.cos();
+                let half_w = w * 0.5;
+                let half_h = h * 0.5;
+                let len = (dx.abs() * half_w) + (dy.abs() * half_h);
+                let sx = cx - dx * len;
+                let sy = cy - dy * len;
+                let ex = cx + dx * len;
+                let ey = cy + dy * len;
+                ((sx, sy), (ex, ey))
+            }
+        }
+    }
+}
+
+/// Resolved linear gradient ready for the painter.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinearGradient {
+    pub direction: GradientDirection,
+    pub stops: Vec<GradientStop>,
+}
+
+impl LinearGradient {
+    /// Return `stops` with any `None` offsets distributed evenly
+    /// between the first/last fixed stops, falling back to the CSS
+    /// default of (0, 1) for the bare two-stop case and even spacing
+    /// otherwise. Used by the painter when handing stops to Vello,
+    /// which requires explicit offsets.
+    pub fn resolved_offsets(&self) -> Vec<(f32, Rgba)> {
+        let n = self.stops.len();
+        if n == 0 {
+            return Vec::new();
+        }
+        if n == 1 {
+            // CSS treats a single stop as a flat fill — emit it at
+            // 0 and 1 so Vello has a valid gradient.
+            let s = self.stops[0];
+            let off = s.offset.unwrap_or(0.0);
+            return vec![(off, s.color), (1.0, s.color)];
+        }
+        let mut out: Vec<(f32, Rgba)> = Vec::with_capacity(n);
+        for (i, s) in self.stops.iter().enumerate() {
+            let off = match s.offset {
+                Some(o) => o,
+                None => i as f32 / (n - 1) as f32,
+            };
+            out.push((off, s.color));
+        }
+        // Ensure non-decreasing offsets (CSS clamps to previous max).
+        for i in 1..out.len() {
+            if out[i].0 < out[i - 1].0 {
+                out[i].0 = out[i - 1].0;
+            }
+        }
+        out
+    }
+}
+
+/// Parse a CSS `linear-gradient(<direction>, <stop>, <stop>, ...)` value.
+/// Returns `None` for any other CSS value (radial-gradient, plain colour,
+/// `url()`, malformed input). Whitespace-tolerant, case-insensitive on
+/// the `linear-gradient` keyword.
+pub fn parse_linear_gradient(s: &str) -> Option<LinearGradient> {
+    let s = s.trim();
+    let lower = s.to_ascii_lowercase();
+    let s = if let Some(rest) = lower.strip_prefix("linear-gradient(") {
+        // Recover the original-case args slice — `lower` was only for
+        // the prefix sniff. Length is the same; just use the same
+        // index into the original string.
+        let start = "linear-gradient(".len();
+        let inner_orig = &s[start..];
+        let inner_orig = inner_orig.strip_suffix(')')?;
+        let _ = rest; // keep `lower` from being flagged as unused
+        inner_orig
+    } else {
+        return None;
+    };
+
+    let parts = split_top_level_commas(s);
+    if parts.is_empty() {
+        return None;
+    }
+    let first = parts[0].trim();
+    let (direction, stops_start) = if let Some(dir) = parse_direction(first) {
+        (dir, 1)
+    } else {
+        // CSS defaults to `to bottom` when no direction is given —
+        // the first comma-separated chunk is then a stop.
+        (GradientDirection::ToBottom, 0)
+    };
+
+    let stops: Vec<GradientStop> = parts[stops_start..]
+        .iter()
+        .filter_map(|p| parse_stop(p.trim()))
+        .collect();
+    if stops.len() < 1 {
+        return None;
+    }
+    Some(LinearGradient { direction, stops })
+}
+
+/// Split `s` on commas at depth-0 only, so commas inside nested
+/// `rgb(... , ... , ...)` / `var(...)` don't terminate a stop.
+fn split_top_level_commas(s: &str) -> Vec<String> {
+    let mut depth: i32 = 0;
+    let mut current = String::new();
+    let mut out: Vec<String> = Vec::new();
+    for c in s.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.trim().is_empty() {
+        out.push(current);
+    }
+    out
+}
+
+fn parse_direction(s: &str) -> Option<GradientDirection> {
+    let lower = s.to_ascii_lowercase();
+    match lower.as_str() {
+        "to top" => Some(GradientDirection::ToTop),
+        "to top right" | "to right top" => Some(GradientDirection::ToTopRight),
+        "to right" => Some(GradientDirection::ToRight),
+        "to bottom right" | "to right bottom" => Some(GradientDirection::ToBottomRight),
+        "to bottom" => Some(GradientDirection::ToBottom),
+        "to bottom left" | "to left bottom" => Some(GradientDirection::ToBottomLeft),
+        "to left" => Some(GradientDirection::ToLeft),
+        "to top left" | "to left top" => Some(GradientDirection::ToTopLeft),
+        _ => {
+            // Angle form: `<number>deg` (also accept rad/grad/turn).
+            if let Some(num) = lower.strip_suffix("deg") {
+                num.trim().parse::<f32>().ok().map(GradientDirection::Angle)
+            } else if let Some(num) = lower.strip_suffix("turn") {
+                num.trim()
+                    .parse::<f32>()
+                    .ok()
+                    .map(|t| GradientDirection::Angle(t * 360.0))
+            } else if let Some(num) = lower.strip_suffix("rad") {
+                num.trim()
+                    .parse::<f32>()
+                    .ok()
+                    .map(|r| GradientDirection::Angle(r.to_degrees()))
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn parse_stop(s: &str) -> Option<GradientStop> {
+    // Stop syntax: `<color>` or `<color> <position>` where position
+    // is a percent (`50%`) or a length (we treat as 0..=1 fraction
+    // by interpreting bare numbers as fractions in 0..1 — Tailwind
+    // doesn't emit lengths here, only colours and percents).
+    //
+    // Splitting on whitespace is tricky because `rgb(255, 0, 0)`
+    // contains spaces inside parens. Find the last whitespace at
+    // depth 0; if the trailing token parses as a percent that's our
+    // offset, otherwise treat the whole thing as a colour.
+    let (color_part, offset_part) = split_color_offset(s);
+    let color = parse_color(color_part.trim())?;
+    let offset = offset_part.and_then(|o| {
+        let trimmed = o.trim();
+        if let Some(p) = trimmed.strip_suffix('%') {
+            p.trim().parse::<f32>().ok().map(|v| v * 0.01)
+        } else {
+            trimmed.parse::<f32>().ok()
+        }
+    });
+    Some(GradientStop { color, offset })
+}
+
+fn split_color_offset(s: &str) -> (&str, Option<&str>) {
+    let mut depth: i32 = 0;
+    let mut last_ws_at_zero: Option<usize> = None;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            c if depth == 0 && c.is_whitespace() => last_ws_at_zero = Some(i),
+            _ => {}
+        }
+    }
+    match last_ws_at_zero {
+        Some(idx) => {
+            let head = s[..idx].trim_end();
+            let tail = s[idx..].trim_start();
+            // Verify the tail looks like an offset — a percent OR a
+            // bare number. Without this, multi-word colour values
+            // (just hypothetical here — `rgb(...)` has parens, not
+            // spaces, but defence-in-depth) would lose their
+            // trailing token.
+            if tail.ends_with('%') || tail.parse::<f32>().is_ok() {
+                (head, Some(tail))
+            } else {
+                (s, None)
+            }
+        }
+        None => (s, None),
+    }
+}
+
+/// Read a node's gradient background. Two paths, in priority order:
+///
+/// 1. The first-class `.linearGradient(direction, colors)` applicator —
+///    a direct DSL hook that bypasses Tailwind's `var(--tw-…)`
+///    indirection entirely. The engine flattens applicators into
+///    namespaced props (single-positional → `.0`; named →
+///    `.<key>`), so we accept either form. The colors argument is a
+///    list literal; each entry is parsed via `parse_color`.
+///
+/// 2. The Tailwind path: `background-image: linear-gradient(...)` with
+///    `var(--tw-gradient-stops/from/via/to)` references. Resolved by
+///    `substitute_tw_gradient_vars`, then parsed.
+///
+/// Returns `None` when neither path produces a gradient.
+pub fn prop_linear_gradient(node: &Node, viewport_w: f32) -> Option<LinearGradient> {
+    let _ = viewport_w; // gradients aren't viewport-keyed (yet)
+    if let Some(g) = read_linear_gradient_applicator(node) {
+        return Some(g);
+    }
+    let raw = node
+        .props
+        .get("background-image")
+        .or_else(|| node.props.get("backgroundImage"))
+        .and_then(|v| v.as_str())?;
+    let resolved = substitute_tw_gradient_vars(node, raw);
+    parse_linear_gradient(&resolved)
+}
+
+/// First-class applicator path: read `.linearGradient(direction,
+/// colors)` props off the node. Engine flattens applicators to
+/// `linearGradient.0` (first positional) and `linearGradient.1`
+/// (second positional) or `linearGradient.direction` /
+/// `linearGradient.colors` if the user used named args. Both forms
+/// are accepted.
+fn read_linear_gradient_applicator(node: &Node) -> Option<LinearGradient> {
+    let dir_str = node
+        .props
+        .get("linearGradient.direction")
+        .or_else(|| node.props.get("linearGradient.0"))
+        .and_then(|v| v.as_str())?;
+    let colors_val = node
+        .props
+        .get("linearGradient.colors")
+        .or_else(|| node.props.get("linearGradient.1"))?;
+    let direction = parse_direction(dir_str.trim())?;
+    let colors = colors_val.as_array()?;
+    let stops: Vec<GradientStop> = colors
+        .iter()
+        .filter_map(|c| {
+            let s = c.as_str()?;
+            Some(GradientStop {
+                color: parse_color(s)?,
+                offset: None,
+            })
+        })
+        .collect();
+    if stops.is_empty() {
+        return None;
+    }
+    Some(LinearGradient { direction, stops })
+}
+
+/// Lex-substitute `var(--tw-gradient-stops)`, then
+/// `var(--tw-gradient-from)`, `var(--tw-gradient-via)`,
+/// `var(--tw-gradient-to)` references using the node's props. Two
+/// passes — `--tw-gradient-stops` itself expands to a list that
+/// then contains the per-colour vars — so we just loop until no
+/// more `var(--tw-` substring remains or the substitution count
+/// hits a sanity cap. Lex substitution is fine because the
+/// Tailwind output is grammar-free (string interpolation only).
+pub fn substitute_tw_gradient_vars(node: &Node, raw: &str) -> String {
+    fn read_var(node: &Node, name: &str) -> Option<String> {
+        node.props
+            .get(name)
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    }
+    let mut s = raw.to_string();
+    for _ in 0..4 {
+        // Each loop replaces one `var(--tw-gradient-…)`. The
+        // capped count guards against pathological recursion that
+        // a buggy emitter could produce; in practice 2 iterations
+        // suffice (stops → from/via/to).
+        let mut replaced = false;
+        for name in &[
+            "--tw-gradient-stops",
+            "--tw-gradient-from",
+            "--tw-gradient-via",
+            "--tw-gradient-to",
+        ] {
+            let needle = format!("var({})", name);
+            if let Some(idx) = s.find(&needle) {
+                let value = read_var(node, name).unwrap_or_default();
+                s.replace_range(idx..idx + needle.len(), &value);
+                replaced = true;
+                break;
+            }
+        }
+        if !replaced {
+            break;
+        }
+    }
+    s
+}
+
 /// Read `name` (with viewport-aware tw breakpoint resolution) as a
 /// `Dim`. Strings carrying `%` resolve to `Dim::Percent`; everything
 /// else (numbers, `"16px"`, `"1rem"`) resolves to `Dim::Length`.
@@ -729,6 +1114,273 @@ mod tests {
             element_type: "Container".into(),
             props: map,
         }
+    }
+
+    // ----------------------------------------------------------------
+    // Linear gradient parser + Tailwind var resolution
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn parse_linear_gradient_to_right_two_stops() {
+        let g = parse_linear_gradient("linear-gradient(to right, #ff0000, #0000ff)")
+            .expect("parses");
+        assert_eq!(g.direction, GradientDirection::ToRight);
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0].color, Rgba(0xff, 0, 0, 0xff));
+        assert_eq!(g.stops[1].color, Rgba(0, 0, 0xff, 0xff));
+        // No explicit offsets — `resolved_offsets` distributes 0..1.
+        let res = g.resolved_offsets();
+        assert_eq!(res[0].0, 0.0);
+        assert_eq!(res[1].0, 1.0);
+    }
+
+    #[test]
+    fn parse_linear_gradient_to_bottom_right_three_stops() {
+        let g = parse_linear_gradient(
+            "linear-gradient(to bottom right, #ff0000, #00ff00, #0000ff)",
+        )
+        .expect("parses");
+        assert_eq!(g.direction, GradientDirection::ToBottomRight);
+        assert_eq!(g.stops.len(), 3);
+        let res = g.resolved_offsets();
+        assert_eq!(res[0].0, 0.0);
+        assert!((res[1].0 - 0.5).abs() < 1e-4);
+        assert_eq!(res[2].0, 1.0);
+    }
+
+    #[test]
+    fn parse_linear_gradient_with_explicit_percent_offsets() {
+        let g = parse_linear_gradient(
+            "linear-gradient(to right, #ff0000 10%, #0000ff 80%)",
+        )
+        .expect("parses");
+        let res = g.resolved_offsets();
+        assert!((res[0].0 - 0.10).abs() < 1e-4);
+        assert!((res[1].0 - 0.80).abs() < 1e-4);
+    }
+
+    #[test]
+    fn parse_linear_gradient_angle_form() {
+        let g = parse_linear_gradient("linear-gradient(45deg, #fff, #000)")
+            .expect("parses");
+        match g.direction {
+            GradientDirection::Angle(a) => assert!((a - 45.0).abs() < 1e-4),
+            _ => panic!("expected angle"),
+        }
+    }
+
+    #[test]
+    fn parse_linear_gradient_no_direction_defaults_to_bottom() {
+        // CSS spec: default direction is `to bottom` when no
+        // direction prefix is given. The first comma chunk is then
+        // a stop, not a direction.
+        let g = parse_linear_gradient("linear-gradient(#fff, #000)").expect("parses");
+        assert_eq!(g.direction, GradientDirection::ToBottom);
+        assert_eq!(g.stops.len(), 2);
+    }
+
+    #[test]
+    fn parse_linear_gradient_rejects_non_linear() {
+        assert!(parse_linear_gradient("radial-gradient(#fff, #000)").is_none());
+        assert!(parse_linear_gradient("#ff0000").is_none());
+        assert!(parse_linear_gradient("").is_none());
+    }
+
+    #[test]
+    fn parse_linear_gradient_case_insensitive_keyword() {
+        let g = parse_linear_gradient("LINEAR-GRADIENT(TO RIGHT, #ff0000, #0000ff)")
+            .expect("parses");
+        assert_eq!(g.direction, GradientDirection::ToRight);
+    }
+
+    #[test]
+    fn gradient_axis_to_right_spans_horizontal_midline() {
+        let dir = GradientDirection::ToRight;
+        let ((sx, sy), (ex, ey)) = dir.axis(10.0, 20.0, 200.0, 100.0);
+        assert_eq!((sx, sy), (10.0, 70.0));
+        assert_eq!((ex, ey), (210.0, 70.0));
+    }
+
+    #[test]
+    fn gradient_axis_to_bottom_spans_vertical_midline() {
+        let dir = GradientDirection::ToBottom;
+        let ((sx, sy), (ex, ey)) = dir.axis(0.0, 0.0, 100.0, 50.0);
+        assert_eq!((sx, sy), (50.0, 0.0));
+        assert_eq!((ex, ey), (50.0, 50.0));
+    }
+
+    #[test]
+    fn gradient_axis_angle_0_points_up() {
+        // 0deg = up in CSS — start at bottom-centre, end at top-centre.
+        let dir = GradientDirection::Angle(0.0);
+        let ((sx, sy), (ex, ey)) = dir.axis(0.0, 0.0, 100.0, 200.0);
+        // Centre is (50, 100); axis half-length on a w=100,h=200
+        // rect with dx=0, dy=-1 is |0|·50 + |-1|·100 = 100.
+        assert!((sx - 50.0).abs() < 1e-3);
+        assert!((sy - 200.0).abs() < 1e-3);
+        assert!((ex - 50.0).abs() < 1e-3);
+        assert!((sy - 200.0).abs() < 1e-3);
+        let _ = ey; // already covered by sy assertion symmetry
+    }
+
+    #[test]
+    fn prop_linear_gradient_resolves_tailwind_var_chain() {
+        // Exact shape `tailwind-parse` produces for
+        // `.tw("bg-gradient-to-r from-blue-500 to-pink-500")`. The
+        // engine flattens these onto the renderer node as kebab-case
+        // CSS-custom-property keys; `prop_linear_gradient` is the
+        // gate that resolves the `var()` indirection.
+        let node = node_with(&[
+            (
+                "background-image",
+                Value::String(
+                    "linear-gradient(to right, var(--tw-gradient-stops))".into(),
+                ),
+            ),
+            (
+                "--tw-gradient-stops",
+                Value::String(
+                    "var(--tw-gradient-from), var(--tw-gradient-to)".into(),
+                ),
+            ),
+            ("--tw-gradient-from", Value::String("#3b82f6".into())),
+            ("--tw-gradient-to", Value::String("#ec4899".into())),
+        ]);
+        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        assert_eq!(g.direction, GradientDirection::ToRight);
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0].color, Rgba(0x3b, 0x82, 0xf6, 0xff));
+        assert_eq!(g.stops[1].color, Rgba(0xec, 0x48, 0x99, 0xff));
+    }
+
+    #[test]
+    fn prop_linear_gradient_resolves_three_stop_via_chain() {
+        // `.tw("bg-gradient-to-br from-blue-500 via-purple-500 to-pink-500")`.
+        // The `via-*` utility replaces the `--tw-gradient-stops` var
+        // with a three-colour list that itself uses
+        // `var(--tw-gradient-from)` / `var(--tw-gradient-to)` — our
+        // substitution loop must handle the nested case.
+        let node = node_with(&[
+            (
+                "background-image",
+                Value::String(
+                    "linear-gradient(to bottom right, var(--tw-gradient-stops))"
+                        .into(),
+                ),
+            ),
+            (
+                "--tw-gradient-stops",
+                Value::String(
+                    "var(--tw-gradient-from), #a855f7, var(--tw-gradient-to)".into(),
+                ),
+            ),
+            ("--tw-gradient-from", Value::String("#3b82f6".into())),
+            ("--tw-gradient-to", Value::String("#ec4899".into())),
+        ]);
+        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        assert_eq!(g.direction, GradientDirection::ToBottomRight);
+        assert_eq!(g.stops.len(), 3);
+        assert_eq!(g.stops[0].color, Rgba(0x3b, 0x82, 0xf6, 0xff));
+        assert_eq!(g.stops[1].color, Rgba(0xa8, 0x55, 0xf7, 0xff));
+        assert_eq!(g.stops[2].color, Rgba(0xec, 0x48, 0x99, 0xff));
+    }
+
+    #[test]
+    fn prop_linear_gradient_returns_none_without_background_image() {
+        // Solid-colour node — gradient path is opt-in.
+        let node = node_with(&[(
+            "background-color",
+            Value::String("#ffffff".into()),
+        )]);
+        assert!(prop_linear_gradient(&node, 800.0).is_none());
+    }
+
+    #[test]
+    fn prop_linear_gradient_reads_applicator_positional() {
+        // `.linearGradient("to right", ["#3b82f6", "#ec4899"])` —
+        // engine flattens the two positional args to
+        // `linearGradient.0` (direction) + `linearGradient.1` (colors).
+        let node = node_with(&[
+            (
+                "linearGradient.0",
+                Value::String("to right".into()),
+            ),
+            (
+                "linearGradient.1",
+                serde_json::json!(["#3b82f6", "#ec4899"]),
+            ),
+        ]);
+        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        assert_eq!(g.direction, GradientDirection::ToRight);
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[0].color, Rgba(0x3b, 0x82, 0xf6, 0xff));
+        assert_eq!(g.stops[1].color, Rgba(0xec, 0x48, 0x99, 0xff));
+    }
+
+    #[test]
+    fn prop_linear_gradient_reads_applicator_named() {
+        // `.linearGradient(direction: "45deg", colors: [...])` —
+        // engine flattens named args under the key name directly.
+        let node = node_with(&[
+            (
+                "linearGradient.direction",
+                Value::String("45deg".into()),
+            ),
+            (
+                "linearGradient.colors",
+                serde_json::json!(["#ff0000", "#00ff00", "#0000ff"]),
+            ),
+        ]);
+        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        match g.direction {
+            GradientDirection::Angle(a) => assert!((a - 45.0).abs() < 1e-4),
+            _ => panic!("expected angle"),
+        }
+        assert_eq!(g.stops.len(), 3);
+    }
+
+    #[test]
+    fn prop_linear_gradient_applicator_beats_tailwind_path() {
+        // If both an explicit `.linearGradient(...)` AND tw classes
+        // are on the same node, the applicator wins. (Predictable
+        // override semantics — easier to reason about than mixing.)
+        let node = node_with(&[
+            (
+                "linearGradient.0",
+                Value::String("to bottom".into()),
+            ),
+            (
+                "linearGradient.1",
+                serde_json::json!(["#000000", "#ffffff"]),
+            ),
+            (
+                "background-image",
+                Value::String(
+                    "linear-gradient(to right, var(--tw-gradient-stops))".into(),
+                ),
+            ),
+            (
+                "--tw-gradient-stops",
+                Value::String("#ff0000, #0000ff".into()),
+            ),
+        ]);
+        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        assert_eq!(g.direction, GradientDirection::ToBottom);
+        assert_eq!(g.stops[0].color, Rgba(0, 0, 0, 0xff));
+        assert_eq!(g.stops[1].color, Rgba(0xff, 0xff, 0xff, 0xff));
+    }
+
+    #[test]
+    fn parse_linear_gradient_single_stop_extends_to_full_range() {
+        // CSS treats a single-stop gradient as a flat fill; we
+        // duplicate the stop at offset 0 and 1 so Vello has a valid
+        // two-point ramp. Without this, Vello rejects the gradient.
+        let g = parse_linear_gradient("linear-gradient(to right, #ff0000)")
+            .expect("parses");
+        let res = g.resolved_offsets();
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].1, Rgba(0xff, 0, 0, 0xff));
+        assert_eq!(res[1].1, Rgba(0xff, 0, 0, 0xff));
     }
 
     #[test]

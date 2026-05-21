@@ -42,28 +42,39 @@ struct GalleryBrowserView: View {
     private var canGoBack: Bool { !history.isEmpty }
 
     var body: some View {
-        VStack(spacing: 0) {
-            if !isFullscreen {
-                BrowserToolbar(
-                    currentUrl: currentUrl,
-                    isConnected: isConnected,
-                    isLoading: isLoading,
-                    canGoBack: canGoBack,
-                    isFullscreen: isFullscreen,
-                    onUrlSubmit: { submitted in connect(to: submitted) },
-                    onBackTap: goBack,
-                    onHomeTap: goHome,
-                    onRefreshTap: refresh,
-                    onFullscreenToggle: { isFullscreen.toggle() }
-                )
-                .transition(.move(edge: .top).combined(with: .opacity))
+        // Toolbar is pinned to the top safe-area via `safeAreaInset`
+        // instead of being a sibling in a top-down VStack. Reason:
+        // when the URL TextField gains focus the iOS keyboard
+        // appears and SwiftUI, by default, shifts the entire scene
+        // up to keep the focused field visible above the keyboard
+        // — which dragged the toolbar (and its URL pill) up under
+        // the Dynamic Island. `safeAreaInset(edge: .top)` declares
+        // the toolbar as a fixed-position inset of the surrounding
+        // content; SwiftUI keeps it locked above the top safe-area
+        // regardless of the keyboard's bottom inset, and adjusts
+        // the content's bottom inset instead. Net effect: the URL
+        // pill never enters the unsafe Island region.
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(.systemBackground))
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if !isFullscreen {
+                    BrowserToolbar(
+                        currentUrl: currentUrl,
+                        isConnected: isConnected,
+                        isLoading: isLoading,
+                        canGoBack: canGoBack,
+                        isFullscreen: isFullscreen,
+                        onUrlSubmit: { submitted in connect(to: submitted) },
+                        onBackTap: goBack,
+                        onHomeTap: goHome,
+                        onRefreshTap: refresh,
+                        onFullscreenToggle: { isFullscreen.toggle() }
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
-
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
-        .animation(.easeInOut(duration: 0.2), value: isFullscreen)
-        .background(Color(.systemBackground))
+            .animation(.easeInOut(duration: 0.2), value: isFullscreen)
         .sheet(isPresented: $showComponentGallery) {
             NavigationStack(path: $componentPath) {
                 ComponentListView(onItemSelected: { item in
