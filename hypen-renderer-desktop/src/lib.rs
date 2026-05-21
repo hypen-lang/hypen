@@ -28,6 +28,7 @@ pub mod layout;
 pub mod module;
 pub mod paint;
 pub mod painter;
+pub mod remote;
 pub mod style;
 pub mod text;
 pub mod tree;
@@ -35,6 +36,7 @@ pub mod window;
 
 pub use app::DesktopApp;
 pub use module::HypenModule;
+pub use remote::RemoteModule;
 pub use painter::{PaintTarget, Painter};
 pub use tree::{Node, Tree};
 

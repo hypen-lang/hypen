@@ -57,19 +57,53 @@ impl Padding {
     }
 }
 
-/// Read a number prop, checking both `name` and `name.0` (the engine
-/// rewrites single-positional applicators to the latter form).
+/// Convert a camelCase prop name to its CSS kebab-case equivalent.
+/// `backgroundColor` → `background-color`. Used by [`prop_str`] /
+/// [`prop_f32`] to fall back onto props that arrive via `.tw(...)`
+/// (the engine's tailwind expander emits CSS-style kebab names) when
+/// no explicit applicator was set.
+fn camel_to_kebab(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    for ch in name.chars() {
+        if ch.is_ascii_uppercase() {
+            if !out.is_empty() {
+                out.push('-');
+            }
+            out.push(ch.to_ascii_lowercase());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Read a number prop. Lookup order: explicit applicator
+/// (`backgroundColor`), single-arg form (`backgroundColor.0`), then
+/// the kebab-case fallback (`background-color`) for tw-expanded
+/// classes.
 pub fn prop_f32(node: &Node, name: &str) -> Option<f32> {
     let direct = node.props.get(name);
     let dotted = node.props.get(&format!("{name}.0"));
-    direct.or(dotted).and_then(value_to_f32)
+    let kebab_name = camel_to_kebab(name);
+    let kebab = if kebab_name != name {
+        node.props.get(&kebab_name)
+    } else {
+        None
+    };
+    direct.or(dotted).or(kebab).and_then(value_to_f32)
 }
 
-/// Read a string prop, same fallback logic as [`prop_f32`].
+/// Read a string prop, same fallback chain as [`prop_f32`].
 pub fn prop_str<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
     let direct = node.props.get(name);
     let dotted = node.props.get(&format!("{name}.0"));
-    direct.or(dotted).and_then(Value::as_str)
+    let kebab_name = camel_to_kebab(name);
+    let kebab = if kebab_name != name {
+        node.props.get(&kebab_name)
+    } else {
+        None
+    };
+    direct.or(dotted).or(kebab).and_then(Value::as_str)
 }
 
 /// Read a colour prop and parse it. Accepts CSS hex (`#rgb`, `#rgba`,
@@ -237,8 +271,22 @@ fn value_to_f32(v: &Value) -> Option<f32> {
 
 /// Parse a CSS-ish length: `"16"`, `"16px"`. Phase 3 doesn't honour `%`
 /// or `em` — Taffy will deal with those once we expose width/height.
+///
+/// Accepts:
+/// - `"16"`, `"16.5"` — bare numbers (treated as px).
+/// - `"16px"` — explicit px.
+/// - `"1rem"`, `"1.5rem"` — root-em, treated as 16px per rem (CSS
+///   default; Hypen doesn't expose a custom root font size yet).
+/// - `"1em"`, `"1.25em"` — same conversion as `rem` for now (we don't
+///   track parent font-size during layout build).
 fn parse_length(s: &str) -> Option<f32> {
     let trimmed = s.trim();
+    if let Some(num) = trimmed.strip_suffix("rem") {
+        return num.trim().parse::<f32>().ok().map(|v| v * 16.0);
+    }
+    if let Some(num) = trimmed.strip_suffix("em") {
+        return num.trim().parse::<f32>().ok().map(|v| v * 16.0);
+    }
     let stripped = trimmed.strip_suffix("px").unwrap_or(trimmed);
     stripped.trim().parse::<f32>().ok()
 }
@@ -601,5 +649,88 @@ mod tests {
         assert_eq!(b.width, 2.0);
         assert_eq!(b.color.3, 0);
         assert!(!b.is_visible());
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 12: kebab-case + rem fallbacks (tw-class compatibility)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn camel_to_kebab_handles_common_css_names() {
+        assert_eq!(camel_to_kebab("backgroundColor"), "background-color");
+        assert_eq!(camel_to_kebab("borderColor"), "border-color");
+        assert_eq!(camel_to_kebab("fontSize"), "font-size");
+        assert_eq!(camel_to_kebab("borderRadius"), "border-radius");
+        // No-op when there's no uppercase.
+        assert_eq!(camel_to_kebab("color"), "color");
+        assert_eq!(camel_to_kebab(""), "");
+    }
+
+    #[test]
+    fn prop_color_falls_back_to_kebab_for_tw_classes() {
+        // .tw("bg-white") expands to `background-color: "#ffffff"` —
+        // a kebab-case prop with no `.0` suffix. The renderer must
+        // pick it up so cards from tw classes get filled.
+        let node = node_with(&[("background-color", serde_json::json!("#ffffff"))]);
+        assert_eq!(prop_color(&node, "backgroundColor"), Some(Rgba(0xff, 0xff, 0xff, 0xff)));
+    }
+
+    #[test]
+    fn explicit_applicator_wins_over_kebab_fallback() {
+        // .backgroundColor(red) AND a stale tw-emitted background-color
+        // — the explicit applicator's value should win.
+        let node = node_with(&[
+            ("backgroundColor.0", serde_json::json!("red")),
+            ("background-color", serde_json::json!("blue")),
+        ]);
+        assert_eq!(prop_color(&node, "backgroundColor"), Some(Rgba(0xff, 0, 0, 0xff)));
+    }
+
+    #[test]
+    fn prop_f32_reads_kebab_font_size_from_tw() {
+        // tw `text-lg` → `font-size: "1.125rem"`. The renderer reads
+        // it through the kebab fallback and parse_length resolves rem.
+        let node = node_with(&[("font-size", serde_json::json!("1.125rem"))]);
+        assert!((prop_f32(&node, "fontSize").unwrap() - 18.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_length_accepts_rem_units() {
+        assert_eq!(parse_length("1rem"), Some(16.0));
+        assert_eq!(parse_length("1.5rem"), Some(24.0));
+        assert_eq!(parse_length("0.5rem"), Some(8.0));
+        assert_eq!(parse_length(" 2rem "), Some(32.0));
+    }
+
+    #[test]
+    fn parse_length_accepts_em_units() {
+        assert_eq!(parse_length("1em"), Some(16.0));
+        assert_eq!(parse_length("1.25em"), Some(20.0));
+    }
+
+    #[test]
+    fn parse_length_accepts_bare_and_px() {
+        assert_eq!(parse_length("16"), Some(16.0));
+        assert_eq!(parse_length("16px"), Some(16.0));
+        assert_eq!(parse_length("16.5"), Some(16.5));
+    }
+
+    #[test]
+    fn parse_length_rejects_unknown_units() {
+        // Not yet supported: %, vh, vw, ch.
+        assert_eq!(parse_length("50%"), None);
+        assert_eq!(parse_length("1vh"), None);
+    }
+
+    #[test]
+    fn padding_picks_up_tw_kebab_with_rem() {
+        // .tw("p-4") → padding: "1rem". Whole-padding shorthand via
+        // kebab + rem resolves to 16px on every side.
+        let node = node_with(&[("padding", serde_json::json!("1rem"))]);
+        let p = padding(&node);
+        assert_eq!(p.top, 16.0);
+        assert_eq!(p.right, 16.0);
+        assert_eq!(p.bottom, 16.0);
+        assert_eq!(p.left, 16.0);
     }
 }

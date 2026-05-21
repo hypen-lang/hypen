@@ -1,4 +1,10 @@
-//! Phase 7 demo: text input with two-way state binding.
+//! Input demo: text input with two-way state binding.
+//!
+//! Mouse: click to place the caret, drag to select. Keyboard:
+//! Backspace / Delete / arrows to edit, Shift+arrows to extend the
+//! selection, Home / End / Shift versions for line edges. Cmd / Ctrl +
+//! A selects all; +C / X / V copy / cut / paste through the system
+//! clipboard.
 //!
 //! ```bash
 //! cargo run -p hypen-renderer-desktop --example input

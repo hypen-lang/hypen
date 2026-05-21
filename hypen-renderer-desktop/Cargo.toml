@@ -32,6 +32,11 @@ accesskit_winit = "0.32.2"
 # Phase 9: system clipboard for copy / cut / paste in Input.
 arboard = "3"
 
+# Phase 11: WebSocket client for connecting to a Hypen RemoteServer.
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
 # Re-exported by winit; pinned here so we can implement raw-window-handle for
 # the wgpu surface without version-mismatch grief.
 raw-window-handle = "0.6"
@@ -63,3 +68,7 @@ path = "examples/input.rs"
 [[example]]
 name = "scroll"
 path = "examples/scroll.rs"
+
+[[example]]
+name = "remote"
+path = "examples/remote.rs"

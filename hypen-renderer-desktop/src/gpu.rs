@@ -116,11 +116,18 @@ impl Gpu {
             .await
             .expect("request adapter");
 
+        // Adopt the adapter's actual limits rather than wgpu's
+        // `downlevel_defaults`, which caps `max_texture_dimension_2d`
+        // at 2048 — too low for HiDPI external displays (a 1440p Mac
+        // display at 2x is 2880×1620 physical pixels). Falls back to
+        // the conservative default if the adapter limits look smaller
+        // than the platform default for some reason.
+        let adapter_limits = adapter.limits();
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("hypen-desktop device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: adapter_limits,
                 ..Default::default()
             })
             .await

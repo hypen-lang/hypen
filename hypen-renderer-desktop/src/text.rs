@@ -361,4 +361,46 @@ mod tests {
             "transparent draw must leave the pixmap byte-identical",
         );
     }
+
+    // -----------------------------------------------------------------
+    // byte_offset_at_x — click-to-position cursor on Inputs
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn byte_offset_at_x_returns_zero_for_empty_string() {
+        let mut t = TextEngine::new();
+        assert_eq!(t.byte_offset_at_x("", 0.0, 18.0), 0);
+        assert_eq!(t.byte_offset_at_x("", 100.0, 18.0), 0);
+    }
+
+    #[test]
+    fn byte_offset_at_x_zero_lands_at_start() {
+        let mut t = TextEngine::new();
+        assert_eq!(t.byte_offset_at_x("hello", 0.0, 18.0), 0);
+    }
+
+    #[test]
+    fn byte_offset_at_x_far_right_lands_at_end() {
+        let mut t = TextEngine::new();
+        // 10000 px is well past any realistic string — result must be
+        // the byte length so click-past-end places the caret at end.
+        let s = "hello";
+        assert_eq!(t.byte_offset_at_x(s, 10_000.0, 18.0), s.len());
+    }
+
+    #[test]
+    fn byte_offset_at_x_lands_on_a_char_boundary_for_multibyte() {
+        // "héllo" has bytes h(0) é(1..3) l(3) l(4) o(5) — len 6.
+        // Any returned offset must be a valid char boundary so callers
+        // can safely slice with it.
+        let mut t = TextEngine::new();
+        let s = "héllo";
+        for px in [0.0_f32, 5.0, 10.0, 20.0, 50.0, 200.0] {
+            let off = t.byte_offset_at_x(s, px, 18.0);
+            assert!(
+                s.is_char_boundary(off),
+                "offset {off} for x={px} is not a char boundary in {s:?}",
+            );
+        }
+    }
 }

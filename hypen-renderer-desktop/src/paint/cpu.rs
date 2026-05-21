@@ -23,9 +23,16 @@ pub struct InteractionState {
     /// Renderer node id of the keyboard-focused element, if any (Button
     /// or Input alike).
     pub focused: Option<String>,
-    /// Per-Input cursor byte offset, mirrored from `App` so the painter
-    /// can place the caret without owning the editor state.
-    pub input_cursors: std::collections::HashMap<String, usize>,
+    /// Per-Input selection (anchor + head byte offsets), mirrored from
+    /// `App` so the painter can place the caret + highlight band
+    /// without owning the editor state. Collapsed selection means just
+    /// a caret; otherwise a translucent range is painted.
+    pub input_selections: std::collections::HashMap<String, crate::window::Selection>,
+    /// Active IME preedit composition: `(focused_input_id, text)`.
+    /// While composing, the text is rendered inline at the caret with
+    /// an underline to show it isn't committed yet — `__hypen_bind`
+    /// dispatch is suppressed until the user commits or cancels.
+    pub ime_preedit: Option<(String, String)>,
 }
 
 pub struct CpuPainter {
@@ -177,29 +184,102 @@ impl CpuPainter {
                         );
                     }
 
-                    // Caret when this input has keyboard focus. Width
-                    // of the leading substring up to `cursor` (byte
-                    // offset) tells us the x position.
+                    // Selection / caret / IME preedit when this input
+                    // is focused.
                     if self.interaction.focused.as_deref() == Some(&item.node_id) {
-                        let cursor_byte = self
+                        let sel = self
                             .interaction
-                            .input_cursors
+                            .input_selections
                             .get(&item.node_id)
                             .copied()
-                            .unwrap_or(value.len())
-                            .min(value.len());
-                        let leading = &value[..cursor_byte];
-                        let (caret_w, _) =
-                            self.text.measure(leading, *font_size * scale_factor, None);
-                        let caret_x = text_x + caret_w;
-                        let caret_h = *font_size * 1.2 * scale_factor;
-                        let caret = crate::layout::Rect {
-                            x: caret_x,
-                            y: text_y,
-                            w: 1.5 * scale_factor,
-                            h: caret_h,
-                        };
-                        fill_rect(&mut pixmap, caret, Rgba(0x00, 0x7a, 0xff, 0xff), 0.0);
+                            .unwrap_or_else(|| crate::window::Selection::caret(value.len()))
+                            .clamped(value.len());
+                        let h_px = *font_size * 1.2 * scale_factor;
+                        let preedit = self
+                            .interaction
+                            .ime_preedit
+                            .as_ref()
+                            .filter(|(id, _)| id == &item.node_id)
+                            .map(|(_, t)| t.as_str());
+
+                        if !sel.is_collapsed() && preedit.is_none() {
+                            // Translucent accent-blue selection band
+                            // running from the leading edge of the
+                            // selected range to its trailing edge.
+                            let (lead_w, _) = self.text.measure(
+                                &value[..sel.min()],
+                                *font_size * scale_factor,
+                                None,
+                            );
+                            let (sel_w, _) = self.text.measure(
+                                &value[sel.min()..sel.max()],
+                                *font_size * scale_factor,
+                                None,
+                            );
+                            let band = crate::layout::Rect {
+                                x: text_x + lead_w,
+                                y: text_y,
+                                w: sel_w.max(2.0 * scale_factor),
+                                h: h_px,
+                            };
+                            fill_rect(&mut pixmap, band, Rgba(0x00, 0x7a, 0xff, 0x55), 0.0);
+                        } else {
+                            // Caret. Width of the leading substring up
+                            // to `head` tells us the x position. When
+                            // composing, the caret sits at the *end* of
+                            // the preedit so it visually leads the
+                            // composition like every native input.
+                            let (caret_w, _) = self.text.measure(
+                                &value[..sel.head],
+                                *font_size * scale_factor,
+                                None,
+                            );
+                            let mut caret_x = text_x + caret_w;
+                            if let Some(pre) = preedit {
+                                let (pre_w, _) = self.text.measure(
+                                    pre,
+                                    *font_size * scale_factor,
+                                    None,
+                                );
+                                // Paint preedit inline at caret_x in the
+                                // text colour, then a thin underline to
+                                // show it isn't committed yet.
+                                self.text.draw_text_colored(
+                                    &mut pixmap,
+                                    pre,
+                                    caret_x,
+                                    text_y,
+                                    *font_size * scale_factor,
+                                    *color,
+                                    None,
+                                );
+                                let underline = crate::layout::Rect {
+                                    x: caret_x,
+                                    y: text_y + h_px - 1.0 * scale_factor,
+                                    w: pre_w,
+                                    h: 1.0 * scale_factor,
+                                };
+                                fill_rect(
+                                    &mut pixmap,
+                                    underline,
+                                    Rgba(0x00, 0x7a, 0xff, 0xff),
+                                    0.0,
+                                );
+                                caret_x += pre_w;
+                            }
+                            let caret = crate::layout::Rect {
+                                x: caret_x,
+                                y: text_y,
+                                w: 1.5 * scale_factor,
+                                h: h_px,
+                            };
+                            fill_rect(
+                                &mut pixmap,
+                                caret,
+                                Rgba(0x00, 0x7a, 0xff, 0xff),
+                                0.0,
+                            );
+                        }
                     }
                 }
                 _ => {}

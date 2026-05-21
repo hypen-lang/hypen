@@ -13,6 +13,7 @@
 //! builds a stateless module behind the scenes.
 
 use crate::module::HypenModule;
+use crate::remote::RemoteModule;
 use crate::window::{App as WindowApp, AppEvent, PatchQueue};
 use hypen_server::app::HypenApp;
 use hypen_server::module::ModuleBuilder;
@@ -67,6 +68,33 @@ impl DesktopApp {
     pub fn module(mut self, instance: Arc<dyn HypenModule>) -> Self {
         self.module = Some(instance);
         self
+    }
+
+    /// Connect to a remote `RemoteServer` over WebSocket and stream
+    /// patches from a registered module by name. Counterpart to the
+    /// TypeScript `RemoteServer` in `hypen-web/packages/server`. The
+    /// renderer doesn't care whether the engine runs in-process or
+    /// across the network — the same `HypenModule` contract holds.
+    ///
+    /// ```rust,ignore
+    /// // Server (TS, in your example app):
+    /// //   new RemoteServer().module("Counter", counter)
+    /// //     .ui(`Column { Text("Count: @{state.count}") }`)
+    /// //     .listen(3000);
+    /// //
+    /// // Client (this binary):
+    /// DesktopApp::new()
+    ///     .title("Counter (remote)")
+    ///     .connect("ws://localhost:3000", "Counter")
+    ///     .run();
+    /// ```
+    pub fn connect(
+        self,
+        url: impl Into<String>,
+        module_name: impl Into<String>,
+    ) -> Self {
+        let remote = RemoteModule::connect(url, module_name);
+        self.module(Arc::new(remote))
     }
 
     /// Convenience for stateless demos. Builds an internal module with no

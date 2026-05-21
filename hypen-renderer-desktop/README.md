@@ -2,7 +2,7 @@
 
 Native desktop renderer for Hypen.
 
-## Status: Phase 8 (page scrolling + overflow indicator)
+## Status: Phase 11 (Remote WebSocket client)
 
 The renderer drives a real `hypen-server::ModuleInstance<S>` through the
 standard SDK lifecycle (`instantiate` → `on_patches` → `mount` → click →
@@ -34,6 +34,64 @@ without touching the rest of the crate.
   (the engine's resolved form of `Button("@actions.X")`).
 - Patches flushed every frame; `about_to_wait` requests a repaint whenever
   the SDK pushes patches between events (e.g. async actions).
+
+## What works (additions in Phase 11)
+
+- **Remote mode** — `DesktopApp::new().connect(url, module_name).run()`
+  opens a WebSocket to a Hypen `RemoteServer` and streams the standard
+  `RemoteMessage` protocol (`Hello` / `SessionAck` / `InitialTree` /
+  `Patch` / `DispatchAction`). The renderer doesn't change behaviour:
+  the same `HypenModule` trait that wraps the in-process Rust SDK
+  also wraps the network client, so paint / layout / hit-test /
+  AccessKit / IME all work unchanged.
+- A worker OS thread owns its own `current_thread` tokio runtime so
+  the (sync) winit event loop stays sync. Patches arrive on the worker,
+  flow through an `Arc<Fn(&[Patch]) + Send + Sync>` callback, and land
+  in the same `PatchQueue` the local SDK module uses.
+- A connect-race buffer ensures the `InitialTree` isn't lost if it
+  arrives before `on_patches` is wired (the renderer drains pending
+  patches the moment the callback is set).
+- Example: `cargo run -p hypen-renderer-desktop --example remote`
+  connects to `ws://localhost:3000` (module `App`); pass `URL MODULE`
+  on the command line to override.
+
+## What works (additions in Phase 10)
+
+- **IME composition** wired through `winit`'s `Ime` event:
+  - `set_ime_allowed(true)` toggles when an `Input` is focused;
+    `set_ime_cursor_area` follows so the candidate window positions
+    near the focused field.
+  - `Preedit` text is stored as `Option<(node_id, text)>` and rendered
+    inline at the caret with a 1px accent-blue underline so the user
+    sees what they're composing isn't yet committed.
+  - `Commit` flows through the same `replace_selection_with` primitive
+    as plain typing, so a non-empty selection is replaced by the
+    committed text and the caret advances.
+  - `Disabled` clears state cleanly.
+- Pure state-machine extracted to `apply_ime_transition` so the
+  Enabled / Preedit / Commit / Disabled transitions can be tested
+  without spinning up an `App`.
+
+## What works (additions in Phase 9)
+
+- **Selection** in `Input` — `Selection { anchor, head }` per Input
+  with click-to-position, mouse-drag-to-select, Shift+ArrowLeft /
+  ArrowRight / Home / End to extend.
+- **System clipboard** via `arboard`: Ctrl/Cmd + A select-all, +C
+  copy, +X cut, +V paste. Newlines in the clipboard collapse to
+  spaces for single-line `Input` (`Textarea` will preserve them later).
+- **Editing primitives** are selection-aware: typing replaces the
+  selected range; Backspace / Delete with a non-empty selection
+  delete the range; collapsed selections fall back to per-codepoint
+  edits (so multibyte text still walks correctly).
+- **Painter selection band** — translucent accent-blue rectangle from
+  `min` to `max` byte offset; the caret only paints when the selection
+  is collapsed.
+- **Real production bug fixed by tests**: `text::draw_text_colored`
+  used to ignore source alpha because cosmic-text's swash glyph path
+  overwrites the colour's alpha byte with per-pixel coverage — so
+  `Rgba::TRANSPARENT` still mutated the pixmap. Now short-circuited
+  at the source. Regression test in place.
 
 ## What works (additions in Phase 8)
 
@@ -93,7 +151,7 @@ without touching the rest of the crate.
 
 ## Tests
 
-88 unit tests in the renderer + 8 SDK integration tests. Run them with:
+131 unit tests in the renderer + 8 SDK integration tests. Run them with:
 
 ```bash
 cargo test -p hypen-renderer-desktop --lib
@@ -101,17 +159,19 @@ cargo test -p hypen-server --tests
 ```
 
 Coverage: `Tree` patch application, `LayoutPass` flex + hit-testing +
-focus traversal, text wrap measurement, style helpers (color / length /
-padding precedence), and the painter's color-math primitives. The
-window/event-loop layer isn't unit-tested directly — its logic delegates
-to `LayoutPass::hit` / `focus_next` / `focus_prev`, which are covered.
+focus traversal, text wrap measurement + click-to-byte hit-test, style
+helpers (color / length / padding precedence), the painter's
+color-math + selection-band logic, and the `Selection` /
+`replace_selection_with` primitives that drive Input editing. The
+window/event-loop layer is not unit-tested directly — its branches
+delegate to `LayoutPass::hit` / `focus_next` / `replace_selection_with`,
+which are covered.
 
 ## What does **not** work yet
 
-- IME composition (CJK, dead keys with combining marks).
 - `Textarea`, `Checkbox`, `Switch`, `Select` (only `Input` so far).
-- Selection (mouse drag, Shift+arrows) + clipboard (Ctrl+C / V / X) +
-  word-wise navigation (Ctrl+arrows).
+- Word-wise navigation (Ctrl+arrows) + double-click-to-select-word +
+  triple-click-to-select-line.
 - Per-Container scroll (only the whole page scrolls today). Inner
   scrollables — a list inside a sidebar — land later when we expose
   Taffy's overflow style.
@@ -129,6 +189,20 @@ cargo run -p hypen-renderer-desktop --example hello
 # Counter — clicks +/- to change a counter, demonstrates the full
 # click → action → state → repaint loop
 cargo run -p hypen-renderer-desktop --example counter
+
+# Input — two-way binding, drag-select, Cmd/Ctrl+A/C/X/V, IME compose
+cargo run -p hypen-renderer-desktop --example input
+
+# Scroll — long Column with overflow indicator
+cargo run -p hypen-renderer-desktop --example scroll
+
+# Remote — connect to a running Hypen RemoteServer.
+# Start a server first; e.g. the bundled social example:
+#   cd examples/social/typescript && bun install && bun run dev
+# Then in another terminal:
+cargo run -p hypen-renderer-desktop --example remote
+# Or override URL + module name explicitly:
+cargo run -p hypen-renderer-desktop --example remote -- ws://localhost:3000 App
 ```
 
 ## SDK contract used by this renderer
