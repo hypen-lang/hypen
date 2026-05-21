@@ -12,6 +12,8 @@ use crate::layout::Rect as LayoutRect;
 use crate::style::Rgba;
 use crate::window::AppEvent;
 use std::collections::HashMap;
+#[allow(unused_imports)]
+use std::collections::hash_map;
 use std::io::Read;
 use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
@@ -72,9 +74,48 @@ pub fn set_waker(proxy: EventLoopProxy<AppEvent>) {
     *cache().waker.lock().expect("image cache waker poisoned") = Some(proxy);
 }
 
+/// Cap on the per-rect image render cache. Sized to comfortably hold
+/// every Image visible on a busy feed *plus* enough off-screen slack
+/// to scroll past one screenful without wholesale eviction. Each
+/// entry holds a tile sized to the laid-out rect; we cap individual
+/// tiles at `MAX_TILE_DIM` so a single huge image can't blow memory.
+const IMAGE_RENDER_CACHE_CAP: usize = 256;
+/// Cap on the longest side of any cached tile in physical pixels.
+/// Past this we render at a smaller intrinsic size and let the
+/// composite upscale via tiny-skia's bilinear sampler. Avoids 9 MB+
+/// tiles on 100%-width post body images at HiDPI, where building
+/// the alpha mask + scaling 2 M+ pixels per cache miss was the
+/// dominant cost during scroll.
+const MAX_TILE_DIM: u32 = 768;
+
+/// Per-painter cache of pre-scaled + masked image pixmaps. Keyed on
+/// `(src, tile_w, tile_h, fit, radius)` — note `tile_w/h` after the
+/// `MAX_TILE_DIM` cap, not the requested rect's full size. On cache
+/// hit, painting an Image becomes a single `draw_pixmap` (with
+/// optional bilinear up-scale when the cap kicked in).
+#[derive(Default)]
+pub struct ImageRenderCache {
+    /// Insertion-ordered for FIFO eviction at `IMAGE_RENDER_CACHE_CAP`.
+    /// Single-entry eviction keeps cache churn proportional to
+    /// inserts instead of dropping wholesale on overflow.
+    entries: indexmap::IndexMap<u64, Pixmap>,
+}
+
+impl ImageRenderCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
+
 /// Paint `src` (a path or URL) inside `rect` on `pixmap`. Falls back
 /// to a placeholder rectangle when src is missing, still loading, or
-/// permanently failed.
+/// permanently failed. Backwards-compatible wrapper around
+/// [`paint_image_cached`] for the test suite + any external callers
+/// that haven't moved to the cache yet.
 pub fn paint_image(
     pixmap: &mut Pixmap,
     rect: LayoutRect,
@@ -83,6 +124,39 @@ pub fn paint_image(
     radius: f32,
     fit: crate::layout::ObjectFit,
 ) {
+    let mut cache = ImageRenderCache::new();
+    paint_image_cached(pixmap, rect, src, scale_factor, radius, fit, &mut cache);
+}
+
+/// Same as [`paint_image`] but composites a pre-rasterised tile from
+/// `tile_cache` when one exists. Cache miss does the full scale + mask
+/// pipeline once into a tile, stores it, and composites.
+pub fn paint_image_cached(
+    pixmap: &mut Pixmap,
+    rect: LayoutRect,
+    src: Option<&str>,
+    scale_factor: f32,
+    radius: f32,
+    fit: crate::layout::ObjectFit,
+    tile_cache: &mut ImageRenderCache,
+) {
+    let target_w = rect.w.ceil().max(1.0) as u32;
+    let target_h = rect.h.ceil().max(1.0) as u32;
+    // Cap the tile's longest side at `MAX_TILE_DIM`. The cache is
+    // keyed on the *capped* size, so we don't store giant tiles for
+    // 100%-width post body images. Composite uses tiny-skia's
+    // bilinear sampler to upscale back to `(target_w, target_h)`.
+    let scale_to_tile = (MAX_TILE_DIM as f32 / target_w.max(target_h) as f32).min(1.0);
+    let cw = ((target_w as f32) * scale_to_tile).ceil().max(1.0) as u32;
+    let ch = ((target_h as f32) * scale_to_tile).ceil().max(1.0) as u32;
+    let upscaled = scale_to_tile < 1.0;
+    if let Some(s) = src {
+        let key = render_cache_key(s, cw, ch, fit, radius);
+        if let Some(tile) = tile_cache.entries.get(&key) {
+            composite_tile(pixmap, tile, rect, upscaled);
+            return;
+        }
+    }
     let bitmap_data: Option<(Vec<u8>, u32, u32)> = src.and_then(|s| {
         ensure_loaded(s);
         let entries = cache().entries.lock().expect("image cache poisoned");
@@ -98,13 +172,21 @@ pub fn paint_image(
         let size = IntSize::from_wh(w, h).expect("non-zero source size");
         let pm =
             Pixmap::from_vec(data, size).expect("source bitmap matches RGBA layout");
-        // Resolve object-fit into per-axis scale + centring offsets.
-        // `Fill` (CSS default) lets the axes scale independently;
-        // `Cover` and `Contain` stay uniform but pick which extreme.
-        // `None` keeps natural pixel size and centres / crops at
-        // the rect.
-        let sx = rect.w / w as f32;
-        let sy = rect.h / h as f32;
+        // Render into a tile-sized scratch pixmap so the (scale +
+        // mask) pipeline runs once per `(src, target_size, fit,
+        // radius)` tuple instead of once per frame. Tile size is the
+        // requested rect's size in physical pixels.
+        let mut tile = match Pixmap::new(cw, ch) {
+            Some(p) => p,
+            None => {
+                paint_placeholder(pixmap, rect, scale_factor);
+                return;
+            }
+        };
+        // Resolve object-fit into per-axis scale + centring offsets,
+        // expressed against the tile origin (0, 0)..(cw, ch).
+        let sx = cw as f32 / w as f32;
+        let sy = ch as f32 / h as f32;
         let (sx, sy) = match fit {
             crate::layout::ObjectFit::Fill => (sx, sy),
             crate::layout::ObjectFit::Cover => {
@@ -117,22 +199,26 @@ pub fn paint_image(
             }
             crate::layout::ObjectFit::None => (1.0, 1.0),
         };
-        let dx = rect.x + (rect.w - w as f32 * sx) * 0.5;
-        let dy = rect.y + (rect.h - h as f32 * sy) * 0.5;
+        let dx = (cw as f32 - w as f32 * sx) * 0.5;
+        let dy = (ch as f32 - h as f32 * sy) * 0.5;
         let transform = Transform::from_scale(sx, sy).post_translate(dx, dy);
         let paint = PixmapPaint {
             quality: tiny_skia::FilterQuality::Bilinear,
             ..PixmapPaint::default()
         };
-        // Build an alpha mask for rounded corners (or a circle when
-        // the radius is half the rect — the avatar case). Skipped
-        // when radius is 0 to avoid the per-paint Mask alloc.
+        // Mask is built against the tile's local coordinates so it
+        // stays valid for any future composite location.
         let mask = if radius > 0.0 {
-            build_rounded_rect_mask(pixmap.width(), pixmap.height(), rect, radius)
+            build_rounded_rect_mask(
+                cw,
+                ch,
+                LayoutRect { x: 0.0, y: 0.0, w: cw as f32, h: ch as f32 },
+                radius,
+            )
         } else {
             None
         };
-        pixmap.draw_pixmap(
+        tile.draw_pixmap(
             0,
             0,
             PixmapRef::from_bytes(pm.data(), w, h).expect("pixmap bytes valid"),
@@ -140,10 +226,78 @@ pub fn paint_image(
             transform,
             mask.as_ref(),
         );
+        // Cache the tile keyed on what fed it. FIFO-evict ONE entry
+        // when over cap so churn is proportional to inserts instead
+        // of dropping wholesale (which previously caused full re-
+        // render storms on long feeds).
+        if let Some(s) = src {
+            if tile_cache.entries.len() >= IMAGE_RENDER_CACHE_CAP {
+                tile_cache.entries.shift_remove_index(0);
+            }
+            let key = render_cache_key(s, cw, ch, fit, radius);
+            tile_cache.entries.insert(key, tile);
+            let tile = tile_cache.entries.get(&key).expect("just inserted");
+            composite_tile(pixmap, tile, rect, upscaled);
+        } else {
+            composite_tile(pixmap, &tile, rect, upscaled);
+        }
         return;
     }
 
     paint_placeholder(pixmap, rect, scale_factor);
+}
+
+/// Composite `tile` onto `pixmap` at `rect`. When `upscaled` is true,
+/// the tile's intrinsic size is smaller than `rect` (the per-side
+/// `MAX_TILE_DIM` cap kicked in) and tiny-skia's bilinear sampler
+/// scales it up at composite time.
+fn composite_tile(
+    pixmap: &mut Pixmap,
+    tile: &Pixmap,
+    rect: LayoutRect,
+    upscaled: bool,
+) {
+    let transform = if upscaled {
+        let sx = rect.w / tile.width() as f32;
+        let sy = rect.h / tile.height() as f32;
+        Transform::from_scale(sx, sy).post_translate(rect.x.round(), rect.y.round())
+    } else {
+        Transform::from_translate(rect.x.round(), rect.y.round())
+    };
+    let paint = if upscaled {
+        PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bilinear,
+            ..PixmapPaint::default()
+        }
+    } else {
+        PixmapPaint::default()
+    };
+    pixmap.draw_pixmap(
+        0,
+        0,
+        PixmapRef::from_bytes(tile.data(), tile.width(), tile.height())
+            .expect("tile bytes valid"),
+        &paint,
+        transform,
+        None,
+    );
+}
+
+fn render_cache_key(
+    src: &str,
+    w: u32,
+    h: u32,
+    fit: crate::layout::ObjectFit,
+    radius: f32,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut hasher);
+    w.hash(&mut hasher);
+    h.hash(&mut hasher);
+    (fit as u8).hash(&mut hasher);
+    radius.to_bits().hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Build a `Mask` of `surface_w × surface_h` whose alpha is opaque
@@ -326,30 +480,40 @@ fn paint_placeholder(pixmap: &mut Pixmap, rect: LayoutRect, scale: f32) {
 }
 
 fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
-    let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
+    if w <= 0.0 || h <= 0.0 {
+        return None;
+    }
     let rect = Rect::from_xywh(x, y, w, h)?;
     if r <= 0.0 {
         let mut pb = PathBuilder::new();
         pb.push_rect(rect);
         return pb.finish();
     }
-    // Cubic-Bezier kappa for a quarter-circle approximation. Quad_to
-    // (parabola) produces a visible squircle for large radii — at
-    // `radius == side/2` it's noticeably flat at the cardinal points.
-    // The cubic-with-kappa form is the standard CSS-correct circle
-    // and matches every other renderer's `border-radius: 50%`.
+    // CSS `border-radius: 50%` (or any radius >= half the longer
+    // side) means *ellipse*, not stadium. When the requested radius
+    // exceeds `min(w, h) / 2` AND the shape isn't square, use
+    // separate `rx = w/2`, `ry = h/2` so a `rounded-full` ring on
+    // a non-square element still encloses an ellipse rather than a
+    // capsule.
     const K: f32 = 0.5522847498307936;
-    let c = r * K;
+    let max_corner = w.min(h) * 0.5;
+    let (rx, ry) = if r >= max_corner {
+        (w * 0.5, h * 0.5)
+    } else {
+        (r, r)
+    };
+    let cx = rx * K;
+    let cy = ry * K;
     let mut pb = PathBuilder::new();
-    pb.move_to(x + r, y);
-    pb.line_to(x + w - r, y);
-    pb.cubic_to(x + w - r + c, y, x + w, y + r - c, x + w, y + r);
-    pb.line_to(x + w, y + h - r);
-    pb.cubic_to(x + w, y + h - r + c, x + w - r + c, y + h, x + w - r, y + h);
-    pb.line_to(x + r, y + h);
-    pb.cubic_to(x + r - c, y + h, x, y + h - r + c, x, y + h - r);
-    pb.line_to(x, y + r);
-    pb.cubic_to(x, y + r - c, x + r - c, y, x + r, y);
+    pb.move_to(x + rx, y);
+    pb.line_to(x + w - rx, y);
+    pb.cubic_to(x + w - rx + cx, y, x + w, y + ry - cy, x + w, y + ry);
+    pb.line_to(x + w, y + h - ry);
+    pb.cubic_to(x + w, y + h - ry + cy, x + w - rx + cx, y + h, x + w - rx, y + h);
+    pb.line_to(x + rx, y + h);
+    pb.cubic_to(x + rx - cx, y + h, x, y + h - ry + cy, x, y + h - ry);
+    pb.line_to(x, y + ry);
+    pb.cubic_to(x, y + ry - cy, x + rx - cx, y, x + rx, y);
     pb.close();
     pb.finish()
 }

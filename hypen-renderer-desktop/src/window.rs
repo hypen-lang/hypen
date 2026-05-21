@@ -9,7 +9,7 @@ use crate::accessibility::{renderer_id_for, tree_update_for_layout};
 use crate::damage::Damage;
 use crate::gpu::Gpu;
 use crate::ime::{apply_ime_transition, ImeEffect};
-use crate::layout::{ItemKind, LayoutPass};
+use crate::layout::{ItemKind, LayoutPass, TaffyState};
 use crate::module::HypenModule;
 use crate::paint::cpu::CpuPainter;
 use crate::painter::PaintTarget;
@@ -132,7 +132,13 @@ pub struct App {
     ak: Option<AkAdapter>,
     painter: CpuPainter,
     tree: Tree,
-    pixels: Vec<u8>,
+    /// Retained Taffy structure. Reused across frames; rebuilt only
+    /// when its structure-key (tree generation, viewport, scale)
+    /// stops matching the current redraw inputs. Saves the per-
+    /// frame `TaffyTree` allocation + full renderer-tree walk on
+    /// scroll-out-of-buffer / scrollables-changed / resize-where-
+    /// only-position-shifted invalidations.
+    taffy: TaffyState,
 
     /// Cached layout from the last paint. Used by hit-testing on click,
     /// hover, drag, and press.
@@ -243,7 +249,7 @@ impl App {
             ak: None,
             painter: CpuPainter::new(),
             tree: Tree::new(),
-            pixels: Vec::new(),
+            taffy: TaffyState::new(),
             layout: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             hovered: None,
@@ -283,13 +289,6 @@ impl App {
         self.clipboard.as_mut()
     }
 
-    fn ensure_pixel_buf(&mut self, w: u32, h: u32) {
-        let needed = (w as usize) * (h as usize) * 4;
-        if self.pixels.len() != needed {
-            self.pixels.resize(needed, 0);
-        }
-    }
-
     fn flush_patches(&mut self) -> bool {
         let patches = self.queue.drain();
         if patches.is_empty() {
@@ -321,8 +320,6 @@ impl App {
             (Some(gpu), Some(window)) => (gpu.size.0, gpu.size.1, window.scale_factor() as f32),
             _ => return,
         };
-        self.ensure_pixel_buf(w, h);
-
         let mut hovered_set: HashSet<String> = HashSet::new();
         if let Some(id) = self.hovered.clone() {
             hovered_set.insert(id);
@@ -350,9 +347,7 @@ impl App {
         // them as scrollable.
         if let Some(prev) = self.layout.as_ref() {
             self.scrollables.retain(|id, off| {
-                if let Some(item) =
-                    prev.items.iter().find(|it| &it.node_id == id)
-                {
+                if let Some(item) = prev.item_by_id(id) {
                     if let Some(meta) = item.scrollable {
                         let max = (meta.content_h - item.rect.h).max(0.0);
                         *off = off.clamp(0.0, max);
@@ -371,15 +366,28 @@ impl App {
         // bump the key and force a recompute.
         let key = self.layout_cache_key(w, h, scale);
         let key_match = self.last_layout_key == Some(key);
-        let cache_miss = self.layout.is_none() || !key_match;
+        // The cull window the cached layout was emitted against
+        // is centred on `last_scroll_y_in_layout`. As page scroll
+        // moves further, eventually we need a fresh emit to
+        // populate the items that have entered the cull buffer.
+        // Half a viewport-height of slack keeps the fast path
+        // running through normal wheel bursts and only forces a
+        // recompute on a meaningful scroll shift.
+        let scroll_recompute_threshold = (h as f32) * 0.5;
+        let scroll_outside_buffer = !key_match
+            || (self.scroll_y - self.last_scroll_y_in_layout).abs()
+                > scroll_recompute_threshold;
+        let cache_miss = self.layout.is_none() || !key_match || scroll_outside_buffer;
         if cache_miss {
-            let pass = LayoutPass::compute_with_scrolls(
+            let pass = LayoutPass::compute_with_state(
+                &mut self.taffy,
                 &self.tree,
                 self.painter.text_engine_mut(),
                 (w, h),
                 scale,
                 self.scroll_y,
                 &self.scrollables,
+                self.tree_generation,
             );
             self.layout = Some(pass);
             self.last_layout_key = Some(key);
@@ -413,12 +421,7 @@ impl App {
         let pass = self.layout.as_ref().expect("layout populated above");
         self.painter.paint_layout_with_damage(
             pass,
-            PaintTarget {
-                pixels: &mut self.pixels,
-                width: w,
-                height: h,
-                scale_factor: scale,
-            },
+            PaintTarget::new(w, h, scale),
             self.scroll_y,
             damage,
         );
@@ -437,7 +440,9 @@ impl App {
         // Forward damage to the GPU upload too: only the dirty
         // rectangle gets pushed across PCIe (still drawing the full
         // surface from the texture afterwards, since the unchanged
-        // pixels live in the texture from previous frames).
+        // pixels live in the texture from previous frames). The
+        // bytes come straight from the painter's pixmap — no
+        // surface-sized memcpy into an App-owned buffer.
         let upload_region = damage.map(|r| {
             (
                 r.x.max(0.0) as u32,
@@ -446,8 +451,10 @@ impl App {
                 r.h.max(0.0) as u32,
             )
         });
-        if let Err(e) = gpu.present_region(&self.pixels, upload_region) {
-            log::warn!("present failed: {e}");
+        if let Some(bytes) = self.painter.pixmap_data() {
+            if let Err(e) = gpu.present_region(bytes, upload_region) {
+                log::warn!("present failed: {e}");
+            }
         }
 
         self.publish_accessibility();
@@ -476,7 +483,7 @@ impl App {
     /// when no current layout exists or the id isn't in it.
     fn item_damage_rect(&self, id: &str) -> Option<crate::layout::Rect> {
         let layout = self.layout.as_ref()?;
-        let item = layout.items.iter().find(|it| it.node_id == id)?;
+        let item = layout.item_by_id(id)?;
         // 6 px is a comfortable cover for the 3 px outset focus ring +
         // 2 px stroke and any 1 px border anti-aliasing.
         const PAD: f32 = 6.0;
@@ -626,9 +633,7 @@ impl ApplicationHandler<AppEvent> for App {
                     if matches!(req.action, AkAction::Click) {
                         if let Some(layout) = self.layout.as_ref() {
                             if let Some(rid) = renderer_id_for(layout, req.target_node) {
-                                if let Some(item) =
-                                    layout.items.iter().find(|it| it.node_id == rid)
-                                {
+                                if let Some(item) = layout.item_by_id(&rid) {
                                     if let Some(action) = item.action.clone() {
                                         log::debug!("dispatch (a11y): {action}");
                                         self.module.dispatch_action(&action, None);
@@ -668,6 +673,23 @@ impl ApplicationHandler<AppEvent> for App {
                 // events becomes one gpu.resize + one paint per
                 // displayed frame.
                 self.pending_resize = Some((size.width, size.height));
+                self.layout = None;
+                self.damage.add_full();
+                if let Some(w) = self.window.as_ref() {
+                    w.request_redraw();
+                }
+            }
+            WindowEvent::ScaleFactorChanged { .. } => {
+                // The platform changed our HiDPI scale (window dragged
+                // between displays, system zoom toggle, etc.). The
+                // layout cache key includes scale, so the next paint
+                // would auto-recompute — but on backends that don't
+                // also fire a `Resized`, we'd otherwise paint a stale
+                // frame at the new scale until something else nudges
+                // a redraw. Clear and request explicitly. Bitmap
+                // raster caches stay valid: text + icon tiles are
+                // keyed on physical font_size / dimensions, which
+                // change with scale and miss naturally.
                 self.layout = None;
                 self.damage.add_full();
                 if let Some(w) = self.window.as_ref() {
@@ -822,11 +844,8 @@ impl ApplicationHandler<AppEvent> for App {
                     let cy = self.cursor.y as f32;
                     // Topmost scrollable Container under the cursor wins
                     // — fall back to page scroll when there isn't one.
-                    let target = self.layout.as_ref().and_then(|l| {
-                        l.items.iter().rev().find(|it| {
-                            it.scrollable.is_some() && it.rect.contains(cx, cy)
-                        })
-                    });
+                    let target =
+                        self.layout.as_ref().and_then(|l| l.hit_scrollable(cx, cy));
                     let mut container_damage: Option<crate::layout::Rect> = None;
                     let mut full_damage = false;
                     if let Some(item) = target {

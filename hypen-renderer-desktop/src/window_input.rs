@@ -11,7 +11,7 @@ impl App {
     pub(super) fn focused_input(&self) -> Option<(String, String, String)> {
         let id = self.focused.clone()?;
         let layout = self.layout.as_ref()?;
-        let item = layout.items.iter().find(|it| it.node_id == id)?;
+        let item = layout.item_by_id(&id)?;
         match &item.kind {
             ItemKind::Input { value, bind_path, .. } => bind_path
                 .as_ref()
@@ -27,7 +27,7 @@ impl App {
         id: &str,
     ) -> Option<(String, f32, crate::layout::Rect)> {
         let layout = self.layout.as_ref()?;
-        let item = layout.items.iter().find(|it| it.node_id == id)?;
+        let item = layout.item_by_id(id)?;
         match &item.kind {
             ItemKind::Input { value, font_size, .. } => {
                 Some((value.clone(), *font_size, item.rect))
@@ -201,7 +201,7 @@ impl App {
         let action = (|| -> Option<String> {
             let id = self.focused.as_deref()?;
             let layout = self.layout.as_ref()?;
-            let item = layout.items.iter().find(|it| it.node_id == id)?;
+            let item = layout.item_by_id(id)?;
             item.action.clone()
         })();
         if let Some(action) = action {

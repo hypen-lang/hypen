@@ -11,18 +11,31 @@
 
 use crate::tree::Tree;
 
-/// The framebuffer the painter writes into.
-///
-/// `pixels` is a tightly packed RGBA8 (premultiplied alpha) buffer of
-/// `width * height * 4` bytes. The renderer's GPU layer uploads this
-/// to a wgpu texture and blits it to the surface.
+/// Where the painter writes. Width / height are in physical pixels;
+/// the painter owns the actual byte buffer (a `tiny_skia::Pixmap`
+/// kept across frames so `Pixmap::new` allocs only happen on resize)
+/// and exposes a borrow via `CpuPainter::pixmap_data()` after the
+/// paint completes. The GPU layer uploads from that borrow directly,
+/// avoiding a redundant per-frame surface-sized copy into App-owned
+/// bytes.
 pub struct PaintTarget<'a> {
-    pub pixels: &'a mut [u8],
     pub width: u32,
     pub height: u32,
     /// Logical → physical scale factor (HiDPI). Painters use this to
     /// scale font sizes / stroke widths so output is crisp.
     pub scale_factor: f32,
+    _phantom: std::marker::PhantomData<&'a ()>,
+}
+
+impl<'a> PaintTarget<'a> {
+    pub fn new(width: u32, height: u32, scale_factor: f32) -> Self {
+        Self {
+            width,
+            height,
+            scale_factor,
+            _phantom: std::marker::PhantomData,
+        }
+    }
 }
 
 /// Trait implemented by each rasteriser backend.

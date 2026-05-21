@@ -46,6 +46,12 @@ pub struct CpuPainter {
     /// runs once per `(shape, size, tint)` tuple instead of per
     /// frame.
     icon_cache: crate::paint::icon::IconRasterCache,
+    /// Pre-scaled + masked Image tiles, keyed on
+    /// `(src, target_w, target_h, fit, radius)`. Each post body
+    /// image runs the (decode → scale → mask) pipeline once and
+    /// then becomes a single `draw_pixmap` per frame, even during
+    /// scroll bursts.
+    image_cache: crate::paint::image::ImageRenderCache,
 }
 
 impl CpuPainter {
@@ -55,6 +61,7 @@ impl CpuPainter {
             interaction: InteractionState::default(),
             pixmap: None,
             icon_cache: crate::paint::icon::IconRasterCache::new(),
+            image_cache: crate::paint::image::ImageRenderCache::new(),
         }
     }
 
@@ -139,10 +146,10 @@ impl CpuPainter {
         damage: Option<crate::layout::Rect>,
     ) {
         let PaintTarget {
-            pixels,
             width,
             height,
             scale_factor,
+            ..
         } = target;
 
         let need_realloc = self
@@ -174,7 +181,21 @@ impl CpuPainter {
             pixmap.fill(bg);
         }
 
+        // Viewport cull rect — items fully outside the surface
+        // contribute nothing, and on a long feed they outnumber
+        // visible items 5×+. Skipping their composites turns
+        // "paint scales with feed length" into "paint scales with
+        // visible posts".
+        let viewport = crate::layout::Rect {
+            x: 0.0,
+            y: 0.0,
+            w: width as f32,
+            h: height as f32,
+        };
         for item in &layout.items {
+            if !crate::damage::rects_intersect(item.rect, viewport) {
+                continue;
+            }
             if let Some(d) = damage {
                 if !crate::damage::rects_intersect(item.rect, d) {
                     continue;
@@ -228,13 +249,14 @@ impl CpuPainter {
 
             match &item.kind {
                 ItemKind::Image { src, fit } => {
-                    crate::paint::image::paint_image(
+                    crate::paint::image::paint_image_cached(
                         pixmap,
                         item.rect,
                         src.as_deref(),
                         scale_factor,
                         item.border.radius * scale_factor,
                         *fit,
+                        &mut self.image_cache,
                     );
                 }
                 ItemKind::Icon {
@@ -468,9 +490,23 @@ impl CpuPainter {
             );
         }
 
-        let src = pixmap.data();
-        debug_assert_eq!(src.len(), pixels.len());
-        pixels.copy_from_slice(src);
+        // No surface-sized copy here: the GPU upload path reads
+        // `pixmap.data()` directly via `pixmap_data()` after the
+        // paint returns. Saves `width * height * 4` bytes of
+        // memcpy per frame (~10 MB at 1440p HiDPI).
+    }
+
+    /// Borrow the painter's pixmap bytes for GPU upload. Valid
+    /// until the next `paint_layout*` call (which may grow the
+    /// buffer on resize). Returns `None` only before the first
+    /// paint when no pixmap is allocated yet.
+    pub fn pixmap_data(&self) -> Option<&[u8]> {
+        self.pixmap.as_ref().map(|p| p.data())
+    }
+
+    /// Width of the current pixmap in physical pixels.
+    pub fn pixmap_size(&self) -> Option<(u32, u32)> {
+        self.pixmap.as_ref().map(|p| (p.width(), p.height()))
     }
 }
 
@@ -625,28 +661,37 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
-    let r = r.min(w * 0.5).min(h * 0.5).max(0.0);
     let rect = Rect::from_xywh(x, y, w, h)?;
     if r <= 0.0 {
         let mut pb = PathBuilder::new();
         pb.push_rect(rect);
         return pb.finish();
     }
-    // Cubic-Bezier kappa for a quarter-circle. Quad_to (parabolic)
-    // visibly squashes the corners at `radius == side/2` — the
-    // squircle that showed up on every `rounded-full` avatar.
+    // CSS-correct rounded rect: when the requested radius would
+    // otherwise clamp to `min(w, h) / 2` AND the shape isn't square,
+    // expand to elliptical corners (`rx = w/2, ry = h/2`) so the
+    // overall shape is a true ellipse rather than a stadium /
+    // capsule. Without this, `rounded-full` on a non-square element
+    // produced a "stretched" border along the long axis.
     const K: f32 = 0.5522847498307936;
-    let c = r * K;
+    let max_corner = w.min(h) * 0.5;
+    let (rx, ry) = if r >= max_corner {
+        (w * 0.5, h * 0.5)
+    } else {
+        (r, r)
+    };
+    let cx = rx * K;
+    let cy = ry * K;
     let mut pb = PathBuilder::new();
-    pb.move_to(x + r, y);
-    pb.line_to(x + w - r, y);
-    pb.cubic_to(x + w - r + c, y, x + w, y + r - c, x + w, y + r);
-    pb.line_to(x + w, y + h - r);
-    pb.cubic_to(x + w, y + h - r + c, x + w - r + c, y + h, x + w - r, y + h);
-    pb.line_to(x + r, y + h);
-    pb.cubic_to(x + r - c, y + h, x, y + h - r + c, x, y + h - r);
-    pb.line_to(x, y + r);
-    pb.cubic_to(x, y + r - c, x + r - c, y, x + r, y);
+    pb.move_to(x + rx, y);
+    pb.line_to(x + w - rx, y);
+    pb.cubic_to(x + w - rx + cx, y, x + w, y + ry - cy, x + w, y + ry);
+    pb.line_to(x + w, y + h - ry);
+    pb.cubic_to(x + w, y + h - ry + cy, x + w - rx + cx, y + h, x + w - rx, y + h);
+    pb.line_to(x + rx, y + h);
+    pb.cubic_to(x + rx - cx, y + h, x, y + h - ry + cy, x, y + h - ry);
+    pb.line_to(x, y + ry);
+    pb.cubic_to(x, y + ry - cy, x + rx - cx, y, x + rx, y);
     pb.close();
     pb.finish()
 }

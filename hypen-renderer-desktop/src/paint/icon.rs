@@ -14,7 +14,7 @@ use crate::layout::Rect as LayoutRect;
 use crate::style::Rgba;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use svgtypes::PathSegment;
 use tiny_skia::{
     FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Stroke,
@@ -32,7 +32,8 @@ const ICON_RASTER_CACHE_CAP: usize = 128;
 /// same time `Pixmap` reallocs would invalidate stale renders.
 #[derive(Default)]
 pub struct IconRasterCache {
-    entries: HashMap<u64, Pixmap>,
+    /// Insertion-ordered for FIFO single-entry eviction at cap.
+    entries: IndexMap<u64, Pixmap>,
 }
 
 impl IconRasterCache {
@@ -359,7 +360,9 @@ pub fn paint_icon_cached(
         };
         paint_icon(&mut tile, local_rect, paths, view_box, tint);
         if cache.entries.len() >= ICON_RASTER_CACHE_CAP {
-            cache.entries.clear();
+            // FIFO single-entry eviction. Wholesale clear caused
+            // big re-tessellation bursts whenever the cache filled.
+            cache.entries.shift_remove_index(0);
         }
         cache.entries.insert(key, tile);
     }

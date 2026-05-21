@@ -203,6 +203,21 @@ pub struct LayoutPass {
     /// natural (un-scrolled) coordinate space. Used by the window to
     /// clamp the scroll offset.
     pub content_size: (f32, f32),
+    /// Side index: `node_id` → index into `items`. Lets every hover /
+    /// click / IME / damage path that needs an item by id do an O(1)
+    /// lookup instead of scanning the full vec. Built once at the end
+    /// of `compute_inner_state`.
+    by_node_id: HashMap<String, usize>,
+    /// Indexes of `items` whose `action` is `Some(_)` — Buttons /
+    /// Cards / Links. `actionables()` and `hit()` iterate this.
+    actionable_ids: Vec<usize>,
+    /// Indexes of focusable items (actionables + Inputs) in document
+    /// order. `focus_next` / `focus_prev` walk this directly.
+    focusable_ids: Vec<usize>,
+    /// Indexes of items whose `scrollable` is `Some(_)`. Wheel
+    /// routing iterates these (in reverse for topmost-first) instead
+    /// of the full items vec.
+    scrollable_ids: Vec<usize>,
 }
 
 /// Per-Taffy-node sidecar so the measure callback can look up text
@@ -213,21 +228,75 @@ struct NodeContext {
     font_size: f32,
 }
 
+/// Retained Taffy structure across frames. The App holds one of
+/// these so resize / scroll-out-of-buffer / scale invalidations
+/// reuse the existing `TaffyTree` instead of allocating a fresh
+/// one each frame and walking the renderer tree to rebuild it.
+///
+/// `structure_key` is a hash of the inputs that change the *shape*
+/// of the Taffy tree (renderer-tree generation, viewport, scale —
+/// the last two because tw breakpoints and HiDPI scaling are baked
+/// into per-node `Style` at build time). When that key matches
+/// across frames, the structure is reused. Otherwise it's torn
+/// down and rebuilt.
+pub struct TaffyState {
+    tree: TaffyTree<NodeContext>,
+    root: NodeId,
+    renderer_for_taffy: HashMap<NodeId, String>,
+    structure_key: u64,
+}
+
+impl TaffyState {
+    pub fn new() -> Self {
+        let mut tree: TaffyTree<NodeContext> = TaffyTree::new();
+        // Dummy root; replaced on first structure rebuild.
+        let root = tree
+            .new_leaf(Style::default())
+            .expect("taffy root placeholder");
+        Self {
+            tree,
+            root,
+            renderer_for_taffy: HashMap::new(),
+            structure_key: 0,
+        }
+    }
+}
+
+impl Default for TaffyState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+fn taffy_structure_key(tree_generation: u64, viewport: (u32, u32), scale: f32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    tree_generation.hash(&mut h);
+    viewport.0.hash(&mut h);
+    viewport.1.hash(&mut h);
+    scale.to_bits().hash(&mut h);
+    h.finish()
+}
+
 impl LayoutPass {
     /// Convenience for callers that don't need scrolling — equivalent
-    /// to [`Self::compute_with_scroll`] with `scroll_y = 0.0`.
+    /// Convenience for tests / static screenshots that want every
+    /// item in the tree, regardless of whether it falls within the
+    /// viewport. The App always wants culling, so the public
+    /// scroll-aware entry points pass `cull = true` internally.
     pub fn compute(
         tree: &Tree,
         text: &mut TextEngine,
         viewport: (u32, u32),
         scale: f32,
     ) -> Self {
-        Self::compute_with_scroll(tree, text, viewport, scale, 0.0)
+        Self::compute_inner(tree, text, viewport, scale, 0.0, &HashMap::new(), false)
     }
 
-    /// Page-only scroll: `scroll_y` shifts every emitted item's `y` by
-    /// the same amount. No per-container scroll. Equivalent to
-    /// [`Self::compute_with_scrolls`] with an empty container map.
+    /// Page-only scroll, no culling — kept for tests and the demo
+    /// pre-renders. Production callers go through
+    /// [`Self::compute_with_scrolls`] which culls off-viewport
+    /// subtrees.
     pub fn compute_with_scroll(
         tree: &Tree,
         text: &mut TextEngine,
@@ -235,7 +304,7 @@ impl LayoutPass {
         scale: f32,
         scroll_y: f32,
     ) -> Self {
-        Self::compute_with_scrolls(tree, text, viewport, scale, scroll_y, &HashMap::new())
+        Self::compute_inner(tree, text, viewport, scale, scroll_y, &HashMap::new(), false)
     }
 
     /// Run a full layout pass with both page-level `scroll_y` (physical
@@ -244,7 +313,10 @@ impl LayoutPass {
     /// its current vertical scroll offset (positive = scrolled down).
     /// Descendants of each scrollable container have its offset
     /// subtracted from their `y` *in addition to* the page scroll, so
-    /// nested scrollables compose correctly.
+    /// nested scrollables compose correctly. Items fully outside the
+    /// viewport (with one viewport-height of buffer on each side)
+    /// are skipped at emit time so paint / hit-test / a11y work
+    /// scales with visible content rather than feed length.
     pub fn compute_with_scrolls(
         tree: &Tree,
         text: &mut TextEngine,
@@ -253,44 +325,105 @@ impl LayoutPass {
         scroll_y: f32,
         scrolls: &HashMap<String, f32>,
     ) -> Self {
-        let mut taffy: TaffyTree<NodeContext> = TaffyTree::new();
+        Self::compute_inner(tree, text, viewport, scale, scroll_y, scrolls, true)
+    }
 
-        // The synthetic outer container holds top-level page padding and
-        // a vertical stack of root children.
-        let mut renderer_for_taffy: HashMap<NodeId, String> = HashMap::new();
+    /// Layout entry point used by `App.redraw` — keeps `TaffyState`
+    /// across frames so resize / scroll-out-of-buffer / scale changes
+    /// don't pay the cost of a fresh `TaffyTree` allocation + full
+    /// renderer-tree walk every time. Structure rebuilds only when
+    /// `(tree_generation, viewport, scale)` changes; other
+    /// invalidations (page scroll position, per-Container scroll
+    /// state) reuse the existing tree and just re-run
+    /// `compute_layout` + emit.
+    pub fn compute_with_state(
+        state: &mut TaffyState,
+        tree: &Tree,
+        text: &mut TextEngine,
+        viewport: (u32, u32),
+        scale: f32,
+        scroll_y: f32,
+        scrolls: &HashMap<String, f32>,
+        tree_generation: u64,
+    ) -> Self {
+        Self::compute_inner_state(state, tree, text, viewport, scale, scroll_y, scrolls, tree_generation, true)
+    }
+
+    fn compute_inner(
+        tree: &Tree,
+        text: &mut TextEngine,
+        viewport: (u32, u32),
+        scale: f32,
+        scroll_y: f32,
+        scrolls: &HashMap<String, f32>,
+        cull: bool,
+    ) -> Self {
+        // One-shot entry for tests + demo pre-renders. Spins up a
+        // fresh `TaffyState` so back-compat callers keep working
+        // without threading retention through every site.
+        let mut state = TaffyState::new();
+        Self::compute_inner_state(&mut state, tree, text, viewport, scale, scroll_y, scrolls, 0, cull)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn compute_inner_state(
+        state: &mut TaffyState,
+        tree: &Tree,
+        text: &mut TextEngine,
+        viewport: (u32, u32),
+        scale: f32,
+        scroll_y: f32,
+        scrolls: &HashMap<String, f32>,
+        tree_generation: u64,
+        cull: bool,
+    ) -> Self {
+        let key = taffy_structure_key(tree_generation, viewport, scale);
         let viewport_w_px = viewport.0 as f32;
-        let mut root_children = Vec::new();
-        for child_id in tree.root_children() {
-            if let Some(node_id) = build_subtree(
-                &mut taffy,
-                tree,
-                child_id,
-                scale,
-                viewport_w_px,
-                &mut renderer_for_taffy,
-            ) {
-                root_children.push(node_id);
-            }
-        }
 
-        let pad = DEFAULT_PADDING_PX * scale;
-        let outer_style = Style {
-            display: Display::Flex,
-            flex_direction: FlexDirection::Column,
-            padding: Rect_::length(pad),
-            gap: Size {
-                width: length(DEFAULT_GAP_PX * scale),
-                height: length(DEFAULT_GAP_PX * scale),
-            },
-            size: Size {
-                width: length(viewport.0 as f32),
-                height: length(viewport.1 as f32),
-            },
-            ..Default::default()
-        };
-        let root = taffy
-            .new_with_children(outer_style, &root_children)
-            .expect("taffy root node");
+        if state.structure_key != key {
+            // Rebuild structure. Reuse the `TaffyState` allocation
+            // by replacing the inner `TaffyTree` (`TaffyTree::new()`
+            // re-allocates the slotmap; the held HashMap clears in
+            // place).
+            state.tree = TaffyTree::new();
+            state.renderer_for_taffy.clear();
+            let mut root_children = Vec::new();
+            for child_id in tree.root_children() {
+                if let Some(node_id) = build_subtree(
+                    &mut state.tree,
+                    tree,
+                    child_id,
+                    scale,
+                    viewport_w_px,
+                    &mut state.renderer_for_taffy,
+                ) {
+                    root_children.push(node_id);
+                }
+            }
+            let pad = DEFAULT_PADDING_PX * scale;
+            let outer_style = Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                padding: Rect_::length(pad),
+                gap: Size {
+                    width: length(DEFAULT_GAP_PX * scale),
+                    height: length(DEFAULT_GAP_PX * scale),
+                },
+                size: Size {
+                    width: length(viewport.0 as f32),
+                    height: length(viewport.1 as f32),
+                },
+                ..Default::default()
+            };
+            state.root = state
+                .tree
+                .new_with_children(outer_style, &root_children)
+                .expect("taffy root node");
+            state.structure_key = key;
+        }
+        let root = state.root;
+        let taffy = &mut state.tree;
+        let renderer_for_taffy = &state.renderer_for_taffy;
 
         let available = Size {
             width: AvailableSpace::Definite(viewport.0 as f32),
@@ -330,6 +463,28 @@ impl LayoutPass {
         // coordinates first so we can capture the true content size.
         let mut items = Vec::new();
         let mut content_size = (0.0_f32, 0.0_f32);
+        // Cull subtrees outside the viewport (with one viewport-
+        // height of buffer above + below for smooth scroll-in).
+        // The cull viewport is in NATURAL (pre-page-scroll) item
+        // coordinates: emit_items writes `rect.y = natural - any
+        // ancestor container shifts`, and page scroll is applied as
+        // a separate post-pass — so the cull's `y` origin must be
+        // `scroll_y` to track which items are actually on-screen.
+        // Items emitted here feed every downstream walk — paint,
+        // hit-test, AccessKit, raster cache lookups — so culling
+        // here bounds frame work to visible content. Tests that
+        // need to inspect off-screen layout call the test-facing
+        // `LayoutPass::compute*` wrappers which thread `cull = false`.
+        let cull_viewport = if cull {
+            Some(Rect {
+                x: 0.0,
+                y: scroll_y,
+                w: viewport.0 as f32,
+                h: viewport.1 as f32,
+            })
+        } else {
+            None
+        };
         emit_items(
             &taffy,
             root,
@@ -342,6 +497,7 @@ impl LayoutPass {
             scrolls,
             &mut items,
             &mut content_size,
+            cull_viewport,
         );
 
         // Apply scroll. Phase 8 only scrolls the page vertically;
@@ -352,17 +508,46 @@ impl LayoutPass {
             }
         }
 
+        let mut by_node_id = HashMap::with_capacity(items.len());
+        let mut actionable_ids = Vec::new();
+        let mut focusable_ids = Vec::new();
+        let mut scrollable_ids = Vec::new();
+        for (idx, it) in items.iter().enumerate() {
+            by_node_id.insert(it.node_id.clone(), idx);
+            if it.action.is_some() {
+                actionable_ids.push(idx);
+            }
+            if it.is_focusable() {
+                focusable_ids.push(idx);
+            }
+            if it.scrollable.is_some() {
+                scrollable_ids.push(idx);
+            }
+        }
+
         Self {
             items,
             content_size,
+            by_node_id,
+            actionable_ids,
+            focusable_ids,
+            scrollable_ids,
         }
     }
 
+    /// O(1) item lookup by renderer node id.
+    pub fn item_by_id(&self, id: &str) -> Option<&LayoutItem> {
+        self.by_node_id.get(id).map(|&i| &self.items[i])
+    }
+
     pub fn hit(&self, x: f32, y: f32) -> Option<&LayoutItem> {
-        self.items
+        // Walk actionables in reverse paint order — topmost wins.
+        // O(n_actionables) instead of O(n_items).
+        self.actionable_ids
             .iter()
             .rev()
-            .find(|it| it.action.is_some() && it.rect.contains(x, y))
+            .map(|&i| &self.items[i])
+            .find(|it| it.rect.contains(x, y))
     }
 
     /// Topmost focusable item under the cursor — actionables OR text
@@ -370,51 +555,67 @@ impl LayoutPass {
     /// an Input focuses it for typing; clicking a Button focuses *and*
     /// the matching mouse-up dispatches its action).
     pub fn hit_focusable(&self, x: f32, y: f32) -> Option<&LayoutItem> {
-        self.items
+        self.focusable_ids
             .iter()
             .rev()
-            .find(|it| it.is_focusable() && it.rect.contains(x, y))
+            .map(|&i| &self.items[i])
+            .find(|it| it.rect.contains(x, y))
     }
 
-    /// All actionable items in document (paint) order. Used by keyboard
-    /// navigation to walk Tab focus through the tree.
+    /// Topmost scrollable Container under the cursor. Used by the
+    /// wheel handler to route scroll to the innermost scrollable.
+    pub fn hit_scrollable(&self, x: f32, y: f32) -> Option<&LayoutItem> {
+        self.scrollable_ids
+            .iter()
+            .rev()
+            .map(|&i| &self.items[i])
+            .find(|it| it.rect.contains(x, y))
+    }
+
+    /// All actionable items in document (paint) order.
     pub fn actionables(&self) -> impl Iterator<Item = &LayoutItem> {
-        self.items.iter().filter(|it| it.action.is_some())
+        self.actionable_ids.iter().map(|&i| &self.items[i])
     }
 
     /// All focusable items in document order — actionables + text inputs.
-    /// Tab cycles through this list.
     pub fn focusables(&self) -> impl Iterator<Item = &LayoutItem> {
-        self.items.iter().filter(|it| it.is_focusable())
+        self.focusable_ids.iter().map(|&i| &self.items[i])
     }
 
     /// Node id of the focusable that follows `current` in document
     /// order. If `current` is `None` or unknown, returns the first
     /// focusable. If `current` is the last, wraps to the first.
     pub fn focus_next(&self, current: Option<&str>) -> Option<String> {
-        let ids: Vec<&str> = self.focusables().map(|it| it.node_id.as_str()).collect();
-        if ids.is_empty() {
+        if self.focusable_ids.is_empty() {
             return None;
         }
         let idx = current
-            .and_then(|c| ids.iter().position(|id| *id == c))
-            .map(|i| (i + 1) % ids.len())
+            .and_then(|c| {
+                self.focusable_ids
+                    .iter()
+                    .position(|&i| self.items[i].node_id == c)
+            })
+            .map(|i| (i + 1) % self.focusable_ids.len())
             .unwrap_or(0);
-        Some(ids[idx].to_string())
+        Some(self.items[self.focusable_ids[idx]].node_id.clone())
     }
 
     /// Node id of the focusable that precedes `current` in document
     /// order. Wraps to the last when `current` is the first.
     pub fn focus_prev(&self, current: Option<&str>) -> Option<String> {
-        let ids: Vec<&str> = self.focusables().map(|it| it.node_id.as_str()).collect();
-        if ids.is_empty() {
+        let n = self.focusable_ids.len();
+        if n == 0 {
             return None;
         }
         let idx = current
-            .and_then(|c| ids.iter().position(|id| *id == c))
-            .map(|i| (i + ids.len() - 1) % ids.len())
-            .unwrap_or(ids.len() - 1);
-        Some(ids[idx].to_string())
+            .and_then(|c| {
+                self.focusable_ids
+                    .iter()
+                    .position(|&i| self.items[i].node_id == c)
+            })
+            .map(|i| (i + n - 1) % n)
+            .unwrap_or(n - 1);
+        Some(self.items[self.focusable_ids[idx]].node_id.clone())
     }
 }
 
@@ -479,6 +680,8 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, viewport_w, scale);
+            apply_alignment_props(&mut style, node, viewport_w);
+            apply_size_props(&mut style, node, viewport_w, scale);
             let id = taffy.new_leaf(style).ok()?;
             renderer_for_taffy.insert(id, node_id.to_string());
             Some(id)
@@ -506,6 +709,8 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, viewport_w, scale);
+            apply_alignment_props(&mut style, node, viewport_w);
+            apply_size_props(&mut style, node, viewport_w, scale);
             let id = taffy.new_leaf(style).ok()?;
             renderer_for_taffy.insert(id, node_id.to_string());
             Some(id)
@@ -515,11 +720,28 @@ fn build_subtree(
                 .map(|v| v * scale)
                 .unwrap_or(DEFAULT_FONT_SIZE_PX * scale);
             let content = node.text_content().unwrap_or("").to_string();
+            // Text leaves DO take padding / margin / border like any
+            // other flex node — `tw("text-sm font-semibold px-4")` on
+            // a Text was being silently dropped because the Text
+            // branch only set `display: Flex` and forgot the box
+            // model. `px-4` then collapsed to zero, and the user saw
+            // "1421 likes" rendered flush-left instead of indented.
+            let pad = padding_at(node, viewport_w);
             let mut style = Style {
                 display: Display::Flex,
+                padding: Rect_ {
+                    left: length(pad.left * scale),
+                    right: length(pad.right * scale),
+                    top: length(pad.top * scale),
+                    bottom: length(pad.bottom * scale),
+                },
+                margin: margin_to_taffy(margin_at(node, viewport_w), scale),
+                border: border_to_taffy(border_at(node, viewport_w), scale),
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, viewport_w, scale);
+            apply_alignment_props(&mut style, node, viewport_w);
+            apply_size_props(&mut style, node, viewport_w, scale);
             let id = taffy
                 .new_leaf_with_context(
                     style,
@@ -570,6 +792,8 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, viewport_w, scale);
+            apply_alignment_props(&mut style, node, viewport_w);
+            apply_size_props(&mut style, node, viewport_w, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(taffy, tree, child_id, scale, viewport_w, renderer_for_taffy) {
@@ -605,6 +829,8 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, viewport_w, scale);
+            apply_alignment_props(&mut style, node, viewport_w);
+            apply_size_props(&mut style, node, viewport_w, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) =
@@ -667,6 +893,8 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, viewport_w, scale);
+            apply_alignment_props(&mut style, node, viewport_w);
+            apply_size_props(&mut style, node, viewport_w, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(taffy, tree, child_id, scale, viewport_w, renderer_for_taffy) {
@@ -690,6 +918,105 @@ fn length_or_zero_lpa(v: LengthPercentageAuto) -> LengthPercentageAuto {
         LengthPercentageAuto::length(0.0)
     } else {
         v
+    }
+}
+
+/// Read `width` / `height` props (px or %) and apply to the Style's
+/// `size`. Touches every container kind so explicit sizing on
+/// generic Columns / Rows / Containers behaves like every other
+/// renderer instead of always falling through to content size.
+fn apply_size_props(style: &mut Style, node: &crate::tree::Node, viewport_w: f32, scale: f32) {
+    if let Some(d) = prop_dim_at(node, "width", viewport_w) {
+        style.size.width = match d {
+            Dim::Length(v) => Dimension::length(v * scale),
+            Dim::Percent(p) => Dimension::percent(p),
+        };
+    }
+    if let Some(d) = prop_dim_at(node, "height", viewport_w) {
+        style.size.height = match d {
+            Dim::Length(v) => Dimension::length(v * scale),
+            Dim::Percent(p) => Dimension::percent(p),
+        };
+    }
+    if let Some(d) = prop_dim_at(node, "minWidth", viewport_w) {
+        style.min_size.width = match d {
+            Dim::Length(v) => Dimension::length(v * scale),
+            Dim::Percent(p) => Dimension::percent(p),
+        };
+    }
+    if let Some(d) = prop_dim_at(node, "minHeight", viewport_w) {
+        style.min_size.height = match d {
+            Dim::Length(v) => Dimension::length(v * scale),
+            Dim::Percent(p) => Dimension::percent(p),
+        };
+    }
+    if let Some(d) = prop_dim_at(node, "maxWidth", viewport_w) {
+        style.max_size.width = match d {
+            Dim::Length(v) => Dimension::length(v * scale),
+            Dim::Percent(p) => Dimension::percent(p),
+        };
+    }
+    if let Some(d) = prop_dim_at(node, "maxHeight", viewport_w) {
+        style.max_size.height = match d {
+            Dim::Length(v) => Dimension::length(v * scale),
+            Dim::Percent(p) => Dimension::percent(p),
+        };
+    }
+}
+
+/// Apply alignment props (`align-items`, `align-self`,
+/// `justify-content`, `justify-self`). Without this, tw
+/// `items-center` / `justify-center` were silently dropped and
+/// children stretched to fill the cross-axis — that's what made
+/// the StoryItem's circular border container render as an ellipse
+/// (the inner container with `rounded-full` was being stretched
+/// horizontally to match its parent's width via the default flex
+/// `align-items: stretch`).
+fn apply_alignment_props(style: &mut Style, node: &crate::tree::Node, viewport_w: f32) {
+    use crate::style::prop_str_at;
+    if let Some(s) = prop_str_at(node, "alignItems", viewport_w) {
+        if let Some(a) = parse_align(&s) {
+            style.align_items = Some(a);
+        }
+    }
+    if let Some(s) = prop_str_at(node, "alignSelf", viewport_w) {
+        if let Some(a) = parse_align(&s) {
+            style.align_self = Some(a);
+        }
+    }
+    if let Some(s) = prop_str_at(node, "justifyContent", viewport_w) {
+        if let Some(j) = parse_justify(&s) {
+            style.justify_content = Some(j);
+        }
+    }
+    if let Some(s) = prop_str_at(node, "justifySelf", viewport_w) {
+        if let Some(a) = parse_align(&s) {
+            style.justify_self = Some(a);
+        }
+    }
+}
+
+fn parse_align(s: &str) -> Option<AlignItems> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "start" | "flex-start" => Some(AlignItems::Start),
+        "center" => Some(AlignItems::Center),
+        "end" | "flex-end" => Some(AlignItems::End),
+        "stretch" => Some(AlignItems::Stretch),
+        "baseline" => Some(AlignItems::Baseline),
+        _ => None,
+    }
+}
+
+fn parse_justify(s: &str) -> Option<JustifyContent> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "start" | "flex-start" => Some(JustifyContent::Start),
+        "center" => Some(JustifyContent::Center),
+        "end" | "flex-end" => Some(JustifyContent::End),
+        "space-between" => Some(JustifyContent::SpaceBetween),
+        "space-around" => Some(JustifyContent::SpaceAround),
+        "space-evenly" => Some(JustifyContent::SpaceEvenly),
+        "stretch" => Some(JustifyContent::Stretch),
+        _ => None,
     }
 }
 
@@ -774,6 +1101,7 @@ fn emit_items(
     scrolls: &HashMap<String, f32>,
     out: &mut Vec<LayoutItem>,
     natural_bounds: &mut (f32, f32),
+    cull_viewport: Option<Rect>,
 ) {
     let layout = taffy.layout(node_id).expect("taffy layout");
     let x = parent_x + layout.location.x;
@@ -787,6 +1115,24 @@ fn emit_items(
     natural_bounds.0 = natural_bounds.0.max(x + layout.size.width);
     natural_bounds.1 = natural_bounds.1.max(y_natural + layout.size.height);
 
+    // Viewport cull. When `cull_viewport` is `Some`, subtrees whose
+    // rect ends one full viewport above the visible region OR starts
+    // one full viewport below are skipped wholesale (no LayoutItem
+    // emit, no recursion). Buffer = one viewport-height of slack on
+    // each side so a partly-off-screen post that's about to scroll
+    // in stays in the layout. The synthetic outer wrapper has no
+    // renderer node — never cull it, otherwise the entire tree
+    // disappears for any page taller than the viewport.
+    let renderer_id = renderer_for_taffy.get(&node_id).cloned();
+    if let (Some(v), Some(_)) = (cull_viewport, renderer_id.as_deref()) {
+        let buffer = v.h;
+        let bottom = rect.y + rect.h;
+        let top = rect.y;
+        if bottom < v.y - buffer || top > v.y + v.h + buffer {
+            return;
+        }
+    }
+
     // Detect if this renderer node is a scrollable container; if so,
     // its descendants get an additional shift equal to its scroll
     // offset, and we back-fill `ScrollMeta { content_h }` after walking
@@ -794,7 +1140,6 @@ fn emit_items(
     let mut child_scroll_shift_y = parent_scroll_shift_y;
     let mut scrollable_idx: Option<usize> = None;
 
-    let renderer_id = renderer_for_taffy.get(&node_id).cloned();
     if let Some(rid) = renderer_id.as_deref() {
         if let Some(node) = tree.get(rid) {
             let action = resolve_action(node);
@@ -1017,6 +1362,7 @@ fn emit_items(
             scrolls,
             out,
             natural_bounds,
+            cull_viewport,
         );
         if scrollable_idx.is_some() {
             if let Ok(cl) = taffy.layout(child) {

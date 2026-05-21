@@ -964,6 +964,82 @@ use std::sync::Arc;
     }
 
     #[test]
+    fn align_items_center_sizes_inner_to_content() {
+        // Regression: a Column with `alignItems: "center"` was
+        // ignored, so the inner border-container in StoryItem
+        // stretched to the parent's full width (default
+        // `align-items: stretch`). That made `rounded-full` on a
+        // square 60×60 content render around a much wider
+        // rectangle, drawing the border as a stadium / ellipse
+        // instead of a circle.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "outer",
+            "Column",
+            &[("alignItems", json!("center"))],
+        ));
+        tree.apply(&insert_patch("root", "outer"));
+        // Container wraps the Image (whose width/height are read).
+        tree.apply(&create_patch("ring", "Container", &[]));
+        tree.apply(&insert_patch("outer", "ring"));
+        tree.apply(&create_patch(
+            "img",
+            "Image",
+            &[("width", json!(60)), ("height", json!(60))],
+        ));
+        tree.apply(&insert_patch("ring", "img"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let ring = find_item(&pass, "ring");
+        // alignItems: center on the outer should let the ring
+        // size to its content (60-ish, allowing for 8px default
+        // padding zero on Container) instead of stretching to the
+        // full viewport width.
+        assert!(
+            ring.rect.w < 200.0,
+            "alignItems: center should not stretch ring to viewport; got rect.w={}",
+            ring.rect.w,
+        );
+        // And the ring should be square-ish (within 1px of its
+        // content) — the visible "stretching" of the border ring
+        // would manifest as w > 200 on a wide viewport.
+        assert!(
+            (ring.rect.w - ring.rect.h).abs() < 2.0,
+            "ring should be ~square; got {}x{}",
+            ring.rect.w,
+            ring.rect.h,
+        );
+    }
+
+    #[test]
+    fn justify_content_center_centers_main_axis() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "row",
+            "Row",
+            &[("justifyContent", json!("center"))],
+        ));
+        tree.apply(&insert_patch("root", "row"));
+        tree.apply(&create_patch(
+            "child",
+            "Image",
+            &[("width", json!(40)), ("height", json!(40))],
+        ));
+        tree.apply(&insert_patch("row", "child"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let row = find_item(&pass, "row");
+        let child = find_item(&pass, "child");
+        // Center within row → child x ≈ row.x + (row.w - 40) / 2.
+        let expected_x = row.rect.x + (row.rect.w - 40.0) * 0.5;
+        assert!(
+            (child.rect.x - expected_x).abs() < 1.0,
+            "child x should be centered ({expected_x}), got {}",
+            child.rect.x,
+        );
+    }
+
+    #[test]
     fn directional_border_sets_only_those_sides() {
         // Regression: tw `border-b` used to expand to a full
         // `border-width: 1px` (all 4 sides) so every card / divider

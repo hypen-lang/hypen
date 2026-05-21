@@ -8,7 +8,7 @@ use crate::style::Rgba;
 use cosmic_text::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight,
 };
-use std::collections::HashMap;
+use indexmap::IndexMap;
 use tiny_skia::Pixmap;
 
 /// Cap on cached `(text, font_size, wrap_width) -> (w, h)` entries.
@@ -31,13 +31,13 @@ pub struct TextEngine {
     /// per layout pass). The (text, size, wrap) triple is invariant
     /// for a given content snapshot, so a cheap cache turns N text
     /// nodes × M Taffy passes into ≤N shapes per frame.
-    measure_cache: HashMap<u64, (f32, f32)>,
+    measure_cache: IndexMap<u64, (f32, f32)>,
     /// Pre-rasterised pixmaps keyed on `(text, font_size, color, wrap)`.
     /// On a cache hit, painting a Text becomes a single `draw_pixmap`
     /// instead of running cosmic-text's shape + per-glyph alpha blend
     /// loop again. This is the leaf-element layer cache — text nodes
     /// are by far the slowest single op in the paint loop.
-    raster_cache: HashMap<u64, Pixmap>,
+    raster_cache: IndexMap<u64, Pixmap>,
 }
 
 impl TextEngine {
@@ -45,8 +45,8 @@ impl TextEngine {
         Self {
             fonts: FontSystem::new(),
             swash: SwashCache::new(),
-            measure_cache: HashMap::new(),
-            raster_cache: HashMap::new(),
+            measure_cache: IndexMap::new(),
+            raster_cache: IndexMap::new(),
         }
     }
 
@@ -113,9 +113,12 @@ impl TextEngine {
         }
         let result = (max_w.ceil(), total_h.ceil());
         if self.measure_cache.len() >= MEASURE_CACHE_CAP {
-            // Cheap LRU substitute: drop the whole map when it fills.
-            // The next frame rebuilds only what's still on screen.
-            self.measure_cache.clear();
+            // FIFO single-entry eviction. Wholesale clear caused
+            // frame-time cliffs as the cache filled — every miss past
+            // the cap re-shaped the next 2k unique text/font/wrap
+            // tuples in lockstep. Single-entry pop keeps churn
+            // proportional to inserts.
+            self.measure_cache.shift_remove_index(0);
         }
         self.measure_cache.insert(key, result);
         result
@@ -343,7 +346,11 @@ impl TextEngine {
             };
             self.draw_text_weighted(&mut tile, text, 0.0, 0.0, font_size, color, wrap_width, weight);
             if self.raster_cache.len() >= RASTER_CACHE_CAP {
-                self.raster_cache.clear();
+                // FIFO single-entry eviction; wholesale clear was
+                // catastrophic on text-heavy screens (every miss
+                // past 512 unique tiles re-rasterised the next
+                // batch in lockstep).
+                self.raster_cache.shift_remove_index(0);
             }
             self.raster_cache.insert(key, tile);
         }
