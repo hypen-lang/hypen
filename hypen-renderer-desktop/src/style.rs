@@ -431,6 +431,33 @@ pub fn border_at(node: &Node, viewport_w: f32) -> Border {
     }
 }
 
+/// True if the user supplied any border-* prop on this node — even
+/// if it resolved to `width: 0` (e.g. `.tw("border-0")`). Lets the
+/// layout's default-border fallback distinguish "user opted out" from
+/// "user didn't say anything", so `border-0` actually clears the
+/// default Button stroke instead of being shadowed by it.
+pub fn has_explicit_border(node: &Node) -> bool {
+    const KEYS: &[&str] = &[
+        "border",
+        "border.0",
+        "border.width",
+        "border.color",
+        "border.radius",
+        "borderWidth",
+        "borderWidth.0",
+        "border-width",
+        "borderColor",
+        "borderColor.0",
+        "border-color",
+        "borderRadius",
+        "borderRadius.0",
+        "border-radius",
+        "cornerRadius",
+        "cornerRadius.0",
+    ];
+    KEYS.iter().any(|k| node.props.contains_key(*k))
+}
+
 fn value_to_f32(v: &Value) -> Option<f32> {
     match v {
         Value::Number(n) => n.as_f64().map(|f| f as f32),

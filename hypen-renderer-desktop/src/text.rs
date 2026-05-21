@@ -8,12 +8,26 @@ use crate::style::Rgba;
 use cosmic_text::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache,
 };
+use std::collections::HashMap;
 use tiny_skia::Pixmap;
+
+/// Cap on cached `(text, font_size, wrap_width) -> (w, h)` entries.
+/// 2k is plenty for a busy screen (the social example tops out near
+/// ~120 unique text/font/wrap tuples) and bounds memory at ~32KB.
+const MEASURE_CACHE_CAP: usize = 2048;
 
 /// Owns the long-lived text engine state.
 pub struct TextEngine {
     pub fonts: FontSystem,
     pub swash: SwashCache,
+    /// Memoise `measure(text, font_size, wrap_width)` results.
+    /// Cosmic-text's `Buffer::new` + `set_text` + `shape_until_scroll`
+    /// pipeline is the dominant per-frame cost on text-heavy screens
+    /// (Taffy fires the measure callback multiple times per text node
+    /// per layout pass). The (text, size, wrap) triple is invariant
+    /// for a given content snapshot, so a cheap cache turns N text
+    /// nodes × M Taffy passes into ≤N shapes per frame.
+    measure_cache: HashMap<u64, (f32, f32)>,
 }
 
 impl TextEngine {
@@ -21,7 +35,16 @@ impl TextEngine {
         Self {
             fonts: FontSystem::new(),
             swash: SwashCache::new(),
+            measure_cache: HashMap::new(),
         }
+    }
+
+    /// Drop the cached measurements. Call when the font system gains
+    /// new fonts, or on a heavy memory-pressure signal. The cache
+    /// auto-evicts at `MEASURE_CACHE_CAP` so ordinary use never needs
+    /// to call this.
+    pub fn clear_measure_cache(&mut self) {
+        self.measure_cache.clear();
     }
 
     /// Measure `text` at `font_size` (physical px). When `wrap_width` is
@@ -33,6 +56,19 @@ impl TextEngine {
         font_size: f32,
         wrap_width: Option<f32>,
     ) -> (f32, f32) {
+        // Cache key: hash text + font_size bits + wrap bits. f32 NaN
+        // never reaches us (Taffy hands us finite values), so
+        // to_bits() is collision-free across the inputs we get.
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        font_size.to_bits().hash(&mut hasher);
+        wrap_width.map(f32::to_bits).hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some(&hit) = self.measure_cache.get(&key) {
+            return hit;
+        }
+
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new().family(Family::SansSerif);
@@ -49,7 +85,14 @@ impl TextEngine {
         if total_h == 0.0 {
             total_h = font_size * 1.3;
         }
-        (max_w.ceil(), total_h.ceil())
+        let result = (max_w.ceil(), total_h.ceil());
+        if self.measure_cache.len() >= MEASURE_CACHE_CAP {
+            // Cheap LRU substitute: drop the whole map when it fills.
+            // The next frame rebuilds only what's still on screen.
+            self.measure_cache.clear();
+        }
+        self.measure_cache.insert(key, result);
+        result
     }
 
     /// Return the byte offset within `text` whose leading-substring

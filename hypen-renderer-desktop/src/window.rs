@@ -6,7 +6,9 @@
 //! repaint whenever new patches show up.
 
 use crate::accessibility::{renderer_id_for, tree_update_for_layout};
+use crate::damage::Damage;
 use crate::gpu::Gpu;
+use crate::ime::{apply_ime_transition, ImeEffect};
 use crate::layout::{ItemKind, LayoutPass};
 use crate::module::HypenModule;
 use crate::paint::cpu::CpuPainter;
@@ -165,6 +167,42 @@ pub struct App {
     /// we toggle off when focus leaves an `Input`.
     ime_active: bool,
 
+    /// Per-frame damage tracking. `Full` is the conservative default
+    /// after patches / resize / scroll (anything that moves geometry
+    /// or invalidates the whole image). `Region(rect)` accumulates
+    /// scoped damage from high-frequency events that only change a
+    /// small area — hover and press tints in particular. The redraw
+    /// path consumes this and resets to `None`; both the CPU paint
+    /// and the GPU upload then operate on the bounding rect only.
+    damage: Damage,
+    /// Bumps every time `flush_patches` applies one or more Patches.
+    /// Feeds the layout cache key — patches mutate the tree, so any
+    /// non-empty patch batch invalidates the cached layout.
+    tree_generation: u64,
+    /// Hash of the inputs that fed the most recent successful layout
+    /// pass. When the next frame's key matches, we reuse `self.layout`
+    /// instead of running Taffy + cosmic-text again. Captures: tree
+    /// generation, viewport (w, h), scale, page scroll, every
+    /// per-Container scroll offset.
+    last_layout_key: Option<u64>,
+    /// Pending resize coalescing. macOS / GNOME emit a burst of
+    /// `Resized` events while the user drags a window edge; doing a
+    /// full `gpu.resize` + layout + paint per event multiplies work by
+    /// ~10–20x. We store the latest size here and apply it once at
+    /// the start of the next redraw, so a drag turns into one
+    /// configure + texture upload per displayed frame instead of one
+    /// per OS event.
+    pending_resize: Option<(u32, u32)>,
+    /// Hash of the last AccessKit tree we published. Lets us skip
+    /// rebuilding + sending the full TreeUpdate when nothing
+    /// semantically changed (e.g. the user is just hovering or
+    /// scrolling — no new node IDs, no new roles, no new bounds).
+    last_a11y_fingerprint: u64,
+    /// Last `(focused_id, rect)` we passed to `set_ime_cursor_area`.
+    /// `None` whenever the OS IME is currently disabled. Lets us
+    /// skip the redundant call every frame when the focused Input's
+    /// rect hasn't moved.
+    last_ime_target: Option<(String, (i32, i32, u32, u32))>,
     /// Vertical page scroll offset in physical pixels.
     scroll_y: f32,
     /// Per-scrollable-Container offsets in physical pixels, keyed by
@@ -206,6 +244,12 @@ impl App {
             clipboard: None,
             ime_preedit: None,
             ime_active: false,
+            damage: Damage::Full,
+            tree_generation: 0,
+            last_layout_key: None,
+            pending_resize: None,
+            last_a11y_fingerprint: 0,
+            last_ime_target: None,
             scroll_y: 0.0,
             scrollables: HashMap::new(),
         }
@@ -237,12 +281,25 @@ impl App {
             false
         } else {
             self.tree.apply_batch(&patches);
+            self.tree_generation = self.tree_generation.wrapping_add(1);
             self.layout = None;
+            // Tree mutation can move anything, anywhere — we don't
+            // try to compute the touched subtrees today.
+            self.damage.add_full();
             true
         }
     }
 
     fn redraw(&mut self) {
+        // Apply any pending resize once, just before painting. This
+        // turns a Resized burst from N gpu.resize + paint passes into
+        // exactly one per displayed frame.
+        if let Some((w, h)) = self.pending_resize.take() {
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.resize(w, h);
+            }
+        }
+
         self.flush_patches();
 
         let (w, h, scale) = match (self.gpu.as_ref(), self.window.as_ref()) {
@@ -291,8 +348,42 @@ impl App {
             });
         }
 
-        self.painter.paint_with_scrolls(
-            &self.tree,
+        // Layout cache. Hover / press / focus / caret-only frames
+        // don't change anything that feeds Taffy or cosmic-text, so a
+        // matching key lets us skip the entire layout pass and reuse
+        // the previous frame's `self.layout`. Mutates that change the
+        // tree (patches), viewport (resize), or scroll positions all
+        // bump the key and force a recompute.
+        let key = self.layout_cache_key(w, h, scale);
+        let cache_miss = self.layout.is_none() || self.last_layout_key != Some(key);
+        if cache_miss {
+            let pass = LayoutPass::compute_with_scrolls(
+                &self.tree,
+                self.painter.text_engine_mut(),
+                (w, h),
+                scale,
+                self.scroll_y,
+                &self.scrollables,
+            );
+            self.layout = Some(pass);
+            self.last_layout_key = Some(key);
+        }
+        // Resolve damage. `Damage::None` means a redraw fired but
+        // no specific region was marked — repaint everything to be
+        // safe (something might have changed without going through a
+        // damage-marking path). Layout-cache misses also force a full
+        // repaint, since the new geometry can shift any item.
+        let damage = match self.damage {
+            Damage::Region(r) if !cache_miss => Some(r),
+            _ => None,
+        };
+        self.damage = Damage::None;
+        // Borrow split: paint_layout takes `&LayoutPass` while the
+        // painter takes `&mut self.painter`; both fields live on
+        // `self`, so we lift the immutable borrow up first.
+        let pass = self.layout.as_ref().expect("layout populated above");
+        self.painter.paint_layout_with_damage(
+            pass,
             PaintTarget {
                 pixels: &mut self.pixels,
                 width: w,
@@ -300,27 +391,33 @@ impl App {
                 scale_factor: scale,
             },
             self.scroll_y,
-            &self.scrollables,
-        );
-        let pass = LayoutPass::compute_with_scrolls(
-            &self.tree,
-            self.painter.text_engine_mut(),
-            (w, h),
-            scale,
-            self.scroll_y,
-            &self.scrollables,
+            damage,
         );
         let new_scroll = clamp_scroll(self.scroll_y, pass.content_size.1, h as f32);
         if (new_scroll - self.scroll_y).abs() > f32::EPSILON {
             self.scroll_y = new_scroll;
+            self.damage.add_full();
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
         }
-        self.layout = Some(pass);
+        // `self.layout` is already populated by the cache-miss branch
+        // above; no second store needed.
 
         let gpu = self.gpu.as_mut().expect("gpu set");
-        if let Err(e) = gpu.present(&self.pixels) {
+        // Forward damage to the GPU upload too: only the dirty
+        // rectangle gets pushed across PCIe (still drawing the full
+        // surface from the texture afterwards, since the unchanged
+        // pixels live in the texture from previous frames).
+        let upload_region = damage.map(|r| {
+            (
+                r.x.max(0.0) as u32,
+                r.y.max(0.0) as u32,
+                r.w.max(0.0) as u32,
+                r.h.max(0.0) as u32,
+            )
+        });
+        if let Err(e) = gpu.present_region(&self.pixels, upload_region) {
             log::warn!("present failed: {e}");
         }
 
@@ -332,9 +429,110 @@ impl App {
         self.sync_ime_to_focus();
     }
 
+    /// Mark the whole surface dirty and ask winit to redraw. Used by
+    /// every event handler that mutates state in a way we don't (or
+    /// don't yet) damage-track precisely. Hover / press transitions
+    /// are the explicit exception — they call `mark_interaction_damage`
+    /// + `request_redraw` directly so that mouse-only-moving frames
+    /// stay scoped.
+    fn request_redraw_full(&mut self) {
+        self.damage.add_full();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
+    /// Look up an item's drawn rect, expanded by a few px so damage
+    /// covers borders, hover tints, and the focus ring. Returns `None`
+    /// when no current layout exists or the id isn't in it.
+    fn item_damage_rect(&self, id: &str) -> Option<crate::layout::Rect> {
+        let layout = self.layout.as_ref()?;
+        let item = layout.items.iter().find(|it| it.node_id == id)?;
+        // 6 px is a comfortable cover for the 3 px outset focus ring +
+        // 2 px stroke and any 1 px border anti-aliasing.
+        const PAD: f32 = 6.0;
+        Some(crate::layout::Rect {
+            x: item.rect.x - PAD,
+            y: item.rect.y - PAD,
+            w: item.rect.w + 2.0 * PAD,
+            h: item.rect.h + 2.0 * PAD,
+        })
+    }
+
+    /// Mark damage for an interaction transition: union of the rect
+    /// of `old` and `new` (either may be `None`).
+    fn mark_interaction_damage(&mut self, old: Option<&str>, new: Option<&str>) {
+        if let Some(id) = old {
+            if let Some(r) = self.item_damage_rect(id) {
+                self.damage.add_region(r);
+            }
+        }
+        if let Some(id) = new {
+            if let Some(r) = self.item_damage_rect(id) {
+                self.damage.add_region(r);
+            }
+        }
+    }
+
+    /// Hash the inputs that feed `LayoutPass::compute_with_scrolls`.
+    /// Used as a cache key so hover / press / focus / caret-only
+    /// frames can reuse the previous frame's layout instead of
+    /// rerunning Taffy + cosmic-text.
+    fn layout_cache_key(&self, w: u32, h: u32, scale: f32) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h_hasher = std::collections::hash_map::DefaultHasher::new();
+        self.tree_generation.hash(&mut h_hasher);
+        w.hash(&mut h_hasher);
+        h.hash(&mut h_hasher);
+        scale.to_bits().hash(&mut h_hasher);
+        self.scroll_y.to_bits().hash(&mut h_hasher);
+        // Sorted iteration so two equivalent maps with different
+        // insertion order produce the same key.
+        let mut sorted: Vec<(&String, &f32)> = self.scrollables.iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        for (id, off) in sorted {
+            id.hash(&mut h_hasher);
+            off.to_bits().hash(&mut h_hasher);
+        }
+        h_hasher.finish()
+    }
+
     fn publish_accessibility(&mut self) {
         let Some(adapter) = self.ak.as_mut() else { return };
         let Some(layout) = self.layout.as_ref() else { return };
+        // Fingerprint the layout's a11y-relevant shape so we skip the
+        // full TreeUpdate rebuild when nothing semantic changed (the
+        // common case during scroll / hover bursts). The fingerprint
+        // covers what `tree_update_for_layout` actually reads:
+        // node id, item kind discriminant, and rect bounds (rounded
+        // to 1px so subpixel jitter doesn't invalidate the cache).
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        layout.items.len().hash(&mut hasher);
+        for it in &layout.items {
+            it.node_id.hash(&mut hasher);
+            std::mem::discriminant(&it.kind).hash(&mut hasher);
+            (it.rect.x as i32).hash(&mut hasher);
+            (it.rect.y as i32).hash(&mut hasher);
+            (it.rect.w as i32).hash(&mut hasher);
+            (it.rect.h as i32).hash(&mut hasher);
+            it.action.hash(&mut hasher);
+            // `Text { content }` and `Input { value }` change the
+            // accessible label without changing rect; mix those in.
+            match &it.kind {
+                ItemKind::Text { content, .. } => content.hash(&mut hasher),
+                ItemKind::Input { value, placeholder, .. } => {
+                    value.hash(&mut hasher);
+                    placeholder.hash(&mut hasher);
+                }
+                _ => {}
+            }
+        }
+        let fp = hasher.finish();
+        if fp == self.last_a11y_fingerprint {
+            return;
+        }
+        self.last_a11y_fingerprint = fp;
         adapter.update_if_active(|| tree_update_for_layout(layout));
     }
 
@@ -513,21 +711,30 @@ impl App {
             self.ime_active = want_ime;
             if !want_ime {
                 self.ime_preedit = None;
+                self.last_ime_target = None;
             }
         }
         if want_ime {
-            // Approximate cursor area = the focused Input's rect.
-            // Refining this to the exact caret pixel lands when we
-            // expose the painter's text-engine measure to the
-            // window — cheap follow-up.
+            // Only call `set_ime_cursor_area` when the focused Input's
+            // rect or identity actually moves. The OS winit backends
+            // translate this into platform syscalls that are cheap
+            // individually but show up in profiles when called every
+            // frame on a focused input that hasn't moved.
             if let Some(id) = self.focused.as_deref() {
                 if let Some((_, _, rect)) = self.lookup_input(id) {
-                    use winit::dpi::PhysicalPosition as P;
-                    use winit::dpi::PhysicalSize as S;
-                    window.set_ime_cursor_area(
-                        P::new(rect.x as i32, rect.y as i32),
-                        S::new(rect.w as u32, rect.h as u32),
+                    let target = (
+                        id.to_string(),
+                        (rect.x as i32, rect.y as i32, rect.w as u32, rect.h as u32),
                     );
+                    if self.last_ime_target.as_ref() != Some(&target) {
+                        use winit::dpi::PhysicalPosition as P;
+                        use winit::dpi::PhysicalSize as S;
+                        window.set_ime_cursor_area(
+                            P::new(target.1 .0, target.1 .1),
+                            S::new(target.1 .2, target.1 .3),
+                        );
+                        self.last_ime_target = Some(target);
+                    }
                 }
             }
         }
@@ -694,6 +901,13 @@ impl App {
     fn handle_click(&mut self) {
         let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
         let pressed_id = self.pressed.take();
+        // Press tint always disappears on release; damage the released
+        // button so it repaints in the un-pressed colour.
+        if let Some(id) = pressed_id.as_deref() {
+            if let Some(r) = self.item_damage_rect(id) {
+                self.damage.add_region(r);
+            }
+        }
         if let Some(layout) = self.layout.as_ref() {
             if let Some(item) = layout.hit(px, py) {
                 let same_target = pressed_id
@@ -709,9 +923,7 @@ impl App {
             }
         }
         self.dragging_input = None;
-        if let Some(w) = self.window.as_ref() {
-            w.request_redraw();
-        }
+        self.request_redraw_full();
     }
 }
 
@@ -747,9 +959,7 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             AppEvent::Accessibility(AkEvent { window_event, .. }) => match window_event {
                 AkWindowEvent::InitialTreeRequested => {
-                    if let Some(w) = self.window.as_ref() {
-                        w.request_redraw();
-                    }
+                    self.request_redraw_full();
                 }
                 AkWindowEvent::ActionRequested(req) => {
                     if matches!(req.action, AkAction::Click) {
@@ -762,9 +972,7 @@ impl ApplicationHandler<AppEvent> for App {
                                         log::debug!("dispatch (a11y): {action}");
                                         self.module.dispatch_action(&action, None);
                                         self.focused = Some(rid);
-                                        if let Some(w) = self.window.as_ref() {
-                                            w.request_redraw();
-                                        }
+                                        self.request_redraw_full();
                                     }
                                 }
                             }
@@ -776,9 +984,7 @@ impl ApplicationHandler<AppEvent> for App {
             AppEvent::Wake => {
                 // Background worker (image fetch, future async work)
                 // finished and wants the renderer to repaint.
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                self.request_redraw_full();
             }
         }
     }
@@ -795,10 +1001,14 @@ impl ApplicationHandler<AppEvent> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => {
-                if let Some(gpu) = self.gpu.as_mut() {
-                    gpu.resize(size.width, size.height);
-                }
+                // Coalesce: stash the latest size and let the next
+                // redraw apply it once. winit already coalesces
+                // request_redraw calls, so a drag burst of N Resized
+                // events becomes one gpu.resize + one paint per
+                // displayed frame.
+                self.pending_resize = Some((size.width, size.height));
                 self.layout = None;
+                self.damage.add_full();
                 if let Some(w) = self.window.as_ref() {
                     w.request_redraw();
                 }
@@ -821,15 +1031,15 @@ impl ApplicationHandler<AppEvent> for App {
                             Selection::range(sel.anchor, new_head).clamped(value.len());
                         if new_sel != sel {
                             self.input_selections.insert(drag_id, new_sel);
-                            if let Some(w) = self.window.as_ref() {
-                                w.request_redraw();
-                            }
+                            self.request_redraw_full();
                         }
                     }
                 }
 
                 let new_hover = self.hit_actionable(px, py);
                 if new_hover != self.hovered {
+                    let prev = self.hovered.clone();
+                    self.mark_interaction_damage(prev.as_deref(), new_hover.as_deref());
                     self.hovered = new_hover;
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
@@ -837,7 +1047,11 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::CursorLeft { .. } => {
-                if self.hovered.take().is_some() {
+                let prev = self.hovered.take();
+                if let Some(id) = prev.as_deref() {
+                    if let Some(r) = self.item_damage_rect(id) {
+                        self.damage.add_region(r);
+                    }
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
                     }
@@ -854,6 +1068,8 @@ impl ApplicationHandler<AppEvent> for App {
                 let mut needs_redraw = false;
 
                 if action_target != self.pressed {
+                    let prev = self.pressed.clone();
+                    self.mark_interaction_damage(prev.as_deref(), action_target.as_deref());
                     self.pressed = action_target;
                     needs_redraw = true;
                 }
@@ -876,6 +1092,8 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
                 if focus_target != self.focused {
+                    let prev = self.focused.clone();
+                    self.mark_interaction_damage(prev.as_deref(), focus_target.as_deref());
                     self.focused = focus_target;
                     needs_redraw = true;
                 }
@@ -937,9 +1155,7 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     if scrolled {
                         self.layout = None;
-                        if let Some(w) = self.window.as_ref() {
-                            w.request_redraw();
-                        }
+                        self.request_redraw_full();
                     }
                 }
             }
@@ -948,22 +1164,16 @@ impl ApplicationHandler<AppEvent> for App {
             }
             WindowEvent::Ime(ime_ev) => {
                 self.handle_ime(ime_ev);
-                if let Some(w) = self.window.as_ref() {
-                    w.request_redraw();
-                }
+                self.request_redraw_full();
             }
             WindowEvent::KeyboardInput { event: ev, .. } => {
                 if self.handle_keyboard(&ev) {
-                    if let Some(w) = self.window.as_ref() {
-                        w.request_redraw();
-                    }
+                    self.request_redraw_full();
                 }
             }
             WindowEvent::Focused(false) => {
                 if self.focused.take().is_some() || self.hovered.take().is_some() {
-                    if let Some(w) = self.window.as_ref() {
-                        w.request_redraw();
-                    }
+                    self.request_redraw_full();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -989,74 +1199,7 @@ impl ApplicationHandler<AppEvent> for App {
             }
         }
         if !self.queue.is_empty() {
-            if let Some(w) = self.window.as_ref() {
-                w.request_redraw();
-            }
-        }
-    }
-}
-
-/// What [`apply_ime_transition`] needs the caller to do as a side
-/// effect after the pure state update lands.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ImeEffect {
-    /// Pure state update (preedit / active toggle); nothing else to do.
-    None,
-    /// Insert this text at the current selection. The caller is
-    /// responsible for the actual `replace_selection_with` (it needs
-    /// the focused Input's value + bind path, which the pure
-    /// transition function doesn't see).
-    Commit(String),
-}
-
-/// Pure state-machine for IME events. Mutates `preedit` + `ime_active`
-/// in place; returns the side-effect the caller still owes.
-///
-/// Contract:
-/// - `Enabled`: flips `ime_active` to true, clears any stale preedit.
-/// - `Preedit(text, _)`: stores `(focused_id, text)` if focused on an
-///   Input AND the text is non-empty; clears preedit otherwise.
-///   Without a focused Input it's a no-op (the OS shouldn't deliver
-///   preedits when there's nowhere to put them, but be forgiving).
-/// - `Commit(text)`: clears preedit; returns `Commit(text)` to ask the
-///   caller to insert `text` (empty commits → `None`).
-/// - `Disabled`: flips `ime_active` to false, clears preedit.
-pub(crate) fn apply_ime_transition(
-    preedit: &mut Option<(String, String)>,
-    ime_active: &mut bool,
-    focused_input_id: Option<&str>,
-    event: Ime,
-) -> ImeEffect {
-    match event {
-        Ime::Enabled => {
-            *ime_active = true;
-            *preedit = None;
-            ImeEffect::None
-        }
-        Ime::Preedit(text, _cursor_range) => {
-            let id = match focused_input_id {
-                Some(id) => id,
-                None => return ImeEffect::None,
-            };
-            *preedit = if text.is_empty() {
-                None
-            } else {
-                Some((id.to_string(), text))
-            };
-            ImeEffect::None
-        }
-        Ime::Commit(text) => {
-            *preedit = None;
-            if text.is_empty() {
-                ImeEffect::None
-            } else {
-                ImeEffect::Commit(text)
-            }
-        }
-        Ime::Disabled => {
-            *ime_active = false;
-            *preedit = None;
-            ImeEffect::None
+            self.request_redraw_full();
         }
     }
 }
@@ -1253,106 +1396,4 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // apply_ime_transition — pure IME state machine
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn ime_enabled_sets_active_clears_stale_preedit() {
-        let mut pre = Some(("stale".into(), "garbage".into()));
-        let mut active = false;
-        let effect = apply_ime_transition(&mut pre, &mut active, Some("input"), Ime::Enabled);
-        assert!(active);
-        assert_eq!(pre, None);
-        assert_eq!(effect, ImeEffect::None);
-    }
-
-    #[test]
-    fn ime_preedit_with_text_stores_pair() {
-        let mut pre = None;
-        let mut active = true;
-        let effect = apply_ime_transition(
-            &mut pre,
-            &mut active,
-            Some("name"),
-            Ime::Preedit("こん".into(), None),
-        );
-        assert_eq!(pre, Some(("name".to_string(), "こん".to_string())));
-        assert!(active);
-        assert_eq!(effect, ImeEffect::None);
-    }
-
-    #[test]
-    fn ime_preedit_empty_clears_preedit() {
-        let mut pre = Some(("name".to_string(), "こん".to_string()));
-        let mut active = true;
-        let effect = apply_ime_transition(
-            &mut pre,
-            &mut active,
-            Some("name"),
-            Ime::Preedit(String::new(), None),
-        );
-        assert_eq!(pre, None);
-        assert_eq!(effect, ImeEffect::None);
-    }
-
-    #[test]
-    fn ime_preedit_without_focused_input_is_noop() {
-        // OS shouldn't deliver preedit without a focus target, but be
-        // defensive — preedit storage requires a node id.
-        let mut pre = None;
-        let mut active = true;
-        let effect = apply_ime_transition(
-            &mut pre,
-            &mut active,
-            None,
-            Ime::Preedit("hello".into(), None),
-        );
-        assert_eq!(pre, None);
-        assert!(active);
-        assert_eq!(effect, ImeEffect::None);
-    }
-
-    #[test]
-    fn ime_commit_returns_text_and_clears_preedit() {
-        let mut pre = Some(("name".to_string(), "こん".to_string()));
-        let mut active = true;
-        let effect = apply_ime_transition(
-            &mut pre,
-            &mut active,
-            Some("name"),
-            Ime::Commit("今日は".into()),
-        );
-        assert_eq!(pre, None);
-        assert!(active, "Commit must not toggle ime_active off");
-        assert_eq!(effect, ImeEffect::Commit("今日は".into()));
-    }
-
-    #[test]
-    fn ime_commit_empty_clears_preedit_without_inserting() {
-        let mut pre = Some(("name".to_string(), "こん".to_string()));
-        let mut active = true;
-        let effect = apply_ime_transition(
-            &mut pre,
-            &mut active,
-            Some("name"),
-            Ime::Commit(String::new()),
-        );
-        assert_eq!(pre, None);
-        assert_eq!(effect, ImeEffect::None);
-    }
-
-    #[test]
-    fn ime_disabled_clears_everything() {
-        let mut pre = Some(("name".to_string(), "こん".to_string()));
-        let mut active = true;
-        let effect = apply_ime_transition(
-            &mut pre,
-            &mut active,
-            Some("name"),
-            Ime::Disabled,
-        );
-        assert!(!active);
-        assert_eq!(pre, None);
-        assert_eq!(effect, ImeEffect::None);
-    }
 }

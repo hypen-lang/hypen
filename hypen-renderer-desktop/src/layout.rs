@@ -19,7 +19,7 @@
 //! - `color.0`, `backgroundColor.0` — read by the painter, not layout.
 
 use crate::style::{
-    border_at, margin_at, padding_at, prop_color_at, prop_f32_at, Border, Rgba,
+    border_at, has_explicit_border, margin_at, padding_at, prop_color_at, prop_f32_at, Border, Rgba,
 };
 use crate::text::TextEngine;
 use crate::tree::{Tree, ROOT_ID};
@@ -401,11 +401,21 @@ fn build_subtree(
     match node.element_type.as_str() {
         et if IMAGE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
             // Images are leaf nodes sized by `width` / `height` props.
-            // When unset, fall back to `DEFAULT_IMAGE_SIZE_PX × default`
-            // so the placeholder takes a sensible amount of room
-            // instead of collapsing.
-            let w = prop_f32_at(node, "width", viewport_w).unwrap_or(DEFAULT_IMAGE_SIZE_PX) * scale;
-            let h = prop_f32_at(node, "height", viewport_w).unwrap_or(DEFAULT_IMAGE_SIZE_PX) * scale;
+            // `.size(N)` is the convenience applicator for square
+            // glyphs (icons especially) and falls back as both axes
+            // when neither width nor height is specified — matches
+            // what hypen-web's icon component does. Without this,
+            // every `.size(24)` icon rendered at the 60px default and
+            // ate header space.
+            let size_fallback = prop_f32_at(node, "size", viewport_w);
+            let w = prop_f32_at(node, "width", viewport_w)
+                .or(size_fallback)
+                .unwrap_or(DEFAULT_IMAGE_SIZE_PX)
+                * scale;
+            let h = prop_f32_at(node, "height", viewport_w)
+                .or(size_fallback)
+                .unwrap_or(DEFAULT_IMAGE_SIZE_PX)
+                * scale;
             let style = Style {
                 display: Display::Flex,
                 size: Size {
@@ -645,7 +655,9 @@ fn emit_items(
                         prop_f32_at(node, "fontSize", viewport_w).unwrap_or(DEFAULT_FONT_SIZE_PX);
                     let color = prop_color_at(node, "color", viewport_w).unwrap_or(Rgba::BLACK);
                     let background = background_explicit.or(Some(Rgba(0xff, 0xff, 0xff, 0xff)));
-                    if !item_border.is_visible() {
+                    // Default Input frame, but only when the user
+                    // didn't explicitly opt out (e.g. `border-0`).
+                    if !item_border.is_visible() && !has_explicit_border(node) {
                         item_border = Border {
                             width: 1.0,
                             color: Rgba(0xc4, 0xcc, 0xd8, 0xff),
@@ -696,15 +708,26 @@ fn emit_items(
                     // (rasterised on the painter's GPU surface every
                     // frame); otherwise fall back to the bitmap
                     // `Image` path with a `src`.
+                    // The engine resolves `Icon(@resources.foo)` and
+                    // injects `__iconPaths` + `__iconViewBox` (matches
+                    // the DOM / Canvas renderers in hypen-web). The
+                    // legacy un-prefixed names are kept as a fallback
+                    // for tests that synthesise patches by hand.
                     let icon_paths = node
                         .props
-                        .get("paths")
+                        .get("__iconPaths")
+                        .or_else(|| node.props.get("paths"))
                         .map(crate::paint::icon::parse_paths)
                         .unwrap_or_default();
                     if !icon_paths.is_empty() {
-                        let view_box = crate::paint::icon::parse_view_box(
-                            crate::style::prop_str_at(node, "viewBox", viewport_w),
-                        );
+                        let view_box_str = node
+                            .props
+                            .get("__iconViewBox")
+                            .and_then(|v| v.as_str())
+                            .or_else(|| {
+                                node.props.get("viewBox").and_then(|v| v.as_str())
+                            });
+                        let view_box = crate::paint::icon::parse_view_box(view_box_str);
                         let tint = prop_color_at(node, "color", viewport_w);
                         out.push(LayoutItem {
                             node_id: rid.to_string(),
@@ -734,11 +757,20 @@ fn emit_items(
                     }
                 }
                 et if ACTIONABLE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
-                    let background = background_explicit
-                        .or(Some(Rgba(0xe7, 0xee, 0xff, 0xff)));
-                    if !item_border.is_visible() {
-                        // Default Button stroke when neither width nor
-                        // colour was set — keeps the Phase 3 look.
+                    // Default Button bg + stroke kick in only when the
+                    // user didn't override either with `.tw(...)` or
+                    // explicit applicators. `bg-transparent` and
+                    // `border-0` disable them respectively.
+                    let bg_explicit_present =
+                        node.props.contains_key("backgroundColor")
+                            || node.props.contains_key("backgroundColor.0")
+                            || node.props.contains_key("background-color");
+                    let background = if bg_explicit_present {
+                        background_explicit
+                    } else {
+                        Some(Rgba(0xe7, 0xee, 0xff, 0xff))
+                    };
+                    if !item_border.is_visible() && !has_explicit_border(node) {
                         item_border = Border {
                             width: 1.0,
                             color: Rgba(0x4a, 0x6a, 0xd6, 0xff),
@@ -1649,6 +1681,51 @@ mod tests {
     }
 
     #[test]
+    fn icon_size_applicator_sets_both_width_and_height() {
+        // `.size(N)` is the canonical Hypen applicator for square
+        // glyphs (the web Icon component reads it directly). The
+        // desktop renderer used to ignore it, so every `.size(24)`
+        // icon laid out at the 60px DEFAULT_IMAGE_SIZE_PX default
+        // and ate header space. Phase 16 fix: size resolves into
+        // both width and height when neither is explicitly set.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "heart",
+            "Icon",
+            &[
+                ("__iconPaths", json!([{"d": "M5 12h14"}])),
+                ("size", json!(24)),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "heart"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "heart");
+        assert!(
+            (item.rect.w - 24.0).abs() < 0.5 && (item.rect.h - 24.0).abs() < 0.5,
+            "expected 24x24 from .size(24), got {}x{}",
+            item.rect.w,
+            item.rect.h,
+        );
+    }
+
+    #[test]
+    fn explicit_width_overrides_size_applicator() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "thumb",
+            "Image",
+            &[("size", json!(24)), ("width", json!(48))],
+        ));
+        tree.apply(&insert_patch("root", "thumb"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "thumb");
+        assert!((item.rect.w - 48.0).abs() < 0.5, "rect.w={}", item.rect.w);
+        assert!((item.rect.h - 24.0).abs() < 0.5, "rect.h={}", item.rect.h);
+    }
+
+    #[test]
     fn image_explicit_width_height_resolve_through_layout() {
         let mut tree = Tree::new();
         tree.apply(&create_patch(
@@ -1716,6 +1793,56 @@ mod tests {
             }
             other => panic!("expected ItemKind::Icon, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn button_with_explicit_border_zero_does_not_get_default_stroke() {
+        // Regression: `.tw("border-0")` expands to `borderWidth: 0`.
+        // The Button branch used to fall back to its default stroke
+        // because `Border::is_visible()` returned false, so explicit
+        // opt-out got silently overridden.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "iconbtn",
+            "Button",
+            &[
+                ("action", json!("@actions.tap")),
+                ("borderWidth", json!(0.0)),
+                ("backgroundColor", json!("transparent")),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "iconbtn"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "iconbtn");
+        assert!(
+            !item.border.is_visible(),
+            "explicit borderWidth: 0 must not produce a visible default border, got {:?}",
+            item.border,
+        );
+        // Background must respect the user's transparent.
+        assert_eq!(item.background, Some(Rgba::TRANSPARENT));
+    }
+
+    #[test]
+    fn button_without_any_border_prop_still_gets_default_stroke() {
+        // Counterpart to the regression test above: a Button with no
+        // border-related prop at all should keep the Phase 3 default
+        // look so demos and bare buttons stay visible.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("action", json!("@actions.tap"))],
+        ));
+        tree.apply(&insert_patch("root", "btn"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "btn");
+        assert!(
+            item.border.is_visible(),
+            "Button with no border props must keep its default stroke",
+        );
     }
 
     // ---------------------------------------------------------------
@@ -1860,6 +1987,46 @@ mod tests {
             baseline.content_size.1,
             scrolled.content_size.1,
         );
+    }
+
+    #[test]
+    fn icon_with_engine_prefixed_props_emits_icon_kind() {
+        // The engine emits `__iconPaths` + `__iconViewBox` (the
+        // double-underscore is its convention for renderer-only
+        // synthetic props). Every other renderer reads those names;
+        // the desktop renderer used to read plain `paths` and
+        // silently fell back to a bitmap placeholder for every
+        // engine-resolved icon. Regression: now both forms work.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "heart",
+            "Icon",
+            &[
+                (
+                    "__iconPaths",
+                    json!([
+                        {
+                            "d": "M5 12h14",
+                            "fill": "none",
+                            "stroke": "#1a1a1f",
+                            "strokeWidth": 2.0,
+                        }
+                    ]),
+                ),
+                ("__iconViewBox", json!("0 0 24 24")),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "heart"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "heart");
+        match &item.kind {
+            ItemKind::Icon { paths, view_box, .. } => {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(*view_box, (0.0, 0.0, 24.0, 24.0));
+            }
+            other => panic!("expected ItemKind::Icon, got {other:?}"),
+        }
     }
 
     #[test]

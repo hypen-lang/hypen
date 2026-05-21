@@ -17,7 +17,7 @@ use std::sync::mpsc;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tiny_skia::{
-    Color, FillRule, IntSize, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Rect,
+    Color, FillRule, IntSize, Mask, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Rect,
     Transform,
 };
 use winit::event_loop::EventLoopProxy;
@@ -80,6 +80,7 @@ pub fn paint_image(
     rect: LayoutRect,
     src: Option<&str>,
     scale_factor: f32,
+    radius: f32,
 ) {
     let bitmap_data: Option<(Vec<u8>, u32, u32)> = src.and_then(|s| {
         ensure_loaded(s);
@@ -96,12 +97,27 @@ pub fn paint_image(
         let size = IntSize::from_wh(w, h).expect("non-zero source size");
         let pm =
             Pixmap::from_vec(data, size).expect("source bitmap matches RGBA layout");
+        // Cover-fit: scale to the larger of the two ratios so the
+        // image fills the rect without leaving empty bands. Without
+        // this a non-square source decoded into a square avatar slot
+        // looked stretched / "flipped". Then center on the off-axis.
         let sx = rect.w / w as f32;
         let sy = rect.h / h as f32;
-        let transform = Transform::from_scale(sx, sy).post_translate(rect.x, rect.y);
+        let s = sx.max(sy);
+        let dx = rect.x + (rect.w - w as f32 * s) * 0.5;
+        let dy = rect.y + (rect.h - h as f32 * s) * 0.5;
+        let transform = Transform::from_scale(s, s).post_translate(dx, dy);
         let paint = PixmapPaint {
             quality: tiny_skia::FilterQuality::Bilinear,
             ..PixmapPaint::default()
+        };
+        // Build an alpha mask for rounded corners (or a circle when
+        // the radius is half the rect — the avatar case). Skipped
+        // when radius is 0 to avoid the per-paint Mask alloc.
+        let mask = if radius > 0.0 {
+            build_rounded_rect_mask(pixmap.width(), pixmap.height(), rect, radius)
+        } else {
+            None
         };
         pixmap.draw_pixmap(
             0,
@@ -109,12 +125,27 @@ pub fn paint_image(
             PixmapRef::from_bytes(pm.data(), w, h).expect("pixmap bytes valid"),
             &paint,
             transform,
-            None,
+            mask.as_ref(),
         );
         return;
     }
 
     paint_placeholder(pixmap, rect, scale_factor);
+}
+
+/// Build a `Mask` of `surface_w × surface_h` whose alpha is opaque
+/// only inside the rounded rect described by `rect` + `radius`. Used
+/// to clip bitmap draws to circular / rounded shapes.
+fn build_rounded_rect_mask(
+    surface_w: u32,
+    surface_h: u32,
+    rect: LayoutRect,
+    radius: f32,
+) -> Option<Mask> {
+    let mut mask = Mask::new(surface_w, surface_h)?;
+    let path = rounded_rect_path(rect.x, rect.y, rect.w, rect.h, radius)?;
+    mask.fill_path(&path, FillRule::Winding, true, Transform::identity());
+    Some(mask)
 }
 
 /// Trigger a load if we haven't seen this src before. Local file
@@ -372,7 +403,7 @@ mod tests {
             w: 56.0,
             h: 56.0,
         };
-        paint_image(&mut pm, rect, Some("/no/such/file.png"), 1.0);
+        paint_image(&mut pm, rect, Some("/no/such/file.png"), 1.0, 0.0);
         assert_ne!(
             pm.data(),
             before.as_slice(),
@@ -391,7 +422,7 @@ mod tests {
             w: 64.0,
             h: 64.0,
         };
-        paint_image(&mut pm, rect, None, 1.0);
+        paint_image(&mut pm, rect, None, 1.0, 0.0);
         assert_ne!(pm.data(), before.as_slice());
     }
 
@@ -423,7 +454,7 @@ mod tests {
             w: 32.0,
             h: 32.0,
         };
-        paint_image(&mut canvas, rect, Some(key), 1.0);
+        paint_image(&mut canvas, rect, Some(key), 1.0, 0.0);
 
         // Placeholder gray is roughly (0xe5, 0xe7, 0xeb). Loaded red
         // should have R >> G across the painted area. Sample a few

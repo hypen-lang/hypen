@@ -23,7 +23,9 @@
 
 pub mod accessibility;
 pub mod app;
+pub(crate) mod damage;
 pub mod gpu;
+pub(crate) mod ime;
 pub mod layout;
 pub mod module;
 pub mod paint;

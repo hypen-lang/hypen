@@ -211,13 +211,25 @@ pub fn paint_icon(
             None => continue,
         };
 
-        // Fill — engine resolves "none" / "currentColor" to actual
-        // values per the IR layer, so anything we get here is meant
-        // to paint. `tint` overrides if set (Hypen's `.color(red)`
-        // applicator on Icon).
-        if let Some(fill_color) =
-            tint.or_else(|| p.fill.as_deref().and_then(crate::style::parse_color))
-        {
+        // Fill. SVG semantics: a path with `fill="none"` is *not*
+        // filled, even when the user supplied a `.color(...)` tint —
+        // tint replaces fill colour, it does not introduce one. Same
+        // gate for `currentColor` (delegate to tint) and missing
+        // (treat as if the user said "use the default fill").
+        // Lucide-style outline icons all set `fill="none"`; without
+        // this gate, tinting them would also fill every path,
+        // producing solid blobs and triggering tiny-skia "horizontal
+        // line cannot be filled" warnings on H / V strokes.
+        let fill_attr = p.fill.as_deref();
+        let fill_disabled = matches!(fill_attr, Some("none") | Some("transparent"));
+        let fill_color = if fill_disabled {
+            None
+        } else if matches!(fill_attr, None | Some("currentColor")) {
+            tint
+        } else {
+            tint.or_else(|| fill_attr.and_then(crate::style::parse_color))
+        };
+        if let Some(fill_color) = fill_color {
             if fill_color.3 > 0 {
                 let mut paint = Paint::default();
                 let [r, g, b, a] = fill_color.premultiplied();
@@ -235,12 +247,22 @@ pub fn paint_icon(
             }
         }
 
-        // Stroke. Lucide-style icons (used by the bundled apps) rely
-        // entirely on stroke; this is the path that draws the outline
-        // in the calorie screenshot's bell / settings glyphs.
-        let stroke_color = tint
-            .filter(|_| p.stroke.is_some())
-            .or_else(|| p.stroke.as_deref().and_then(crate::style::parse_color));
+        // Stroke. Symmetric to fill: `stroke="none"` opts out, even
+        // when tint is set; `currentColor` and missing both delegate
+        // to tint (with a sensible BLACK fallback — Lucide icons
+        // ship with `stroke="currentColor"` and rely entirely on the
+        // host to colour them).
+        let stroke_attr = p.stroke.as_deref();
+        let stroke_disabled = matches!(stroke_attr, Some("none") | Some("transparent"));
+        let stroke_color = if stroke_disabled {
+            None
+        } else if matches!(stroke_attr, Some("currentColor")) {
+            Some(tint.unwrap_or(Rgba::BLACK))
+        } else if stroke_attr.is_some() {
+            tint.or_else(|| stroke_attr.and_then(crate::style::parse_color))
+        } else {
+            None
+        };
         if let Some(stroke_color) = stroke_color {
             if stroke_color.3 > 0 {
                 let width = p.stroke_width.unwrap_or(1.0);
@@ -426,6 +448,49 @@ mod tests {
         assert!(
             centre.red() > centre.green() + 50,
             "tint should win over path fill; got R={} G={} B={}",
+            centre.red(),
+            centre.green(),
+            centre.blue(),
+        );
+    }
+
+    #[test]
+    fn paint_icon_does_not_fill_when_path_fill_is_none_even_with_tint() {
+        // Regression: tint used to override path fill unconditionally,
+        // including for `fill="none"` lucide-style outline icons. That
+        // produced solid filled blobs on every outline icon and
+        // triggered tiny-skia "horizontal lines cannot be filled"
+        // warnings on H/V strokes. Tint replaces fill colour, it
+        // doesn't introduce fill where there was none.
+        let paths = vec![IconPath {
+            d: "M0 0 H10 V10 H0 Z".into(),
+            fill: Some("none".into()),
+            stroke: Some("currentColor".into()),
+            stroke_width: Some(2.0),
+            stroke_linecap: None,
+            stroke_linejoin: None,
+        }];
+        let mut pm = Pixmap::new(50, 50).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        paint_icon(
+            &mut pm,
+            LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                w: 50.0,
+                h: 50.0,
+            },
+            &paths,
+            (0.0, 0.0, 10.0, 10.0),
+            Some(Rgba(0xff, 0, 0, 0xff)),
+        );
+        // Centre should stay (mostly) white because the path is only
+        // stroked, not filled. Allow slight anti-aliasing bleed from
+        // the surrounding strokes.
+        let centre = pm.pixel(25, 25).expect("centre pixel");
+        assert!(
+            centre.red() > 240 && centre.green() > 240 && centre.blue() > 240,
+            "fill=none should leave centre unfilled even with tint; got R={} G={} B={}",
             centre.red(),
             centre.green(),
             centre.blue(),

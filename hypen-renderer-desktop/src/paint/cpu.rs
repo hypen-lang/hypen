@@ -38,6 +38,9 @@ pub struct InteractionState {
 pub struct CpuPainter {
     text: TextEngine,
     interaction: InteractionState,
+    /// Reusable pixmap buffer. Reallocated only when the surface size
+    /// changes — avoids ~10MB+ per-frame allocs on resize.
+    pixmap: Option<Pixmap>,
 }
 
 impl CpuPainter {
@@ -45,6 +48,7 @@ impl CpuPainter {
         Self {
             text: TextEngine::new(),
             interaction: InteractionState::default(),
+            pixmap: None,
         }
     }
 
@@ -84,14 +88,49 @@ impl CpuPainter {
     }
 
     /// Same as [`Self::paint_with_scroll`] but additionally honours
-    /// per-Container scroll offsets. `scrolls` maps each scrollable
-    /// container's `node_id` to its current vertical offset. Phase 16.
+    /// per-Container scroll offsets. Returns the layout it computed
+    /// so the caller can reuse it (e.g. App.layout) instead of
+    /// recomputing — Phase 16 perf.
     pub fn paint_with_scrolls(
         &mut self,
         tree: &Tree,
         target: PaintTarget<'_>,
         scroll_y: f32,
         scrolls: &std::collections::HashMap<String, f32>,
+    ) -> LayoutPass {
+        let layout = LayoutPass::compute_with_scrolls(
+            tree,
+            &mut self.text,
+            (target.width, target.height),
+            target.scale_factor,
+            scroll_y,
+            scrolls,
+        );
+        self.paint_layout(&layout, target, scroll_y);
+        layout
+    }
+
+    /// Paint a precomputed layout. Used by callers that already have
+    /// a `LayoutPass` and want to avoid the double-compute cost.
+    /// `scroll_y` is the page-level offset, used only to size the
+    /// scrollbar indicator (the layout already bakes scroll into its
+    /// item rects).
+    pub fn paint_layout(&mut self, layout: &LayoutPass, target: PaintTarget<'_>, scroll_y: f32) {
+        self.paint_layout_with_damage(layout, target, scroll_y, None);
+    }
+
+    /// Same as [`Self::paint_layout`] but only repaints inside the
+    /// `damage` rect (physical pixels). Items whose rect doesn't
+    /// intersect the damage are skipped, and the page-background fill
+    /// is scoped to the damage rect — the rest of the previous
+    /// frame's pixels are kept (the painter retains its `Pixmap` from
+    /// frame to frame). `None` falls back to a full repaint.
+    pub fn paint_layout_with_damage(
+        &mut self,
+        layout: &LayoutPass,
+        target: PaintTarget<'_>,
+        scroll_y: f32,
+        damage: Option<crate::layout::Rect>,
     ) {
         let PaintTarget {
             pixels,
@@ -100,19 +139,41 @@ impl CpuPainter {
             scale_factor,
         } = target;
 
-        let mut pixmap = Pixmap::new(width, height).expect("pixmap alloc");
-        pixmap.fill(Color::from_rgba8(0xfb, 0xfb, 0xfd, 0xff));
-
-        let layout = LayoutPass::compute_with_scrolls(
-            tree,
-            &mut self.text,
-            (width, height),
-            scale_factor,
-            scroll_y,
-            scrolls,
-        );
+        let need_realloc = self
+            .pixmap
+            .as_ref()
+            .map(|p| p.width() != width || p.height() != height)
+            .unwrap_or(true);
+        // A reallocation throws away the previous frame's pixels, so
+        // a "damage rect only" repaint becomes a full repaint
+        // automatically — the rest of the surface would otherwise be
+        // garbage / zeroed.
+        let damage = if need_realloc { None } else { damage };
+        if need_realloc {
+            self.pixmap = Some(Pixmap::new(width, height).expect("pixmap alloc"));
+        }
+        let pixmap = self.pixmap.as_mut().expect("pixmap set");
+        let bg = Color::from_rgba8(0xfb, 0xfb, 0xfd, 0xff);
+        if let Some(d) = damage {
+            // Clear only the damaged area to the page background; the
+            // rest of the surface keeps the previous frame's content.
+            let mut paint = Paint::default();
+            paint.set_color(bg);
+            if let Some(rect) =
+                tiny_skia::Rect::from_xywh(d.x, d.y, d.w.max(1.0), d.h.max(1.0))
+            {
+                pixmap.fill_rect(rect, &paint, Transform::identity(), None);
+            }
+        } else {
+            pixmap.fill(bg);
+        }
 
         for item in &layout.items {
+            if let Some(d) = damage {
+                if !crate::damage::rects_intersect(item.rect, d) {
+                    continue;
+                }
+            }
             // Background and border apply to every element type. Buttons
             // additionally tint based on hover/press state.
             let mut background = item.background;
@@ -132,11 +193,11 @@ impl CpuPainter {
 
             let radius = item.border.radius * scale_factor;
             if let Some(bg) = background {
-                fill_rect(&mut pixmap, item.rect, bg, radius);
+                fill_rect(pixmap, item.rect, bg, radius);
             }
             if item.border.is_visible() {
                 stroke_rect(
-                    &mut pixmap,
+                    pixmap,
                     item.rect,
                     border_color,
                     radius,
@@ -147,10 +208,11 @@ impl CpuPainter {
             match &item.kind {
                 ItemKind::Image { src } => {
                     crate::paint::image::paint_image(
-                        &mut pixmap,
+                        pixmap,
                         item.rect,
                         src.as_deref(),
                         scale_factor,
+                        item.border.radius * scale_factor,
                     );
                 }
                 ItemKind::Icon {
@@ -159,7 +221,7 @@ impl CpuPainter {
                     tint,
                 } => {
                     crate::paint::icon::paint_icon(
-                        &mut pixmap,
+                        pixmap,
                         item.rect,
                         paths,
                         *view_box,
@@ -189,7 +251,7 @@ impl CpuPainter {
                         }
                     };
                     self.text.draw_text_colored(
-                        &mut pixmap,
+                        pixmap,
                         content,
                         item.rect.x + dx,
                         item.rect.y,
@@ -215,7 +277,7 @@ impl CpuPainter {
                             // Placeholder is muted gray; engine doesn't
                             // resolve a separate `placeholderColor` yet.
                             self.text.draw_text_colored(
-                                &mut pixmap,
+                                pixmap,
                                 p,
                                 text_x,
                                 text_y,
@@ -226,7 +288,7 @@ impl CpuPainter {
                         }
                     } else {
                         self.text.draw_text_colored(
-                            &mut pixmap,
+                            pixmap,
                             value,
                             text_x,
                             text_y,
@@ -274,7 +336,7 @@ impl CpuPainter {
                                 w: sel_w.max(2.0 * scale_factor),
                                 h: h_px,
                             };
-                            fill_rect(&mut pixmap, band, Rgba(0x00, 0x7a, 0xff, 0x55), 0.0);
+                            fill_rect(pixmap, band, Rgba(0x00, 0x7a, 0xff, 0x55), 0.0);
                         } else {
                             // Caret. Width of the leading substring up
                             // to `head` tells us the x position. When
@@ -297,7 +359,7 @@ impl CpuPainter {
                                 // text colour, then a thin underline to
                                 // show it isn't committed yet.
                                 self.text.draw_text_colored(
-                                    &mut pixmap,
+                                    pixmap,
                                     pre,
                                     caret_x,
                                     text_y,
@@ -312,7 +374,7 @@ impl CpuPainter {
                                     h: 1.0 * scale_factor,
                                 };
                                 fill_rect(
-                                    &mut pixmap,
+                                    pixmap,
                                     underline,
                                     Rgba(0x00, 0x7a, 0xff, 0xff),
                                     0.0,
@@ -326,7 +388,7 @@ impl CpuPainter {
                                 h: h_px,
                             };
                             fill_rect(
-                                &mut pixmap,
+                                pixmap,
                                 caret,
                                 Rgba(0x00, 0x7a, 0xff, 0xff),
                                 0.0,
@@ -346,7 +408,7 @@ impl CpuPainter {
                 .iter()
                 .find(|it| it.node_id == focus_id && it.action.is_some())
             {
-                draw_focus_ring(&mut pixmap, item.rect, scale_factor);
+                draw_focus_ring(pixmap, item.rect, scale_factor);
             }
         }
 
@@ -364,7 +426,7 @@ impl CpuPainter {
             let progress = (scroll_y / max_scroll).clamp(0.0, 1.0);
             let thumb_y = progress * (viewport_h - thumb_h);
             fill_rect(
-                &mut pixmap,
+                pixmap,
                 crate::layout::Rect {
                     x: track_x,
                     y: thumb_y,

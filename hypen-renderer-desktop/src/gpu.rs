@@ -294,28 +294,64 @@ impl Gpu {
     /// states (Outdated / Lost / Timeout / Occluded) are handled internally
     /// and the frame is silently skipped.
     pub fn present(&mut self, pixels: &[u8]) -> Result<(), &'static str> {
+        self.present_region(pixels, None)
+    }
+
+    /// Same as [`Self::present`] but uploads only the rectangular
+    /// sub-region `(x, y, w, h)` from the source `pixels` buffer to
+    /// the same coordinates in the upload texture. Used by the
+    /// damage-tracking redraw path so a hover transition pushes a
+    /// few-KB rect across PCIe instead of a full ~10MB framebuffer.
+    /// `None` uploads the whole surface.
+    pub fn present_region(
+        &mut self,
+        pixels: &[u8],
+        region: Option<(u32, u32, u32, u32)>,
+    ) -> Result<(), &'static str> {
         let (w, h) = self.size;
         debug_assert_eq!(pixels.len(), (w as usize) * (h as usize) * 4);
 
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.upload_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(w * 4),
-                rows_per_image: Some(h),
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
+        let (rx, ry, rw, rh) = match region {
+            Some((x, y, rw, rh)) => {
+                // Clamp to surface to avoid undefined behaviour on
+                // out-of-bounds writes (damage rects can extend
+                // slightly past the surface during resize / scroll).
+                let x = x.min(w.saturating_sub(1));
+                let y = y.min(h.saturating_sub(1));
+                let rw = rw.min(w - x);
+                let rh = rh.min(h - y);
+                (x, y, rw, rh)
+            }
+            None => (0, 0, w, h),
+        };
+        if rw == 0 || rh == 0 {
+            // Nothing to upload — still need to redraw the surface
+            // from the existing texture below.
+        } else {
+            // Source byte offset = (y * full_w + x) * 4. The full
+            // bytes_per_row stays as `w * 4` so wgpu keeps stepping
+            // by one full source row.
+            let offset = (ry as u64 * w as u64 + rx as u64) * 4;
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.upload_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: rx, y: ry, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset,
+                    bytes_per_row: Some(w * 4),
+                    rows_per_image: Some(rh),
+                },
+                wgpu::Extent3d {
+                    width: rw,
+                    height: rh,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
 
         let surface_tex = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(t)
