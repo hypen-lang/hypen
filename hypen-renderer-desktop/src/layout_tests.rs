@@ -1884,3 +1884,137 @@ use std::sync::Arc;
             "Text inside a non-scrollable Column must have no clip_to",
         );
     }
+
+    // -----------------------------------------------------------------
+    // .onHover applicator
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn on_hover_populates_hover_action_on_non_actionable_container() {
+        // `.onHover(@actions.island_hover, target: "island")` on a
+        // bare Container should make it hover-trackable even though
+        // Container isn't in ACTIONABLE_TYPES. The static `target`
+        // arg lives on `hover_payload`; `hovered:` is appended at
+        // dispatch time.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "ctn",
+            "Container",
+            &[
+                ("onHover.0", json!("@actions.island_hover")),
+                ("onHover.target", json!("island")),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "ctn"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let ctn = find_item(&pass, "ctn");
+        assert_eq!(ctn.hover_action.as_deref(), Some("island_hover"));
+        let payload = ctn
+            .hover_payload
+            .as_ref()
+            .expect("static onHover args must populate hover_payload");
+        assert_eq!(payload.get("target"), Some(&json!("island")));
+        assert!(
+            !payload.as_object().unwrap().contains_key("hovered"),
+            "hovered must NOT be baked in at layout time; window adds it",
+        );
+        // The id index includes it.
+        assert!(
+            pass.hoverable_ids
+                .iter()
+                .any(|&i| pass.items[i].node_id == "ctn"),
+            "hover-trackable item should be in hoverable_ids",
+        );
+    }
+
+    #[test]
+    fn on_hover_without_args_leaves_hover_payload_empty() {
+        // Bare `.onHover(@actions.foo)` should still register but
+        // produce `hover_payload: None`. The window's dispatch wraps
+        // it in an object with just `{hovered: bool}`.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("onHover.0", json!("@actions.foo"))],
+        ));
+        tree.apply(&insert_patch("root", "btn"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let btn = find_item(&pass, "btn");
+        assert_eq!(btn.hover_action.as_deref(), Some("foo"));
+        assert!(btn.hover_payload.is_none());
+    }
+
+    #[test]
+    fn hit_hoverable_finds_topmost_hover_subject_under_cursor() {
+        // Two siblings, both hover-tracked; the second is painted on
+        // top so it wins the hit test. Mirrors `hit()`'s reverse
+        // iteration semantics for actionables.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("stack", "Stack", &[]));
+        tree.apply(&insert_patch("root", "stack"));
+        tree.apply(&create_patch(
+            "back",
+            "Container",
+            &[
+                ("onHover.0", json!("@actions.h")),
+                ("width", json!(400)),
+                ("height", json!(400)),
+            ],
+        ));
+        tree.apply(&insert_patch("stack", "back"));
+        tree.apply(&create_patch(
+            "front",
+            "Container",
+            &[
+                ("onHover.0", json!("@actions.h")),
+                ("width", json!(100)),
+                ("height", json!(100)),
+            ],
+        ));
+        tree.apply(&insert_patch("stack", "front"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        // Stack puts subsequent children at the parent's top-left,
+        // so `front` sits on top of `back` at (0, 0). Anywhere inside
+        // front's 100×100 rect should hit `front`.
+        let hit = pass.hit_hoverable(50.0, 50.0).expect("hit");
+        assert_eq!(hit.node_id, "front", "topmost hover subject must win");
+    }
+
+    #[test]
+    fn resolve_hover_payload_strips_author_supplied_hovered_flag() {
+        // A DSL author who wrote `.onHover(@actions.x, hovered: true)`
+        // would otherwise see their static value clobber the runtime
+        // bool. `resolve_hover_payload` filters it out so the window
+        // is always authoritative for the on/off transition.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "ctn",
+            "Container",
+            &[
+                ("onHover.0", json!("@actions.x")),
+                ("onHover.hovered", json!(true)),
+                ("onHover.target", json!("island")),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "ctn"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let ctn = find_item(&pass, "ctn");
+        let payload = ctn.hover_payload.as_ref().unwrap();
+        assert_eq!(payload.get("target"), Some(&json!("island")));
+        assert!(
+            payload.as_object().unwrap().get("hovered").is_none(),
+            "the author's hovered: literal must be stripped",
+        );
+    }

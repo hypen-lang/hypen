@@ -1375,6 +1375,8 @@ mod tests {
             rect: LayoutRect { x, y, w, h },
             action: None,
             action_payload: None,
+            hover_action: None,
+            hover_payload: None,
             background: Some(Rgba(0xff, 0, 0, 0xff)),
             border: Border::default(),
             scrollable: None,
@@ -1405,6 +1407,7 @@ mod tests {
             actionable_ids: vec![],
             focusable_ids: vec![],
             scrollable_ids: vec![],
+            hoverable_ids: vec![],
         };
         // Build is the side effect we're testing — just verify it
         // doesn't panic and produces a non-empty scene for visible
@@ -1432,6 +1435,7 @@ mod tests {
             actionable_ids: vec![],
             focusable_ids: vec![],
             scrollable_ids: vec![],
+            hoverable_ids: vec![],
         }
     }
 
@@ -1504,6 +1508,7 @@ mod tests {
             actionable_ids: vec![],
             focusable_ids: vec![],
             scrollable_ids: vec![],
+            hoverable_ids: vec![],
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(scene.encoding().path_tags.len(), 0);
@@ -1542,6 +1547,7 @@ mod tests {
             actionable_ids: vec![],
             focusable_ids: vec![],
             scrollable_ids: vec![],
+            hoverable_ids: vec![],
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 200.0);
         // At least one path encoded (the on-screen item) — and the

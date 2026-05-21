@@ -41,9 +41,10 @@ pub mod window;
 
 pub use app::DesktopApp;
 pub use module::HypenModule;
-pub use remote::RemoteModule;
+pub use remote::{ConnectionStatus, RemoteModule};
 pub use painter::{PaintTarget, Painter};
 pub use tree::{Node, Tree};
+pub use window::Shortcut;
 
 /// Re-exported for convenience so callers don't need to depend on the
 /// engine crate directly to inspect patches.

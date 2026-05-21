@@ -44,12 +44,52 @@ pub(crate) fn backoff_for(attempt: u32) -> Duration {
 }
 
 type PatchCallback = Arc<dyn Fn(&[Patch]) + Send + Sync>;
+type StatusCallback = Arc<dyn Fn(&ConnectionStatus) + Send + Sync>;
+
+/// Lifecycle of a [`RemoteModule`]'s WebSocket. Fired through
+/// [`RemoteModule::on_status`] so the renderer (and, for our use,
+/// the browser shell) can show a connecting spinner / error banner /
+/// reconnecting indicator without polling.
+///
+/// State machine:
+///
+/// ```text
+///  Connecting ──┬──> Connected ──> Reconnecting ──> Connecting ──┐
+///               │       │                                          │
+///               └──> Failed{kind}  <───── (give-up)  ─────────────┘
+///                       │
+///                       └──> Closed  (clean shutdown)
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionStatus {
+    /// Worker is attempting the WebSocket handshake (first attempt or
+    /// a reconnect after a `Reconnecting` state).
+    Connecting,
+    /// Handshake completed; the server sent `SessionAck`. The first
+    /// patches usually arrive immediately after.
+    Connected,
+    /// Server dropped the connection (or the network did); a retry
+    /// is queued and we're back to `Connecting` after the backoff.
+    Reconnecting { attempt: u32 },
+    /// All reconnect attempts exhausted (`MAX_RECONNECT_ATTEMPTS`).
+    /// The worker has exited; no further patches will arrive.
+    Failed { reason: String },
+    /// Caller dropped the outbound channel — clean shutdown.
+    Closed,
+}
 
 #[derive(Default)]
 pub(crate) struct Inner {
     /// Callback set by `on_patches`. The window's `PatchQueue` lives
     /// behind this.
     callback: Option<PatchCallback>,
+    /// Callback set by `on_status`. Fires every time the worker
+    /// transitions between states in [`ConnectionStatus`].
+    status_callback: Option<StatusCallback>,
+    /// Latest status the worker reached. Replayed to a late
+    /// `on_status` wiring so the UI doesn't miss the initial
+    /// "Connecting" state because of the wire-up race.
+    last_status: Option<ConnectionStatus>,
     /// Patches that arrived from the network *before* the renderer
     /// wired its callback. Drained on the first `on_patches` call so
     /// no initial tree is lost to the connect/wire-up race.
@@ -121,6 +161,21 @@ pub(crate) fn deliver_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
     }
 }
 
+/// Stamp `last_status` and fire the status callback if one is wired.
+/// Pure side-channel — never blocks on the patch queue / outbound
+/// channel — so worker-side callers can call it freely without
+/// risking a stall on a busy UI thread.
+pub(crate) fn deliver_status(inner: &Arc<Mutex<Inner>>, status: ConnectionStatus) {
+    let cb = {
+        let mut guard = inner.lock().expect("remote inner poisoned");
+        guard.last_status = Some(status.clone());
+        guard.status_callback.as_ref().map(Arc::clone)
+    };
+    if let Some(cb) = cb {
+        cb(&status);
+    }
+}
+
 /// Why a single session ended. Drives whether the outer loop tries
 /// again (with backoff) or exits.
 enum SessionEnd {
@@ -140,6 +195,10 @@ async fn run_worker(
 ) {
     let mut session_id: Option<String> = None;
     let mut attempt: u32 = 0;
+    // First connect attempt — surface the Connecting state before
+    // the TCP handshake even starts so the UI has time to render
+    // a spinner.
+    deliver_status(&inner, ConnectionStatus::Connecting);
     loop {
         let result = run_session(
             &url,
@@ -152,6 +211,7 @@ async fn run_worker(
         match result {
             Ok(SessionEnd::Shutdown) => {
                 log::info!("remote: shutdown requested; exiting worker");
+                deliver_status(&inner, ConnectionStatus::Closed);
                 break;
             }
             Ok(SessionEnd::Disconnected) | Err(_) => {
@@ -160,6 +220,15 @@ async fn run_worker(
                     log::error!(
                         "remote: giving up after {MAX_RECONNECT_ATTEMPTS} reconnect attempts",
                     );
+                    deliver_status(
+                        &inner,
+                        ConnectionStatus::Failed {
+                            reason: format!(
+                                "could not connect to {url} after \
+                                {MAX_RECONNECT_ATTEMPTS} attempts"
+                            ),
+                        },
+                    );
                     break;
                 }
                 let delay = backoff_for(attempt);
@@ -167,7 +236,12 @@ async fn run_worker(
                     "remote: disconnected (attempt {attempt}); retrying in {:?}",
                     delay,
                 );
+                deliver_status(
+                    &inner,
+                    ConnectionStatus::Reconnecting { attempt },
+                );
                 tokio::time::sleep(delay).await;
+                deliver_status(&inner, ConnectionStatus::Connecting);
             }
         }
     }
@@ -280,6 +354,8 @@ fn handle_incoming(
                 "remote: session ack id={id} new={is_new} restored={is_restored}",
             );
             *session_id = Some(id);
+            // Handshake done — UI can drop the spinner now.
+            deliver_status(inner, ConnectionStatus::Connected);
         }
         RemoteMessage::InitialTree { patches, .. }
         | RemoteMessage::Patch { patches, .. } => {
@@ -301,6 +377,28 @@ fn handle_incoming(
         RemoteMessage::Hello { .. }
         | RemoteMessage::DispatchAction { .. }
         | RemoteMessage::SubscribeState { .. } => {}
+    }
+}
+
+impl RemoteModule {
+    /// Subscribe to lifecycle transitions of the underlying WebSocket
+    /// (Connecting → Connected → Reconnecting → … → Failed | Closed).
+    /// Fires immediately with the current state if one was already
+    /// recorded, so wiring `on_status` after the worker started
+    /// doesn't drop the initial `Connecting` event on the floor.
+    pub fn on_status<F>(&self, cb: F)
+    where
+        F: Fn(&ConnectionStatus) + Send + Sync + 'static,
+    {
+        let cb: StatusCallback = Arc::new(cb);
+        let last = {
+            let mut g = self.inner.lock().expect("remote inner poisoned");
+            g.status_callback = Some(Arc::clone(&cb));
+            g.last_status.clone()
+        };
+        if let Some(s) = last {
+            cb(&s);
+        }
     }
 }
 

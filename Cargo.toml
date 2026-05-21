@@ -6,6 +6,7 @@ members = [
     "tailwind-parse",
     "hypen-sdk-rs",
     "hypen-renderer-desktop",
+    "hypen-browser",
     "engine-compatibility-tests/runners/rust",
 ]
 exclude = [

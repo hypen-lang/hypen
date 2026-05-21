@@ -24,6 +24,7 @@ pub struct DesktopApp {
     title: String,
     size: (u32, u32),
     module: Option<Arc<dyn HypenModule>>,
+    shortcuts: Vec<crate::window::ShortcutBinding>,
 }
 
 impl DesktopApp {
@@ -32,7 +33,41 @@ impl DesktopApp {
             title: "Hypen Desktop".into(),
             size: (960, 640),
             module: None,
+            shortcuts: Vec::new(),
         }
+    }
+
+    /// Register a keyboard shortcut. When the user presses the key
+    /// combo, the renderer dispatches `action_name` against the
+    /// mounted [`HypenModule`] with the given static `payload`.
+    ///
+    /// ```rust,ignore
+    /// use hypen_renderer_desktop::{DesktopApp, Shortcut};
+    /// DesktopApp::new()
+    ///     .shortcut(Shortcut::cmd("l"), "focus_url", None)
+    ///     .shortcut(Shortcut::plain("Escape"), "esc", None)
+    ///     .run();
+    /// ```
+    ///
+    /// `cmd` and `ctrl` are treated as the same modifier
+    /// cross-platform — the macOS convention (`Cmd+L`) and the
+    /// Linux / Windows convention (`Ctrl+L`) fire the same handler.
+    /// Useful for `Cmd+L` (focus URL), `Cmd+R` (refresh), `Cmd+W`
+    /// (close), etc. in browser-style apps. Shortcuts only fire
+    /// when no text Input has the focus — typing a literal `l` into
+    /// an address bar never accidentally dispatches `focus_url`.
+    pub fn shortcut(
+        mut self,
+        combo: crate::window::Shortcut,
+        action_name: impl Into<String>,
+        payload: Option<serde_json::Value>,
+    ) -> Self {
+        self.shortcuts.push(crate::window::ShortcutBinding {
+            combo,
+            action: action_name.into(),
+            payload,
+        });
+        self
     }
 
     pub fn title(mut self, t: impl Into<String>) -> Self {
@@ -164,6 +199,7 @@ impl DesktopApp {
             Arc::clone(&module),
             proxy,
         );
+        app.set_shortcuts(self.shortcuts.clone());
         event_loop.run_app(&mut app).expect("event loop run");
     }
 }

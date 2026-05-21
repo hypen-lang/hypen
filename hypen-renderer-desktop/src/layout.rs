@@ -205,6 +205,19 @@ pub struct LayoutItem {
     /// `HypenModule::dispatch_action` so the SDK / action handler
     /// can react. `None` when the action has no extra arguments.
     pub action_payload: Option<serde_json::Value>,
+    /// Action name to dispatch on hover-state changes via the
+    /// `.onHover(@actions.X, …)` applicator. The window fires this
+    /// twice per pointer trip: once on enter with payload
+    /// `{hovered: true, …static args}`, once on leave with
+    /// `{hovered: false, …static args}`. Mirrors `action` so any
+    /// element type can opt in — not gated to ACTIONABLE_TYPES. See
+    /// `resolve_hover_action` for the parsing rules.
+    pub hover_action: Option<String>,
+    /// Static payload entries from `.onHover(@actions.X, key: value)`.
+    /// The `hovered: bool` flag is merged in at dispatch time, so this
+    /// field never contains it. `None` when only the action ref was
+    /// supplied.
+    pub hover_payload: Option<serde_json::Value>,
     /// Optional fill. Painted under everything else for the same item.
     /// Optional fill from `backgroundColor` / tw `bg-*`. Buttons no
     /// longer get implicit chrome — set `.backgroundColor(...)` or
@@ -266,6 +279,12 @@ pub struct LayoutPass {
     /// routing iterates these (in reverse for topmost-first) instead
     /// of the full items vec.
     pub(crate) scrollable_ids: Vec<usize>,
+    /// Indexes of items whose `hover_action` is `Some(_)`. Hover
+    /// hit-testing (`hit_hoverable`) iterates this list in reverse —
+    /// just like `actionable_ids` — to find the topmost subject under
+    /// the cursor. Kept separate from `actionable_ids` because hover
+    /// applicators are allowed on ANY element type, not just buttons.
+    pub(crate) hoverable_ids: Vec<usize>,
 }
 
 /// Per-Taffy-node sidecar so the measure callback can look up text
@@ -996,6 +1015,7 @@ impl LayoutPass {
         let mut actionable_ids = Vec::new();
         let mut focusable_ids = Vec::new();
         let mut scrollable_ids = Vec::new();
+        let mut hoverable_ids = Vec::new();
         for (idx, it) in items.iter().enumerate() {
             by_node_id.insert(it.node_id.clone(), idx);
             if it.action.is_some() {
@@ -1007,6 +1027,9 @@ impl LayoutPass {
             if it.scrollable.is_some() {
                 scrollable_ids.push(idx);
             }
+            if it.hover_action.is_some() {
+                hoverable_ids.push(idx);
+            }
         }
 
         Self {
@@ -1016,6 +1039,7 @@ impl LayoutPass {
             actionable_ids,
             focusable_ids,
             scrollable_ids,
+            hoverable_ids,
         }
     }
 
@@ -1028,6 +1052,18 @@ impl LayoutPass {
         // Walk actionables in reverse paint order — topmost wins.
         // O(n_actionables) instead of O(n_items).
         self.actionable_ids
+            .iter()
+            .rev()
+            .map(|&i| &self.items[i])
+            .find(|it| it.rect.contains(x, y))
+    }
+
+    /// Topmost element with an `onHover` applicator under the cursor.
+    /// Parallel pipeline to `hit()` because hover-trackable subjects
+    /// aren't gated to actionable types (a plain Row / Container can
+    /// opt in via `.onHover(...)`).
+    pub fn hit_hoverable(&self, x: f32, y: f32) -> Option<&LayoutItem> {
+        self.hoverable_ids
             .iter()
             .rev()
             .map(|&i| &self.items[i])
@@ -2179,6 +2215,8 @@ fn emit_items(
         if let Some(node) = tree.get(rid) {
             let action = resolve_action(node);
             let action_payload = action.as_ref().and_then(|_| resolve_action_payload(node));
+            let hover_action = resolve_hover_action(node);
+            let hover_payload = hover_action.as_ref().and_then(|_| resolve_hover_payload(node));
             let mut item_border = border_at(node, viewport_w);
             // The DSL says `.borderRadius(8)` even when there's no
             // border line — round the fill anyway. The painter checks
@@ -2244,6 +2282,8 @@ fn emit_items(
                         rect,
                         action: None,
                         action_payload: None,
+                        hover_action: hover_action.clone(),
+                        hover_payload: hover_payload.clone(),
                         background,
                         border: item_border,
                         scrollable: None,
@@ -2284,6 +2324,8 @@ fn emit_items(
                         rect,
                         action,
                         action_payload: action_payload.clone(),
+                        hover_action: hover_action.clone(),
+                        hover_payload: hover_payload.clone(),
                         background: background_explicit,
                         border: item_border,
                         scrollable: None,
@@ -2330,6 +2372,8 @@ fn emit_items(
                             rect,
                             action,
                             action_payload: action_payload.clone(),
+                            hover_action: hover_action.clone(),
+                            hover_payload: hover_payload.clone(),
                             background: background_explicit,
                             border: item_border,
                             scrollable: None,
@@ -2351,6 +2395,8 @@ fn emit_items(
                             rect,
                             action,
                             action_payload: action_payload.clone(),
+                            hover_action: hover_action.clone(),
+                            hover_payload: hover_payload.clone(),
                             background: background_explicit,
                             border: item_border,
                             scrollable: None,
@@ -2369,6 +2415,8 @@ fn emit_items(
                         rect,
                         action,
                         action_payload: action_payload.clone(),
+                        hover_action: hover_action.clone(),
+                        hover_payload: hover_payload.clone(),
                         background: background_explicit,
                         border: item_border,
                         scrollable: None,
@@ -2387,6 +2435,8 @@ fn emit_items(
                         rect,
                         action,
                         action_payload,
+                        hover_action,
+                        hover_payload,
                         background: background_explicit,
                         border: item_border,
                         // Filled in after children walk. content_h
@@ -2634,6 +2684,33 @@ pub(crate) fn resolve_named_event_action(
         obj.insert(suffix.to_string(), value.clone());
     }
     Some((action, serde_json::Value::Object(obj)))
+}
+
+/// Pull an `@actions.X` reference off `props.onHover`. Thin wrapper
+/// over [`resolve_named_event_action`] for the hover case. Applies to
+/// ANY element type — the goal of `.onHover(...)` is to let a plain
+/// Container / Row light up state when the pointer is over it, which
+/// the actionable-type gate would block.
+pub(crate) fn resolve_hover_action(node: &crate::tree::Node) -> Option<String> {
+    resolve_named_event_action(node, "onHover").map(|(action, _)| action)
+}
+
+/// Collect the static named arguments from an `.onHover(@actions.X, …)`
+/// applicator. The window appends `hovered: bool` at dispatch time,
+/// so this helper deliberately strips an author-supplied `hovered`
+/// key — otherwise a stale `hovered: true` from the DSL would leak
+/// into a leave-side event and clobber the runtime value.
+pub(crate) fn resolve_hover_payload(
+    node: &crate::tree::Node,
+) -> Option<serde_json::Value> {
+    let (_, mut payload) = resolve_named_event_action(node, "onHover")?;
+    if let serde_json::Value::Object(ref mut obj) = payload {
+        obj.remove("hovered");
+        if obj.is_empty() {
+            return None;
+        }
+    }
+    Some(payload)
 }
 
 // Suppress warning on imports used only in helper paths.

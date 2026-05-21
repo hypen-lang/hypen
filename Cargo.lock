@@ -1791,6 +1791,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
+name = "hypen-browser"
+version = "0.4.949"
+dependencies = [
+ "dirs",
+ "env_logger",
+ "hypen-engine",
+ "hypen-parser",
+ "hypen-renderer-desktop",
+ "hypen-server",
+ "indexmap",
+ "log",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "hypen-compat-tests"
 version = "0.0.0"
 dependencies = [

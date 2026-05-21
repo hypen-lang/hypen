@@ -43,6 +43,56 @@ impl App {
             .clamped(value.len())
     }
 
+    /// Look up the registered [`ShortcutBinding`] for the current key
+    /// event. Returns the matching binding or `None`.
+    ///
+    /// Modifier rules:
+    /// - `cmd_or_ctrl` matches either Cmd (macOS) or Ctrl
+    ///   (Linux/Windows) — both via `clipboard_modifier()`.
+    /// - `shift` / `alt` must match the binding exactly (no
+    ///   `false` accepting `true`, else `Cmd+Shift+L` would also
+    ///   match `Cmd+L`).
+    ///
+    /// Unmodified shortcuts are suppressed while an `Input` is
+    /// focused so typing letters into the address bar can't fire a
+    /// `Cmd-less` `l` binding — which would be impossible to type at
+    /// all otherwise.
+    fn match_shortcut(
+        &self,
+        ev: &KeyEvent,
+        shift: bool,
+        cmd: bool,
+        editing_focused: bool,
+    ) -> Option<&crate::window::ShortcutBinding> {
+        let alt = self.modifiers.alt_key();
+        let key_name = match ev.logical_key.as_ref() {
+            Key::Character(s) => s.to_lowercase(),
+            Key::Named(NamedKey::Escape) => "Escape".to_string(),
+            Key::Named(NamedKey::Enter) => "Enter".to_string(),
+            Key::Named(NamedKey::Tab) => "Tab".to_string(),
+            Key::Named(NamedKey::Space) => "Space".to_string(),
+            Key::Named(NamedKey::ArrowUp) => "ArrowUp".to_string(),
+            Key::Named(NamedKey::ArrowDown) => "ArrowDown".to_string(),
+            Key::Named(NamedKey::ArrowLeft) => "ArrowLeft".to_string(),
+            Key::Named(NamedKey::ArrowRight) => "ArrowRight".to_string(),
+            _ => return None,
+        };
+        self.shortcuts.iter().find(|b| {
+            if b.combo.cmd_or_ctrl != cmd {
+                return false;
+            }
+            if b.combo.shift != shift || b.combo.alt != alt {
+                return false;
+            }
+            if editing_focused && !b.combo.cmd_or_ctrl {
+                // Unmodified shortcut while typing — would steal
+                // characters from the focused Input.
+                return false;
+            }
+            b.combo.key.eq_ignore_ascii_case(&key_name)
+        })
+    }
+
     /// Apply `mutate(value, sel)` to the focused Input and dispatch
     /// `__hypen_bind` if the value changed. Returns true if anything
     /// changed (including a pure selection move).
@@ -293,6 +343,19 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // Caller-registered shortcuts beat the renderer's default Tab /
+        // Enter / Space. We let editing-focused state silence
+        // unmodified shortcuts so single-letter bindings don't fight
+        // text input — Cmd+L over a focused address bar should STILL
+        // fire (the user explicitly wants to re-focus / select-all),
+        // so the cmd-modified path is allowed through.
+        if let Some(binding) = self.match_shortcut(ev, shift, cmd, editing_focused) {
+            log::debug!("dispatch shortcut: {}", binding.action);
+            self.module
+                .dispatch_action(&binding.action, binding.payload.clone());
+            return true;
         }
 
         match ev.logical_key.as_ref() {

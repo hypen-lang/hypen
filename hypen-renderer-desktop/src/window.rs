@@ -72,6 +72,64 @@ impl Selection {
     }
 }
 
+/// A keyboard shortcut binding registered via
+/// [`crate::DesktopApp::shortcut`]. When the user presses the
+/// described combo, the renderer dispatches `action` against the
+/// mounted [`HypenModule`] with the static `payload`.
+#[derive(Debug, Clone)]
+pub struct ShortcutBinding {
+    pub combo: Shortcut,
+    pub action: String,
+    pub payload: Option<serde_json::Value>,
+}
+
+/// A keyboard combo: a `key` (logical character or named key like
+/// `"Escape"`) plus a set of required modifiers. `cmd` is the macOS
+/// "Command" key; the renderer treats it as interchangeable with
+/// `ctrl` so the same binding fires on Linux / Windows / macOS.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Shortcut {
+    /// Single-character key (`"l"`, `"r"`, …) — case-insensitive — OR
+    /// a winit `NamedKey` debug name (`"Escape"`, `"Enter"`, …).
+    pub key: String,
+    /// Require Cmd (macOS) / Ctrl (Linux + Windows) to be held.
+    pub cmd_or_ctrl: bool,
+    pub shift: bool,
+    pub alt: bool,
+}
+
+impl Shortcut {
+    /// Bare key, no modifiers. Typical use: `Shortcut::plain("Escape")`.
+    pub fn plain(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            cmd_or_ctrl: false,
+            shift: false,
+            alt: false,
+        }
+    }
+
+    /// `Cmd+<key>` on macOS / `Ctrl+<key>` elsewhere.
+    pub fn cmd(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            cmd_or_ctrl: true,
+            shift: false,
+            alt: false,
+        }
+    }
+
+    /// `Cmd+Shift+<key>`.
+    pub fn cmd_shift(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            cmd_or_ctrl: true,
+            shift: true,
+            alt: false,
+        }
+    }
+}
+
 /// User-event type carried through the winit event loop.
 #[derive(Debug)]
 pub enum AppEvent {
@@ -174,6 +232,14 @@ pub struct App {
     layout: Option<LayoutPass>,
     cursor: PhysicalPosition<f64>,
     hovered: Option<String>,
+    /// Renderer node id of the topmost element under the cursor with
+    /// an `.onHover(...)` applicator. Kept separate from `hovered`
+    /// because hover-action subjects can be any element type (Row,
+    /// Container, …) while `hovered` tracks actionables for tint
+    /// damage. Updated on every CursorMoved; on change we fire two
+    /// dispatches — leave on the old, enter on the new — so handlers
+    /// can flip CSS-:hover-like state on/off.
+    hover_subject: Option<String>,
     pressed: Option<String>,
     focused: Option<String>,
     modifiers: ModifiersState,
@@ -287,6 +353,12 @@ pub struct App {
     /// raster tiles) get dropped on the occlude edge so the process
     /// can trim while hidden.
     is_occluded: bool,
+    /// Keyboard shortcuts registered via [`crate::DesktopApp::shortcut`].
+    /// Checked before the per-key default handling so a binding
+    /// always wins over the renderer's built-in Tab / Enter / Space
+    /// behaviour. Shortcuts are silenced while an `Input` is focused
+    /// (typing in the address bar must not trigger `focus_url` etc.).
+    shortcuts: Vec<ShortcutBinding>,
 }
 
 impl App {
@@ -312,6 +384,7 @@ impl App {
             layout: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             hovered: None,
+            hover_subject: None,
             pressed: None,
             focused: None,
             modifiers: ModifiersState::default(),
@@ -337,7 +410,15 @@ impl App {
             patch_window_start: None,
             patch_window_flushes: 0,
             is_occluded: false,
+            shortcuts: Vec::new(),
         }
+    }
+
+    /// Replace the shortcut table. Called once by
+    /// [`crate::DesktopApp::run`] after all bindings have been
+    /// registered.
+    pub fn set_shortcuts(&mut self, shortcuts: Vec<ShortcutBinding>) {
+        self.shortcuts = shortcuts;
     }
 
     /// True when the Ctrl (Linux/Windows) or Cmd (macOS) modifier is
@@ -707,6 +788,60 @@ impl App {
             .map(|item| item.node_id.clone())
     }
 
+    /// Recompute the `onHover` subject under the cursor and fire the
+    /// leave / enter dispatch pair if it changed. Idempotent — calling
+    /// with the same cursor position twice does nothing.
+    ///
+    /// We dispatch leave BEFORE enter so a handler that toggles the
+    /// same boolean for both subjects ends in the correct state. The
+    /// payload is `{hovered: bool, …static args from .onHover(...)}`;
+    /// any author-supplied `hovered` key is stripped in
+    /// `resolve_hover_payload` so the runtime value wins.
+    fn update_hover_subject(&mut self, x: f32, y: f32) {
+        let new_subject = self
+            .layout
+            .as_ref()
+            .and_then(|l| l.hit_hoverable(x, y))
+            .map(|item| item.node_id.clone());
+        if new_subject == self.hover_subject {
+            return;
+        }
+        let prev = self.hover_subject.take();
+        if let Some(id) = prev.as_deref() {
+            self.dispatch_hover(id, false);
+        }
+        self.hover_subject = new_subject;
+        if let Some(id) = self.hover_subject.clone() {
+            self.dispatch_hover(&id, true);
+        }
+    }
+
+    /// Look up the hover action + payload for a node, merge the
+    /// runtime `hovered` flag into the payload, and dispatch.
+    /// Silently no-ops if the node disappeared between the hover
+    /// transition and this call — common when an action handler
+    /// rewrites the tree out from under us.
+    fn dispatch_hover(&self, id: &str, hovered: bool) {
+        let item = match self.layout.as_ref().and_then(|l| l.item_by_id(id)) {
+            Some(it) => it,
+            None => return,
+        };
+        let action = match item.hover_action.as_deref() {
+            Some(a) => a,
+            None => return,
+        };
+        let mut payload_obj = match item.hover_payload.clone() {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        payload_obj.insert("hovered".into(), serde_json::Value::Bool(hovered));
+        log::debug!("dispatch hover: {action} payload={payload_obj:?}");
+        self.module.dispatch_action(
+            action,
+            Some(serde_json::Value::Object(payload_obj)),
+        );
+    }
+
     fn hit_focusable(&self, x: f32, y: f32) -> Option<String> {
         self.layout
             .as_ref()
@@ -878,6 +1013,10 @@ impl ApplicationHandler<AppEvent> for App {
                         w.request_redraw();
                     }
                 }
+                // Fire `.onHover` enter/leave on subject change. Runs
+                // independently of the actionable-tint path above —
+                // hover-trackable subjects aren't gated to Buttons.
+                self.update_hover_subject(px, py);
             }
             WindowEvent::CursorLeft { .. } => {
                 let prev = self.hovered.take();
@@ -888,6 +1027,11 @@ impl ApplicationHandler<AppEvent> for App {
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
                     }
+                }
+                // Fire a leave dispatch for any element currently
+                // tracking onHover — the pointer just left the window.
+                if let Some(id) = self.hover_subject.take() {
+                    self.dispatch_hover(&id, false);
                 }
             }
             WindowEvent::MouseInput {
