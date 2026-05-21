@@ -6,7 +6,7 @@
 
 use crate::style::Rgba;
 use cosmic_text::{
-    Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache,
+    Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight,
 };
 use std::collections::HashMap;
 use tiny_skia::Pixmap;
@@ -15,6 +15,10 @@ use tiny_skia::Pixmap;
 /// 2k is plenty for a busy screen (the social example tops out near
 /// ~120 unique text/font/wrap tuples) and bounds memory at ~32KB.
 const MEASURE_CACHE_CAP: usize = 2048;
+/// Cap on cached rasterised-text pixmaps. ~500 unique
+/// (text, font_size, color, wrap) tuples covers a complex screen with
+/// headroom. Avg pixmap size is ~5KB so memory is bounded near 2.5MB.
+const RASTER_CACHE_CAP: usize = 512;
 
 /// Owns the long-lived text engine state.
 pub struct TextEngine {
@@ -28,6 +32,12 @@ pub struct TextEngine {
     /// for a given content snapshot, so a cheap cache turns N text
     /// nodes × M Taffy passes into ≤N shapes per frame.
     measure_cache: HashMap<u64, (f32, f32)>,
+    /// Pre-rasterised pixmaps keyed on `(text, font_size, color, wrap)`.
+    /// On a cache hit, painting a Text becomes a single `draw_pixmap`
+    /// instead of running cosmic-text's shape + per-glyph alpha blend
+    /// loop again. This is the leaf-element layer cache — text nodes
+    /// are by far the slowest single op in the paint loop.
+    raster_cache: HashMap<u64, Pixmap>,
 }
 
 impl TextEngine {
@@ -36,15 +46,17 @@ impl TextEngine {
             fonts: FontSystem::new(),
             swash: SwashCache::new(),
             measure_cache: HashMap::new(),
+            raster_cache: HashMap::new(),
         }
     }
 
-    /// Drop the cached measurements. Call when the font system gains
-    /// new fonts, or on a heavy memory-pressure signal. The cache
-    /// auto-evicts at `MEASURE_CACHE_CAP` so ordinary use never needs
-    /// to call this.
+    /// Drop the cached measurements + rasters. Call when the font
+    /// system gains new fonts, or on a heavy memory-pressure signal.
+    /// Both caches auto-evict at their caps so ordinary use never
+    /// needs to call this.
     pub fn clear_measure_cache(&mut self) {
         self.measure_cache.clear();
+        self.raster_cache.clear();
     }
 
     /// Measure `text` at `font_size` (physical px). When `wrap_width` is
@@ -56,14 +68,28 @@ impl TextEngine {
         font_size: f32,
         wrap_width: Option<f32>,
     ) -> (f32, f32) {
-        // Cache key: hash text + font_size bits + wrap bits. f32 NaN
-        // never reaches us (Taffy hands us finite values), so
+        self.measure_weighted(text, font_size, wrap_width, 400)
+    }
+
+    /// Same as [`Self::measure`] but takes a CSS-style font weight.
+    /// Bold glyphs are wider, so the wrap result depends on weight;
+    /// the cache keys on it.
+    pub fn measure_weighted(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        wrap_width: Option<f32>,
+        weight: u16,
+    ) -> (f32, f32) {
+        // Cache key: hash text + font_size bits + wrap bits + weight.
+        // f32 NaN never reaches us (Taffy hands us finite values), so
         // to_bits() is collision-free across the inputs we get.
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         text.hash(&mut hasher);
         font_size.to_bits().hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
+        weight.hash(&mut hasher);
         let key = hasher.finish();
         if let Some(&hit) = self.measure_cache.get(&key) {
             return hit;
@@ -71,7 +97,7 @@ impl TextEngine {
 
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
-        let attrs = Attrs::new().family(Family::SansSerif);
+        let attrs = Attrs::new().family(Family::SansSerif).weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
         buffer.shape_until_scroll(&mut self.fonts, false);
@@ -157,6 +183,22 @@ impl TextEngine {
         color: Rgba,
         wrap_width: Option<f32>,
     ) {
+        self.draw_text_weighted(pixmap, text, x, y, font_size, color, wrap_width, 400);
+    }
+
+    /// Same as [`Self::draw_text_colored`] but takes a CSS-style font
+    /// weight (100..900). 400 = normal, 700 = bold.
+    pub fn draw_text_weighted(
+        &mut self,
+        pixmap: &mut Pixmap,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        color: Rgba,
+        wrap_width: Option<f32>,
+        weight: u16,
+    ) {
         // cosmic-text's swash glyph path overwrites the source colour's
         // alpha byte with the per-pixel coverage byte, so the inner
         // `if a == 0` guard never sees a zero source. Short-circuit
@@ -167,7 +209,7 @@ impl TextEngine {
         }
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
-        let attrs = Attrs::new().family(Family::SansSerif);
+        let attrs = Attrs::new().family(Family::SansSerif).weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
 
@@ -227,6 +269,100 @@ impl TextEngine {
             },
         );
     }
+
+    /// Same surface as [`Self::draw_text_colored`], but composites a
+    /// pre-rasterised pixmap from the raster cache when one exists.
+    /// Cache key is `(text, font_size, color, wrap_width, scale)`;
+    /// on miss, raster into a small text-sized pixmap, store, and
+    /// composite. Subsequent paints of the same content become a
+    /// single `draw_pixmap` instead of the full shape + per-glyph
+    /// alpha blend loop.
+    ///
+    /// Falls back to `draw_text_colored` when the measured size
+    /// rounds to zero (empty text) — no cached entry needed.
+    pub fn draw_text_cached(
+        &mut self,
+        target: &mut Pixmap,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        color: Rgba,
+        wrap_width: Option<f32>,
+    ) {
+        self.draw_text_cached_weighted(target, text, x, y, font_size, color, wrap_width, 400);
+    }
+
+    /// Same as [`Self::draw_text_cached`] but takes a CSS-style font
+    /// weight (100..900). 400 is normal, 700 is bold.
+    pub fn draw_text_cached_weighted(
+        &mut self,
+        target: &mut Pixmap,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        color: Rgba,
+        wrap_width: Option<f32>,
+        weight: u16,
+    ) {
+        if color.3 == 0 || text.is_empty() {
+            return;
+        }
+        // Measure first — both the cache key and the cached pixmap
+        // dimensions need it. measure() is itself cached.
+        let (mw, mh) = self.measure_weighted(text, font_size, wrap_width, weight);
+        let cw = mw.ceil().max(1.0) as u32;
+        let ch = mh.ceil().max(1.0) as u32;
+        if cw == 0 || ch == 0 {
+            return;
+        }
+
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        font_size.to_bits().hash(&mut hasher);
+        let color_u32 = u32::from_le_bytes([color.0, color.1, color.2, color.3]);
+        color_u32.hash(&mut hasher);
+        wrap_width.map(f32::to_bits).hash(&mut hasher);
+        weight.hash(&mut hasher);
+        cw.hash(&mut hasher);
+        ch.hash(&mut hasher);
+        let key = hasher.finish();
+
+        if !self.raster_cache.contains_key(&key) {
+            // Render the text into a fresh small pixmap at origin
+            // (0, 0). The pixmap is sized to the measured bbox so
+            // unrelated background pixels don't get cached.
+            let mut tile = match Pixmap::new(cw, ch) {
+                Some(p) => p,
+                None => {
+                    self.draw_text_weighted(target, text, x, y, font_size, color, wrap_width, weight);
+                    return;
+                }
+            };
+            self.draw_text_weighted(&mut tile, text, 0.0, 0.0, font_size, color, wrap_width, weight);
+            if self.raster_cache.len() >= RASTER_CACHE_CAP {
+                self.raster_cache.clear();
+            }
+            self.raster_cache.insert(key, tile);
+        }
+
+        let tile = self.raster_cache.get(&key).expect("inserted above");
+        // Composite onto `target` at the requested origin. Integer
+        // translate keeps text crisp — fractional offsets would force
+        // a sampler resample and blur the glyphs.
+        let transform = tiny_skia::Transform::from_translate(x.round(), y.round());
+        target.draw_pixmap(
+            0,
+            0,
+            tiny_skia::PixmapRef::from_bytes(tile.data(), tile.width(), tile.height())
+                .expect("tile bytes valid"),
+            &tiny_skia::PixmapPaint::default(),
+            transform,
+            None,
+        );
+    }
 }
 
 impl Default for TextEngine {
@@ -240,6 +376,53 @@ mod tests {
     use super::TextEngine;
     use crate::style::Rgba;
     use tiny_skia::Pixmap;
+
+    #[test]
+    fn draw_text_cached_matches_uncached_pixels() {
+        // Cache hit must produce visually identical output to the
+        // uncached path. Render the same text twice via
+        // `draw_text_cached` (second call hits the cache) and compare
+        // to a third render via `draw_text_colored` directly.
+        let mut t = TextEngine::new();
+        let mut a = Pixmap::new(64, 32).unwrap();
+        let mut b = Pixmap::new(64, 32).unwrap();
+        a.fill(tiny_skia::Color::WHITE);
+        b.fill(tiny_skia::Color::WHITE);
+        // First call → cache miss, populates entry.
+        t.draw_text_cached(&mut a, "Hi", 0.0, 0.0, 18.0, Rgba(0, 0, 0, 0xff), None);
+        // Reference render via the direct path.
+        t.draw_text_colored(&mut b, "Hi", 0.0, 0.0, 18.0, Rgba(0, 0, 0, 0xff), None);
+        assert_eq!(a.data(), b.data(), "cached miss-render should match uncached");
+
+        // Second call → cache hit, must still match.
+        let mut c = Pixmap::new(64, 32).unwrap();
+        c.fill(tiny_skia::Color::WHITE);
+        t.draw_text_cached(&mut c, "Hi", 0.0, 0.0, 18.0, Rgba(0, 0, 0, 0xff), None);
+        assert_eq!(a.data(), c.data(), "cached hit-render should match miss");
+    }
+
+    #[test]
+    fn draw_text_cached_zero_alpha_is_noop() {
+        // Defensive: matches `draw_text_colored`'s short-circuit for
+        // `Rgba::TRANSPARENT` so the cache never stores a pixmap that
+        // can't be observed.
+        let mut t = TextEngine::new();
+        let mut pm = Pixmap::new(32, 16).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let before = pm.data().to_vec();
+        t.draw_text_cached(&mut pm, "Hi", 0.0, 0.0, 18.0, Rgba::TRANSPARENT, None);
+        assert_eq!(pm.data(), before.as_slice(), "transparent draw must not mutate");
+    }
+
+    #[test]
+    fn draw_text_cached_empty_text_is_noop() {
+        let mut t = TextEngine::new();
+        let mut pm = Pixmap::new(32, 16).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let before = pm.data().to_vec();
+        t.draw_text_cached(&mut pm, "", 0.0, 0.0, 18.0, Rgba(0, 0, 0, 0xff), None);
+        assert_eq!(pm.data(), before.as_slice(), "empty text must not mutate");
+    }
 
     #[test]
     fn measure_unwrapped_returns_single_line_height() {

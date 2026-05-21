@@ -14,10 +14,36 @@ use crate::layout::Rect as LayoutRect;
 use crate::style::Rgba;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use svgtypes::PathSegment;
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform,
+    FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Stroke,
+    Transform,
 };
+
+/// Cap on cached icon rasterisations. ~128 unique
+/// (paths, viewBox, tint, w, h) combinations covers a busy chrome
+/// (every header / nav / action icon once); avg pixmap ~3 KB so
+/// memory is bounded near 400 KB.
+const ICON_RASTER_CACHE_CAP: usize = 128;
+
+/// Per-painter cache of pre-rasterised icon pixmaps. Lives on the
+/// painter so the cache lifetime matches the surface; freed at the
+/// same time `Pixmap` reallocs would invalidate stale renders.
+#[derive(Default)]
+pub struct IconRasterCache {
+    entries: HashMap<u64, Pixmap>,
+}
+
+impl IconRasterCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
+    }
+}
 
 /// One stroked / filled path inside an SVG icon. Mirrors the engine's
 /// `IconPath` so we can deserialise straight from the `paths` prop.
@@ -292,6 +318,98 @@ pub fn paint_icon(
     }
 }
 
+/// Composite a cached icon raster onto `pixmap` if one exists for
+/// the given inputs; otherwise rasterise into a fresh small pixmap
+/// (sized to the rect), cache it, and composite.
+///
+/// Cache key: `(paths shape + colours + widths, viewBox, tint, w, h)`.
+/// Subsequent paints of the same icon at the same size become a single
+/// `draw_pixmap` instead of re-parsing every `d`-string + retessellating
+/// every path. On a typical Lucide-icon-heavy header that's ~10
+/// `tiny-skia` `stroke_path` calls per icon collapsed to one bilinear
+/// blit.
+pub fn paint_icon_cached(
+    pixmap: &mut Pixmap,
+    rect: LayoutRect,
+    paths: &[IconPath],
+    view_box: (f32, f32, f32, f32),
+    tint: Option<Rgba>,
+    cache: &mut IconRasterCache,
+) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || paths.is_empty() {
+        return;
+    }
+    let cw = rect.w.ceil().max(1.0) as u32;
+    let ch = rect.h.ceil().max(1.0) as u32;
+    let key = icon_cache_key(paths, view_box, tint, cw, ch);
+    if !cache.entries.contains_key(&key) {
+        let mut tile = match Pixmap::new(cw, ch) {
+            Some(p) => p,
+            None => {
+                paint_icon(pixmap, rect, paths, view_box, tint);
+                return;
+            }
+        };
+        // Render at origin (0,0) of the tile, dimensions `(cw, ch)`.
+        let local_rect = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: cw as f32,
+            h: ch as f32,
+        };
+        paint_icon(&mut tile, local_rect, paths, view_box, tint);
+        if cache.entries.len() >= ICON_RASTER_CACHE_CAP {
+            cache.entries.clear();
+        }
+        cache.entries.insert(key, tile);
+    }
+    let tile = cache.entries.get(&key).expect("inserted above");
+    // Integer translate keeps the alpha-anti-aliased icon edges
+    // crisp; fractional offsets force a sampler resample and blur.
+    let transform = Transform::from_translate(rect.x.round(), rect.y.round());
+    pixmap.draw_pixmap(
+        0,
+        0,
+        PixmapRef::from_bytes(tile.data(), tile.width(), tile.height())
+            .expect("tile bytes valid"),
+        &PixmapPaint::default(),
+        transform,
+        None,
+    );
+}
+
+fn icon_cache_key(
+    paths: &[IconPath],
+    view_box: (f32, f32, f32, f32),
+    tint: Option<Rgba>,
+    w: u32,
+    h: u32,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    paths.len().hash(&mut hasher);
+    for p in paths {
+        p.d.hash(&mut hasher);
+        p.fill.hash(&mut hasher);
+        p.stroke.hash(&mut hasher);
+        p.stroke_width.map(f32::to_bits).hash(&mut hasher);
+        p.stroke_linecap.hash(&mut hasher);
+        p.stroke_linejoin.hash(&mut hasher);
+    }
+    view_box.0.to_bits().hash(&mut hasher);
+    view_box.1.to_bits().hash(&mut hasher);
+    view_box.2.to_bits().hash(&mut hasher);
+    view_box.3.to_bits().hash(&mut hasher);
+    if let Some(c) = tint {
+        u32::from_le_bytes([c.0, c.1, c.2, c.3]).hash(&mut hasher);
+    } else {
+        u32::MAX.hash(&mut hasher);
+    }
+    w.hash(&mut hasher);
+    h.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn line_cap_from(s: Option<&str>) -> LineCap {
     match s {
         Some("round") => LineCap::Round,
@@ -363,6 +481,77 @@ mod tests {
         let p = build_path("M0 0 L10 10").expect("simple ML");
         // Path has at least one segment.
         assert!(p.bounds().width() > 0.0 && p.bounds().height() > 0.0);
+    }
+
+    #[test]
+    fn paint_icon_cached_matches_uncached_pixels() {
+        // Cache hit must produce visually identical output to the
+        // direct path. Render via `paint_icon_cached` twice (miss
+        // then hit) and via `paint_icon` once into a separate pixmap.
+        let paths = vec![IconPath {
+            d: "M0 0 H10 V10 H0 Z".into(),
+            fill: Some("#000000".into()),
+            stroke: None,
+            stroke_width: None,
+            stroke_linecap: None,
+            stroke_linejoin: None,
+        }];
+        let rect = LayoutRect { x: 0.0, y: 0.0, w: 32.0, h: 32.0 };
+        let view_box = (0.0, 0.0, 10.0, 10.0);
+
+        let mut a = Pixmap::new(48, 48).unwrap();
+        a.fill(tiny_skia::Color::WHITE);
+        let mut b = Pixmap::new(48, 48).unwrap();
+        b.fill(tiny_skia::Color::WHITE);
+
+        let mut cache = IconRasterCache::new();
+        paint_icon_cached(&mut a, rect, &paths, view_box, None, &mut cache);
+        paint_icon(&mut b, rect, &paths, view_box, None);
+        // Cache miss render path goes through `paint_icon` against a
+        // fresh tile and then composites; the `a` pixels must equal
+        // the `b` pixels, modulo nothing.
+        assert_eq!(a.data(), b.data(), "cached miss-render should match uncached");
+
+        // Second call → cache hit, still must match.
+        let mut c = Pixmap::new(48, 48).unwrap();
+        c.fill(tiny_skia::Color::WHITE);
+        paint_icon_cached(&mut c, rect, &paths, view_box, None, &mut cache);
+        assert_eq!(a.data(), c.data(), "cached hit-render should match miss");
+    }
+
+    #[test]
+    fn paint_icon_cached_empty_paths_or_zero_rect_is_noop() {
+        let mut cache = IconRasterCache::new();
+        let mut pm = Pixmap::new(20, 20).unwrap();
+        pm.fill(tiny_skia::Color::WHITE);
+        let before = pm.data().to_vec();
+
+        paint_icon_cached(
+            &mut pm,
+            LayoutRect { x: 0.0, y: 0.0, w: 20.0, h: 20.0 },
+            &[],
+            (0.0, 0.0, 24.0, 24.0),
+            None,
+            &mut cache,
+        );
+        assert_eq!(pm.data(), before.as_slice(), "empty paths must no-op");
+
+        paint_icon_cached(
+            &mut pm,
+            LayoutRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+            &[IconPath {
+                d: "M0 0 L1 1".into(),
+                fill: Some("#000".into()),
+                stroke: None,
+                stroke_width: None,
+                stroke_linecap: None,
+                stroke_linejoin: None,
+            }],
+            (0.0, 0.0, 24.0, 24.0),
+            None,
+            &mut cache,
+        );
+        assert_eq!(pm.data(), before.as_slice(), "zero rect must no-op");
     }
 
     #[test]

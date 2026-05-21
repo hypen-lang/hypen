@@ -41,6 +41,11 @@ pub struct CpuPainter {
     /// Reusable pixmap buffer. Reallocated only when the surface size
     /// changes — avoids ~10MB+ per-frame allocs on resize.
     pixmap: Option<Pixmap>,
+    /// Pre-rasterised icon pixmaps. Same idea as the text raster
+    /// cache: the slow op (path tessellation + per-pixel coverage)
+    /// runs once per `(shape, size, tint)` tuple instead of per
+    /// frame.
+    icon_cache: crate::paint::icon::IconRasterCache,
 }
 
 impl CpuPainter {
@@ -49,6 +54,7 @@ impl CpuPainter {
             text: TextEngine::new(),
             interaction: InteractionState::default(),
             pixmap: None,
+            icon_cache: crate::paint::icon::IconRasterCache::new(),
         }
     }
 
@@ -196,23 +202,39 @@ impl CpuPainter {
                 fill_rect(pixmap, item.rect, bg, radius);
             }
             if item.border.is_visible() {
-                stroke_rect(
-                    pixmap,
-                    item.rect,
-                    border_color,
-                    radius,
-                    item.border.width * scale_factor,
-                );
+                if item.border.is_partial() {
+                    // tw `border-b` etc. — stroke only the requested
+                    // sides as thin un-rounded fill rects. Skips
+                    // corner rounding on partial borders for now;
+                    // most tw usage is single-side dividers where
+                    // straight corners look right.
+                    paint_partial_border(
+                        pixmap,
+                        item.rect,
+                        border_color,
+                        item.border.width * scale_factor,
+                        item.border.sides,
+                    );
+                } else {
+                    stroke_rect(
+                        pixmap,
+                        item.rect,
+                        border_color,
+                        radius,
+                        item.border.width * scale_factor,
+                    );
+                }
             }
 
             match &item.kind {
-                ItemKind::Image { src } => {
+                ItemKind::Image { src, fit } => {
                     crate::paint::image::paint_image(
                         pixmap,
                         item.rect,
                         src.as_deref(),
                         scale_factor,
                         item.border.radius * scale_factor,
+                        *fit,
                     );
                 }
                 ItemKind::Icon {
@@ -220,12 +242,13 @@ impl CpuPainter {
                     view_box,
                     tint,
                 } => {
-                    crate::paint::icon::paint_icon(
+                    crate::paint::icon::paint_icon_cached(
                         pixmap,
                         item.rect,
                         paths,
                         *view_box,
                         *tint,
+                        &mut self.icon_cache,
                     );
                 }
                 ItemKind::Text {
@@ -239,8 +262,12 @@ impl CpuPainter {
                     // is the full rect for alignment purposes — long
                     // text still wraps at the rect edge.
                     let scaled_size = *font_size * scale_factor;
-                    let (line_w, _) =
-                        self.text.measure(content, scaled_size, Some(item.rect.w));
+                    let (line_w, _) = self.text.measure_weighted(
+                        content,
+                        scaled_size,
+                        Some(item.rect.w),
+                        item.font_weight,
+                    );
                     let dx = match align {
                         crate::layout::TextAlign::Start => 0.0,
                         crate::layout::TextAlign::Center => {
@@ -250,7 +277,7 @@ impl CpuPainter {
                             (item.rect.w - line_w).max(0.0)
                         }
                     };
-                    self.text.draw_text_colored(
+                    self.text.draw_text_cached_weighted(
                         pixmap,
                         content,
                         item.rect.x + dx,
@@ -258,6 +285,7 @@ impl CpuPainter {
                         scaled_size,
                         *color,
                         Some(item.rect.w),
+                        item.font_weight,
                     );
                 }
                 ItemKind::Input {
@@ -276,7 +304,7 @@ impl CpuPainter {
                         if let Some(p) = placeholder.as_deref() {
                             // Placeholder is muted gray; engine doesn't
                             // resolve a separate `placeholderColor` yet.
-                            self.text.draw_text_colored(
+                            self.text.draw_text_cached_weighted(
                                 pixmap,
                                 p,
                                 text_x,
@@ -284,10 +312,11 @@ impl CpuPainter {
                                 *font_size * scale_factor,
                                 Rgba(0x90, 0x96, 0xa1, 0xff),
                                 Some(inner_w),
+                                item.font_weight,
                             );
                         }
                     } else {
-                        self.text.draw_text_colored(
+                        self.text.draw_text_cached_weighted(
                             pixmap,
                             value,
                             text_x,
@@ -295,6 +324,7 @@ impl CpuPainter {
                             *font_size * scale_factor,
                             *color,
                             Some(inner_w),
+                            item.font_weight,
                         );
                     }
 
@@ -475,6 +505,66 @@ fn fill_rect(pixmap: &mut Pixmap, rect: crate::layout::Rect, color: Rgba, radius
     }
 }
 
+/// Stroke just the sides flagged in `sides` as thin straight fill
+/// rects. Used for tw `border-b` / `border-t` etc. — single-side
+/// dividers where corner rounding is irrelevant.
+fn paint_partial_border(
+    pixmap: &mut Pixmap,
+    rect: crate::layout::Rect,
+    color: Rgba,
+    width: f32,
+    sides: u8,
+) {
+    use crate::style::{
+        BORDER_SIDE_BOTTOM, BORDER_SIDE_LEFT, BORDER_SIDE_RIGHT, BORDER_SIDE_TOP,
+    };
+    if color.3 == 0 || width <= 0.0 {
+        return;
+    }
+    if sides & BORDER_SIDE_TOP != 0 {
+        fill_rect(
+            pixmap,
+            crate::layout::Rect { x: rect.x, y: rect.y, w: rect.w, h: width },
+            color,
+            0.0,
+        );
+    }
+    if sides & BORDER_SIDE_BOTTOM != 0 {
+        fill_rect(
+            pixmap,
+            crate::layout::Rect {
+                x: rect.x,
+                y: rect.y + rect.h - width,
+                w: rect.w,
+                h: width,
+            },
+            color,
+            0.0,
+        );
+    }
+    if sides & BORDER_SIDE_LEFT != 0 {
+        fill_rect(
+            pixmap,
+            crate::layout::Rect { x: rect.x, y: rect.y, w: width, h: rect.h },
+            color,
+            0.0,
+        );
+    }
+    if sides & BORDER_SIDE_RIGHT != 0 {
+        fill_rect(
+            pixmap,
+            crate::layout::Rect {
+                x: rect.x + rect.w - width,
+                y: rect.y,
+                w: width,
+                h: rect.h,
+            },
+            color,
+            0.0,
+        );
+    }
+}
+
 fn stroke_rect(
     pixmap: &mut Pixmap,
     rect: crate::layout::Rect,
@@ -542,16 +632,21 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia
         pb.push_rect(rect);
         return pb.finish();
     }
+    // Cubic-Bezier kappa for a quarter-circle. Quad_to (parabolic)
+    // visibly squashes the corners at `radius == side/2` — the
+    // squircle that showed up on every `rounded-full` avatar.
+    const K: f32 = 0.5522847498307936;
+    let c = r * K;
     let mut pb = PathBuilder::new();
     pb.move_to(x + r, y);
     pb.line_to(x + w - r, y);
-    pb.quad_to(x + w, y, x + w, y + r);
+    pb.cubic_to(x + w - r + c, y, x + w, y + r - c, x + w, y + r);
     pb.line_to(x + w, y + h - r);
-    pb.quad_to(x + w, y + h, x + w - r, y + h);
+    pb.cubic_to(x + w, y + h - r + c, x + w - r + c, y + h, x + w - r, y + h);
     pb.line_to(x + r, y + h);
-    pb.quad_to(x, y + h, x, y + h - r);
+    pb.cubic_to(x + r - c, y + h, x, y + h - r + c, x, y + h - r);
     pb.line_to(x, y + r);
-    pb.quad_to(x, y, x + r, y);
+    pb.cubic_to(x, y + r - c, x + r - c, y, x + r, y);
     pb.close();
     pb.finish()
 }

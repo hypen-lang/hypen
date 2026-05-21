@@ -81,6 +81,7 @@ pub fn paint_image(
     src: Option<&str>,
     scale_factor: f32,
     radius: f32,
+    fit: crate::layout::ObjectFit,
 ) {
     let bitmap_data: Option<(Vec<u8>, u32, u32)> = src.and_then(|s| {
         ensure_loaded(s);
@@ -97,16 +98,28 @@ pub fn paint_image(
         let size = IntSize::from_wh(w, h).expect("non-zero source size");
         let pm =
             Pixmap::from_vec(data, size).expect("source bitmap matches RGBA layout");
-        // Cover-fit: scale to the larger of the two ratios so the
-        // image fills the rect without leaving empty bands. Without
-        // this a non-square source decoded into a square avatar slot
-        // looked stretched / "flipped". Then center on the off-axis.
+        // Resolve object-fit into per-axis scale + centring offsets.
+        // `Fill` (CSS default) lets the axes scale independently;
+        // `Cover` and `Contain` stay uniform but pick which extreme.
+        // `None` keeps natural pixel size and centres / crops at
+        // the rect.
         let sx = rect.w / w as f32;
         let sy = rect.h / h as f32;
-        let s = sx.max(sy);
-        let dx = rect.x + (rect.w - w as f32 * s) * 0.5;
-        let dy = rect.y + (rect.h - h as f32 * s) * 0.5;
-        let transform = Transform::from_scale(s, s).post_translate(dx, dy);
+        let (sx, sy) = match fit {
+            crate::layout::ObjectFit::Fill => (sx, sy),
+            crate::layout::ObjectFit::Cover => {
+                let s = sx.max(sy);
+                (s, s)
+            }
+            crate::layout::ObjectFit::Contain => {
+                let s = sx.min(sy);
+                (s, s)
+            }
+            crate::layout::ObjectFit::None => (1.0, 1.0),
+        };
+        let dx = rect.x + (rect.w - w as f32 * sx) * 0.5;
+        let dy = rect.y + (rect.h - h as f32 * sy) * 0.5;
+        let transform = Transform::from_scale(sx, sy).post_translate(dx, dy);
         let paint = PixmapPaint {
             quality: tiny_skia::FilterQuality::Bilinear,
             ..PixmapPaint::default()
@@ -320,16 +333,23 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia
         pb.push_rect(rect);
         return pb.finish();
     }
+    // Cubic-Bezier kappa for a quarter-circle approximation. Quad_to
+    // (parabola) produces a visible squircle for large radii — at
+    // `radius == side/2` it's noticeably flat at the cardinal points.
+    // The cubic-with-kappa form is the standard CSS-correct circle
+    // and matches every other renderer's `border-radius: 50%`.
+    const K: f32 = 0.5522847498307936;
+    let c = r * K;
     let mut pb = PathBuilder::new();
     pb.move_to(x + r, y);
     pb.line_to(x + w - r, y);
-    pb.quad_to(x + w, y, x + w, y + r);
+    pb.cubic_to(x + w - r + c, y, x + w, y + r - c, x + w, y + r);
     pb.line_to(x + w, y + h - r);
-    pb.quad_to(x + w, y + h, x + w - r, y + h);
+    pb.cubic_to(x + w, y + h - r + c, x + w - r + c, y + h, x + w - r, y + h);
     pb.line_to(x + r, y + h);
-    pb.quad_to(x, y + h, x, y + h - r);
+    pb.cubic_to(x + r - c, y + h, x, y + h - r + c, x, y + h - r);
     pb.line_to(x, y + r);
-    pb.quad_to(x, y, x + r, y);
+    pb.cubic_to(x, y + r - c, x + r - c, y, x + r, y);
     pb.close();
     pb.finish()
 }
@@ -403,7 +423,14 @@ mod tests {
             w: 56.0,
             h: 56.0,
         };
-        paint_image(&mut pm, rect, Some("/no/such/file.png"), 1.0, 0.0);
+        paint_image(
+            &mut pm,
+            rect,
+            Some("/no/such/file.png"),
+            1.0,
+            0.0,
+            crate::layout::ObjectFit::Fill,
+        );
         assert_ne!(
             pm.data(),
             before.as_slice(),
@@ -422,7 +449,7 @@ mod tests {
             w: 64.0,
             h: 64.0,
         };
-        paint_image(&mut pm, rect, None, 1.0, 0.0);
+        paint_image(&mut pm, rect, None, 1.0, 0.0, crate::layout::ObjectFit::Fill);
         assert_ne!(pm.data(), before.as_slice());
     }
 
@@ -454,7 +481,14 @@ mod tests {
             w: 32.0,
             h: 32.0,
         };
-        paint_image(&mut canvas, rect, Some(key), 1.0, 0.0);
+        paint_image(
+            &mut canvas,
+            rect,
+            Some(key),
+            1.0,
+            0.0,
+            crate::layout::ObjectFit::Fill,
+        );
 
         // Placeholder gray is roughly (0xe5, 0xe7, 0xeb). Loaded red
         // should have R >> G across the painted area. Sample a few

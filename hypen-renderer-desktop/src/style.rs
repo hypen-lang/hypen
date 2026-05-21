@@ -318,17 +318,49 @@ fn read_box_props(node: &Node, prefix: &str) -> Padding {
     p
 }
 
+/// Per-side bitmask: 1=top, 2=right, 4=bottom, 8=left.
+pub const BORDER_SIDE_TOP: u8 = 1;
+pub const BORDER_SIDE_RIGHT: u8 = 2;
+pub const BORDER_SIDE_BOTTOM: u8 = 4;
+pub const BORDER_SIDE_LEFT: u8 = 8;
+pub const BORDER_SIDES_ALL: u8 = BORDER_SIDE_TOP | BORDER_SIDE_RIGHT | BORDER_SIDE_BOTTOM | BORDER_SIDE_LEFT;
+
 /// Resolved border style for a node.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Border {
     pub width: f32,
     pub color: Rgba,
     pub radius: f32,
+    /// Bitmask of which sides this border draws on. `BORDER_SIDES_ALL`
+    /// (the default) is the standard "stroke the full rounded rect"
+    /// path. A subset means tw `border-b` / `border-t` etc. — those
+    /// expand to per-side keys (`border-bottom-width: 1px`) which
+    /// the layout reads here, then the painter strokes only the set
+    /// sides as thin un-rounded fill rects.
+    pub sides: u8,
+}
+
+impl Default for Border {
+    fn default() -> Self {
+        Self {
+            width: 0.0,
+            color: Rgba::TRANSPARENT,
+            radius: 0.0,
+            sides: BORDER_SIDES_ALL,
+        }
+    }
 }
 
 impl Border {
     pub fn is_visible(&self) -> bool {
-        self.width > 0.0 && self.color.3 > 0
+        self.width > 0.0 && self.color.3 > 0 && self.sides != 0
+    }
+
+    /// True when only some of the four sides are flagged. Painter
+    /// uses this to fall back from `stroke_rect` (which draws all
+    /// four edges of the rounded rect) to a per-side fill_rect path.
+    pub fn is_partial(&self) -> bool {
+        self.sides != 0 && self.sides != BORDER_SIDES_ALL
     }
 }
 
@@ -385,6 +417,7 @@ pub fn border(node: &Node) -> Border {
         // matches the DOM applicator's "default solid black" behaviour.
         color: color.unwrap_or(if width > 0.0 { Rgba::BLACK } else { Rgba::TRANSPARENT }),
         radius,
+        sides: BORDER_SIDES_ALL,
     }
 }
 
@@ -393,12 +426,22 @@ pub fn border_at(node: &Node, viewport_w: f32) -> Border {
     let mut width = 0.0_f32;
     let mut radius = 0.0_f32;
     let mut color: Option<Rgba> = None;
+    let mut uniform_set = false;
+    // Per-side widths feed `sides` and the eventual stroke width
+    // — set when tw `border-b` / `border-t` / etc. emits a directional
+    // key (e.g. `border-bottom-width: 1px`).
+    let mut top: Option<f32> = None;
+    let mut right: Option<f32> = None;
+    let mut bottom: Option<f32> = None;
+    let mut left: Option<f32> = None;
 
     if let Some(v) = prop_f32_at(node, "border", viewport_w) {
         width = v;
+        uniform_set = true;
     }
     if let Some(v) = node.props.get("border.width").and_then(value_to_f32) {
         width = v;
+        uniform_set = true;
     }
     if let Some(v) = node
         .props
@@ -413,6 +456,7 @@ pub fn border_at(node: &Node, viewport_w: f32) -> Border {
     }
     if let Some(v) = prop_f32_at(node, "borderWidth", viewport_w) {
         width = v;
+        uniform_set = true;
     }
     if let Some(v) = prop_color_at(node, "borderColor", viewport_w) {
         color = Some(v);
@@ -423,11 +467,45 @@ pub fn border_at(node: &Node, viewport_w: f32) -> Border {
     if let Some(v) = prop_f32_at(node, "cornerRadius", viewport_w) {
         radius = v;
     }
+    // Per-side: tw `border-b` → `border-bottom-width: 1px`. We accept
+    // both camelCase + kebab via the standard `prop_f32_at` chain.
+    top = prop_f32_at(node, "borderTopWidth", viewport_w);
+    right = prop_f32_at(node, "borderRightWidth", viewport_w);
+    bottom = prop_f32_at(node, "borderBottomWidth", viewport_w);
+    left = prop_f32_at(node, "borderLeftWidth", viewport_w);
+
+    let sides = if uniform_set {
+        BORDER_SIDES_ALL
+    } else if top.is_some() || right.is_some() || bottom.is_some() || left.is_some() {
+        // Only the explicitly-set sides draw. Width is the max of the
+        // per-side widths (uniform stroke per visible side).
+        let mut s = 0u8;
+        if top.is_some_and(|w| w > 0.0) {
+            s |= BORDER_SIDE_TOP;
+        }
+        if right.is_some_and(|w| w > 0.0) {
+            s |= BORDER_SIDE_RIGHT;
+        }
+        if bottom.is_some_and(|w| w > 0.0) {
+            s |= BORDER_SIDE_BOTTOM;
+        }
+        if left.is_some_and(|w| w > 0.0) {
+            s |= BORDER_SIDE_LEFT;
+        }
+        width = [top, right, bottom, left]
+            .iter()
+            .filter_map(|v| *v)
+            .fold(0.0_f32, |a, b| a.max(b));
+        s
+    } else {
+        BORDER_SIDES_ALL
+    };
 
     Border {
         width,
         color: color.unwrap_or(if width > 0.0 { Rgba::BLACK } else { Rgba::TRANSPARENT }),
         radius,
+        sides,
     }
 }
 
@@ -486,6 +564,48 @@ fn parse_length(s: &str) -> Option<f32> {
     }
     let stripped = trimmed.strip_suffix("px").unwrap_or(trimmed);
     stripped.trim().parse::<f32>().ok()
+}
+
+/// Parse a dimension prop that may carry a `%` unit. Returns the
+/// numeric portion in [0, 1] for percent; `None` for length-only or
+/// unparseable. Callers should fall through to `parse_length` /
+/// `prop_f32_at` when this returns `None`.
+pub(crate) fn parse_percent(s: &str) -> Option<f32> {
+    let trimmed = s.trim();
+    let num = trimmed.strip_suffix('%')?;
+    num.trim().parse::<f32>().ok().map(|v| v * 0.01)
+}
+
+/// Read `name` (with viewport-aware tw breakpoint resolution) as a
+/// `Dim`. Strings carrying `%` resolve to `Dim::Percent`; everything
+/// else (numbers, `"16px"`, `"1rem"`) resolves to `Dim::Length`.
+/// Returns `None` when the prop is absent or unparseable.
+pub fn prop_dim_at(node: &Node, name: &str, viewport_w: f32) -> Option<Dim> {
+    // Percent strings are only meaningful as raw values; check the
+    // bare prop and the dotted positional first. If neither is a
+    // string with `%`, fall through to the standard `prop_f32_at`
+    // chain (which honours camelCase + dotted + kebab + tw
+    // breakpoints) as a length.
+    if let Some(s) = node.props.get(name).and_then(|v| v.as_str()) {
+        if let Some(pct) = parse_percent(s) {
+            return Some(Dim::Percent(pct));
+        }
+    }
+    let dotted = format!("{name}.0");
+    if let Some(s) = node.props.get(&dotted).and_then(|v| v.as_str()) {
+        if let Some(pct) = parse_percent(s) {
+            return Some(Dim::Percent(pct));
+        }
+    }
+    prop_f32_at(node, name, viewport_w).map(Dim::Length)
+}
+
+/// Length / percent / auto resolution for sizing props on Image and
+/// future percent-aware containers.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Dim {
+    Length(f32),
+    Percent(f32),
 }
 
 /// Best-effort CSS-ish colour parser.

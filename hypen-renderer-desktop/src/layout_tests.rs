@@ -1,0 +1,1439 @@
+//! Tests for `crate::layout`. Lives in its own file via `#[path]` so
+//! `layout.rs` itself stays focused on the build / walk / API surface
+//! without the editor-buffer weight of ~1.2k lines of test helpers
+//! and patch-stream fixtures.
+
+use super::*;
+use crate::tree::Tree;
+use hypen_engine::Patch;
+use indexmap::IndexMap;
+use serde_json::{json, Value};
+use std::sync::Arc;
+
+    /// Build a `Patch::Create` with the given props (k/v pairs of `&str` →
+    /// `serde_json::Value`).
+    fn create_patch(id: &str, element_type: &str, props: &[(&str, Value)]) -> Patch {
+        let mut map: IndexMap<String, Value> = IndexMap::new();
+        for (k, v) in props {
+            map.insert((*k).into(), v.clone());
+        }
+        Patch::Create {
+            id: id.into(),
+            element_type: element_type.into(),
+            props: Arc::new(map),
+        }
+    }
+
+    fn insert_patch(parent_id: &str, id: &str) -> Patch {
+        Patch::Insert {
+            parent_id: parent_id.into(),
+            id: id.into(),
+            before_id: None,
+        }
+    }
+
+    /// Convenience: build a Text node with positional content under the given
+    /// parent.
+    fn add_text(tree: &mut Tree, parent: &str, id: &str, content: &str) {
+        tree.apply(&create_patch(id, "Text", &[("0", json!(content))]));
+        tree.apply(&insert_patch(parent, id));
+    }
+
+    fn find_item<'a>(pass: &'a LayoutPass, node_id: &str) -> &'a LayoutItem {
+        pass.items
+            .iter()
+            .find(|it| it.node_id == node_id)
+            .unwrap_or_else(|| panic!("expected layout item for node `{node_id}`"))
+    }
+
+    #[test]
+    fn column_stacks_two_texts_vertically() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        add_text(&mut tree, "col", "t1", "First");
+        add_text(&mut tree, "col", "t2", "Second");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let first = find_item(&pass, "t1");
+        let second = find_item(&pass, "t2");
+        assert!(
+            second.rect.y > first.rect.y + first.rect.h - 1.0,
+            "expected second text below first; got first={:?} second={:?}",
+            first.rect,
+            second.rect
+        );
+    }
+
+    #[test]
+    fn row_stacks_two_texts_horizontally() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("row", "Row", &[]));
+        tree.apply(&insert_patch("root", "row"));
+        add_text(&mut tree, "row", "t1", "First");
+        add_text(&mut tree, "row", "t2", "Second");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let first = find_item(&pass, "t1");
+        let second = find_item(&pass, "t2");
+        assert!(
+            second.rect.x > first.rect.x + first.rect.w - 1.0,
+            "expected second text to the right of first; got first={:?} second={:?}",
+            first.rect,
+            second.rect
+        );
+    }
+
+    #[test]
+    fn text_rect_size_is_nonzero() {
+        let mut tree = Tree::new();
+        add_text(&mut tree, "root", "t1", "Hello");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let item = find_item(&pass, "t1");
+        assert!(
+            item.rect.w > 0.0 && item.rect.h > 0.0,
+            "expected non-zero text rect, got {:?}",
+            item.rect
+        );
+    }
+
+    #[test]
+    fn button_emits_button_kind_with_resolved_action() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("action", json!("@actions.increment"))],
+        ));
+        tree.apply(&insert_patch("root", "btn"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let item = find_item(&pass, "btn");
+        assert!(
+            matches!(item.kind, ItemKind::Button),
+            "expected ItemKind::Button, got {:?}",
+            item.kind
+        );
+        assert_eq!(item.action.as_deref(), Some("increment"));
+    }
+
+    #[test]
+    fn button_action_strips_at_actions_prefix() {
+        let mut tree = Tree::new();
+        // Three buttons in a Column so they're all distinct, separately
+        // discoverable items.
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        tree.apply(&create_patch(
+            "b_full",
+            "Button",
+            &[("action", json!("@actions.foo"))],
+        ));
+        tree.apply(&insert_patch("col", "b_full"));
+        tree.apply(&create_patch(
+            "b_at",
+            "Button",
+            &[("action", json!("@foo"))],
+        ));
+        tree.apply(&insert_patch("col", "b_at"));
+        tree.apply(&create_patch(
+            "b_bare",
+            "Button",
+            &[("action", json!("foo"))],
+        ));
+        tree.apply(&insert_patch("col", "b_bare"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        for id in ["b_full", "b_at", "b_bare"] {
+            let item = find_item(&pass, id);
+            assert_eq!(
+                item.action.as_deref(),
+                Some("foo"),
+                "button `{id}` should resolve to action `foo`",
+            );
+        }
+    }
+
+    #[test]
+    fn hit_returns_topmost_actionable() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        tree.apply(&create_patch(
+            "b1",
+            "Button",
+            &[("action", json!("@actions.first"))],
+        ));
+        tree.apply(&insert_patch("col", "b1"));
+        add_text(&mut tree, "b1", "b1_label", "First");
+        tree.apply(&create_patch(
+            "b2",
+            "Button",
+            &[("action", json!("@actions.second"))],
+        ));
+        tree.apply(&insert_patch("col", "b2"));
+        add_text(&mut tree, "b2", "b2_label", "Second");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let second = find_item(&pass, "b2");
+        assert!(
+            second.rect.w > 0.0 && second.rect.h > 0.0,
+            "second button should have a non-zero rect, got {:?}",
+            second.rect
+        );
+        let cx = second.rect.x + second.rect.w / 2.0;
+        let cy = second.rect.y + second.rect.h / 2.0;
+        let hit = pass.hit(cx, cy).expect("expected a hit at the second button's center");
+        assert_eq!(hit.node_id, "b2");
+        assert_eq!(hit.action.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn text_inside_button_is_not_actionable() {
+        // Regression: `resolve_action` used to fall back to `props["0"]`
+        // for any element type, so a Text child of a Button (whose
+        // content lives at `props["0"]`) ended up flagged actionable
+        // and won the hit-test over its parent Button.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("action", json!("@actions.tap"))],
+        ));
+        tree.apply(&insert_patch("root", "btn"));
+        add_text(&mut tree, "btn", "label", "Tap");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let label = find_item(&pass, "label");
+        assert!(
+            label.action.is_none(),
+            "Text content must not be misread as an action",
+        );
+    }
+
+    #[test]
+    fn hit_outside_returns_none() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("action", json!("@actions.tap"))],
+        ));
+        tree.apply(&insert_patch("root", "btn"));
+        add_text(&mut tree, "btn", "label", "Tap");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        assert!(pass.hit(-1.0, -1.0).is_none());
+    }
+
+    #[test]
+    fn hit_skips_non_actionable() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "box",
+            "Container",
+            &[("padding.0", json!(40))],
+        ));
+        tree.apply(&insert_patch("root", "box"));
+        add_text(&mut tree, "box", "label", "Just a label");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let container = find_item(&pass, "box");
+        // Sanity: container has a non-zero rect we can probe.
+        assert!(
+            container.rect.w > 0.0 && container.rect.h > 0.0,
+            "container should have a non-zero rect from padding, got {:?}",
+            container.rect
+        );
+        assert!(container.action.is_none());
+
+        let cx = container.rect.x + container.rect.w / 2.0;
+        let cy = container.rect.y + container.rect.h / 2.0;
+        // The container is non-actionable and has no actionable descendants.
+        assert!(
+            pass.hit(cx, cy).is_none(),
+            "hit on non-actionable container should return None",
+        );
+    }
+
+    #[test]
+    fn padding_pushes_first_child_inward() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "col",
+            "Column",
+            &[("padding.0", json!(50))],
+        ));
+        tree.apply(&insert_patch("root", "col"));
+        add_text(&mut tree, "col", "t1", "Padded");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let child = find_item(&pass, "t1");
+        assert!(
+            child.rect.x >= 50.0,
+            "expected child x >= 50 (padding inset), got {}",
+            child.rect.x
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Focus traversal (keyboard navigation)
+    // ---------------------------------------------------------------
+
+    fn three_button_layout() -> LayoutPass {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        for id in ["b1", "b2", "b3"] {
+            tree.apply(&create_patch(
+                id,
+                "Button",
+                &[("action", json!(format!("@actions.{id}")))],
+            ));
+            tree.apply(&insert_patch("col", id));
+            add_text(&mut tree, id, &format!("{id}_label"), id);
+        }
+        let mut text = TextEngine::new();
+        LayoutPass::compute(&tree, &mut text, (800, 600), 1.0)
+    }
+
+    #[test]
+    fn focus_next_starts_at_first_when_none() {
+        let pass = three_button_layout();
+        assert_eq!(pass.focus_next(None).as_deref(), Some("b1"));
+    }
+
+    #[test]
+    fn focus_next_walks_in_order_and_wraps() {
+        let pass = three_button_layout();
+        assert_eq!(pass.focus_next(Some("b1")).as_deref(), Some("b2"));
+        assert_eq!(pass.focus_next(Some("b2")).as_deref(), Some("b3"));
+        assert_eq!(pass.focus_next(Some("b3")).as_deref(), Some("b1"));
+    }
+
+    #[test]
+    fn focus_prev_starts_at_last_when_none() {
+        let pass = three_button_layout();
+        assert_eq!(pass.focus_prev(None).as_deref(), Some("b3"));
+    }
+
+    #[test]
+    fn focus_prev_walks_backwards_and_wraps() {
+        let pass = three_button_layout();
+        assert_eq!(pass.focus_prev(Some("b3")).as_deref(), Some("b2"));
+        assert_eq!(pass.focus_prev(Some("b2")).as_deref(), Some("b1"));
+        assert_eq!(pass.focus_prev(Some("b1")).as_deref(), Some("b3"));
+    }
+
+    #[test]
+    fn focus_unknown_id_falls_back_to_first_or_last() {
+        let pass = three_button_layout();
+        assert_eq!(pass.focus_next(Some("ghost")).as_deref(), Some("b1"));
+        assert_eq!(pass.focus_prev(Some("ghost")).as_deref(), Some("b3"));
+    }
+
+    #[test]
+    fn focus_returns_none_when_no_actionables() {
+        let mut tree = Tree::new();
+        add_text(&mut tree, ROOT_ID, "t", "just text");
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        assert_eq!(pass.focus_next(None), None);
+        assert_eq!(pass.focus_prev(None), None);
+    }
+
+    #[test]
+    fn focus_skips_non_actionable_containers() {
+        // Container in the tree should be ignored — only Buttons walk.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("box", "Container", &[]));
+        tree.apply(&insert_patch("root", "box"));
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("action", json!("@actions.tap"))],
+        ));
+        tree.apply(&insert_patch("box", "btn"));
+        add_text(&mut tree, "btn", "label", "Tap");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        assert_eq!(pass.focus_next(None).as_deref(), Some("btn"));
+        // Walking past the only actionable wraps back to itself.
+        assert_eq!(pass.focus_next(Some("btn")).as_deref(), Some("btn"));
+    }
+
+    #[test]
+    fn border_width_pushes_child_inward_via_taffy() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "box",
+            "Container",
+            &[("borderWidth.0", json!(10))],
+        ));
+        tree.apply(&insert_patch("root", "box"));
+        add_text(&mut tree, "box", "t1", "Inside");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let container = find_item(&pass, "box");
+        let child = find_item(&pass, "t1");
+        assert!(
+            child.rect.x >= container.rect.x + 10.0,
+            "expected child x ({}) to be at least 10 inside container x ({}); got delta {}",
+            child.rect.x,
+            container.rect.x,
+            child.rect.x - container.rect.x,
+        );
+    }
+
+    #[test]
+    fn text_wraps_to_constrained_width() {
+        // A long Text inside a Column constrained to 120px should wrap
+        // into multiple lines, growing height beyond a single line.
+        let mut tree = Tree::new();
+        let long = "the quick brown fox jumps over the lazy dog several times";
+        add_text(&mut tree, ROOT_ID, "narrow", long);
+        let mut text = TextEngine::new();
+
+        // Wide viewport: text fits on one line, height ≈ one line.
+        let wide = LayoutPass::compute(&tree, &mut text, (1200, 600), 1.0);
+        let h_wide = find_item(&wide, "narrow").rect.h;
+
+        // Narrow viewport: text wraps, height should be larger.
+        let narrow = LayoutPass::compute(&tree, &mut text, (180, 600), 1.0);
+        let h_narrow = find_item(&narrow, "narrow").rect.h;
+
+        assert!(
+            h_narrow > h_wide,
+            "narrow-viewport wrapped height ({h_narrow}) should exceed wide ({h_wide})",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Input element
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn input_emits_input_kind_with_value_placeholder_bind() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "in",
+            "Input",
+            &[
+                ("value", json!("hello")),
+                ("placeholder", json!("Type here")),
+                ("bind", json!("name")),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "in"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "in");
+        match &item.kind {
+            ItemKind::Input {
+                value,
+                placeholder,
+                bind_path,
+                ..
+            } => {
+                assert_eq!(value, "hello");
+                assert_eq!(placeholder.as_deref(), Some("Type here"));
+                assert_eq!(bind_path.as_deref(), Some("name"));
+            }
+            other => panic!("expected ItemKind::Input, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn input_is_focusable_and_walked_by_focus_next() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        tree.apply(&create_patch("in", "Input", &[("bind", json!("name"))]));
+        tree.apply(&insert_patch("col", "in"));
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("action", json!("@actions.save"))],
+        ));
+        tree.apply(&insert_patch("col", "btn"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        // First Tab from None → first focusable in document order.
+        assert_eq!(pass.focus_next(None).as_deref(), Some("in"));
+        // Walk forward from Input → Button.
+        assert_eq!(pass.focus_next(Some("in")).as_deref(), Some("btn"));
+        // Wrap from last focusable back to first.
+        assert_eq!(pass.focus_next(Some("btn")).as_deref(), Some("in"));
+    }
+
+    // ---------------------------------------------------------------
+    // Scrolling
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn content_size_grows_with_more_children() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        for i in 0..30 {
+            let id = format!("t{i}");
+            add_text(&mut tree, "col", &id, &format!("row {i}"));
+        }
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 200), 1.0);
+        // 30 rows of ~24px line height should comfortably exceed
+        // the 200px viewport.
+        assert!(
+            pass.content_size.1 > 200.0,
+            "expected content_size.1 > 200, got {}",
+            pass.content_size.1,
+        );
+    }
+
+    #[test]
+    fn compute_with_scroll_shifts_every_item_y() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        for i in 0..5 {
+            let id = format!("r{i}");
+            add_text(&mut tree, "col", &id, &format!("row {i}"));
+        }
+        let mut text = TextEngine::new();
+        let unscrolled = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+        let scrolled =
+            LayoutPass::compute_with_scroll(&tree, &mut text, (400, 600), 1.0, 100.0);
+        for unrolled_item in unscrolled.items.iter() {
+            let scrolled_item = find_item(&scrolled, &unrolled_item.node_id);
+            let dy = unrolled_item.rect.y - scrolled_item.rect.y;
+            assert!(
+                (dy - 100.0).abs() < 0.5,
+                "item {id} expected -100 shift, got {dy}",
+                id = unrolled_item.node_id,
+            );
+        }
+    }
+
+    #[test]
+    fn hit_test_still_resolves_under_scroll() {
+        // A Button positioned past the natural viewport top should
+        // become hittable at the top of the viewport once scrolled.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        for i in 0..40 {
+            let id = format!("r{i}");
+            add_text(&mut tree, "col", &id, &format!("filler {i}"));
+        }
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("action", json!("@actions.tap"))],
+        ));
+        tree.apply(&insert_patch("col", "btn"));
+        add_text(&mut tree, "btn", "lbl", "Tap");
+        let mut text = TextEngine::new();
+        let unscrolled = LayoutPass::compute(&tree, &mut text, (400, 200), 1.0);
+        let btn_natural_y = find_item(&unscrolled, "btn").rect.y;
+        // Choose a scroll offset that puts the button into view.
+        let scroll_y = btn_natural_y - 50.0;
+        let scrolled =
+            LayoutPass::compute_with_scroll(&tree, &mut text, (400, 200), 1.0, scroll_y);
+        let btn = find_item(&scrolled, "btn");
+        let cx = btn.rect.x + btn.rect.w / 2.0;
+        let cy = btn.rect.y + btn.rect.h / 2.0;
+        let hit = scrolled.hit(cx, cy).expect("button should be hittable after scroll");
+        assert_eq!(hit.node_id, "btn");
+    }
+
+    #[test]
+    fn input_can_be_hit_focused_but_not_action_hit() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("in", "Input", &[("bind", json!("name"))]));
+        tree.apply(&insert_patch("root", "in"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "in");
+        let cx = item.rect.x + item.rect.w / 2.0;
+        let cy = item.rect.y + item.rect.h / 2.0;
+        assert!(
+            pass.hit(cx, cy).is_none(),
+            "Input must not be returned by hit() — it has no action",
+        );
+        let focused = pass
+            .hit_focusable(cx, cy)
+            .expect("Input should be focus-hittable");
+        assert_eq!(focused.node_id, "in");
+    }
+
+    // ---------------------------------------------------------------
+    // End-to-end round-trip: Patches → Tree → LayoutPass.
+    // Lives here (not tree.rs) because it crosses both layers.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn patches_to_layout_full_round_trip() {
+        // Build a representative tree using the same Patch types the
+        // engine emits in production: Create, Insert, SetProp.
+        let patches: Vec<Patch> = vec![
+            // Root Column.
+            create_patch("col", "Column", &[]),
+            insert_patch("root", "col"),
+            // Plain Text child.
+            create_patch("hdr", "Text", &[("0", json!("Welcome"))]),
+            insert_patch("col", "hdr"),
+            // Button child wired to an action — created without action,
+            // SetProp adds it. Exercises the SetProp side of the API.
+            create_patch("btn", "Button", &[]),
+            insert_patch("col", "btn"),
+            Patch::SetProp {
+                id: "btn".into(),
+                name: "action".into(),
+                value: json!("@actions.save"),
+            },
+            // Input child with a bind path.
+            create_patch(
+                "in",
+                "Input",
+                &[
+                    ("placeholder", json!("Type here")),
+                    ("bind", json!("user.name")),
+                ],
+            ),
+            insert_patch("col", "in"),
+        ];
+
+        let mut tree = Tree::new();
+        tree.apply_batch(&patches);
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        // The tree has 4 user nodes (col, hdr, btn, in) + the implicit
+        // outer wrapper, so items.len() ≥ 4. Every emitted node above
+        // is renderable.
+        assert!(
+            pass.items.len() >= 4,
+            "expected at least 4 layout items (col, hdr, btn, in); got {}",
+            pass.items.len(),
+        );
+
+        // Button: ItemKind::Button + resolved action stripped of `@actions.`.
+        let btn = find_item(&pass, "btn");
+        assert!(matches!(btn.kind, ItemKind::Button));
+        assert_eq!(btn.action.as_deref(), Some("save"));
+
+        // Input: bind_path matches what we set; placeholder propagated.
+        let input = find_item(&pass, "in");
+        match &input.kind {
+            ItemKind::Input {
+                placeholder,
+                bind_path,
+                ..
+            } => {
+                assert_eq!(placeholder.as_deref(), Some("Type here"));
+                assert_eq!(bind_path.as_deref(), Some("user.name"));
+            }
+            other => panic!("expected ItemKind::Input for `in`, got {other:?}"),
+        }
+
+        // Header text content survived the patch round-trip.
+        let hdr = find_item(&pass, "hdr");
+        if let ItemKind::Text { content, .. } = &hdr.kind {
+            assert_eq!(content, "Welcome");
+        } else {
+            panic!("expected ItemKind::Text for `hdr`, got {:?}", hdr.kind);
+        }
+
+        // Layout produced a non-zero content rect.
+        assert!(
+            pass.content_size.0 > 0.0 && pass.content_size.1 > 0.0,
+            "expected non-zero content_size, got {:?}",
+            pass.content_size,
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 13: Image element + text-align
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn parse_text_align_handles_common_values() {
+        assert_eq!(parse_text_align(None), TextAlign::Start);
+        assert_eq!(parse_text_align(Some("start")), TextAlign::Start);
+        assert_eq!(parse_text_align(Some("left")), TextAlign::Start);
+        assert_eq!(parse_text_align(Some("center")), TextAlign::Center);
+        assert_eq!(parse_text_align(Some("CENTER")), TextAlign::Center);
+        assert_eq!(parse_text_align(Some("end")), TextAlign::End);
+        assert_eq!(parse_text_align(Some("right")), TextAlign::End);
+        // Unknown values fall back to Start rather than panicking.
+        assert_eq!(parse_text_align(Some("justify")), TextAlign::Start);
+        assert_eq!(parse_text_align(Some("")), TextAlign::Start);
+    }
+
+    #[test]
+    fn text_align_resolves_through_camel_and_kebab_props() {
+        // Two Texts in the same column — first uses .textAlign("center")
+        // (camelCase from the applicator), second uses tw-style
+        // `text-align: "right"` (kebab from the .tw expander). Both
+        // should resolve via the layout's `parse_text_align` path.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        tree.apply(&create_patch(
+            "t_center",
+            "Text",
+            &[
+                ("0", json!("centered")),
+                ("textAlign.0", json!("center")),
+            ],
+        ));
+        tree.apply(&insert_patch("col", "t_center"));
+        tree.apply(&create_patch(
+            "t_right",
+            "Text",
+            &[
+                ("0", json!("aligned-right")),
+                ("text-align", json!("right")),
+            ],
+        ));
+        tree.apply(&insert_patch("col", "t_right"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+        let centered = find_item(&pass, "t_center");
+        match &centered.kind {
+            ItemKind::Text { align, .. } => assert_eq!(*align, TextAlign::Center),
+            other => panic!("expected ItemKind::Text, got {other:?}"),
+        }
+        let right = find_item(&pass, "t_right");
+        match &right.kind {
+            ItemKind::Text { align, .. } => assert_eq!(*align, TextAlign::End),
+            other => panic!("expected ItemKind::Text, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_element_emits_image_kind_with_src() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "avatar",
+            "Image",
+            &[("src", json!("/tmp/some.png"))],
+        ));
+        tree.apply(&insert_patch("root", "avatar"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "avatar");
+        match &item.kind {
+            ItemKind::Image { src, .. } => assert_eq!(src.as_deref(), Some("/tmp/some.png")),
+            other => panic!("expected ItemKind::Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn image_default_size_when_width_height_unset() {
+        // An Image without width/height props uses a sensible default
+        // so the layout slot doesn't collapse to zero.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("avatar", "Image", &[]));
+        tree.apply(&insert_patch("root", "avatar"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "avatar");
+        assert!(
+            item.rect.w >= DEFAULT_IMAGE_SIZE_PX - 0.5,
+            "expected default image width, got {}",
+            item.rect.w,
+        );
+        assert!(
+            item.rect.h >= DEFAULT_IMAGE_SIZE_PX - 0.5,
+            "expected default image height, got {}",
+            item.rect.h,
+        );
+    }
+
+    #[test]
+    fn image_width_percent_resolves_to_parent_width() {
+        // A column at 800 px wide containing `Image.width("100%")`
+        // should produce an item rect that fills (most of) the column.
+        // Take the page padding into account: outer wrapper is 24 px
+        // padding on all sides at scale 1, so the image should be
+        // close to 800 - 48 = 752 px wide.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "img",
+            "Image",
+            &[("width", json!("100%")), ("height", json!(120))],
+        ));
+        tree.apply(&insert_patch("root", "img"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "img");
+        assert!(
+            item.rect.w >= 700.0,
+            "100% width Image should fill its parent column, got rect.w={}",
+            item.rect.w,
+        );
+        assert!((item.rect.h - 120.0).abs() < 0.5, "rect.h={}", item.rect.h);
+    }
+
+    #[test]
+    fn image_aspect_ratio_drives_height_from_width() {
+        // 100% width + aspectRatio 1 → height = width.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "img",
+            "Image",
+            &[
+                ("width", json!("100%")),
+                ("aspectRatio", json!(1.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "img"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "img");
+        assert!(
+            (item.rect.w - item.rect.h).abs() < 1.0,
+            "aspectRatio 1 should make square; got {}x{}",
+            item.rect.w,
+            item.rect.h,
+        );
+    }
+
+    #[test]
+    fn font_weight_numeric_resolves() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "t",
+            "Text",
+            &[("0", json!("Hello")), ("fontWeight", json!(700))],
+        ));
+        tree.apply(&insert_patch("root", "t"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        assert_eq!(find_item(&pass, "t").font_weight, 700);
+    }
+
+    #[test]
+    fn font_weight_named_resolves() {
+        // tw `font-semibold` expands to `font-weight: "600"`. Test the
+        // string form of `fontWeight` accepts both names and numeric
+        // strings.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        for (id, w_prop, expected) in [
+            ("t1", json!("semibold"), 600u16),
+            ("t2", json!("bold"), 700),
+            ("t3", json!("normal"), 400),
+            ("t4", json!("700"), 700),
+        ] {
+            tree.apply(&create_patch(
+                id,
+                "Text",
+                &[("0", json!("hi")), ("fontWeight", w_prop)],
+            ));
+            tree.apply(&insert_patch("col", id));
+            let mut text = TextEngine::new();
+            let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+            assert_eq!(
+                find_item(&pass, id).font_weight,
+                expected,
+                "id `{id}` font_weight",
+            );
+        }
+    }
+
+    #[test]
+    fn object_fit_resolves_per_token() {
+        use crate::layout::ObjectFit;
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        for (id, fit, expected) in [
+            ("a", json!("cover"), ObjectFit::Cover),
+            ("b", json!("contain"), ObjectFit::Contain),
+            ("c", json!("none"), ObjectFit::None),
+            ("d", json!("fill"), ObjectFit::Fill),
+        ] {
+            tree.apply(&create_patch(
+                id,
+                "Image",
+                &[("src", json!("/x.png")), ("objectFit", fit)],
+            ));
+            tree.apply(&insert_patch("col", id));
+            let mut text = TextEngine::new();
+            let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+            match find_item(&pass, id).kind {
+                ItemKind::Image { fit: actual, .. } => {
+                    assert_eq!(actual, expected, "image `{id}` fit");
+                }
+                ref other => panic!("expected ItemKind::Image, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn object_fit_default_is_fill() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("img", "Image", &[("src", json!("/x.png"))]));
+        tree.apply(&insert_patch("root", "img"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        match find_item(&pass, "img").kind {
+            ItemKind::Image { fit, .. } => {
+                assert_eq!(fit, crate::layout::ObjectFit::Fill);
+            }
+            ref other => panic!("expected ItemKind::Image, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn stack_overlays_second_child_on_first_with_margin_offset() {
+        // Stack pattern: avatar Image + plus-icon overlay. The
+        // avatar lays out normally and sizes the Stack; the overlay
+        // is absolute and offset via margin → top/left inset, so
+        // both end up at the same parent origin instead of stacking
+        // vertically.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("stack", "Stack", &[]));
+        tree.apply(&insert_patch("root", "stack"));
+        tree.apply(&create_patch(
+            "base",
+            "Image",
+            &[("width", json!(56)), ("height", json!(56))],
+        ));
+        tree.apply(&insert_patch("stack", "base"));
+        tree.apply(&create_patch(
+            "badge",
+            "Container",
+            &[
+                ("width", json!(20)),
+                ("height", json!(20)),
+                ("marginTop", json!(36)),
+                ("marginLeft", json!(36)),
+            ],
+        ));
+        tree.apply(&insert_patch("stack", "badge"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let base = find_item(&pass, "base");
+        let badge = find_item(&pass, "badge");
+        // Both children share the parent's left edge; badge offsets
+        // 36 right + 36 down via marginTop/marginLeft → inset.
+        assert!(
+            (badge.rect.x - (base.rect.x + 36.0)).abs() < 0.5,
+            "badge should be 36 to the right of base; got base.x={}, badge.x={}",
+            base.rect.x,
+            badge.rect.x,
+        );
+        assert!(
+            (badge.rect.y - (base.rect.y + 36.0)).abs() < 0.5,
+            "badge should be 36 below base.y; got base.y={}, badge.y={}",
+            base.rect.y,
+            badge.rect.y,
+        );
+    }
+
+    #[test]
+    fn directional_border_sets_only_those_sides() {
+        // Regression: tw `border-b` used to expand to a full
+        // `border-width: 1px` (all 4 sides) so every card / divider
+        // ended up with a box around it. Now the per-side keys
+        // (`border-bottom-width: 1px`) flow through as a `Border`
+        // with `sides` bitmask containing only that edge.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "card",
+            "Container",
+            &[("borderBottomWidth", json!(1))],
+        ));
+        tree.apply(&insert_patch("root", "card"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "card");
+        use crate::style::{
+            BORDER_SIDES_ALL, BORDER_SIDE_BOTTOM,
+        };
+        assert_eq!(item.border.sides, BORDER_SIDE_BOTTOM);
+        assert_ne!(item.border.sides, BORDER_SIDES_ALL);
+        assert!(item.border.is_partial());
+        assert!(item.border.is_visible());
+    }
+
+    #[test]
+    fn uniform_border_keeps_sides_all() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "card",
+            "Container",
+            &[("borderWidth", json!(2))],
+        ));
+        tree.apply(&insert_patch("root", "card"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "card");
+        assert_eq!(item.border.sides, crate::style::BORDER_SIDES_ALL);
+        assert!(!item.border.is_partial());
+    }
+
+    #[test]
+    fn flex_1_text_grows_to_fill_row_without_wrapping() {
+        // Regression: tw `flex-1` (which expands to `flex: "1"`) used
+        // to be silently dropped by build_subtree, leaving every
+        // child at the Taffy default (`grow: 0, shrink: 1, basis:
+        // auto`). With sibling `shrink-0` items in a row, the
+        // flex-1 text would shrink and wrap mid-word ("Hypengram"
+        // → "Hypengra\nm"). Now the title grows to absorb the row's
+        // free space and stays on a single line.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("row", "Row", &[]));
+        tree.apply(&insert_patch("root", "row"));
+        tree.apply(&create_patch(
+            "title",
+            "Text",
+            &[("0", json!("Hypengram")), ("flex", json!("1"))],
+        ));
+        tree.apply(&insert_patch("row", "title"));
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("flexShrink", json!(0)), ("action", json!("@actions.tap"))],
+        ));
+        tree.apply(&insert_patch("row", "btn"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let title = find_item(&pass, "title");
+        let btn = find_item(&pass, "btn");
+        // Title should be wide enough to dominate the row — at least
+        // 10x the natural "Hypengram" width.
+        assert!(
+            title.rect.w > btn.rect.w,
+            "flex-1 title ({}) should be wider than shrink-0 button ({})",
+            title.rect.w,
+            btn.rect.w,
+        );
+    }
+
+    #[test]
+    fn flex_none_keeps_intrinsic_width() {
+        // `flex: "none"` opts out of growing AND shrinking — the
+        // child stays at its content size even in a tightly-packed
+        // row.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("row", "Row", &[]));
+        tree.apply(&insert_patch("root", "row"));
+        tree.apply(&create_patch(
+            "tag",
+            "Text",
+            &[("0", json!("ok")), ("flex", json!("none"))],
+        ));
+        tree.apply(&insert_patch("row", "tag"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let tag = find_item(&pass, "tag");
+        // "ok" at default font size is small. With flex: none the
+        // item should NOT stretch to fill the row.
+        assert!(tag.rect.w < 200.0, "flex: none should keep tight width, got {}", tag.rect.w);
+    }
+
+    #[test]
+    fn icon_size_applicator_sets_both_width_and_height() {
+        // `.size(N)` is the canonical Hypen applicator for square
+        // glyphs (the web Icon component reads it directly). The
+        // desktop renderer used to ignore it, so every `.size(24)`
+        // icon laid out at the 60px DEFAULT_IMAGE_SIZE_PX default
+        // and ate header space. Phase 16 fix: size resolves into
+        // both width and height when neither is explicitly set.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "heart",
+            "Icon",
+            &[
+                ("__iconPaths", json!([{"d": "M5 12h14"}])),
+                ("size", json!(24)),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "heart"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "heart");
+        assert!(
+            (item.rect.w - 24.0).abs() < 0.5 && (item.rect.h - 24.0).abs() < 0.5,
+            "expected 24x24 from .size(24), got {}x{}",
+            item.rect.w,
+            item.rect.h,
+        );
+    }
+
+    #[test]
+    fn explicit_width_overrides_size_applicator() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "thumb",
+            "Image",
+            &[("size", json!(24)), ("width", json!(48))],
+        ));
+        tree.apply(&insert_patch("root", "thumb"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "thumb");
+        assert!((item.rect.w - 48.0).abs() < 0.5, "rect.w={}", item.rect.w);
+        assert!((item.rect.h - 24.0).abs() < 0.5, "rect.h={}", item.rect.h);
+    }
+
+    #[test]
+    fn image_explicit_width_height_resolve_through_layout() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "thumb",
+            "Image",
+            &[("width.0", json!(120)), ("height.0", json!(80))],
+        ));
+        tree.apply(&insert_patch("root", "thumb"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "thumb");
+        assert!((item.rect.w - 120.0).abs() < 0.5, "rect.w={}", item.rect.w);
+        assert!((item.rect.h - 80.0).abs() < 0.5, "rect.h={}", item.rect.h);
+    }
+
+    #[test]
+    fn icon_without_paths_falls_back_to_image_kind() {
+        // No `paths` prop → `Icon` shapes the same as `Image` (the
+        // bitmap path). Source string flows through unchanged.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("home", "Icon", &[("src", json!("home"))]));
+        tree.apply(&insert_patch("root", "home"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "home");
+        assert!(matches!(item.kind, ItemKind::Image { .. }));
+    }
+
+    #[test]
+    fn icon_with_engine_resolved_paths_emits_icon_kind() {
+        // The engine resolves `Icon(@resources.heart)` into
+        // structured `paths` + `viewBox` props. When those land,
+        // layout picks the vector ItemKind::Icon path so the
+        // painter rasterises the SVG instead of treating it as a
+        // bitmap.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "heart",
+            "Icon",
+            &[
+                (
+                    "paths",
+                    json!([
+                        {
+                            "d": "M5 12h14",
+                            "fill": "none",
+                            "stroke": "#1a1a1f",
+                            "strokeWidth": 2.0,
+                        }
+                    ]),
+                ),
+                ("viewBox", json!("0 0 24 24")),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "heart"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "heart");
+        match &item.kind {
+            ItemKind::Icon { paths, view_box, tint } => {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(paths[0].d, "M5 12h14");
+                assert_eq!(*view_box, (0.0, 0.0, 24.0, 24.0));
+                assert!(tint.is_none());
+            }
+            other => panic!("expected ItemKind::Icon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn button_with_explicit_border_zero_does_not_get_default_stroke() {
+        // Regression: `.tw("border-0")` expands to `borderWidth: 0`.
+        // The Button branch used to fall back to its default stroke
+        // because `Border::is_visible()` returned false, so explicit
+        // opt-out got silently overridden.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "iconbtn",
+            "Button",
+            &[
+                ("action", json!("@actions.tap")),
+                ("borderWidth", json!(0.0)),
+                ("backgroundColor", json!("transparent")),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "iconbtn"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "iconbtn");
+        assert!(
+            !item.border.is_visible(),
+            "explicit borderWidth: 0 must not produce a visible default border, got {:?}",
+            item.border,
+        );
+        // Background must respect the user's transparent.
+        assert_eq!(item.background, Some(Rgba::TRANSPARENT));
+    }
+
+    #[test]
+    fn button_without_any_border_prop_still_gets_default_stroke() {
+        // Counterpart to the regression test above: a Button with no
+        // border-related prop at all should keep the Phase 3 default
+        // look so demos and bare buttons stay visible.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("action", json!("@actions.tap"))],
+        ));
+        tree.apply(&insert_patch("root", "btn"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "btn");
+        assert!(
+            item.border.is_visible(),
+            "Button with no border props must keep its default stroke",
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 16: per-Container scrolling
+    // ---------------------------------------------------------------
+
+    fn build_scrollable_column(rows: usize, overflow_prop: &str) -> Tree {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "scroller",
+            "Container",
+            &[(overflow_prop, json!("scroll"))],
+        ));
+        tree.apply(&insert_patch("root", "scroller"));
+        for i in 0..rows {
+            let id = format!("r{i}");
+            add_text(&mut tree, "scroller", &id, &format!("row {i}"));
+        }
+        tree
+    }
+
+    #[test]
+    fn container_with_overflow_scroll_is_marked_scrollable() {
+        let tree = build_scrollable_column(20, "overflow");
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 200), 1.0);
+        let item = find_item(&pass, "scroller");
+        let meta = item
+            .scrollable
+            .expect("Container with overflow:scroll should be scrollable");
+        assert!(
+            meta.content_h > 0.0,
+            "expected ScrollMeta.content_h > 0, got {}",
+            meta.content_h,
+        );
+    }
+
+    #[test]
+    fn container_with_overflow_y_auto_is_marked_scrollable() {
+        let tree = build_scrollable_column(20, "overflowY");
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 200), 1.0);
+        let item = find_item(&pass, "scroller");
+        assert!(item.scrollable.is_some());
+    }
+
+    #[test]
+    fn container_without_overflow_is_not_scrollable() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("box", "Container", &[]));
+        tree.apply(&insert_patch("root", "box"));
+        add_text(&mut tree, "box", "t", "hi");
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+        assert!(find_item(&pass, "box").scrollable.is_none());
+    }
+
+    #[test]
+    fn per_container_scroll_shifts_descendants_only() {
+        // Apply a per-container scroll; the container's own rect should
+        // stay put but its descendants should shift up.
+        let tree = build_scrollable_column(20, "overflow");
+        let mut text = TextEngine::new();
+        let unscrolled = LayoutPass::compute(&tree, &mut text, (400, 200), 1.0);
+        let container_unscrolled = find_item(&unscrolled, "scroller").rect.y;
+        let r0_unscrolled = find_item(&unscrolled, "r0").rect.y;
+
+        let mut scrolls = HashMap::new();
+        scrolls.insert("scroller".to_string(), 50.0);
+        let scrolled = LayoutPass::compute_with_scrolls(
+            &tree,
+            &mut text,
+            (400, 200),
+            1.0,
+            0.0,
+            &scrolls,
+        );
+        let container_scrolled = find_item(&scrolled, "scroller").rect.y;
+        let r0_scrolled = find_item(&scrolled, "r0").rect.y;
+
+        assert!(
+            (container_unscrolled - container_scrolled).abs() < 0.5,
+            "container y must not move: unscrolled={container_unscrolled}, scrolled={container_scrolled}",
+        );
+        let dy = r0_unscrolled - r0_scrolled;
+        assert!(
+            (dy - 50.0).abs() < 0.5,
+            "expected descendant -50 shift, got {dy}",
+        );
+    }
+
+    #[test]
+    fn page_scroll_and_container_scroll_compose() {
+        let tree = build_scrollable_column(30, "overflow");
+        let mut text = TextEngine::new();
+        let mut scrolls = HashMap::new();
+        scrolls.insert("scroller".to_string(), 20.0);
+        let pass = LayoutPass::compute_with_scrolls(
+            &tree,
+            &mut text,
+            (400, 200),
+            1.0,
+            10.0,
+            &scrolls,
+        );
+        let baseline = LayoutPass::compute(&tree, &mut text, (400, 200), 1.0);
+        // Container shifts by page scroll only.
+        let cd = find_item(&baseline, "scroller").rect.y - find_item(&pass, "scroller").rect.y;
+        assert!(
+            (cd - 10.0).abs() < 0.5,
+            "container should shift by 10 (page only), got {cd}",
+        );
+        // Descendants shift by page + container = 30.
+        let dd = find_item(&baseline, "r0").rect.y - find_item(&pass, "r0").rect.y;
+        assert!(
+            (dd - 30.0).abs() < 0.5,
+            "descendant should shift by 30 (page+container), got {dd}",
+        );
+    }
+
+    #[test]
+    fn content_size_uses_natural_bounds_not_scrolled() {
+        // With per-container scroll active, descendants' shifted y
+        // could fool a naive content_size calculation. Verify it
+        // tracks natural extents instead.
+        let tree = build_scrollable_column(30, "overflow");
+        let mut text = TextEngine::new();
+        let baseline = LayoutPass::compute(&tree, &mut text, (400, 200), 1.0);
+        let mut scrolls = HashMap::new();
+        scrolls.insert("scroller".to_string(), 100.0);
+        let scrolled = LayoutPass::compute_with_scrolls(
+            &tree,
+            &mut text,
+            (400, 200),
+            1.0,
+            0.0,
+            &scrolls,
+        );
+        assert!(
+            (baseline.content_size.1 - scrolled.content_size.1).abs() < 0.5,
+            "content_size.1 must be invariant of per-container scroll: baseline={}, scrolled={}",
+            baseline.content_size.1,
+            scrolled.content_size.1,
+        );
+    }
+
+    #[test]
+    fn icon_with_engine_prefixed_props_emits_icon_kind() {
+        // The engine emits `__iconPaths` + `__iconViewBox` (the
+        // double-underscore is its convention for renderer-only
+        // synthetic props). Every other renderer reads those names;
+        // the desktop renderer used to read plain `paths` and
+        // silently fell back to a bitmap placeholder for every
+        // engine-resolved icon. Regression: now both forms work.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "heart",
+            "Icon",
+            &[
+                (
+                    "__iconPaths",
+                    json!([
+                        {
+                            "d": "M5 12h14",
+                            "fill": "none",
+                            "stroke": "#1a1a1f",
+                            "strokeWidth": 2.0,
+                        }
+                    ]),
+                ),
+                ("__iconViewBox", json!("0 0 24 24")),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "heart"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "heart");
+        match &item.kind {
+            ItemKind::Icon { paths, view_box, .. } => {
+                assert_eq!(paths.len(), 1);
+                assert_eq!(*view_box, (0.0, 0.0, 24.0, 24.0));
+            }
+            other => panic!("expected ItemKind::Icon, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn icon_color_prop_becomes_tint() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "icon",
+            "Icon",
+            &[
+                ("paths", json!([{"d": "M0 0 L10 10"}])),
+                ("color.0", json!("red")),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "icon"));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let item = find_item(&pass, "icon");
+        match &item.kind {
+            ItemKind::Icon { tint, .. } => {
+                assert_eq!(*tint, Some(Rgba(0xff, 0, 0, 0xff)));
+            }
+            other => panic!("expected ItemKind::Icon, got {other:?}"),
+        }
+    }

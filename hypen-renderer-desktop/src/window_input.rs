@@ -1,0 +1,395 @@
+//! `App`-method extension for Input editing, IME, keyboard, and click
+//! dispatch. Lives in its own file via `#[path]` from `window.rs` so
+//! the main file can stay focused on App/state and the
+//! ApplicationHandler dispatch loop. The methods all attach to the
+//! same `App` defined in the parent.
+
+use super::*;
+
+impl App {
+    /// Find the focused Input (if any) and return `(node_id, value, bind_path)`.
+    pub(super) fn focused_input(&self) -> Option<(String, String, String)> {
+        let id = self.focused.clone()?;
+        let layout = self.layout.as_ref()?;
+        let item = layout.items.iter().find(|it| it.node_id == id)?;
+        match &item.kind {
+            ItemKind::Input { value, bind_path, .. } => bind_path
+                .as_ref()
+                .map(|p| (id, value.clone(), p.clone())),
+            _ => None,
+        }
+    }
+
+    /// Look up an Input's `(value, font_size, rect)` by node id. Used
+    /// by mouse-driven cursor positioning + drag-select.
+    pub(super) fn lookup_input(
+        &self,
+        id: &str,
+    ) -> Option<(String, f32, crate::layout::Rect)> {
+        let layout = self.layout.as_ref()?;
+        let item = layout.items.iter().find(|it| it.node_id == id)?;
+        match &item.kind {
+            ItemKind::Input { value, font_size, .. } => {
+                Some((value.clone(), *font_size, item.rect))
+            }
+            _ => None,
+        }
+    }
+
+    /// Read the current selection of `id`, defaulting to a caret at
+    /// the end of `value`.
+    pub(super) fn selection_of(&self, id: &str, value: &str) -> Selection {
+        self.input_selections
+            .get(id)
+            .copied()
+            .unwrap_or_else(|| Selection::caret(value.len()))
+            .clamped(value.len())
+    }
+
+    /// Apply `mutate(value, sel)` to the focused Input and dispatch
+    /// `__hypen_bind` if the value changed. Returns true if anything
+    /// changed (including a pure selection move).
+    pub(super) fn edit_focused_input<F>(&mut self, mutate: F) -> bool
+    where
+        F: FnOnce(&str, Selection) -> (String, Selection),
+    {
+        let (id, value, bind_path) = match self.focused_input() {
+            Some(x) => x,
+            None => return false,
+        };
+        let sel = self.selection_of(&id, &value);
+        let (new_value, new_sel) = mutate(&value, sel);
+        let new_sel = new_sel.clamped(new_value.len());
+        if new_value == value && new_sel == sel {
+            return false;
+        }
+        self.input_selections.insert(id.clone(), new_sel);
+        if new_value != value {
+            self.module.dispatch_action(
+                "__hypen_bind",
+                Some(json!({ "path": bind_path, "value": new_value })),
+            );
+        }
+        true
+    }
+
+    /// Replace the selected range (or insert at the caret if collapsed)
+    /// with `replacement`. Used by typing + paste. `pub(crate)` so the
+    /// test module can exercise the pure logic without an `App`.
+    pub(crate) fn replace_selection_with(
+        value: &str,
+        sel: Selection,
+        replacement: &str,
+    ) -> (String, Selection) {
+        let lo = sel.min().min(value.len());
+        let hi = sel.max().min(value.len());
+        let mut new = String::with_capacity(value.len() - (hi - lo) + replacement.len());
+        new.push_str(&value[..lo]);
+        new.push_str(replacement);
+        new.push_str(&value[hi..]);
+        let caret = lo + replacement.len();
+        (new, Selection::caret(caret))
+    }
+
+    pub(super) fn copy_focused_selection(&mut self) -> bool {
+        let (id, value, _) = match self.focused_input() {
+            Some(x) => x,
+            None => return false,
+        };
+        let sel = self.selection_of(&id, &value);
+        if sel.is_collapsed() {
+            return false;
+        }
+        let text = value[sel.min()..sel.max()].to_string();
+        match self.clipboard_get() {
+            Some(cb) => match cb.set_text(text) {
+                Ok(()) => true,
+                Err(e) => {
+                    log::warn!("clipboard copy failed: {e}");
+                    false
+                }
+            },
+            None => false,
+        }
+    }
+
+    pub(super) fn cut_focused_selection(&mut self) -> bool {
+        if !self.copy_focused_selection() {
+            return false;
+        }
+        self.edit_focused_input(|val, sel| Self::replace_selection_with(val, sel, ""))
+    }
+
+    pub(super) fn paste_into_focused_input(&mut self) -> bool {
+        let pasted = match self.clipboard_get().and_then(|cb| cb.get_text().ok()) {
+            Some(s) => s,
+            None => return false,
+        };
+        // Single-line `Input` strips embedded newlines; Textarea will
+        // preserve them when multi-line editing lands.
+        let cleaned: String = pasted.replace(['\n', '\r'], " ");
+        if cleaned.is_empty() {
+            return false;
+        }
+        self.edit_focused_input(|val, sel| Self::replace_selection_with(val, sel, &cleaned))
+    }
+
+    /// Apply a winit `Ime` event to the focused Input. Pure transition
+    /// (toggling flags / setting preedit) lives in
+    /// [`apply_ime_transition`]; this method is the side-effecting
+    /// adapter that calls `edit_focused_input` on `Commit`.
+    pub(super) fn handle_ime(&mut self, event: Ime) {
+        let focused_input_id = self.focused_input().map(|(id, _, _)| id);
+        let effect = apply_ime_transition(
+            &mut self.ime_preedit,
+            &mut self.ime_active,
+            focused_input_id.as_deref(),
+            event,
+        );
+        if let ImeEffect::Commit(text) = effect {
+            // Insertion goes through the same primitive typing uses,
+            // so a non-empty selection is replaced and the caret
+            // advances to the end of the inserted text.
+            self.edit_focused_input(|val, sel| {
+                Self::replace_selection_with(val, sel, &text)
+            });
+        }
+    }
+
+    /// Toggle `set_ime_allowed` on the window so the OS IME activates
+    /// when an `Input` is focused and dismisses otherwise. Also updates
+    /// `set_ime_cursor_area` so candidate windows position near the
+    /// caret instead of in the corner.
+    pub(super) fn sync_ime_to_focus(&mut self) {
+        let want_ime = self.focused_input().is_some();
+        let Some(window) = self.window.as_ref() else { return };
+        if want_ime != self.ime_active {
+            window.set_ime_allowed(want_ime);
+            self.ime_active = want_ime;
+            if !want_ime {
+                self.ime_preedit = None;
+                self.last_ime_target = None;
+            }
+        }
+        if want_ime {
+            // Only call `set_ime_cursor_area` when the focused Input's
+            // rect or identity actually moves. The OS winit backends
+            // translate this into platform syscalls that are cheap
+            // individually but show up in profiles when called every
+            // frame on a focused input that hasn't moved.
+            if let Some(id) = self.focused.as_deref() {
+                if let Some((_, _, rect)) = self.lookup_input(id) {
+                    let target = (
+                        id.to_string(),
+                        (rect.x as i32, rect.y as i32, rect.w as u32, rect.h as u32),
+                    );
+                    if self.last_ime_target.as_ref() != Some(&target) {
+                        use winit::dpi::PhysicalPosition as P;
+                        use winit::dpi::PhysicalSize as S;
+                        window.set_ime_cursor_area(
+                            P::new(target.1 .0, target.1 .1),
+                            S::new(target.1 .2, target.1 .3),
+                        );
+                        self.last_ime_target = Some(target);
+                    }
+                }
+            }
+        }
+    }
+
+    pub(super) fn dispatch_focused(&mut self) -> bool {
+        let action = (|| -> Option<String> {
+            let id = self.focused.as_deref()?;
+            let layout = self.layout.as_ref()?;
+            let item = layout.items.iter().find(|it| it.node_id == id)?;
+            item.action.clone()
+        })();
+        if let Some(action) = action {
+            log::debug!("dispatch (kbd): {action}");
+            self.module.dispatch_action(&action, None);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Handle keyboard input. Tab walks focus forward, Shift+Tab back;
+    /// Enter / Space activates the focused actionable; Escape clears
+    /// focus. While an `Input` is focused, editing keys mutate its
+    /// text + selection and dispatch `__hypen_bind`. Ctrl/Cmd shortcuts
+    /// (A / C / X / V) cover select-all + clipboard.
+    pub(super) fn handle_keyboard(&mut self, ev: &KeyEvent) -> bool {
+        if ev.state != ElementState::Pressed {
+            return false;
+        }
+
+        let editing_focused = self.focused_input().is_some();
+        let shift = self.modifiers.shift_key();
+        let cmd = self.clipboard_modifier();
+
+        if cmd && editing_focused {
+            match ev.logical_key.as_ref() {
+                Key::Character(s) if s.eq_ignore_ascii_case("a") => {
+                    return self.edit_focused_input(|val, _| {
+                        (val.to_string(), Selection::range(0, val.len()))
+                    });
+                }
+                Key::Character(s) if s.eq_ignore_ascii_case("c") => {
+                    return self.copy_focused_selection();
+                }
+                Key::Character(s) if s.eq_ignore_ascii_case("x") => {
+                    return self.cut_focused_selection();
+                }
+                Key::Character(s) if s.eq_ignore_ascii_case("v") => {
+                    return self.paste_into_focused_input();
+                }
+                _ => {}
+            }
+        }
+
+        match ev.logical_key.as_ref() {
+            Key::Named(NamedKey::Tab) => {
+                let layout = match self.layout.as_ref() {
+                    Some(l) => l,
+                    None => return false,
+                };
+                let next = if shift {
+                    layout.focus_prev(self.focused.as_deref())
+                } else {
+                    layout.focus_next(self.focused.as_deref())
+                };
+                if next != self.focused {
+                    self.focused = next;
+                    return true;
+                }
+                false
+            }
+            Key::Named(NamedKey::Escape) => self.focused.take().is_some(),
+            Key::Named(NamedKey::Backspace) if editing_focused => {
+                self.edit_focused_input(|val, sel| {
+                    if !sel.is_collapsed() {
+                        return Self::replace_selection_with(val, sel, "");
+                    }
+                    if sel.head == 0 {
+                        return (val.to_string(), sel);
+                    }
+                    let prev = prev_char_boundary(val, sel.head);
+                    let mut new = String::with_capacity(val.len());
+                    new.push_str(&val[..prev]);
+                    new.push_str(&val[sel.head..]);
+                    (new, Selection::caret(prev))
+                })
+            }
+            Key::Named(NamedKey::Delete) if editing_focused => {
+                self.edit_focused_input(|val, sel| {
+                    if !sel.is_collapsed() {
+                        return Self::replace_selection_with(val, sel, "");
+                    }
+                    if sel.head >= val.len() {
+                        return (val.to_string(), sel);
+                    }
+                    let next = next_char_boundary(val, sel.head);
+                    let mut new = String::with_capacity(val.len());
+                    new.push_str(&val[..sel.head]);
+                    new.push_str(&val[next..]);
+                    (new, Selection::caret(sel.head))
+                })
+            }
+            Key::Named(NamedKey::ArrowLeft) if editing_focused => {
+                // Word-step modifier: Ctrl on Win/Linux, Option (Alt)
+                // on macOS — both common conventions, both supported.
+                let word_step =
+                    self.modifiers.control_key() || self.modifiers.alt_key();
+                self.edit_focused_input(move |val, sel| {
+                    let new_head = if word_step {
+                        crate::text_nav::word_start(val, sel.head)
+                    } else if shift || sel.is_collapsed() {
+                        prev_char_boundary(val, sel.head)
+                    } else {
+                        sel.min()
+                    };
+                    let anchor = if shift { sel.anchor } else { new_head };
+                    (val.to_string(), Selection::range(anchor, new_head))
+                })
+            }
+            Key::Named(NamedKey::ArrowRight) if editing_focused => {
+                let word_step =
+                    self.modifiers.control_key() || self.modifiers.alt_key();
+                self.edit_focused_input(move |val, sel| {
+                    let new_head = if word_step {
+                        crate::text_nav::word_end(val, sel.head)
+                    } else if shift || sel.is_collapsed() {
+                        next_char_boundary(val, sel.head)
+                    } else {
+                        sel.max()
+                    };
+                    let anchor = if shift { sel.anchor } else { new_head };
+                    (val.to_string(), Selection::range(anchor, new_head))
+                })
+            }
+            Key::Named(NamedKey::Home) if editing_focused => {
+                self.edit_focused_input(move |val, sel| {
+                    let anchor = if shift { sel.anchor } else { 0 };
+                    (val.to_string(), Selection::range(anchor, 0))
+                })
+            }
+            Key::Named(NamedKey::End) if editing_focused => {
+                self.edit_focused_input(move |val, sel| {
+                    let len = val.len();
+                    let anchor = if shift { sel.anchor } else { len };
+                    (val.to_string(), Selection::range(anchor, len))
+                })
+            }
+            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space)
+                if !editing_focused =>
+            {
+                self.dispatch_focused()
+            }
+            _ => {
+                if editing_focused {
+                    if let Some(text) = ev.text.as_deref() {
+                        let clean: String =
+                            text.chars().filter(|c| !c.is_control()).collect();
+                        if !clean.is_empty() {
+                            return self.edit_focused_input(|val, sel| {
+                                Self::replace_selection_with(val, sel, &clean)
+                            });
+                        }
+                    }
+                }
+                false
+            }
+        }
+    }
+
+    /// Handle a mouse-up. Dispatches an action only when the pointer
+    /// is still over the same actionable that received mouse-down.
+    /// Drag-select state clears regardless.
+    pub(super) fn handle_click(&mut self) {
+        let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
+        let pressed_id = self.pressed.take();
+        // Press tint always disappears on release; damage the released
+        // button so it repaints in the un-pressed colour.
+        if let Some(id) = pressed_id.as_deref() {
+            if let Some(r) = self.item_damage_rect(id) {
+                self.damage.add_region(r);
+            }
+        }
+        if let Some(layout) = self.layout.as_ref() {
+            if let Some(item) = layout.hit(px, py) {
+                let same_target = pressed_id
+                    .as_deref()
+                    .map(|id| id == item.node_id)
+                    .unwrap_or(true);
+                if same_target {
+                    if let Some(action) = item.action.clone() {
+                        log::debug!("dispatch action: {action}");
+                        self.module.dispatch_action(&action, None);
+                    }
+                }
+            }
+        }
+        self.dragging_input = None;
+        self.request_redraw_full();
+    }
+}

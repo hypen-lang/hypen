@@ -33,6 +33,7 @@ pub mod painter;
 pub mod remote;
 pub mod style;
 pub mod text;
+pub(crate) mod text_nav;
 pub mod tree;
 pub mod window;
 

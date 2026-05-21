@@ -135,10 +135,16 @@ impl Gpu {
 
         let caps = surface.get_capabilities(&adapter);
         let format = caps.formats[0];
-        let swap_rb = matches!(
-            format,
-            wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
-        );
+        // wgpu maps shader's logical `@location(0)` output components
+        // to the surface format's storage layout automatically — a
+        // BGRA surface stores `vec4(r, g, b, a)` shader output with
+        // the R component at the R-position regardless of byte order.
+        // The previous manual `swap_rb` was double-swapping on BGRA
+        // surfaces (the macOS default), turning warm skin tones blue
+        // because the texture-side data was rotated relative to where
+        // wgpu expected it. Forcing `false` lets wgpu handle the
+        // mapping in both directions.
+        let swap_rb = false;
 
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -422,8 +428,15 @@ fn create_upload(
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        // Linear RGBA — the swap_rb shader uniform handles BGRA surfaces.
-        format: wgpu::TextureFormat::Rgba8Unorm,
+        // sRGB-encoded RGBA. Pixmap data from `tiny-skia` /
+        // `image::to_rgba8()` is already sRGB-encoded (the standard
+        // for image files and CSS colours), so the upload texture
+        // must declare sRGB too. With `Rgba8Unorm` (linear), wgpu
+        // would treat sRGB byte values as if they were linear and
+        // re-encode on write to the sRGB surface — washing out
+        // mid-tones and producing the colour-cast that made bitmap
+        // avatars look bluish next to correctly-rendered UI chrome.
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
         usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     });

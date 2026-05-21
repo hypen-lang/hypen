@@ -152,6 +152,12 @@ pub struct App {
     /// drag-selected. `Some(id)` between mouse-down inside that Input
     /// and the next mouse-up; `head` updates on every CursorMoved.
     dragging_input: Option<String>,
+    /// Multi-click tracking for double-click-word and triple-click-line
+    /// selection. A click within `MULTI_CLICK_MS` and `MULTI_CLICK_PX`
+    /// of the previous one bumps `count`; otherwise it resets to 1.
+    last_click_at: Option<std::time::Instant>,
+    last_click_pos: PhysicalPosition<f64>,
+    click_count: u32,
     /// System clipboard handle, lazily created on first copy/paste so
     /// systems without a clipboard server don't fail at startup.
     clipboard: Option<Clipboard>,
@@ -180,11 +186,16 @@ pub struct App {
     /// non-empty patch batch invalidates the cached layout.
     tree_generation: u64,
     /// Hash of the inputs that fed the most recent successful layout
-    /// pass. When the next frame's key matches, we reuse `self.layout`
-    /// instead of running Taffy + cosmic-text again. Captures: tree
-    /// generation, viewport (w, h), scale, page scroll, every
-    /// per-Container scroll offset.
+    /// pass — excluding page `scroll_y`. Page scroll is applied as a
+    /// uniform post-pass shift, so a scroll-only frame can re-shift
+    /// the cached layout without recomputing Taffy + measure. Other
+    /// changes (patches, resize, per-Container scroll, scale) bump
+    /// the key and force a full recompute.
     last_layout_key: Option<u64>,
+    /// `scroll_y` baked into `self.layout`'s items. Frames where
+    /// `last_layout_key` matches but this differs only need a uniform
+    /// y-shift, not a layout recompute.
+    last_scroll_y_in_layout: f32,
     /// Pending resize coalescing. macOS / GNOME emit a burst of
     /// `Resized` events while the user drags a window edge; doing a
     /// full `gpu.resize` + layout + paint per event multiplies work by
@@ -241,12 +252,16 @@ impl App {
             modifiers: ModifiersState::default(),
             input_selections: HashMap::new(),
             dragging_input: None,
+            last_click_at: None,
+            last_click_pos: PhysicalPosition::new(0.0, 0.0),
+            click_count: 0,
             clipboard: None,
             ime_preedit: None,
             ime_active: false,
             damage: Damage::Full,
             tree_generation: 0,
             last_layout_key: None,
+            last_scroll_y_in_layout: 0.0,
             pending_resize: None,
             last_a11y_fingerprint: 0,
             last_ime_target: None,
@@ -355,7 +370,8 @@ impl App {
         // tree (patches), viewport (resize), or scroll positions all
         // bump the key and force a recompute.
         let key = self.layout_cache_key(w, h, scale);
-        let cache_miss = self.layout.is_none() || self.last_layout_key != Some(key);
+        let key_match = self.last_layout_key == Some(key);
+        let cache_miss = self.layout.is_none() || !key_match;
         if cache_miss {
             let pass = LayoutPass::compute_with_scrolls(
                 &self.tree,
@@ -367,6 +383,19 @@ impl App {
             );
             self.layout = Some(pass);
             self.last_layout_key = Some(key);
+            self.last_scroll_y_in_layout = self.scroll_y;
+        } else if (self.scroll_y - self.last_scroll_y_in_layout).abs() > f32::EPSILON {
+            // Scroll-only fast path: re-shift the cached items by the
+            // delta. Skips Taffy + cosmic-text + raster-cache key
+            // changes entirely. Page scroll is the dominant case
+            // where this kicks in — wheel events on a list of posts.
+            let delta = self.scroll_y - self.last_scroll_y_in_layout;
+            if let Some(layout) = self.layout.as_mut() {
+                for it in layout.items.iter_mut() {
+                    it.rect.y -= delta;
+                }
+            }
+            self.last_scroll_y_in_layout = self.scroll_y;
         }
         // Resolve damage. `Damage::None` means a redraw fired but
         // no specific region was marked — repaint everything to be
@@ -474,10 +503,11 @@ impl App {
         }
     }
 
-    /// Hash the inputs that feed `LayoutPass::compute_with_scrolls`.
-    /// Used as a cache key so hover / press / focus / caret-only
-    /// frames can reuse the previous frame's layout instead of
-    /// rerunning Taffy + cosmic-text.
+    /// Hash the inputs that feed `LayoutPass::compute_with_scrolls`,
+    /// excluding page `scroll_y` — that's a uniform post-pass shift,
+    /// not a layout-altering input. Frames that only change `scroll_y`
+    /// take the fast path in `redraw` and re-shift the cached items
+    /// instead of recomputing Taffy + measure.
     fn layout_cache_key(&self, w: u32, h: u32, scale: f32) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut h_hasher = std::collections::hash_map::DefaultHasher::new();
@@ -485,7 +515,6 @@ impl App {
         w.hash(&mut h_hasher);
         h.hash(&mut h_hasher);
         scale.to_bits().hash(&mut h_hasher);
-        self.scroll_y.to_bits().hash(&mut h_hasher);
         // Sorted iteration so two equivalent maps with different
         // insertion order produce the same key.
         let mut sorted: Vec<(&String, &f32)> = self.scrollables.iter().collect();
@@ -549,383 +578,15 @@ impl App {
             .and_then(|l| l.hit_focusable(x, y))
             .map(|item| item.node_id.clone())
     }
-
-    /// Find the focused Input (if any) and return `(node_id, value, bind_path)`.
-    fn focused_input(&self) -> Option<(String, String, String)> {
-        let id = self.focused.clone()?;
-        let layout = self.layout.as_ref()?;
-        let item = layout.items.iter().find(|it| it.node_id == id)?;
-        match &item.kind {
-            ItemKind::Input { value, bind_path, .. } => bind_path
-                .as_ref()
-                .map(|p| (id, value.clone(), p.clone())),
-            _ => None,
-        }
-    }
-
-    /// Look up an Input's `(value, font_size, rect)` by node id. Used
-    /// by mouse-driven cursor positioning + drag-select.
-    fn lookup_input(
-        &self,
-        id: &str,
-    ) -> Option<(String, f32, crate::layout::Rect)> {
-        let layout = self.layout.as_ref()?;
-        let item = layout.items.iter().find(|it| it.node_id == id)?;
-        match &item.kind {
-            ItemKind::Input { value, font_size, .. } => {
-                Some((value.clone(), *font_size, item.rect))
-            }
-            _ => None,
-        }
-    }
-
-    /// Read the current selection of `id`, defaulting to a caret at
-    /// the end of `value`.
-    fn selection_of(&self, id: &str, value: &str) -> Selection {
-        self.input_selections
-            .get(id)
-            .copied()
-            .unwrap_or_else(|| Selection::caret(value.len()))
-            .clamped(value.len())
-    }
-
-    /// Apply `mutate(value, sel)` to the focused Input and dispatch
-    /// `__hypen_bind` if the value changed. Returns true if anything
-    /// changed (including a pure selection move).
-    fn edit_focused_input<F>(&mut self, mutate: F) -> bool
-    where
-        F: FnOnce(&str, Selection) -> (String, Selection),
-    {
-        let (id, value, bind_path) = match self.focused_input() {
-            Some(x) => x,
-            None => return false,
-        };
-        let sel = self.selection_of(&id, &value);
-        let (new_value, new_sel) = mutate(&value, sel);
-        let new_sel = new_sel.clamped(new_value.len());
-        if new_value == value && new_sel == sel {
-            return false;
-        }
-        self.input_selections.insert(id.clone(), new_sel);
-        if new_value != value {
-            self.module.dispatch_action(
-                "__hypen_bind",
-                Some(json!({ "path": bind_path, "value": new_value })),
-            );
-        }
-        true
-    }
-
-    /// Replace the selected range (or insert at the caret if collapsed)
-    /// with `replacement`. Used by typing + paste. `pub(crate)` so the
-    /// test module can exercise the pure logic without an `App`.
-    pub(crate) fn replace_selection_with(
-        value: &str,
-        sel: Selection,
-        replacement: &str,
-    ) -> (String, Selection) {
-        let lo = sel.min().min(value.len());
-        let hi = sel.max().min(value.len());
-        let mut new = String::with_capacity(value.len() - (hi - lo) + replacement.len());
-        new.push_str(&value[..lo]);
-        new.push_str(replacement);
-        new.push_str(&value[hi..]);
-        let caret = lo + replacement.len();
-        (new, Selection::caret(caret))
-    }
-
-    fn copy_focused_selection(&mut self) -> bool {
-        let (id, value, _) = match self.focused_input() {
-            Some(x) => x,
-            None => return false,
-        };
-        let sel = self.selection_of(&id, &value);
-        if sel.is_collapsed() {
-            return false;
-        }
-        let text = value[sel.min()..sel.max()].to_string();
-        match self.clipboard_get() {
-            Some(cb) => match cb.set_text(text) {
-                Ok(()) => true,
-                Err(e) => {
-                    log::warn!("clipboard copy failed: {e}");
-                    false
-                }
-            },
-            None => false,
-        }
-    }
-
-    fn cut_focused_selection(&mut self) -> bool {
-        if !self.copy_focused_selection() {
-            return false;
-        }
-        self.edit_focused_input(|val, sel| Self::replace_selection_with(val, sel, ""))
-    }
-
-    fn paste_into_focused_input(&mut self) -> bool {
-        let pasted = match self.clipboard_get().and_then(|cb| cb.get_text().ok()) {
-            Some(s) => s,
-            None => return false,
-        };
-        // Single-line `Input` strips embedded newlines; Textarea will
-        // preserve them when multi-line editing lands.
-        let cleaned: String = pasted.replace(['\n', '\r'], " ");
-        if cleaned.is_empty() {
-            return false;
-        }
-        self.edit_focused_input(|val, sel| Self::replace_selection_with(val, sel, &cleaned))
-    }
-
-    /// Apply a winit `Ime` event to the focused Input. Pure transition
-    /// (toggling flags / setting preedit) lives in
-    /// [`apply_ime_transition`]; this method is the side-effecting
-    /// adapter that calls `edit_focused_input` on `Commit`.
-    fn handle_ime(&mut self, event: Ime) {
-        let focused_input_id = self.focused_input().map(|(id, _, _)| id);
-        let effect = apply_ime_transition(
-            &mut self.ime_preedit,
-            &mut self.ime_active,
-            focused_input_id.as_deref(),
-            event,
-        );
-        if let ImeEffect::Commit(text) = effect {
-            // Insertion goes through the same primitive typing uses,
-            // so a non-empty selection is replaced and the caret
-            // advances to the end of the inserted text.
-            self.edit_focused_input(|val, sel| {
-                Self::replace_selection_with(val, sel, &text)
-            });
-        }
-    }
-
-    /// Toggle `set_ime_allowed` on the window so the OS IME activates
-    /// when an `Input` is focused and dismisses otherwise. Also updates
-    /// `set_ime_cursor_area` so candidate windows position near the
-    /// caret instead of in the corner.
-    fn sync_ime_to_focus(&mut self) {
-        let want_ime = self.focused_input().is_some();
-        let Some(window) = self.window.as_ref() else { return };
-        if want_ime != self.ime_active {
-            window.set_ime_allowed(want_ime);
-            self.ime_active = want_ime;
-            if !want_ime {
-                self.ime_preedit = None;
-                self.last_ime_target = None;
-            }
-        }
-        if want_ime {
-            // Only call `set_ime_cursor_area` when the focused Input's
-            // rect or identity actually moves. The OS winit backends
-            // translate this into platform syscalls that are cheap
-            // individually but show up in profiles when called every
-            // frame on a focused input that hasn't moved.
-            if let Some(id) = self.focused.as_deref() {
-                if let Some((_, _, rect)) = self.lookup_input(id) {
-                    let target = (
-                        id.to_string(),
-                        (rect.x as i32, rect.y as i32, rect.w as u32, rect.h as u32),
-                    );
-                    if self.last_ime_target.as_ref() != Some(&target) {
-                        use winit::dpi::PhysicalPosition as P;
-                        use winit::dpi::PhysicalSize as S;
-                        window.set_ime_cursor_area(
-                            P::new(target.1 .0, target.1 .1),
-                            S::new(target.1 .2, target.1 .3),
-                        );
-                        self.last_ime_target = Some(target);
-                    }
-                }
-            }
-        }
-    }
-
-    fn dispatch_focused(&mut self) -> bool {
-        let action = (|| -> Option<String> {
-            let id = self.focused.as_deref()?;
-            let layout = self.layout.as_ref()?;
-            let item = layout.items.iter().find(|it| it.node_id == id)?;
-            item.action.clone()
-        })();
-        if let Some(action) = action {
-            log::debug!("dispatch (kbd): {action}");
-            self.module.dispatch_action(&action, None);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Handle keyboard input. Tab walks focus forward, Shift+Tab back;
-    /// Enter / Space activates the focused actionable; Escape clears
-    /// focus. While an `Input` is focused, editing keys mutate its
-    /// text + selection and dispatch `__hypen_bind`. Ctrl/Cmd shortcuts
-    /// (A / C / X / V) cover select-all + clipboard.
-    fn handle_keyboard(&mut self, ev: &KeyEvent) -> bool {
-        if ev.state != ElementState::Pressed {
-            return false;
-        }
-
-        let editing_focused = self.focused_input().is_some();
-        let shift = self.modifiers.shift_key();
-        let cmd = self.clipboard_modifier();
-
-        if cmd && editing_focused {
-            match ev.logical_key.as_ref() {
-                Key::Character(s) if s.eq_ignore_ascii_case("a") => {
-                    return self.edit_focused_input(|val, _| {
-                        (val.to_string(), Selection::range(0, val.len()))
-                    });
-                }
-                Key::Character(s) if s.eq_ignore_ascii_case("c") => {
-                    return self.copy_focused_selection();
-                }
-                Key::Character(s) if s.eq_ignore_ascii_case("x") => {
-                    return self.cut_focused_selection();
-                }
-                Key::Character(s) if s.eq_ignore_ascii_case("v") => {
-                    return self.paste_into_focused_input();
-                }
-                _ => {}
-            }
-        }
-
-        match ev.logical_key.as_ref() {
-            Key::Named(NamedKey::Tab) => {
-                let layout = match self.layout.as_ref() {
-                    Some(l) => l,
-                    None => return false,
-                };
-                let next = if shift {
-                    layout.focus_prev(self.focused.as_deref())
-                } else {
-                    layout.focus_next(self.focused.as_deref())
-                };
-                if next != self.focused {
-                    self.focused = next;
-                    return true;
-                }
-                false
-            }
-            Key::Named(NamedKey::Escape) => self.focused.take().is_some(),
-            Key::Named(NamedKey::Backspace) if editing_focused => {
-                self.edit_focused_input(|val, sel| {
-                    if !sel.is_collapsed() {
-                        return Self::replace_selection_with(val, sel, "");
-                    }
-                    if sel.head == 0 {
-                        return (val.to_string(), sel);
-                    }
-                    let prev = prev_char_boundary(val, sel.head);
-                    let mut new = String::with_capacity(val.len());
-                    new.push_str(&val[..prev]);
-                    new.push_str(&val[sel.head..]);
-                    (new, Selection::caret(prev))
-                })
-            }
-            Key::Named(NamedKey::Delete) if editing_focused => {
-                self.edit_focused_input(|val, sel| {
-                    if !sel.is_collapsed() {
-                        return Self::replace_selection_with(val, sel, "");
-                    }
-                    if sel.head >= val.len() {
-                        return (val.to_string(), sel);
-                    }
-                    let next = next_char_boundary(val, sel.head);
-                    let mut new = String::with_capacity(val.len());
-                    new.push_str(&val[..sel.head]);
-                    new.push_str(&val[next..]);
-                    (new, Selection::caret(sel.head))
-                })
-            }
-            Key::Named(NamedKey::ArrowLeft) if editing_focused => {
-                self.edit_focused_input(move |val, sel| {
-                    let new_head = if shift || sel.is_collapsed() {
-                        prev_char_boundary(val, sel.head)
-                    } else {
-                        sel.min()
-                    };
-                    let anchor = if shift { sel.anchor } else { new_head };
-                    (val.to_string(), Selection::range(anchor, new_head))
-                })
-            }
-            Key::Named(NamedKey::ArrowRight) if editing_focused => {
-                self.edit_focused_input(move |val, sel| {
-                    let new_head = if shift || sel.is_collapsed() {
-                        next_char_boundary(val, sel.head)
-                    } else {
-                        sel.max()
-                    };
-                    let anchor = if shift { sel.anchor } else { new_head };
-                    (val.to_string(), Selection::range(anchor, new_head))
-                })
-            }
-            Key::Named(NamedKey::Home) if editing_focused => {
-                self.edit_focused_input(move |val, sel| {
-                    let anchor = if shift { sel.anchor } else { 0 };
-                    (val.to_string(), Selection::range(anchor, 0))
-                })
-            }
-            Key::Named(NamedKey::End) if editing_focused => {
-                self.edit_focused_input(move |val, sel| {
-                    let len = val.len();
-                    let anchor = if shift { sel.anchor } else { len };
-                    (val.to_string(), Selection::range(anchor, len))
-                })
-            }
-            Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Space)
-                if !editing_focused =>
-            {
-                self.dispatch_focused()
-            }
-            _ => {
-                if editing_focused {
-                    if let Some(text) = ev.text.as_deref() {
-                        let clean: String =
-                            text.chars().filter(|c| !c.is_control()).collect();
-                        if !clean.is_empty() {
-                            return self.edit_focused_input(|val, sel| {
-                                Self::replace_selection_with(val, sel, &clean)
-                            });
-                        }
-                    }
-                }
-                false
-            }
-        }
-    }
-
-    /// Handle a mouse-up. Dispatches an action only when the pointer
-    /// is still over the same actionable that received mouse-down.
-    /// Drag-select state clears regardless.
-    fn handle_click(&mut self) {
-        let (px, py) = (self.cursor.x as f32, self.cursor.y as f32);
-        let pressed_id = self.pressed.take();
-        // Press tint always disappears on release; damage the released
-        // button so it repaints in the un-pressed colour.
-        if let Some(id) = pressed_id.as_deref() {
-            if let Some(r) = self.item_damage_rect(id) {
-                self.damage.add_region(r);
-            }
-        }
-        if let Some(layout) = self.layout.as_ref() {
-            if let Some(item) = layout.hit(px, py) {
-                let same_target = pressed_id
-                    .as_deref()
-                    .map(|id| id == item.node_id)
-                    .unwrap_or(true);
-                if same_target {
-                    if let Some(action) = item.action.clone() {
-                        log::debug!("dispatch action: {action}");
-                        self.module.dispatch_action(&action, None);
-                    }
-                }
-            }
-        }
-        self.dragging_input = None;
-        self.request_redraw_full();
-    }
 }
+
+// Input editing / IME / keyboard / click dispatch methods for `App`
+// live in a separate file via `#[path]` so this file can stay focused
+// on App state, the redraw flow, and the ApplicationHandler match.
+// The included module declares another `impl App { ... }` block with
+// the rest of the methods.
+#[path = "window_input.rs"]
+mod input_impl;
 
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -1030,8 +691,18 @@ impl ApplicationHandler<AppEvent> for App {
                         let new_sel =
                             Selection::range(sel.anchor, new_head).clamped(value.len());
                         if new_sel != sel {
+                            // Selection band paints inside the input's
+                            // rect; nothing else changed.
+                            let dmg = self.item_damage_rect(&drag_id);
                             self.input_selections.insert(drag_id, new_sel);
-                            self.request_redraw_full();
+                            if let Some(r) = dmg {
+                                self.damage.add_region(r);
+                            } else {
+                                self.damage.add_full();
+                            }
+                            if let Some(w) = self.window.as_ref() {
+                                w.request_redraw();
+                            }
                         }
                     }
                 }
@@ -1067,6 +738,21 @@ impl ApplicationHandler<AppEvent> for App {
                 let focus_target = self.hit_focusable(cx, cy);
                 let mut needs_redraw = false;
 
+                // Compute multi-click count before the input
+                // mutations below — count==2 selects the word at
+                // cursor, count==3 selects the whole input.
+                let now = std::time::Instant::now();
+                self.click_count = next_click_count(
+                    self.click_count,
+                    self.last_click_at,
+                    now,
+                    self.last_click_pos,
+                    self.cursor,
+                );
+                self.last_click_at = Some(now);
+                self.last_click_pos = self.cursor;
+                let click_count = self.click_count;
+
                 if action_target != self.pressed {
                     let prev = self.pressed.clone();
                     self.mark_interaction_damage(prev.as_deref(), action_target.as_deref());
@@ -1077,7 +763,9 @@ impl ApplicationHandler<AppEvent> for App {
                 // Click-to-position cursor for Inputs. Compute the byte
                 // offset under the click and seed both anchor + head
                 // there so a non-drag click collapses any prior
-                // selection at the click point.
+                // selection at the click point. Double-click expands
+                // to the word at that byte; triple-click selects the
+                // entire input value.
                 if let Some(id) = focus_target.as_deref() {
                     if let Some((value, font_size, rect)) = self.lookup_input(id) {
                         let local_x = (cx - rect.x - 12.0).max(0.0);
@@ -1085,9 +773,23 @@ impl ApplicationHandler<AppEvent> for App {
                             .painter
                             .text_engine_mut()
                             .byte_offset_at_x(&value, local_x, font_size);
-                        self.input_selections
-                            .insert(id.to_string(), Selection::caret(byte));
-                        self.dragging_input = Some(id.to_string());
+                        let sel = match click_count {
+                            2 => {
+                                let (s, e) = crate::text_nav::word_range_at(&value, byte);
+                                Selection::range(s, e)
+                            }
+                            3 => Selection::range(0, value.len()),
+                            _ => Selection::caret(byte),
+                        };
+                        self.input_selections.insert(id.to_string(), sel);
+                        // Drag only meaningful for single-click; a
+                        // double-click already grabbed a range, and
+                        // dragging from there would feel jumpy.
+                        self.dragging_input = if click_count == 1 {
+                            Some(id.to_string())
+                        } else {
+                            None
+                        };
                         needs_redraw = true;
                     }
                 }
@@ -1125,7 +827,8 @@ impl ApplicationHandler<AppEvent> for App {
                             it.scrollable.is_some() && it.rect.contains(cx, cy)
                         })
                     });
-                    let mut scrolled = false;
+                    let mut container_damage: Option<crate::layout::Rect> = None;
+                    let mut full_damage = false;
                     if let Some(item) = target {
                         let meta = item.scrollable.unwrap();
                         let max = (meta.content_h - item.rect.h).max(0.0);
@@ -1133,8 +836,11 @@ impl ApplicationHandler<AppEvent> for App {
                         let cur = self.scrollables.get(&id).copied().unwrap_or(0.0);
                         let new = (cur + dy).clamp(0.0, max);
                         if (new - cur).abs() > f32::EPSILON {
+                            // Per-container scroll: only items inside
+                            // this container moved. Damage = the
+                            // container's rect (children clip to it).
+                            container_damage = Some(item.rect);
                             self.scrollables.insert(id, new);
-                            scrolled = true;
                         }
                     } else {
                         let viewport_h = self
@@ -1150,11 +856,22 @@ impl ApplicationHandler<AppEvent> for App {
                         let new = clamp_scroll(self.scroll_y + dy, content_h, viewport_h);
                         if (new - self.scroll_y).abs() > f32::EPSILON {
                             self.scroll_y = new;
-                            scrolled = true;
+                            // Page scroll moves every item — repaint
+                            // the whole surface.
+                            full_damage = true;
                         }
                     }
-                    if scrolled {
+                    if let Some(rect) = container_damage {
+                        self.damage.add_region(rect);
                         self.layout = None;
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                    } else if full_damage {
+                        // Page scroll is just a uniform y-shift — let
+                        // `redraw`'s fast path re-shift the cached
+                        // layout instead of forcing a full recompute.
+                        // Damage stays Full because every item moves.
                         self.request_redraw_full();
                     }
                 }
@@ -1163,8 +880,24 @@ impl ApplicationHandler<AppEvent> for App {
                 self.modifiers = modifiers.state();
             }
             WindowEvent::Ime(ime_ev) => {
+                // Preedit / commit paint inline at the caret of the
+                // focused input — damage = that input's rect. On
+                // commit, the value changes and a __hypen_bind action
+                // dispatches, which produces patches that bump
+                // tree_generation and force full damage anyway.
+                let focused_id = self.focused.clone();
                 self.handle_ime(ime_ev);
-                self.request_redraw_full();
+                let damaged = focused_id
+                    .as_deref()
+                    .and_then(|id| self.item_damage_rect(id));
+                if let Some(r) = damaged {
+                    self.damage.add_region(r);
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                } else {
+                    self.request_redraw_full();
+                }
             }
             WindowEvent::KeyboardInput { event: ev, .. } => {
                 if self.handle_keyboard(&ev) {
@@ -1235,165 +968,44 @@ pub(crate) fn next_char_boundary(s: &str, cursor: usize) -> usize {
     i
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// macOS / GNOME / Windows all use ~500 ms + ~5 px as the
+/// double-click thresholds. Past either threshold, the click count
+/// resets to 1.
+const MULTI_CLICK_MS: u128 = 500;
+const MULTI_CLICK_PX: f64 = 5.0;
+/// Largest multi-click count we keep — quad-click and beyond fold
+/// back into 1 so the user can re-enter single-click mode by holding
+/// still and clicking again.
+const MAX_CLICK_COUNT: u32 = 3;
 
-    #[test]
-    fn prev_boundary_steps_back_one_ascii_char() {
-        assert_eq!(prev_char_boundary("hello", 5), 4);
-        assert_eq!(prev_char_boundary("hello", 1), 0);
-        assert_eq!(prev_char_boundary("hello", 0), 0);
+/// Pure click-count state machine. Returns the next `click_count`
+/// given the current count, the previous click's time/position, and
+/// the new click's time/position.
+pub(crate) fn next_click_count(
+    prev_count: u32,
+    prev_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+    prev_pos: winit::dpi::PhysicalPosition<f64>,
+    new_pos: winit::dpi::PhysicalPosition<f64>,
+) -> u32 {
+    let close_in_time = prev_at
+        .map(|t| now.duration_since(t).as_millis() < MULTI_CLICK_MS)
+        .unwrap_or(false);
+    let close_in_space = (new_pos.x - prev_pos.x).abs() < MULTI_CLICK_PX
+        && (new_pos.y - prev_pos.y).abs() < MULTI_CLICK_PX;
+    if close_in_time && close_in_space {
+        let next = prev_count.saturating_add(1);
+        if next > MAX_CLICK_COUNT {
+            1
+        } else {
+            next.max(2)
+        }
+    } else {
+        1
     }
-
-    #[test]
-    fn prev_boundary_steps_over_multibyte() {
-        let s = "é";
-        assert_eq!(s.len(), 2);
-        assert_eq!(prev_char_boundary(s, 2), 0);
-    }
-
-    #[test]
-    fn next_boundary_steps_forward_one_ascii_char() {
-        assert_eq!(next_char_boundary("hello", 0), 1);
-        assert_eq!(next_char_boundary("hello", 4), 5);
-        assert_eq!(next_char_boundary("hello", 5), 5);
-    }
-
-    #[test]
-    fn next_boundary_steps_over_multibyte() {
-        let s = "é";
-        assert_eq!(next_char_boundary(s, 0), 2);
-    }
-
-    #[test]
-    fn boundary_helpers_handle_emoji_correctly() {
-        let s = "ab😀cd";
-        assert_eq!(next_char_boundary(s, 2), 6);
-        assert_eq!(prev_char_boundary(s, 6), 2);
-    }
-
-    #[test]
-    fn clamp_scroll_pins_to_zero_when_content_fits() {
-        assert_eq!(clamp_scroll(0.0, 100.0, 600.0), 0.0);
-        assert_eq!(clamp_scroll(50.0, 100.0, 600.0), 0.0);
-    }
-
-    #[test]
-    fn clamp_scroll_caps_at_max_offset() {
-        assert_eq!(clamp_scroll(0.0, 1200.0, 600.0), 0.0);
-        assert_eq!(clamp_scroll(300.0, 1200.0, 600.0), 300.0);
-        assert_eq!(clamp_scroll(600.0, 1200.0, 600.0), 600.0);
-        assert_eq!(clamp_scroll(900.0, 1200.0, 600.0), 600.0);
-    }
-
-    #[test]
-    fn clamp_scroll_rejects_negative() {
-        assert_eq!(clamp_scroll(-10.0, 1200.0, 600.0), 0.0);
-    }
-
-    // ---------------------------------------------------------------
-    // Selection helpers
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn selection_caret_collapses_anchor_and_head() {
-        let s = Selection::caret(5);
-        assert_eq!(s.anchor, 5);
-        assert_eq!(s.head, 5);
-        assert!(s.is_collapsed());
-        assert_eq!(s.min(), 5);
-        assert_eq!(s.max(), 5);
-    }
-
-    #[test]
-    fn selection_range_min_max_normalise_order() {
-        let forward = Selection::range(2, 7);
-        assert_eq!(forward.min(), 2);
-        assert_eq!(forward.max(), 7);
-        assert!(!forward.is_collapsed());
-
-        let backward = Selection::range(7, 2);
-        assert_eq!(backward.min(), 2);
-        assert_eq!(backward.max(), 7);
-        assert!(!backward.is_collapsed());
-    }
-
-    #[test]
-    fn selection_clamped_pins_each_field_to_max() {
-        assert_eq!(
-            Selection::range(5, 100).clamped(10),
-            Selection::range(5, 10),
-        );
-        assert_eq!(
-            Selection::range(20, 30).clamped(10),
-            Selection::range(10, 10),
-        );
-        assert!(Selection::range(20, 30).clamped(10).is_collapsed());
-    }
-
-    // ---------------------------------------------------------------
-    // replace_selection_with
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn replace_inserts_at_caret_when_collapsed() {
-        let (new, sel) = App::replace_selection_with("hello", Selection::caret(5), " world");
-        assert_eq!(new, "hello world");
-        assert_eq!(sel, Selection::caret(11));
-    }
-
-    #[test]
-    fn replace_at_zero_prepends() {
-        let (new, sel) = App::replace_selection_with("world", Selection::caret(0), "hello ");
-        assert_eq!(new, "hello world");
-        assert_eq!(sel, Selection::caret(6));
-    }
-
-    #[test]
-    fn replace_substitutes_a_range() {
-        let (new, sel) =
-            App::replace_selection_with("hello world", Selection::range(0, 5), "yo");
-        assert_eq!(new, "yo world");
-        assert_eq!(sel, Selection::caret(2));
-    }
-
-    #[test]
-    fn replace_handles_reversed_anchor_head() {
-        let (new, sel) =
-            App::replace_selection_with("hello world", Selection::range(11, 6), "");
-        assert_eq!(new, "hello ");
-        assert_eq!(sel, Selection::caret(6));
-    }
-
-    #[test]
-    fn replace_with_empty_deletes_the_selected_range() {
-        let (new, sel) =
-            App::replace_selection_with("abcde", Selection::range(1, 4), "");
-        assert_eq!(new, "ae");
-        assert_eq!(sel, Selection::caret(1));
-    }
-
-    #[test]
-    fn replace_clamps_indices_past_value_length() {
-        // Defensive against external state changes that shrank the
-        // value before the editor caught up — past-the-end indices
-        // collapse to value.len() and the replacement appends.
-        let (new, sel) =
-            App::replace_selection_with("abc", Selection::range(10, 20), "xy");
-        assert_eq!(new, "abcxy");
-        assert_eq!(sel, Selection::caret(5));
-    }
-
-    #[test]
-    fn replace_handles_multibyte_correctly() {
-        // "héllo" — h(1) é(2) l(1) l(1) o(1) = 6 bytes.
-        // Selecting the "é" (bytes 1..3) and replacing with "i".
-        let (new, sel) =
-            App::replace_selection_with("héllo", Selection::range(1, 3), "i");
-        assert_eq!(new, "hillo");
-        assert_eq!(sel, Selection::caret(2));
-    }
-
-    // -----------------------------------------------------------------
 }
+
+#[cfg(test)]
+#[path = "window_tests.rs"]
+mod tests;
+

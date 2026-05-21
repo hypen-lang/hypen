@@ -119,7 +119,7 @@ fn build_node_for(item: &LayoutItem, pass: &LayoutPass) -> Node {
             node
         }
         ItemKind::Container => Node::new(Role::GenericContainer),
-        ItemKind::Image { src } => {
+        ItemKind::Image { src, .. } => {
             let mut node = Node::new(Role::Image);
             // Without a real `alt` prop the best we can do is the
             // file name (or src tail) so screen readers say something
