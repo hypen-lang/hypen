@@ -109,12 +109,15 @@ func buildSearchModule(allExplorePosts: [PostThumbnail], app: HypenApp) -> Modul
     hypen(SearchState(explorePosts: allExplorePosts))
         .name("Search")
         .app(app)
-        .onAction("search") { (state: inout SearchState) in
-            let query = state.searchQuery.lowercased()
+        .onAction("search", payload: InputValuePayload.self) {
+            (state: inout SearchState, payload: InputValuePayload) in
+            let query = payload.text.lowercased()
             if query.isEmpty {
                 state.explorePosts = allExplorePosts
             } else {
-                state.explorePosts = allExplorePosts.filter { $0.imageUrl.lowercased().contains(query) }
+                state.explorePosts = allExplorePosts.filter {
+                    $0.username.lowercased().contains(query) || $0.caption.lowercased().contains(query)
+                }
             }
         }
         .build()

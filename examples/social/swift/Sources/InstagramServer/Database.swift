@@ -139,12 +139,17 @@ final class Database: @unchecked Sendable {
     func queryExplorePosts() -> [PostThumbnail] {
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }
-        let sql = "SELECT id, image_url FROM posts ORDER BY likes_count DESC"
+        let sql = "SELECT p.id, p.image_url, u.username, p.caption FROM posts p JOIN users u ON p.user_id = u.id ORDER BY p.likes_count DESC"
         sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
 
         var posts: [PostThumbnail] = []
         while sqlite3_step(stmt) == SQLITE_ROW {
-            posts.append(PostThumbnail(id: col(stmt, 0), imageUrl: col(stmt, 1)))
+            posts.append(PostThumbnail(
+                id: col(stmt, 0),
+                imageUrl: col(stmt, 1),
+                username: col(stmt, 2),
+                caption: col(stmt, 3)
+            ))
         }
         return posts
     }

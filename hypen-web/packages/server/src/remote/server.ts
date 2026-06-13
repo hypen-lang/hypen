@@ -45,6 +45,7 @@ import {
   discoverComponents,
   loadDiscoveredComponents,
 } from "../discovery.js";
+import { Engine } from "../engine.js";
 import {
   RemoteSession,
   createBunWebSocketTransport,
@@ -125,6 +126,9 @@ export class RemoteServer {
         return server._sessionManager;
       },
       get discoveredComponents() { return server._discoveredComponents; },
+      createEngine() {
+        return new Engine();
+      },
       *otherSessions(self) {
         for (const s of server._sessions) {
           if (s !== self) yield s;

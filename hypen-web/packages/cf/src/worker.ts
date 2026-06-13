@@ -32,7 +32,7 @@ function defaultRoutingKey(request: Request): string {
   const cookie = request.headers.get("Cookie");
   if (cookie) {
     const match = cookie.match(/hypen_session=([^;]+)/);
-    if (match) return match[1];
+    if (match && match[1]) return match[1];
   }
 
   // Use URL path as key (e.g., /room/abc -> "room:abc")

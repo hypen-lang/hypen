@@ -68,6 +68,8 @@ data class Conversation(
 data class PostThumbnail(
     val id: String,
     val imageUrl: String,
+    val username: String = "",
+    val caption: String = "",
 )
 
 @Serializable

@@ -49,7 +49,13 @@ fn test_text_element_patches_include_props() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     println!("Patches:");
     for patch in &patches {

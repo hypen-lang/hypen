@@ -269,8 +269,7 @@ fn extract_data_source_bindings_from_expression(
                 let full_path = format!("{}.{}", ident, path_str);
                 if !seen_paths.contains(&full_path) {
                     seen_paths.insert(full_path);
-                    let path: Vec<String> =
-                        path_str.split('.').map(|s| s.to_string()).collect();
+                    let path: Vec<String> = path_str.split('.').map(|s| s.to_string()).collect();
                     bindings.push(Binding::data_source(&ident, path));
                 }
             }
@@ -434,8 +433,7 @@ mod tests {
 
     #[test]
     fn test_item_ternary() {
-        let context =
-            build_expression_context(&json!({}), Some(&json!({"selected": true})), None);
+        let context = build_expression_context(&json!({}), Some(&json!({"selected": true})), None);
 
         let result =
             evaluate_expression("item.selected ? '#FFA7E1' : '#374151'", &context).unwrap();
@@ -467,8 +465,7 @@ mod tests {
         let state = json!({"name": "Alice", "count": 5});
         let evaluator = build_evaluator(&state, None, None);
         let result =
-            evaluate_template_string("@{state.name} has @{state.count} items", &evaluator)
-                .unwrap();
+            evaluate_template_string("@{state.name} has @{state.count} items", &evaluator).unwrap();
         assert_eq!(result, "Alice has 5 items");
     }
 
@@ -521,12 +518,10 @@ mod tests {
         let evaluator = build_evaluator(&state, None, None);
 
         // Middle-dot (U+00B7, 2 bytes in UTF-8)
-        let result =
-            evaluate_template_string("@{state.a} · @{state.b}", &evaluator).unwrap();
+        let result = evaluate_template_string("@{state.a} · @{state.b}", &evaluator).unwrap();
         assert_eq!(result, "ALPHA · BETA");
 
-        let result =
-            evaluate_template_string("prefix · @{state.a}", &evaluator).unwrap();
+        let result = evaluate_template_string("prefix · @{state.a}", &evaluator).unwrap();
         assert_eq!(result, "prefix · ALPHA");
 
         // Em dash (U+2014, 3 bytes)
@@ -542,8 +537,7 @@ mod tests {
         assert_eq!(result, "你好 ALPHA");
 
         // Accented letter (2 bytes)
-        let result =
-            evaluate_template_string("café @{state.a}", &evaluator).unwrap();
+        let result = evaluate_template_string("café @{state.a}", &evaluator).unwrap();
         assert_eq!(result, "café ALPHA");
     }
 
@@ -554,8 +548,7 @@ mod tests {
         let state = json!({"a": "café", "b": "naïve"});
         let evaluator = build_evaluator(&state, None, None);
 
-        let result =
-            evaluate_template_string("@{state.a} · @{state.b}", &evaluator).unwrap();
+        let result = evaluate_template_string("@{state.a} · @{state.b}", &evaluator).unwrap();
         assert_eq!(result, "café · naïve");
     }
 

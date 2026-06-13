@@ -496,6 +496,7 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
   // Mouse hover events
   onMouseEnter: createEventHandler("mouseenter", { extractPayload: mousePayload }),
   onMouseLeave: createEventHandler("mouseleave", { extractPayload: mousePayload }),
+  onHover: createEventHandler("mouseenter", { extractPayload: mousePayload }), // Alias for onMouseEnter
 
   // Two-way binding for .bind(@state.x)
   bind: ((element: HTMLElement, value: unknown) => {

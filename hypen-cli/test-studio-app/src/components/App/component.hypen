@@ -17,8 +17,6 @@ module App {
         Text("-A")      .fontSize(99)
 
       }
-      .height("20vh")
-      .backgroundColor(red)
       .onClick("@actions.decrement")
       .padding("16sp")
 

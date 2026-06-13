@@ -53,40 +53,26 @@ const BREAKPOINTS: Record<string, string> = {
 };
 
 /**
- * Per-document stylesheet for variant CSS rules
+ * Singleton stylesheet for variant CSS rules
  */
-const variantStyleSheets = new Map<Document, CSSStyleSheet>();
+let variantStyleSheet: CSSStyleSheet | null = null;
 
 /**
- * Track inserted rules to avoid duplicates (per-document)
+ * Track inserted rules to avoid duplicates
  */
-const insertedRules = new Map<Document, Set<string>>();
+const insertedRules = new Set<string>();
 
 /**
- * Get or create the variant stylesheet for a document
+ * Get or create the variant stylesheet
  */
-function getVariantStyleSheet(doc: Document): CSSStyleSheet {
-  let sheet = variantStyleSheets.get(doc);
-  if (!sheet) {
-    const style = doc.createElement('style');
+function getVariantStyleSheet(): CSSStyleSheet {
+  if (!variantStyleSheet) {
+    const style = document.createElement('style');
     style.id = 'hypen-variants';
-    doc.head.appendChild(style);
-    sheet = style.sheet as CSSStyleSheet;
-    variantStyleSheets.set(doc, sheet);
+    document.head.appendChild(style);
+    variantStyleSheet = style.sheet as CSSStyleSheet;
   }
-  return sheet;
-}
-
-/**
- * Get or create the inserted-rules dedup set for a document
- */
-function getInsertedRules(doc: Document): Set<string> {
-  let set = insertedRules.get(doc);
-  if (!set) {
-    set = new Set<string>();
-    insertedRules.set(doc, set);
-  }
-  return set;
+  return variantStyleSheet;
 }
 
 /**
@@ -348,21 +334,19 @@ export class ApplicatorRegistry {
       const minWidth = BREAKPOINTS[breakpoint];
 
       if (minWidth) {
-        const doc = element.ownerDocument as Document;
-        const dedup = getInsertedRules(doc);
         const cssName = this.toKebabCase(prop);
         const cssValue = this.formatCssValue(cssName, value);
         const className = `hypen-${cssName.replace(/[^a-zA-Z0-9-]/g, '')}-${breakpoint}-${hashValue(value)}`;
         const ruleKey = `${className}:${cssValue}`;
 
         // Avoid duplicate rule insertion
-        if (!dedup.has(ruleKey)) {
-          const sheet = getVariantStyleSheet(doc);
+        if (!insertedRules.has(ruleKey)) {
+          const sheet = getVariantStyleSheet();
           sheet.insertRule(
             `@media (min-width: ${minWidth}) { .${className} { ${cssName}: ${cssValue}; } }`,
             sheet.cssRules.length
           );
-          dedup.add(ruleKey);
+          insertedRules.add(ruleKey);
         }
 
         element.classList.add(className);
@@ -378,21 +362,19 @@ export class ApplicatorRegistry {
       // Only handle known CSS pseudo-states
       const validStates = ['hover', 'focus', 'active', 'disabled', 'focus-visible', 'focus-within'];
       if (validStates.includes(state)) {
-        const doc = element.ownerDocument as Document;
-        const dedup = getInsertedRules(doc);
         const cssName = this.toKebabCase(prop);
         const cssValue = this.formatCssValue(cssName, value);
         const className = `hypen-${cssName.replace(/[^a-zA-Z0-9-]/g, '')}-${state}-${hashValue(value)}`;
         const ruleKey = `${className}:${cssValue}`;
 
         // Avoid duplicate rule insertion
-        if (!dedup.has(ruleKey)) {
-          const sheet = getVariantStyleSheet(doc);
+        if (!insertedRules.has(ruleKey)) {
+          const sheet = getVariantStyleSheet();
           sheet.insertRule(
             `.${className}:${state} { ${cssName}: ${cssValue}; }`,
             sheet.cssRules.length
           );
-          dedup.add(ruleKey);
+          insertedRules.add(ruleKey);
         }
 
         element.classList.add(className);

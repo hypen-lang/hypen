@@ -50,6 +50,13 @@ await Bun.build({
   target: "browser",
   format: "esm",
   sourcemap: "external",
+  // Emit shared chunks so cross-entrypoint singletons (e.g. the
+  // `portable` impl slot, the global module registry) live in ONE
+  // module instance at runtime. Without splitting, each entrypoint
+  // gets its own inlined copy of `portable.ts` and `setPortableImpl`
+  // only mutates the copy reachable from `@hypen-space/core/portable`
+  // — router.js / state.js keep stale `notInstalled` placeholders.
+  splitting: true,
 });
 
 // Generate type declarations using tsc

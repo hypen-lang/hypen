@@ -11,8 +11,8 @@ import type { ComponentHandler } from "./index.js";
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 export const iconHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("span");
+  create(): HTMLElement {
+    const el = document.createElement("span");
     el.style.display = "inline-flex";
     el.style.alignItems = "center";
     el.style.justifyContent = "center";
@@ -22,7 +22,6 @@ export const iconHandler: ComponentHandler = {
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    const doc = el.ownerDocument as Document;
     // Server-resolved icon data (from engine's ResourceRegistry)
     const paths: Array<{
       d: string;
@@ -40,7 +39,7 @@ export const iconHandler: ComponentHandler = {
 
     if (paths && Array.isArray(paths)) {
       // Render from pre-resolved SVG path data
-      const svg = doc.createElementNS(SVG_NS, "svg");
+      const svg = document.createElementNS(SVG_NS, "svg");
       svg.setAttribute("xmlns", SVG_NS);
       svg.setAttribute("width", String(size));
       svg.setAttribute("height", String(size));
@@ -49,7 +48,7 @@ export const iconHandler: ComponentHandler = {
       svg.style.display = "block";
 
       for (const pathData of paths) {
-        const path = doc.createElementNS(SVG_NS, "path");
+        const path = document.createElementNS(SVG_NS, "path");
         path.setAttribute("d", pathData.d);
         path.setAttribute("fill", pathData.fill || "none");
         path.setAttribute(

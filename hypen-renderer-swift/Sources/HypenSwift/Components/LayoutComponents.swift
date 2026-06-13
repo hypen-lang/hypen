@@ -232,17 +232,6 @@ public struct ColumnComponent: ComponentHandler {
                                 renderer: context.renderer,
                                 actionDispatcher: context.actionDispatcher
                             )
-                        } else if effectiveModifier.fillMaxHeight {
-                            // h-full / fillMaxHeight: propagate parent's offered height
-                            // through the VStack so descendants (e.g. an inner Column
-                            // with `flex-1` siblings) actually receive the full height.
-                            // Without this the VStack sizes to children's ideal and
-                            // a non-flex sibling further down (BottomNav) gets pushed
-                            // off-screen.
-                            VStack(alignment: horizontalAlignment, spacing: gap) {
-                                wrappedChildren()
-                            }
-                            .frame(maxHeight: .infinity, alignment: .top)
                         } else {
                             VStack(alignment: horizontalAlignment, spacing: gap) {
                                 wrappedChildren()
@@ -932,17 +921,35 @@ public struct ListComponent: ComponentHandler {
         let direction = context.element.getStringProp("direction.0")
             ?? context.element.getStringProp("1")
             ?? "vertical"
+        // CSS-style `flex-direction` from `tw("flex flex-row")` —
+        // emitted as the kebab key `flex-direction: row`. Without
+        // this, Lists declared via Tailwind classes (e.g. AddFood's
+        // horizontal category-tab list) stacked vertically because
+        // only the `direction.0` applicator path was checked.
+        let flexDirection = context.element.getStringProp("flexDirection.0")
+            ?? context.element.getStringProp("flex-direction.0")
+            ?? context.element.getStringProp("flex-direction")
+            ?? context.element.getStringProp("flexDirection")
         let gap = modifier.gap ?? context.element.getCGFloatProp("gap.0") ?? 0
         let isHorizontal = direction.lowercased() == "horizontal"
+            || flexDirection?.lowercased() == "row"
+            || flexDirection?.lowercased() == "row-reverse"
 
-        // Propagate expansion permissions to children, like Column/Row do
-        let allowsHorizontalExpansion = modifier.fillMaxWidth || modifier.width != nil
+        // Propagate expansion permissions to children, like Column/Row do.
+        // A horizontal List always lays children out in a row, so children's
+        // flex/weight expansion should resolve against the row's width even
+        // when the list itself has no explicit width — same contract as Row.
+        let allowsHorizontalExpansion = isHorizontal || modifier.fillMaxWidth || modifier.width != nil
         let allowsVerticalExpansion = modifier.fillMaxHeight || modifier.height != nil
         let explicitWidth = modifier.width
 
         return AnyView(
-            ScrollView(isHorizontal ? .horizontal : .vertical, showsIndicators: true) {
+            Group {
                 if isHorizontal {
+                    // Non-scrolling HStack so weight/flex-1 children distribute
+                    // evenly across the available width (like Row). Switch back
+                    // to a horizontal ScrollView if the caller opts in via
+                    // overflow-x scroll/auto in the future.
                     HStack(spacing: gap) {
                         ForEach(childElements, id: \.id) { childElement in
                             HypenElementView(
@@ -955,17 +962,20 @@ public struct ListComponent: ComponentHandler {
                             .environment(\.parentExplicitWidth, explicitWidth)
                         }
                     }
+                    .frame(maxWidth: .infinity)
                 } else {
-                    VStack(alignment: .leading, spacing: gap) {
-                        ForEach(childElements, id: \.id) { childElement in
-                            HypenElementView(
-                                elementId: childElement.id,
-                                renderer: context.renderer,
-                                actionDispatcher: context.actionDispatcher
-                            )
-                            .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
-                            .environment(\.parentAllowsVerticalExpansion, allowsVerticalExpansion)
-                            .environment(\.parentExplicitWidth, explicitWidth)
+                    ScrollView(.vertical, showsIndicators: true) {
+                        VStack(alignment: .leading, spacing: gap) {
+                            ForEach(childElements, id: \.id) { childElement in
+                                HypenElementView(
+                                    elementId: childElement.id,
+                                    renderer: context.renderer,
+                                    actionDispatcher: context.actionDispatcher
+                                )
+                                .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                                .environment(\.parentAllowsVerticalExpansion, allowsVerticalExpansion)
+                                .environment(\.parentExplicitWidth, explicitWidth)
+                            }
                         }
                     }
                 }
@@ -1043,6 +1053,10 @@ public struct GridComponent: ComponentHandler {
         // needs to lay out the individual items directly (not a single wrapper as one cell).
         let rawChildren = context.renderer.getChildren(of: context.element.id)
         let childElements = GridComponent.flattenControlFlowChildren(rawChildren, renderer: context.renderer)
+        print("[HypenGrid] columns=\(columns) spacing=\(spacing) scrollable=\(scrollable) raw=\(rawChildren.count) types=\(rawChildren.map { $0.elementType }), flattened=\(childElements.count)")
+        for (i, child) in childElements.enumerated() {
+            print("[HypenGrid]   child[\(i)] id=\(child.id) type=\(child.elementType) props=\(child.props.keys.sorted())")
+        }
 
         // Scrollable grids use ScrollView + LazyVGrid — the canonical SwiftUI pattern.
         // LazyVGrid's "reports one row in sizeThatFits" bug doesn't matter here because the
@@ -1185,6 +1199,7 @@ private struct HypenGridLayout: Layout {
 
         let totalWidth = proposal.width ?? 0
         let colWidth = columnWidth(in: totalWidth)
+        print("[HypenGridLayout] sizeThatFits proposal=\(proposal) totalWidth=\(totalWidth) colWidth=\(colWidth) subviews=\(subviews.count)")
         let grid = computeGrid(subviews: subviews)
 
         // Compute row heights by measuring each child with its column-span width
@@ -1207,6 +1222,7 @@ private struct HypenGridLayout: Layout {
         guard !subviews.isEmpty else { return }
 
         let colWidth = columnWidth(in: bounds.width)
+        print("[HypenGridLayout] placeSubviews bounds=\(bounds) colWidth=\(colWidth)")
         let grid = computeGrid(subviews: subviews)
 
         // Compute row heights (same logic as sizeThatFits)

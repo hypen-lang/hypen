@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const dividerHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("hr");
+  create(): HTMLElement {
+    const el = document.createElement("hr");
     el.dataset.hypenType = "divider";
     el.style.border = "none";
     el.style.borderTop = "1px solid #e0e0e0";

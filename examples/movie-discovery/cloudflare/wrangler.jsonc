@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-movie-discovery",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/dist/client/*.js"], "fallthrough": true }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "MOVIE_DISCOVERY_DO", "class_name": "MovieDiscoveryDO" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MovieDiscoveryDO"] }
+  ],
+
+  "vars": {
+    "OMDB_API_KEY": "2ab6e349"
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}

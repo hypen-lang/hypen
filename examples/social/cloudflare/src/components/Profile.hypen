@@ -1,0 +1,75 @@
+module Profile {
+    Column {
+        Row {
+            Text("@{state.currentUser.username}")
+                .tw("text-xl font-semibold flex-1")
+
+            Button {
+                Icon(@resources.menu)
+                    .size(24)
+                    .color("#262626")
+            }
+            .tw("bg-transparent border-0 p-2")
+            .onClick(@router.push, to: "/")
+        }
+        .tw("px-4 py-3 flex-row items-center border-b border-gray-200")
+
+        Row {
+            Image(src: "@{state.currentUser.avatarUrl}")
+                .tw("w-20 h-20 rounded-full")
+
+            Column {
+                Text("@{state.currentUser.postsCount}")
+                    .tw("text-base font-bold text-center")
+                Text("Posts")
+                    .tw("text-xs text-center text-gray-600")
+            }
+            .tw("flex-1 items-center justify-center")
+
+            Column {
+                Text("@{state.currentUser.followersCount}")
+                    .tw("text-base font-bold text-center")
+                Text("Followers")
+                    .tw("text-xs text-center text-gray-600")
+            }
+            .tw("flex-1 items-center justify-center")
+
+            Column {
+                Text("@{state.currentUser.followingCount}")
+                    .tw("text-base font-bold text-center")
+                Text("Following")
+                    .tw("text-xs text-center text-gray-600")
+            }
+            .tw("flex-1 items-center justify-center")
+        }
+        .tw("px-4 py-5 flex-row items-center gap-4")
+
+        Column {
+            Text("@{state.currentUser.displayName}")
+                .tw("text-sm font-semibold")
+            If(condition: "@{state.currentUser.bio}") {
+                Text("@{state.currentUser.bio}")
+                    .tw("text-sm text-gray-700")
+            }
+        }
+        .tw("px-4 pb-3 gap-1")
+
+        Button {
+            Text("Edit Profile")
+                .tw("text-sm font-semibold text-center")
+        }
+        .tw("mx-4 mb-5 py-1.5 bg-gray-50 border border-gray-300 rounded-md")
+        .onClick(@actions.editProfile)
+
+        Grid(@state.userPosts, key: "id") {
+            Image(src: "@{item.imageUrl}")
+                .objectFit("cover")
+                .tw("aspect-square w-full")
+        }
+        .gridColumns(3)
+        .gap(2)
+        .tw("border-t border-gray-200 pt-2")
+    }
+    .scrollable(true)
+    .tw("flex-1 bg-white")
+}

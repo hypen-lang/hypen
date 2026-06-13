@@ -7,7 +7,7 @@ import type { OpenFile, ConsoleLog } from "./Studio";
 // Static imports - bundled by Bun at build time (same as landing page)
 import { Engine } from "@hypen-space/web-engine";
 import { app, HypenModuleInstance, getStateSnapshot } from "@hypen-space/core";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web/dom";
 import { RemoteEngine } from "@hypen-space/core/remote/client";
 
 // Parse import statements from Hypen DSL
@@ -79,6 +79,7 @@ type PreviewProps = {
 // Module-level engine singleton to avoid WASM memory corruption with StrictMode
 let globalEngine: any | null = null;
 let engineInitPromise: Promise<any> | null = null;
+let globalRenderCallback: ((patches: any[]) => void) | null = null;
 
 async function getOrCreateEngine(): Promise<any> {
   if (globalEngine) return globalEngine;
@@ -155,20 +156,21 @@ export function Preview({
     });
     remoteEngineRef.current = remote;
 
-    // Create a DOMRenderer with an engine adapter that forwards actions to RemoteServer.
-    // Adapter wraps dispatchAction (to log) but delegates onPatches/onStateUpdate to remote
-    // so createHypenClient can subscribe via the same patch stream.
-    const adapter: any = {
+    // Create a DOMRenderer with an engine adapter that forwards actions to RemoteServer
+    const renderer = new DOMRenderer(rendererContainerRef.current, {
       dispatchAction: (name: string, payload?: unknown) => {
         remote.dispatchAction(name, payload);
         onActionLog(name, payload);
       },
-      onPatches: (cb: any) => remote.onPatches(cb),
-    };
-    const { renderer } = createHypenClient(rendererContainerRef.current, adapter);
+    });
     rendererRef.current = renderer;
 
     remote
+      .onPatches((patches) => {
+        if (rendererRef.current) {
+          rendererRef.current.applyPatches(patches);
+        }
+      })
       .onStateUpdate((state) => {
         if (!timeTravelingRef.current) {
           onStateChange(state as Record<string, any>);
@@ -220,13 +222,24 @@ export function Preview({
       const engine = await getOrCreateEngine();
       engineRef.current = engine;
 
-      // createHypenClient registers a setRenderCallback on the engine that
-      // closes over this renderer; on a StrictMode remount it overwrites the
-      // previous registration to point at the new renderer (last-writer-wins),
-      // which is the intent the previous globalRenderCallback indirection
-      // achieved manually.
-      const { renderer } = createHypenClient(rendererContainerRef.current, engine as any);
+      const renderer = new DOMRenderer(rendererContainerRef.current, engine as any);
       rendererRef.current = renderer;
+
+      // Use global callback pattern to handle StrictMode remounts
+      globalRenderCallback = (patches: any[]) => {
+        if (rendererRef.current) {
+          rendererRef.current.applyPatches(patches);
+        }
+      };
+
+      if (!(engine as any).__callbackRegistered) {
+        engine.setRenderCallback((patches: any[]) => {
+          if (globalRenderCallback) {
+            globalRenderCallback(patches);
+          }
+        });
+        (engine as any).__callbackRegistered = true;
+      }
 
       // Set up component resolver for imports
       // Built-in element types that don't need resolution

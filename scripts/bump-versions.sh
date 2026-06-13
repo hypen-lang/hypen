@@ -14,11 +14,11 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Current versions (edit these as the source of truth)
-CURRENT_RUST_VERSION="0.4.980"
-CURRENT_NPM_VERSION="0.4.980"
-CURRENT_LSP_VERSION="0.4.980"
-CURRENT_GRADLE_VERSION="0.4.980"
-CURRENT_SWIFT_SERVER_VERSION="0.4.980"
+CURRENT_RUST_VERSION="0.5.0"
+CURRENT_NPM_VERSION="0.5.0"
+CURRENT_LSP_VERSION="0.5.0"
+CURRENT_GRADLE_VERSION="0.5.0"
+CURRENT_SWIFT_SERVER_VERSION="0.5.0"
 # @hypen-space/ios-streamer is versioned independently (macOS-only, optional
 # CLI dep). Bump it via --ios-streamer <version>; otherwise it's left alone.
 CURRENT_IOS_STREAMER_VERSION="0.1.0"
@@ -147,6 +147,12 @@ echo "  ✓ hypen-engine-rs/Cargo.toml"
 sed -i '' "s/hypen-engine = { version = \"$CURRENT_RUST_VERSION\"/hypen-engine = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-sdk-rs/Cargo.toml"
 sed -i '' "s/hypen-parser = { version = \"$CURRENT_RUST_VERSION\"/hypen-parser = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-sdk-rs/Cargo.toml"
 echo "  ✓ hypen-sdk-rs/Cargo.toml"
+
+# hypen-renderer-desktop (dependency versions need updating for crates.io)
+sed -i '' "s/hypen-engine = { version = \"$CURRENT_RUST_VERSION\"/hypen-engine = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-renderer-desktop/Cargo.toml"
+sed -i '' "s/hypen-parser = { version = \"$CURRENT_RUST_VERSION\"/hypen-parser = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-renderer-desktop/Cargo.toml"
+sed -i '' "s/hypen-server = { version = \"$CURRENT_RUST_VERSION\"/hypen-server = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-renderer-desktop/Cargo.toml"
+echo "  ✓ hypen-renderer-desktop/Cargo.toml"
 
 # ── NPM packages (own versions + cross-deps) ────────────────────────────
 

@@ -137,7 +137,59 @@ pub fn parse_classes(input: &str) -> TailwindOutput {
         }
     }
 
+    resolve_gradient_groups(&mut output);
+
     output
+}
+
+fn resolve_gradient_groups(output: &mut TailwindOutput) {
+    resolve_gradient_props(&mut output.base);
+    for properties in output.variants.values_mut() {
+        resolve_gradient_props(properties);
+    }
+}
+
+fn resolve_gradient_props(properties: &mut Vec<CssProperty>) {
+    let mut background_image_index = None;
+    let mut from = None;
+    let mut via = None;
+    let mut to = None;
+
+    for (index, prop) in properties.iter().enumerate() {
+        match prop.property.as_str() {
+            "background-image" if prop.value.contains("var(--tw-gradient-stops)") => {
+                background_image_index = Some(index);
+            }
+            "--tw-gradient-from" => from = Some(prop.value.clone()),
+            "--tw-gradient-via" => via = Some(prop.value.clone()),
+            "--tw-gradient-to" => to = Some(prop.value.clone()),
+            _ => {}
+        }
+    }
+
+    let Some(index) = background_image_index else {
+        return;
+    };
+
+    let direction = gradient_direction(&properties[index].value);
+    let from = from.unwrap_or_else(|| "transparent".to_string());
+    let to = to.unwrap_or_else(|| "transparent".to_string());
+    let stops = if let Some(via) = via {
+        format!("{}, {}, {}", from, via, to)
+    } else {
+        format!("{}, {}", from, to)
+    };
+
+    properties[index].value = format!("linear-gradient({}, {})", direction, stops);
+    properties.retain(|prop| !prop.property.starts_with("--tw-gradient-"));
+}
+
+fn gradient_direction(value: &str) -> &str {
+    value
+        .strip_prefix("linear-gradient(")
+        .and_then(|rest| rest.split_once(", var(--tw-gradient-stops))"))
+        .map(|(direction, _)| direction)
+        .unwrap_or("to bottom")
 }
 
 /// Parse a single Tailwind class
@@ -287,10 +339,28 @@ fn parse_arbitrary(utility: &str) -> Option<Vec<CssProperty>> {
     // - layout and effects support negative values (top, inset, z-index)
     // - sizing, typography, borders do NOT support negation — skip if negative
     None.or_else(|| spacing::parse_arbitrary(prefix, value))
-        .or_else(|| if is_negative { None } else { sizing::parse_arbitrary(prefix, value) })
-        .or_else(|| if is_negative { None } else { typography::parse_arbitrary(prefix, value) })
+        .or_else(|| {
+            if is_negative {
+                None
+            } else {
+                sizing::parse_arbitrary(prefix, value)
+            }
+        })
+        .or_else(|| {
+            if is_negative {
+                None
+            } else {
+                typography::parse_arbitrary(prefix, value)
+            }
+        })
         .or_else(|| layout::parse_arbitrary(bare_prefix, neg_val))
-        .or_else(|| if is_negative { None } else { borders::parse_arbitrary(prefix, value) })
+        .or_else(|| {
+            if is_negative {
+                None
+            } else {
+                borders::parse_arbitrary(prefix, value)
+            }
+        })
         .or_else(|| effects::parse_arbitrary(bare_prefix, neg_val))
 }
 
@@ -333,5 +403,31 @@ mod tests {
         let props = output.to_props();
         assert_eq!(props.get("padding"), Some(&"1rem".to_string()));
         assert_eq!(props.get("padding@md"), Some(&"2rem".to_string()));
+    }
+
+    #[test]
+    fn test_resolves_gradient_stops_to_concrete_background_image() {
+        let output =
+            parse_classes("bg-gradient-to-br from-indigo-950 via-slate-900 to-fuchsia-950");
+        let props = output.to_props();
+
+        assert_eq!(
+            props.get("background-image"),
+            Some(&"linear-gradient(to bottom right, #1e1b4b, #0f172a, #4a044e)".to_string())
+        );
+        assert!(!props.contains_key("--tw-gradient-from"));
+        assert!(!props.contains_key("--tw-gradient-via"));
+        assert!(!props.contains_key("--tw-gradient-to"));
+    }
+
+    #[test]
+    fn test_resolves_two_stop_gradient_to_concrete_background_image() {
+        let output = parse_classes("bg-gradient-to-b from-slate-950 via-indigo-950 to-slate-950");
+        let props = output.to_props();
+
+        assert_eq!(
+            props.get("background-image"),
+            Some(&"linear-gradient(to bottom, #020617, #1e1b4b, #020617)".to_string())
+        );
     }
 }

@@ -1,0 +1,12 @@
+{
+  "name": "hypen-android-server",
+  "version": "1.0.0",
+  "description": "Sample Hypen server for Android renderer testing",
+  "type": "module",
+  "scripts": {
+    "start": "bun run server.ts",
+    "dev": "bun --watch run server.ts",
+    "shop": "bun run shop-server.ts",
+    "shop:dev": "bun --watch run shop-server.ts"
+  }
+}

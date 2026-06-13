@@ -73,10 +73,6 @@ export class CanvasRenderer implements Renderer {
   private rafId: number | null = null;
   private needsRedraw = false;
 
-  private resizeObserver: ResizeObserver | null = null;
-  private dprMediaQuery: MediaQueryList | null = null;
-  private dprChangeHandler: (() => void) | null = null;
-
   private frameCount = 0;
   private lastFrameTime = 0;
 
@@ -142,30 +138,6 @@ export class CanvasRenderer implements Renderer {
     // Eagerly initialise Taffy WASM for layout (non-blocking — fallback used until ready)
     initTaffyLayout();
 
-    // Observe size changes — without this, the canvas backing store stays
-    // pinned at construction-time dimensions while CSS stretches the
-    // display box, and content gets bitmap-stretched / hit-testing drifts.
-    if (typeof ResizeObserver !== "undefined") {
-      this.resizeObserver = new ResizeObserver(() => {
-        this.setupHiDPI();
-        this.scheduleRedraw();
-      });
-      this.resizeObserver.observe(this.canvas);
-    }
-
-    // Track DPR changes (e.g. dragging window across monitors with
-    // different scaling). matchMedia fires once per crossing.
-    if (typeof window !== "undefined" && typeof window.matchMedia === "function") {
-      const dpr = window.devicePixelRatio || 1;
-      this.dprMediaQuery = window.matchMedia(`(resolution: ${dpr}dppx)`);
-      this.dprChangeHandler = () => {
-        this.options.devicePixelRatio = window.devicePixelRatio || 1;
-        this.setupHiDPI();
-        this.scheduleRedraw();
-      };
-      this.dprMediaQuery.addEventListener("change", this.dprChangeHandler);
-    }
-
     // Don't schedule initial render - wait for patches
   }
 
@@ -176,17 +148,14 @@ export class CanvasRenderer implements Renderer {
     const dpr = this.options.devicePixelRatio || 1;
     const rect = this.canvas.getBoundingClientRect();
 
-    // Skip when the host is collapsed — a 0-pixel backing store throws
-    // in some 2D contexts and the next non-zero resize will reinitialise.
-    if (rect.width === 0 || rect.height === 0) return;
-
     this.canvas.width = rect.width * dpr;
     this.canvas.height = rect.height * dpr;
 
-    // Reset transform first — `scale()` is cumulative across calls, so on
-    // a resize the second call would compound (dpr²) and shrink content.
-    this.ctx.setTransform(1, 0, 0, 1, 0, 0);
     this.ctx.scale(dpr, dpr);
+
+    // Update canvas display size
+    this.canvas.style.width = `${rect.width}px`;
+    this.canvas.style.height = `${rect.height}px`;
 
     // Sync dirty tracker with new canvas size
     if (this.dirtyTracker) {
@@ -763,15 +732,6 @@ export class CanvasRenderer implements Renderer {
   destroy(): void {
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
-    }
-    if (this.resizeObserver) {
-      this.resizeObserver.disconnect();
-      this.resizeObserver = null;
-    }
-    if (this.dprMediaQuery && this.dprChangeHandler) {
-      this.dprMediaQuery.removeEventListener("change", this.dprChangeHandler);
-      this.dprMediaQuery = null;
-      this.dprChangeHandler = null;
     }
     this.eventManager.destroy();
     this.scrollManager.destroy();

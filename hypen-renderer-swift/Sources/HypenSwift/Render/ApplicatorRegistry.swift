@@ -283,6 +283,8 @@ extension ApplicatorRegistry {
         // Layout
         registry.register(AlignmentApplicator())
         registry.register(AlignItemsApplicator())
+        registry.register(JustifyContentApplicator())
+        registry.register(VerticalAlignmentApplicator())
         registry.register(HorizontalAlignmentApplicator())
         registry.register(WeightApplicator())
         registry.register(FlexApplicator())

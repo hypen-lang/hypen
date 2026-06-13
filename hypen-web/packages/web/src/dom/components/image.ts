@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const imageHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("img");
+  create(): HTMLElement {
+    const el = document.createElement("img");
     el.dataset.hypenType = "image";
     return el as any as HTMLElement;
   },

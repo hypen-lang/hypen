@@ -210,17 +210,27 @@ fn test_patches_emitted_on_state_change() {
 
     let instance = ModuleInstance::new(Arc::new(def), None).unwrap();
 
-    // Register patch callback (after construction, so initial render is not captured)
+    // Initial render is deferred from `new` to `mount`, so a callback
+    // wired here captures the initial Create batch.
     instance.on_patches(move |p| {
         patches_clone.lock().unwrap().push(p.to_vec());
     });
 
     instance.mount();
+    let after_mount = patches.lock().unwrap().len();
+    assert!(
+        after_mount > 0,
+        "mount() should flush the initial render through on_patches"
+    );
 
-    // Dispatch action — this should produce patches (setProp for updated text)
+    // Dispatch action — this should produce additional patches
+    // (SetProp for the updated text).
     instance.dispatch_action("increment", None).unwrap();
     let after_dispatch = patches.lock().unwrap().len();
-    assert!(after_dispatch > 0, "State change should produce patches");
+    assert!(
+        after_dispatch > after_mount,
+        "state change after mount should produce more patches"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -560,8 +570,8 @@ struct ExplorePost {
 
 #[test]
 fn test_nested_module_grid_renders_items() {
-    use hypen_server::remote::{ModuleSessionConfig, RemoteSession};
     use hypen_server::discovery::ComponentRegistry;
+    use hypen_server::remote::{ModuleSessionConfig, RemoteSession};
 
     // Same pattern as examples/social/rust: App + Search modules,
     // Search has a Grid(@state.explorePosts) that should render Image elements.
@@ -589,9 +599,18 @@ fn test_nested_module_grid_renders_items() {
             .state(SearchState {
                 search_query: String::new(),
                 explore_posts: vec![
-                    ExplorePost { id: "p1".into(), image_url: "https://img1.jpg".into() },
-                    ExplorePost { id: "p2".into(), image_url: "https://img2.jpg".into() },
-                    ExplorePost { id: "p3".into(), image_url: "https://img3.jpg".into() },
+                    ExplorePost {
+                        id: "p1".into(),
+                        image_url: "https://img1.jpg".into(),
+                    },
+                    ExplorePost {
+                        id: "p2".into(),
+                        image_url: "https://img2.jpg".into(),
+                    },
+                    ExplorePost {
+                        id: "p3".into(),
+                        image_url: "https://img3.jpg".into(),
+                    },
                 ],
             })
             .build(),
@@ -599,20 +618,26 @@ fn test_nested_module_grid_renders_items() {
 
     // Register Search component source (same as the module's DSL)
     let mut components = ComponentRegistry::new();
-    components.register("Search", r#"module Search {
+    components.register(
+        "Search",
+        r#"module Search {
         Column {
             Input(placeholder: "Search")
             Grid(@state.explorePosts, key: "id") {
                 Image(src: "@{item.imageUrl}")
             }
         }
-    }"#, None);
+    }"#,
+        None,
+    );
 
     // Create session — same API as the real server
     let session = RemoteSession::from_definition_with_state(
         app_module,
         components,
-        AppState { current_view: "search".to_string() },
+        AppState {
+            current_view: "search".to_string(),
+        },
         vec![ModuleSessionConfig::from_definition(search_module)],
     );
 
@@ -624,11 +649,17 @@ fn test_nested_module_grid_renders_items() {
         .iter()
         .find_map(|r| {
             let v: serde_json::Value = serde_json::from_str(r).ok()?;
-            if v["type"] == "initialTree" { Some(v) } else { None }
+            if v["type"] == "initialTree" {
+                Some(v)
+            } else {
+                None
+            }
         })
         .expect("Should receive an initialTree response");
 
-    let patches = initial_tree["patches"].as_array().expect("patches should be an array");
+    let patches = initial_tree["patches"]
+        .as_array()
+        .expect("patches should be an array");
     let creates: Vec<&str> = patches
         .iter()
         .filter(|p| p["type"] == "create")
@@ -649,7 +680,6 @@ fn test_nested_module_grid_renders_items() {
         "Should create 3 Image elements. Got creates: {:?}",
         creates
     );
-
 }
 
 // ---------------------------------------------------------------------------
@@ -748,7 +778,11 @@ fn test_remote_session_dispatches_nested_module_action() {
     for _ in 0..2 {
         let _ = session.handle_message(action_json);
     }
-    assert_eq!(session.revision(), 3, "revision should advance per dispatch");
+    assert_eq!(
+        session.revision(),
+        3,
+        "revision should advance per dispatch"
+    );
 }
 
 /// RemoteSession installs `router.*` engine action handlers on construction
@@ -768,7 +802,9 @@ fn test_remote_session_router_push_updates_location() {
 
     let app = Arc::new(
         HypenApp::module::<AppState>("App")
-            .state(AppState { location: "/".into() })
+            .state(AppState {
+                location: "/".into(),
+            })
             .ui(r#"module App {
                 Column {
                     Text("Path: @{state.location}")
@@ -806,11 +842,15 @@ fn test_remote_session_router_replace_updates_path() {
 
     #[derive(Clone, Default, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct AppState { location: String }
+    struct AppState {
+        location: String,
+    }
 
     let app = Arc::new(
         HypenApp::module::<AppState>("App")
-            .state(AppState { location: "/".into() })
+            .state(AppState {
+                location: "/".into(),
+            })
             .ui(r#"module App { Text("@{state.location}") }"#)
             .build(),
     );
@@ -818,7 +858,9 @@ fn test_remote_session_router_replace_updates_path() {
     let _ = session.handle_hello(None);
 
     let dispatch = |kind: &str, to: &str| {
-        format!(r#"{{"type":"dispatchAction","module":"App","action":"router.{kind}","payload":{{"to":"{to}"}}}}"#)
+        format!(
+            r#"{{"type":"dispatchAction","module":"App","action":"router.{kind}","payload":{{"to":"{to}"}}}}"#
+        )
     };
     let _ = session.handle_message(&dispatch("push", "/a"));
     let _ = session.handle_message(&dispatch("replace", "/b"));
@@ -830,7 +872,8 @@ fn test_remote_session_router_replace_updates_path() {
     );
     // History depth check: `router.back` should pop /b off and leave / —
     // proving replace didn't push a history frame.
-    let _ = session.handle_message(r#"{"type":"dispatchAction","module":"App","action":"router.back"}"#);
+    let _ = session
+        .handle_message(r#"{"type":"dispatchAction","module":"App","action":"router.back"}"#);
     assert_eq!(session.router().current_path(), "/");
 }
 
@@ -847,7 +890,9 @@ fn test_remote_session_router_works_with_no_user_actions() {
 
     #[derive(Clone, Default, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct AppState { location: String }
+    struct AppState {
+        location: String,
+    }
 
     let app = Arc::new(
         HypenApp::module::<AppState>("App")
@@ -859,7 +904,8 @@ fn test_remote_session_router_works_with_no_user_actions() {
     let session = RemoteSession::from_definition(app, ComponentRegistry::new());
     let _ = session.handle_hello(None);
 
-    let push = r#"{"type":"dispatchAction","module":"App","action":"router.push","payload":{"to":"/x"}}"#;
+    let push =
+        r#"{"type":"dispatchAction","module":"App","action":"router.push","payload":{"to":"/x"}}"#;
     let _ = session.handle_message(push);
     assert_eq!(session.router().current_path(), "/x");
 }
@@ -876,7 +922,9 @@ fn test_remote_session_router_push_without_location_field() {
 
     #[derive(Clone, Default, Serialize, Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct PlainState { label: String }
+    struct PlainState {
+        label: String,
+    }
 
     let app = Arc::new(
         HypenApp::module::<PlainState>("App")
@@ -887,12 +935,16 @@ fn test_remote_session_router_push_without_location_field() {
     let session = RemoteSession::from_definition(app, ComponentRegistry::new());
     let _ = session.handle_hello(None);
 
-    let push = r#"{"type":"dispatchAction","module":"App","action":"router.push","payload":{"to":"/z"}}"#;
+    let push =
+        r#"{"type":"dispatchAction","module":"App","action":"router.push","payload":{"to":"/z"}}"#;
     let _ = session.handle_message(push);
 
     // Router moved but state is untouched (no `location` field to mirror into).
     assert_eq!(session.router().current_path(), "/z");
-    assert_eq!(session.get_state().get("label").and_then(|v| v.as_str()), Some("hi"));
+    assert_eq!(
+        session.get_state().get("label").and_then(|v| v.as_str()),
+        Some("hi")
+    );
     assert!(session.get_state().get("location").is_none());
 }
 
@@ -918,7 +970,9 @@ fn test_remote_session_route_enter_hook() {
 
     let app = Arc::new(
         HypenApp::module::<AppState>("App")
-            .state(AppState { location: "/".into() })
+            .state(AppState {
+                location: "/".into(),
+            })
             .ui(r#"module App { Comments() }"#)
             .build(),
     );
@@ -938,7 +992,9 @@ fn test_remote_session_route_enter_hook() {
     let session = RemoteSession::from_definition_with_state(
         app,
         components,
-        AppState { location: "/".into() },
+        AppState {
+            location: "/".into(),
+        },
         vec![ModuleSessionConfig::from_definition(comments)],
     );
 
@@ -988,7 +1044,9 @@ fn test_remote_session_router_back_restores_previous() {
 
     let app = Arc::new(
         HypenApp::module::<AppState>("App")
-            .state(AppState { location: "/".into() })
+            .state(AppState {
+                location: "/".into(),
+            })
             .ui(r#"module App { Text("@{state.location}") }"#)
             .build(),
     );

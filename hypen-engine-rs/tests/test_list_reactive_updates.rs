@@ -56,7 +56,13 @@ fn test_list_registers_dependency_on_array_binding() {
     let state = json!({"items": [{"name": "A"}, {"name": "B"}]});
 
     // WHEN: We create the tree
-    let _initial_patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let _initial_patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let list_node_id = tree.root().expect("Should have root");
 
     // THEN: The List node should be registered as depending on "items"
@@ -84,7 +90,13 @@ fn test_list_stores_element_template_for_rerender() {
     let state = json!({"items": [{"name": "A"}]});
 
     // WHEN: We create the tree
-    let _initial_patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let _initial_patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let list_node_id = tree.root().expect("Should have root");
 
     // THEN: The List node should have the element_template stored
@@ -124,7 +136,13 @@ fn test_list_rerenders_when_array_changes() {
     let module = Module::new("TestModule");
     let mut instance = ModuleInstance::new(module, initial_state);
 
-    let initial_patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, instance.get_state(), &mut dependencies);
+    let initial_patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    );
     let list_node_id = tree.root().expect("Should have root");
 
     // Verify initial render created 3 nodes (List + 2 Text)
@@ -193,7 +211,13 @@ fn test_list_clears_when_array_becomes_empty() {
     let module = Module::new("TestModule");
     let mut instance = ModuleInstance::new(module, initial_state);
 
-    let _initial_patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, instance.get_state(), &mut dependencies);
+    let _initial_patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    );
     let list_node_id = tree.root().expect("Should have root");
 
     // Verify initial children
@@ -243,7 +267,13 @@ fn test_list_renders_when_array_populates_from_empty() {
     let module = Module::new("TestModule");
     let mut instance = ModuleInstance::new(module, initial_state);
 
-    let _initial_patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, instance.get_state(), &mut dependencies);
+    let _initial_patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    );
     let list_node_id = tree.root().expect("Should have root");
 
     // Verify no children initially
@@ -299,7 +329,13 @@ fn test_list_item_bindings_are_replaced_with_values() {
     let state = json!({"items": [{"name": "Alice"}, {"name": "Bob"}]});
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: The Text nodes should have the actual values, not "@{item.name}"
     let text_creates: Vec<_> = patches
@@ -353,7 +389,13 @@ fn test_list_nested_item_bindings() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: The Text nodes should have the nested values
     let text_creates: Vec<_> = patches
@@ -416,7 +458,13 @@ fn test_list_item_ternary_expression_boolean_true() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: The Box elements should have evaluated border widths
     let box_creates: Vec<_> = patches
@@ -477,7 +525,13 @@ fn test_list_item_ternary_expression_with_colors() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: The Box elements should have evaluated colors
     let colors: Vec<_> = patches
@@ -540,7 +594,13 @@ fn test_list_item_ternary_with_nested_path() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: The Text elements should have evaluated values
     let texts: Vec<_> = patches
@@ -601,7 +661,13 @@ fn test_list_item_numeric_comparison_expression() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: The Text elements should have evaluated stock status
     let texts: Vec<_> = patches
@@ -665,7 +731,13 @@ fn test_list_item_logical_or_fallback_expression() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: The Text elements should use nickname when hasNickname is true, name otherwise
     let texts: Vec<_> = patches
@@ -726,7 +798,13 @@ fn test_list_item_expression_with_string_concatenation() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: The Text elements should have concatenated names
     let texts: Vec<_> = patches
@@ -786,7 +864,13 @@ fn test_list_item_expression_without_expression_not_evaluated() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: Simple interpolation should still work
     let texts: Vec<_> = patches
@@ -850,7 +934,13 @@ fn test_list_item_multiple_expressions_in_same_prop() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: Both expressions in the style should be evaluated
     let styles: Vec<_> = patches
@@ -924,7 +1014,13 @@ fn test_list_item_template_string_with_expression() {
     });
 
     // WHEN: We create the tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: The Row elements should have evaluated border properties
     let row_creates: Vec<_> = patches

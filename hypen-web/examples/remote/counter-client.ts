@@ -5,7 +5,7 @@
  */
 
 import { RemoteEngine } from "../../../packages/core/src/remote/client.js";
-import { createHypenClient } from "../../../packages/web/src/dom/index.js";
+import { DOMRenderer } from "../../../packages/web/src/dom/index.js";
 
 async function main() {
   console.log("=== Hypen Remote Counter Client ===\n");
@@ -17,6 +17,9 @@ async function main() {
     return;
   }
 
+  // Create renderer
+  const renderer = new DOMRenderer(app);
+
   // Create remote engine
   const remoteEngine = new RemoteEngine("ws://localhost:3000", {
     autoReconnect: true,
@@ -24,8 +27,11 @@ async function main() {
     maxReconnectAttempts: 10,
   });
 
-  // Wire renderer + patch subscription in one call
-  createHypenClient(app, remoteEngine);
+  // Set up patch handler
+  remoteEngine.onPatches((patches) => {
+    console.log(`📦 Received ${patches.length} patches`);
+    renderer.applyPatches(patches);
+  });
 
   // Set up connection handlers
   remoteEngine.onConnect(() => {

@@ -14,10 +14,11 @@ pub use crate::events::EventEmitter;
 pub use crate::module::BoxFuture;
 pub use crate::module::{create_nested_instance, ModuleBuilder, ModuleDefinition, ModuleInstance};
 pub use crate::router::HypenRouter;
+pub use crate::state::State;
 
 pub use crate::remote::{
-    ModuleSessionConfig, RemoteMessage, RemoteSession, SessionConfig, SessionInfo,
-    SessionManager, SessionManagerConfig,
+    ModuleSessionConfig, RemoteMessage, RemoteSession, SessionConfig, SessionInfo, SessionManager,
+    SessionManagerConfig,
 };
 
 // Re-export engine types that users commonly need

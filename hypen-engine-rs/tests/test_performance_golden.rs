@@ -32,11 +32,9 @@ fn list_with_complex_template(array_path: &str, template_children: Vec<Element>)
         props: Props::from_map(indexmap! {
             "0".to_string() => Value::Binding(Binding::state(path_parts))
         }),
-        ir_children: template_children
-            .into_iter()
-            .map(IRNode::Element)
-            .collect(),
-        key: None, module_scope: None,
+        ir_children: template_children.into_iter().map(IRNode::Element).collect(),
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -65,7 +63,8 @@ fn product_card_template() -> Element {
                     "fontWeight".to_string() => Value::Static(json!("bold")),
                 }),
                 ir_children: Vec::new(),
-                key: None, module_scope: None,
+                key: None,
+                module_scope: None,
             }),
             // Product description
             IRNode::Element(Element {
@@ -75,7 +74,8 @@ fn product_card_template() -> Element {
                     "color".to_string() => Value::Static(json!("#666")),
                 }),
                 ir_children: Vec::new(),
-                key: None, module_scope: None,
+                key: None,
+                module_scope: None,
             }),
             // Price with conditional styling
             IRNode::Element(Element {
@@ -91,7 +91,8 @@ fn product_card_template() -> Element {
                     },
                 }),
                 ir_children: Vec::new(),
-                key: None, module_scope: None,
+                key: None,
+                module_scope: None,
             }),
             // Stock status
             IRNode::Element(Element {
@@ -103,10 +104,12 @@ fn product_card_template() -> Element {
                     },
                 }),
                 ir_children: Vec::new(),
-                key: None, module_scope: None,
+                key: None,
+                module_scope: None,
             }),
         ],
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -140,7 +143,13 @@ fn golden_replace_item_bindings_10_items() {
 
     // WHEN: Create tree
     let start = Instant::now();
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    ));
     let elapsed = start.elapsed();
 
     // THEN: Capture current behavior as golden master
@@ -199,7 +208,13 @@ fn golden_replace_item_bindings_100_items() {
 
     // WHEN: Create tree
     let start = Instant::now();
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    ));
     let elapsed = start.elapsed();
 
     // THEN: Capture performance baseline
@@ -249,7 +264,8 @@ fn golden_list_partial_update_changes_one_item() {
             "0".to_string() => Value::Static(json!("@{item.name}"))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }));
 
     let initial_state = json!({
@@ -265,7 +281,13 @@ fn golden_list_partial_update_changes_one_item() {
     let module = Module::new("TestModule");
     let mut instance = ModuleInstance::new(module, initial_state);
 
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, instance.get_state(), &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    ));
     let list_node_id = tree.root().expect("Should have root");
 
     // Verify initial state: 6 nodes (1 List + 5 Text)
@@ -338,7 +360,8 @@ fn golden_list_add_one_item_to_end() {
             "0".to_string() => Value::Static(json!("@{item.name}"))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }));
 
     let initial_state = json!({
@@ -352,7 +375,13 @@ fn golden_list_add_one_item_to_end() {
     let module = Module::new("TestModule");
     let mut instance = ModuleInstance::new(module, initial_state);
 
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, instance.get_state(), &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    ));
     let list_node_id = tree.root().expect("Should have root");
 
     patches.clear();
@@ -419,7 +448,8 @@ fn golden_list_reorder_items() {
             "0".to_string() => Value::Static(json!("@{item.name}"))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None, // Note: key would come from item.id in optimized version
+        key: None,
+        module_scope: None, // Note: key would come from item.id in optimized version
     }));
 
     let initial_state = json!({
@@ -434,7 +464,13 @@ fn golden_list_reorder_items() {
     let module = Module::new("TestModule");
     let mut instance = ModuleInstance::new(module, initial_state);
 
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, instance.get_state(), &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    ));
     let list_node_id = tree.root().expect("Should have root");
 
     patches.clear();
@@ -503,7 +539,8 @@ fn golden_list_reverse_order() {
             "0".to_string() => Value::Static(json!("@{item.name}"))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }));
 
     let initial_state = json!({
@@ -519,7 +556,13 @@ fn golden_list_reverse_order() {
     let module = Module::new("TestModule");
     let mut instance = ModuleInstance::new(module, initial_state);
 
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, instance.get_state(), &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    ));
     let list_node_id = tree.root().expect("Should have root");
 
     patches.clear();
@@ -653,14 +696,21 @@ fn golden_dependency_graph_cleared_on_render() {
             "0".to_string() => Value::Binding(Binding::state(vec!["counter".to_string()]))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     };
 
     let initial_state = json!({"counter": 0});
     let module = Module::new("TestModule");
     let mut instance = ModuleInstance::new(module, initial_state);
 
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, instance.get_state(), &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    ));
     let node_id = tree.root().expect("Should have root");
 
     // Verify initial dependency
@@ -715,13 +765,20 @@ fn golden_dependency_multi_binding_tracking() {
             }
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     };
 
     let state = json!({"firstName": "John", "lastName": "Doe"});
 
     // WHEN: Create tree
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    ));
     let node_id = tree.root().expect("Should have root");
 
     // THEN: Both paths should track the node
@@ -771,7 +828,8 @@ fn golden_correctness_item_binding_substitution() {
             "0".to_string() => Value::Static(json!("Hello, @{item.name}!"))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }));
 
     let state = json!({
@@ -782,7 +840,13 @@ fn golden_correctness_item_binding_substitution() {
         ]
     });
 
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    ));
 
     // Extract all Text node values
     let text_values: Vec<String> = patches
@@ -843,7 +907,8 @@ fn golden_correctness_ternary_evaluation() {
             }
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }));
 
     let state = json!({
@@ -854,7 +919,13 @@ fn golden_correctness_ternary_evaluation() {
         ]
     });
 
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    ));
 
     // Extract all Box color values
     let colors: Vec<String> = patches
@@ -908,7 +979,8 @@ fn golden_correctness_nested_path_resolution() {
             "0".to_string() => Value::Static(json!("@{item.user.profile.displayName}"))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }));
 
     let state = json!({
@@ -918,7 +990,13 @@ fn golden_correctness_nested_path_resolution() {
         ]
     });
 
-    patches.extend(reconcile_ir(&mut tree, &IRNode::Element(list.clone()), None, &state, &mut dependencies));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    ));
 
     let text_values: Vec<String> = patches
         .iter()

@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const sliderHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("input");
+  create(): HTMLElement {
+    const el = document.createElement("input");
     el.type = "range";
     el.dataset.hypenType = "slider";
     return el as any as HTMLElement;

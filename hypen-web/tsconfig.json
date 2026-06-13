@@ -25,7 +25,6 @@
     // nominally equal). Every per-package tsconfig already has an
     // equivalent paths map — this mirrors it at the root so
     // `bun run typecheck` resolves from src too.
-    "baseUrl": ".",
     "paths": {
       "@hypen-space/core": ["./packages/core/src/index.ts"],
       // Non-standard export: core/package.json maps "./components" to

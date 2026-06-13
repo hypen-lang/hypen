@@ -220,9 +220,7 @@ impl WasmEngine {
             .map_err(|e| structured_error("resourceError", &format!("Invalid resources: {}", e)))?;
 
         #[cfg(debug_assertions)]
-        web_sys::console::log_1(
-            &format!("[WASM] Registered {} resources", map.len()).into(),
-        );
+        web_sys::console::log_1(&format!("[WASM] Registered {} resources", map.len()).into());
 
         self.core.resource_registry.register_map(map);
         Ok(())
@@ -268,12 +266,15 @@ impl WasmEngine {
             from_value(state_js).map_err(|e| structured_error("stateError", &e.to_string()))?
         };
 
-        let parent_id = self.node_id_index.lookup(parent_node_id_str).ok_or_else(|| {
-            structured_error(
-                "renderError",
-                &format!("Parent node not found: {}", parent_node_id_str),
-            )
-        })?;
+        let parent_id = self
+            .node_id_index
+            .lookup(parent_node_id_str)
+            .ok_or_else(|| {
+                structured_error(
+                    "renderError",
+                    &format!("Parent node not found: {}", parent_node_id_str),
+                )
+            })?;
 
         #[cfg(debug_assertions)]
         web_sys::console::log_1(
@@ -308,7 +309,8 @@ impl WasmEngine {
 
             for name in import.imported_names() {
                 if self
-                    .core.component_registry
+                    .core
+                    .component_registry
                     .get(&name, Some(source_path))
                     .is_some()
                 {
@@ -391,11 +393,11 @@ impl WasmEngine {
                                     let ir_node = ast_to_ir_node(&component_spec);
                                     if let IRNode::Element(ir_element) = &ir_node {
                                         let ir_element = ir_element.clone();
-                                        let component =
-                                            crate::ir::Component::new(name.clone(), move |_props| {
-                                                ir_element.clone()
-                                            })
-                                            .with_source_path(&path);
+                                        let component = crate::ir::Component::new(
+                                            name.clone(),
+                                            move |_props| ir_element.clone(),
+                                        )
+                                        .with_source_path(&path);
                                         self.core.component_registry.register(component);
                                     }
 
@@ -414,7 +416,11 @@ impl WasmEngine {
 
     /// Recursively resolve components with path context
     fn resolve_components_with_context(&mut self, element: &Element, context_path: Option<&str>) {
-        if self.core.component_registry.is_primitive(&element.element_type) {
+        if self
+            .core
+            .component_registry
+            .is_primitive(&element.element_type)
+        {
             for child_ir in &element.ir_children {
                 if let IRNode::Element(child) = child_ir {
                     self.resolve_components_with_context(child, context_path);
@@ -424,7 +430,8 @@ impl WasmEngine {
         }
 
         if self
-            .core.component_registry
+            .core
+            .component_registry
             .get(&element.element_type, context_path)
             .is_none()
         {
@@ -618,7 +625,11 @@ impl WasmEngine {
     /// - empty string / null / undefined → primary module set via [`set_module`](Self::set_module)
     /// - any other string → named module registered via [`register_module`] (lowercased)
     #[wasm_bindgen(js_name = updateState)]
-    pub fn update_state(&mut self, scope: Option<String>, state_patch: JsValue) -> Result<(), JsValue> {
+    pub fn update_state(
+        &mut self,
+        scope: Option<String>,
+        state_patch: JsValue,
+    ) -> Result<(), JsValue> {
         let patch: serde_json::Value = from_value(state_patch)
             .map_err(|e| structured_error("stateError", &format!("Invalid state patch: {}", e)))?;
 
@@ -665,12 +676,8 @@ impl WasmEngine {
     /// Set (or replace) a named data source context.
     #[wasm_bindgen(js_name = setContext)]
     pub fn set_context(&mut self, name: &str, data_js: JsValue) -> Result<(), JsValue> {
-        let data: serde_json::Value = from_value(data_js).map_err(|e| {
-            structured_error(
-                "stateError",
-                &format!("Invalid context data: {}", e),
-            )
-        })?;
+        let data: serde_json::Value = from_value(data_js)
+            .map_err(|e| structured_error("stateError", &format!("Invalid context data: {}", e)))?;
 
         self.core.set_context(name, data);
         self.render_dirty();
@@ -808,7 +815,8 @@ impl WasmEngine {
     #[wasm_bindgen(js_name = currentState)]
     pub fn current_state(&self) -> JsValue {
         let state = self
-            .core.module
+            .core
+            .module
             .as_ref()
             .map(|m| m.get_state())
             .unwrap_or(&NULL_STATE);
@@ -963,11 +971,7 @@ pub fn path_has_js(value_json: &str, path: &str) -> Result<String, JsValue> {
 /// Set `new_value_json` at `path` inside `value_json`; returns the
 /// updated JSON string.
 #[wasm_bindgen(js_name = pathSet)]
-pub fn path_set_js(
-    value_json: &str,
-    path: &str,
-    new_value_json: &str,
-) -> Result<String, JsValue> {
+pub fn path_set_js(value_json: &str, path: &str, new_value_json: &str) -> Result<String, JsValue> {
     let mut v: serde_json::Value = serde_json::from_str(value_json)
         .map_err(|e| structured_error("stateError", &format!("pathSet: bad value JSON: {e}")))?;
     let nv: serde_json::Value = serde_json::from_str(new_value_json).map_err(|e| {

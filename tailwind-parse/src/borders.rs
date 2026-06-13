@@ -73,8 +73,7 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
         if let Some(dash) = rest.find('-') {
             let side = &rest[..dash];
             let size = &rest[dash + 1..];
-            if let (Some(props), Some(value)) =
-                (directional_radius_props(side), radius_value(size))
+            if let (Some(props), Some(value)) = (directional_radius_props(side), radius_value(size))
             {
                 return Some(props.iter().map(|p| CssProperty::new(p, value)).collect());
             }
@@ -99,15 +98,26 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
             "2" => "2px",
             "4" => "4px",
             "8" => "8px",
-            // Directional borders: native renderers don't support per-side border width,
-            // so we map to full border-width as a best-effort fallback.
-            "t" | "r" | "b" | "l" => return Some(vec![CssProperty::new("border-width", "1px")]),
-            "t-0" | "r-0" | "b-0" | "l-0" => {
-                return Some(vec![CssProperty::new("border-width", "0px")])
-            }
-            "t-2" | "r-2" | "b-2" | "l-2" => {
-                return Some(vec![CssProperty::new("border-width", "2px")])
-            }
+            // Directional borders. Web renders these via the per-side
+            // CSS props directly; native renderers that don't yet
+            // support per-side widths can fall back by checking for
+            // any of the per-side keys and treating them as a uniform
+            // border. Emitting the per-side key is strictly more
+            // information than the previous "border-width: 1px"
+            // collapse, so the desktop / web / mobile renderers all
+            // see what the user actually asked for.
+            "t" => return Some(vec![CssProperty::new("border-top-width", "1px")]),
+            "r" => return Some(vec![CssProperty::new("border-right-width", "1px")]),
+            "b" => return Some(vec![CssProperty::new("border-bottom-width", "1px")]),
+            "l" => return Some(vec![CssProperty::new("border-left-width", "1px")]),
+            "t-0" => return Some(vec![CssProperty::new("border-top-width", "0px")]),
+            "r-0" => return Some(vec![CssProperty::new("border-right-width", "0px")]),
+            "b-0" => return Some(vec![CssProperty::new("border-bottom-width", "0px")]),
+            "l-0" => return Some(vec![CssProperty::new("border-left-width", "0px")]),
+            "t-2" => return Some(vec![CssProperty::new("border-top-width", "2px")]),
+            "r-2" => return Some(vec![CssProperty::new("border-right-width", "2px")]),
+            "b-2" => return Some(vec![CssProperty::new("border-bottom-width", "2px")]),
+            "l-2" => return Some(vec![CssProperty::new("border-left-width", "2px")]),
             // Border style
             "solid" => return Some(vec![CssProperty::new("border-style", "solid")]),
             "dashed" => return Some(vec![CssProperty::new("border-style", "dashed")]),

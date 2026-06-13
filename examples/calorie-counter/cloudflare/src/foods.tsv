@@ -1,0 +1,138 @@
+id	name	icon	calories	carbs_g	protein_g	fat_g	serving_label	category	sort_order
+# Curated subset of USDA Nutritive Value of Foods (2002). Names cleaned up
+# from the raw PDF extraction; icons hand-picked. Per-100g or per-100ml as
+# noted by the serving_label. Expand freely — rows are loaded at first boot
+# by server/db.ts (which skips comment lines and the header row).
+
+# ---------- Fruits ----------
+f001	Banana	🍌	105	27.0	1.3	0.4	1 medium	popular	10
+f002	Apple	🍎	52	14.0	0.3	0.2	1 medium	popular	11
+f003	Orange	🍊	47	11.7	1.1	0.1	1 medium	popular	12
+f004	Strawberries	🍓	30	7.2	0.6	0.6	100 g	popular	13
+f005	Grapes	🍇	69	18.1	0.7	0.2	100 g	popular	14
+f006	Mango	🥭	65	16.9	0.5	0.5	100 g	popular	15
+f007	Watermelon	🍉	32	7.3	0.7	0.4	100 g	popular	16
+f008	Peach	🍑	43	11.2	1.0	0.0	1 medium	popular	17
+f009	Pear	🍐	59	15.1	0.6	0.6	1 medium	popular	18
+f010	Pineapple	🍍	49	12.3	0.7	0.7	100 g	popular	19
+f011	Blueberries	🫐	57	14.5	0.7	0.3	100 g	popular	20
+f012	Avocado	🥑	160	9.0	2.0	15.0	1/2 fruit	popular	21
+f013	Lemon	🍋	29	9.3	1.1	0.3	1 medium	popular	22
+f014	Raisins	🍇	300	79.3	3.5	0.7	100 g	popular	23
+
+# ---------- Vegetables ----------
+f020	Broccoli	🥦	28	5.7	3.4	0.0	100 g	popular	30
+f021	Carrots	🥕	45	10.3	1.3	0.0	100 g	popular	31
+f022	Cucumber	🥒	13	2.9	1.0	0.0	100 g	popular	32
+f023	Lettuce	🥬	14	1.8	1.8	0.0	100 g	popular	33
+f024	Spinach	🥬	23	3.6	2.9	0.4	100 g	popular	34
+f025	Tomato	🍅	18	3.9	0.9	0.2	100 g	popular	35
+f026	Onion	🧅	38	8.8	1.3	0.0	100 g	popular	36
+f027	Bell Pepper	🫑	27	6.7	0.7	0.0	100 g	popular	37
+f028	Corn	🌽	108	24.7	3.9	1.3	100 g	popular	38
+f029	Potato (baked)	🥔	109	25.3	2.5	0.0	1 medium	popular	39
+f030	Sweet Potato	🍠	86	20.1	1.6	0.1	1 medium	popular	40
+f031	Mushrooms	🍄	26	3.9	2.4	0.3	100 g	popular	41
+f032	Cauliflower	🥦	25	5.0	2.0	0.0	100 g	popular	42
+
+# ---------- Proteins / meat / fish ----------
+f040	Grilled Chicken Breast	🍗	165	0.0	31.0	3.6	100 g	popular	50
+f041	Chicken Thigh (roasted)	🍗	209	0.0	26.0	11.0	100 g	popular	51
+f042	Chicken Drumstick	🍗	173	0.0	28.3	5.7	1 drumstick	popular	52
+f043	Turkey (roasted)	🦃	170	0.0	29.3	5.0	100 g	popular	53
+f044	Ground Beef Patty	🥩	268	0.0	15.0	15.0	1 patty	popular	54
+f045	Salmon (baked)	🐟	216	0.0	27.1	11.0	100 g	popular	55
+f046	Cod (baked)	🐟	105	0.0	23.5	1.1	100 g	popular	56
+f047	Tuna (water-packed)	🐟	116	0.0	25.9	1.2	100 g	popular	57
+f048	Shrimp (steamed)	🦐	112	3.5	23.5	1.2	100 g	popular	58
+f049	Bacon (regular)	🥓	574	0.0	31.6	47.4	100 g	popular	59
+f050	Ham (roasted lean)	🍖	156	0.0	24.7	5.9	100 g	popular	60
+f051	Pork Chop (broiled lean)	🥩	202	0.0	30.6	8.2	100 g	popular	61
+f052	Egg (boiled)	🥚	78	0.6	6.3	5.3	1 large	popular	62
+
+# ---------- Grains / bread / pasta / rice ----------
+f060	Oatmeal (cooked)	🥣	150	27.0	5.0	3.0	1 serving	popular	70
+f061	White Bread	🍞	268	48.0	8.0	4.0	100 g	popular	71
+f062	Whole Wheat Bread	🍞	246	46.4	10.7	3.6	100 g	popular	72
+f063	Bagel (plain)	🥯	275	53.5	9.9	1.4	1 bagel	popular	73
+f064	Croissant	🥐	405	45.6	8.8	21.1	1 croissant	popular	74
+f065	English Muffin	🍞	235	45.6	7.0	1.8	1 muffin	popular	75
+f066	Pancakes (with syrup)	🥞	224	25.0	3.5	6.0	2 pancakes	popular	76
+f067	Waffle (frozen)	🧇	264	39.4	6.1	9.1	1 waffle	popular	77
+f068	White Rice (cooked)	🍚	130	28.5	2.5	0.0	100 g	popular	78
+f069	Brown Rice (cooked)	🍚	111	23.1	2.6	1.0	100 g	popular	79
+f070	Spaghetti (cooked)	🍝	141	28.6	5.0	0.7	100 g	popular	80
+f071	Whole Wheat Pasta	🍝	124	26.4	5.0	0.7	100 g	popular	81
+f072	Cheerios	🥣	367	76.7	10.0	6.7	100 g	popular	82
+f073	Cornflakes	🥣	364	85.7	7.1	0.0	100 g	popular	83
+f074	Granola	🥣	451	65.5	10.9	18.2	100 g	popular	84
+
+# ---------- Dairy ----------
+f080	Whole Milk	🥛	63	4.6	3.4	3.4	100 ml	popular	90
+f081	2% Milk	🥛	51	5.1	3.4	2.1	100 ml	popular	91
+f082	Skim Milk	🥛	36	5.1	3.4	0.0	100 ml	popular	92
+f083	Greek Yogurt	🥛	59	3.6	10.0	0.4	100 g	popular	93
+f084	Cottage Cheese (2%)	🧀	86	3.4	13.1	1.7	100 g	popular	94
+f085	Cheddar Cheese	🧀	404	1.3	22.9	33.3	100 g	popular	95
+f086	Mozzarella (part-skim)	🧀	282	3.6	28.6	17.9	100 g	popular	96
+f087	Parmesan (grated)	🧀	392	3.9	35.8	25.8	100 g	popular	97
+f088	Butter (salted)	🧈	717	0.1	0.9	81.1	100 g	popular	98
+f089	Cream Cheese	🧀	350	5.5	6.2	34.2	100 g	popular	99
+
+# ---------- Legumes / nuts / seeds ----------
+f100	Peanuts (dry roasted)	🥜	593	21.4	25.0	50.0	100 g	popular	110
+f101	Peanut Butter	🥜	594	18.8	25.0	50.0	100 g	popular	111
+f102	Almonds	🥜	579	21.6	21.2	49.9	100 g	popular	112
+f103	Walnuts	🥜	654	13.7	15.2	65.2	100 g	popular	113
+f104	Cashews (roasted)	🥜	582	32.1	14.3	46.4	100 g	popular	114
+f105	Chickpeas (cooked)	🫘	164	27.4	9.2	2.4	100 g	popular	115
+f106	Black Beans (cooked)	🫘	132	23.0	8.9	0.5	100 g	popular	116
+f107	Lentils (cooked)	🫘	116	20.2	9.1	0.5	100 g	popular	117
+f108	Hummus	🫘	166	14.3	7.9	9.6	100 g	popular	118
+f109	Tofu (firm)	🫘	144	2.8	15.8	8.7	100 g	popular	119
+
+# ---------- Snacks / treats ----------
+f120	Potato Chips	🍟	536	53.0	7.0	34.0	100 g	popular	130
+f121	Tortilla Chips	🌮	507	64.3	7.1	25.0	100 g	popular	131
+f122	Popcorn (air popped)	🍿	388	75.0	12.5	0.0	100 g	popular	132
+f123	Chocolate Chip Cookies	🍪	480	70.0	5.0	20.0	1 cookie	popular	133
+f124	Brownie	🍫	405	64.3	5.4	16.1	1 brownie	popular	134
+f125	Ice Cream (vanilla)	🍨	207	24.0	3.5	11.0	100 g	popular	135
+f126	Donut (yeast glazed)	🍩	403	45.0	6.7	23.3	1 medium	popular	136
+f127	Dark Chocolate	🍫	575	62.5	0.0	37.5	100 g	popular	137
+f128	Gummy Bears	🍬	386	100.0	0.0	0.0	100 g	popular	138
+f129	M&M's (plain)	🍫	492	71.2	3.8	21.2	100 g	popular	139
+
+# ---------- Fast food / mixed ----------
+f140	Cheeseburger	🍔	261	33.0	14.0	12.0	1 regular	popular	150
+f141	Hamburger	🍔	257	32.0	11.0	9.0	1 regular	popular	151
+f142	Hot Dog (plain)	🌭	247	44.9	10.2	15.3	1 hot dog	popular	152
+f143	Pepperoni Pizza Slice	🍕	255	19.7	14.0	9.8	1 slice	popular	153
+f144	Cheese Pizza Slice	🍕	222	14.3	12.7	4.8	1 slice	popular	154
+f145	French Fries (medium)	🍟	342	39.5	4.5	18.7	100 g	popular	155
+f146	Burrito (beans + beef)	🌯	220	28.5	9.5	7.8	1 burrito	popular	156
+f147	Taco (beef)	🌮	216	15.8	12.3	12.3	1 small	popular	157
+f148	Submarine Sandwich	🥪	200	22.4	9.7	8.3	100 g	popular	158
+f149	Sushi Roll (avg)	🍣	145	30.0	5.0	0.5	1 roll	popular	159
+
+# ---------- Beverages ----------
+f160	Black Coffee	☕	2	0.6	0.0	0.0	100 ml	popular	170
+f161	Green Tea	🍵	1	0.0	0.0	0.0	100 ml	popular	171
+f162	Orange Juice	🧃	47	11.0	0.8	0.0	100 ml	popular	172
+f163	Apple Juice	🧃	46	11.3	0.1	0.1	100 ml	popular	173
+f164	Cola	🥤	43	10.7	0.0	0.0	100 ml	popular	174
+f165	Diet Cola	🥤	1	0.0	0.0	0.0	100 ml	popular	175
+f166	Beer (regular)	🍺	41	3.7	0.3	0.0	100 ml	popular	176
+f167	Red Wine	🍷	71	1.9	0.0	0.0	100 ml	popular	177
+f168	White Wine	🍷	68	1.0	0.0	0.0	100 ml	popular	178
+f169	Smoothie (fruit)	🥤	90	20.0	1.0	0.5	100 ml	popular	179
+
+# ---------- Meals (category: meal) — pre-combined entries for the "Meals" tab ----------
+m001	Chicken Caesar Salad	🥗	280	10.0	28.0	14.0	1 bowl	meal	200
+m002	Pasta Bolognese	🍝	420	55.0	18.0	13.0	1 plate	meal	201
+m003	Stir-Fry Veggies + Tofu	🥘	340	30.0	22.0	14.0	1 plate	meal	202
+m004	Breakfast Omelette	🍳	310	4.0	22.0	22.0	2 eggs	meal	203
+m005	Turkey Sandwich	🥪	340	40.0	22.0	10.0	1 sandwich	meal	204
+m006	Grilled Salmon + Rice	🍱	520	40.0	32.0	22.0	1 plate	meal	205
+m007	Oatmeal + Banana + Almonds	🥣	360	55.0	10.0	12.0	1 bowl	meal	206
+m008	Chicken Burrito Bowl	🥗	540	55.0	34.0	18.0	1 bowl	meal	207

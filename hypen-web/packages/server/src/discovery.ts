@@ -374,16 +374,6 @@ export function watchComponents(
   options: WatchOptions = {}
 ): { stop: () => void } {
   const resolvedDir = resolve(baseDir);
-
-  // Fail fast with a useful message instead of a `fs.watch` ENOENT stack
-  // trace when the components directory does not exist (e.g. user ran
-  // `hypen dev` from the parent of a freshly-init'd project).
-  if (!existsSync(resolvedDir)) {
-    throw new Error(
-      `Components directory not found: ${resolvedDir}\n` +
-        `Make sure you're inside your Hypen project (or use --components <path>).`
-    );
-  }
   const {
     onChange,
     onAdd,

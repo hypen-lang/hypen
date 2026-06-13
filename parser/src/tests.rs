@@ -1538,9 +1538,7 @@ fn test_data_source_reference_nested_path() {
 
     let component = result.unwrap();
     if let Some(Argument::Positioned { value, .. }) = component.arguments.arguments.first() {
-        assert!(
-            matches!(value, Value::Reference(s) if s == "firebase.user.profile.name")
-        );
+        assert!(matches!(value, Value::Reference(s) if s == "firebase.user.profile.name"));
     } else {
         panic!("Expected positional data source reference argument");
     }
@@ -1598,9 +1596,7 @@ fn test_multiple_data_source_references() {
     let users = component.arguments.get_named("users");
     let messages = component.arguments.get_named("messages");
     assert!(matches!(users, Some(Value::Reference(s)) if s == "spacetime.user"));
-    assert!(
-        matches!(messages, Some(Value::Reference(s)) if s == "firebase.chat.messages")
-    );
+    assert!(matches!(messages, Some(Value::Reference(s)) if s == "firebase.chat.messages"));
 }
 
 #[test]

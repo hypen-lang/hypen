@@ -37,13 +37,18 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
 
     // Aspect ratio
     if let Some(val) = utility.strip_prefix("aspect-") {
-        let value = match val {
-            "auto" => "auto",
-            "square" => "1 / 1",
-            "video" => "16 / 9",
+        let value: String = match val {
+            "auto" => "auto".to_string(),
+            "square" => "1 / 1".to_string(),
+            "video" => "16 / 9".to_string(),
+            // Arbitrary value: `aspect-[2/3]` → `2/3`. Tailwind escapes
+            // spaces as underscores inside brackets, so undo that.
+            _ if val.len() >= 2 && val.starts_with('[') && val.ends_with(']') => {
+                val[1..val.len() - 1].replace('_', " ")
+            }
             _ => return None,
         };
-        return Some(vec![CssProperty::new("aspect-ratio", value)]);
+        return Some(vec![CssProperty::new("aspect-ratio", &value)]);
     }
 
     // Container
@@ -227,6 +232,13 @@ mod tests {
         let props = parse("aspect-video").unwrap();
         assert_eq!(props[0].property, "aspect-ratio");
         assert_eq!(props[0].value, "16 / 9");
+    }
+
+    #[test]
+    fn test_aspect_ratio_arbitrary() {
+        let props = parse("aspect-[2/3]").unwrap();
+        assert_eq!(props[0].property, "aspect-ratio");
+        assert_eq!(props[0].value, "2/3");
     }
 
     #[test]

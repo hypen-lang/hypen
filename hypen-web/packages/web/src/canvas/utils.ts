@@ -13,42 +13,6 @@ import type { BoxSpacing, Rectangle, Point, VirtualNode } from "./types.js";
 const ROOT_FONT_PX = 16;
 
 /**
- * Active layout viewport — used to resolve `vw` / `vh` correctly during a
- * layout pass. Set by `computeLayout` (layout.ts) at entry and cleared on
- * exit. Layout traversal is synchronous, so a single module-level slot is
- * sufficient and avoids threading a `viewport` parameter through every
- * `cssLengthToPx` call site (there are dozens).
- *
- * Falls back to `window.innerWidth` / `window.innerHeight` outside a layout
- * pass (e.g. for direct callers that resolve sizes ahead of layout). When
- * neither is available — e.g. headless tests — `vw`/`vh` degrade to the
- * pre-fix unitless-pixel behavior.
- */
-let currentViewport: { width: number; height: number } | null = null;
-
-export function setCurrentViewport(viewport: { width: number; height: number } | null): void {
-  currentViewport = viewport;
-}
-
-export function getCurrentViewport(): { width: number; height: number } | null {
-  return currentViewport;
-}
-
-function resolveViewportPx(unit: "vw" | "vh", n: number): number {
-  if (currentViewport) {
-    const dim = unit === "vw" ? currentViewport.width : currentViewport.height;
-    return (n / 100) * dim;
-  }
-  if (typeof window !== "undefined") {
-    const dim = unit === "vw" ? window.innerWidth : window.innerHeight;
-    if (Number.isFinite(dim) && dim > 0) return (n / 100) * dim;
-  }
-  // Last resort: treat as unitless px so the layout still gets a numeric
-  // value (matches pre-fix behavior in the no-viewport case).
-  return n;
-}
-
-/**
  * Parse a CSS length string (or number) into pixels.
  * Returns `null` for `"auto"` or unparseable input; returns `null` for `%`
  * values so callers can decide whether to keep the percentage verbatim or
@@ -69,8 +33,10 @@ export function cssLengthToPx(value: any): number | null {
     case "px": return n;
     case "rem":
     case "em": return n * ROOT_FONT_PX;
+    // We don't have a viewport reference here; treat vw/vh as unitless px
+    // fallback so the layout gets _some_ numeric value rather than zero.
     case "vw":
-    case "vh": return resolveViewportPx(unit, n);
+    case "vh": return n;
     // Typographic point — 1/72 inch at CSS reference density (96dpi).
     case "pt": return n * (96 / 72);
     // Density-independent (dp) and scale-independent (sp) logical pixels
@@ -84,38 +50,6 @@ export function cssLengthToPx(value: any): number | null {
     case "mm": return n * (96 / 25.4);
     default: return n;
   }
-}
-
-/**
- * Resolve a CSS `line-height` value to a pixel value.
- *
- * Unitless numbers (e.g. `1`, `1.5`, `"1.25"`) are CSS multipliers of the
- * font-size — `line-height: 1` (Tailwind's `leading-none`) means line box =
- * 1 × font-size, NOT 1 pixel. Without this branch, `cssLengthToPx("1")`
- * returned literally `1`, and a Column of `leading-none` Texts collapsed
- * each line to 1px tall — emoji + label in a bottom-tab button rendered at
- * the same y and overlapped.
- *
- * Anything with an explicit unit (`16px`, `1.5em`, `1rem`, `120%` is
- * rejected → null since Taffy/measure expects px) falls through to
- * `cssLengthToPx`.
- */
-export function resolveLineHeight(value: any, fontSize: number): number | null {
-  if (value === undefined || value === null) return null;
-  if (typeof value === "number" && Number.isFinite(value)) {
-    // Unitless number: multiplier of font-size (matches CSS spec).
-    return value * fontSize;
-  }
-  if (typeof value === "string") {
-    const s = value.trim();
-    if (s === "" || s === "auto" || s === "normal") return null;
-    // Pure numeric string with no unit → unitless multiplier.
-    if (/^-?\d*\.?\d+$/.test(s)) {
-      const n = parseFloat(s);
-      return Number.isFinite(n) ? n * fontSize : null;
-    }
-  }
-  return cssLengthToPx(value);
 }
 
 /**

@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const videoHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("video");
+  create(): HTMLElement {
+    const el = document.createElement("video");
     el.dataset.hypenType = "video";
     return el as any as HTMLElement;
   },

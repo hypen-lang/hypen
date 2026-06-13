@@ -26,7 +26,9 @@ fn test_router_ast_to_ir_basic() {
     let ir = ast_to_ir_node(&ast);
 
     match ir {
-        IRNode::Router { routes, fallback, .. } => {
+        IRNode::Router {
+            routes, fallback, ..
+        } => {
             assert_eq!(routes.len(), 2);
             assert_eq!(routes[0].path, "/");
             assert_eq!(routes[1].path, "/about");
@@ -68,7 +70,9 @@ fn test_router_ast_to_ir_with_else_fallback() {
     "#;
     let ir = ast_to_ir_node(&parse_component(source).unwrap());
     match ir {
-        IRNode::Router { routes, fallback, .. } => {
+        IRNode::Router {
+            routes, fallback, ..
+        } => {
             assert_eq!(routes.len(), 1);
             assert!(fallback.is_some(), "Else should produce fallback");
             assert_eq!(fallback.unwrap().len(), 1);
@@ -90,14 +94,8 @@ fn test_router_reconciles_to_matching_route() {
     let ir = IRNode::Router {
         location: Value::Binding(Binding::state(vec!["location".to_string()])),
         routes: vec![
-            RouterRoute::new(
-                "/",
-                vec![IRNode::Element(Element::new("HomeView"))],
-            ),
-            RouterRoute::new(
-                "/search",
-                vec![IRNode::Element(Element::new("SearchView"))],
-            ),
+            RouterRoute::new("/", vec![IRNode::Element(Element::new("HomeView"))]),
+            RouterRoute::new("/search", vec![IRNode::Element(Element::new("SearchView"))]),
             RouterRoute::new(
                 "/profile",
                 vec![IRNode::Element(Element::new("ProfileView"))],
@@ -227,14 +225,8 @@ fn test_router_swaps_view_on_location_change() {
     let ir = IRNode::Router {
         location: Value::Binding(Binding::state(vec!["location".to_string()])),
         routes: vec![
-            RouterRoute::new(
-                "/",
-                vec![IRNode::Element(Element::new("HomeView"))],
-            ),
-            RouterRoute::new(
-                "/search",
-                vec![IRNode::Element(Element::new("SearchView"))],
-            ),
+            RouterRoute::new("/", vec![IRNode::Element(Element::new("HomeView"))]),
+            RouterRoute::new("/search", vec![IRNode::Element(Element::new("SearchView"))]),
         ],
         fallback: None,
         module_scope: None,
@@ -434,7 +426,9 @@ fn test_router_param_changes_hit_same_cache_bucket() {
         .count();
     let create_count = patches
         .iter()
-        .filter(|p| matches!(p, Patch::Create { element_type, .. } if element_type == "ProfileView"))
+        .filter(
+            |p| matches!(p, Patch::Create { element_type, .. } if element_type == "ProfileView"),
+        )
         .count();
     assert_eq!(detach_count, 0, "same pattern = no detach: {:?}", patches);
     assert_eq!(attach_count, 0, "same pattern = no attach: {:?}", patches);
@@ -460,10 +454,7 @@ fn test_router_reuses_cached_subtree_on_navigate_back() {
         location: Value::Binding(Binding::state(vec!["location".to_string()])),
         routes: vec![
             RouterRoute::new("/", vec![IRNode::Element(Element::new("HomeView"))]),
-            RouterRoute::new(
-                "/search",
-                vec![IRNode::Element(Element::new("SearchView"))],
-            ),
+            RouterRoute::new("/search", vec![IRNode::Element(Element::new("SearchView"))]),
         ],
         fallback: None,
         module_scope: None,
@@ -473,7 +464,13 @@ fn test_router_reuses_cached_subtree_on_navigate_back() {
     let _ = reconcile(&mut tree, &ir, None, &json!({"location": "/"}), &mut deps);
 
     // Navigate away to /search. HomeView gets Detached and cached.
-    let _ = reconcile(&mut tree, &ir, None, &json!({"location": "/search"}), &mut deps);
+    let _ = reconcile(
+        &mut tree,
+        &ir,
+        None,
+        &json!({"location": "/search"}),
+        &mut deps,
+    );
 
     // Navigate back to "/". Expect Attach for the cached HomeView,
     // NOT Create (we must reuse the previously-built subtree).
@@ -577,10 +574,7 @@ fn test_cached_subtree_stays_reactive_while_detached() {
         location: Value::Binding(Binding::state(vec!["location".to_string()])),
         routes: vec![
             RouterRoute::new("/", vec![IRNode::Element(home_text)]),
-            RouterRoute::new(
-                "/other",
-                vec![IRNode::Element(Element::new("Other"))],
-            ),
+            RouterRoute::new("/other", vec![IRNode::Element(Element::new("Other"))]),
         ],
         fallback: None,
         module_scope: None,
@@ -704,11 +698,7 @@ fn test_router_at_root_inserts_children_under_root_not_router_node() {
 
     // Find the Insert patch for HomeView. It must reference parent = "root".
     let home_insert = patches.iter().find_map(|p| match p {
-        Patch::Insert {
-            parent_id,
-            id,
-            ..
-        } => {
+        Patch::Insert { parent_id, id, .. } => {
             // Look up whether this insert targets HomeView.
             let is_home = patches.iter().any(|q| {
                 matches!(q, Patch::Create { id: cid, element_type, .. }
@@ -772,7 +762,11 @@ fn test_router_at_root_nav_attaches_children_under_root_not_router_node() {
                 matches!(q, Patch::Create { id: cid, element_type, .. }
                     if cid == id && element_type == "SearchView")
             });
-            if is_search { Some(parent_id.clone()) } else { None }
+            if is_search {
+                Some(parent_id.clone())
+            } else {
+                None
+            }
         }
         _ => None,
     });
@@ -787,13 +781,7 @@ fn test_router_at_root_nav_attaches_children_under_root_not_router_node() {
 
     // Now navigate back to "/" — this should hit the cache and emit an
     // Attach patch. That Attach's parent_id must also be "root".
-    let back_patches = reconcile(
-        &mut tree,
-        &ir,
-        None,
-        &json!({"location": "/"}),
-        &mut deps,
-    );
+    let back_patches = reconcile(&mut tree, &ir, None, &json!({"location": "/"}), &mut deps);
 
     let attach_parents: Vec<String> = back_patches
         .iter()
@@ -846,29 +834,47 @@ fn test_nested_router_inserts_children_under_wrapping_element_not_root() {
 
     let patches = reconcile(&mut tree, &ir, None, &state, &mut deps);
 
-    let column_id = patches.iter().find_map(|p| match p {
-        Patch::Create { id, element_type, .. } if element_type == "Column" => Some(id.clone()),
-        _ => None,
-    }).expect("expected Column Create");
+    let column_id = patches
+        .iter()
+        .find_map(|p| match p {
+            Patch::Create {
+                id, element_type, ..
+            } if element_type == "Column" => Some(id.clone()),
+            _ => None,
+        })
+        .expect("expected Column Create");
 
     // Column should be inserted into "root".
-    let column_insert_parent = patches.iter().find_map(|p| match p {
-        Patch::Insert { parent_id, id, .. } if *id == column_id => Some(parent_id.clone()),
-        _ => None,
-    }).expect("expected Column Insert");
-    assert_eq!(column_insert_parent, "root", "Column is the IR root → inserts under \"root\"");
+    let column_insert_parent = patches
+        .iter()
+        .find_map(|p| match p {
+            Patch::Insert { parent_id, id, .. } if *id == column_id => Some(parent_id.clone()),
+            _ => None,
+        })
+        .expect("expected Column Insert");
+    assert_eq!(
+        column_insert_parent, "root",
+        "Column is the IR root → inserts under \"root\""
+    );
 
     // HomeView should be inserted under the Column, NOT "root".
-    let home_insert_parent = patches.iter().find_map(|p| match p {
-        Patch::Insert { parent_id, id, .. } => {
-            let is_home = patches.iter().any(|q| {
-                matches!(q, Patch::Create { id: cid, element_type, .. }
+    let home_insert_parent = patches
+        .iter()
+        .find_map(|p| match p {
+            Patch::Insert { parent_id, id, .. } => {
+                let is_home = patches.iter().any(|q| {
+                    matches!(q, Patch::Create { id: cid, element_type, .. }
                     if cid == id && element_type == "HomeView")
-            });
-            if is_home { Some(parent_id.clone()) } else { None }
-        }
-        _ => None,
-    }).expect("expected HomeView Insert");
+                });
+                if is_home {
+                    Some(parent_id.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .expect("expected HomeView Insert");
     assert_eq!(
         home_insert_parent, column_id,
         "Nested Router: HomeView must Insert under the wrapping Column, \
@@ -900,23 +906,41 @@ fn test_nested_router_nav_routes_children_under_wrapping_element() {
     let ir = IRNode::Element(column);
 
     let initial = reconcile(&mut tree, &ir, None, &json!({"location": "/"}), &mut deps);
-    let column_id = initial.iter().find_map(|p| match p {
-        Patch::Create { id, element_type, .. } if element_type == "Column" => Some(id.clone()),
-        _ => None,
-    }).expect("Column created");
+    let column_id = initial
+        .iter()
+        .find_map(|p| match p {
+            Patch::Create {
+                id, element_type, ..
+            } if element_type == "Column" => Some(id.clone()),
+            _ => None,
+        })
+        .expect("Column created");
 
     // Nav to /search — fresh SearchView should Insert under Column.
-    let nav = reconcile(&mut tree, &ir, None, &json!({"location": "/search"}), &mut deps);
-    let search_parent = nav.iter().find_map(|p| match p {
-        Patch::Insert { parent_id, id, .. } => {
-            let is_search = nav.iter().any(|q| {
-                matches!(q, Patch::Create { id: cid, element_type, .. }
+    let nav = reconcile(
+        &mut tree,
+        &ir,
+        None,
+        &json!({"location": "/search"}),
+        &mut deps,
+    );
+    let search_parent = nav
+        .iter()
+        .find_map(|p| match p {
+            Patch::Insert { parent_id, id, .. } => {
+                let is_search = nav.iter().any(|q| {
+                    matches!(q, Patch::Create { id: cid, element_type, .. }
                     if cid == id && element_type == "SearchView")
-            });
-            if is_search { Some(parent_id.clone()) } else { None }
-        }
-        _ => None,
-    }).expect("SearchView Insert");
+                });
+                if is_search {
+                    Some(parent_id.clone())
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .expect("SearchView Insert");
     assert_eq!(
         search_parent, column_id,
         "Nested Router nav: SearchView must Insert under Column, not \"root\". \
@@ -926,10 +950,13 @@ fn test_nested_router_nav_routes_children_under_wrapping_element() {
 
     // Nav back to / — cached Attach must target Column.
     let back = reconcile(&mut tree, &ir, None, &json!({"location": "/"}), &mut deps);
-    let attach_parents: Vec<String> = back.iter().filter_map(|p| match p {
-        Patch::Attach { parent_id, .. } => Some(parent_id.clone()),
-        _ => None,
-    }).collect();
+    let attach_parents: Vec<String> = back
+        .iter()
+        .filter_map(|p| match p {
+            Patch::Attach { parent_id, .. } => Some(parent_id.clone()),
+            _ => None,
+        })
+        .collect();
     assert!(!attach_parents.is_empty(), "expected Attach on nav-back");
     for p in &attach_parents {
         assert_eq!(

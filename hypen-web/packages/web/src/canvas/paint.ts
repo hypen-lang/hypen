@@ -9,7 +9,7 @@ import { renderText } from "./text.js";
 import { ScrollManager, isScrollable } from "./scroll.js";
 import { getVisibleChildren, VIRTUALIZE_THRESHOLD } from "./virtualize.js";
 import type { SelectionManager } from "./selection.js";
-import { cssLengthToPx, resolveLineHeight } from "./utils.js";
+import { cssLengthToPx } from "./utils.js";
 
 /**
  * Module-level reference to the active SelectionManager so paintText
@@ -205,14 +205,9 @@ function paintContainer(ctx: CanvasRenderingContext2D, node: VirtualNode): void 
   }
 
   // Draw background
-  const backgroundColor = props.backgroundColor || props.background;
-  if (backgroundColor) {
-    // Support for gradients
-    if (typeof backgroundColor === "string" && backgroundColor.includes("gradient")) {
-      ctx.fillStyle = parseGradient(ctx, backgroundColor, x, y, width, height);
-    } else {
-      ctx.fillStyle = backgroundColor;
-    }
+  const background = resolveBackgroundPaint(props);
+  if (background) {
+    ctx.fillStyle = resolveCanvasPaint(ctx, background, x, y, width, height);
 
     if (radius > 0) {
       drawRoundedRect(ctx, x, y, width, height, radius);
@@ -271,14 +266,13 @@ function paintText(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const layout = node.layout!;
   const props = node.props;
 
-  // `??` (not `||`) so a bound `0`, `false`, or `""` still renders.
-  let text = String(props[0] ?? props.text ?? "");
+  let text = String(props[0] || props.text || "");
   const color = props.color || "#000000";
   const fontSize = cssLengthToPx(props.fontSize) ?? 16;
   const fontWeight = props.fontWeight || "normal";
   const fontFamily = props.fontFamily || "system-ui, sans-serif";
   const textAlign = props.textAlign || "left";
-  const lineHeight = resolveLineHeight(props.lineHeight, fontSize) ?? fontSize * 1.2;
+  const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
   const textDecoration = props.textDecoration || "none";
   const textTransform = props.textTransform || "none";
   const letterSpacing = cssLengthToPx(props.letterSpacing) ?? 0;
@@ -384,7 +378,7 @@ function paintButton(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const y = layout.y;
   const width = layout.width;
   const height = layout.height;
-  const radius = layout.border.radius;
+  const radius = layout.border.radius || 4;
 
   // Apply shadow if specified
   const shadow = props.shadow || props.boxShadow;
@@ -403,16 +397,12 @@ function paintButton(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     backgroundColor = props.hoverColor;
   } else if (node.focused && props.focusColor !== undefined) {
     backgroundColor = props.focusColor;
-  } else if (props.backgroundColor !== undefined) {
-    backgroundColor = props.backgroundColor;
+  } else {
+    backgroundColor = resolveBackgroundPaint(props);
   }
 
   if (backgroundColor !== undefined) {
-    if (typeof backgroundColor === "string" && backgroundColor.includes("gradient")) {
-      ctx.fillStyle = parseGradient(ctx, backgroundColor, x, y, width, height);
-    } else {
-      ctx.fillStyle = backgroundColor;
-    }
+    ctx.fillStyle = resolveCanvasPaint(ctx, backgroundColor, x, y, width, height);
     drawRoundedRect(ctx, x, y, width, height, radius);
     ctx.fill();
   }
@@ -450,7 +440,7 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const y = layout.y;
   const width = layout.width;
   const height = layout.height;
-  const radius = layout.border.radius;
+  const radius = layout.border.radius || 4;
 
   // Background
   ctx.fillStyle = props.backgroundColor || "#ffffff";
@@ -475,7 +465,7 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     const fontSize = cssLengthToPx(props.fontSize) ?? 16;
     const fontWeight = props.fontWeight || "normal";
     const fontFamily = props.fontFamily || "system-ui, sans-serif";
-    const lineHeight = resolveLineHeight(props.lineHeight, fontSize) ?? fontSize * 1.2;
+    const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
 
     renderText(
       ctx,
@@ -725,14 +715,6 @@ function drawRoundedRect(
   radius: number
 ): void {
   if (radius <= 0 || width <= 0 || height <= 0) {
-    // beginPath is critical here — without it, this rect appends to the
-    // existing path and the next `ctx.fill()` re-fills every previously
-    // queued rect with the current fillStyle. That manifested as a
-    // calculator grid where every button painted in the last button's
-    // colour and only the last button's child text survived (each
-    // subsequent fill repainted over earlier children). Mirrors the
-    // beginPath() the rounded branch already does below.
-    ctx.beginPath();
     ctx.rect(x, y, width, height);
     return;
   }
@@ -784,6 +766,45 @@ function applyShadow(ctx: CanvasRenderingContext2D, shadow: any): void {
 }
 
 /**
+ * Resolve DOM background applicator props into the CSS-like paint strings
+ * Canvas understands. DOM applicators map `.linearGradient("...")` to
+ * `background-image: linear-gradient(...)`; Canvas receives the original prop
+ * and must do the same translation before painting.
+ */
+function resolveBackgroundPaint(props: Record<string, any>): string | undefined {
+  if (props.linearGradient !== undefined) {
+    return `linear-gradient(${props.linearGradient})`;
+  }
+  if (props.radialGradient !== undefined) {
+    return `radial-gradient(${props.radialGradient})`;
+  }
+  if (props.conicGradient !== undefined) {
+    return `conic-gradient(${props.conicGradient})`;
+  }
+  if (props.backgroundImage !== undefined) {
+    return String(props.backgroundImage);
+  }
+  if (props.backgroundColor !== undefined) {
+    return String(props.backgroundColor);
+  }
+  if (props.background !== undefined) {
+    return String(props.background);
+  }
+  return undefined;
+}
+
+function resolveCanvasPaint(
+  ctx: CanvasRenderingContext2D,
+  paint: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): CanvasGradient | string {
+  return paint.includes("gradient(") ? parseGradient(ctx, paint, x, y, width, height) : paint;
+}
+
+/**
  * Parse gradient string and create canvas gradient
  * Supports:
  * - linear-gradient(direction, color1, color2, ...)
@@ -803,7 +824,7 @@ function parseGradient(
     const match = gradientStr.match(/linear-gradient\((.*)\)/);
     if (!match) return gradientStr;
 
-    const parts = match[1].split(",").map((s) => s.trim());
+    const parts = splitCssArgs(match[1]);
 
     // Determine direction (default to bottom)
     let x0 = x, y0 = y, x1 = x, y1 = y + height;
@@ -813,29 +834,20 @@ function parseGradient(
       colorStart = 1;
       const direction = parts[0];
 
-      if (direction.includes("to right") || direction === "90deg") {
-        x1 = x + width;
-        y1 = y;
-      } else if (direction.includes("to left") || direction === "270deg") {
-        x0 = x + width;
-        x1 = x;
-        y0 = y;
-        y1 = y;
-      } else if (direction.includes("to top") || direction === "0deg") {
-        y0 = y + height;
-        y1 = y;
+      const angle = parseCssGradientAngle(direction);
+      if (angle !== null) {
+        const line = gradientLineForAngle(angle, x, y, width, height);
+        x0 = line.x0;
+        y0 = line.y0;
+        x1 = line.x1;
+        y1 = line.y1;
       }
-      // Default is "to bottom" which we already set
     }
 
     const gradient = ctx.createLinearGradient(x0, y0, x1, y1);
 
     // Add color stops
-    const colors = parts.slice(colorStart);
-    colors.forEach((color, i) => {
-      const stop = i / (colors.length - 1);
-      gradient.addColorStop(stop, color.trim());
-    });
+    addColorStops(gradient, parts.slice(colorStart));
 
     return gradient;
   } else if (gradientStr.startsWith("radial-gradient")) {
@@ -843,7 +855,7 @@ function parseGradient(
     const match = gradientStr.match(/radial-gradient\((.*)\)/);
     if (!match) return gradientStr;
 
-    const parts = match[1].split(",").map((s) => s.trim());
+    const parts = splitCssArgs(match[1]);
 
     // Create radial gradient from center
     const centerX = x + width / 2;
@@ -853,15 +865,114 @@ function parseGradient(
     const gradient = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, radius);
 
     // Add color stops
-    parts.forEach((color, i) => {
-      const stop = i / (parts.length - 1);
-      gradient.addColorStop(stop, color.trim());
-    });
+    addColorStops(gradient, parts);
 
+    return gradient;
+  } else if (gradientStr.startsWith("conic-gradient")) {
+    const match = gradientStr.match(/conic-gradient\((.*)\)/);
+    if (!match) return gradientStr;
+    const createConicGradient = (ctx as CanvasRenderingContext2D & {
+      createConicGradient?: (startAngle: number, x: number, y: number) => CanvasGradient;
+    }).createConicGradient;
+    if (!createConicGradient) return firstGradientColor(match[1]) ?? gradientStr;
+    const centerX = x + width / 2;
+    const centerY = y + height / 2;
+    const gradient = createConicGradient.call(ctx, 0, centerX, centerY);
+    addColorStops(gradient, splitCssArgs(match[1]));
     return gradient;
   }
 
   return gradientStr;
+}
+
+function splitCssArgs(input: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input[i];
+    if (ch === "(") depth++;
+    else if (ch === ")") depth = Math.max(0, depth - 1);
+    else if (ch === "," && depth === 0) {
+      const part = input.slice(start, i).trim();
+      if (part) parts.push(part);
+      start = i + 1;
+    }
+  }
+  const tail = input.slice(start).trim();
+  if (tail) parts.push(tail);
+  return parts;
+}
+
+function parseCssGradientAngle(direction: string): number | null {
+  const trimmed = direction.trim().toLowerCase();
+  const deg = trimmed.match(/^(-?(?:\d+|\d*\.\d+))deg$/);
+  if (deg) return Number(deg[1]);
+  if (!trimmed.startsWith("to ")) return null;
+
+  const words = new Set(trimmed.slice(3).split(/\s+/).filter(Boolean));
+  if (words.has("top") && words.has("right")) return 45;
+  if (words.has("right") && words.has("bottom")) return 135;
+  if (words.has("bottom") && words.has("left")) return 225;
+  if (words.has("left") && words.has("top")) return 315;
+  if (words.has("top")) return 0;
+  if (words.has("right")) return 90;
+  if (words.has("bottom")) return 180;
+  if (words.has("left")) return 270;
+  return null;
+}
+
+function gradientLineForAngle(
+  cssDegrees: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): { x0: number; y0: number; x1: number; y1: number } {
+  const radians = (cssDegrees * Math.PI) / 180;
+  const cx = x + width / 2;
+  const cy = y + height / 2;
+  const half = Math.sqrt(width * width + height * height) / 2;
+  const dx = Math.sin(radians) * half;
+  const dy = -Math.cos(radians) * half;
+  return {
+    x0: cx - dx,
+    y0: cy - dy,
+    x1: cx + dx,
+    y1: cy + dy,
+  };
+}
+
+function parseColorStop(raw: string, fallbackStop: number): { color: string; stop: number } {
+  const trimmed = raw.trim();
+  const match = trimmed.match(/^(.*\S)\s+(-?(?:\d+|\d*\.\d+)%)$/);
+  if (!match) return { color: trimmed, stop: fallbackStop };
+  return {
+    color: match[1].trim(),
+    stop: Math.max(0, Math.min(1, parseFloat(match[2]) / 100)),
+  };
+}
+
+function addColorStops(gradient: CanvasGradient, rawStops: string[]): void {
+  const stops = rawStops.filter(Boolean);
+  if (stops.length === 0) return;
+  if (stops.length === 1) {
+    const parsed = parseColorStop(stops[0], 0);
+    gradient.addColorStop(0, parsed.color);
+    gradient.addColorStop(1, parsed.color);
+    return;
+  }
+  stops.forEach((raw, i) => {
+    const fallback = i / (stops.length - 1);
+    const { color, stop } = parseColorStop(raw, fallback);
+    gradient.addColorStop(stop, color);
+  });
+}
+
+function firstGradientColor(input: string): string | undefined {
+  const first = splitCssArgs(input)[0];
+  if (!first) return undefined;
+  return parseColorStop(first, 0).color;
 }
 
 /**
@@ -1277,19 +1388,15 @@ function paintCard(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const y = layout.y;
   const width = layout.width;
   const height = layout.height;
-  const radius = layout.border.radius;
+  const radius = layout.border.radius || 8;
 
   // Default card shadow
   const shadow = props.shadow || props.boxShadow || "0 2 8 rgba(0,0,0,0.1)";
   applyShadow(ctx, shadow);
 
   // Background
-  const backgroundColor = props.backgroundColor || "#ffffff";
-  if (typeof backgroundColor === "string" && backgroundColor.includes("gradient")) {
-    ctx.fillStyle = parseGradient(ctx, backgroundColor, x, y, width, height);
-  } else {
-    ctx.fillStyle = backgroundColor;
-  }
+  const backgroundColor = resolveBackgroundPaint(props) || "#ffffff";
+  ctx.fillStyle = resolveCanvasPaint(ctx, backgroundColor, x, y, width, height);
 
   drawRoundedRect(ctx, x, y, width, height, radius);
   ctx.fill();
@@ -1333,8 +1440,8 @@ function paintBadge(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   drawRoundedRect(ctx, x, y, width, height, radius);
   ctx.fill();
 
-  // `??` so a literal `0`/`false`/`""` value still renders.
-  const text = String(props[0] ?? props.text ?? "");
+  // Text content
+  const text = String(props[0] || props.text || "");
   if (text) {
     ctx.fillStyle = props.color || "#ffffff";
     ctx.font = `${props.fontWeight || "bold"} ${props.fontSize || 10}px ${props.fontFamily || "sans-serif"}`;
@@ -1369,8 +1476,8 @@ function paintAvatar(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
   ctx.fill();
 
-  // `??` so a literal `0`/`false`/`""` value still renders.
-  const text = String(props[0] ?? props.text ?? props.initials ?? "");
+  // Text initials if provided
+  const text = String(props[0] || props.text || props.initials || "");
   if (text) {
     ctx.fillStyle = props.color || "#ffffff";
     ctx.font = `${props.fontWeight || "bold"} ${props.fontSize || size / 2.5}px ${props.fontFamily || "sans-serif"}`;
@@ -1510,8 +1617,7 @@ function paintLink(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const layout = node.layout!;
   const props = node.props;
 
-  // `??` so a literal `0`/`false`/`""` value still renders.
-  const text = String(props[0] ?? props.text ?? "");
+  const text = String(props[0] || props.text || "");
   const color = node.hovered ? (props.hoverColor || "#0056b3") : (props.color || "#007bff");
   const fontSize = cssLengthToPx(props.fontSize) ?? 16;
   const fontWeight = props.fontWeight || "normal";
@@ -1635,9 +1741,6 @@ function drawStar(
   ctx.lineTo(cx, cy - outerRadius);
   ctx.closePath();
 }
-
-
-
 
 
 

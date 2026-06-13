@@ -32,7 +32,7 @@ type CommandPaletteProps = {
   panels: PanelState;
   togglePanel: (panel: keyof PanelState) => void;
   onSave: () => void;
-  onOpenTestMode: () => void;
+  onToggleTestMode: () => void;
   onRun: () => void;
 };
 
@@ -42,7 +42,7 @@ export function CommandPalette({
   panels,
   togglePanel,
   onSave,
-  onOpenTestMode,
+  onToggleTestMode,
   onRun,
 }: CommandPaletteProps) {
   const [search, setSearch] = useState("");
@@ -135,10 +135,10 @@ export function CommandPalette({
         category: "View",
       },
       {
-        id: "open-test-mode",
-        label: "Open Test Mode (new window)",
+        id: "toggle-test-mode",
+        label: "Toggle Test Mode",
         icon: <LayoutGrid className="w-4 h-4" />,
-        action: onOpenTestMode,
+        action: onToggleTestMode,
         category: "Run",
       },
       {
@@ -149,7 +149,7 @@ export function CommandPalette({
         category: "Run",
       },
     ],
-    [togglePanel, onSave, onOpenTestMode, onRun]
+    [togglePanel, onSave, onToggleTestMode, onRun]
   );
 
   const filteredCommands = useMemo(() => {

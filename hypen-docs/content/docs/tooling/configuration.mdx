@@ -243,16 +243,14 @@ On the browser side, connect to the remote server:
 
 ```typescript
 import { RemoteEngine } from "@hypen-space/core/remote";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
 const engine = new RemoteEngine("ws://localhost:3001", {
   autoReconnect: true,
 });
 
-// `createHypenClient` is the recommended one-call wiring (constructs the
-// renderer and subscribes to patches). The bare `DOMRenderer` constructor
-// is still available for advanced use.
-createHypenClient(document.getElementById("app"), engine);
+const renderer = new DOMRenderer(document.getElementById("app"));
+engine.onPatches((patches) => renderer.applyPatches(patches));
 await engine.connect();
 ```
 

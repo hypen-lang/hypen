@@ -14,7 +14,6 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     // No rootDir in the dev typecheck config — see server/tsconfig.json.
-    "baseUrl": ".",
     "paths": {
       "@hypen-space/core": ["../core/src/index.ts"],
       // Non-standard export: see root tsconfig.json for rationale.

@@ -49,16 +49,20 @@ await hypen.unmount();
 
 ## Engine (Low-Level)
 
-Use the `Engine` class directly for custom integrations. The `createHypenClient` helper from `@hypen-space/web/dom` (or `/canvas`) wires the renderer and the engine's patch callback in one call:
+Use the `Engine` class directly for custom integrations:
 
 ```typescript
 import { Engine } from "@hypen-space/web-engine";
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web";
 
 const engine = new Engine();
 await engine.init({ wasmUrl: "/hypen_engine_bg.wasm" });
 
-createHypenClient(document.getElementById("app")!, engine);
+const renderer = new DOMRenderer(document.getElementById("app")!, engine);
+
+engine.setRenderCallback((patches) => {
+  renderer.applyPatches(patches);
+});
 
 engine.renderSource(`
   Column {

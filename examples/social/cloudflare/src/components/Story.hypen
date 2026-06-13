@@ -1,0 +1,24 @@
+module Story {
+    Column {
+        Row {
+            Image(src: "@{state.story.user.avatarUrl}")
+                .tw("size-8 rounded-full")
+
+            Text("@{state.story.user.username}")
+                .tw("text-sm font-semibold text-white pl-2 flex-1")
+
+            Button {
+                Text("✕")
+                    .tw("text-lg text-white")
+            }
+            .onClick(@router.push, to: "/")
+            .tw("bg-transparent p-2")
+        }
+        .tw("py-3 px-4 items-center absolute top-0 left-0 right-0 z-10")
+
+        Image(src: "@{state.story.imageUrl}")
+            .tw("w-full flex-1")
+            .objectFit("cover")
+    }
+    .tw("flex-1 w-full bg-black relative")
+}

@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const spacerHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("div");
+  create(): HTMLElement {
+    const el = document.createElement("div");
     el.style.flex = "1";
     el.dataset.hypenType = "spacer";
     return el;

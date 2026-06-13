@@ -5,7 +5,7 @@
  */
 
 import { Engine } from "../../../packages/core/src/index.js";
-import { createHypenClient } from "../../../packages/web/src/dom/index.js";
+import { DOMRenderer } from "../../../packages/web/src/dom/index.js";
 import { HypenAppComponent } from "../../../packages/core/src/remote/component.js";
 
 async function main() {
@@ -22,7 +22,13 @@ async function main() {
     return;
   }
 
-  createHypenClient(appContainer, engine);
+  const renderer = new DOMRenderer(appContainer);
+
+  // Set render callback
+  engine.setRenderCallback((patches) => {
+    console.log(`📦 Local patches: ${patches.length}`);
+    renderer.applyPatches(patches);
+  });
 
   // Create a local UI with embedded remote app
   const localUI = `

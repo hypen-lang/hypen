@@ -326,3 +326,8 @@ export {
   isDebugMode,
 } from "./logger.js";
 export type { LogLevel, LoggerConfig, LogHandler } from "./logger.js";
+
+// Patch-stream validation — catch silent resolver misses (opaque component
+// elementTypes) in CI / smoke tests off the wire.
+export { validatePatches } from "./validate.js";
+export type { PatchValidationResult } from "./validate.js";

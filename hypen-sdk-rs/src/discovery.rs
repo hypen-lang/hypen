@@ -118,10 +118,7 @@ impl ComponentRegistry {
                         .unwrap_or("Unknown")
                         .to_string();
                     let source = std::fs::read_to_string(&index_file).map_err(|e| {
-                        SdkError::Component(format!(
-                            "Failed to read {}: {e}",
-                            index_file.display()
-                        ))
+                        SdkError::Component(format!("Failed to read {}: {e}", index_file.display()))
                     })?;
                     self.register(&name, source, Some(index_file));
                     loaded.push(name);

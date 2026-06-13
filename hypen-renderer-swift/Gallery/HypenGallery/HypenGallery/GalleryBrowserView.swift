@@ -29,13 +29,6 @@ struct GalleryBrowserView: View {
     /// to force a fresh WebSocket connection (same pattern as Android's
     /// `refreshKey`).
     @State private var refreshKey: Int = 0
-    /// When inside an app, the toolbar collapses into a floating pill by
-    /// default so the Hypen view gets full screen real estate. Tap the pill
-    /// to expand into the full toolbar; submitting / tapping outside / going
-    /// home collapses it again. Home and component-gallery screens always
-    /// show the full toolbar — there's no rendered app underneath to hide
-    /// behind there.
-    @State private var isToolbarExpanded: Bool = false
 
     /// Present the legacy component gallery as a sheet.
     @State private var showComponentGallery: Bool = false
@@ -48,92 +41,40 @@ struct GalleryBrowserView: View {
 
     private var canGoBack: Bool { !history.isEmpty }
 
-    /// Inside an app, hide the full toolbar by default and show the pill
-    /// instead — tap to expand. Anywhere else (home, etc.), show the full
-    /// toolbar always.
-    private var isAppScreen: Bool {
-        if case .app = currentScreen { return true }
-        return false
-    }
-    private var showFullToolbar: Bool { !isFullscreen && (!isAppScreen || isToolbarExpanded) }
-    private var showPill: Bool { !isFullscreen && isAppScreen && !isToolbarExpanded }
-
     var body: some View {
-        ZStack(alignment: .top) {
-            // Content fills the full screen so the rendered Hypen app gets
-            // every pixel. The toolbar / pill float on top.
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-            // Tap-outside-to-collapse — only present while the toolbar is
-            // expanded over an app. Sized to cover the rest of the screen
-            // below the toolbar (top inset is approximate; SwiftUI doesn't
-            // give us the actual toolbar height for free, but anywhere
-            // below ~88pt is safe — toolbar + status bar.).
-            if isAppScreen && isToolbarExpanded {
-                Color.clear
-                    .contentShape(Rectangle())
-                    .onTapGesture { isToolbarExpanded = false }
-                    .padding(.top, 88)
-                    .ignoresSafeArea(edges: .bottom)
+        // Toolbar is pinned to the top safe-area via `safeAreaInset`
+        // instead of being a sibling in a top-down VStack. Reason:
+        // when the URL TextField gains focus the iOS keyboard
+        // appears and SwiftUI, by default, shifts the entire scene
+        // up to keep the focused field visible above the keyboard
+        // — which dragged the toolbar (and its URL pill) up under
+        // the Dynamic Island. `safeAreaInset(edge: .top)` declares
+        // the toolbar as a fixed-position inset of the surrounding
+        // content; SwiftUI keeps it locked above the top safe-area
+        // regardless of the keyboard's bottom inset, and adjusts
+        // the content's bottom inset instead. Net effect: the URL
+        // pill never enters the unsafe Island region.
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(.systemBackground))
+            .safeAreaInset(edge: .top, spacing: 0) {
+                if !isFullscreen {
+                    BrowserToolbar(
+                        currentUrl: currentUrl,
+                        isConnected: isConnected,
+                        isLoading: isLoading,
+                        canGoBack: canGoBack,
+                        isFullscreen: isFullscreen,
+                        onUrlSubmit: { submitted in connect(to: submitted) },
+                        onBackTap: goBack,
+                        onHomeTap: goHome,
+                        onRefreshTap: refresh,
+                        onFullscreenToggle: { isFullscreen.toggle() }
+                    )
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                }
             }
-
-            // Floating pill — small, top-centered, appears only on app screen
-            // when the toolbar is collapsed. Hypen content fills the screen
-            // edge-to-edge so the surrounding ZStack stretches into the
-            // top safe-area / Dynamic Island region; without explicit
-            // padding the pill sits behind the island. Use the window's
-            // safe-area inset so the pill clears it on every device.
-            if showPill {
-                BrowserPill(
-                    currentUrl: currentUrl,
-                    isConnected: isConnected,
-                    onTap: { isToolbarExpanded = true }
-                )
-                .padding(.top, topSafeAreaInset() + 6)
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
-
-            // Full toolbar — default for non-app screens; expanded mode for app.
-            if showFullToolbar {
-                BrowserToolbar(
-                    currentUrl: currentUrl,
-                    isConnected: isConnected,
-                    isLoading: isLoading,
-                    canGoBack: canGoBack,
-                    isFullscreen: isFullscreen,
-                    onUrlSubmit: { submitted in
-                        connect(to: submitted)
-                        isToolbarExpanded = false
-                    },
-                    onBackTap: {
-                        isToolbarExpanded = false
-                        goBack()
-                    },
-                    onHomeTap: {
-                        isToolbarExpanded = false
-                        goHome()
-                    },
-                    onRefreshTap: {
-                        refresh()
-                        isToolbarExpanded = false
-                    },
-                    onFullscreenToggle: {
-                        isFullscreen.toggle()
-                        isToolbarExpanded = false
-                    }
-                )
-                .transition(.move(edge: .top).combined(with: .opacity))
-            }
-        }
-        .animation(.easeInOut(duration: 0.2), value: isFullscreen)
-        .animation(.easeInOut(duration: 0.18), value: isToolbarExpanded)
-        .onChange(of: currentScreen) { _, newValue in
-            // Re-collapse on every screen change — entering a fresh app
-            // should always start full-bleed.
-            if case .app = newValue { isToolbarExpanded = false }
-        }
-        .background(Color(.systemBackground))
+            .animation(.easeInOut(duration: 0.2), value: isFullscreen)
         .sheet(isPresented: $showComponentGallery) {
             NavigationStack(path: $componentPath) {
                 ComponentListView(onItemSelected: { item in
@@ -306,15 +247,4 @@ private func extractNameFromUrl(_ url: String) -> String {
     case "10.0.2.2": return "Local (Emulator)"
     default: return host
     }
-}
-
-/// Top safe-area inset for the active key window. Used to position the
-/// floating BrowserPill below the Dynamic Island / status bar. Returns 0
-/// before the window scene is up.
-private func topSafeAreaInset() -> CGFloat {
-    UIApplication.shared.connectedScenes
-        .compactMap { $0 as? UIWindowScene }
-        .flatMap(\.windows)
-        .first(where: \.isKeyWindow)?
-        .safeAreaInsets.top ?? 0
 }

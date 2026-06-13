@@ -5,15 +5,15 @@
 import type { ComponentHandler } from "./index.js";
 
 export const checkboxHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const wrapper = doc.createElement("label");
+  create(): HTMLElement {
+    const wrapper = document.createElement("label");
     wrapper.dataset.hypenType = "checkbox";
     wrapper.style.display = "inline-flex";
     wrapper.style.alignItems = "center";
     wrapper.style.gap = "8px";
     wrapper.style.cursor = "pointer";
 
-    const input = doc.createElement("input");
+    const input = document.createElement("input");
     input.type = "checkbox";
     input.dataset.hypenCheckbox = "true";
     
@@ -23,7 +23,6 @@ export const checkboxHandler: ComponentHandler = {
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    const doc = el.ownerDocument as Document;
     const input = el.querySelector('input[type="checkbox"]') as HTMLInputElement;
     if (!input) return;
 
@@ -47,7 +46,7 @@ export const checkboxHandler: ComponentHandler = {
       textNodes.forEach(node => node.remove());
       
       // Add new label text
-      el.appendChild(doc.createTextNode(String(label)));
+      el.appendChild(document.createTextNode(String(label)));
     }
   },
 };

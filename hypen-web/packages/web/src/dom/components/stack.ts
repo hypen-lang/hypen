@@ -4,13 +4,13 @@
 
 import type { ComponentHandler } from "./index.js";
 
-// Inject global styles once per document
-const injectedDocs = new WeakSet<Document>();
-function ensureStackStyles(doc: Document): void {
-  if (injectedDocs.has(doc)) return;
-  injectedDocs.add(doc);
+// Inject global styles once
+let stackStylesInjected = false;
+function ensureStackStyles(): void {
+  if (stackStylesInjected) return;
+  stackStylesInjected = true;
 
-  const style = doc.createElement("style");
+  const style = document.createElement("style");
   style.id = "hypen-stack-styles";
   style.textContent = `
     [data-hypen-type="stack"] {
@@ -29,14 +29,14 @@ function ensureStackStyles(doc: Document): void {
       /* Don't set justify-self/align-self here - let parent's justify-items/align-items control */
     }
   `;
-  doc.head.appendChild(style);
+  document.head.appendChild(style);
 }
 
 export const stackHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    ensureStackStyles(doc);
+  create(): HTMLElement {
+    ensureStackStyles();
 
-    const el = doc.createElement("div");
+    const el = document.createElement("div");
     el.dataset.hypenType = "stack";
 
     return el;

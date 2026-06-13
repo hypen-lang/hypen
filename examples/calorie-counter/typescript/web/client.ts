@@ -2,15 +2,16 @@ import { RemoteEngine } from "@hypen-space/core/remote/client";
 // Import from `/dom` so the bundler doesn't have to pull in the
 // canvas renderer's Taffy/pretext deps just to use the DOM
 // renderer.
-import { createHypenClient } from "@hypen-space/web/dom";
+import { DOMRenderer } from "@hypen-space/web/dom";
 
 const SESSION_KEY = "hypen-calorie-counter-session";
 const WS_URL = "ws://localhost:3000";
 
 const appContainer = document.getElementById("app")!;
-const statusEl = document.getElementById("status")!;
+const statusEl = document.getElementById("status");
 
 function updateStatus(status: string) {
+  if (!statusEl) return;
   statusEl.textContent = status;
   statusEl.className = `status ${status}`;
 }
@@ -35,13 +36,17 @@ const engine = new RemoteEngine(WS_URL, {
   },
 });
 
-createHypenClient(appContainer, engine);
+const renderer = new DOMRenderer(appContainer, engine);
 
 engine.onConnect(() => updateStatus("connecting"));
 
 engine.onSessionEstablished(({ sessionId }) => {
   localStorage.setItem(SESSION_KEY, sessionId);
   updateStatus("connected");
+});
+
+engine.onPatches((patches) => {
+  renderer.applyPatches(patches);
 });
 
 engine.onDisconnect(() => updateStatus("disconnected"));

@@ -104,7 +104,7 @@ func getUserPosts(db *sql.DB, userId string) []PostThumbnail {
 }
 
 func getExplorePosts(db *sql.DB) []PostThumbnail {
-	rows, err := db.Query("SELECT id, image_url FROM posts ORDER BY likes_count DESC")
+	rows, err := db.Query("SELECT p.id, p.image_url, u.username, p.caption FROM posts p JOIN users u ON p.user_id = u.id ORDER BY p.likes_count DESC")
 	if err != nil {
 		return nil
 	}
@@ -112,7 +112,7 @@ func getExplorePosts(db *sql.DB) []PostThumbnail {
 	var posts []PostThumbnail
 	for rows.Next() {
 		var p PostThumbnail
-		rows.Scan(&p.ID, &p.ImageUrl)
+		rows.Scan(&p.ID, &p.ImageUrl, &p.Username, &p.Caption)
 		posts = append(posts, p)
 	}
 	return posts

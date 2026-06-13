@@ -9,8 +9,8 @@ import { frameworkLoggers } from "@hypen-space/core/logger";
 const log = frameworkLoggers.router;
 
 export const routeHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("div");
+  create(): HTMLElement {
+    const el = document.createElement("div");
     el.style.display = "flex";
     el.style.flexDirection = "column";
     el.style.width = "100%";

@@ -1,40 +1,34 @@
 /**
- * HypenDurableObject — Base class for running Hypen apps inside
- * Cloudflare Durable Objects with Hibernation WebSocket support.
+ * HypenDurableObject — base class for running Hypen apps inside Cloudflare
+ * Durable Objects with Hibernation WebSocket support.
  *
- * This is infrastructure code. Developers don't extend this class
- * directly — the build tool (`hypen build --platform cloudflare`)
- * generates a worker that instantiates a concrete subclass.
+ * A thin host around `RemoteSession` (in `@hypen-space/core`), which owns the
+ * remote protocol, nested-module registration, resources, and router
+ * auto-wiring. This class provides only the Cloudflare-specific parts: the WS
+ * upgrade + Hibernation acceptance, the `CFTransport`, and per-DO storage
+ * binding. Subclasses implement `getConfig()` and `createEngine()`.
  *
- * Responsibilities:
- *   1. WebSocket upgrade in fetch()
- *   2. Bind DO storage to all state stores via __bindStorage
- *   3. Hibernation-safe lifecycle via webSocketMessage / webSocketClose
- *   4. Engine + module instance creation on connection / wake
- *   5. Action dispatch and patch streaming
- *   6. Final state flush on disconnect
+ * Hibernation: the runtime can evict the DO (and all in-memory sessions)
+ * between messages while the socket stays alive at the edge. `ensureSession`
+ * lazily rebuilds on the next message; since the client won't re-send `hello`,
+ * a non-hello first message synthesises one so the initial tree is re-sent
+ * before the message is processed.
  */
 
-import { HypenModuleInstance } from "@hypen-space/core/app";
-import type {
-  IEngine,
-  HypenModuleDefinition,
-} from "@hypen-space/core/app";
-import type { Patch } from "@hypen-space/core/types";
-import type {
-  InitialTreeMessage,
-  PatchMessage,
-  DispatchActionMessage,
-  HelloMessage,
-  SessionAckMessage,
+import type { HypenApp, HypenModule, HypenModuleDefinition } from "@hypen-space/core/app";
+import type { BaseEngine } from "@hypen-space/core/engine-base";
+import type { RemoteClient, RemoteMessage } from "@hypen-space/core/remote";
+import {
+  RemoteSession,
+  SessionManager,
+  type SessionHost,
+  type SessionTransport,
+  type OutgoingMessage,
 } from "@hypen-space/core/remote";
 import type { DurableObjectStorage, DurableObjectStateStore } from "./durable-object-store.js";
 
-// ---------------------------------------------------------------------------
-// Minimal Cloudflare type stubs so the package compiles without the
-// `cloudflare:workers` import (which only resolves inside wrangler).
-// At runtime in a CF worker these are shadowed by the real types.
-// ---------------------------------------------------------------------------
+// Minimal Cloudflare type stubs — shadowed at runtime by `cloudflare:workers`
+// (which only resolves inside wrangler).
 
 /** Minimal stub for Cloudflare's DurableObjectState */
 export interface DurableObjectState {
@@ -45,60 +39,90 @@ export interface DurableObjectState {
   getWebSockets(): WebSocket[];
 }
 
-// ---------------------------------------------------------------------------
-// Session data — per-WebSocket state that must be reconstructed after
-// hibernation since in-memory data is lost when the DO is evicted.
-// ---------------------------------------------------------------------------
-
-interface SessionData {
-  engine: IEngine;
-  moduleInstance: HypenModuleInstance<any>;
-  revision: number;
-  sessionId: string;
-  initialized: boolean;
+// workerd provides `WebSocketPair` at runtime. We avoid `declare global` (a
+// consumer also pulling in `@cloudflare/workers-types` would hit a
+// duplicate-declaration error) and cast locally instead.
+type WebSocketPairCtor = { new (): { 0: WebSocket; 1: WebSocket } };
+function getWebSocketPair(): WebSocketPairCtor {
+  return (globalThis as unknown as { WebSocketPair: WebSocketPairCtor }).WebSocketPair;
 }
 
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
+/**
+ * Wrap a Cloudflare (hibernatable) WebSocket as a `SessionTransport`. Each
+ * outgoing protocol message is JSON-serialised. Closing is best-effort — a
+ * socket already closed by the edge throws, which we swallow.
+ */
+export class CFTransport implements SessionTransport {
+  constructor(private readonly ws: WebSocket) {}
+
+  send(message: OutgoingMessage): void {
+    this.ws.send(JSON.stringify(message));
+  }
+
+  close(code?: number, reason?: string): void {
+    try {
+      this.ws.close(code, reason);
+    } catch {
+      /* socket already closed at the edge */
+    }
+  }
+}
 
 export interface HypenDurableObjectConfig {
-  /** The module definition (built via `app.defineState(...).build()`) */
+  /** The primary module definition (built via `app.defineState(...).build()`). */
   module: HypenModuleDefinition<any>;
-  /** Hypen DSL template string for the UI */
+  /** Hypen DSL template string for the primary UI. */
   template: string;
-  /** Module name used in protocol messages (default: "App") */
+  /** Module name used in protocol messages (default: "App"). */
   moduleName?: string;
+  /**
+   * The `HypenApp` registry of named modules. Required for multi-module apps:
+   * nested-module state registration and `Router {}` auto-wiring resolve
+   * route targets against it. Omit for a single-module app.
+   */
+  app?: HypenApp;
+  /**
+   * Templates for components that are NOT registered on `app` — e.g. a
+   * stateless `BottomNav` built with bare `app.defineState({})` so its
+   * `@state.*` falls through to the primary module. The Bun server discovers
+   * these by filename; a DO has no filesystem, so they're listed here.
+   * Name → Hypen DSL template.
+   */
+  componentTemplates?: Record<string, string>;
+  /**
+   * SVG resource bundle for `Icon(@resources.foo)` references. Name → raw SVG.
+   */
+  resources?: Record<string, string>;
+  /** Mirror actions/state to other sockets sharing this DO (default false). */
+  syncActions?: boolean;
 }
-
-// ---------------------------------------------------------------------------
-// Abstract base class
-// ---------------------------------------------------------------------------
 
 export abstract class HypenDurableObject {
   protected ctx: DurableObjectState;
   protected env: unknown;
 
   /**
-   * In-memory session keyed by WebSocket identity. Lost on hibernation —
-   * `ensureSession` lazily re-creates it when the DO wakes.
+   * Live sessions keyed by WebSocket identity. Emptied on hibernation —
+   * `ensureSession` lazily re-creates entries when the DO wakes.
    */
-  private sessions = new Map<WebSocket, SessionData>();
+  private sessions = new Map<WebSocket, RemoteSession>();
+
+  /** One session manager per DO; created lazily once the config is known. */
+  private _sessionManager: SessionManager | null = null;
+
+  /** Built-once `SessionHost` shared across this DO's sessions. */
+  private _host: SessionHost | null = null;
 
   constructor(ctx: DurableObjectState, env: unknown) {
     this.ctx = ctx;
     this.env = env;
   }
 
-  /** Subclass must provide the module + template config. */
+  /** Subclass must provide the app config (module + template + registry). */
   abstract getConfig(): HypenDurableObjectConfig;
 
   /** Subclass must provide an engine factory (WASM creation is platform-specific). */
-  abstract createEngine(): IEngine;
-
-  // -----------------------------------------------------------------------
-  // fetch — WebSocket upgrade
-  // -----------------------------------------------------------------------
+  abstract createEngine(): BaseEngine;
 
   async fetch(request: Request): Promise<Response> {
     const upgradeHeader = request.headers.get("Upgrade");
@@ -106,8 +130,8 @@ export abstract class HypenDurableObject {
       return new Response("Expected WebSocket upgrade", { status: 426 });
     }
 
-    // Create a WebSocketPair — client goes to the caller, server stays here
-    const pair = new WebSocketPair();
+    // Create a WebSocketPair — client goes to the caller, server stays here.
+    const pair = new (getWebSocketPair())();
     const client = pair[0];
     const server = pair[1];
 
@@ -115,177 +139,205 @@ export abstract class HypenDurableObject {
     // evict this DO from memory while keeping the WebSocket alive at the edge.
     this.ctx.acceptWebSocket(server);
 
-    // Bind DO storage to the module's state store so persistence calls
-    // route to this DO's transactional storage.
+    // Bind DO storage so persistence calls route to this DO's storage.
     this.bindStorage();
 
-    return new Response(null, { status: 101, webSocket: client });
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+    } as ResponseInit & { webSocket: WebSocket });
   }
 
-  // -----------------------------------------------------------------------
-  // Hibernation WebSocket API
-  // -----------------------------------------------------------------------
-
   /**
-   * Called by the CF runtime when a message arrives on an accepted WebSocket.
-   * After hibernation the DO is re-constructed from scratch, so all in-memory
-   * state (engine, module instance) must be lazily re-created here.
+   * Message arrived on an accepted WebSocket. After hibernation the DO is
+   * reconstructed, so the session is lazily re-created and fed to
+   * `RemoteSession.receive`.
    */
-  async webSocketMessage(
-    ws: WebSocket,
-    message: string | ArrayBuffer,
-  ): Promise<void> {
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     const text = typeof message === "string" ? message : new TextDecoder().decode(message);
 
-    let msg: { type: string; [key: string]: unknown };
+    let msg: RemoteMessage;
     try {
-      msg = JSON.parse(text);
+      msg = JSON.parse(text) as RemoteMessage;
     } catch {
       return; // ignore unparseable messages
     }
 
-    switch (msg.type) {
-      case "hello": {
-        const helloMsg = msg as unknown as HelloMessage;
-        const session = await this.ensureSession(ws);
-        await this.initializeSession(ws, session, helloMsg.sessionId);
-        break;
-      }
+    // Re-bind storage on every message — after a wake the storage handle may
+    // be freshly recreated, and the session we're about to (re)build needs it
+    // in place before any load/save runs.
+    this.bindStorage();
 
-      case "dispatchAction": {
-        const actionMsg = msg as unknown as DispatchActionMessage;
-        const session = await this.ensureSession(ws);
-        if (!session.initialized) {
-          // Session never received a hello — initialize with defaults
-          await this.initializeSession(ws, session);
-        }
-        session.engine.dispatchAction(actionMsg.action, actionMsg.payload ?? null);
-        break;
-      }
+    const session = this.ensureSession(ws);
 
-      default:
-        break;
+    // A client that believes it is still connected (post-hibernation, or a
+    // legacy client that never sent `hello`) sends a non-hello first message.
+    // Synthesise the handshake so the session renders and ships its initial
+    // tree before the real message is processed.
+    if (msg.type !== "hello" && !session.helloReceived) {
+      await session.receive({ type: "hello" } as RemoteMessage);
     }
+
+    await session.receive(msg);
   }
 
   /**
-   * Called by the CF runtime when a WebSocket closes.
-   * Flush state and clean up the session.
+   * Called by the CF runtime when a WebSocket closes. Tears the session down —
+   * `RemoteSession.destroy` runs the disconnect hook and flushes persisted
+   * state via the bound store.
    */
-  async webSocketClose(
-    ws: WebSocket,
-    code: number,
-    reason: string,
-  ): Promise<void> {
+  async webSocketClose(ws: WebSocket, _code: number, _reason: string): Promise<void> {
     const session = this.sessions.get(ws);
-    if (session) {
-      // Final state flush — destroy calls stateStore.save under the hood
-      await session.moduleInstance.destroy();
-      this.sessions.delete(ws);
-    }
+    if (!session) return;
+    this.sessions.delete(ws);
+    await session.destroy();
   }
 
-  // -----------------------------------------------------------------------
-  // Private helpers
-  // -----------------------------------------------------------------------
+  /** Lazily create (once) the per-DO session manager. */
+  private getSessionManager(): SessionManager {
+    if (!this._sessionManager) {
+      this._sessionManager = new SessionManager();
+    }
+    return this._sessionManager;
+  }
 
   /**
-   * Bind this DO's storage to any state store that exposes `__bindStorage`.
-   * Called on every fetch() and lazily on wake so the store always has a
-   * reference to the (possibly new) storage instance.
+   * Build (once) the `SessionHost` adapter `RemoteSession` consumes. Mirrors
+   * `RemoteServer.getHost()` but sources its module/template/registry from
+   * `getConfig()` and its engine from the subclass's `createEngine()`.
    */
-  private bindStorage(): void {
+  private getHost(): SessionHost {
+    if (this._host) return this._host;
+
     const config = this.getConfig();
-    const store = config.module.stateStore;
-    if (store && typeof (store as DurableObjectStateStore<unknown>).__bindStorage === "function") {
-      (store as DurableObjectStateStore<unknown>).__bindStorage(this.ctx.storage);
-    }
+    const self = this;
+
+    const discoveredComponents = mergeComponentTemplates(
+      config.app ?? null,
+      config.componentTemplates,
+    );
+
+    this._host = {
+      module: config.module as HypenModule<any>,
+      moduleName: config.moduleName ?? "App",
+      ui: config.template,
+      resources: config.resources ?? {},
+      app: config.app ?? null,
+      syncActions: config.syncActions ?? false,
+      sessionManager: this.getSessionManager(),
+      discoveredComponents,
+      createEngine() {
+        return self.createEngine();
+      },
+      *otherSessions(current: RemoteSession) {
+        for (const s of self.sessions.values()) if (s !== current) yield s;
+      },
+      *sessionsForId(sessionId: string) {
+        for (const s of self.sessions.values()) if (s.sessionId === sessionId) yield s;
+      },
+      onSessionReady(_session: RemoteSession, _client: RemoteClient) {
+        /* no-op: the DO has no per-connection hooks to fire */
+      },
+      onSessionDestroyed(_session: RemoteSession, _client: RemoteClient) {
+        /* webSocketClose owns map removal */
+      },
+    };
+    return this._host;
   }
 
-  /**
-   * Get or create the session data for a WebSocket. After hibernation the
-   * `sessions` map is empty, so this re-creates the engine and module instance.
-   */
-  private async ensureSession(ws: WebSocket): Promise<SessionData> {
+  /** Get or lazily (re)create the session for a WebSocket. */
+  private ensureSession(ws: WebSocket): RemoteSession {
     let session = this.sessions.get(ws);
     if (session) return session;
 
-    // Re-bind storage in case we just woke from hibernation
-    this.bindStorage();
-
-    const config = this.getConfig();
-    const engine = this.createEngine();
-
-    const moduleInstance = new HypenModuleInstance(engine, config.module);
-    await moduleInstance.waitForReady();
-
-    // Flush microtasks so state changes from onCreated are applied
-    await new Promise<void>((resolve) => queueMicrotask(resolve));
-
-    session = {
-      engine,
-      moduleInstance,
-      revision: 0,
-      sessionId: "",
-      initialized: false,
-    };
-
+    const transport = new CFTransport(ws);
+    // `helloGraceMs: null` disables the auto-init timer — initialisation is
+    // driven explicitly (real or synthesised `hello`) so it always completes
+    // before the triggering message is dispatched, and no timer dangles
+    // across a hibernation boundary.
+    session = new RemoteSession(this.getHost(), transport, { helloGraceMs: null });
     this.sessions.set(ws, session);
     return session;
   }
 
   /**
-   * Render the initial tree and send it + sessionAck to the client.
+   * Bind this DO's storage to every `.persist(durableObjectStore(...))` state
+   * store — the primary module plus any named modules on the registry. Called
+   * on `fetch` and on every message so the store always references the
+   * current (possibly post-wake) storage instance.
    */
-  private async initializeSession(
-    ws: WebSocket,
-    session: SessionData,
-    requestedSessionId?: string,
-  ): Promise<void> {
-    if (session.initialized) return;
-    session.initialized = true;
-    session.sessionId = requestedSessionId ?? crypto.randomUUID();
-
+  private bindStorage(): void {
     const config = this.getConfig();
-    const moduleName = config.moduleName ?? "App";
-
-    // Send session acknowledgement
-    const ack: SessionAckMessage = {
-      type: "sessionAck",
-      sessionId: session.sessionId,
-      isNew: true,
-      isRestored: false,
-    };
-    ws.send(JSON.stringify(ack));
-
-    // Capture patches from initial render
-    const initialPatches: Patch[] = [];
-    session.engine.setRenderCallback((patches: Patch[]) => {
-      initialPatches.push(...patches);
-    });
-
-    session.engine.renderSource(config.template);
-
-    // Wire up streaming render callback for subsequent updates
-    session.engine.setRenderCallback((patches: Patch[]) => {
-      session.revision++;
-      const patchMsg: PatchMessage = {
-        type: "patch",
-        module: moduleName,
-        patches,
-        revision: session.revision,
-      };
-      ws.send(JSON.stringify(patchMsg));
-    });
-
-    // Send the initial tree
-    const initialMessage: InitialTreeMessage = {
-      type: "initialTree",
-      module: moduleName,
-      state: session.moduleInstance.getState(),
-      patches: initialPatches,
-      revision: 0,
-    };
-    ws.send(JSON.stringify(initialMessage));
+    bindStore(config.module.stateStore, this.ctx.storage);
+    if (config.app) {
+      for (const def of config.app.components.values()) {
+        bindStore(def.stateStore, this.ctx.storage);
+      }
+    }
+    this.onStorageBound(this.ctx.storage);
   }
+
+  /**
+   * Hook called after persistence stores are bound, on `fetch` and on every
+   * message (so it runs again post-hibernation). Override to wire app-specific
+   * storage — e.g. binding the DO's `state.storage.sql` into a `bun:sqlite`
+   * shim and seeding the schema. Default no-op. Idempotent work should guard
+   * itself (the schema seed is run-once in the examples).
+   */
+  protected onStorageBound(_storage: DurableObjectStorage): void {
+    // no-op by default
+  }
+}
+
+/** Bind DO storage into a state store if it exposes the `__bindStorage` channel. */
+function bindStore(store: unknown, storage: DurableObjectStorage): void {
+  const s = store as DurableObjectStateStore<unknown> | undefined;
+  if (s && typeof s.__bindStorage === "function") {
+    s.__bindStorage(storage);
+  }
+}
+
+/**
+ * Build the `discoveredComponents` map `RemoteSession` reads — merging the
+ * app registry with explicit `componentTemplates`. Exported for testing.
+ *
+ * `RemoteSession`'s component resolver reads `template`; its nested-module
+ * state registration reads the `module` def. Two sources:
+ *
+ *   1. Named modules on `app` — carry their `module` def (for nested-module
+ *      state) and, for inline `.ui(...)` components, a non-empty `.template`.
+ *   2. `componentTemplates` — explicit name→template for components whose DSL
+ *      lives outside the module def: anonymous fallbacks (e.g. BottomNav) AND
+ *      named modules whose template is an external `.hypen` file (registry
+ *      `.template` empty).
+ *
+ * An explicit template OVERRIDES an empty/absent registry template (so a named
+ * module with an external `.hypen` resolves), but a non-empty registry
+ * `.ui(...)` template is left intact, and the registry `module` def is always
+ * preserved.
+ */
+export function mergeComponentTemplates(
+  appRegistry: HypenApp | null,
+  componentTemplates?: Record<string, string>,
+): Map<string, { template: string; module?: HypenModuleDefinition<any> }> {
+  const merged = new Map<
+    string,
+    { template: string; module?: HypenModuleDefinition<any> }
+  >();
+  if (appRegistry) {
+    for (const [name, def] of appRegistry.components) {
+      merged.set(name, { template: def.template ?? "", module: def });
+    }
+  }
+  if (componentTemplates) {
+    for (const [name, template] of Object.entries(componentTemplates)) {
+      const existing = merged.get(name);
+      if (!existing) {
+        merged.set(name, { template });
+      } else if (!existing.template) {
+        existing.template = template;
+      }
+    }
+  }
+  return merged;
 }

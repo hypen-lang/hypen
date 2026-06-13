@@ -29,8 +29,8 @@ const activeInstances = new WeakMap<
 >();
 
 export const hypenAppHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("div");
+  create(): HTMLElement {
+    const el = document.createElement("div");
     el.dataset.hypenType = "hypenapp";
     el.style.display = "contents"; // Don't affect layout
     return el;

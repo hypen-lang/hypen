@@ -1,0 +1,17 @@
+{
+  "name": "create-hypen-cf",
+  "version": "0.1.0",
+  "description": "Scaffold a Hypen app deployed to Cloudflare Workers + Durable Objects",
+  "type": "module",
+  "bin": {
+    "create-hypen-cf": "bin/create-hypen-cf.ts"
+  },
+  "files": ["bin", "templates"],
+  "scripts": {
+    "typecheck": "bunx tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  }
+}

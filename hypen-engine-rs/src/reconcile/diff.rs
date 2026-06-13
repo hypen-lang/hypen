@@ -1,10 +1,8 @@
-use super::conditionals::{
-    evaluate_value, find_matching_branch, find_matching_route_with_key,
-};
-use super::tree::DEFAULT_ROUTER_CACHE_SIZE;
+use super::conditionals::{evaluate_value, find_matching_branch, find_matching_route_with_key};
 use super::item_bindings::replace_ir_node_item_bindings;
 use super::keyed::{generate_item_key, reconcile_iterable_children};
 use super::resolve::{evaluate_binding, resolve_props_full};
+use super::tree::DEFAULT_ROUTER_CACHE_SIZE;
 use super::{ControlFlowKind, InstanceTree, Patch};
 use crate::ir::{Element, IRNode, NodeId, Props, RouterRoute, Value};
 use crate::reactive::DependencyGraph;
@@ -310,15 +308,10 @@ fn create_list_tree_impl(
                 } else {
                     item_key.clone()
                 };
-                let child_with_item = replace_ir_node_item_bindings(
-                    child_ir, item, index, "item", &item_key,
-                );
-                let child_id = create_ir_node_tree_impl(
-                    ctx,
-                    &child_with_item,
-                    Some(node_id),
-                    false,
-                );
+                let child_with_item =
+                    replace_ir_node_item_bindings(child_ir, item, index, "item", &item_key);
+                let child_id =
+                    create_ir_node_tree_impl(ctx, &child_with_item, Some(node_id), false);
                 if let Some(child_node) = ctx.tree.get_mut(child_id) {
                     child_node.key = Some(child_key);
                 }
@@ -600,12 +593,7 @@ fn create_control_flow_tree(
     is_root: bool,
 ) -> NodeId {
     match node {
-        IRNode::ForEach { .. } => create_foreach_ir_tree(
-            ctx,
-            node,
-            parent_id,
-            is_root,
-        ),
+        IRNode::ForEach { .. } => create_foreach_ir_tree(ctx, node, parent_id, is_root),
         IRNode::Conditional {
             value,
             branches,
@@ -763,8 +751,13 @@ fn create_conditional_tree(
         ctx.tree.add_child(parent, node_id, None);
     }
 
-    let matched_children =
-        find_matching_branch(&evaluated_value, branches, fallback, effective_state, ctx.data_sources);
+    let matched_children = find_matching_branch(
+        &evaluated_value,
+        branches,
+        fallback,
+        effective_state,
+        ctx.data_sources,
+    );
 
     let render_parent = parent_id;
 
@@ -1107,21 +1100,16 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             // Read the current cache state out of the existing node. Each
             // Router instance carries its own detached-subtree cache keyed
             // by route pattern (see ControlFlowKind::Router).
-            let (mut cache, prev_route_key, max_cache_size) =
-                match existing.control_flow.as_ref() {
-                    Some(ControlFlowKind::Router {
-                        cache,
-                        current_route_key,
-                        max_cache_size,
-                    }) => (cache.clone(), current_route_key.clone(), *max_cache_size),
-                    _ => (IndexMap::new(), None, DEFAULT_ROUTER_CACHE_SIZE),
-                };
+            let (mut cache, prev_route_key, max_cache_size) = match existing.control_flow.as_ref() {
+                Some(ControlFlowKind::Router {
+                    cache,
+                    current_route_key,
+                    max_cache_size,
+                }) => (cache.clone(), current_route_key.clone(), *max_cache_size),
+                _ => (IndexMap::new(), None, DEFAULT_ROUTER_CACHE_SIZE),
+            };
 
-            let matched = find_matching_route_with_key(
-                &location_str,
-                routes,
-                fallback.as_deref(),
-            );
+            let matched = find_matching_route_with_key(&location_str, routes, fallback.as_deref());
             let new_route_key = matched.as_ref().map(|(k, _)| k.clone());
 
             // Same route as before — nothing structural to do. Descendant
@@ -1176,12 +1164,7 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 if let Some(evicted_key) = evicted_key {
                     if let Some(evicted_ids) = cache.shift_remove(&evicted_key) {
                         for evicted_id in evicted_ids {
-                            remove_subtree(
-                                ctx.tree,
-                                evicted_id,
-                                ctx.patches,
-                                ctx.dependencies,
-                            );
+                            remove_subtree(ctx.tree, evicted_id, ctx.patches, ctx.dependencies);
                         }
                     }
                 } else {

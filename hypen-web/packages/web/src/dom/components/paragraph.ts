@@ -5,16 +5,15 @@
 import type { ComponentHandler } from "./index.js";
 
 export const paragraphHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("p");
+  create(): HTMLElement {
+    const el = document.createElement("p");
     el.dataset.hypenType = "paragraph";
     return el;
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
     // Text content
-    // `??` (not `||`) so the literal `0`, `false`, `""` still render.
-    const text = props["0"] ?? props.text;
+    const text = props["0"] || props.text;
     if (text !== undefined) {
       el.textContent = String(text);
     }

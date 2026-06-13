@@ -229,27 +229,35 @@ pub fn parse_arbitrary(prefix: &str, value: &str) -> Option<Vec<CssProperty>> {
 
     let property = match base_prefix {
         "p" => "padding",
-        "px" => return Some(vec![
-            CssProperty::new("padding-left", val),
-            CssProperty::new("padding-right", val),
-        ]),
-        "py" => return Some(vec![
-            CssProperty::new("padding-top", val),
-            CssProperty::new("padding-bottom", val),
-        ]),
+        "px" => {
+            return Some(vec![
+                CssProperty::new("padding-left", val),
+                CssProperty::new("padding-right", val),
+            ])
+        }
+        "py" => {
+            return Some(vec![
+                CssProperty::new("padding-top", val),
+                CssProperty::new("padding-bottom", val),
+            ])
+        }
         "pt" => "padding-top",
         "pr" => "padding-right",
         "pb" => "padding-bottom",
         "pl" => "padding-left",
         "m" => "margin",
-        "mx" => return Some(vec![
-            CssProperty::new("margin-left", val),
-            CssProperty::new("margin-right", val),
-        ]),
-        "my" => return Some(vec![
-            CssProperty::new("margin-top", val),
-            CssProperty::new("margin-bottom", val),
-        ]),
+        "mx" => {
+            return Some(vec![
+                CssProperty::new("margin-left", val),
+                CssProperty::new("margin-right", val),
+            ])
+        }
+        "my" => {
+            return Some(vec![
+                CssProperty::new("margin-top", val),
+                CssProperty::new("margin-bottom", val),
+            ])
+        }
         "mt" => "margin-top",
         "mr" => "margin-right",
         "mb" => "margin-bottom",

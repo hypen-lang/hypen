@@ -8,8 +8,8 @@ import type { ComponentHandler } from "../components/index.js";
 import type { ApplicatorHandler } from "../applicators/index.js";
 
 export const canvasHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("canvas");
+  create(): HTMLElement {
+    const el = document.createElement("canvas");
     el.dataset.hypenType = "canvas";
     return el as any as HTMLElement;
   },

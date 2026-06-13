@@ -253,8 +253,7 @@ mod tests {
     fn test_size_full_numeric_scale_present() {
         // `size-N` was the original failure case (used in social BottomNav avatar).
         for n in ["7", "9", "11"] {
-            let props = parse(&format!("size-{n}"))
-                .unwrap_or_else(|| panic!("missing size-{n}"));
+            let props = parse(&format!("size-{n}")).unwrap_or_else(|| panic!("missing size-{n}"));
             assert_eq!(props.len(), 2);
             assert_eq!(props[0].property, "width");
             assert_eq!(props[1].property, "height");
@@ -269,8 +268,8 @@ mod tests {
     fn test_max_width_numeric_scale_present() {
         for n in ["4", "8", "12", "16", "20", "24", "32", "48", "64", "96"] {
             let utility = format!("max-w-{n}");
-            let props = parse(&utility)
-                .unwrap_or_else(|| panic!("missing numeric max-w: {utility}"));
+            let props =
+                parse(&utility).unwrap_or_else(|| panic!("missing numeric max-w: {utility}"));
             assert_eq!(props[0].property, "max-width");
         }
     }

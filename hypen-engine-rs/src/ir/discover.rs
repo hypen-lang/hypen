@@ -121,8 +121,7 @@ fn walk(ir: &IRNode, out: &mut Vec<DiscoveredRouter>) {
 /// Conditional / Router children are included at their natural depth.
 fn collect_element_names(children: &[IRNode]) -> Vec<String> {
     let mut names = Vec::new();
-    let mut queue: std::collections::VecDeque<&IRNode> =
-        children.iter().collect();
+    let mut queue: std::collections::VecDeque<&IRNode> = children.iter().collect();
     while let Some(node) = queue.pop_front() {
         match node {
             IRNode::Element(el) => {
@@ -150,7 +149,9 @@ fn collect_element_names(children: &[IRNode]) -> Vec<String> {
                     }
                 }
             }
-            IRNode::Router { routes, fallback, .. } => {
+            IRNode::Router {
+                routes, fallback, ..
+            } => {
                 for RouterRoute { children, .. } in routes {
                     for child in children {
                         queue.push_back(child);

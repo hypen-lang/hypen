@@ -189,15 +189,32 @@ function getMockMessages(currentUserId: string): Conversation[] {
   ];
 }
 
-function getExplorePosts(): { id: string; imageUrl: string }[] {
+function getExplorePosts(): {
+  id: string;
+  imageUrl: string;
+  username: string;
+  caption: string;
+}[] {
   const posts = db
-    .query("SELECT id, image_url FROM posts ORDER BY likes_count DESC")
+    .query(
+      "SELECT p.id, p.image_url, p.caption, u.username FROM posts p JOIN users u ON p.user_id = u.id ORDER BY p.likes_count DESC",
+    )
     .all() as any[];
-  const base = posts.map((p) => ({ id: p.id, imageUrl: p.image_url }));
+  const base = posts.map((p) => ({
+    id: p.id,
+    imageUrl: p.image_url,
+    username: p.username ?? "",
+    caption: p.caption ?? "",
+  }));
   const multiplied = [];
   for (let i = 0; i < 10; i++) {
     for (const p of base) {
-      multiplied.push({ id: `${p.id}_${i}`, imageUrl: p.imageUrl });
+      multiplied.push({
+        id: `${p.id}_${i}`,
+        imageUrl: p.imageUrl,
+        username: p.username,
+        caption: p.caption,
+      });
     }
   }
   return multiplied;
@@ -307,7 +324,7 @@ export const homePageModule = app
 
 interface SearchState {
   searchQuery: string;
-  explorePosts: { id: string; imageUrl: string }[];
+  explorePosts: { id: string; imageUrl: string; username: string; caption: string }[];
 }
 
 const allExplorePosts = getExplorePosts();
@@ -318,12 +335,18 @@ export const searchModule = app
     searchQuery: "",
     explorePosts: allExplorePosts,
   })
-  .onAction("search", ({ state }) => {
-    const query = state.searchQuery.toLowerCase();
+  .onAction("search", ({ action, state }) => {
+    const payload = (action.payload ?? {}) as { value?: string; input?: string };
+    const raw = payload.value ?? payload.input ?? "";
+    const query = raw.toLowerCase();
     state.explorePosts =
       query === ""
         ? allExplorePosts
-        : allExplorePosts.filter((p) => p.imageUrl.toLowerCase().includes(query));
+        : allExplorePosts.filter(
+            (p) =>
+              p.username.toLowerCase().includes(query) ||
+              p.caption.toLowerCase().includes(query),
+          );
   })
   .build();
 

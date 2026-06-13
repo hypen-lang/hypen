@@ -13,12 +13,10 @@ The Canvas Renderer is a complete alternative to the DOM renderer that draws all
 
 ## Quick Start
 
-`createHypenClient` is the recommended one-call wiring (constructs the renderer and subscribes to engine patches). `CanvasRenderer` is still exported directly for advanced setups.
-
 ```typescript
 import { app } from "@hypen-space/core";
 import { Engine } from "@hypen-space/web-engine";
-import { createHypenClient } from "@hypen-space/web/canvas";
+import { CanvasRenderer } from "@hypen-space/web/canvas";
 
 // Setup canvas
 const canvas = document.getElementById("app") as HTMLCanvasElement;
@@ -27,8 +25,13 @@ const canvas = document.getElementById("app") as HTMLCanvasElement;
 const engine = new Engine();
 await engine.init();
 
-// Create canvas renderer + patch subscription in one call
-createHypenClient(canvas, engine);
+// Create canvas renderer
+const renderer = new CanvasRenderer(canvas, engine);
+
+// Set render callback
+engine.setRenderCallback((patches) => {
+  renderer.applyPatches(patches);
+});
 
 // Render UI
 await engine.renderSource(`

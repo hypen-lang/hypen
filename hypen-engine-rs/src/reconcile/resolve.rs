@@ -252,10 +252,7 @@ mod tests {
         let mut props = IndexMap::new();
         props.insert(
             "data".to_string(),
-            Value::Binding(Binding::data_source(
-                "firebase",
-                vec!["users".to_string()],
-            )),
+            Value::Binding(Binding::data_source("firebase", vec!["users".to_string()])),
         );
 
         let state = json!({});

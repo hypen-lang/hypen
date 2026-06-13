@@ -9,8 +9,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const centerHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("div");
+  create(): HTMLElement {
+    const el = document.createElement("div");
     el.style.display = "flex";
     el.style.alignItems = "center";
     el.style.justifyContent = "center";

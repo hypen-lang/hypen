@@ -23,7 +23,8 @@ fn text_with_binding(path: &str) -> Element {
         element_type: "Text".to_string(),
         props,
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -31,8 +32,12 @@ fn column_with_children(children: Vec<Element>) -> Element {
     Element {
         element_type: "Column".to_string(),
         props: Props::new(),
-        ir_children: children.into_iter().map(hypen_engine::ir::IRNode::Element).collect(),
-        key: None, module_scope: None,
+        ir_children: children
+            .into_iter()
+            .map(hypen_engine::ir::IRNode::Element)
+            .collect(),
+        key: None,
+        module_scope: None,
     }
 }
 

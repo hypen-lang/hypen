@@ -211,7 +211,13 @@ pub extern "C" fn hypen_destroy() {
 /// Get the current revision number
 #[no_mangle]
 pub extern "C" fn hypen_get_revision() -> u64 {
-    ENGINE.with(|engine| engine.borrow().as_ref().map(|e| e.core.revision).unwrap_or(0))
+    ENGINE.with(|engine| {
+        engine
+            .borrow()
+            .as_ref()
+            .map(|e| e.core.revision)
+            .unwrap_or(0)
+    })
 }
 
 // ============================================================================
@@ -411,10 +417,17 @@ pub extern "C" fn hypen_update_state(patch_ptr: *const u8, patch_len: usize) -> 
 ///
 /// `EngineCore::register_module` lowercases the scope name, so the
 /// existence check and update must too.
-fn update_module_state_internal(engine: &mut WasiEngine, name: &str, patch: serde_json::Value) -> i32 {
+fn update_module_state_internal(
+    engine: &mut WasiEngine,
+    name: &str,
+    patch: serde_json::Value,
+) -> i32 {
     let canonical = name.to_lowercase();
     if !engine.core.modules.contains_key(&canonical) {
-        return fail(4, &format!("update_module_state: module '{}' not found", name));
+        return fail(
+            4,
+            &format!("update_module_state: module '{}' not found", name),
+        );
     }
     if engine.core.update_state(Some(&canonical), patch) {
         render_dirty_internal(engine);
@@ -444,7 +457,12 @@ pub extern "C" fn hypen_update_module_state(config_ptr: *const u8, config_len: u
 
     let update: ModuleStateUpdate = match serde_json::from_str(config_str) {
         Ok(v) => v,
-        Err(e) => return fail(2, &format!("hypen_update_module_state: invalid JSON: {}", e)),
+        Err(e) => {
+            return fail(
+                2,
+                &format!("hypen_update_module_state: invalid JSON: {}", e),
+            )
+        }
     };
 
     ENGINE.with(|engine| {
@@ -738,7 +756,11 @@ pub extern "C" fn hypen_dispatch_action(action_ptr: *const u8, action_len: usize
 
         // Registered action: serialize the Action envelope. Otherwise fall
         // back to the shared data-source classifier on EngineCore.
-        if engine.core.registered_actions.contains(&action_payload.name) {
+        if engine
+            .core
+            .registered_actions
+            .contains(&action_payload.name)
+        {
             let action = Action::new(&action_payload.name).with_payload(action_payload.payload);
             ACTION_BUFFER.with(|buf| {
                 if let Ok(json) = serde_json::to_vec(&action) {
@@ -851,17 +873,23 @@ pub extern "C" fn hypen_register_component(
                 let ir_node = ast_to_ir_node(&component_spec);
                 let ir_element = match ir_node {
                     IRNode::Element(e) => e,
-                    _ => return fail(3, "hypen_register_component: component root must be an element"),
+                    _ => {
+                        return fail(
+                            3,
+                            "hypen_register_component: component root must be an element",
+                        )
+                    }
                 };
-                let is_module = component_spec.declaration_type
-                    == hypen_parser::DeclarationType::Module;
+                let is_module =
+                    component_spec.declaration_type == hypen_parser::DeclarationType::Module;
                 let module_name = if is_module {
                     Some(component_spec.name.to_lowercase())
                 } else {
                     None
                 };
-                let mut component = crate::ir::Component::new(name, move |_props| ir_element.clone())
-                    .with_source_path(&path);
+                let mut component =
+                    crate::ir::Component::new(name, move |_props| ir_element.clone())
+                        .with_source_path(&path);
                 if is_module {
                     component.is_module = true;
                     component.module_name = module_name;
@@ -907,7 +935,10 @@ pub extern "C" fn hypen_register_resources(json_ptr: *const u8, json_len: usize)
         Err(e) => {
             return fail(
                 2,
-                &format!("hypen_register_resources: invalid JSON (expected {{name: svg}} map): {}", e),
+                &format!(
+                    "hypen_register_resources: invalid JSON (expected {{name: svg}} map): {}",
+                    e
+                ),
             )
         }
     };
@@ -1231,7 +1262,12 @@ pub extern "C" fn hypen_portable_match_path(
 ) -> i32 {
     let pattern = match ptr_to_str(pattern_ptr, pattern_len) {
         Ok(s) => s,
-        Err(_) => return fail(1, "hypen_portable_match_path: invalid UTF-8 pattern pointer"),
+        Err(_) => {
+            return fail(
+                1,
+                "hypen_portable_match_path: invalid UTF-8 pattern pointer",
+            )
+        }
     };
     let path = match ptr_to_str(path_ptr, path_len) {
         Ok(s) => s,
@@ -1273,11 +1309,21 @@ pub extern "C" fn hypen_portable_session_step(
 ) -> i32 {
     let state_str = match ptr_to_str(state_ptr, state_len) {
         Ok(s) => s,
-        Err(_) => return fail(1, "hypen_portable_session_step: invalid UTF-8 state pointer"),
+        Err(_) => {
+            return fail(
+                1,
+                "hypen_portable_session_step: invalid UTF-8 state pointer",
+            )
+        }
     };
     let event_str = match ptr_to_str(event_ptr, event_len) {
         Ok(s) => s,
-        Err(_) => return fail(1, "hypen_portable_session_step: invalid UTF-8 event pointer"),
+        Err(_) => {
+            return fail(
+                1,
+                "hypen_portable_session_step: invalid UTF-8 event pointer",
+            )
+        }
     };
 
     let state: crate::portable::SessionState = match serde_json::from_str(state_str) {
@@ -1386,7 +1432,11 @@ pub extern "C" fn hypen_portable_path_has(
         Ok(v) => v,
         Err(e) => return fail(2, &format!("hypen_portable_path_has: bad JSON: {e}")),
     };
-    let out = if crate::portable::path_has(&v, path) { "true" } else { "false" };
+    let out = if crate::portable::path_has(&v, path) {
+        "true"
+    } else {
+        "false"
+    };
     write_portable_result(out.as_bytes().to_vec());
     0
 }
@@ -1412,7 +1462,12 @@ pub extern "C" fn hypen_portable_path_set(
     };
     let new_value_str = match ptr_to_str(new_value_ptr, new_value_len) {
         Ok(s) => s,
-        Err(_) => return fail(1, "hypen_portable_path_set: invalid UTF-8 new-value pointer"),
+        Err(_) => {
+            return fail(
+                1,
+                "hypen_portable_path_set: invalid UTF-8 new-value pointer",
+            )
+        }
     };
     let mut v: serde_json::Value = match serde_json::from_str(value_str) {
         Ok(v) => v,
@@ -1420,7 +1475,12 @@ pub extern "C" fn hypen_portable_path_set(
     };
     let nv: serde_json::Value = match serde_json::from_str(new_value_str) {
         Ok(v) => v,
-        Err(e) => return fail(2, &format!("hypen_portable_path_set: bad new-value JSON: {e}")),
+        Err(e) => {
+            return fail(
+                2,
+                &format!("hypen_portable_path_set: bad new-value JSON: {e}"),
+            )
+        }
     };
     crate::portable::path_set(&mut v, path, nv);
     match serde_json::to_vec(&v) {
@@ -1494,10 +1554,7 @@ pub extern "C" fn hypen_portable_decode_uri_component(
 
 /// parse_query: result JSON `{"path": "...", "query": {...}}`.
 #[no_mangle]
-pub extern "C" fn hypen_portable_parse_query(
-    input_ptr: *const u8,
-    input_len: usize,
-) -> i32 {
+pub extern "C" fn hypen_portable_parse_query(input_ptr: *const u8, input_len: usize) -> i32 {
     let input = match ptr_to_str(input_ptr, input_len) {
         Ok(s) => s,
         Err(_) => return fail(1, "hypen_portable_parse_query: invalid UTF-8"),

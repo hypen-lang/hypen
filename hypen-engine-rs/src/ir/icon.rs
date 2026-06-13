@@ -135,7 +135,10 @@ impl ResourceRegistry {
 /// ```
 pub fn parse_svg(svg: &str) -> IconData {
     let root = RootDefaults::extract(svg);
-    let view_box = root.view_box.clone().unwrap_or_else(|| "0 0 24 24".to_string());
+    let view_box = root
+        .view_box
+        .clone()
+        .unwrap_or_else(|| "0 0 24 24".to_string());
     let mut paths = Vec::new();
 
     // Extract <path> elements
@@ -220,8 +223,7 @@ impl RootDefaults {
             view_box: extract_attr(root_attrs, "viewBox"),
             fill: extract_attr(root_attrs, "fill"),
             stroke: extract_attr(root_attrs, "stroke"),
-            stroke_width: extract_attr(root_attrs, "stroke-width")
-                .and_then(|s| s.parse().ok()),
+            stroke_width: extract_attr(root_attrs, "stroke-width").and_then(|s| s.parse().ok()),
             stroke_linecap: extract_attr(root_attrs, "stroke-linecap"),
             stroke_linejoin: extract_attr(root_attrs, "stroke-linejoin"),
         }
@@ -292,10 +294,7 @@ impl<'a> Iterator for RegexLite<'a> {
 
 fn extract_attr(source: &str, name: &str) -> Option<String> {
     // Look for name="value" or name='value'
-    let patterns = [
-        format!("{}=\"", name),
-        format!("{}='", name),
-    ];
+    let patterns = [format!("{}=\"", name), format!("{}='", name)];
 
     for pattern in &patterns {
         if let Some(start) = source.find(pattern.as_str()) {
@@ -335,22 +334,45 @@ fn parse_path_attrs(attrs: &str, root: &RootDefaults) -> Option<IconPath> {
         fill: resolve_str(attrs, "fill", root.fill.as_ref(), "none"),
         stroke: resolve_str(attrs, "stroke", root.stroke.as_ref(), "currentColor"),
         stroke_width: resolve_stroke_width(attrs, root.stroke_width),
-        stroke_linecap: resolve_str(attrs, "stroke-linecap", root.stroke_linecap.as_ref(), "round"),
-        stroke_linejoin: resolve_str(attrs, "stroke-linejoin", root.stroke_linejoin.as_ref(), "round"),
+        stroke_linecap: resolve_str(
+            attrs,
+            "stroke-linecap",
+            root.stroke_linecap.as_ref(),
+            "round",
+        ),
+        stroke_linejoin: resolve_str(
+            attrs,
+            "stroke-linejoin",
+            root.stroke_linejoin.as_ref(),
+            "round",
+        ),
     })
 }
 
 fn circle_to_path(attrs: &str, root: &RootDefaults) -> Option<IconPath> {
-    let cx: f64 = extract_attr(attrs, "cx").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let cy: f64 = extract_attr(attrs, "cy").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let r: f64 = extract_attr(attrs, "r").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let cx: f64 = extract_attr(attrs, "cx")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let cy: f64 = extract_attr(attrs, "cy")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let r: f64 = extract_attr(attrs, "r")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
     if r <= 0.0 {
         return None;
     }
 
     let d = format!(
         "M{},{} a{},{} 0 1,0 {},0 a{},{} 0 1,0 -{},0",
-        cx - r, cy, r, r, r * 2.0, r, r, r * 2.0
+        cx - r,
+        cy,
+        r,
+        r,
+        r * 2.0,
+        r,
+        r,
+        r * 2.0
     );
 
     Some(IconPath {
@@ -358,8 +380,18 @@ fn circle_to_path(attrs: &str, root: &RootDefaults) -> Option<IconPath> {
         fill: resolve_str(attrs, "fill", root.fill.as_ref(), "none"),
         stroke: resolve_str(attrs, "stroke", root.stroke.as_ref(), "currentColor"),
         stroke_width: resolve_stroke_width(attrs, root.stroke_width),
-        stroke_linecap: resolve_str(attrs, "stroke-linecap", root.stroke_linecap.as_ref(), "round"),
-        stroke_linejoin: resolve_str(attrs, "stroke-linejoin", root.stroke_linejoin.as_ref(), "round"),
+        stroke_linecap: resolve_str(
+            attrs,
+            "stroke-linecap",
+            root.stroke_linecap.as_ref(),
+            "round",
+        ),
+        stroke_linejoin: resolve_str(
+            attrs,
+            "stroke-linejoin",
+            root.stroke_linejoin.as_ref(),
+            "round",
+        ),
     })
 }
 
@@ -376,16 +408,34 @@ fn line_to_path(attrs: &str, root: &RootDefaults) -> Option<IconPath> {
         fill: resolve_str(attrs, "fill", root.fill.as_ref(), "none"),
         stroke: resolve_str(attrs, "stroke", root.stroke.as_ref(), "currentColor"),
         stroke_width: resolve_stroke_width(attrs, root.stroke_width),
-        stroke_linecap: resolve_str(attrs, "stroke-linecap", root.stroke_linecap.as_ref(), "round"),
-        stroke_linejoin: resolve_str(attrs, "stroke-linejoin", root.stroke_linejoin.as_ref(), "round"),
+        stroke_linecap: resolve_str(
+            attrs,
+            "stroke-linecap",
+            root.stroke_linecap.as_ref(),
+            "round",
+        ),
+        stroke_linejoin: resolve_str(
+            attrs,
+            "stroke-linejoin",
+            root.stroke_linejoin.as_ref(),
+            "round",
+        ),
     })
 }
 
 fn rect_to_path(attrs: &str, root: &RootDefaults) -> Option<IconPath> {
-    let x: f64 = extract_attr(attrs, "x").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let y: f64 = extract_attr(attrs, "y").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let w: f64 = extract_attr(attrs, "width").and_then(|s| s.parse().ok()).unwrap_or(0.0);
-    let h: f64 = extract_attr(attrs, "height").and_then(|s| s.parse().ok()).unwrap_or(0.0);
+    let x: f64 = extract_attr(attrs, "x")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let y: f64 = extract_attr(attrs, "y")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let w: f64 = extract_attr(attrs, "width")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
+    let h: f64 = extract_attr(attrs, "height")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.0);
     if w <= 0.0 || h <= 0.0 {
         return None;
     }
@@ -397,8 +447,18 @@ fn rect_to_path(attrs: &str, root: &RootDefaults) -> Option<IconPath> {
         fill: resolve_str(attrs, "fill", root.fill.as_ref(), "none"),
         stroke: resolve_str(attrs, "stroke", root.stroke.as_ref(), "currentColor"),
         stroke_width: resolve_stroke_width(attrs, root.stroke_width),
-        stroke_linecap: resolve_str(attrs, "stroke-linecap", root.stroke_linecap.as_ref(), "round"),
-        stroke_linejoin: resolve_str(attrs, "stroke-linejoin", root.stroke_linejoin.as_ref(), "round"),
+        stroke_linecap: resolve_str(
+            attrs,
+            "stroke-linecap",
+            root.stroke_linecap.as_ref(),
+            "round",
+        ),
+        stroke_linejoin: resolve_str(
+            attrs,
+            "stroke-linejoin",
+            root.stroke_linejoin.as_ref(),
+            "round",
+        ),
     })
 }
 
@@ -437,7 +497,9 @@ pub fn resolve_icons_in_ir(registry: &ResourceRegistry, node: &mut super::IRNode
             });
 
         let Some(name) = icon_name else { return };
-        let Some(icon_data) = registry.resolve(&name) else { return };
+        let Some(icon_data) = registry.resolve(&name) else {
+            return;
+        };
         let icon_props = ResourceRegistry::to_props(icon_data);
 
         if let Some(paths) = icon_props.get("paths") {
@@ -465,7 +527,11 @@ mod tests {
         let icon = parse_svg(svg);
         assert_eq!(icon.paths.len(), 1);
         let p = &icon.paths[0];
-        assert_eq!(p.stroke_width, 1.5, "stroke-width=1.5 from <svg> root should be inherited, got {}", p.stroke_width);
+        assert_eq!(
+            p.stroke_width, 1.5,
+            "stroke-width=1.5 from <svg> root should be inherited, got {}",
+            p.stroke_width
+        );
         assert_eq!(p.stroke, "currentColor");
         assert_eq!(p.fill, "none");
         assert_eq!(p.stroke_linecap, "round");
@@ -490,7 +556,10 @@ mod tests {
         let svg = r#"<svg viewBox="0 0 24 24"><path d="M0 0L10 10" stroke-width="5"/><path d="M1 1L2 2"/></svg>"#;
         let icon = parse_svg(svg);
         assert_eq!(icon.paths.len(), 2);
-        assert_eq!(icon.paths[0].stroke_width, 5.0, "first path carries its own width");
+        assert_eq!(
+            icon.paths[0].stroke_width, 5.0,
+            "first path carries its own width"
+        );
         assert_eq!(
             icon.paths[1].stroke_width, 2.0,
             "second path must fall back to hardcoded 2.0, not inherit from sibling"
@@ -657,8 +726,14 @@ mod tests {
         resolve_icons_in_ir(&registry, &mut node);
 
         if let IRNode::Element(el) = &node {
-            assert!(el.props.contains_key("__iconPaths"), "Should inject __iconPaths");
-            assert!(el.props.contains_key("__iconViewBox"), "Should inject __iconViewBox");
+            assert!(
+                el.props.contains_key("__iconPaths"),
+                "Should inject __iconPaths"
+            );
+            assert!(
+                el.props.contains_key("__iconViewBox"),
+                "Should inject __iconViewBox"
+            );
             match el.props.get("__iconViewBox").unwrap() {
                 Value::Static(v) => assert_eq!(v, "0 0 24 24"),
                 other => panic!("Expected Static viewBox, got: {:?}", other),
@@ -680,10 +755,9 @@ mod tests {
 
         // Simulate Icon("star") — prop "0" is Value::Static("star")
         let mut element = Element::new("Icon");
-        element.props.insert(
-            "0".to_string(),
-            Value::Static(serde_json::json!("star")),
-        );
+        element
+            .props
+            .insert("0".to_string(), Value::Static(serde_json::json!("star")));
         let mut node = IRNode::Element(element);
 
         resolve_icons_in_ir(&registry, &mut node);
@@ -710,7 +784,10 @@ mod tests {
         resolve_icons_in_ir(&registry, &mut node);
 
         if let IRNode::Element(el) = &node {
-            assert!(!el.props.contains_key("__iconPaths"), "Should not inject paths for missing resource");
+            assert!(
+                !el.props.contains_key("__iconPaths"),
+                "Should not inject paths for missing resource"
+            );
         } else {
             panic!("Expected Element");
         }

@@ -5,14 +5,6 @@
  */
 
 export { CanvasRenderer } from "./renderer.js";
-export {
-  createCanvasClient as createHypenClient,
-  createCanvasClient,
-  type CanvasClient as HypenClient,
-  type CanvasClient,
-  type CanvasClientOptions as HypenClientOptions,
-  type CanvasClientOptions,
-} from "../client.js";
 export { registerPainter } from "./paint.js";
 export { CanvasEventManager } from "./events.js";
 export { InputOverlay } from "./input.js";

@@ -19,7 +19,7 @@ pub enum Value {
     Boolean(bool),
     List(Vec<Value>),
     Map(HashMap<String, Value>),
-    Reference(String),           // e.g., @state.user, @actions.login, @spacetime.messages
+    Reference(String), // e.g., @state.user, @actions.login, @spacetime.messages
     DataSourceReference(String), // DEPRECATED: use Reference instead. Kept for backward compat.
 }
 
@@ -148,7 +148,6 @@ impl ComponentSpecification {
         }
     }
 }
-
 
 /// Import clause specifying what to import
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

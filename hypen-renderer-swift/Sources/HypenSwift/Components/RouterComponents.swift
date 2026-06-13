@@ -75,17 +75,9 @@ private struct RouterViewWrapper: View {
     }
 
     var body: some View {
-        // Router is a transparent container — the matched Route's content
-        // is the real layout. We MUST pass the full available height down,
-        // otherwise an inner Column with `flex-1`/weighted children
-        // (e.g. `Column { Home().tw("flex-1"); BottomNav() }`) only sees the
-        // content's ideal height, and `FlexColumnLayout` ends up giving the
-        // weighted child the whole bounds — pushing the non-flex sibling
-        // (BottomNav) past the bottom edge.
-        VStack(spacing: 0) {
+        VStack {
             children()
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .environment(\.routerController, router)
         .environment(\.routeMatched, $hasMatch)
         .hypenModifier(modifier)
@@ -138,10 +130,9 @@ private struct RouteViewWrapper: View {
         if let router = router {
             let match = router.matchPath(pattern: path)
             if match != nil {
-                VStack(spacing: 0) {
+                VStack {
                     children()
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                 .hypenModifier(modifier)
                 .onAppear {
                     matchedBinding?.wrappedValue = true

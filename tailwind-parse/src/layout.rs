@@ -848,8 +848,8 @@ mod tests {
     fn test_grid_rows_full_scale() {
         for n in 1..=12 {
             let utility = format!("grid-rows-{n}");
-            let props = parse(&utility)
-                .unwrap_or_else(|| panic!("missing grid-rows value: {utility}"));
+            let props =
+                parse(&utility).unwrap_or_else(|| panic!("missing grid-rows value: {utility}"));
             assert_eq!(props[0].property, "grid-template-rows");
             assert_eq!(props[0].value, format!("repeat({n}, minmax(0, 1fr))"));
         }
@@ -861,8 +861,8 @@ mod tests {
     fn test_row_span_full_scale() {
         for n in 1..=12 {
             let utility = format!("row-span-{n}");
-            let props = parse(&utility)
-                .unwrap_or_else(|| panic!("missing row-span value: {utility}"));
+            let props =
+                parse(&utility).unwrap_or_else(|| panic!("missing row-span value: {utility}"));
             assert_eq!(props[0].property, "grid-row");
             assert_eq!(props[0].value, format!("span {n} / span {n}"));
         }
@@ -872,13 +872,13 @@ mod tests {
     #[test]
     fn test_row_start_end_full_scale() {
         for n in 1..=13 {
-            let start = parse(&format!("row-start-{n}"))
-                .unwrap_or_else(|| panic!("missing row-start-{n}"));
+            let start =
+                parse(&format!("row-start-{n}")).unwrap_or_else(|| panic!("missing row-start-{n}"));
             assert_eq!(start[0].property, "grid-row-start");
             assert_eq!(start[0].value, n.to_string());
 
-            let end = parse(&format!("row-end-{n}"))
-                .unwrap_or_else(|| panic!("missing row-end-{n}"));
+            let end =
+                parse(&format!("row-end-{n}")).unwrap_or_else(|| panic!("missing row-end-{n}"));
             assert_eq!(end[0].property, "grid-row-end");
             assert_eq!(end[0].value, n.to_string());
         }

@@ -154,7 +154,6 @@ impl Engine {
         self.core.register_module(name, module);
     }
 
-
     /// Get a named module's state (for reconciler lookups).
     pub fn get_module_state(&self, name: &str) -> Option<&serde_json::Value> {
         self.core.get_module_state(name)

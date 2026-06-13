@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const audioHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("audio");
+  create(): HTMLElement {
+    const el = document.createElement("audio");
     el.dataset.hypenType = "audio";
     return el as any as HTMLElement;
   },

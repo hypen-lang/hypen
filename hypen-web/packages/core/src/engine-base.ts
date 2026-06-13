@@ -47,6 +47,35 @@ import type {
 const log = frameworkLoggers.engine;
 
 /**
+ * Recursively convert wasm-bindgen `Map` values into plain objects.
+ *
+ * The web-target WASM returns action payloads (and nested values) as `Map`
+ * instances; user handlers expect plain objects. Only plain objects
+ * (`constructor === Object`), arrays, and Maps are descended into — class
+ * instances, `Date`, etc. are passed through untouched.
+ */
+function mapToPlainObject(value: any): any {
+  if (value instanceof Map) {
+    const obj: Record<string, any> = {};
+    for (const [key, val] of value.entries()) {
+      obj[key] = mapToPlainObject(val);
+    }
+    return obj;
+  }
+  if (Array.isArray(value)) {
+    return value.map(mapToPlainObject);
+  }
+  if (value && typeof value === "object" && value.constructor === Object) {
+    const obj: Record<string, any> = {};
+    for (const [key, val] of Object.entries(value)) {
+      obj[key] = mapToPlainObject(val);
+    }
+    return obj;
+  }
+  return value;
+}
+
+/**
  * Shared base wrapping a wasm-bindgen `WasmEngine`. `any` here is load-
  * bearing: the concrete type is `WasmEngine` from either the `wasm-node`
  * or `wasm-browser` build, and those are separate generated `.d.ts`
@@ -56,6 +85,16 @@ const log = frameworkLoggers.engine;
 export abstract class BaseEngine {
   protected wasmEngine: any = null;
   protected initialized = false;
+
+  /**
+   * Component names the resolver was asked for and returned `null` on — i.e.
+   * names that are neither a registered primitive (the engine checks those
+   * first and never consults the resolver for them) nor resolvable to a
+   * template. Each such name produces an opaque `Create` patch the renderer
+   * drops. Tracked so a miss is warned about once and can be asserted on in
+   * tests. See `getUnresolvedComponents`.
+   */
+  private unresolvedComponents = new Set<string>();
 
   /**
    * Initialize the WASM module. Platform-specific.
@@ -98,14 +137,45 @@ export abstract class BaseEngine {
 
   /**
    * Set the component resolver for dynamic component composition.
+   *
+   * The resolver is wrapped to detect "resolver misses": the engine only
+   * consults the resolver for element types that are NOT registered
+   * primitives, so a `null` return means the name resolves to nothing and
+   * the engine will emit an opaque `Create` the renderer silently drops
+   * (e.g. an anonymous component that never got registered). The first miss
+   * for each unique name is logged with actionable guidance; every miss is
+   * recorded for `getUnresolvedComponents()` / test assertions.
    */
   setComponentResolver(resolver: ComponentResolver): void {
     const engine = this.ensureInitialized();
     engine.setComponentResolver(
       (componentName: string, contextPath: string | null) => {
-        return resolver(componentName, contextPath);
+        const resolved = resolver(componentName, contextPath);
+        if (resolved == null) {
+          if (!this.unresolvedComponents.has(componentName)) {
+            this.unresolvedComponents.add(componentName);
+            log.warn(
+              `Component "${componentName}" did not resolve: it is not a ` +
+                `registered primitive and the component resolver returned null. ` +
+                `The engine will emit an opaque Create for it and the renderer ` +
+                `will drop it. Did you forget to register/.module(...) the ` +
+                `component, or is its name misspelled in the template?`,
+            );
+          }
+        }
+        return resolved;
       },
     );
+  }
+
+  /**
+   * Names the component resolver has been asked for and failed to resolve
+   * this session (see `setComponentResolver`). Useful as a CI / smoke-test
+   * assertion — an empty array means every referenced component resolved to
+   * a primitive or a template.
+   */
+  getUnresolvedComponents(): string[] {
+    return [...this.unresolvedComponents];
   }
 
   /**
@@ -220,11 +290,24 @@ export abstract class BaseEngine {
 
   /**
    * Platform hook: normalize an incoming action before the user handler
-   * sees it. Default identity; subclasses can override to unwrap native
-   * values (e.g. browser Maps in action payloads).
+   * sees it.
+   *
+   * The default converts any `Map` instances in the payload into plain
+   * objects (deeply). This is the landmine the wasm-bindgen **web** target
+   * sets: it returns structured action payloads as JS `Map`s, so a handler
+   * reading `payload.to` gets `undefined` and `@router.push, to: "/x"`
+   * silently no-ops. Every consumer of the web-target WASM — the browser
+   * engine, a Cloudflare `CFEngine`, any future runtime — inherits the fix
+   * here instead of rediscovering it.
+   *
+   * The wasm-bindgen **bundler** (node) target already returns plain
+   * objects, so for it this is a harmless deep walk. Subclasses on that
+   * target may override with an identity to skip the walk (see
+   * `@hypen-space/server`).
    */
   protected normalizeAction(action: Action): Action {
-    return action;
+    if (!action.payload) return action;
+    return { ...action, payload: mapToPlainObject(action.payload) };
   }
 
   /**

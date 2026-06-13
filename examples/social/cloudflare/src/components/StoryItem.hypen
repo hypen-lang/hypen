@@ -1,0 +1,14 @@
+Column {
+    Column {
+        Image(src: "@{item.user.avatarUrl}")
+            .tw("w-14 h-14 rounded-full")
+    }
+    .tw("p-0.5 rounded-full")
+    .borderWidth(2)
+    .borderColor("@{item.hasUnseenStory ? '#e1306c' : '#dbdbdb'}")
+
+    Text("@{item.user.username}")
+        .tw("text-xs text-gray-800 mt-1 w-full text-center truncate")
+}
+.tw("items-center py-1 px-1 w-20 shrink-0 cursor-pointer")
+.onClick(@router.push, to: "/story/@{item.id}")

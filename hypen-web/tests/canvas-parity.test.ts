@@ -30,7 +30,12 @@ beforeAll(async () => {
   // The Taffy path is what the production renderer uses; the fallback is
   // covered by canvas-layout.test.ts. We want to assert the production path
   // matches the engine's expectations.
-  await initTaffyLayout();
+  const ready = await initTaffyLayout();
+  if (!ready) {
+    throw new Error(
+      "Taffy failed to initialise — these tests would silently run the JS fallback layout and assert wrong numbers.",
+    );
+  }
 });
 
 class MockCtx {

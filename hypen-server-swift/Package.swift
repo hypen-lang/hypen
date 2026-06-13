@@ -25,15 +25,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
     ],
     targets: [
-        // The Rust engine ships as a pre-built XCFramework so consumers
-        // don't need a Rust toolchain. CI rebuilds for every release and
-        // rewrites the URL + checksum below before tagging.
-        //
-        // For local development, run scripts/build-xcframework.sh and
-        // switch this target to `.binaryTarget(name:..., path: "hypen_engineFFI.xcframework")`.
-        .binaryTarget(
+        .systemLibrary(
             name: "hypen_engineFFI",
-            path: "hypen_engineFFI.xcframework"
+            path: "Sources/hypen_engineFFI"
         ),
         .target(
             name: "HypenEngine",

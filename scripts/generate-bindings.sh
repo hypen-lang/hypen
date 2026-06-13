@@ -41,7 +41,7 @@ fi
 # Generate Kotlin bindings
 echo ""
 echo -e "${GREEN}Generating Kotlin bindings...${NC}"
-cargo run --bin uniffi-bindgen --features uniffi -- generate \
+cargo run --bin uniffi-bindgen --features uniffi-cli -- generate \
     --library "$LIB_PATH" \
     --language kotlin \
     --out-dir "$ROOT_DIR/hypen-kotlin/src/main/kotlin"
@@ -51,7 +51,7 @@ echo -e "${GREEN}✓ Kotlin bindings generated at hypen-kotlin/src/main/kotlin${
 if [ -d "$ROOT_DIR/hypen-server-swift" ]; then
     echo ""
     echo -e "${GREEN}Generating Swift bindings...${NC}"
-    cargo run --bin uniffi-bindgen --features uniffi -- generate \
+    cargo run --bin uniffi-bindgen --features uniffi-cli -- generate \
         --library "$LIB_PATH" \
         --language swift \
         --out-dir "$ROOT_DIR/hypen-server-swift/generated-bindings"

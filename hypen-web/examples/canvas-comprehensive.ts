@@ -13,7 +13,7 @@
 import { Engine } from "../packages/web-engine/src/engine.js";
 import { app } from "../packages/core/src/app.js";
 import { HypenModuleInstance } from "../packages/core/src/app.js";
-import { createHypenClient } from "../packages/web/src/canvas/index.js";
+import { CanvasRenderer } from "../packages/web/src/canvas/index.js";
 
 // Define state
 type DemoState = {
@@ -406,8 +406,8 @@ async function main() {
   await engine.init();
   console.log("Engine initialized");
 
-  // Create canvas renderer + wire patches in one call
-  createHypenClient(canvas, engine, {
+  // Create canvas renderer
+  const renderer = new CanvasRenderer(canvas, engine, {
     devicePixelRatio: window.devicePixelRatio,
     backgroundColor: "#ffffff",
     enableAccessibility: true,
@@ -418,6 +418,12 @@ async function main() {
   });
 
   console.log("Canvas renderer created");
+
+  // Set render callback
+  engine.setRenderCallback((patches) => {
+    console.log(`Applying ${patches.length} patches`);
+    renderer.applyPatches(patches);
+  });
 
   // Create module instance
   const instance = new HypenModuleInstance(engine, demoModule);

@@ -1,0 +1,81 @@
+module UserProfile {
+    Column {
+        Row {
+            Button {
+                Text("←")
+                    .tw("text-xl")
+            }
+            .onClick(@router.push, to: "/")
+            .tw("bg-transparent p-2")
+
+            Text("@{state.viewedUser.username}")
+                .tw("text-base font-semibold flex-1 text-center")
+
+            Column {}
+                .tw("w-10")
+        }
+        .tw("py-2 px-2 items-center bg-white border-b border-gray-200")
+
+        Row {
+            Image(src: "@{state.viewedUser.avatarUrl}")
+                .tw("size-20 rounded-full")
+
+            Row {
+                Column {
+                    Text("@{state.viewedUser.postsCount}")
+                        .tw("text-base font-bold text-center")
+                    Text("Posts")
+                        .tw("text-sm text-center")
+                }
+                .tw("flex-1 items-center")
+
+                Column {
+                    Text("@{state.viewedUser.followersCount}")
+                        .tw("text-base font-bold text-center")
+                    Text("Followers")
+                        .tw("text-sm text-center")
+                }
+                .tw("flex-1 items-center")
+
+                Column {
+                    Text("@{state.viewedUser.followingCount}")
+                        .tw("text-base font-bold text-center")
+                    Text("Following")
+                        .tw("text-sm text-center")
+                }
+                .tw("flex-1 items-center")
+            }
+            .tw("flex-1 justify-around")
+        }
+        .tw("py-5 px-4 items-center bg-white")
+
+        Column {
+            Text("@{state.viewedUser.displayName}")
+                .tw("text-sm font-semibold")
+            If(condition: "@{state.viewedUser.bio}") {
+                Text("@{state.viewedUser.bio}")
+                    .tw("text-sm")
+            }
+        }
+        .tw("px-4 pb-3 bg-white")
+
+        Button {
+            Text("@{state.viewedUser.isFollowing ? 'Following' : 'Follow'}")
+                .tw("text-sm font-semibold")
+                .color("@{state.viewedUser.isFollowing ? '#262626' : '#ffffff'}")
+        }
+        .onClick(@actions.toggleFollow)
+        .tw("mx-4 mb-4 p-1.5 rounded-md items-center")
+        .backgroundColor("@{state.viewedUser.isFollowing ? '#efefef' : '#0095f6'}")
+
+        List(@state.viewedUser.posts, key: "id") {
+            Image(src: "@{item.imageUrl}")
+                .width(120)
+                .height(120)
+                .objectFit("cover")
+                .tw("p-px")
+        }
+        .tw("flex-1")
+    }
+    .tw("flex-1 bg-white")
+}

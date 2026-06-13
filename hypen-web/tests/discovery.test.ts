@@ -220,7 +220,7 @@ Text('Counter')`
         patterns: ["folder"],
       });
 
-      expect(code).toContain("FooterModule = app.defineState({}).build()");
+      expect(code).toContain('FooterModule = app.defineState({}, { name: "Footer" }).build()');
     });
 
     test("generates import statements for modules", async () => {

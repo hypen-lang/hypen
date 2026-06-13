@@ -158,6 +158,7 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
         if let Some(color) = crate::colors::COLORS.get(color_name) {
             let transparent = make_transparent(color);
             return Some(vec![
+                CssProperty::new("--tw-gradient-via", color),
                 CssProperty::new("--tw-gradient-to", &transparent),
                 CssProperty::new(
                     "--tw-gradient-stops",

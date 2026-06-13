@@ -18,7 +18,6 @@
     // the program via the paths map, and rootDir then rejects those
     // files as "not under rootDir"). The build config
     // (tsconfig.build.json) still sets rootDir for declaration emission.
-    "baseUrl": ".",
     "paths": {
       "@hypen-space/core": ["../core/src/index.ts"],
       // Non-standard export: see root tsconfig.json for rationale.

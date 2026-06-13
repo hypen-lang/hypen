@@ -66,6 +66,8 @@ type Conversation struct {
 type PostThumbnail struct {
 	ID       string `json:"id"`
 	ImageUrl string `json:"imageUrl"`
+	Username string `json:"username"`
+	Caption  string `json:"caption"`
 }
 
 // ViewedUser is a user profile being viewed with their posts.

@@ -14,8 +14,6 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -177,44 +175,55 @@ fun GalleryBrowser(
         }
     }
 
-    // When the user is *inside* an app, the toolbar starts collapsed as a pill
-    // hovering over the Hypen view (max screen real estate for the rendered
-    // app). Tap the pill to expand into the full toolbar; submitting a URL or
-    // tapping outside collapses back. Home / QR screens never use the pill —
-    // there's no app underneath to hide behind.
-    var isToolbarExpanded by remember { mutableStateOf(false) }
-
-    // Reset to collapsed whenever we enter the App screen (or switch URLs)
-    // so each new connection starts with the rendered app full-bleed.
-    LaunchedEffect(currentScreen) {
-        if (currentScreen is BrowserScreen.App) isToolbarExpanded = false
-    }
-
-    val showFullToolbar = !isFullscreen && (currentScreen !is BrowserScreen.App || isToolbarExpanded)
-    val showPill = !isFullscreen && currentScreen is BrowserScreen.App && !isToolbarExpanded
-
     Box(modifier = Modifier.fillMaxSize()) {
-        // Main content fills the full screen — toolbar / pill float on top.
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .then(
-                    if (!isFullscreen) {
-                        Modifier.navigationBarsPadding()
-                    } else {
-                        Modifier
-                    }
+        Column(modifier = Modifier.fillMaxSize()) {
+            // Browser toolbar (hidden in fullscreen)
+            AnimatedVisibility(
+                visible = !isFullscreen,
+                enter = slideInVertically { -it },
+                exit = slideOutVertically { -it },
+            ) {
+                BrowserToolbar(
+                    currentUrl = currentUrl,
+                    isConnected = isConnected,
+                    isLoading = isLoading,
+                    canGoBack = canGoBack,
+                    isFullscreen = isFullscreen,
+                    onUrlSubmit = { url -> connectToUrl(url) },
+                    onBackClick = { goBack() },
+                    onHomeClick = { goHome() },
+                    onRefreshClick = {
+                        if (currentScreen is BrowserScreen.App) {
+                            isConnected = false
+                            isLoading = true
+                            refreshKey++
+                        }
+                    },
+                    onScanQrClick = { navigateTo(BrowserScreen.QRScanner) },
+                    onFullscreenToggle = { isFullscreen = !isFullscreen },
+                    modifier = Modifier.statusBarsPadding(),
                 )
-        ) {
-            when (val screen = currentScreen) {
-                is BrowserScreen.Home -> {
-                    // Push Home content below the floating toolbar so it's not
-                    // hidden behind the URL bar.
-                    Column(modifier = Modifier.fillMaxSize()) {
-                        Spacer(modifier = Modifier.height(56.dp).statusBarsPadding())
+            }
+
+            // Main content
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(
+                        if (!isFullscreen) {
+                            Modifier.navigationBarsPadding()
+                        } else {
+                            Modifier
+                        }
+                    )
+            ) {
+                when (val screen = currentScreen) {
+                    is BrowserScreen.Home -> {
                         HomeScreen(
                             recentApps = recentApps,
-                            onAppClick = { app -> connectToUrl(app.url, app.name) },
+                            onAppClick = { app ->
+                                connectToUrl(app.url, app.name)
+                            },
                             onDeleteApp = { app ->
                                 appStorage.removeApp(app.id)
                                 recentApps = appStorage.getRecentApps()
@@ -223,115 +232,37 @@ fun GalleryBrowser(
                             modifier = Modifier.fillMaxSize()
                         )
                     }
-                }
 
-                is BrowserScreen.QRScanner -> {
-                    QRScannerScreen(
-                        onQRCodeScanned = { scannedUrl -> connectToUrl(scannedUrl) },
-                        onBack = { goBack() },
-                        modifier = Modifier.fillMaxSize()
-                    )
-                }
-
-                is BrowserScreen.App -> {
-                    // key() forces a fresh HypenAppContent instance on refresh,
-                    // which tears down the existing WebSocket and reconnects.
-                    key(screen.url, refreshKey) {
-                        HypenAppContent(
-                            url = screen.url,
-                            onConnected = {
-                                isConnected = true
-                                isLoading = false
+                    is BrowserScreen.QRScanner -> {
+                        QRScannerScreen(
+                            onQRCodeScanned = { scannedUrl ->
+                                connectToUrl(scannedUrl)
                             },
-                            onError = {
-                                isConnected = false
-                                isLoading = false
-                            },
+                            onBack = { goBack() },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
+
+                    is BrowserScreen.App -> {
+                        // key() forces a fresh HypenAppContent instance on refresh, which
+                        // tears down the existing WebSocket and reconnects cleanly.
+                        key(screen.url, refreshKey) {
+                            HypenAppContent(
+                                url = screen.url,
+                                onConnected = {
+                                    isConnected = true
+                                    isLoading = false
+                                },
+                                onError = {
+                                    isConnected = false
+                                    isLoading = false
+                                },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
                 }
             }
-        }
-
-        // Floating pill — collapsed default for the App screen.
-        AnimatedVisibility(
-            visible = showPill,
-            enter = slideInVertically { -it },
-            exit = slideOutVertically { -it },
-            modifier = Modifier
-                .align(Alignment.TopCenter)
-                .statusBarsPadding()
-                .padding(top = 6.dp),
-        ) {
-            BrowserPill(
-                currentUrl = currentUrl,
-                isConnected = isConnected,
-                onTap = { isToolbarExpanded = true },
-            )
-        }
-
-        // Full toolbar — shown on Home/QR by default and on App when expanded.
-        AnimatedVisibility(
-            visible = showFullToolbar,
-            enter = slideInVertically { -it },
-            exit = slideOutVertically { -it },
-            modifier = Modifier.align(Alignment.TopCenter),
-        ) {
-            BrowserToolbar(
-                currentUrl = currentUrl,
-                isConnected = isConnected,
-                isLoading = isLoading,
-                canGoBack = canGoBack,
-                isFullscreen = isFullscreen,
-                onUrlSubmit = { url ->
-                    connectToUrl(url)
-                    // connectToUrl flips currentScreen to App, which the
-                    // LaunchedEffect above will re-collapse — but be
-                    // explicit so it works for same-URL resubmits too.
-                    isToolbarExpanded = false
-                },
-                onBackClick = {
-                    isToolbarExpanded = false
-                    goBack()
-                },
-                onHomeClick = {
-                    isToolbarExpanded = false
-                    goHome()
-                },
-                onRefreshClick = {
-                    if (currentScreen is BrowserScreen.App) {
-                        isConnected = false
-                        isLoading = true
-                        refreshKey++
-                    }
-                    isToolbarExpanded = false
-                },
-                onScanQrClick = {
-                    isToolbarExpanded = false
-                    navigateTo(BrowserScreen.QRScanner)
-                },
-                onFullscreenToggle = {
-                    isFullscreen = !isFullscreen
-                    isToolbarExpanded = false
-                },
-                modifier = Modifier.statusBarsPadding(),
-            )
-        }
-
-        // Tap anywhere outside the expanded toolbar (over the rendered app)
-        // to collapse it back into the pill. Sized to cover only the area
-        // *below* the toolbar so we don't intercept toolbar taps.
-        if (currentScreen is BrowserScreen.App && isToolbarExpanded) {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(top = 80.dp)  // approx. height of toolbar + status bar
-                    .clickable(
-                        interactionSource = remember { MutableInteractionSource() },
-                        indication = null,
-                    ) { isToolbarExpanded = false }
-            )
         }
 
         // Exit fullscreen hint (shows briefly when entering fullscreen)

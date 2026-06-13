@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const avatarHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("div");
+  create(): HTMLElement {
+    const el = document.createElement("div");
     el.dataset.hypenType = "avatar";
     el.style.display = "inline-flex";
     el.style.alignItems = "center";
@@ -23,11 +23,10 @@ export const avatarHandler: ComponentHandler = {
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    const doc = el.ownerDocument as Document;
     // Image source - support named arg with .0 suffix, positional arg, or plain name
     const src = props["src.0"] || props["0"] || props.src || props.source;
     if (src !== undefined) {
-      const img = doc.createElement("img");
+      const img = document.createElement("img");
       img.src = String(src);
       img.style.width = "100%";
       img.style.height = "100%";

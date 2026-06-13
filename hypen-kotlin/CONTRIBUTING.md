@@ -14,8 +14,8 @@ Thank you for your interest in contributing to the Hypen Kotlin SDK! This docume
 
 ```bash
 # Clone the repository
-git clone https://github.com/hypen-lang/hypen.git
-cd hypen/hypen-kotlin
+git clone https://github.com/hypen-space/hypen-engine-rs.git
+cd hypen-engine-rs/hypen-kotlin
 
 # Build the library
 ./gradlew build

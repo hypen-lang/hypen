@@ -513,8 +513,15 @@ fn test_list_creates_wrapper_with_foreach_child() {
 
     match &ir_node {
         IRNode::Element(element) => {
-            assert_eq!(element.element_type, "List", "Wrapper should be a List element");
-            assert_eq!(element.ir_children.len(), 1, "Should have one ForEach IR child");
+            assert_eq!(
+                element.element_type, "List",
+                "Wrapper should be a List element"
+            );
+            assert_eq!(
+                element.ir_children.len(),
+                1,
+                "Should have one ForEach IR child"
+            );
             match &element.ir_children[0] {
                 IRNode::ForEach {
                     source, item_name, ..
@@ -523,7 +530,10 @@ fn test_list_creates_wrapper_with_foreach_child() {
                     assert_eq!(source.path, vec!["todos"]);
                     assert_eq!(item_name, "item");
                 }
-                _ => panic!("Expected ForEach IR child, got {:?}", element.ir_children[0]),
+                _ => panic!(
+                    "Expected ForEach IR child, got {:?}",
+                    element.ir_children[0]
+                ),
             }
         }
         _ => panic!(
@@ -560,7 +570,13 @@ fn test_foreach_reconciliation_add_items() {
         module_scope: None,
     };
 
-    patches.extend(reconcile_ir(&mut tree, &ir_node, None, &initial_state, &mut deps));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &ir_node,
+        None,
+        &initial_state,
+        &mut deps,
+    ));
     let node_id = tree.root().expect("Should have root");
 
     // Now update with 3 items
@@ -573,7 +589,9 @@ fn test_foreach_reconciliation_add_items() {
     });
 
     let mut update_patches = Vec::new();
-    update_patches.extend(reconcile_ir(&mut tree, &ir_node, None, &new_state, &mut deps));
+    update_patches.extend(reconcile_ir(
+        &mut tree, &ir_node, None, &new_state, &mut deps,
+    ));
 
     // Should have generated create patches for the new item
     let container = tree.get(node_id).unwrap();
@@ -605,7 +623,13 @@ fn test_conditional_reconciliation_branch_change() {
         module_scope: None,
     };
 
-    patches.extend(reconcile_ir(&mut tree, &ir_node, None, &initial_state, &mut deps));
+    patches.extend(reconcile_ir(
+        &mut tree,
+        &ir_node,
+        None,
+        &initial_state,
+        &mut deps,
+    ));
     let node_id = tree.root().expect("Should have root");
 
     // Verify initial render
@@ -617,7 +641,9 @@ fn test_conditional_reconciliation_branch_change() {
     let new_state = json!({ "status": "ready" });
 
     let mut update_patches = Vec::new();
-    update_patches.extend(reconcile_ir(&mut tree, &ir_node, None, &new_state, &mut deps));
+    update_patches.extend(reconcile_ir(
+        &mut tree, &ir_node, None, &new_state, &mut deps,
+    ));
 
     // Should have removed Spinner and created Content
     let container = tree.get(node_id).unwrap();
@@ -1349,7 +1375,9 @@ fn test_conditional_reconciliation_grow_children() {
     // Switch to "detailed" mode
     let new_state = json!({ "mode": "detailed" });
     let mut update_patches = Vec::new();
-    update_patches.extend(reconcile_ir(&mut tree, &ir_node, None, &new_state, &mut deps));
+    update_patches.extend(reconcile_ir(
+        &mut tree, &ir_node, None, &new_state, &mut deps,
+    ));
 
     let container = tree.get(node_id).unwrap();
     assert_eq!(container.children.len(), 2, "Should now have 2 children");
@@ -1421,7 +1449,9 @@ fn test_conditional_reconciliation_shrink_children() {
     // Switch to "simple" mode
     let new_state = json!({ "mode": "simple" });
     let mut update_patches = Vec::new();
-    update_patches.extend(reconcile_ir(&mut tree, &ir_node, None, &new_state, &mut deps));
+    update_patches.extend(reconcile_ir(
+        &mut tree, &ir_node, None, &new_state, &mut deps,
+    ));
 
     let container = tree.get(node_id).unwrap();
     assert_eq!(container.children.len(), 1, "Should now have 1 child");
@@ -1469,7 +1499,9 @@ fn test_conditional_reconciliation_to_no_match() {
     // Switch to unmatched value
     let new_state = json!({ "status": "unknown" });
     let mut update_patches = Vec::new();
-    update_patches.extend(reconcile_ir(&mut tree, &ir_node, None, &new_state, &mut deps));
+    update_patches.extend(reconcile_ir(
+        &mut tree, &ir_node, None, &new_state, &mut deps,
+    ));
 
     assert_eq!(
         tree.get(node_id).unwrap().children.len(),
@@ -1520,7 +1552,9 @@ fn test_conditional_reconciliation_tab_switch_reuses_structure() {
     // Switch to "settings" tab
     let new_state = json!({ "tab": "settings" });
     let mut update_patches = Vec::new();
-    update_patches.extend(reconcile_ir(&mut tree, &ir_node, None, &new_state, &mut deps));
+    update_patches.extend(reconcile_ir(
+        &mut tree, &ir_node, None, &new_state, &mut deps,
+    ));
 
     // The Column should be reconciled (same type), not removed+recreated
     let container = tree.get(node_id).unwrap();

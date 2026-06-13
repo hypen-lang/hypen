@@ -76,8 +76,6 @@ export class RerenderTracker {
    * Create or update the heatmap overlay for an element
    */
   private updateHeatmap(id: string, element: HTMLElement, renderCount: number, patchType: string): void {
-    const doc = element.ownerDocument as Document;
-    const win = doc.defaultView ?? window;
     // Calculate opacity based on render count (increment by heatmapIncrement% each time)
     const opacity = Math.min(
       (renderCount * this.config.heatmapIncrement) / 100,
@@ -87,7 +85,7 @@ export class RerenderTracker {
     log.debug(`Updating heatmap for ${id}, count: ${renderCount}, opacity: ${opacity}`);
 
     // For inline elements or text, use a simpler approach: background color + outline
-    const isInline = win.getComputedStyle(element).display.includes('inline');
+    const isInline = window.getComputedStyle(element).display.includes('inline');
 
     if (isInline || element.tagName === 'SPAN') {
       // Store original styles if not already stored
@@ -107,8 +105,8 @@ export class RerenderTracker {
       element.setAttribute('data-hypen-renders', `${renderCount}× ${patchType}`);
 
       // Add CSS for the badge if not already added
-      if (!doc.getElementById('hypen-debug-styles')) {
-        const style = doc.createElement('style');
+      if (!document.getElementById('hypen-debug-styles')) {
+        const style = document.createElement('style');
         style.id = 'hypen-debug-styles';
         style.textContent = `
           [data-hypen-renders]::before {
@@ -129,7 +127,7 @@ export class RerenderTracker {
             text-shadow: none;
           }
         `;
-        doc.head.appendChild(style);
+        document.head.appendChild(style);
       }
 
       // Store in overlays map for cleanup
@@ -150,7 +148,7 @@ export class RerenderTracker {
       let overlay = this.overlays.get(id);
 
       if (!overlay) {
-        overlay = doc.createElement("div");
+        overlay = document.createElement("div");
         overlay.className = "hypen-debug-overlay";
         overlay.style.cssText = `
           position: absolute;
@@ -173,7 +171,7 @@ export class RerenderTracker {
           visibility: visible !important;
         `;
 
-        const currentPosition = win.getComputedStyle(element).position;
+        const currentPosition = window.getComputedStyle(element).position;
         if (currentPosition === 'static') {
           element.style.position = 'relative';
         }

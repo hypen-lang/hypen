@@ -7,9 +7,7 @@ use crate::{
     ir::{NodeId, Value},
     lifecycle::ModuleInstance,
     reactive::{DependencyGraph, Scheduler},
-    reconcile::{
-        evaluate_binding, reconcile_ir_node_impl, InstanceTree, Patch, ReconcileCtx,
-    },
+    reconcile::{evaluate_binding, reconcile_ir_node_impl, InstanceTree, Patch, ReconcileCtx},
 };
 
 /// Render only dirty nodes (optimized for state changes)
@@ -19,7 +17,14 @@ pub fn render_dirty_nodes(
     tree: &mut InstanceTree,
     module: Option<&ModuleInstance>,
 ) -> Vec<Patch> {
-    render_dirty_nodes_full(scheduler, tree, module, &mut DependencyGraph::new(), None, None)
+    render_dirty_nodes_full(
+        scheduler,
+        tree,
+        module,
+        &mut DependencyGraph::new(),
+        None,
+        None,
+    )
 }
 
 /// Render only dirty nodes with data source context
@@ -29,7 +34,14 @@ pub fn render_dirty_nodes_with_data_sources(
     module: Option<&ModuleInstance>,
     data_sources: Option<&indexmap::IndexMap<String, serde_json::Value>>,
 ) -> Vec<Patch> {
-    render_dirty_nodes_full(scheduler, tree, module, &mut DependencyGraph::new(), data_sources, None)
+    render_dirty_nodes_full(
+        scheduler,
+        tree,
+        module,
+        &mut DependencyGraph::new(),
+        data_sources,
+        None,
+    )
 }
 
 /// Render only dirty nodes with dependency tracking for List reconciliation
@@ -84,13 +96,18 @@ pub fn render_dirty_nodes_full(
 
         if is_list_node {
             // For List nodes, we need to re-reconcile the entire list
-            render_dirty_list(node_id, tree, state, &mut patches, dependencies, data_sources);
+            render_dirty_list(
+                node_id,
+                tree,
+                state,
+                &mut patches,
+                dependencies,
+                data_sources,
+            );
         } else if is_control_flow {
             // For control flow nodes (ForEach/Conditional from IRNode path),
             // re-reconcile the entire subtree using the stored IR template.
-            let ir_template = tree
-                .get(node_id)
-                .and_then(|n| n.ir_node_template.clone());
+            let ir_template = tree.get(node_id).and_then(|n| n.ir_node_template.clone());
             if let Some(template) = ir_template {
                 let mut ctx = ReconcileCtx {
                     tree,

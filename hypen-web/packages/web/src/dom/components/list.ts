@@ -5,8 +5,8 @@
 import type { ComponentHandler } from "./index.js";
 
 export const listHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("div");
+  create(): HTMLElement {
+    const el = document.createElement("div");
     el.style.display = "flex";
     el.style.flexDirection = "column"; // Default to vertical (like Android)
     // Default to flex-start to match Android/iOS behavior

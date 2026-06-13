@@ -10,7 +10,25 @@ export {
 } from "./worker.js";
 export {
   HypenDurableObject,
+  CFTransport,
+  mergeComponentTemplates,
   type HypenDurableObjectConfig,
   type DurableObjectState,
 } from "./durable-object.js";
+export {
+  createCFEngine,
+  installCFPortable,
+  makeCFPortableImpl,
+  type CFWasmExports,
+} from "./engine.js";
+export {
+  defineHypenWorker,
+  type DefineHypenWorkerOptions,
+} from "./define-worker.js";
+export {
+  buildClientPages,
+  servePage,
+  type ClientBundle,
+  type ClientPagesConfig,
+} from "./client-pages.js";
 export type { StateStore } from "@hypen-space/core/persistence";

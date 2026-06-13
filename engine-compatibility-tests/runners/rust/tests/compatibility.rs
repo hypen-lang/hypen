@@ -155,7 +155,10 @@ fn should_skip(tc: &TestCase) -> Option<String> {
     if let Some(ref skip) = tc.skip {
         if let Some(ref sdks) = skip.sdks {
             if sdks.iter().any(|s| s == "rust") {
-                return skip.reason.clone().or_else(|| Some("skipped for rust".into()));
+                return skip
+                    .reason
+                    .clone()
+                    .or_else(|| Some("skipped for rust".into()));
             }
         }
     }
@@ -199,9 +202,7 @@ fn should_skip(tc: &TestCase) -> Option<String> {
 /// f64 representations match (e.g., `100` == `100.0`).
 fn json_values_equal(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(an), Value::Number(bn)) => {
-            an.as_f64() == bn.as_f64()
-        }
+        (Value::Number(an), Value::Number(bn)) => an.as_f64() == bn.as_f64(),
         (Value::Object(am), Value::Object(bm)) => {
             am.len() == bm.len()
                 && am
@@ -210,7 +211,10 @@ fn json_values_equal(a: &Value, b: &Value) -> bool {
         }
         (Value::Array(aa), Value::Array(ba)) => {
             aa.len() == ba.len()
-                && aa.iter().zip(ba.iter()).all(|(av, bv)| json_values_equal(av, bv))
+                && aa
+                    .iter()
+                    .zip(ba.iter())
+                    .all(|(av, bv)| json_values_equal(av, bv))
         }
         _ => a == b,
     }
@@ -335,7 +339,11 @@ fn parse_source_to_ir(name: &str, source: &str) -> IRNode {
 fn run_fixture(tc: &TestCase) {
     // Set up engine
     let mut engine = Engine::new();
-    let mut current_state = tc.input.initial_state.clone().unwrap_or(Value::Object(Default::default()));
+    let mut current_state = tc
+        .input
+        .initial_state
+        .clone()
+        .unwrap_or(Value::Object(Default::default()));
 
     // Set up module
     if let Some(ref module_cfg) = tc.input.module {
@@ -377,7 +385,16 @@ fn run_fixture(tc: &TestCase) {
             engine.render_ir_node(&ir_node);
 
             let patches = collected_patches.lock().unwrap();
-            assert_expected(&tc.name, "single", &patches, expected.patch_count, expected.patch_types.as_deref(), expected.patches.as_deref(), None, None);
+            assert_expected(
+                &tc.name,
+                "single",
+                &patches,
+                expected.patch_count,
+                expected.patch_types.as_deref(),
+                expected.patches.as_deref(),
+                None,
+                None,
+            );
             return;
         }
     }

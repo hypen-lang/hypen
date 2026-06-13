@@ -121,9 +121,8 @@ pub(crate) fn reconcile_iterable_children(
                 // Re-attach the matched child and reconcile in place against
                 // the freshly substituted IR (so item-binding values get
                 // refreshed even when keys match).
-                let substituted = replace_ir_node_item_bindings(
-                    template, item, item_index, item_name, &item_key,
-                );
+                let substituted =
+                    replace_ir_node_item_bindings(template, item, item_index, item_name, &item_key);
                 if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
                     parent_node.children.push_back(old_id);
                 }
@@ -134,9 +133,8 @@ pub(crate) fn reconcile_iterable_children(
                 // No keyed match but an unkeyed slot is free — reuse it
                 // positionally. This is the path for templates whose items
                 // don't carry stable identity.
-                let substituted = replace_ir_node_item_bindings(
-                    template, item, item_index, item_name, &item_key,
-                );
+                let substituted =
+                    replace_ir_node_item_bindings(template, item, item_index, item_name, &item_key);
                 if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
                     parent_node.children.push_back(old_id);
                 }
@@ -146,9 +144,8 @@ pub(crate) fn reconcile_iterable_children(
             } else {
                 // Brand new child — create_ir_node_tree_impl will append it
                 // to the parent's children list and emit Create+Insert.
-                let substituted = replace_ir_node_item_bindings(
-                    template, item, item_index, item_name, &item_key,
-                );
+                let substituted =
+                    replace_ir_node_item_bindings(template, item, item_index, item_name, &item_key);
                 create_ir_node_tree_impl(ctx, &substituted, Some(parent_id), false)
             };
 

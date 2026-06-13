@@ -119,13 +119,6 @@ export function RunNativeMenu({ overrideUrl }: { overrideUrl?: string } = {}) {
         throw new Error(body?.message ?? body?.error ?? `status ${res.status}`);
       }
       setLastLaunched(d.name);
-      // Auto-open Test Mode in a new window with this device's mirror
-      // pre-attached. Skip if we're already inside the test-mode page —
-      // that page handles `?device=` itself, no need for a second window.
-      if (typeof window !== "undefined" && window.location.pathname !== "/test-mode") {
-        const qs = new URLSearchParams({ device: `${d.platform}:${d.id}` });
-        window.open(`/test-mode?${qs.toString()}`, "_blank", "noopener,noreferrer");
-      }
       setTimeout(() => setOpen(false), 1500);
     } catch (e: any) {
       setError(e?.message ?? String(e));

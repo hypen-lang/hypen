@@ -132,14 +132,20 @@ func buildSearchModule(allExplorePosts []PostThumbnail) *core.ModuleDefinition {
 	}).
 		Name("Search").
 		OnAction("search", func(ctx core.TypedActionContext[SearchState]) {
-			query := strings.ToLower(ctx.State.SearchQuery)
+			payloadMap, _ := ctx.Action.Payload.(map[string]any)
+			raw, _ := payloadMap["value"].(string)
+			if raw == "" {
+				raw, _ = payloadMap["input"].(string)
+			}
+			query := strings.ToLower(raw)
 			if query == "" {
 				ctx.State.ExplorePosts = allExplorePosts
 				return
 			}
 			filtered := make([]PostThumbnail, 0)
 			for _, p := range allExplorePosts {
-				if strings.Contains(strings.ToLower(p.ImageUrl), query) {
+				if strings.Contains(strings.ToLower(p.Username), query) ||
+					strings.Contains(strings.ToLower(p.Caption), query) {
 					filtered = append(filtered, p)
 				}
 			}

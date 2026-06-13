@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-social",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/*.sql", "**/*.hypen", "**/*.svg", "**/dist/client/*.js"], "fallthrough": true }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "SOCIAL_DO", "class_name": "SocialDO" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["SocialDO"] }
+  ],
+
+  // Observability was enabled in the CF dashboard; pin it in code so
+  // the next deploy doesn't silently revert it. Lets `wrangler tail`
+  // and the dashboard logs view stay populated.
+  "observability": {
+    "enabled": true
+  }
+}

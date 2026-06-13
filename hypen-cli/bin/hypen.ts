@@ -91,8 +91,6 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
 `;
 
 interface Config {
-  /** "file-based" → watch components dir; "server-based" → exec entry script. */
-  layout?: "file-based" | "server-based";
   components: string;
   entry: string;
   port?: number;
@@ -108,7 +106,6 @@ async function loadConfig(): Promise<Config> {
       const raw = readFileSync(configJsonPath, "utf-8");
       const config = JSON.parse(raw);
       const parsedConfig: Config = {
-        layout: config.layout,
         components: config.components || "./src/components",
         entry: config.entry || "App",
         port: config.port,
@@ -312,37 +309,8 @@ async function ensureProjectDeps() {
 async function devServer(options: { port?: number; debug?: boolean }) {
   await ensureProjectDeps();
   const config = await loadConfig();
-
-  // Server-based projects ARE the dev server — `src/app.ts` (or whatever
-  // `entry` points at) registers modules inline and starts RemoteServer.
-  // Spawn it under `bun --hot` instead of running the file-discovery dev
-  // loop, which has nothing to scan.
-  if (config.layout === "server-based" || /\.(ts|js|mjs)$/.test(config.entry)) {
-    const entryPath = resolve(config.entry);
-    if (!existsSync(entryPath)) {
-      console.error(
-        `\n  Error: server-based entry not found: ${entryPath}\n` +
-        `  Check the "entry" field in hypen.json.\n`
-      );
-      process.exit(1);
-    }
-    const port = String(options.port || config.port || 3000);
-    console.log(
-      `\n  ${pink("Hypen Dev Server")} ${dim("(server-based)")}\n` +
-      `  ${dim("Entry:")} ${entryPath}\n` +
-      `  ${dim("Port: ")} ${port}\n`
-    );
-    const child = Bun.spawn({
-      cmd: ["bun", "--hot", entryPath],
-      env: { ...process.env, PORT: port },
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    const code = await child.exited;
-    process.exit(code ?? 0);
-  }
-
   const { dev } = await import("../src/dev.js");
+
   await dev({
     components: config.components,
     entry: config.entry,

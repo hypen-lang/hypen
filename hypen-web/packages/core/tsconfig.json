@@ -14,7 +14,6 @@
     "noUncheckedIndexedAccess": true,
     "noImplicitOverride": true,
     "rootDir": "./src",
-    "baseUrl": ".",
     "paths": {
       "@hypen-space/core": ["./src/index.ts"],
       "@hypen-space/core/*": ["./src/*"]

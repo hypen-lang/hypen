@@ -1,0 +1,49 @@
+module Messages {
+    Column {
+        Row {
+            Button {
+                Text("←")
+                    .tw("text-xl")
+            }
+            .onClick(@router.push, to: "/")
+            .tw("bg-transparent p-2")
+
+            Text("@{state.currentUser.username}")
+                .tw("text-base font-semibold flex-1 text-center")
+
+            Column {}
+                .tw("w-10")
+        }
+        .tw("py-2 px-2 items-center bg-white border-b border-gray-200")
+
+        List(@state.messages, key: "id") {
+            Row {
+                Image(src: "@{item.user.avatarUrl}")
+                    .tw("size-14 rounded-full")
+
+                Column {
+                    Text("@{item.user.username}")
+                        .tw("text-sm font-semibold")
+                    Row {
+                        Text("@{item.lastMessage}")
+                            .tw("text-sm text-gray-400")
+                        Text(" · @{item.timeAgo}")
+                            .tw("text-sm text-gray-400")
+                    }
+                }
+                .tw("pl-3 flex-1")
+
+                Column {
+                    If(condition: "@{item.isUnread}") {
+                        Column {}
+                            .tw("size-2 rounded-full bg-blue-500")
+                    }
+                }
+                .tw("w-4 items-center")
+            }
+            .tw("py-3 px-4 items-center cursor-pointer")
+        }
+        .tw("flex-1")
+    }
+    .tw("flex-1 w-full bg-white")
+}

@@ -1,0 +1,112 @@
+Column {
+    // Avatar and more-button need shrink-0 so the flex-1 username column
+    // doesn't squeeze them to 0 width.
+    Row {
+        Image(src: "@{item.user.avatarUrl}")
+            .tw("w-8 h-8 rounded-full shrink-0")
+
+        Column {
+            Text("@{item.user.username}")
+                .tw("text-sm font-semibold")
+            If(condition: "@{item.location}") {
+                Text("@{item.location}")
+                    .tw("text-xs text-gray-500")
+            }
+        }
+        .tw("flex-1 pl-3")
+
+        Button {
+            Icon(@resources.more-horizontal)
+                .size(20)
+                .color("#262626")
+        }
+        .tw("bg-transparent border-0 p-1 shrink-0")
+        .onClick(@actions.postOptions, postId: "@{item.id}")
+    }
+    .tw("py-2.5 px-4 flex-row items-center")
+
+    Image(src: "@{item.imageUrl}")
+        .width("100%")
+        .aspectRatio("1")
+        .objectFit("cover")
+
+    Row {
+        Row {
+            Button {
+                If(condition: "@{item.isLiked}") {
+                    Icon(@resources.heart)
+                        .size(24)
+                        .color("#ed4956")
+                }
+                If(condition: "@{!item.isLiked}") {
+                    Icon(@resources.heart)
+                        .size(24)
+                        .color("#262626")
+                }
+            }
+            .backgroundColor("transparent")
+            .border("none")
+            .padding(8)
+            .onClick(@actions.toggleLike, postId: "@{item.id}")
+
+            Button {
+                Icon(@resources.message-circle)
+                    .size(24)
+                    .color("#262626")
+            }
+            .backgroundColor("transparent")
+            .border("none")
+            .padding(8)
+            .onClick(@router.push, to: "/comments/@{item.id}")
+
+            Button {
+                Icon(@resources.send)
+                    .size(24)
+                    .color("#262626")
+            }
+            .backgroundColor("transparent")
+            .border("none")
+            .padding(8)
+            .onClick(@actions.sharePost, postId: "@{item.id}")
+        }
+
+        Button {
+            If(condition: "@{item.isSaved}") {
+                Icon(@resources.bookmark)
+                    .size(24)
+                    .color("#262626")
+            }
+            If(condition: "@{!item.isSaved}") {
+                Icon(@resources.bookmark)
+                    .size(24)
+                    .color("#262626")
+            }
+        }
+        .backgroundColor("transparent")
+        .border("none")
+        .padding(8)
+        .onClick(@actions.toggleSave, postId: "@{item.id}")
+    }
+    .tw("py-1 px-3 flex-row justify-between items-center")
+
+    Text("@{item.likesCount} likes")
+        .tw("text-sm font-semibold px-4")
+
+    Row {
+        Text("@{item.user.username}")
+            .tw("text-sm font-semibold pr-1")
+        Text("@{item.caption}")
+            .tw("text-sm")
+    }
+    .tw("py-1 px-4")
+
+    If(condition: "@{item.commentsCount > 0}") {
+        Button {
+            Text("View all @{item.commentsCount} comments")
+                .tw("text-sm text-gray-500")
+        }
+        .tw("bg-transparent border-0 py-1 px-4 self-start")
+        .onClick(@router.push, to: "/comments/@{item.id}")
+    }
+}
+.tw("bg-white border-b border-gray-100 mb-2")

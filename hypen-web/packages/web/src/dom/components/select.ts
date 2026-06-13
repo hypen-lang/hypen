@@ -5,14 +5,13 @@
 import type { ComponentHandler } from "./index.js";
 
 export const selectHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const el = doc.createElement("select");
+  create(): HTMLElement {
+    const el = document.createElement("select");
     el.dataset.hypenType = "select";
     return el as any as HTMLElement;
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    const doc = el.ownerDocument as Document;
     const select = el as HTMLSelectElement;
 
     // Value property
@@ -37,7 +36,7 @@ export const selectHandler: ComponentHandler = {
       
       // Add new options
       props.options.forEach((opt: any) => {
-        const option = doc.createElement("option");
+        const option = document.createElement("option");
         
         if (typeof opt === "string") {
           option.value = opt;

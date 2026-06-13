@@ -5,15 +5,15 @@
 import type { ComponentHandler } from "./index.js";
 
 export const switchHandler: ComponentHandler = {
-  create(doc: Document): HTMLElement {
-    const wrapper = doc.createElement("label");
+  create(): HTMLElement {
+    const wrapper = document.createElement("label");
     wrapper.dataset.hypenType = "switch";
     wrapper.style.display = "inline-flex";
     wrapper.style.alignItems = "center";
     wrapper.style.gap = "8px";
     wrapper.style.cursor = "pointer";
 
-    const input = doc.createElement("input");
+    const input = document.createElement("input");
     input.type = "checkbox";
     input.dataset.hypenSwitch = "true";
     
@@ -28,7 +28,7 @@ export const switchHandler: ComponentHandler = {
     input.style.transition = "background-color 0.2s";
     
     // Add pseudo-element styling via CSS
-    const style = doc.createElement("style");
+    const style = document.createElement("style");
     style.textContent = `
       input[data-hypen-switch="true"]::before {
         content: "";
@@ -55,7 +55,6 @@ export const switchHandler: ComponentHandler = {
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    const doc = el.ownerDocument as Document;
     const input = el.querySelector('input[type="checkbox"]') as HTMLInputElement;
     if (!input) return;
 
@@ -79,7 +78,7 @@ export const switchHandler: ComponentHandler = {
       textNodes.forEach(node => node.remove());
       
       // Add new label text
-      el.appendChild(doc.createTextNode(String(label)));
+      el.appendChild(document.createTextNode(String(label)));
     }
   },
 };

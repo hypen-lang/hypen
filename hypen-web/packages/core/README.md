@@ -91,9 +91,10 @@ const counter = app
 const engine = new Engine();
 await engine.init();
 
-// 3. Mount a renderer (one call wires up patch streaming + actions)
-import { createHypenClient } from "@hypen-space/web/dom";
-const { renderer } = createHypenClient(document.getElementById("app")!, engine);
+// 3. Connect your renderer
+engine.setRenderCallback((patches) => {
+  myRenderer.applyPatches(patches);
+});
 
 // 4. Register the module and render
 engine.setModule("counter", counter.actions, counter.stateKeys, counter.initialState);
@@ -309,12 +310,8 @@ const remote = new RemoteEngine("ws://localhost:3000", {
   autoReconnect: true,
 });
 
-// Mount a renderer once — `createHypenClient` accepts RemoteEngine
-// directly (it picks up `onPatches` automatically).
-import { createHypenClient } from "@hypen-space/web/dom";
-createHypenClient(document.getElementById("app")!, remote);
-
 remote
+  .onPatches((patches) => renderer.applyPatches(patches))
   .onStateUpdate((state) => console.log("Server state:", state))
   .onConnect(() => console.log("Connected"));
 

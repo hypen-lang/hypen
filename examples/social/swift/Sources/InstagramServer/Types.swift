@@ -59,6 +59,8 @@ struct Conversation: Codable, Sendable {
 struct PostThumbnail: Codable, Sendable {
     let id: String
     let imageUrl: String
+    var username: String = ""
+    var caption: String = ""
 }
 
 struct ViewedUser: Codable, Sendable {
@@ -135,3 +137,8 @@ struct StoryState: Codable, Sendable {
 
 struct PostIdPayload: Codable, Sendable { let postId: String }
 struct CommentIdPayload: Codable, Sendable { let commentId: String }
+struct InputValuePayload: Codable, Sendable {
+    let value: String?
+    let input: String?
+    var text: String { value ?? input ?? "" }
+}
