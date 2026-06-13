@@ -11,8 +11,8 @@ categories = ["gui", "web-programming"]
 readme = "README.md"
 
 [dependencies]
-hypen-engine = { version = "0.4.949", path = "../hypen-engine-rs" }
-hypen-parser = { version = "0.4.949", path = "../parser" }
+hypen-engine = { version = "0.5.0", path = "../hypen-engine-rs" }
+hypen-parser = { version = "0.5.0", path = "../parser" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 indexmap = { version = "2.0", features = ["serde"] }

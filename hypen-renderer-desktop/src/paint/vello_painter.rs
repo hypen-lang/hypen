@@ -14,8 +14,10 @@
 //! `tiny_skia::Pixmap`s.
 
 use crate::layout::{ItemKind, LayoutPass, Rect as LayoutRect, TextAlign};
-use crate::style::{Rgba, BORDER_SIDES_ALL, BORDER_SIDE_BOTTOM, BORDER_SIDE_LEFT,
-    BORDER_SIDE_RIGHT, BORDER_SIDE_TOP};
+use crate::style::{
+    Rgba, BORDER_SIDES_ALL, BORDER_SIDE_BOTTOM, BORDER_SIDE_LEFT, BORDER_SIDE_RIGHT,
+    BORDER_SIDE_TOP,
+};
 use crate::text::TextEngine;
 use crate::window::Selection;
 use std::collections::HashMap;
@@ -31,6 +33,11 @@ pub struct InteractionState {
     pub hovered: std::collections::HashSet<String>,
     pub pressed: std::collections::HashSet<String>,
     pub focused: Option<String>,
+    /// `true` when the current focus arrived via the keyboard (Tab) and
+    /// so should show a focus ring — the `:focus-visible` rule. Mouse
+    /// clicks focus without setting this, so clicking a button / tile
+    /// doesn't stamp a blue ring on it (the press feedback is enough).
+    pub focus_visible: bool,
     pub input_selections: HashMap<String, Selection>,
     pub ime_preedit: Option<(String, String)>,
 }
@@ -244,17 +251,10 @@ impl VelloPainter {
                 Some(root_id) => {
                     let start = i;
                     let mut end = i + 1;
-                    while end < items.len()
-                        && items[end].subtree_root.as_deref() == Some(root_id)
-                    {
+                    while end < items.len() && items[end].subtree_root.as_deref() == Some(root_id) {
                         end += 1;
                     }
-                    self.paint_subtree(
-                        &items[start..end],
-                        root_id,
-                        scale_factor,
-                        viewport_rect,
-                    );
+                    self.paint_subtree(&items[start..end], root_id, scale_factor, viewport_rect);
                     i = end;
                 }
             }
@@ -374,10 +374,8 @@ impl VelloPainter {
                 // Split-borrow: `cached.scene` reads `self.subtree_cache`,
                 // `self.scene` is the disjoint mut target.
                 let pushed = push_outer_clip(&mut self.scene, outer_clip);
-                self.scene.append(
-                    &cached.scene,
-                    Some(Affine::translate((0.0, dy as f64))),
-                );
+                self.scene
+                    .append(&cached.scene, Some(Affine::translate((0.0, dy as f64))));
                 if pushed {
                     self.scene.pop_layer();
                 }
@@ -481,16 +479,45 @@ impl VelloPainter {
         // explicit fills.
         let mut background = item.background;
         let mut border_color = item.border.color;
+        let pressed = self.interaction.pressed.contains(&item.node_id);
+        let hovered = self.interaction.hovered.contains(&item.node_id);
+
+        // Declarative `hover:` styling (tw `hover:bg-*` / `hover:border-*`,
+        // expanded by the engine into `backgroundColor:hover` /
+        // `borderColor:hover`). Applies to any hovered item — only
+        // actionables ever land in the `hovered` set, so this naturally
+        // covers Buttons / Links / Cards. Wins over the auto-tint below.
+        if hovered && !pressed {
+            if let Some(bg) = item.hover.background {
+                background = Some(bg);
+            }
+            if let Some(bc) = item.hover.border_color {
+                border_color = bc;
+            }
+        }
+
+        // Automatic pseudo-state tint for Buttons that didn't declare
+        // their own `hover:` style. Buttons with an opaque fill get
+        // lightened / darkened; transparent ones (icon buttons like the
+        // browser toolbar's home / reload / pin) get a subtle neutral
+        // overlay — otherwise hover / press read as nothing at all.
         if matches!(item.kind, ItemKind::Button) {
-            if self.interaction.pressed.contains(&item.node_id) {
-                if let Some(bg) = background.as_mut() {
-                    *bg = darken(*bg, 0.85);
-                }
+            const HOVER_FILL: Rgba = Rgba(100, 116, 139, 28);
+            const PRESS_FILL: Rgba = Rgba(100, 116, 139, 48);
+            let has_fill = background.is_some_and(|b| b.3 > 0);
+            if pressed {
+                background = if has_fill {
+                    background.map(|b| darken(b, 0.85))
+                } else {
+                    Some(PRESS_FILL)
+                };
                 border_color = darken(border_color, 0.7);
-            } else if self.interaction.hovered.contains(&item.node_id) {
-                if let Some(bg) = background.as_mut() {
-                    *bg = lighten(*bg, 1.05);
-                }
+            } else if hovered && item.hover.background.is_none() {
+                background = if has_fill {
+                    background.map(|b| lighten(b, 1.05))
+                } else {
+                    Some(HOVER_FILL)
+                };
             }
         }
 
@@ -607,10 +634,13 @@ impl VelloPainter {
             }
         }
 
-        if self.interaction.focused.as_deref() == Some(&item.node_id) {
-            // Match the item's own corner radius so focus on a circle
-            // (rounded-full Image / Avatar) follows the shape instead
-            // of stamping an awkward 11px-radius rect over it.
+        if self.interaction.focus_visible
+            && self.interaction.focused.as_deref() == Some(&item.node_id)
+        {
+            // Keyboard focus only (`:focus-visible`). Match the item's
+            // own corner radius so focus on a circle (rounded-full
+            // Image / Avatar) follows the shape instead of stamping an
+            // awkward 11px-radius rect over it.
             draw_focus_ring(&mut self.scene, item.rect, scale_factor, radius);
         }
 
@@ -683,6 +713,29 @@ impl VelloPainter {
         let text_x = item.rect.x + pad_x;
         let text_y = item.rect.y + pad_y;
 
+        // An Input is single-line: draw the value/placeholder with NO
+        // wrap and clip overflow to the field. Previously this passed
+        // `Some(inner_w)`, so a long value (e.g. a full URL in the
+        // address bar) wrapped onto a second line — but the caret and
+        // selection below measure single-line (`None`), so the caret
+        // landed at the unwrapped x-offset while the glyphs sat on the
+        // wrapped line. Single-line + clip keeps glyphs and caret on
+        // the same baseline. (Horizontal scroll-to-caret for values
+        // wider than the field is a separate enhancement.)
+        let content_clip = vello::kurbo::Rect::new(
+            text_x as f64,
+            item.rect.y as f64,
+            (text_x + inner_w) as f64,
+            (item.rect.y + item.rect.h) as f64,
+        );
+        self.scene.push_layer(
+            vello::peniko::Fill::NonZero,
+            vello::peniko::BlendMode::default(),
+            1.0,
+            Affine::IDENTITY,
+            &content_clip,
+        );
+
         if value.is_empty() {
             if let Some(p) = placeholder {
                 self.text.draw_text_into_scene(
@@ -692,7 +745,7 @@ impl VelloPainter {
                     text_y,
                     scaled_size,
                     Rgba(0x90, 0x96, 0xa1, 0xff),
-                    Some(inner_w),
+                    None,
                     weight,
                 );
             }
@@ -704,7 +757,7 @@ impl VelloPainter {
                 text_y,
                 scaled_size,
                 color,
-                Some(inner_w),
+                None,
                 weight,
             );
         }
@@ -748,12 +801,9 @@ impl VelloPainter {
                 );
             } else {
                 let caret_offset = sel.head.min(value.len());
-                let (caret_x_offset, _) = self.text.measure_weighted(
-                    &value[..caret_offset],
-                    scaled_size,
-                    None,
-                    weight,
-                );
+                let (caret_x_offset, _) =
+                    self.text
+                        .measure_weighted(&value[..caret_offset], scaled_size, None, weight);
                 fill_rect(
                     &mut self.scene,
                     LayoutRect {
@@ -768,12 +818,9 @@ impl VelloPainter {
             }
             if let Some(pre) = preedit {
                 let caret_offset = sel.head.min(value.len());
-                let (caret_x_offset, _) = self.text.measure_weighted(
-                    &value[..caret_offset],
-                    scaled_size,
-                    None,
-                    weight,
-                );
+                let (caret_x_offset, _) =
+                    self.text
+                        .measure_weighted(&value[..caret_offset], scaled_size, None, weight);
                 self.text.draw_text_into_scene(
                     &mut self.scene,
                     pre,
@@ -784,9 +831,7 @@ impl VelloPainter {
                     None,
                     weight,
                 );
-                let (pre_w, _) =
-                    self.text
-                        .measure_weighted(pre, scaled_size, None, weight);
+                let (pre_w, _) = self.text.measure_weighted(pre, scaled_size, None, weight);
                 fill_rect(
                     &mut self.scene,
                     LayoutRect {
@@ -800,6 +845,9 @@ impl VelloPainter {
                 );
             }
         }
+
+        // Close the single-line content clip pushed at the top.
+        self.scene.pop_layer();
     }
 
     fn draw_image(
@@ -968,13 +1016,7 @@ fn fill_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32) {
     }
 }
 
-fn stroke_rect(
-    scene: &mut Scene,
-    rect: LayoutRect,
-    color: Rgba,
-    radius: f32,
-    width: f32,
-) {
+fn stroke_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32, width: f32) {
     if width <= 0.0 || color.3 == 0 {
         return;
     }
@@ -1001,20 +1043,19 @@ fn stroke_rect(
     }
 }
 
-fn stroke_partial_border(
-    scene: &mut Scene,
-    rect: LayoutRect,
-    color: Rgba,
-    width: f32,
-    sides: u8,
-) {
+fn stroke_partial_border(scene: &mut Scene, rect: LayoutRect, color: Rgba, width: f32, sides: u8) {
     if width <= 0.0 || color.3 == 0 {
         return;
     }
     if sides & BORDER_SIDE_TOP != 0 {
         fill_rect(
             scene,
-            LayoutRect { x: rect.x, y: rect.y, w: rect.w, h: width },
+            LayoutRect {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: width,
+            },
             color,
             0.0,
         );
@@ -1035,7 +1076,12 @@ fn stroke_partial_border(
     if sides & BORDER_SIDE_LEFT != 0 {
         fill_rect(
             scene,
-            LayoutRect { x: rect.x, y: rect.y, w: width, h: rect.h },
+            LayoutRect {
+                x: rect.x,
+                y: rect.y,
+                w: width,
+                h: rect.h,
+            },
             color,
             0.0,
         );
@@ -1102,11 +1148,12 @@ fn draw_icon(
     let transform = Affine::translate((dx, dy)).pre_scale(scale);
 
     for p in paths {
-        let Some(bezpath) = svg_path_to_kurbo(&p.d) else { continue };
+        let Some(bezpath) = svg_path_to_kurbo(&p.d) else {
+            continue;
+        };
 
         let fill_attr = p.fill.as_deref();
-        let fill_disabled =
-            matches!(fill_attr, Some("none") | Some("transparent"));
+        let fill_disabled = matches!(fill_attr, Some("none") | Some("transparent"));
         let fill_color = if fill_disabled {
             None
         } else if matches!(fill_attr, None | Some("currentColor")) {
@@ -1116,19 +1163,12 @@ fn draw_icon(
         };
         if let Some(c) = fill_color {
             if c.3 > 0 {
-                scene.fill(
-                    Fill::NonZero,
-                    transform,
-                    color_to_peniko(c),
-                    None,
-                    &bezpath,
-                );
+                scene.fill(Fill::NonZero, transform, color_to_peniko(c), None, &bezpath);
             }
         }
 
         let stroke_attr = p.stroke.as_deref();
-        let stroke_disabled =
-            matches!(stroke_attr, Some("none") | Some("transparent"));
+        let stroke_disabled = matches!(stroke_attr, Some("none") | Some("transparent"));
         let stroke_color = if stroke_disabled {
             None
         } else if matches!(stroke_attr, Some("currentColor")) {
@@ -1301,27 +1341,51 @@ fn svg_path_to_kurbo(d: &str) -> Option<BezPath> {
         let mut produced_quad_ctrl: Option<(f64, f64)> = None;
         match segment {
             MoveTo { abs, x, y } => {
-                let to = if abs { (x, y) } else { (current.0 + x, current.1 + y) };
+                let to = if abs {
+                    (x, y)
+                } else {
+                    (current.0 + x, current.1 + y)
+                };
                 path.move_to(to);
                 current = to;
                 subpath_start = to;
             }
             LineTo { abs, x, y } => {
-                let to = if abs { (x, y) } else { (current.0 + x, current.1 + y) };
+                let to = if abs {
+                    (x, y)
+                } else {
+                    (current.0 + x, current.1 + y)
+                };
                 path.line_to(to);
                 current = to;
             }
             HorizontalLineTo { abs, x } => {
-                let to = if abs { (x, current.1) } else { (current.0 + x, current.1) };
+                let to = if abs {
+                    (x, current.1)
+                } else {
+                    (current.0 + x, current.1)
+                };
                 path.line_to(to);
                 current = to;
             }
             VerticalLineTo { abs, y } => {
-                let to = if abs { (current.0, y) } else { (current.0, current.1 + y) };
+                let to = if abs {
+                    (current.0, y)
+                } else {
+                    (current.0, current.1 + y)
+                };
                 path.line_to(to);
                 current = to;
             }
-            CurveTo { abs, x1, y1, x2, y2, x, y } => {
+            CurveTo {
+                abs,
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
                 let (c1, c2, to) = if abs {
                     ((x1, y1), (x2, y2), (x, y))
                 } else {
@@ -1340,16 +1404,16 @@ fn svg_path_to_kurbo(d: &str) -> Option<BezPath> {
                 // the previous segment was not a cubic, the reflected
                 // control is the current point itself (per SVG spec).
                 let c1 = match last_cubic_ctrl {
-                    Some((px, py)) => (
-                        2.0 * current.0 - px,
-                        2.0 * current.1 - py,
-                    ),
+                    Some((px, py)) => (2.0 * current.0 - px, 2.0 * current.1 - py),
                     None => current,
                 };
                 let (c2, to) = if abs {
                     ((x2, y2), (x, y))
                 } else {
-                    ((current.0 + x2, current.1 + y2), (current.0 + x, current.1 + y))
+                    (
+                        (current.0 + x2, current.1 + y2),
+                        (current.0 + x, current.1 + y),
+                    )
                 };
                 path.curve_to(c1, c2, to);
                 produced_cubic_ctrl = Some(c2);
@@ -1359,7 +1423,10 @@ fn svg_path_to_kurbo(d: &str) -> Option<BezPath> {
                 let (c, to) = if abs {
                     ((x1, y1), (x, y))
                 } else {
-                    ((current.0 + x1, current.1 + y1), (current.0 + x, current.1 + y))
+                    (
+                        (current.0 + x1, current.1 + y1),
+                        (current.0 + x, current.1 + y),
+                    )
                 };
                 path.quad_to(c, to);
                 produced_quad_ctrl = Some(c);
@@ -1367,13 +1434,14 @@ fn svg_path_to_kurbo(d: &str) -> Option<BezPath> {
             }
             SmoothQuadratic { abs, x, y } => {
                 let c = match last_quad_ctrl {
-                    Some((px, py)) => (
-                        2.0 * current.0 - px,
-                        2.0 * current.1 - py,
-                    ),
+                    Some((px, py)) => (2.0 * current.0 - px, 2.0 * current.1 - py),
                     None => current,
                 };
-                let to = if abs { (x, y) } else { (current.0 + x, current.1 + y) };
+                let to = if abs {
+                    (x, y)
+                } else {
+                    (current.0 + x, current.1 + y)
+                };
                 path.quad_to(c, to);
                 produced_quad_ctrl = Some(c);
                 current = to;
@@ -1388,7 +1456,11 @@ fn svg_path_to_kurbo(d: &str) -> Option<BezPath> {
                 x,
                 y,
             } => {
-                let to = if abs { (x, y) } else { (current.0 + x, current.1 + y) };
+                let to = if abs {
+                    (x, y)
+                } else {
+                    (current.0 + x, current.1 + y)
+                };
                 let svg_arc = SvgArc {
                     from: Point::new(current.0, current.1),
                     to: Point::new(to.0, to.1),
@@ -1441,6 +1513,7 @@ mod tests {
             hover_action: None,
             hover_payload: None,
             background: Some(Rgba(0xff, 0, 0, 0xff)),
+            hover: crate::layout::HoverStyle::default(),
             border: Border::default(),
             scrollable: None,
             font_weight: 400,
@@ -1485,7 +1558,12 @@ mod tests {
     /// "feed" with three sibling subtrees "post_a", "post_b", "post_c".
     /// Each post has one item placed inside its parent's clip rect.
     fn three_post_layout() -> LayoutPass {
-        let clip = LayoutRect { x: 0.0, y: 0.0, w: 800.0, h: 600.0 };
+        let clip = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 600.0,
+        };
         let mut a = item_in("post_a", "post_a", 0.0, 0.0, 400.0, 100.0);
         a.clip_to = Some(clip);
         let mut b = item_in("post_b", "post_b", 0.0, 110.0, 400.0, 100.0);
@@ -1528,7 +1606,10 @@ mod tests {
         // Now hover post_b. Key for post_b changes (hover state
         // toggled), but post_a / post_c keys are unchanged → they
         // hit the existing entries while post_b takes a fresh miss.
-        painter.interaction_mut().hovered.insert("post_b".to_string());
+        painter
+            .interaction_mut()
+            .hovered
+            .insert("post_b".to_string());
         painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(painter.subtree_cache_hits(), 2);
         assert_eq!(painter.subtree_cache_misses(), 4);
@@ -1715,13 +1796,23 @@ mod tests {
         // Same src, two very different rects — story-avatar size and
         // hot-link thumbnail size. Different fit, different radius too.
         painter.draw_image(
-            LayoutRect { x: 0.0, y: 0.0, w: 56.0, h: 56.0 },
+            LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                w: 56.0,
+                h: 56.0,
+            },
             Some(src),
             ObjectFit::Cover,
             8.0,
         );
         painter.draw_image(
-            LayoutRect { x: 100.0, y: 100.0, w: 28.0, h: 28.0 },
+            LayoutRect {
+                x: 100.0,
+                y: 100.0,
+                w: 28.0,
+                h: 28.0,
+            },
             Some(src),
             ObjectFit::Contain,
             0.0,

@@ -1,10 +1,7 @@
 //! Integration tests for Children() slot functionality
 //! Moved from src/ir/children_slots_test.rs to tests/.
 
-use hypen_engine::ir::{
-    Component, ComponentRegistry, Element, IRNode, Value,
-};
-
+use hypen_engine::ir::{Component, ComponentRegistry, Element, IRNode, Value};
 
 /// Helper to create a simple text element
 fn text(content: &str) -> Element {
@@ -85,9 +82,7 @@ fn test_named_slot() {
             el
         });
 
-        Element::new("Column")
-            .with_child(header)
-            .with_child(body)
+        Element::new("Column").with_child(header).with_child(body)
     });
 
     let mut registry = ComponentRegistry::new();
@@ -119,12 +114,18 @@ fn test_named_slot() {
     // Check header slot received header child
     let header_container = unwrap_el(&expanded.ir_children[0]);
     assert_eq!(header_container.ir_children.len(), 1);
-    assert_eq!(unwrap_el(&header_container.ir_children[0]).element_type, "Text");
+    assert_eq!(
+        unwrap_el(&header_container.ir_children[0]).element_type,
+        "Text"
+    );
 
     // Check body slot received body child
     let body_container = unwrap_el(&expanded.ir_children[1]);
     assert_eq!(body_container.ir_children.len(), 1);
-    assert_eq!(unwrap_el(&body_container.ir_children[0]).element_type, "Text");
+    assert_eq!(
+        unwrap_el(&body_container.ir_children[0]).element_type,
+        "Text"
+    );
 }
 
 #[test]
@@ -140,12 +141,9 @@ fn test_default_slot_without_applicator() {
             el
         });
 
-        let body = Element::new("Container")
-            .with_child(Element::new("Children")); // default slot
+        let body = Element::new("Container").with_child(Element::new("Children")); // default slot
 
-        Element::new("Column")
-            .with_child(header)
-            .with_child(body)
+        Element::new("Column").with_child(header).with_child(body)
     });
 
     let mut registry = ComponentRegistry::new();
@@ -159,8 +157,12 @@ fn test_default_slot_without_applicator() {
 
     let mut panel = Element::new("Panel");
     panel.ir_children.push(IRNode::Element(header_child));
-    panel.ir_children.push(IRNode::Element(text("Default Content 1")));
-    panel.ir_children.push(IRNode::Element(text("Default Content 2")));
+    panel
+        .ir_children
+        .push(IRNode::Element(text("Default Content 1")));
+    panel
+        .ir_children
+        .push(IRNode::Element(text("Default Content 2")));
 
     let expanded = registry.expand(&panel);
 
@@ -179,10 +181,7 @@ fn test_nested_children_slots() {
     let outer = Component::new("Outer", |_props| {
         Element::new("Container")
             .with_child(text("Outer Start"))
-            .with_child(
-                Element::new("Inner")
-                    .with_child(Element::new("Children")),
-            )
+            .with_child(Element::new("Inner").with_child(Element::new("Children")))
             .with_child(text("Outer End"))
     });
 
@@ -199,23 +198,34 @@ fn test_nested_children_slots() {
     registry.register(inner);
 
     // Create nested usage
-    let outer_instance = Element::new("Outer")
-        .with_child(text("Actual Content"));
+    let outer_instance = Element::new("Outer").with_child(text("Actual Content"));
 
     let expanded = registry.expand(&outer_instance);
 
     // Should have: Outer Start, Inner (with nested structure), Outer End
     assert_eq!(expanded.ir_children.len(), 3);
     assert_eq!(unwrap_el(&expanded.ir_children[0]).element_type, "Text"); // Outer Start
-    assert_eq!(unwrap_el(&expanded.ir_children[1]).element_type, "Container"); // Inner expanded
+    assert_eq!(
+        unwrap_el(&expanded.ir_children[1]).element_type,
+        "Container"
+    ); // Inner expanded
     assert_eq!(unwrap_el(&expanded.ir_children[2]).element_type, "Text"); // Outer End
 
     // Check Inner expanded correctly
     let inner_expanded = unwrap_el(&expanded.ir_children[1]);
     assert_eq!(inner_expanded.ir_children.len(), 3);
-    assert_eq!(unwrap_el(&inner_expanded.ir_children[0]).element_type, "Text"); // Inner Start
-    assert_eq!(unwrap_el(&inner_expanded.ir_children[1]).element_type, "Text"); // Actual Content
-    assert_eq!(unwrap_el(&inner_expanded.ir_children[2]).element_type, "Text"); // Inner End
+    assert_eq!(
+        unwrap_el(&inner_expanded.ir_children[0]).element_type,
+        "Text"
+    ); // Inner Start
+    assert_eq!(
+        unwrap_el(&inner_expanded.ir_children[1]).element_type,
+        "Text"
+    ); // Actual Content
+    assert_eq!(
+        unwrap_el(&inner_expanded.ir_children[2]).element_type,
+        "Text"
+    ); // Inner End
 }
 
 #[test]
@@ -236,15 +246,13 @@ fn test_multiple_children_of_same_slot() {
     let mut registry = ComponentRegistry::new();
     registry.register(component);
 
-    let mut action1 = Element::new("Button")
-        .with_child(text("Action 1"));
+    let mut action1 = Element::new("Button").with_child(text("Action 1"));
     action1.props.insert(
         "slot.0".to_string(),
         Value::Static(serde_json::json!("actions")),
     );
 
-    let mut action2 = Element::new("Button")
-        .with_child(text("Action 2"));
+    let mut action2 = Element::new("Button").with_child(text("Action 2"));
     action2.props.insert(
         "slot.0".to_string(),
         Value::Static(serde_json::json!("actions")),
@@ -260,8 +268,14 @@ fn test_multiple_children_of_same_slot() {
     let column = &expanded;
     let actions_row = unwrap_el(&column.ir_children[0]);
     assert_eq!(actions_row.ir_children.len(), 2);
-    assert_eq!(unwrap_el(&actions_row.ir_children[0]).element_type, "Button");
-    assert_eq!(unwrap_el(&actions_row.ir_children[1]).element_type, "Button");
+    assert_eq!(
+        unwrap_el(&actions_row.ir_children[0]).element_type,
+        "Button"
+    );
+    assert_eq!(
+        unwrap_el(&actions_row.ir_children[1]).element_type,
+        "Button"
+    );
 }
 
 #[test]
@@ -293,10 +307,8 @@ fn test_children_slot_deep_in_tree() {
     let component = Component::new("DeepCard", |_props| {
         Element::new("Container").with_child(
             Element::new("Column").with_child(
-                Element::new("Row").with_child(
-                    Element::new("Container")
-                        .with_child(Element::new("Children")),
-                ),
+                Element::new("Row")
+                    .with_child(Element::new("Container").with_child(Element::new("Children"))),
             ),
         )
     });
@@ -304,8 +316,7 @@ fn test_children_slot_deep_in_tree() {
     let mut registry = ComponentRegistry::new();
     registry.register(component);
 
-    let instance = Element::new("DeepCard")
-        .with_child(text("Deep Child"));
+    let instance = Element::new("DeepCard").with_child(text("Deep Child"));
 
     let expanded = registry.expand(&instance);
 

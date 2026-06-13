@@ -23,7 +23,13 @@ fn test_reconcile_tracks_dependencies_on_first_render() {
     let state = json!({"count": 0});
 
     // WHEN: First render (tree is empty)
-    reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: Dependencies should be tracked
     let affected = dependencies.get_affected_nodes("count");
@@ -47,11 +53,23 @@ fn test_reconcile_tracks_dependencies_on_second_render() {
     let state = json!({"count": 0});
 
     // First render
-    reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // WHEN: Clear dependencies and render again (simulating Engine.render())
     dependencies.clear();
-    reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: Dependencies should be tracked again
     let affected = dependencies.get_affected_nodes("count");
@@ -75,12 +93,24 @@ fn test_reconcile_tracks_dependencies_with_prop_changes() {
 
     // First render with state1
     let state1 = json!({"message": "Hello"});
-    reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state1, &mut dependencies);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state1,
+        &mut dependencies,
+    );
 
     // WHEN: Clear dependencies and reconcile with new state
     dependencies.clear();
     let state2 = json!({"message": "World"});
-    reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state2, &mut dependencies);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state2,
+        &mut dependencies,
+    );
 
     // THEN: Dependencies should still be tracked
     let affected = dependencies.get_affected_nodes("message");
@@ -114,11 +144,23 @@ fn test_reconcile_tracks_multiple_bindings_on_rerender() {
     });
 
     // First render
-    reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // WHEN: Clear and re-render
     dependencies.clear();
-    reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: Both dependencies should be tracked
     let affected_user = dependencies.get_affected_nodes("user.name");

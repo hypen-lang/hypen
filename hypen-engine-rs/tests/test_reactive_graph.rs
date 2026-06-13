@@ -30,9 +30,7 @@ fn test_add_dependency_basic() {
     let binding = Binding::state(vec!["user".to_string(), "name".to_string()]);
 
     // WHEN: Add dependency
-    graph.add_dependency(node_id, &binding,
-        None,
-);
+    graph.add_dependency(node_id, &binding, None);
 
     // THEN: Dependency recorded
     let nodes = graph.get_dependent_nodes("user.name");
@@ -51,15 +49,9 @@ fn test_add_multiple_nodes_same_path() {
     let binding = Binding::state(vec!["count".to_string()]);
 
     // WHEN: Multiple nodes depend on same path
-    graph.add_dependency(node1, &binding,
-        None,
-);
-    graph.add_dependency(node2, &binding,
-        None,
-);
-    graph.add_dependency(node3, &binding,
-        None,
-);
+    graph.add_dependency(node1, &binding, None);
+    graph.add_dependency(node2, &binding, None);
+    graph.add_dependency(node3, &binding, None);
 
     // THEN: All nodes tracked
     let nodes = graph.get_dependent_nodes("count");
@@ -74,15 +66,13 @@ fn test_add_single_node_multiple_paths() {
     let node_id = node(1);
 
     // WHEN: Single node depends on multiple paths
-    graph.add_dependency(node_id, &Binding::state(vec!["firstName".to_string()]),
+    graph.add_dependency(
+        node_id,
+        &Binding::state(vec!["firstName".to_string()]),
         None,
-);
-    graph.add_dependency(node_id, &Binding::state(vec!["lastName".to_string()]),
-        None,
-);
-    graph.add_dependency(node_id, &Binding::state(vec!["email".to_string()]),
-        None,
-);
+    );
+    graph.add_dependency(node_id, &Binding::state(vec!["lastName".to_string()]), None);
+    graph.add_dependency(node_id, &Binding::state(vec!["email".to_string()]), None);
 
     // THEN: Node tracked for all paths
     assert!(graph
@@ -104,9 +94,7 @@ fn test_get_dependent_nodes_nonexistent_path() {
     // GIVEN: Graph with some dependencies
     let mut graph = DependencyGraph::new();
     let node_id = node(1);
-    graph.add_dependency(node_id, &Binding::state(vec!["user".to_string()]),
-        None,
-);
+    graph.add_dependency(node_id, &Binding::state(vec!["user".to_string()]), None);
 
     // WHEN: Query nonexistent path
     let nodes = graph.get_dependent_nodes("nonexistent");
@@ -123,15 +111,15 @@ fn test_remove_node_clears_all_dependencies() {
 
     graph.add_dependency(
         node_id,
-        &Binding::state(vec!["user".to_string(), "name".to_string()]), None,
+        &Binding::state(vec!["user".to_string(), "name".to_string()]),
+        None,
     );
     graph.add_dependency(
         node_id,
-        &Binding::state(vec!["user".to_string(), "email".to_string()]), None,
-    );
-    graph.add_dependency(node_id, &Binding::state(vec!["settings".to_string()]),
+        &Binding::state(vec!["user".to_string(), "email".to_string()]),
         None,
-);
+    );
+    graph.add_dependency(node_id, &Binding::state(vec!["settings".to_string()]), None);
 
     // Verify dependencies exist
     assert!(graph
@@ -170,12 +158,8 @@ fn test_remove_node_preserves_other_nodes() {
     let node2 = node(2);
     let binding = Binding::state(vec!["shared".to_string()]);
 
-    graph.add_dependency(node1, &binding,
-        None,
-);
-    graph.add_dependency(node2, &binding,
-        None,
-);
+    graph.add_dependency(node1, &binding, None);
+    graph.add_dependency(node2, &binding, None);
 
     // WHEN: Remove one node
     graph.remove_node(node1);
@@ -198,7 +182,8 @@ fn test_get_affected_nodes_exact_match() {
     let node_id = node(1);
     graph.add_dependency(
         node_id,
-        &Binding::state(vec!["user".to_string(), "name".to_string()]), None,
+        &Binding::state(vec!["user".to_string(), "name".to_string()]),
+        None,
     );
 
     // WHEN: "user.name" changes
@@ -220,7 +205,8 @@ fn test_get_affected_nodes_parent_changed() {
             "user".to_string(),
             "profile".to_string(),
             "name".to_string(),
-        ]), None,
+        ]),
+        None,
     );
 
     // WHEN: Parent "user" changes
@@ -236,9 +222,7 @@ fn test_get_affected_nodes_child_changed() {
     // GIVEN: Node depends on parent "user"
     let mut graph = DependencyGraph::new();
     let node_id = node(1);
-    graph.add_dependency(node_id, &Binding::state(vec!["user".to_string()]),
-        None,
-);
+    graph.add_dependency(node_id, &Binding::state(vec!["user".to_string()]), None);
 
     // WHEN: Child "user.email" changes
     let affected = graph.get_affected_nodes("user.email");
@@ -255,7 +239,8 @@ fn test_get_affected_nodes_unrelated_path() {
     let node_id = node(1);
     graph.add_dependency(
         node_id,
-        &Binding::state(vec!["user".to_string(), "name".to_string()]), None,
+        &Binding::state(vec!["user".to_string(), "name".to_string()]),
+        None,
     );
 
     // WHEN: Unrelated "settings" changes
@@ -270,9 +255,7 @@ fn test_get_affected_nodes_similar_but_different_paths() {
     // GIVEN: Node depends on "user"
     let mut graph = DependencyGraph::new();
     let node_id = node(1);
-    graph.add_dependency(node_id, &Binding::state(vec!["user".to_string()]),
-        None,
-);
+    graph.add_dependency(node_id, &Binding::state(vec!["user".to_string()]), None);
 
     // WHEN: Similar but different "username" changes
     let affected = graph.get_affected_nodes("username");
@@ -292,9 +275,7 @@ fn test_clear_removes_all_dependencies() {
 
     for i in 0..10 {
         let node_id = node(i);
-        graph.add_dependency(node_id, &Binding::state(vec![format!("path{}", i)]),
-        None,
-);
+        graph.add_dependency(node_id, &Binding::state(vec![format!("path{}", i)]), None);
     }
 
     // Verify dependencies exist
@@ -318,12 +299,11 @@ fn test_affected_nodes_with_multiple_dependencies() {
     let node2 = node(2); // Depends on "user.name"
     let node3 = node(3); // Depends on "user.profile.avatar"
 
-    graph.add_dependency(node1, &Binding::state(vec!["user".to_string()]),
-        None,
-);
+    graph.add_dependency(node1, &Binding::state(vec!["user".to_string()]), None);
     graph.add_dependency(
         node2,
-        &Binding::state(vec!["user".to_string(), "name".to_string()]), None,
+        &Binding::state(vec!["user".to_string(), "name".to_string()]),
+        None,
     );
     graph.add_dependency(
         node3,
@@ -331,7 +311,8 @@ fn test_affected_nodes_with_multiple_dependencies() {
             "user".to_string(),
             "profile".to_string(),
             "avatar".to_string(),
-        ]), None,
+        ]),
+        None,
     );
 
     // WHEN: "user.profile" changes
@@ -364,12 +345,8 @@ fn test_add_same_dependency_twice_idempotent() {
     let binding = Binding::state(vec!["count".to_string()]);
 
     // WHEN: Add same dependency twice
-    graph.add_dependency(node_id, &binding,
-        None,
-);
-    graph.add_dependency(node_id, &binding,
-        None,
-);
+    graph.add_dependency(node_id, &binding, None);
+    graph.add_dependency(node_id, &binding, None);
 
     // THEN: Only stored once (IndexSet deduplicates)
     let nodes = graph.get_dependent_nodes("count");
@@ -394,9 +371,7 @@ fn test_deeply_nested_path_tracking() {
         "e".to_string(),
     ]);
 
-    graph.add_dependency(node_id, &binding,
-        None,
-);
+    graph.add_dependency(node_id, &binding, None);
 
     // WHEN: Query affected nodes at various levels
     let affected_root = graph.get_affected_nodes("a");

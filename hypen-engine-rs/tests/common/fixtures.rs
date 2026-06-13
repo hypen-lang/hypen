@@ -25,7 +25,8 @@ pub fn text_element(content: &str) -> Element {
             "text".to_string() => Value::Static(json!(content))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -57,7 +58,8 @@ pub fn text_element_with_binding(path: &str) -> Element {
             "text".to_string() => Value::Binding(binding)
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -67,7 +69,8 @@ pub fn column_with_children(children: Vec<Element>) -> Element {
         element_type: "Column".to_string(),
         props: Props::new(),
         ir_children: children.into_iter().map(IRNode::Element).collect(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -77,7 +80,8 @@ pub fn row_with_children(children: Vec<Element>) -> Element {
         element_type: "Row".to_string(),
         props: Props::new(),
         ir_children: children.into_iter().map(IRNode::Element).collect(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -89,7 +93,8 @@ pub fn image_element(url: &str) -> Element {
             "src".to_string() => Value::Static(json!(url))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -101,7 +106,8 @@ pub fn button_element(text: &str) -> Element {
             "text".to_string() => Value::Static(json!(text))
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -114,7 +120,8 @@ pub fn button_with_action(text: &str, action: &str) -> Element {
             "onClick".to_string() => Value::Action(action.to_string())
         }),
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 
@@ -137,7 +144,8 @@ pub fn element_with_props(element_type: &str, props: Props) -> Element {
         element_type: element_type.to_string(),
         props,
         ir_children: Vec::new(),
-        key: None, module_scope: None,
+        key: None,
+        module_scope: None,
     }
 }
 

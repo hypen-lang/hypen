@@ -237,16 +237,17 @@ impl RemoteSession {
         let registry = Arc::new(config.components);
         let reg: Arc<ComponentRegistry> = Arc::clone(&registry);
         engine.set_component_resolver(move |name, _ctx_path| {
-            reg.get(name).map(|entry| hypen_engine::ir::ResolvedComponent {
-                source: entry.source.clone(),
-                path: entry
-                    .path
-                    .as_ref()
-                    .map(|p: &PathBuf| p.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                passthrough: false,
-                lazy: false,
-            })
+            reg.get(name)
+                .map(|entry| hypen_engine::ir::ResolvedComponent {
+                    source: entry.source.clone(),
+                    path: entry
+                        .path
+                        .as_ref()
+                        .map(|p: &PathBuf| p.to_string_lossy().to_string())
+                        .unwrap_or_default(),
+                    passthrough: false,
+                    lazy: false,
+                })
         });
 
         // Set the primary module (state + action declarations). Note that
@@ -268,10 +269,8 @@ impl RemoteSession {
 
         // Register additional named modules (for nested `module Foo { … }` blocks).
         for (name, initial_state, action_names) in &config.modules {
-            let module_meta =
-                hypen_engine::Module::new(name).with_actions(action_names.clone());
-            let module_inst =
-                hypen_engine::ModuleInstance::new(module_meta, initial_state.clone());
+            let module_meta = hypen_engine::Module::new(name).with_actions(action_names.clone());
+            let module_inst = hypen_engine::ModuleInstance::new(module_meta, initial_state.clone());
             engine.register_module(name, module_inst);
         }
 
@@ -296,7 +295,9 @@ impl RemoteSession {
             let handler_arc = Arc::clone(&primary_handler);
             engine.on_action(name.clone(), move |action| {
                 let handler_guard = handler_arc.lock().unwrap();
-                let Some(handler) = handler_guard.as_ref() else { return };
+                let Some(handler) = handler_guard.as_ref() else {
+                    return;
+                };
                 let mut state_guard = state_arc.lock().unwrap();
                 let current = state_guard.get("").cloned().unwrap_or(Value::Null);
                 let new_state = handler(&name, action.payload.as_ref(), &current);
@@ -545,7 +546,13 @@ impl RemoteSession {
         // Extract (name, state, actions) tuples for SessionConfig + collect handlers
         let raw_modules: Vec<(String, Value, Vec<String>)> = modules
             .iter()
-            .map(|m| (m.name.clone(), m.initial_state.clone(), m.action_names.clone()))
+            .map(|m| {
+                (
+                    m.name.clone(),
+                    m.initial_state.clone(),
+                    m.action_names.clone(),
+                )
+            })
             .collect();
 
         let config = SessionConfig {
@@ -699,9 +706,7 @@ impl RemoteSession {
 
         // 1. sessionAck
         let ack = RemoteMessage::SessionAck {
-            session_id: client_session_id
-                .unwrap_or(&self.session_id)
-                .to_string(),
+            session_id: client_session_id.unwrap_or(&self.session_id).to_string(),
             is_new: !is_restored,
             is_restored,
         };
@@ -747,9 +752,7 @@ impl RemoteSession {
         };
 
         match msg {
-            RemoteMessage::Hello { session_id, .. } => {
-                self.handle_hello(session_id.as_deref())
-            }
+            RemoteMessage::Hello { session_id, .. } => self.handle_hello(session_id.as_deref()),
 
             RemoteMessage::DispatchAction {
                 module,
@@ -778,12 +781,7 @@ impl RemoteSession {
     ///
     /// The `module` field on the incoming message is advisory: the engine's
     /// action scope map is authoritative.
-    fn handle_action(
-        &self,
-        _module: &str,
-        action: &str,
-        payload: Option<&Value>,
-    ) -> Vec<String> {
+    fn handle_action(&self, _module: &str, action: &str, payload: Option<&Value>) -> Vec<String> {
         let mut inner = self.inner.lock().unwrap();
         let mut messages = Vec::new();
 
@@ -815,7 +813,11 @@ impl RemoteSession {
             let post = state_arc.lock().unwrap().clone();
             for (key, new_state) in &post {
                 if pre.get(key) != Some(new_state) {
-                    let scope_opt = if key.is_empty() { None } else { Some(key.as_str()) };
+                    let scope_opt = if key.is_empty() {
+                        None
+                    } else {
+                        Some(key.as_str())
+                    };
                     engine.update_state(scope_opt, new_state.clone());
                 }
             }
@@ -964,11 +966,7 @@ mod tests {
 
     fn test_config() -> SessionConfig {
         let mut components = ComponentRegistry::new();
-        components.register(
-            "Greeting",
-            r#"Text("Hello @{state.name}")"#,
-            None,
-        );
+        components.register("Greeting", r#"Text("Hello @{state.name}")"#, None);
 
         SessionConfig {
             module_name: "App".to_string(),

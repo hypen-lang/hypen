@@ -12,7 +12,7 @@ import type { VirtualNode } from "../packages/web/src/canvas/types.js";
 class MockCanvasContext {
   calls: Array<{ method: string; args: any[] }> = [];
   
-  fillStyle: string = "#000000";
+  fillStyle: any = "#000000";
   strokeStyle: string = "#000000";
   lineWidth: number = 1;
   font: string = "10px sans-serif";
@@ -58,6 +58,30 @@ class MockCanvasContext {
   clip() { this.record("clip"); }
   rect(x: number, y: number, w: number, h: number) {
     this.record("rect", x, y, w, h);
+  }
+  createLinearGradient(x0: number, y0: number, x1: number, y1: number) {
+    this.record("createLinearGradient", x0, y0, x1, y1);
+    const stops: Array<[number, string]> = [];
+    return {
+      kind: "linearGradient",
+      stops,
+      addColorStop: (offset: number, color: string) => {
+        stops.push([offset, color]);
+        this.record("addColorStop", offset, color);
+      },
+    };
+  }
+  createRadialGradient(x0: number, y0: number, r0: number, x1: number, y1: number, r1: number) {
+    this.record("createRadialGradient", x0, y0, r0, x1, y1, r1);
+    const stops: Array<[number, string]> = [];
+    return {
+      kind: "radialGradient",
+      stops,
+      addColorStop: (offset: number, color: string) => {
+        stops.push([offset, color]);
+        this.record("addColorStop", offset, color);
+      },
+    };
   }
 
   // Helper to check if method was called
@@ -166,6 +190,53 @@ describe("Canvas Paint System", () => {
       expect(ctx.wasCalled("strokeRect")).toBe(true); // Border
       expect(ctx.strokeStyle).toBe("#000000");
       expect(ctx.lineWidth).toBe(2);
+    });
+
+    test("paints linearGradient applicator with rgba color stops", () => {
+      const node: VirtualNode = {
+        id: "box1",
+        type: "container",
+        props: {
+          linearGradient:
+            "135deg, rgba(236, 72, 153, 0.38) 0%, rgba(8, 8, 8, 0.98) 42%, rgba(244, 114, 182, 0.20) 100%",
+        },
+        children: [],
+        parent: null,
+        visible: true,
+        opacity: 1,
+        clickable: false,
+        hoverable: false,
+        focusable: false,
+        focused: false,
+        hovered: false,
+        layout: {
+          x: 10,
+          y: 20,
+          width: 100,
+          height: 50,
+          margin: { top: 0, right: 0, bottom: 0, left: 0 },
+          padding: { top: 0, right: 0, bottom: 0, left: 0 },
+          border: { width: 0, color: "transparent", radius: 0 },
+          contentX: 0,
+          contentY: 0,
+          contentWidth: 100,
+          contentHeight: 50,
+        },
+      };
+
+      paintNode(ctx as any, node);
+
+      expect(ctx.wasCalled("createLinearGradient")).toBe(true);
+      const gradientCall = ctx.calls.find((call) => call.method === "createLinearGradient")!;
+      expect(gradientCall.args[0]).not.toBe(gradientCall.args[2]);
+      expect(gradientCall.args[1]).not.toBe(gradientCall.args[3]);
+      expect(ctx.countCalls("addColorStop")).toBe(3);
+      expect(ctx.calls.filter((call) => call.method === "addColorStop")).toEqual([
+        { method: "addColorStop", args: [0, "rgba(236, 72, 153, 0.38)"] },
+        { method: "addColorStop", args: [0.42, "rgba(8, 8, 8, 0.98)"] },
+        { method: "addColorStop", args: [1, "rgba(244, 114, 182, 0.20)"] },
+      ]);
+      expect(ctx.fillStyle.kind).toBe("linearGradient");
     });
 
     test("paints container with rounded corners", () => {
@@ -466,4 +537,3 @@ describe("Canvas Paint System", () => {
     });
   });
 });
-

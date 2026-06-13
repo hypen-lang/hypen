@@ -161,16 +161,7 @@ fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, cha
             .map(|s: &str| Value::String(s.to_string()))
             .labelled("identifier");
 
-        choice((
-            string,
-            reference,
-            boolean,
-            number,
-            list,
-            map,
-            identifier,
-        ))
-        .labelled("value")
+        choice((string, reference, boolean, number, list, map, identifier)).labelled("value")
     })
 }
 

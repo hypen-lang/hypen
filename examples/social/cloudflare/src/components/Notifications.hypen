@@ -1,0 +1,39 @@
+module Notifications {
+    Column {
+        Row {
+            Button {
+                Text("←")
+                    .tw("text-xl")
+            }
+            .onClick(@router.push, to: "/")
+            .tw("bg-transparent p-2")
+
+            Text("Notifications")
+                .tw("text-base font-semibold flex-1 text-center")
+
+            Column {}
+                .tw("w-10")
+        }
+        .tw("py-2 px-2 items-center bg-white border-b border-gray-200")
+
+        List(@state.notifications, key: "id") {
+            Row {
+                Image(src: "@{item.user.avatarUrl}")
+                    .tw("size-10 rounded-full")
+
+                Text("@{item.text}")
+                    .tw("text-sm flex-1 px-3")
+
+                If(condition: "@{item.postImageUrl}") {
+                    Image(src: "@{item.postImageUrl}")
+                        .tw("size-10 rounded")
+                        .objectFit("cover")
+                }
+            }
+            .tw("py-3 px-4 items-center")
+            .backgroundColor("@{item.isRead ? '#ffffff' : '#fef3f2'}")
+        }
+        .tw("flex-1")
+    }
+    .tw("flex-1 w-full bg-white")
+}

@@ -184,9 +184,7 @@ pub fn replace_item_bindings_with_name(
     let ir_children = element
         .ir_children
         .iter()
-        .map(|child_ir| {
-            replace_ir_node_item_bindings(child_ir, item, index, item_name, &child_key)
-        })
+        .map(|child_ir| replace_ir_node_item_bindings(child_ir, item, index, item_name, &child_key))
         .collect();
 
     Element {

@@ -83,6 +83,14 @@ jobs:
         run: bun install
         working-directory: hypen-web
 
+      # Typecheck every @hypen-space/* package, including @hypen-space/cf.
+      # cf previously had no typecheck script and was absent from the
+      # aggregate, so it silently drifted behind core across releases; the
+      # `typecheck` script now covers core/web/server/web-engine/cf.
+      - name: Typecheck (all packages)
+        run: bun run typecheck
+        working-directory: hypen-web
+
       - name: Run tests
         run: bun test
         working-directory: hypen-web

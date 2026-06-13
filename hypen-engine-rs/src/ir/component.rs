@@ -9,10 +9,35 @@ use std::sync::Arc;
 /// them as user-defined components. All renderers (DOM, Canvas, iOS, Android)
 /// are expected to handle these element types natively.
 pub const DEFAULT_PRIMITIVES: &[&str] = &[
-    "Text", "Column", "Row", "Button", "Input", "Textarea", "Image", "Container", "Box",
-    "Center", "List", "Spacer", "Stack", "Divider", "Grid", "Card", "Heading", "Checkbox",
-    "Select", "Switch", "Slider", "Spinner", "Badge", "Avatar", "ProgressBar", "Video", "Audio",
-    "Paragraph", "Icon",
+    "Text",
+    "Column",
+    "Row",
+    "Button",
+    "Input",
+    "Textarea",
+    "Image",
+    "Container",
+    "Box",
+    "Center",
+    "List",
+    "Spacer",
+    "Stack",
+    "Divider",
+    "Grid",
+    "Card",
+    "Heading",
+    "Checkbox",
+    "Select",
+    "Switch",
+    "Slider",
+    "Spinner",
+    "Badge",
+    "Avatar",
+    "ProgressBar",
+    "Video",
+    "Audio",
+    "Paragraph",
+    "Icon",
 ];
 
 /// Result from component resolution
@@ -645,8 +670,11 @@ impl ComponentRegistry {
                 super::IRNode::Element(child) => {
                     // Not a Children() placeholder - keep as is but recurse into its children
                     let mut new_child = child.clone();
-                    new_child.ir_children =
-                        self.replace_children_slots(&child.ir_children, actual_children, _context_path);
+                    new_child.ir_children = self.replace_children_slots(
+                        &child.ir_children,
+                        actual_children,
+                        _context_path,
+                    );
                     result.push(super::IRNode::Element(new_child));
                 }
                 other => {
@@ -896,7 +924,10 @@ mod tests {
 
         // Verify children are expanded (HomePage should be replaced with Text)
         assert_eq!(expanded_route1.ir_children.len(), 1);
-        assert_eq!(unwrap_element(&expanded_route1.ir_children[0]).element_type, "Text");
+        assert_eq!(
+            unwrap_element(&expanded_route1.ir_children[0]).element_type,
+            "Text"
+        );
     }
 
     #[test]
@@ -928,8 +959,10 @@ mod tests {
         let element2 = Element::new("Header");
         let expanded2 = registry.expand_with_context(&element2, Some("/pages/Home.hypen"));
         // Should resolve into the template (a Text element via ir_children)
-        assert_ne!(expanded2.element_type, "Header",
-            "Context-scoped resolve must not be blocked by prior bare-name miss");
+        assert_ne!(
+            expanded2.element_type, "Header",
+            "Context-scoped resolve must not be blocked by prior bare-name miss"
+        );
     }
 
     #[test]
@@ -964,4 +997,3 @@ mod tests {
         assert!(expanded2.ir_children.is_empty());
     }
 }
-

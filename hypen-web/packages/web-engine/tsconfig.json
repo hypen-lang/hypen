@@ -12,7 +12,6 @@
     "skipLibCheck": true,
     "noFallthroughCasesInSwitch": true,
     "noImplicitOverride": true,
-    "baseUrl": ".",
     "paths": {
       "@hypen-space/core": ["../core/src/index.ts"],
       // Non-standard export: see root tsconfig.json for rationale.

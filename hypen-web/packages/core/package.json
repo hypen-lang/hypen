@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/core",
-  "version": "0.4.949",
+  "version": "0.5.0",
   "description": "Hypen core - Platform-agnostic reactive UI runtime (types, state, router, events)",
   "type": "module",
   "main": "./dist/index.js",
@@ -38,6 +38,12 @@
       "bun": "./src/router.ts",
       "import": "./dist/router.js",
       "default": "./dist/router.js"
+    },
+    "./managed-router": {
+      "types": "./dist/managed-router.d.ts",
+      "bun": "./src/managed-router.ts",
+      "import": "./dist/managed-router.js",
+      "default": "./dist/managed-router.js"
     },
     "./events": {
       "types": "./dist/events.d.ts",
@@ -105,6 +111,12 @@
       "bun": "./src/engine-base.ts",
       "import": "./dist/engine-base.js",
       "default": "./dist/engine-base.js"
+    },
+    "./persistence": {
+      "types": "./dist/persistence.d.ts",
+      "bun": "./src/persistence.ts",
+      "import": "./dist/persistence.js",
+      "default": "./dist/persistence.js"
     },
     "./portable": {
       "types": "./dist/portable.d.ts",

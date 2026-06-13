@@ -34,12 +34,12 @@
 //! `Node` entries and reconnect with `Attach` doesn't rebuild).
 
 use crate::shell::{
-    build_shell_module, push_recents, push_tabs, ShellCommand, ShellState, TabInfo,
+    build_shell_module, push_debug_log, push_recents, push_tabs, ShellCommand, ShellState, TabInfo,
     SHELL_ACTIONS, SHELL_BIND_PATHS,
 };
 use crate::storage::Storage;
 use hypen_engine::Patch;
-use hypen_renderer_desktop::{ConnectionStatus, HypenModule, RemoteModule};
+use hypen_renderer_desktop::{ConnectionStatus, HypenModule, RemoteModule, Tree};
 use hypen_server::prelude::*;
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -121,6 +121,10 @@ struct Inner {
     tabs: IndexMap<String, Tab>,
     /// Id of the active tab. `None` when the home screen is showing.
     active_tab_id: Option<String>,
+    /// Shadow copy of the full forwarded UI tree (shell chrome + the
+    /// active tab's content), kept in sync by `forward`. Serialised on
+    /// demand by the `dump_tree` debug button.
+    tree: Tree,
 }
 
 impl Inner {
@@ -133,8 +137,22 @@ impl Inner {
             seen_first_root_child: false,
             tabs: IndexMap::new(),
             active_tab_id: None,
+            tree: Tree::new(),
         }
     }
+}
+
+/// Record a debug-console line through the global [`crate::devlog`]
+/// buffer, and — when the console is open — push the refreshed snapshot
+/// into the shell so the panel re-renders. Must be called with NO inner
+/// lock held (it dispatches a shell action).
+fn record_console(shell: &Arc<ModuleInstance<ShellState>>, line: String) {
+    let console = crate::devlog::console();
+    if !console.enabled() {
+        return;
+    }
+    console.push(line);
+    push_debug_log(shell, console.snapshot());
 }
 
 impl BrowserModule {
@@ -180,17 +198,33 @@ impl BrowserModule {
         for cmd in cmds {
             match cmd {
                 ShellCommand::OpenTab { url, name } => self.open_tab(url, name),
-                ShellCommand::NavigateActive { url, name } => {
-                    self.navigate_active_tab(url, name)
-                }
+                ShellCommand::NavigateActive { url, name } => self.navigate_active_tab(url, name),
                 ShellCommand::NewTab => self.new_tab(),
                 ShellCommand::Refresh => self.refresh_active_tab(),
                 ShellCommand::CloseTab { tab_id } => self.close_tab(&tab_id),
                 ShellCommand::SwitchTab { tab_id } => self.switch_tab(&tab_id),
                 ShellCommand::GoHome => self.go_home(),
                 ShellCommand::DeleteRecent { url } => self.delete_recent(&url),
+                ShellCommand::SetDebug(open) => {
+                    crate::devlog::console().set_enabled(open);
+                }
+                ShellCommand::DumpTree => self.dump_tree(),
             }
         }
+    }
+
+    /// Serialise the current forwarded UI tree (shell chrome + active
+    /// tab content) into the debug console. Opens the console if it was
+    /// closed so the dump is visible.
+    fn dump_tree(&self) {
+        let console = crate::devlog::console();
+        console.set_enabled(true);
+        let dump = {
+            let inner = self.inner.lock().expect("inner poisoned");
+            serialize_tree(&inner.tree)
+        };
+        console.push(format!("── UI tree ──\n{dump}"));
+        push_debug_log(&self.shell, console.snapshot());
     }
 
     /// Reuse the active tab's slot for a different URL. Drops the
@@ -296,17 +330,14 @@ impl BrowserModule {
         // Tab) so closing the tab while patches are in flight just
         // drops them cleanly.
         let inner_for_remote = Arc::clone(&self.inner);
+        let shell_for_remote = Arc::clone(&self.shell);
         let tab_id_for_remote = tab_id.clone();
         remote.on_patches(Arc::new(move |patches: &[Patch]| {
             log::debug!(
                 "hypen-browser: tab {tab_id_for_remote} on_patches: {} patches in",
                 patches.len(),
             );
-            let rewritten = process_tab_patches(
-                &inner_for_remote,
-                &tab_id_for_remote,
-                patches,
-            );
+            let rewritten = process_tab_patches(&inner_for_remote, &tab_id_for_remote, patches);
             log::debug!(
                 "hypen-browser: tab {tab_id_for_remote} rewritten {} → forwarding",
                 rewritten.len(),
@@ -314,6 +345,12 @@ impl BrowserModule {
             if !rewritten.is_empty() {
                 forward(&inner_for_remote, &rewritten);
             }
+            // Debug console: record the incoming batch (no-op when the
+            // console is closed).
+            record_console(
+                &shell_for_remote,
+                format!("◀ in  {}", summarize_patches(patches)),
+            );
         }));
 
         // Status callback — surface lifecycle transitions on the
@@ -328,11 +365,7 @@ impl BrowserModule {
                  (thread={:?})",
                 std::thread::current().name().unwrap_or("?"),
             );
-            let snapshot = update_tab_status(
-                &inner_for_status,
-                &tab_id_for_status,
-                status,
-            );
+            let snapshot = update_tab_status(&inner_for_status, &tab_id_for_status, status);
             if let Some((tabs, active)) = snapshot {
                 log::debug!(
                     "hypen-browser: tab {tab_id_for_status} pushing tabs \
@@ -340,9 +373,7 @@ impl BrowserModule {
                     tabs.len(),
                 );
                 push_tabs(&shell_for_status, tabs, active);
-                log::debug!(
-                    "hypen-browser: tab {tab_id_for_status} push_tabs done",
-                );
+                log::debug!("hypen-browser: tab {tab_id_for_status} push_tabs done",);
             }
         });
 
@@ -581,8 +612,7 @@ impl BrowserModule {
     fn publish_tabs(&self) {
         let (infos, active) = {
             let inner = self.inner.lock().expect("inner poisoned");
-            let infos: Vec<TabInfo> =
-                inner.tabs.values().map(|t| t.info.clone()).collect();
+            let infos: Vec<TabInfo> = inner.tabs.values().map(|t| t.info.clone()).collect();
             (infos, inner.active_tab_id.clone())
         };
         push_tabs(&self.shell, infos, active);
@@ -633,10 +663,10 @@ impl HypenModule for BrowserModule {
                 };
                 if let Some(remote) = remote {
                     remote.dispatch_action(name, payload);
+                    // Debug console: record the outgoing action.
+                    record_console(&self.shell, format!("▶ out  action {name}"));
                 } else {
-                    log::debug!(
-                        "hypen-browser: ignoring action {name} — no active tab",
-                    );
+                    log::debug!("hypen-browser: ignoring action {name} — no active tab",);
                 }
             }
         }
@@ -682,6 +712,66 @@ fn classify_dispatch(name: &str, payload: Option<&Value>) -> DispatchTarget {
 
 /// Forward a batch of already-namespaced patches to the renderer.
 /// Buffers them if the renderer hasn't wired its callback yet.
+/// One-line summary of a patch batch for the debug console, e.g.
+/// `12 patches · 3 Create 5 SetProp 4 Insert`.
+fn summarize_patches(patches: &[Patch]) -> String {
+    use std::collections::BTreeMap;
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for p in patches {
+        let kind = match p {
+            Patch::Create { .. } => "Create",
+            Patch::SetProp { .. } => "SetProp",
+            Patch::RemoveProp { .. } => "RemoveProp",
+            Patch::SetText { .. } => "SetText",
+            Patch::Insert { .. } => "Insert",
+            Patch::Move { .. } => "Move",
+            Patch::Remove { .. } => "Remove",
+            Patch::Detach { .. } => "Detach",
+            Patch::Attach { .. } => "Attach",
+        };
+        *counts.entry(kind).or_default() += 1;
+    }
+    let breakdown = counts
+        .iter()
+        .map(|(k, n)| format!("{n} {k}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{} patches · {breakdown}", patches.len())
+}
+
+/// Render `tree` as an indented `<ElementType #id> "text"` outline,
+/// one node per line, depth-first from the root. Used by the
+/// `dump_tree` debug button.
+fn serialize_tree(tree: &Tree) -> String {
+    fn walk(tree: &Tree, id: &str, depth: usize, out: &mut String) {
+        let indent = "  ".repeat(depth);
+        if let Some(node) = tree.get(id) {
+            let text = node
+                .text_content()
+                .map(|t| {
+                    let t = t.trim();
+                    let clipped: String = t.chars().take(40).collect();
+                    format!(" \"{clipped}\"")
+                })
+                .unwrap_or_default();
+            out.push_str(&format!("{indent}<{} #{}>{text}\n", node.element_type, id));
+        } else {
+            out.push_str(&format!("{indent}<? #{id}>\n"));
+        }
+        for child in tree.children_of(id) {
+            walk(tree, child, depth + 1, out);
+        }
+    }
+    let mut out = String::new();
+    for root in tree.root_children() {
+        walk(tree, root, 0, &mut out);
+    }
+    if out.is_empty() {
+        out.push_str("(empty)\n");
+    }
+    out
+}
+
 fn forward(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
     if patches.is_empty() {
         return;
@@ -693,6 +783,9 @@ fn forward(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
     );
     let cb = {
         let mut g = inner.lock().expect("inner poisoned");
+        // Keep the shadow tree in lockstep with what the renderer sees,
+        // so the `dump_tree` debug button can serialise it on demand.
+        g.tree.apply_batch(patches);
         if let Some(cb) = g.callback.as_ref() {
             Some(Arc::clone(cb))
         } else {
@@ -799,11 +892,7 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
 ///
 /// Returns the rewritten patches; returns empty when the tab isn't
 /// known (worker fired after a close, for instance).
-fn process_tab_patches(
-    inner: &Arc<Mutex<Inner>>,
-    tab_id: &str,
-    patches: &[Patch],
-) -> Vec<Patch> {
+fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch]) -> Vec<Patch> {
     let mut g = inner.lock().expect("inner poisoned");
     let (prefix, attached) = match g.tabs.get(tab_id) {
         Some(t) => (t.id_prefix.clone(), t.attached),
@@ -865,12 +954,7 @@ fn rewrite_tab_batch(
     out
 }
 
-fn rewrite_patch(
-    patch: Patch,
-    prefix: &str,
-    viewport: &str,
-    new_roots: &mut Vec<String>,
-) -> Patch {
+fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec<String>) -> Patch {
     match patch {
         Patch::Create {
             id,
@@ -1024,6 +1108,44 @@ mod tests {
         }));
         module.mount();
         (module, captured)
+    }
+
+    #[test]
+    fn serialize_tree_renders_indented_outline() {
+        let props = |entries: &[(&str, Value)]| {
+            let mut m = IndexMap::new();
+            for (k, v) in entries {
+                m.insert((*k).to_string(), v.clone());
+            }
+            Arc::new(m)
+        };
+        let mut tree = Tree::new();
+        tree.apply_batch(&[
+            Patch::Create {
+                id: "col".into(),
+                element_type: "Column".into(),
+                props: props(&[]),
+            },
+            Patch::Insert {
+                parent_id: "root".into(),
+                id: "col".into(),
+                before_id: None,
+            },
+            Patch::Create {
+                id: "t".into(),
+                element_type: "Text".into(),
+                props: props(&[("0", json!("Hello"))]),
+            },
+            Patch::Insert {
+                parent_id: "col".into(),
+                id: "t".into(),
+                before_id: None,
+            },
+        ]);
+        let dump = serialize_tree(&tree);
+        assert!(dump.contains("<Column #col>"), "got:\n{dump}");
+        assert!(dump.contains("  <Text #t> \"Hello\""), "got:\n{dump}");
+        assert_eq!(serialize_tree(&Tree::new()), "(empty)\n");
     }
 
     #[test]
@@ -1240,10 +1362,7 @@ mod tests {
         module.on_patches(Arc::new(|_| {}));
         module.mount();
 
-        module.dispatch_action(
-            "delete_recent",
-            Some(json!({"url": "ws://a"})),
-        );
+        module.dispatch_action("delete_recent", Some(json!({"url": "ws://a"})));
 
         // Storage on disk updated.
         let reloaded = Storage::at_path(path.clone());
@@ -1313,10 +1432,7 @@ mod tests {
             .expect("viewport must be known after mount");
         let before = captured.lock().unwrap().len();
 
-        module.dispatch_action(
-            "switch_tab",
-            Some(json!({"tabId": "tab-B"})),
-        );
+        module.dispatch_action("switch_tab", Some(json!({"tabId": "tab-B"})));
 
         let after = captured.lock().unwrap();
         let new_patches = &after[before..];
@@ -1330,9 +1446,7 @@ mod tests {
         let attaches: Vec<(&str, &str)> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Attach { parent_id, id, .. } => {
-                    Some((parent_id.as_str(), id.as_str()))
-                }
+                Patch::Attach { parent_id, id, .. } => Some((parent_id.as_str(), id.as_str())),
                 _ => None,
             })
             .collect();
@@ -1344,9 +1458,7 @@ mod tests {
         let app_removes: Vec<&str> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id }
-                    if id.starts_with("a1:") || id.starts_with("a2:") =>
-                {
+                Patch::Remove { id } if id.starts_with("a1:") || id.starts_with("a2:") => {
                     Some(id.as_str())
                 }
                 _ => None,
@@ -1379,10 +1491,7 @@ mod tests {
         install_tab(&module, "tab-A", "a1:", &["a1:1"], true);
         module.inner.lock().unwrap().active_tab_id = Some("tab-A".into());
         let before = captured.lock().unwrap().len();
-        module.dispatch_action(
-            "switch_tab",
-            Some(json!({"tabId": "tab-A"})),
-        );
+        module.dispatch_action("switch_tab", Some(json!({"tabId": "tab-A"})));
         let after = captured.lock().unwrap();
         // Only the shell's own state-change patches (from the
         // optimistic `state.active_tab_id` assignment in
@@ -1414,13 +1523,7 @@ mod tests {
         // Insert(viewport) immediately followed by Detach.
         let (module, _captured) = fresh_browser_with_capture();
         install_tab(&module, "tab-bg", "a7:", &[], false);
-        let viewport = module
-            .inner
-            .lock()
-            .unwrap()
-            .viewport_id
-            .clone()
-            .unwrap();
+        let viewport = module.inner.lock().unwrap().viewport_id.clone().unwrap();
 
         let in_patches = vec![
             Patch::Create {
@@ -1451,7 +1554,10 @@ mod tests {
         }
         match &out[2] {
             Patch::Detach { id } => assert_eq!(id, "a7:1"),
-            _ => panic!("expected trailing Detach for background tab; got {:?}", out[2]),
+            _ => panic!(
+                "expected trailing Detach for background tab; got {:?}",
+                out[2]
+            ),
         }
 
         // The id is tracked so future Attach (on switch-to) targets it.
@@ -1495,19 +1601,10 @@ mod tests {
         install_tab(&module, "tab-A", "a1:", &["a1:1"], true);
         install_tab(&module, "tab-B", "a2:", &["a2:1"], false);
         module.inner.lock().unwrap().active_tab_id = Some("tab-A".into());
-        let viewport = module
-            .inner
-            .lock()
-            .unwrap()
-            .viewport_id
-            .clone()
-            .unwrap();
+        let viewport = module.inner.lock().unwrap().viewport_id.clone().unwrap();
         let before = captured.lock().unwrap().len();
 
-        module.dispatch_action(
-            "close_tab",
-            Some(json!({"tabId": "tab-A"})),
-        );
+        module.dispatch_action("close_tab", Some(json!({"tabId": "tab-A"})));
 
         let after = captured.lock().unwrap();
         let new_patches = &after[before..];
@@ -1522,13 +1619,14 @@ mod tests {
         let attached_under_viewport: Vec<&str> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Attach { parent_id, id, .. } if *parent_id == viewport => {
-                    Some(id.as_str())
-                }
+                Patch::Attach { parent_id, id, .. } if *parent_id == viewport => Some(id.as_str()),
                 _ => None,
             })
             .collect();
-        assert!(removed.contains(&"a1:1"), "closed tab's root must be Removed; got {removed:?}");
+        assert!(
+            removed.contains(&"a1:1"),
+            "closed tab's root must be Removed; got {removed:?}"
+        );
         assert!(
             attached_under_viewport.contains(&"a2:1"),
             "survivor's root must be Attach'd to viewport; got {attached_under_viewport:?}",
@@ -1591,10 +1689,9 @@ mod tests {
 
     #[test]
     fn on_patches_drains_shell_patches_buffered_before_wiring() {
-        let storage = Storage::at_path(std::env::temp_dir().join(format!(
-            "hypen-browser-wireup-{}.json",
-            std::process::id()
-        )));
+        let storage = Storage::at_path(
+            std::env::temp_dir().join(format!("hypen-browser-wireup-{}.json", std::process::id())),
+        );
         let module = BrowserModule::build(storage);
         module.mount();
         assert!(!module.inner.lock().unwrap().pending.is_empty());

@@ -163,6 +163,16 @@ pub struct PatchQueue {
 /// for any legitimate burst, far below the GBs we'd see from a leak.
 const PATCH_QUEUE_CAP: usize = 200_000;
 
+/// Backstop cap on detached-but-not-freed subtree roots held alive in
+/// the Tree + Taffy mirror (see [`Tree::evict_detached_over`]). The
+/// engine's own Router keep-alive LRU defaults to ~10 entries and
+/// emits `Remove` on eviction, so a healthy session sits in the low
+/// tens. This cap is set far above that purely so a host that detaches
+/// without ever re-Attaching or Removing (a render loop / buggy
+/// server) can't grow the node arena without bound. Hitting it logs a
+/// warning.
+const DETACHED_SUBTREE_CAP: usize = 1024;
+
 impl PatchQueue {
     pub fn new() -> Arc<Self> {
         Arc::new(Self::default())
@@ -242,6 +252,10 @@ pub struct App {
     hover_subject: Option<String>,
     pressed: Option<String>,
     focused: Option<String>,
+    /// `true` when the focused item should show a focus ring — set when
+    /// focus moves via the keyboard (Tab), cleared on mouse-click focus.
+    /// The `:focus-visible` rule, so clicking doesn't ring buttons/tiles.
+    focus_visible: bool,
     modifiers: ModifiersState,
 
     /// Per-Input selection, keyed by renderer node id. Value lives in
@@ -359,6 +373,9 @@ pub struct App {
     /// behaviour. Shortcuts are silenced while an `Input` is focused
     /// (typing in the address bar must not trigger `focus_url` etc.).
     shortcuts: Vec<ShortcutBinding>,
+    /// macOS: merge the title bar into the content (Safari-style). Set
+    /// via [`App::set_unified_titlebar`]; applied once on window create.
+    unified_titlebar: bool,
 }
 
 impl App {
@@ -387,6 +404,7 @@ impl App {
             hover_subject: None,
             pressed: None,
             focused: None,
+            focus_visible: false,
             modifiers: ModifiersState::default(),
             input_selections: HashMap::new(),
             dragging_input: None,
@@ -411,7 +429,14 @@ impl App {
             patch_window_flushes: 0,
             is_occluded: false,
             shortcuts: Vec::new(),
+            unified_titlebar: false,
         }
+    }
+
+    /// Enable the macOS Safari-style unified title bar. Applied on
+    /// window creation in `resumed`.
+    pub fn set_unified_titlebar(&mut self, on: bool) {
+        self.unified_titlebar = on;
     }
 
     /// Replace the shortcut table. Called once by
@@ -504,6 +529,22 @@ impl App {
         {
             self.taffy.mark_needs_rebuild();
         }
+        // Backstop: if detached subtrees have piled up past the cap
+        // (host detaching without ever re-Attaching or Removing), tear
+        // down the oldest and mirror the teardown into Taffy. No-op in
+        // the common case.
+        let evicted = self.tree.evict_detached_over(DETACHED_SUBTREE_CAP);
+        if !evicted.is_empty() {
+            log::warn!(
+                "evicted {} detached node(s) over the {DETACHED_SUBTREE_CAP}-root \
+                 backstop — the host is detaching subtrees without re-Attaching or \
+                 Removing them (likely a render loop / Router cache that never evicts)",
+                evicted.len(),
+            );
+            for id in &evicted {
+                self.taffy.remove_node(id);
+            }
+        }
         self.damage.add_full();
         n
     }
@@ -528,6 +569,7 @@ impl App {
             interaction.hovered = hovered_set;
             interaction.pressed = pressed_set;
             interaction.focused = self.focused.clone();
+            interaction.focus_visible = self.focus_visible;
             interaction.input_selections = self.input_selections.clone();
             interaction.ime_preedit = self.ime_preedit.clone();
         }
@@ -836,10 +878,8 @@ impl App {
         };
         payload_obj.insert("hovered".into(), serde_json::Value::Bool(hovered));
         log::debug!("dispatch hover: {action} payload={payload_obj:?}");
-        self.module.dispatch_action(
-            action,
-            Some(serde_json::Value::Object(payload_obj)),
-        );
+        self.module
+            .dispatch_action(action, Some(serde_json::Value::Object(payload_obj)));
     }
 
     fn hit_focusable(&self, x: f32, y: f32) -> Option<String> {
@@ -876,6 +916,11 @@ impl ApplicationHandler<AppEvent> for App {
                 .expect("create winit window"),
         );
 
+        #[cfg(target_os = "macos")]
+        if self.unified_titlebar {
+            crate::macos::configure_unified_titlebar(&window);
+        }
+
         let adapter = AkAdapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
         self.ak = Some(adapter);
 
@@ -904,6 +949,8 @@ impl ApplicationHandler<AppEvent> for App {
                                         );
                                         self.module.dispatch_action(&action, payload);
                                         self.focused = Some(rid);
+                                        // Assistive-tech focus shows the ring.
+                                        self.focus_visible = true;
                                         self.request_redraw_full();
                                     }
                                 }
@@ -1103,6 +1150,8 @@ impl ApplicationHandler<AppEvent> for App {
                     let prev = self.focused.clone();
                     self.mark_interaction_damage(prev.as_deref(), focus_target.as_deref());
                     self.focused = focus_target;
+                    // Mouse-driven focus: no ring (`:focus-visible`).
+                    self.focus_visible = false;
                     needs_redraw = true;
                 }
                 if needs_redraw {
@@ -1263,9 +1312,7 @@ impl ApplicationHandler<AppEvent> for App {
                     // would hitch the resume. Its LRU cap bounds it.
                     let n = self.flush_patches();
                     if n > 0 {
-                        log::info!(
-                            "drained {n} patches while occluded (occlude transition)"
-                        );
+                        log::info!("drained {n} patches while occluded (occlude transition)");
                     }
                     self.painter.clear_image_cache();
                     self.painter.text_engine_mut().clear_measure_cache();

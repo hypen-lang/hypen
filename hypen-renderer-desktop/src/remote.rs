@@ -200,14 +200,7 @@ async fn run_worker(
     // a spinner.
     deliver_status(&inner, ConnectionStatus::Connecting);
     loop {
-        let result = run_session(
-            &url,
-            &module_name,
-            &mut session_id,
-            &mut outbound,
-            &inner,
-        )
-        .await;
+        let result = run_session(&url, &module_name, &mut session_id, &mut outbound, &inner).await;
         match result {
             Ok(SessionEnd::Shutdown) => {
                 log::info!("remote: shutdown requested; exiting worker");
@@ -236,10 +229,7 @@ async fn run_worker(
                     "remote: disconnected (attempt {attempt}); retrying in {:?}",
                     delay,
                 );
-                deliver_status(
-                    &inner,
-                    ConnectionStatus::Reconnecting { attempt },
-                );
+                deliver_status(&inner, ConnectionStatus::Reconnecting { attempt });
                 tokio::time::sleep(delay).await;
                 deliver_status(&inner, ConnectionStatus::Connecting);
             }
@@ -258,10 +248,7 @@ async fn run_session(
     inner: &Arc<Mutex<Inner>>,
 ) -> Result<SessionEnd, String> {
     use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::{
-        connect_async,
-        tungstenite::protocol::Message as WsMsg,
-    };
+    use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMsg};
 
     log::info!(
         "remote: connecting to {url} (resume session={:?})",
@@ -332,11 +319,7 @@ pub(crate) fn build_hello(session_id: Option<String>) -> RemoteMessage {
     }
 }
 
-fn handle_incoming(
-    text: &str,
-    inner: &Arc<Mutex<Inner>>,
-    session_id: &mut Option<String>,
-) {
+fn handle_incoming(text: &str, inner: &Arc<Mutex<Inner>>, session_id: &mut Option<String>) {
     let msg: RemoteMessage = match serde_json::from_str(text) {
         Ok(m) => m,
         Err(e) => {
@@ -350,15 +333,12 @@ fn handle_incoming(
             is_new,
             is_restored,
         } => {
-            log::info!(
-                "remote: session ack id={id} new={is_new} restored={is_restored}",
-            );
+            log::info!("remote: session ack id={id} new={is_new} restored={is_restored}",);
             *session_id = Some(id);
             // Handshake done — UI can drop the spinner now.
             deliver_status(inner, ConnectionStatus::Connected);
         }
-        RemoteMessage::InitialTree { patches, .. }
-        | RemoteMessage::Patch { patches, .. } => {
+        RemoteMessage::InitialTree { patches, .. } | RemoteMessage::Patch { patches, .. } => {
             if !patches.is_empty() {
                 deliver_patches(inner, &patches);
             }
@@ -520,15 +500,16 @@ mod tests {
         };
 
         module.dispatch_action("increment", None);
-        module.dispatch_action(
-            "set_value",
-            Some(json!({"value": 42})),
-        );
+        module.dispatch_action("set_value", Some(json!({"value": 42})));
 
         // Pop both messages and assert their shape.
         let m1 = rx.try_recv().expect("first action queued");
         match m1 {
-            RemoteMessage::DispatchAction { module, action, payload } => {
+            RemoteMessage::DispatchAction {
+                module,
+                action,
+                payload,
+            } => {
                 assert_eq!(module, "Counter");
                 assert_eq!(action, "increment");
                 assert!(payload.is_none());
@@ -537,7 +518,11 @@ mod tests {
         }
         let m2 = rx.try_recv().expect("second action queued");
         match m2 {
-            RemoteMessage::DispatchAction { module, action, payload } => {
+            RemoteMessage::DispatchAction {
+                module,
+                action,
+                payload,
+            } => {
                 assert_eq!(module, "Counter");
                 assert_eq!(action, "set_value");
                 assert_eq!(payload, Some(json!({"value": 42})));

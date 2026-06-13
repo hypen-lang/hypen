@@ -61,14 +61,23 @@ fn test_wasm_render_simple_component() {
     let source = r#"Text("Hello")"#;
     let component = hypen_parser::parse_component(source).unwrap();
     let ir_node = ast_to_ir_node(&component);
-    let element = match &ir_node { IRNode::Element(e) => e.clone(), _ => panic!("Expected Element") };
+    let element = match &ir_node {
+        IRNode::Element(e) => e.clone(),
+        _ => panic!("Expected Element"),
+    };
 
     let mut tree = InstanceTree::new();
     let mut dependencies = DependencyGraph::new();
     let mut renderer = MockRenderer::new();
 
     let state_json = serde_json::to_value(HashMap::<String, serde_json::Value>::new()).unwrap();
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state_json, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state_json,
+        &mut dependencies,
+    );
 
     for patch in patches {
         renderer.capture_patch(patch);
@@ -84,7 +93,10 @@ fn test_wasm_state_update_flow() {
     let source = r#"Text("Count: @{state.count}")"#;
     let component = hypen_parser::parse_component(source).unwrap();
     let ir_node = ast_to_ir_node(&component);
-    let element = match &ir_node { IRNode::Element(e) => e.clone(), _ => panic!("Expected Element") };
+    let element = match &ir_node {
+        IRNode::Element(e) => e.clone(),
+        _ => panic!("Expected Element"),
+    };
 
     let mut tree = InstanceTree::new();
     let mut dependencies = DependencyGraph::new();
@@ -92,7 +104,13 @@ fn test_wasm_state_update_flow() {
 
     // Initial render
     let state_json = serde_json::to_value(&initial_state).unwrap();
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state_json, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state_json,
+        &mut dependencies,
+    );
     assert!(!patches.is_empty());
 
     // Update state
@@ -191,12 +209,21 @@ fn test_wasm_nested_component_expansion() {
     "#;
 
     let component = hypen_parser::parse_component(source).unwrap();
-    let element = match ast_to_ir_node(&component) { IRNode::Element(e) => e, _ => panic!("Expected Element") };
+    let element = match ast_to_ir_node(&component) {
+        IRNode::Element(e) => e,
+        _ => panic!("Expected Element"),
+    };
 
     assert_eq!(element.element_type, "Column");
     assert_eq!(element.ir_children.len(), 2);
-    match &element.ir_children[0] { IRNode::Element(e) => assert_eq!(e.element_type, "Text"), _ => panic!("Expected Element") };
-    match &element.ir_children[1] { IRNode::Element(e) => assert_eq!(e.element_type, "Text"), _ => panic!("Expected Element") };
+    match &element.ir_children[0] {
+        IRNode::Element(e) => assert_eq!(e.element_type, "Text"),
+        _ => panic!("Expected Element"),
+    };
+    match &element.ir_children[1] {
+        IRNode::Element(e) => assert_eq!(e.element_type, "Text"),
+        _ => panic!("Expected Element"),
+    };
 }
 
 #[test]
@@ -206,7 +233,10 @@ fn test_wasm_state_binding_extraction() {
 
     let component = hypen_parser::parse_component(source).unwrap();
     let ir_node = ast_to_ir_node(&component);
-    let element = match &ir_node { IRNode::Element(e) => e.clone(), _ => panic!("Expected Element") };
+    let element = match &ir_node {
+        IRNode::Element(e) => e.clone(),
+        _ => panic!("Expected Element"),
+    };
 
     let mut tree = InstanceTree::new();
     let mut dependencies = DependencyGraph::new();
@@ -216,7 +246,13 @@ fn test_wasm_state_binding_extraction() {
     ]);
 
     let state_json = serde_json::to_value(&state).unwrap();
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state_json, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state_json,
+        &mut dependencies,
+    );
 
     // Verify dependencies were tracked
     let affected = dependencies.get_affected_nodes("user.name");
@@ -300,7 +336,13 @@ fn test_wasm_reconciliation_keyed_lists() {
 
     // Initial render
     let state_json = serde_json::to_value(&state).unwrap();
-    let _patches = reconcile_ir(&mut tree, &old_ir_node, None, &state_json, &mut dependencies);
+    let _patches = reconcile_ir(
+        &mut tree,
+        &old_ir_node,
+        None,
+        &state_json,
+        &mut dependencies,
+    );
 
     // Reconcile with new tree
     let reconcile_patches = reconcile_ir(
@@ -335,7 +377,10 @@ fn test_wasm_props_with_various_types() {
     "#;
 
     let component = hypen_parser::parse_component(source).unwrap();
-    let element = match ast_to_ir_node(&component) { IRNode::Element(e) => e, _ => panic!("Expected Element") };
+    let element = match ast_to_ir_node(&component) {
+        IRNode::Element(e) => e,
+        _ => panic!("Expected Element"),
+    };
 
     // Verify all prop types are preserved
     assert!(element.props.contains_key("text"));
@@ -356,7 +401,10 @@ fn test_wasm_applicators() {
     "#;
 
     let component = hypen_parser::parse_component(source).unwrap();
-    let element = match ast_to_ir_node(&component) { IRNode::Element(e) => e, _ => panic!("Expected Element") };
+    let element = match ast_to_ir_node(&component) {
+        IRNode::Element(e) => e,
+        _ => panic!("Expected Element"),
+    };
 
     // Applicators become props with format "applicatorName.index"
     assert!(element.props.contains_key("fontSize.0"));
@@ -370,11 +418,17 @@ fn test_wasm_action_references() {
     let source = r#"Button("@actions.handleClick")"#;
 
     let component = hypen_parser::parse_component(source).unwrap();
-    let element = match ast_to_ir_node(&component) { IRNode::Element(e) => e, _ => panic!("Expected Element") };
+    let element = match ast_to_ir_node(&component) {
+        IRNode::Element(e) => e,
+        _ => panic!("Expected Element"),
+    };
 
     // Positional action references are stored under the "action" key
     let action_prop = element.props.get("action");
-    assert!(action_prop.is_some(), "Positional @actions.* should become props[\"action\"]");
+    assert!(
+        action_prop.is_some(),
+        "Positional @actions.* should become props[\"action\"]"
+    );
 
     match action_prop.unwrap() {
         Value::Action(action) => {
@@ -390,14 +444,23 @@ fn test_wasm_clear_tree() {
     let source = r#"Text("Hello")"#;
     let component = hypen_parser::parse_component(source).unwrap();
     let ir_node = ast_to_ir_node(&component);
-    let element = match &ir_node { IRNode::Element(e) => e.clone(), _ => panic!("Expected Element") };
+    let element = match &ir_node {
+        IRNode::Element(e) => e.clone(),
+        _ => panic!("Expected Element"),
+    };
 
     let mut tree = InstanceTree::new();
     let mut dependencies = DependencyGraph::new();
     let state: HashMap<String, serde_json::Value> = HashMap::new();
 
     let state_json = serde_json::to_value(&state).unwrap();
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state_json, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state_json,
+        &mut dependencies,
+    );
     let root_id = tree.root().expect("Should have root");
     tree.set_root(root_id);
 
@@ -479,13 +542,22 @@ fn test_wasm_error_recovery() {
     let valid_source = r#"Text("Valid")"#;
     let component = hypen_parser::parse_component(valid_source).unwrap();
     let ir_node = ast_to_ir_node(&component);
-    let element = match &ir_node { IRNode::Element(e) => e.clone(), _ => panic!("Expected Element") };
+    let element = match &ir_node {
+        IRNode::Element(e) => e.clone(),
+        _ => panic!("Expected Element"),
+    };
 
     let mut dependencies = DependencyGraph::new();
     let state: HashMap<String, serde_json::Value> = HashMap::new();
 
     let state_json = serde_json::to_value(&state).unwrap();
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state_json, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state_json,
+        &mut dependencies,
+    );
     assert!(!patches.is_empty(), "Should continue working after errors");
 }
 
@@ -500,7 +572,10 @@ fn test_wasm_large_tree_performance() {
 
     let component = hypen_parser::parse_component(&source).unwrap();
     let ir_node = ast_to_ir_node(&component);
-    let element = match &ir_node { IRNode::Element(ref e) => e, _ => panic!("Expected Element") };
+    let element = match &ir_node {
+        IRNode::Element(ref e) => e,
+        _ => panic!("Expected Element"),
+    };
 
     assert_eq!(element.element_type, "Column");
     assert_eq!(element.ir_children.len(), 100);

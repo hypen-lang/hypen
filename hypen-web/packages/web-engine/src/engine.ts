@@ -11,13 +11,13 @@
  *   - `unwrapForWasm` using `JSON.parse(JSON.stringify())` (structuredClone
  *     doesn't handle Hypen's proxy-backed state uniformly across browsers).
  *
- *   - `normalizeAction` that converts `Map` payloads from wasm-bindgen's
- *     web target into plain objects before user handlers see them.
+ * The web-target `Map`-payload conversion (`normalizeAction`) now lives in
+ * `BaseEngine` as the default, so this subclass inherits it — every
+ * web-target consumer gets the fix without re-declaring it.
  */
 
 import { BaseEngine } from "@hypen-space/core/engine-base";
 import { frameworkLoggers } from "@hypen-space/core/logger";
-import type { Action } from "@hypen-space/core/types";
 import { installPortableFromWasm } from "./install-portable.js";
 
 // Re-export types so consumers of "./engine.js" still work
@@ -50,35 +50,6 @@ export interface EngineInitOptions {
    * For self-hosting, point to your own copy of hypen_engine.js
    */
   jsUrl?: string;
-}
-
-/**
- * Recursively convert Maps and nested structures to plain objects.
- *
- * wasm-bindgen's browser target returns JS `Map` instances for action
- * payloads; user handlers expect plain objects.
- */
-function mapToObject(value: any): any {
-  if (value instanceof Map) {
-    const obj: Record<string, any> = {};
-    for (const [key, val] of value.entries()) {
-      obj[key] = mapToObject(val);
-    }
-    return obj;
-  } else if (Array.isArray(value)) {
-    return value.map(mapToObject);
-  } else if (
-    value &&
-    typeof value === "object" &&
-    value.constructor === Object
-  ) {
-    const obj: Record<string, any> = {};
-    for (const [key, val] of Object.entries(value)) {
-      obj[key] = mapToObject(val);
-    }
-    return obj;
-  }
-  return value;
 }
 
 /**
@@ -138,18 +109,5 @@ export class Engine extends BaseEngine {
       return value;
     }
     return JSON.parse(JSON.stringify(value));
-  }
-
-  /**
-   * Browser hook: wasm-bindgen's web target returns `Map` instances in
-   * action payloads. Convert those to plain objects before the user
-   * handler sees them.
-   */
-  protected override normalizeAction(action: Action): Action {
-    if (!action.payload) return action;
-    return {
-      ...action,
-      payload: mapToObject(action.payload),
-    };
   }
 }

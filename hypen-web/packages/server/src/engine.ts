@@ -14,6 +14,7 @@
 // WASM module types
 import { WasmEngine } from "../wasm-node/hypen_engine.js";
 import { BaseEngine } from "@hypen-space/core/engine-base";
+import type { Action } from "@hypen-space/core/types";
 
 // Side-effect import: installs the engine-backed PortableImpl into
 // `@hypen-space/core` as soon as the server package is loaded. After
@@ -78,5 +79,14 @@ export class Engine extends BaseEngine {
       // Fallback for proxy objects or unsupported types
       return JSON.parse(JSON.stringify(value));
     }
+  }
+
+  /**
+   * The bundler (node) target already returns plain-object action payloads,
+   * so we skip `BaseEngine`'s default `Map`-to-object walk (that walk only
+   * matters for the web target). Identity keeps node dispatch allocation-free.
+   */
+  protected override normalizeAction(action: Action): Action {
+    return action;
   }
 }

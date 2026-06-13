@@ -278,8 +278,12 @@ Column {
     // THEN: IR element has correct structure
     assert_eq!(element.element_type, "Column");
     assert_eq!(element.ir_children.len(), 2);
-    assert!(matches!(&element.ir_children[0], hypen_engine::ir::IRNode::Element(e) if e.element_type == "Text"));
-    assert!(matches!(&element.ir_children[1], hypen_engine::ir::IRNode::Element(e) if e.element_type == "Button"));
+    assert!(
+        matches!(&element.ir_children[0], hypen_engine::ir::IRNode::Element(e) if e.element_type == "Text")
+    );
+    assert!(
+        matches!(&element.ir_children[1], hypen_engine::ir::IRNode::Element(e) if e.element_type == "Button")
+    );
 }
 
 #[test]
@@ -418,8 +422,12 @@ component Footer() {
         other => panic!("Expected Element for footer Row, got {:?}", other),
     };
     assert_eq!(footer_row.ir_children.len(), 2);
-    assert!(matches!(&footer_row.ir_children[0], hypen_engine::ir::IRNode::Element(e) if e.element_type == "Text"));
-    assert!(matches!(&footer_row.ir_children[1], hypen_engine::ir::IRNode::Element(e) if e.element_type == "Badge"));
+    assert!(
+        matches!(&footer_row.ir_children[0], hypen_engine::ir::IRNode::Element(e) if e.element_type == "Text")
+    );
+    assert!(
+        matches!(&footer_row.ir_children[1], hypen_engine::ir::IRNode::Element(e) if e.element_type == "Badge")
+    );
 }
 
 // ============================================================================

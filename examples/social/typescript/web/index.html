@@ -6,17 +6,24 @@
   <title>Instagram Clone — Hypen</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; }
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #fafafa; }
-    #app { max-width: 470px; margin: 0 auto; height: 100vh; background: #fff; display: flex; flex-direction: column; }
-    .status { position: fixed; top: 8px; right: 8px; padding: 4px 10px; border-radius: 12px; font-size: 11px; z-index: 1000; }
-    .status.connected { background: #e6f9e6; color: #2d8a2d; }
-    .status.disconnected { background: #ffe6e6; color: #d32f2f; }
-    .status.connecting { background: #fff3e0; color: #e65100; }
+    #app, #app * { font-family: inherit; }
+    button, input, textarea, select { font: inherit; }
+    #app {
+      max-width: 470px;
+      margin: 0 auto;
+      height: 100vh;
+      min-height: 0;
+      background: #fff;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
   </style>
 </head>
 <body>
   <div id="app"></div>
-  <div id="status" class="status connecting">connecting</div>
   <script type="module" src="./client.ts"></script>
 </body>
 </html>

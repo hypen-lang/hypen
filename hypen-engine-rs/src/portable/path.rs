@@ -231,10 +231,7 @@ mod tests {
         // don't get cute with character arithmetic anywhere.
         let mut v = json!({"items": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]});
         path_set(&mut v, "items.10", json!("ten"));
-        assert_eq!(
-            v["items"],
-            json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, "ten"])
-        );
+        assert_eq!(v["items"], json!([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, "ten"]));
     }
 
     #[test]

@@ -127,7 +127,10 @@ fn test_expand_nested_components() {
     assert_eq!(expanded.ir_children.len(), 1);
     assert_element_type(ir_element(&expanded.ir_children[0]), "Row"); // Header expanded to Row
     assert_eq!(ir_element(&expanded.ir_children[0]).ir_children.len(), 1);
-    assert_element_type(ir_element(&ir_element(&expanded.ir_children[0]).ir_children[0]), "Text"); // Logo expanded to Text
+    assert_element_type(
+        ir_element(&ir_element(&expanded.ir_children[0]).ir_children[0]),
+        "Text",
+    ); // Logo expanded to Text
 }
 
 #[test]
@@ -380,11 +383,17 @@ fn test_mixed_lazy_and_regular_children() {
 
     // First child is lazy
     assert_element_type(ir_element(&expanded.ir_children[0]), "LazyWidget");
-    assert!(ir_element(&expanded.ir_children[0]).props.get("__lazy").is_some());
+    assert!(ir_element(&expanded.ir_children[0])
+        .props
+        .get("__lazy")
+        .is_some());
 
     // Second child is regular Text
     assert_element_type(ir_element(&expanded.ir_children[1]), "Text");
-    assert!(ir_element(&expanded.ir_children[1]).props.get("__lazy").is_none());
+    assert!(ir_element(&expanded.ir_children[1])
+        .props
+        .get("__lazy")
+        .is_none());
 }
 
 // ============================================================================
@@ -488,7 +497,11 @@ fn test_passthrough_context_propagation() {
     assert_eq!(expanded.ir_children.len(), 1);
     assert_element_type(ir_element(&expanded.ir_children[0]), "Text");
     // Parser uses prop "0" for first positional argument
-    assert_prop_static_value(ir_element(&expanded.ir_children[0]), "0", &json!("Container Widget"));
+    assert_prop_static_value(
+        ir_element(&expanded.ir_children[0]),
+        "0",
+        &json!("Container Widget"),
+    );
 }
 
 #[test]
@@ -529,7 +542,10 @@ fn test_multiple_passthrough_layers() {
     assert_prop_static_value(ir_element(&expanded.ir_children[0]), "inner", &json!("B"));
 
     assert_eq!(ir_element(&expanded.ir_children[0]).ir_children.len(), 1);
-    assert_element_type(ir_element(&ir_element(&expanded.ir_children[0]).ir_children[0]), "Text");
+    assert_element_type(
+        ir_element(&ir_element(&expanded.ir_children[0]).ir_children[0]),
+        "Text",
+    );
 }
 
 #[test]
@@ -771,7 +787,10 @@ fn test_nested_slot_replacement() {
     assert_eq!(expanded.ir_children.len(), 1);
     assert_element_type(ir_element(&expanded.ir_children[0]), "Column");
     assert_eq!(ir_element(&expanded.ir_children[0]).ir_children.len(), 1);
-    assert_element_type(ir_element(&ir_element(&expanded.ir_children[0]).ir_children[0]), "Text");
+    assert_element_type(
+        ir_element(&ir_element(&expanded.ir_children[0]).ir_children[0]),
+        "Text",
+    );
 }
 
 #[test]

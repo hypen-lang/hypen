@@ -1,0 +1,8 @@
+# The package builds to dist/, which is gitignored repo-wide. But the prebuilt
+# generic browser client IS shipped (consumers get it without a build step), so
+# force-track just that file.
+!dist/
+dist/*
+!dist/client/
+dist/client/*
+!dist/client/generic.js

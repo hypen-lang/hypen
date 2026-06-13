@@ -91,12 +91,7 @@ impl CpuPainter {
     /// (physical pixels) that's subtracted from every item's `y`. The
     /// painter additionally renders a thin scrollbar indicator on the
     /// right edge whenever content overflows the viewport.
-    pub fn paint_with_scroll(
-        &mut self,
-        tree: &Tree,
-        target: PaintTarget<'_>,
-        scroll_y: f32,
-    ) {
+    pub fn paint_with_scroll(&mut self, tree: &Tree, target: PaintTarget<'_>, scroll_y: f32) {
         self.paint_with_scrolls(tree, target, scroll_y, &std::collections::HashMap::new());
     }
 
@@ -172,9 +167,7 @@ impl CpuPainter {
             // rest of the surface keeps the previous frame's content.
             let mut paint = Paint::default();
             paint.set_color(bg);
-            if let Some(rect) =
-                tiny_skia::Rect::from_xywh(d.x, d.y, d.w.max(1.0), d.h.max(1.0))
-            {
+            if let Some(rect) = tiny_skia::Rect::from_xywh(d.x, d.y, d.w.max(1.0), d.h.max(1.0)) {
                 pixmap.fill_rect(rect, &paint, Transform::identity(), None);
             }
         } else {
@@ -294,12 +287,8 @@ impl CpuPainter {
                     );
                     let dx = match align {
                         crate::layout::TextAlign::Start => 0.0,
-                        crate::layout::TextAlign::Center => {
-                            ((item.rect.w - line_w).max(0.0)) * 0.5
-                        }
-                        crate::layout::TextAlign::End => {
-                            (item.rect.w - line_w).max(0.0)
-                        }
+                        crate::layout::TextAlign::Center => ((item.rect.w - line_w).max(0.0)) * 0.5,
+                        crate::layout::TextAlign::End => (item.rect.w - line_w).max(0.0),
                     };
                     self.text.draw_text_cached_weighted(
                         pixmap,
@@ -404,11 +393,8 @@ impl CpuPainter {
                             );
                             let mut caret_x = text_x + caret_w;
                             if let Some(pre) = preedit {
-                                let (pre_w, _) = self.text.measure(
-                                    pre,
-                                    *font_size * scale_factor,
-                                    None,
-                                );
+                                let (pre_w, _) =
+                                    self.text.measure(pre, *font_size * scale_factor, None);
                                 // Paint preedit inline at caret_x in the
                                 // text colour, then a thin underline to
                                 // show it isn't committed yet.
@@ -427,12 +413,7 @@ impl CpuPainter {
                                     w: pre_w,
                                     h: 1.0 * scale_factor,
                                 };
-                                fill_rect(
-                                    pixmap,
-                                    underline,
-                                    Rgba(0x00, 0x7a, 0xff, 0xff),
-                                    0.0,
-                                );
+                                fill_rect(pixmap, underline, Rgba(0x00, 0x7a, 0xff, 0xff), 0.0);
                                 caret_x += pre_w;
                             }
                             let caret = crate::layout::Rect {
@@ -441,12 +422,7 @@ impl CpuPainter {
                                 w: 1.5 * scale_factor,
                                 h: h_px,
                             };
-                            fill_rect(
-                                pixmap,
-                                caret,
-                                Rgba(0x00, 0x7a, 0xff, 0xff),
-                                0.0,
-                            );
+                            fill_rect(pixmap, caret, Rgba(0x00, 0x7a, 0xff, 0xff), 0.0);
                         }
                     }
                 }
@@ -553,16 +529,19 @@ fn paint_partial_border(
     width: f32,
     sides: u8,
 ) {
-    use crate::style::{
-        BORDER_SIDE_BOTTOM, BORDER_SIDE_LEFT, BORDER_SIDE_RIGHT, BORDER_SIDE_TOP,
-    };
+    use crate::style::{BORDER_SIDE_BOTTOM, BORDER_SIDE_LEFT, BORDER_SIDE_RIGHT, BORDER_SIDE_TOP};
     if color.3 == 0 || width <= 0.0 {
         return;
     }
     if sides & BORDER_SIDE_TOP != 0 {
         fill_rect(
             pixmap,
-            crate::layout::Rect { x: rect.x, y: rect.y, w: rect.w, h: width },
+            crate::layout::Rect {
+                x: rect.x,
+                y: rect.y,
+                w: rect.w,
+                h: width,
+            },
             color,
             0.0,
         );
@@ -583,7 +562,12 @@ fn paint_partial_border(
     if sides & BORDER_SIDE_LEFT != 0 {
         fill_rect(
             pixmap,
-            crate::layout::Rect { x: rect.x, y: rect.y, w: width, h: rect.h },
+            crate::layout::Rect {
+                x: rect.x,
+                y: rect.y,
+                w: width,
+                h: rect.h,
+            },
             color,
             0.0,
         );
@@ -654,7 +638,9 @@ fn draw_focus_ring(pixmap: &mut Pixmap, rect: crate::layout::Rect, scale: f32) {
         width: 2.0 * scale,
         ..Default::default()
     };
-    if let Some(path) = rounded_rect_path(ring_rect.x, ring_rect.y, ring_rect.w, ring_rect.h, radius) {
+    if let Some(path) =
+        rounded_rect_path(ring_rect.x, ring_rect.y, ring_rect.w, ring_rect.h, radius)
+    {
         pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
     }
 }
@@ -689,7 +675,14 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia
     pb.line_to(x + w - rx, y);
     pb.cubic_to(x + w - rx + cx, y, x + w, y + ry - cy, x + w, y + ry);
     pb.line_to(x + w, y + h - ry);
-    pb.cubic_to(x + w, y + h - ry + cy, x + w - rx + cx, y + h, x + w - rx, y + h);
+    pb.cubic_to(
+        x + w,
+        y + h - ry + cy,
+        x + w - rx + cx,
+        y + h,
+        x + w - rx,
+        y + h,
+    );
     pb.line_to(x + rx, y + h);
     pb.cubic_to(x + rx - cx, y + h, x, y + h - ry + cy, x, y + h - ry);
     pb.line_to(x, y + ry);
@@ -801,7 +794,10 @@ mod tests {
         // clamp to 5 internally and not panic. We just verify a path
         // came back (no panic, no None).
         let path = rounded_rect_path(0.0, 0.0, 10.0, 100.0, 50.0);
-        assert!(path.is_some(), "expected a Some(path) even with oversized radius");
+        assert!(
+            path.is_some(),
+            "expected a Some(path) even with oversized radius"
+        );
     }
 
     /// Helper: build a fresh white pixmap and capture its initial bytes.
@@ -860,7 +856,10 @@ mod tests {
                 break;
             }
         }
-        assert!(found_red, "expected at least one red-tinted pixel in the filled rect");
+        assert!(
+            found_red,
+            "expected at least one red-tinted pixel in the filled rect"
+        );
     }
 
     #[test]

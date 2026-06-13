@@ -98,3 +98,46 @@ unsafe fn apply_flags_recursive(layer: *mut AnyObject) {
         apply_flags_recursive(child);
     }
 }
+
+/// Merge the window's title bar into the content, Safari-style:
+///
+/// - **`titlebarAppearsTransparent = YES`** — the title bar's chrome
+///   background goes away so the app's own pixels show through.
+/// - **`titleVisibility = Hidden`** — drop the centered title text.
+/// - **`NSWindowStyleMaskFullSizeContentView`** — the content view
+///   grows up under the title bar so the app draws edge-to-edge; the
+///   traffic lights float over the top-left of the content. The window
+///   still has a (transparent) title bar, so its height stays draggable
+///   and the traffic lights stay live.
+///
+/// The app must inset its own top-left chrome so nothing important
+/// hides behind the traffic lights — the browser shell does this with a
+/// top pad on its toolbar.
+pub fn configure_unified_titlebar(window: &Window) {
+    let Ok(handle) = window.window_handle() else {
+        return;
+    };
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return;
+    };
+    let ns_view: *mut AnyObject = h.ns_view.as_ptr().cast();
+    if ns_view.is_null() {
+        return;
+    }
+    // Safety: `ns_view` is the live NSView; `window` returns its
+    // owning NSWindow. All selectors below are public NSWindow API.
+    unsafe {
+        let ns_window: *mut AnyObject = msg_send![ns_view, window];
+        if ns_window.is_null() {
+            return;
+        }
+        let _: () = msg_send![ns_window, setTitlebarAppearsTransparent: true];
+        // NSWindowTitleVisibilityHidden = 1.
+        let _: () = msg_send![ns_window, setTitleVisibility: 1isize];
+        // OR in NSWindowStyleMaskFullSizeContentView (1 << 15) while
+        // preserving the existing titled / closable / resizable bits.
+        let mask: usize = msg_send![ns_window, styleMask];
+        const FULL_SIZE_CONTENT_VIEW: usize = 1 << 15;
+        let _: () = msg_send![ns_window, setStyleMask: mask | FULL_SIZE_CONTENT_VIEW];
+    }
+}

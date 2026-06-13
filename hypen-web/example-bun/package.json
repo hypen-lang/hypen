@@ -11,10 +11,10 @@
     "start": "bun run server.ts"
   },
   "dependencies": {
-    "@hypen-space/core": "^0.4.949",
-    "@hypen-space/server": "^0.4.949",
-    "@hypen-space/web": "^0.4.949",
-    "@hypen-space/web-engine": "^0.4.949",
+    "@hypen-space/core": "^0.5.0",
+    "@hypen-space/server": "^0.5.0",
+    "@hypen-space/web": "^0.5.0",
+    "@hypen-space/web-engine": "^0.5.0",
     "axios": "^1.7.2"
   },
   "devDependencies": {

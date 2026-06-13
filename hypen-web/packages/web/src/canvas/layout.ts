@@ -54,26 +54,40 @@ export async function initTaffyLayout(): Promise<boolean> {
       // raw `__wbg_init` (default export of the `taffy-layout/wasm` subpath)
       // directly with an explicit Response.
       let usedExplicit = false;
-      if (typeof window !== "undefined" && typeof fetch === "function") {
-        const candidates = [
-          new URL("/taffy_wasm_bg.wasm", window.location.origin),
-          new URL("https://cdn.jsdelivr.net/npm/taffy-layout@2.0.3/pkg/taffy_wasm_bg.wasm"),
-          new URL("https://unpkg.com/taffy-layout@2.0.3/pkg/taffy_wasm_bg.wasm"),
-        ];
-        const rawWasm = await import(
-          /* @vite-ignore */ "taffy-layout/wasm" as string
-        );
-        const wbgInit = rawWasm.default as (input?: any) => Promise<unknown>;
-        for (const url of candidates) {
-          try {
-            const res = await fetch(url);
-            if (!res.ok) continue;
-            await wbgInit({ module_or_path: res });
-            usedExplicit = true;
-            break;
-          } catch {
-            // Try next candidate
+      // Only take the fetch path in a real browser. Test environments (and
+      // anything else that installs a fake `window` global) must fall through
+      // to `loadTaffy()`, which resolves the WASM from the package on disk —
+      // a fake window without `location.origin` used to throw here and
+      // silently disable Taffy for the rest of the process.
+      const isRealBrowser =
+        typeof window !== "undefined" &&
+        typeof fetch === "function" &&
+        typeof window.location?.origin === "string" &&
+        window.document?.defaultView === window;
+      if (isRealBrowser) {
+        try {
+          const candidates = [
+            new URL("/taffy_wasm_bg.wasm", window.location.origin),
+            new URL("https://cdn.jsdelivr.net/npm/taffy-layout@2.0.3/pkg/taffy_wasm_bg.wasm"),
+            new URL("https://unpkg.com/taffy-layout@2.0.3/pkg/taffy_wasm_bg.wasm"),
+          ];
+          const rawWasm = await import(
+            /* @vite-ignore */ "taffy-layout/wasm" as string
+          );
+          const wbgInit = rawWasm.default as (input?: any) => Promise<unknown>;
+          for (const url of candidates) {
+            try {
+              const res = await fetch(url);
+              if (!res.ok) continue;
+              await wbgInit({ module_or_path: res });
+              usedExplicit = true;
+              break;
+            } catch {
+              // Try next candidate
+            }
           }
+        } catch {
+          // Fall through to loadTaffy()
         }
       }
       if (!usedExplicit) {

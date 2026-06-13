@@ -39,10 +39,7 @@ pub(crate) struct EngineCore {
     /// (UniFFI, WASI) to validate `dispatch_action` requests before queuing.
     /// `js` uses its own closure-based handler map and doesn't touch this.
     #[cfg_attr(
-        not(any(
-            feature = "uniffi",
-            all(target_arch = "wasm32", feature = "wasi"),
-        )),
+        not(any(feature = "uniffi", all(target_arch = "wasm32", feature = "wasi"),)),
         allow(dead_code)
     )]
     pub registered_actions: Vec<String>,
@@ -103,11 +100,9 @@ impl EngineCore {
     pub fn set_module(&mut self, module: ModuleInstance) {
         // Evict previous primary-slot actions (scope == None). Any named-module
         // actions (scope == Some(_)) are left intact.
-        self.action_module_map
-            .retain(|_, scope| scope.is_some());
+        self.action_module_map.retain(|_, scope| scope.is_some());
         for action in &module.module.actions {
-            self.action_module_map
-                .insert(action.clone(), None);
+            self.action_module_map.insert(action.clone(), None);
         }
         self.module = Some(module);
     }
@@ -142,9 +137,7 @@ impl EngineCore {
     /// the lowercased module name. Lets callers pass scopes in any case
     /// without worrying about matching the engine's internal convention.
     fn canon_scope(scope: Option<&str>) -> Option<String> {
-        scope
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_lowercase())
+        scope.filter(|s| !s.is_empty()).map(|s| s.to_lowercase())
     }
 
     /// Apply a state patch and schedule affected nodes for re-render.
@@ -278,8 +271,7 @@ impl EngineCore {
         self.data_sources.insert(name.to_string(), data);
 
         if !affected.is_empty() {
-            self.scheduler
-                .mark_many_dirty(affected.iter().copied());
+            self.scheduler.mark_many_dirty(affected.iter().copied());
         }
     }
 
@@ -320,8 +312,7 @@ impl EngineCore {
 
         let affected = self.dependencies.get_data_source_affected_nodes(name);
         if !affected.is_empty() {
-            self.scheduler
-                .mark_many_dirty(affected.iter().copied());
+            self.scheduler.mark_many_dirty(affected.iter().copied());
         }
     }
 
@@ -437,10 +428,7 @@ impl EngineCore {
     ///   bindings should route follow-up updates to the primary slot, which
     ///   is the correct default.
     pub fn action_scope_for(&self, action_name: &str) -> Option<String> {
-        self.action_module_map
-            .get(action_name)
-            .cloned()
-            .flatten()
+        self.action_module_map.get(action_name).cloned().flatten()
     }
 
     /// Scan an expanded IR tree for `module_scope` values and auto-register
@@ -460,10 +448,7 @@ impl EngineCore {
         // If the primary module has an anonymous/generic name, the FIRST scope
         // in the expanded IR (typically the root `module X {}` declaration)
         // is assumed to be the primary module.
-        let primary_name = self
-            .module
-            .as_ref()
-            .map(|m| m.module.name.to_lowercase());
+        let primary_name = self.module.as_ref().map(|m| m.module.name.to_lowercase());
 
         let primary_scope: Option<String> = if let Some(ref name) = primary_name {
             if scopes.contains(name.as_str()) {

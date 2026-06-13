@@ -12,9 +12,9 @@
 
 use crate::layout::Rect as LayoutRect;
 use crate::style::Rgba;
+use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use indexmap::IndexMap;
 use svgtypes::PathSegment;
 use tiny_skia::{
     FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, PixmapPaint, PixmapRef, Stroke,
@@ -77,7 +77,9 @@ pub fn parse_paths(value: &Value) -> Vec<IconPath> {
 pub fn parse_view_box(s: Option<&str>) -> (f32, f32, f32, f32) {
     let default = (0.0_f32, 0.0_f32, 24.0_f32, 24.0_f32);
     let Some(s) = s else { return default };
-    let mut it = s.split_ascii_whitespace().filter_map(|t| t.parse::<f32>().ok());
+    let mut it = s
+        .split_ascii_whitespace()
+        .filter_map(|t| t.parse::<f32>().ok());
     match (it.next(), it.next(), it.next(), it.next()) {
         (Some(a), Some(b), Some(c), Some(d)) if c > 0.0 && d > 0.0 => (a, b, c, d),
         _ => default,
@@ -129,7 +131,15 @@ pub fn build_path(d: &str) -> Option<tiny_skia::Path> {
                 last_cubic_ctrl = None;
                 last_quad_ctrl = None;
             }
-            PathSegment::CurveTo { abs, x1, y1, x2, y2, x, y } => {
+            PathSegment::CurveTo {
+                abs,
+                x1,
+                y1,
+                x2,
+                y2,
+                x,
+                y,
+            } => {
                 let (x1, y1) = absify(abs, cx, cy, x1 as f32, y1 as f32);
                 let (x2, y2) = absify(abs, cx, cy, x2 as f32, y2 as f32);
                 let (x, y) = absify(abs, cx, cy, x as f32, y as f32);
@@ -373,8 +383,7 @@ pub fn paint_icon_cached(
     pixmap.draw_pixmap(
         0,
         0,
-        PixmapRef::from_bytes(tile.data(), tile.width(), tile.height())
-            .expect("tile bytes valid"),
+        PixmapRef::from_bytes(tile.data(), tile.width(), tile.height()).expect("tile bytes valid"),
         &PixmapPaint::default(),
         transform,
         None,
@@ -436,7 +445,10 @@ mod tests {
     #[test]
     fn parse_view_box_handles_well_formed() {
         assert_eq!(parse_view_box(Some("0 0 24 24")), (0.0, 0.0, 24.0, 24.0));
-        assert_eq!(parse_view_box(Some("-1 -2 30 40")), (-1.0, -2.0, 30.0, 40.0));
+        assert_eq!(
+            parse_view_box(Some("-1 -2 30 40")),
+            (-1.0, -2.0, 30.0, 40.0)
+        );
         assert_eq!(
             parse_view_box(Some("  0   0   16   16  ")),
             (0.0, 0.0, 16.0, 16.0)
@@ -499,7 +511,12 @@ mod tests {
             stroke_linecap: None,
             stroke_linejoin: None,
         }];
-        let rect = LayoutRect { x: 0.0, y: 0.0, w: 32.0, h: 32.0 };
+        let rect = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 32.0,
+            h: 32.0,
+        };
         let view_box = (0.0, 0.0, 10.0, 10.0);
 
         let mut a = Pixmap::new(48, 48).unwrap();
@@ -513,7 +530,11 @@ mod tests {
         // Cache miss render path goes through `paint_icon` against a
         // fresh tile and then composites; the `a` pixels must equal
         // the `b` pixels, modulo nothing.
-        assert_eq!(a.data(), b.data(), "cached miss-render should match uncached");
+        assert_eq!(
+            a.data(),
+            b.data(),
+            "cached miss-render should match uncached"
+        );
 
         // Second call → cache hit, still must match.
         let mut c = Pixmap::new(48, 48).unwrap();
@@ -531,7 +552,12 @@ mod tests {
 
         paint_icon_cached(
             &mut pm,
-            LayoutRect { x: 0.0, y: 0.0, w: 20.0, h: 20.0 },
+            LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                w: 20.0,
+                h: 20.0,
+            },
             &[],
             (0.0, 0.0, 24.0, 24.0),
             None,
@@ -541,7 +567,12 @@ mod tests {
 
         paint_icon_cached(
             &mut pm,
-            LayoutRect { x: 0.0, y: 0.0, w: 0.0, h: 0.0 },
+            LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0,
+            },
             &[IconPath {
                 d: "M0 0 L1 1".into(),
                 fill: Some("#000".into()),

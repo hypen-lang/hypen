@@ -118,6 +118,41 @@ fn extract_bindings_from_template(s: &str) -> Option<Vec<Binding>> {
 ///
 /// `element_type` is used by `.bind()` to pick the correct bound property
 /// (`checked` for Checkbox, `on` for Switch, `value` otherwise).
+/// Breakpoint names recognised in a *responsive-object* applicator value
+/// like `.gridColumns({default: 2, md: 3, lg: 4})`. Mirrors the tailwind
+/// breakpoints every renderer already resolves via `name@bp` keys.
+const RESPONSIVE_KEYS: &[&str] = &["default", "base", "sm", "md", "lg", "xl", "2xl"];
+
+/// Insert an applicator prop, expanding a responsive-object value into
+/// the same `name@bp.idx` suffix keys that tailwind `md:` classes
+/// produce — the format every renderer (DOM media-query classes,
+/// desktop `lookup_breakpoint`, Swift/Android variant resolution) already
+/// understands. Without this, `.gridColumns({default: 2, md: 3})` reaches
+/// renderers as one opaque object prop that each must special-case (most
+/// don't — the DOM stringifies it to `"[object Object]"`).
+///
+/// Only objects whose keys are *all* breakpoint names are expanded;
+/// composite-value objects such as `.size({width, height})` pass through
+/// untouched as a single `name.idx` prop.
+fn insert_applicator_prop(props: &mut Props, name: &str, idx_key: &str, value: Value) {
+    if let Value::Static(serde_json::Value::Object(map)) = &value {
+        let all_breakpoints =
+            !map.is_empty() && map.keys().all(|k| RESPONSIVE_KEYS.contains(&k.as_str()));
+        if all_breakpoints {
+            for (bp, v) in map {
+                let key = if bp == "default" || bp == "base" {
+                    format!("{name}.{idx_key}")
+                } else {
+                    format!("{name}@{bp}.{idx_key}")
+                };
+                props.insert(key, Value::Static(v.clone()));
+            }
+            return;
+        }
+    }
+    props.insert(format!("{name}.{idx_key}"), value);
+}
+
 fn process_applicators(
     applicators: &[hypen_parser::ApplicatorSpecification],
     props: &mut Props,
@@ -186,17 +221,15 @@ fn process_applicators(
             );
         } else {
             for (i, arg) in applicator.arguments.arguments.iter().enumerate() {
-                let (key, value) = match arg {
-                    hypen_parser::Argument::Named { key, value } => (
-                        format!("{}.{}", applicator.name, key),
-                        parser_value_to_ir(value),
-                    ),
-                    hypen_parser::Argument::Positioned { value, .. } => (
-                        format!("{}.{}", applicator.name, i),
-                        parser_value_to_ir(value),
-                    ),
+                let (idx_key, value) = match arg {
+                    hypen_parser::Argument::Named { key, value } => {
+                        (key.clone(), parser_value_to_ir(value))
+                    }
+                    hypen_parser::Argument::Positioned { value, .. } => {
+                        (i.to_string(), parser_value_to_ir(value))
+                    }
                 };
-                props.insert(key, value);
+                insert_applicator_prop(props, &applicator.name, &idx_key, value);
             }
         }
     }
@@ -297,11 +330,7 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
             }
 
             // Convert children recursively as IRNodes to preserve ForEach/When/If
-            element.ir_children = component
-                .children
-                .iter()
-                .map(ast_to_ir_node)
-                .collect();
+            element.ir_children = component.children.iter().map(ast_to_ir_node).collect();
 
             IRNode::Element(element)
         }
@@ -318,9 +347,7 @@ fn find_named_arg<'a>(
     keys: &[&str],
 ) -> Option<&'a ParserValue> {
     args.iter().find_map(|arg| match arg {
-        hypen_parser::Argument::Named { key, value } if keys.contains(&key.as_str()) => {
-            Some(value)
-        }
+        hypen_parser::Argument::Named { key, value } if keys.contains(&key.as_str()) => Some(value),
         _ => None,
     })
 }
@@ -468,7 +495,9 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
     // Use the `.0` suffix convention that applicators use, since renderers
     // expect props like `columns.0` and `gap.0`.
     for (key, value) in &extra_props {
-        list_element.props.insert(format!("{}.0", key), value.clone());
+        list_element
+            .props
+            .insert(format!("{}.0", key), value.clone());
     }
     list_element.ir_children.push(foreach_ir);
 
@@ -1086,6 +1115,63 @@ mod tests {
     }
 
     #[test]
+    fn test_responsive_object_applicator_expands_to_breakpoint_props() {
+        // `.gridColumns({default: 2, md: 3, lg: 4})` must expand into the
+        // same `name@bp.0` suffix props tailwind `md:` classes produce, so
+        // every renderer resolves it — instead of one opaque object prop.
+        let input = r#"Column {}.gridColumns({default: 2, md: 3, lg: 4})"#;
+        let element = parse_to_element(input);
+        let get = |k: &str| match element.props.get(k) {
+            Some(Value::Static(v)) => v.as_f64(),
+            _ => None,
+        };
+        assert_eq!(get("gridColumns.0"), Some(2.0), "default → unsuffixed base key");
+        assert_eq!(get("gridColumns@md.0"), Some(3.0));
+        assert_eq!(get("gridColumns@lg.0"), Some(4.0));
+    }
+
+    #[test]
+    fn test_non_breakpoint_object_applicator_is_not_expanded() {
+        // A composite-value object (not all-breakpoint keys) stays a single
+        // prop — must not be mistaken for a responsive object.
+        let input = r#"Column {}.size({width: 10, height: 20})"#;
+        let element = parse_to_element(input);
+        assert!(
+            matches!(
+                element.props.get("size.0"),
+                Some(Value::Static(serde_json::Value::Object(_)))
+            ),
+            "composite {{width,height}} object passes through intact",
+        );
+        assert!(element.props.get("size@md.0").is_none());
+    }
+
+    #[test]
+    fn test_tw_applicator_visual_regressions() {
+        let input = r#"Column {}.tw("bg-gradient-to-br from-indigo-950 via-slate-900 to-fuchsia-950 bg-white/10 border-white/10 shadow-xl shadow-2xl opacity-60 backdrop-blur-[18px]")"#;
+        let element = parse_to_element(input);
+
+        let expected = [
+            (
+                "backgroundImage.0",
+                "linear-gradient(to bottom right, #1e1b4b, #0f172a, #4a044e)",
+            ),
+            ("backgroundColor.0", "rgba(255, 255, 255, 0.1)"),
+            ("borderColor.0", "rgba(255, 255, 255, 0.1)"),
+            ("boxShadow.0", "0 25px 50px -12px rgb(0 0 0 / 0.25)"),
+            ("opacity.0", "0.6"),
+            ("backdropFilter.0", "blur(18px)"),
+        ];
+
+        for (key, value) in expected {
+            match element.props.get(key) {
+                Some(Value::Static(actual)) => assert_eq!(actual.as_str().unwrap(), value),
+                other => panic!("Expected static prop {key}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
     fn test_tw_mixed_with_other_applicators() {
         // Test .tw() combined with other applicators
         let input = r#"Text("Hello").tw("p-4").fontSize(18)"#;
@@ -1420,7 +1506,10 @@ mod tests {
                 assert_eq!(binding.provider(), Some("spacetime"));
                 assert_eq!(binding.path, vec!["selectedId"]);
             }
-            other => panic!("Expected DataSource binding for value prop, got: {:?}", other),
+            other => panic!(
+                "Expected DataSource binding for value prop, got: {:?}",
+                other
+            ),
         }
 
         // Should have "bind" with the full data source path
@@ -1511,7 +1600,10 @@ mod tests {
 
         match element.props.get("onClick.0").unwrap() {
             Value::Action(name) => assert_eq!(name, "router.replace"),
-            other => panic!("Expected Value::Action(\"router.replace\"), got: {:?}", other),
+            other => panic!(
+                "Expected Value::Action(\"router.replace\"), got: {:?}",
+                other
+            ),
         }
     }
 }

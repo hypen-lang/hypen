@@ -371,6 +371,8 @@ impl App {
                 };
                 if next != self.focused {
                     self.focused = next;
+                    // Keyboard-driven focus shows the ring (`:focus-visible`).
+                    self.focus_visible = true;
                     return true;
                 }
                 false

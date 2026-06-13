@@ -25,6 +25,7 @@ pub struct DesktopApp {
     size: (u32, u32),
     module: Option<Arc<dyn HypenModule>>,
     shortcuts: Vec<crate::window::ShortcutBinding>,
+    unified_titlebar: bool,
 }
 
 impl DesktopApp {
@@ -34,6 +35,7 @@ impl DesktopApp {
             size: (960, 640),
             module: None,
             shortcuts: Vec::new(),
+            unified_titlebar: false,
         }
     }
 
@@ -72,6 +74,18 @@ impl DesktopApp {
 
     pub fn title(mut self, t: impl Into<String>) -> Self {
         self.title = t.into();
+        self
+    }
+
+    /// macOS only: merge the window's title bar into the content like
+    /// Safari — the title bar goes transparent, the title text hides,
+    /// and content extends full-height under it (`fullSizeContentView`)
+    /// so the app draws edge-to-edge with the traffic lights floating
+    /// over the top. The app is responsible for insetting its own
+    /// top-left content so nothing hides behind the traffic lights.
+    /// No-op on other platforms.
+    pub fn unified_titlebar(mut self, on: bool) -> Self {
+        self.unified_titlebar = on;
         self
     }
 
@@ -123,11 +137,7 @@ impl DesktopApp {
     ///     .connect("ws://localhost:3000", "Counter")
     ///     .run();
     /// ```
-    pub fn connect(
-        self,
-        url: impl Into<String>,
-        module_name: impl Into<String>,
-    ) -> Self {
+    pub fn connect(self, url: impl Into<String>, module_name: impl Into<String>) -> Self {
         let remote = RemoteModule::connect(url, module_name);
         self.module(Arc::new(remote))
     }
@@ -200,6 +210,7 @@ impl DesktopApp {
             proxy,
         );
         app.set_shortcuts(self.shortcuts.clone());
+        app.set_unified_titlebar(self.unified_titlebar);
         event_loop.run_app(&mut app).expect("event loop run");
     }
 }

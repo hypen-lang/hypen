@@ -79,7 +79,10 @@ fn collect_fixtures(root: &Path) -> Vec<PathBuf> {
 fn sorted_object(value: &Value) -> Value {
     match value {
         Value::Object(m) => {
-            let sorted: BTreeMap<_, _> = m.iter().map(|(k, v)| (k.clone(), sorted_object(v))).collect();
+            let sorted: BTreeMap<_, _> = m
+                .iter()
+                .map(|(k, v)| (k.clone(), sorted_object(v)))
+                .collect();
             Value::Object(sorted.into_iter().collect())
         }
         Value::Array(a) => Value::Array(a.iter().map(sorted_object).collect()),
@@ -178,13 +181,21 @@ fn run_path_delete(fixture: &Fixture) {
 fn run_encode_uri_component(fixture: &Fixture) {
     let input = fixture.input.as_str().unwrap();
     let got = Value::String(encode_uri_component(input));
-    assert_eq!(got, fixture.expected, "fixture '{}' encode mismatch", fixture.name);
+    assert_eq!(
+        got, fixture.expected,
+        "fixture '{}' encode mismatch",
+        fixture.name
+    );
 }
 
 fn run_decode_uri_component(fixture: &Fixture) {
     let input = fixture.input.as_str().unwrap();
     let got = Value::String(decode_uri_component(input));
-    assert_eq!(got, fixture.expected, "fixture '{}' decode mismatch", fixture.name);
+    assert_eq!(
+        got, fixture.expected,
+        "fixture '{}' decode mismatch",
+        fixture.name
+    );
 }
 
 fn run_parse_query(fixture: &Fixture) {
@@ -204,7 +215,11 @@ fn run_build_url(fixture: &Fixture) {
     let query: std::collections::BTreeMap<String, String> =
         serde_json::from_value(fixture.input["query"].clone()).unwrap();
     let got = Value::String(build_url(path, &query));
-    assert_eq!(got, fixture.expected, "fixture '{}' build_url mismatch", fixture.name);
+    assert_eq!(
+        got, fixture.expected,
+        "fixture '{}' build_url mismatch",
+        fixture.name
+    );
 }
 
 fn run_session_step(fixture: &Fixture) {
@@ -224,7 +239,11 @@ fn run_session_step(fixture: &Fixture) {
 fn portable_fixtures_match_engine_output() {
     let root = fixtures_root();
     let paths = collect_fixtures(&root);
-    assert!(!paths.is_empty(), "no portable fixtures found at {:?}", root);
+    assert!(
+        !paths.is_empty(),
+        "no portable fixtures found at {:?}",
+        root
+    );
 
     for path in paths {
         let raw = fs::read_to_string(&path).expect("read fixture");

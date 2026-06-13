@@ -45,6 +45,10 @@ pub struct ShellState {
     /// `true` when the floating island shows the full URL bar +
     /// tab strip; `false` when it's collapsed to the active-tab chip.
     pub island_expanded: bool,
+    /// `true` when the user has pinned the island open via the caret
+    /// button. Pinned bars ignore hover-out so they don't collapse
+    /// while you're working in them; unpinned bars follow the pointer.
+    pub island_pinned: bool,
     /// Recent visits, capped at 6 by [`crate::storage::Storage`].
     pub recents: Vec<RecentApp>,
     /// Open tabs in display order. Empty when no app is open — the
@@ -69,6 +73,13 @@ pub struct ShellState {
     pub active_status_message: String,
     /// Derived: the active tab's URL — shown in the loading screen.
     pub active_url: String,
+    /// `true` when the patch debug console is open (the `{ }` toolbar
+    /// button). Off by default.
+    pub debug_open: bool,
+    /// Most-recent patch/action traffic for the debug console, as one
+    /// newline-joined block (newest last). Pushed by the BrowserModule
+    /// via `__set_debug_log`.
+    pub debug_log: String,
 }
 
 impl ShellState {
@@ -76,6 +87,7 @@ impl ShellState {
         Self {
             url_input: String::new(),
             island_expanded: true,
+            island_pinned: false,
             recents,
             tabs: Vec::new(),
             active_tab_id: String::new(),
@@ -84,6 +96,8 @@ impl ShellState {
             active_status: String::new(),
             active_status_message: String::new(),
             active_url: String::new(),
+            debug_open: false,
+            debug_log: String::new(),
         }
     }
 }
@@ -119,6 +133,11 @@ pub enum ShellCommand {
     GoHome,
     /// Drop a recent-apps entry by URL.
     DeleteRecent { url: String },
+    /// The user toggled the patch debug console. The browser uses this
+    /// to start/stop capturing tab traffic into the console.
+    SetDebug(bool),
+    /// Serialise the current UI tree into the debug console.
+    DumpTree,
 }
 
 /// Build the shell module: state + handlers + UI source. Captures
@@ -135,6 +154,8 @@ pub fn build_shell_module(
     let tx_close = cmd_tx.clone();
     let tx_switch = cmd_tx.clone();
     let tx_delete = cmd_tx.clone();
+    let tx_debug = cmd_tx.clone();
+    let tx_tree = cmd_tx.clone();
     let tx_new_tab = cmd_tx;
 
     HypenApp::module::<ShellState>("Shell")
@@ -217,23 +238,50 @@ pub fn build_shell_module(
         .on_action::<()>("toggle_island", |state, _payload, _ctx| {
             state.island_expanded = !state.island_expanded;
         })
+        .on_action::<()>("toggle_debug", move |state, _payload, _ctx| {
+            state.debug_open = !state.debug_open;
+            if !state.debug_open {
+                state.debug_log.clear();
+            }
+            // Tell the browser to start / stop capturing tab traffic.
+            let _ = tx_debug.send(ShellCommand::SetDebug(state.debug_open));
+        })
+        .on_action::<DebugLogPayload>("__set_debug_log", |state, payload, _ctx| {
+            state.debug_log = payload.text;
+        })
+        .on_action::<()>("dump_tree", move |state, _payload, _ctx| {
+            // Open the console (so the dump is visible) and ask the
+            // browser to serialise the live UI tree into it.
+            state.debug_open = true;
+            let _ = tx_tree.send(ShellCommand::DumpTree);
+        })
+        .on_action::<()>("toggle_pin", |state, _payload, _ctx| {
+            // The caret button is a sticky toggle. Pinning keeps the
+            // bar open regardless of hover; unpinning collapses it (so
+            // it doubles as "minimize"). While unpinned the bar follows
+            // the pointer via `island_hover`.
+            state.island_pinned = !state.island_pinned;
+            state.island_expanded = state.island_pinned;
+        })
         .on_action::<HoverPayload>("island_hover", |state, payload, _ctx| {
-            // Hover-driven expand: pointer over the island chip
-            // expands the bar; leaving collapses it. Click `toggle`
-            // still works as a touchpad-friendly fallback.
-            state.island_expanded = payload.hovered;
+            // Hover-driven expand: pointer over the island chip expands
+            // the bar; leaving collapses it. Skipped while pinned so a
+            // pinned bar never collapses out from under the user.
+            if !state.island_pinned {
+                state.island_expanded = payload.hovered;
+            }
         })
         .on_action::<()>("focus_url", |state, _payload, _ctx| {
-            // Cmd+L: bring the island up so the URL bar is visible
-            // and editable. (Programmatic Input focus isn't a
-            // renderer primitive yet — for now, expanding is the
-            // closest equivalent.)
+            // Cmd+L: bring the island up so the URL bar is visible and
+            // editable, and pin it so it stays put while you type.
             state.island_expanded = true;
+            state.island_pinned = true;
         })
         .on_action::<()>("esc", |state, _payload, _ctx| {
-            // Esc collapses the expanded island chrome to its chip.
+            // Esc collapses + unpins the expanded island chrome.
             if state.island_expanded {
                 state.island_expanded = false;
+                state.island_pinned = false;
             }
         })
         // Internal reducer that the wrapper fires after a successful
@@ -269,10 +317,7 @@ pub fn build_shell_module(
 }
 
 /// Push a freshly-loaded recents list into the shell instance.
-pub fn push_recents(
-    instance: &ModuleInstance<ShellState>,
-    recents: Vec<RecentApp>,
-) {
+pub fn push_recents(instance: &ModuleInstance<ShellState>, recents: Vec<RecentApp>) {
     let payload = serde_json::to_value(RecentsPayload { recents }).ok();
     if let Err(e) = instance.dispatch_action("__set_recents", payload) {
         log::warn!("hypen-browser: failed to refresh recents: {e:?}");
@@ -295,6 +340,22 @@ pub fn push_tabs(
     if let Err(e) = instance.dispatch_action("__set_tabs", payload) {
         log::warn!("hypen-browser: failed to refresh tabs: {e:?}");
     }
+}
+
+/// Push the latest patch/action traffic lines into the shell so the
+/// debug console re-renders. No-op cost when the console is closed —
+/// the BrowserModule only calls this while `debug_open` is set.
+pub fn push_debug_log(instance: &ModuleInstance<ShellState>, text: String) {
+    let payload = serde_json::to_value(DebugLogPayload { text }).ok();
+    if let Err(e) = instance.dispatch_action("__set_debug_log", payload) {
+        log::warn!("hypen-browser: failed to push debug log: {e:?}");
+    }
+}
+
+/// Payload for `__set_debug_log` — newline-joined, newest line last.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DebugLogPayload {
+    pub text: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -569,7 +630,17 @@ Stack {
                         .alignItems("center")
 
                     Button {
-                        Text("—")
+                        Text("{ }")
+                            .color("@{state.debug_open ? '#3554d1' : '#94a3b8'}")
+                            .fontSize(13)
+                    }
+                        .backgroundColor("transparent")
+                        .borderWidth(0)
+                        .borderRadius(8)
+                        .padding(6)
+                        .onClick(@actions.toggle_debug)
+                    Button {
+                        Text("⊞")
                             .color("#94a3b8")
                             .fontSize(13)
                     }
@@ -577,10 +648,24 @@ Stack {
                         .borderWidth(0)
                         .borderRadius(8)
                         .padding(6)
-                        .onClick(@actions.toggle_island)
+                        .onClick(@actions.dump_tree)
+                    Button {
+                        Text("@{state.island_pinned ? '⌃' : '⌄'}")
+                            .color("@{state.island_pinned ? '#3554d1' : '#94a3b8'}")
+                            .fontSize(13)
+                    }
+                        .backgroundColor("@{state.island_pinned ? '#eef2ff' : 'transparent'}")
+                        .borderWidth(0)
+                        .borderRadius(8)
+                        .padding(6)
+                        .onClick(@actions.toggle_pin)
                 }
                     .width("100%")
                     .padding(8)
+                    // Clear the macOS traffic lights (unified title bar):
+                    // the toolbar shares the top row with them, so inset
+                    // the left edge past the ~70px light cluster.
+                    .paddingLeft(82)
                     .gap(8)
                     .alignItems("center")
 
@@ -693,14 +778,48 @@ Stack {
                     .borderColor("#d8dade")
                     .borderRadius(999)
                     .padding(8)
-                    .onClick(@actions.toggle_island)
+                    .onClick(@actions.toggle_pin)
                     .onHover(@actions.island_hover)
             }
                 .width("100%")
                 .padding(8)
+                .justifyContent("center")
         }
     }
         .width("100%")
+
+    // Devtools: a right-docked, full-height vertical pane (a third
+    // Stack overlay). Full-window Row that right-aligns a fixed-width
+    // dark pane; `paddingTop` clears the top toolbar so its buttons
+    // (including the `{ }` toggle) stay clickable above the pane.
+    If(condition: "@{state.debug_open}") {
+        Row {
+            Column {
+                Text("Patch console")
+                    .color("#e2e8f0")
+                    .fontSize(12)
+                    .marginBottom(2)
+                Text("▶ out (actions) · ◀ in (patches) · · logs")
+                    .color("#94a3b8")
+                    .fontSize(10)
+                    .marginBottom(8)
+                Text("@{state.debug_log}")
+                    .color("#e2e8f0")
+                    .fontSize(11)
+            }
+                .width(440)
+                .height("100%")
+                .padding(12)
+                .backgroundColor("#0f172a")
+                .borderColor("#1e293b")
+                .borderWidth(1)
+                .scrollable("vertical")
+        }
+            .width("100%")
+            .height("100%")
+            .paddingTop(52)
+            .justifyContent("flex-end")
+    }
 }
     .width("100%")
     .height("100%")
@@ -719,11 +838,15 @@ pub const SHELL_ACTIONS: &[&str] = &[
     "switch_tab",
     "delete_recent",
     "toggle_island",
+    "toggle_pin",
+    "toggle_debug",
+    "dump_tree",
     "island_hover",
     "focus_url",
     "esc",
     "__set_recents",
     "__set_tabs",
+    "__set_debug_log",
 ];
 
 /// State paths the shell owns. Used to route `__hypen_bind`. Anything
@@ -731,6 +854,7 @@ pub const SHELL_ACTIONS: &[&str] = &[
 pub const SHELL_BIND_PATHS: &[&str] = &[
     "url_input",
     "island_expanded",
+    "island_pinned",
     "recents",
     "tabs",
     "active_tab_id",
@@ -739,11 +863,14 @@ pub const SHELL_BIND_PATHS: &[&str] = &[
     "active_status",
     "active_status_message",
     "active_url",
+    "debug_open",
+    "debug_log",
 ];
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::mpsc;
 
     fn build_instance() -> (
@@ -818,10 +945,7 @@ mod tests {
     fn close_tab_action_emits_close_command_with_id() {
         let (instance, rx) = build_instance();
         instance
-            .dispatch_action(
-                "close_tab",
-                Some(serde_json::json!({"tabId": "t-1"})),
-            )
+            .dispatch_action("close_tab", Some(serde_json::json!({"tabId": "t-1"})))
             .unwrap();
         match rx.try_recv() {
             Ok(ShellCommand::CloseTab { tab_id }) => assert_eq!(tab_id, "t-1"),
@@ -833,10 +957,7 @@ mod tests {
     fn switch_tab_action_updates_active_id_optimistically() {
         let (instance, rx) = build_instance();
         instance
-            .dispatch_action(
-                "switch_tab",
-                Some(serde_json::json!({"tabId": "t-2"})),
-            )
+            .dispatch_action("switch_tab", Some(serde_json::json!({"tabId": "t-2"})))
             .unwrap();
         assert_eq!(instance.get_state().active_tab_id, "t-2");
         assert!(matches!(
@@ -870,10 +991,7 @@ mod tests {
         instance.mount();
 
         instance
-            .dispatch_action(
-                "delete_recent",
-                Some(serde_json::json!({"url": "ws://a"})),
-            )
+            .dispatch_action("delete_recent", Some(serde_json::json!({"url": "ws://a"})))
             .unwrap();
 
         let urls: Vec<String> = instance
@@ -893,19 +1011,41 @@ mod tests {
     fn island_hover_action_drives_expanded_state() {
         let (instance, _rx) = build_instance();
         instance
-            .dispatch_action(
-                "island_hover",
-                Some(serde_json::json!({"hovered": false})),
-            )
+            .dispatch_action("island_hover", Some(serde_json::json!({"hovered": false})))
             .unwrap();
         assert!(!instance.get_state().island_expanded);
         instance
-            .dispatch_action(
-                "island_hover",
-                Some(serde_json::json!({"hovered": true})),
-            )
+            .dispatch_action("island_hover", Some(serde_json::json!({"hovered": true})))
             .unwrap();
         assert!(instance.get_state().island_expanded);
+    }
+
+    #[test]
+    fn toggle_debug_flips_state_and_emits_command() {
+        let (instance, rx) = build_instance();
+        assert!(!instance.get_state().debug_open);
+
+        instance.dispatch_action("toggle_debug", None).unwrap();
+        assert!(
+            instance.get_state().debug_open,
+            "first toggle opens console"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(ShellCommand::SetDebug(true))),
+            "opening emits SetDebug(true)",
+        );
+
+        // Push a log line, then toggle off — closing clears it and
+        // emits SetDebug(false).
+        push_debug_log(&instance, "◀ in  1 patches · 1 SetProp".into());
+        assert!(!instance.get_state().debug_log.is_empty());
+        instance.dispatch_action("toggle_debug", None).unwrap();
+        assert!(!instance.get_state().debug_open);
+        assert!(
+            instance.get_state().debug_log.is_empty(),
+            "closing clears the log"
+        );
+        assert!(matches!(rx.try_recv(), Ok(ShellCommand::SetDebug(false))));
     }
 
     #[test]
@@ -917,6 +1057,34 @@ mod tests {
         // Idempotent when collapsed.
         instance.dispatch_action("esc", None).unwrap();
         assert!(!instance.get_state().island_expanded);
+    }
+
+    #[test]
+    fn toggle_pin_makes_island_sticky_against_hover() {
+        let (instance, _rx) = build_instance();
+        // Pin open.
+        instance.dispatch_action("toggle_pin", None).unwrap();
+        assert!(instance.get_state().island_pinned);
+        assert!(instance.get_state().island_expanded);
+        // Hover-out must NOT collapse a pinned bar.
+        instance
+            .dispatch_action("island_hover", Some(json!({"hovered": false})))
+            .unwrap();
+        assert!(
+            instance.get_state().island_expanded,
+            "pinned bar ignores hover-out"
+        );
+        // Unpin collapses it; now hover-out works again.
+        instance.dispatch_action("toggle_pin", None).unwrap();
+        assert!(!instance.get_state().island_pinned);
+        assert!(!instance.get_state().island_expanded);
+        instance
+            .dispatch_action("island_hover", Some(json!({"hovered": true})))
+            .unwrap();
+        assert!(
+            instance.get_state().island_expanded,
+            "unpinned bar follows hover"
+        );
     }
 
     #[test]

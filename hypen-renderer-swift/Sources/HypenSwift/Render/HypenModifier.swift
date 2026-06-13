@@ -353,16 +353,38 @@ extension View {
     /// remains solely in applyWeightExpansion where it's gated by parentAllowsVerticalExpansion.
     @ViewBuilder
     func applyFillExpansion(_ modifier: HypenModifier) -> some View {
-        if modifier.fillMaxWidth && modifier.maxWidth == nil && modifier.width == nil {
-            self.frame(
+        self.modifier(FillExpansionModifier(modifier: modifier))
+    }
+}
+
+/// Expands the view to fill available horizontal space *before* visual styles
+/// (background, border) so they cover the expanded area. Triggered by
+/// `fillMaxWidth`, or by `weight > 0` (flex-1) when the parent is a horizontal
+/// container — matches CSS `flex: 1` semantics where the child grows along
+/// the main axis. Without this inline expansion, the outer
+/// `applyWeightExpansion` wrap would grow the layout box but leave the
+/// background painted at content width, so e.g. tab-row pills hug their text.
+private struct FillExpansionModifier: ViewModifier {
+    @Environment(\.parentAllowsHorizontalExpansion) private var parentAllowsHorizontalExpansion
+    let modifier: HypenModifier
+
+    func body(content: Content) -> some View {
+        let hasWeight = (modifier.weight ?? 0) > 0
+        let shouldFill = modifier.maxWidth == nil
+            && modifier.width == nil
+            && (modifier.fillMaxWidth || (hasWeight && parentAllowsHorizontalExpansion))
+        if shouldFill {
+            content.frame(
                 maxWidth: .infinity,
                 alignment: modifier.alignment ?? .topLeading
             )
         } else {
-            self
+            content
         }
     }
+}
 
+extension View {
     @ViewBuilder
     func aspectRatioIfPresent(_ ratio: CGFloat?) -> some View {
         if let ratio = ratio {

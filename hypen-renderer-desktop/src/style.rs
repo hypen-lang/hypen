@@ -119,15 +119,18 @@ const BREAKPOINTS_DESC: &[(&str, f32)] = &[
 /// Walk breakpoint suffixes from largest-active down to base, returning
 /// the first existing prop value. Used by [`prop_str_at`] /
 /// [`prop_f32_at`] so layout can resolve `padding@md = "2rem"` etc.
-fn lookup_breakpoint<'a>(
-    node: &'a Node,
-    name: &str,
-    viewport_w: f32,
-) -> Option<&'a Value> {
+fn lookup_breakpoint<'a>(node: &'a Node, name: &str, viewport_w: f32) -> Option<&'a Value> {
     for (bp, threshold) in BREAKPOINTS_DESC {
         if viewport_w >= *threshold {
+            // The engine emits responsive props with the positional `.0`
+            // suffix (`padding@md.0`); accept both that and the bare
+            // `padding@md` form so either reaches layout.
             let key = format!("{name}@{bp}");
             if let Some(v) = node.props.get(&key) {
+                return Some(v);
+            }
+            let dotted = format!("{name}@{bp}.0");
+            if let Some(v) = node.props.get(&dotted) {
                 return Some(v);
             }
         }
@@ -135,16 +138,41 @@ fn lookup_breakpoint<'a>(
     None
 }
 
+/// Resolve a *responsive-object* prop value: `.gridColumns({default: 2,
+/// md: 3, lg: 4})` (and any other applicator passed an object keyed by
+/// breakpoint) lands as a single JSON object prop, not the `name@md`
+/// suffix keys that tailwind classes produce. Pick the value for the
+/// largest active breakpoint, falling back to `default` / `base`.
+/// Returns `None` when the prop is absent or isn't an object.
+fn lookup_responsive_object<'a>(
+    node: &'a Node,
+    name: &str,
+    viewport_w: f32,
+) -> Option<&'a Value> {
+    let raw = node
+        .props
+        .get(name)
+        .or_else(|| node.props.get(&format!("{name}.0")))?;
+    let obj = raw.as_object()?;
+    for (bp, threshold) in BREAKPOINTS_DESC {
+        if viewport_w >= *threshold {
+            if let Some(v) = obj.get(*bp) {
+                return Some(v);
+            }
+        }
+    }
+    obj.get("default").or_else(|| obj.get("base"))
+}
+
 /// Read a string prop honouring Tailwind breakpoints. Lookup order:
 /// largest-active `@bp` suffix → direct → `name.0` → kebab. The
 /// non-breakpoint variant ([`prop_str`]) is the right call for paths
 /// that don't have a viewport handy (e.g. accessibility serialisation).
-pub fn prop_str_at<'a>(
-    node: &'a Node,
-    name: &str,
-    viewport_w: f32,
-) -> Option<&'a str> {
+pub fn prop_str_at<'a>(node: &'a Node, name: &str, viewport_w: f32) -> Option<&'a str> {
     if let Some(v) = lookup_breakpoint(node, name, viewport_w).and_then(Value::as_str) {
+        return Some(v);
+    }
+    if let Some(v) = lookup_responsive_object(node, name, viewport_w).and_then(Value::as_str) {
         return Some(v);
     }
     prop_str(node, name)
@@ -153,6 +181,9 @@ pub fn prop_str_at<'a>(
 /// Numeric counterpart of [`prop_str_at`].
 pub fn prop_f32_at(node: &Node, name: &str, viewport_w: f32) -> Option<f32> {
     if let Some(v) = lookup_breakpoint(node, name, viewport_w).and_then(value_to_f32) {
+        return Some(v);
+    }
+    if let Some(v) = lookup_responsive_object(node, name, viewport_w).and_then(value_to_f32) {
         return Some(v);
     }
     prop_f32(node, name)
@@ -323,7 +354,8 @@ pub const BORDER_SIDE_TOP: u8 = 1;
 pub const BORDER_SIDE_RIGHT: u8 = 2;
 pub const BORDER_SIDE_BOTTOM: u8 = 4;
 pub const BORDER_SIDE_LEFT: u8 = 8;
-pub const BORDER_SIDES_ALL: u8 = BORDER_SIDE_TOP | BORDER_SIDE_RIGHT | BORDER_SIDE_BOTTOM | BORDER_SIDE_LEFT;
+pub const BORDER_SIDES_ALL: u8 =
+    BORDER_SIDE_TOP | BORDER_SIDE_RIGHT | BORDER_SIDE_BOTTOM | BORDER_SIDE_LEFT;
 
 /// Resolved border style for a node.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -415,7 +447,11 @@ pub fn border(node: &Node) -> Border {
         width,
         // A width without an explicit colour falls back to opaque black —
         // matches the DOM applicator's "default solid black" behaviour.
-        color: color.unwrap_or(if width > 0.0 { Rgba::BLACK } else { Rgba::TRANSPARENT }),
+        color: color.unwrap_or(if width > 0.0 {
+            Rgba::BLACK
+        } else {
+            Rgba::TRANSPARENT
+        }),
         radius,
         sides: BORDER_SIDES_ALL,
     }
@@ -503,7 +539,11 @@ pub fn border_at(node: &Node, viewport_w: f32) -> Border {
 
     Border {
         width,
-        color: color.unwrap_or(if width > 0.0 { Rgba::BLACK } else { Rgba::TRANSPARENT }),
+        color: color.unwrap_or(if width > 0.0 {
+            Rgba::BLACK
+        } else {
+            Rgba::TRANSPARENT
+        }),
         radius,
         sides,
     }
@@ -598,11 +638,7 @@ pub fn parse_aspect_ratio(s: &str) -> Option<f32> {
 /// numerics, but with the CSS slash form (`"1 / 1"`) accepted on
 /// strings. Falls back to the bare-number reader so explicit
 /// `.aspectRatio(1.5)` still works.
-pub fn prop_aspect_ratio_at(
-    node: &Node,
-    name: &str,
-    viewport_w: f32,
-) -> Option<f32> {
+pub fn prop_aspect_ratio_at(node: &Node, name: &str, viewport_w: f32) -> Option<f32> {
     // String form (the kebab path that tw emits) — try every key
     // variant `prop_f32_at` would check, but route through
     // `parse_aspect_ratio` so `"X / Y"` resolves.
@@ -1122,8 +1158,8 @@ mod tests {
 
     #[test]
     fn parse_linear_gradient_to_right_two_stops() {
-        let g = parse_linear_gradient("linear-gradient(to right, #ff0000, #0000ff)")
-            .expect("parses");
+        let g =
+            parse_linear_gradient("linear-gradient(to right, #ff0000, #0000ff)").expect("parses");
         assert_eq!(g.direction, GradientDirection::ToRight);
         assert_eq!(g.stops.len(), 2);
         assert_eq!(g.stops[0].color, Rgba(0xff, 0, 0, 0xff));
@@ -1136,10 +1172,9 @@ mod tests {
 
     #[test]
     fn parse_linear_gradient_to_bottom_right_three_stops() {
-        let g = parse_linear_gradient(
-            "linear-gradient(to bottom right, #ff0000, #00ff00, #0000ff)",
-        )
-        .expect("parses");
+        let g =
+            parse_linear_gradient("linear-gradient(to bottom right, #ff0000, #00ff00, #0000ff)")
+                .expect("parses");
         assert_eq!(g.direction, GradientDirection::ToBottomRight);
         assert_eq!(g.stops.len(), 3);
         let res = g.resolved_offsets();
@@ -1150,10 +1185,8 @@ mod tests {
 
     #[test]
     fn parse_linear_gradient_with_explicit_percent_offsets() {
-        let g = parse_linear_gradient(
-            "linear-gradient(to right, #ff0000 10%, #0000ff 80%)",
-        )
-        .expect("parses");
+        let g = parse_linear_gradient("linear-gradient(to right, #ff0000 10%, #0000ff 80%)")
+            .expect("parses");
         let res = g.resolved_offsets();
         assert!((res[0].0 - 0.10).abs() < 1e-4);
         assert!((res[1].0 - 0.80).abs() < 1e-4);
@@ -1161,8 +1194,7 @@ mod tests {
 
     #[test]
     fn parse_linear_gradient_angle_form() {
-        let g = parse_linear_gradient("linear-gradient(45deg, #fff, #000)")
-            .expect("parses");
+        let g = parse_linear_gradient("linear-gradient(45deg, #fff, #000)").expect("parses");
         match g.direction {
             GradientDirection::Angle(a) => assert!((a - 45.0).abs() < 1e-4),
             _ => panic!("expected angle"),
@@ -1188,8 +1220,8 @@ mod tests {
 
     #[test]
     fn parse_linear_gradient_case_insensitive_keyword() {
-        let g = parse_linear_gradient("LINEAR-GRADIENT(TO RIGHT, #ff0000, #0000ff)")
-            .expect("parses");
+        let g =
+            parse_linear_gradient("LINEAR-GRADIENT(TO RIGHT, #ff0000, #0000ff)").expect("parses");
         assert_eq!(g.direction, GradientDirection::ToRight);
     }
 
@@ -1233,15 +1265,11 @@ mod tests {
         let node = node_with(&[
             (
                 "background-image",
-                Value::String(
-                    "linear-gradient(to right, var(--tw-gradient-stops))".into(),
-                ),
+                Value::String("linear-gradient(to right, var(--tw-gradient-stops))".into()),
             ),
             (
                 "--tw-gradient-stops",
-                Value::String(
-                    "var(--tw-gradient-from), var(--tw-gradient-to)".into(),
-                ),
+                Value::String("var(--tw-gradient-from), var(--tw-gradient-to)".into()),
             ),
             ("--tw-gradient-from", Value::String("#3b82f6".into())),
             ("--tw-gradient-to", Value::String("#ec4899".into())),
@@ -1263,16 +1291,11 @@ mod tests {
         let node = node_with(&[
             (
                 "background-image",
-                Value::String(
-                    "linear-gradient(to bottom right, var(--tw-gradient-stops))"
-                        .into(),
-                ),
+                Value::String("linear-gradient(to bottom right, var(--tw-gradient-stops))".into()),
             ),
             (
                 "--tw-gradient-stops",
-                Value::String(
-                    "var(--tw-gradient-from), #a855f7, var(--tw-gradient-to)".into(),
-                ),
+                Value::String("var(--tw-gradient-from), #a855f7, var(--tw-gradient-to)".into()),
             ),
             ("--tw-gradient-from", Value::String("#3b82f6".into())),
             ("--tw-gradient-to", Value::String("#ec4899".into())),
@@ -1288,10 +1311,7 @@ mod tests {
     #[test]
     fn prop_linear_gradient_returns_none_without_background_image() {
         // Solid-colour node — gradient path is opt-in.
-        let node = node_with(&[(
-            "background-color",
-            Value::String("#ffffff".into()),
-        )]);
+        let node = node_with(&[("background-color", Value::String("#ffffff".into()))]);
         assert!(prop_linear_gradient(&node, 800.0).is_none());
     }
 
@@ -1301,10 +1321,7 @@ mod tests {
         // engine flattens the two positional args to
         // `linearGradient.0` (direction) + `linearGradient.1` (colors).
         let node = node_with(&[
-            (
-                "linearGradient.0",
-                Value::String("to right".into()),
-            ),
+            ("linearGradient.0", Value::String("to right".into())),
             (
                 "linearGradient.1",
                 serde_json::json!(["#3b82f6", "#ec4899"]),
@@ -1322,10 +1339,7 @@ mod tests {
         // `.linearGradient(direction: "45deg", colors: [...])` —
         // engine flattens named args under the key name directly.
         let node = node_with(&[
-            (
-                "linearGradient.direction",
-                Value::String("45deg".into()),
-            ),
+            ("linearGradient.direction", Value::String("45deg".into())),
             (
                 "linearGradient.colors",
                 serde_json::json!(["#ff0000", "#00ff00", "#0000ff"]),
@@ -1345,19 +1359,14 @@ mod tests {
         // are on the same node, the applicator wins. (Predictable
         // override semantics — easier to reason about than mixing.)
         let node = node_with(&[
-            (
-                "linearGradient.0",
-                Value::String("to bottom".into()),
-            ),
+            ("linearGradient.0", Value::String("to bottom".into())),
             (
                 "linearGradient.1",
                 serde_json::json!(["#000000", "#ffffff"]),
             ),
             (
                 "background-image",
-                Value::String(
-                    "linear-gradient(to right, var(--tw-gradient-stops))".into(),
-                ),
+                Value::String("linear-gradient(to right, var(--tw-gradient-stops))".into()),
             ),
             (
                 "--tw-gradient-stops",
@@ -1375,8 +1384,7 @@ mod tests {
         // CSS treats a single-stop gradient as a flat fill; we
         // duplicate the stop at offset 0 and 1 so Vello has a valid
         // two-point ramp. Without this, Vello rejects the gradient.
-        let g = parse_linear_gradient("linear-gradient(to right, #ff0000)")
-            .expect("parses");
+        let g = parse_linear_gradient("linear-gradient(to right, #ff0000)").expect("parses");
         let res = g.resolved_offsets();
         assert_eq!(res.len(), 2);
         assert_eq!(res[0].1, Rgba(0xff, 0, 0, 0xff));
@@ -1501,14 +1509,8 @@ mod tests {
     fn parses_named_and_hex_colors() {
         assert_eq!(parse_color("red"), Some(Rgba(0xff, 0, 0, 0xff)));
         assert_eq!(parse_color("#fff"), Some(Rgba(0xff, 0xff, 0xff, 0xff)));
-        assert_eq!(
-            parse_color("#1a2b3c"),
-            Some(Rgba(0x1a, 0x2b, 0x3c, 0xff))
-        );
-        assert_eq!(
-            parse_color("#1a2b3c80"),
-            Some(Rgba(0x1a, 0x2b, 0x3c, 0x80))
-        );
+        assert_eq!(parse_color("#1a2b3c"), Some(Rgba(0x1a, 0x2b, 0x3c, 0xff)));
+        assert_eq!(parse_color("#1a2b3c80"), Some(Rgba(0x1a, 0x2b, 0x3c, 0x80)));
         assert_eq!(parse_color("not-a-color"), None);
     }
 
@@ -1692,7 +1694,10 @@ mod tests {
         // a kebab-case prop with no `.0` suffix. The renderer must
         // pick it up so cards from tw classes get filled.
         let node = node_with(&[("background-color", serde_json::json!("#ffffff"))]);
-        assert_eq!(prop_color(&node, "backgroundColor"), Some(Rgba(0xff, 0xff, 0xff, 0xff)));
+        assert_eq!(
+            prop_color(&node, "backgroundColor"),
+            Some(Rgba(0xff, 0xff, 0xff, 0xff))
+        );
     }
 
     #[test]
@@ -1703,7 +1708,10 @@ mod tests {
             ("backgroundColor.0", serde_json::json!("red")),
             ("background-color", serde_json::json!("blue")),
         ]);
-        assert_eq!(prop_color(&node, "backgroundColor"), Some(Rgba(0xff, 0, 0, 0xff)));
+        assert_eq!(
+            prop_color(&node, "backgroundColor"),
+            Some(Rgba(0xff, 0, 0, 0xff))
+        );
     }
 
     #[test]

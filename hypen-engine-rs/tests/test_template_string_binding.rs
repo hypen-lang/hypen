@@ -49,7 +49,13 @@ fn test_template_string_dependency_registration() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"counter": 0});
 
-    let _patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let _patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
 
     // The "counter" path should have the node_id as a dependent
@@ -70,7 +76,13 @@ fn test_template_string_initial_render() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"counter": 42});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let _node_id = tree.root().expect("Should have root");
 
     // Check that the Create patch has the interpolated value
@@ -103,7 +115,13 @@ fn test_template_string_state_update() {
     let mut scheduler = Scheduler::new();
 
     // Initial render
-    let _patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, instance.get_state(), &mut dependencies);
+    let _patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
     tree.set_root(node_id);
 
@@ -159,7 +177,13 @@ fn test_template_string_multiple_bindings() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"greeting": "Hello", "name": "World"});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
 
     // Both paths should have the node as a dependent
@@ -197,7 +221,13 @@ fn test_static_string_not_registered_as_dependency() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({});
 
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
 
     // Static strings should not register any dependencies
@@ -222,12 +252,21 @@ fn test_template_string_in_child_tree() {
     let state = json!({"counter": 0});
 
     // Create tree
-    let _patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let _patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let root_id = tree.root().expect("Should have root");
 
     // Find the child Text node (Column's child)
     let root_node = tree.get(root_id).expect("Root should exist");
-    assert!(!root_node.children.is_empty(), "Column should have children");
+    assert!(
+        !root_node.children.is_empty(),
+        "Column should have children"
+    );
     let child_id = root_node.children[0];
 
     // Child should be registered as dependent on "counter"
@@ -283,7 +322,13 @@ fn test_ternary_expression_evaluation() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"active": true});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // Check that the ternary expression is evaluated
     if let Some(Patch::Create { props, .. }) =
@@ -310,7 +355,13 @@ fn test_ternary_expression_false_condition() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"active": false});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     if let Some(Patch::Create { props, .. }) =
         patches.iter().find(|p| matches!(p, Patch::Create { .. }))
@@ -334,7 +385,13 @@ fn test_ternary_expression_with_colors() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"selected": true});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     if let Some(Patch::Create { props, .. }) =
         patches.iter().find(|p| matches!(p, Patch::Create { .. }))
@@ -361,7 +418,13 @@ fn test_comparison_expression() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"count": 15});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     if let Some(Patch::Create { props, .. }) =
         patches.iter().find(|p| matches!(p, Patch::Create { .. }))
@@ -385,7 +448,13 @@ fn test_logical_and_expression() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"a": true, "b": true});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     if let Some(Patch::Create { props, .. }) =
         patches.iter().find(|p| matches!(p, Patch::Create { .. }))
@@ -409,7 +478,13 @@ fn test_mixed_expression_with_text() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"loading": true});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     if let Some(Patch::Create { props, .. }) =
         patches.iter().find(|p| matches!(p, Patch::Create { .. }))
@@ -433,7 +508,13 @@ fn test_string_concatenation_expression() {
     let mut dependencies = DependencyGraph::new();
     let state = json!({"first": "John", "last": "Doe"});
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     if let Some(Patch::Create { props, .. }) =
         patches.iter().find(|p| matches!(p, Patch::Create { .. }))
@@ -463,7 +544,13 @@ fn test_expression_state_update() {
     let mut scheduler = Scheduler::new();
 
     // Initial render - should show "Not selected"
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, instance.get_state(), &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        instance.get_state(),
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
     tree.set_root(node_id);
 
@@ -526,7 +613,13 @@ fn test_complex_nested_expression() {
         }
     });
 
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     if let Some(Patch::Create { props, .. }) =
         patches.iter().find(|p| matches!(p, Patch::Create { .. }))

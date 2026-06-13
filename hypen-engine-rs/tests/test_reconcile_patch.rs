@@ -475,10 +475,8 @@ fn test_create_patch_exact_json_bytes() {
         "props": { "text": "Hi" },
     });
 
-    let actual: serde_json::Value = serde_json::from_str(
-        &serde_json::to_string(&patch).unwrap(),
-    )
-    .unwrap();
+    let actual: serde_json::Value =
+        serde_json::from_str(&serde_json::to_string(&patch).unwrap()).unwrap();
 
     assert_eq!(
         actual, expected,

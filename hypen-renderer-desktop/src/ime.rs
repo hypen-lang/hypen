@@ -165,12 +165,7 @@ mod tests {
     fn ime_disabled_clears_everything() {
         let mut pre = Some(("name".to_string(), "こん".to_string()));
         let mut active = true;
-        let effect = apply_ime_transition(
-            &mut pre,
-            &mut active,
-            Some("name"),
-            Ime::Disabled,
-        );
+        let effect = apply_ime_transition(&mut pre, &mut active, Some("name"), Ime::Disabled);
         assert!(!active);
         assert_eq!(pre, None);
         assert_eq!(effect, ImeEffect::None);

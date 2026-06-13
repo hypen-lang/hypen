@@ -1,0 +1,34 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-calorie-counter",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Static .wasm imports are pulled in as CompiledWasm modules. The
+  // bundler-target wasm-bindgen glue does `import * as wasm from "./hypen_engine_bg.wasm"`
+  // at module load, so this rule is what makes the engine boot inside a Worker.
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/*.sql", "**/*.tsv", "**/dist/client/*.js"], "fallthrough": true }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "CALORIE_DO", "class_name": "CalorieCounterDO" }
+    ]
+  },
+
+  // `new_sqlite_classes` opts the DO into the synchronous SQLite storage API
+  // (state.storage.sql.exec). That's what the bun:sqlite shim wraps.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["CalorieCounterDO"] }
+  ],
+
+  // Observability was enabled in the CF dashboard; pin it in code so
+  // the next deploy doesn't silently revert it. Lets `wrangler tail`
+  // and the dashboard logs view stay populated.
+  "observability": {
+    "enabled": true
+  }
+}

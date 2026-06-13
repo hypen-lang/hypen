@@ -60,9 +60,7 @@ pub enum RemoteMessage {
     },
 
     /// Client → Server: request state subscription.
-    SubscribeState {
-        module: String,
-    },
+    SubscribeState { module: String },
 
     /// Server → Client: session expired.
     SessionExpired {

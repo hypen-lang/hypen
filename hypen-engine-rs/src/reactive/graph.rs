@@ -421,10 +421,7 @@ mod tests {
         );
         graph.add_dependency(
             node2,
-            &Binding::data_source(
-                "spacetime",
-                vec!["users".to_string(), "name".to_string()],
-            ),
+            &Binding::data_source("spacetime", vec!["users".to_string(), "name".to_string()]),
             None,
         );
         graph.add_dependency(

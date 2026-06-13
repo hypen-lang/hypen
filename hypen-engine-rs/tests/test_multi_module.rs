@@ -99,8 +99,10 @@ fn test_state_isolation_between_modules() {
     engine.set_module(app_module);
 
     // Named module "search"
-    let search_module =
-        ModuleInstance::new(Module::new("Search"), json!({"count": 99, "query": "hello"}));
+    let search_module = ModuleInstance::new(
+        Module::new("Search"),
+        json!({"count": 99, "query": "hello"}),
+    );
     engine.register_module("search", search_module);
 
     let (patches, callback) = patch_capture();
@@ -146,8 +148,7 @@ fn test_same_key_name_isolation() {
     let app_module = ModuleInstance::new(Module::new("App"), json!({"items": ["a", "b"]}));
     engine.set_module(app_module);
 
-    let feed_module =
-        ModuleInstance::new(Module::new("Feed"), json!({"items": ["x", "y", "z"]}));
+    let feed_module = ModuleInstance::new(Module::new("Feed"), json!({"items": ["x", "y", "z"]}));
     engine.register_module("feed", feed_module);
 
     let (patches, callback) = patch_capture();
@@ -313,7 +314,11 @@ fn test_single_module_state_update_backward_compat() {
     engine.update_state(None, json!({"count": 10}));
 
     // THEN: Revision increments and no panics
-    assert_eq!(engine.revision(), 2, "update_state should increment revision");
+    assert_eq!(
+        engine.revision(),
+        2,
+        "update_state should increment revision"
+    );
 }
 
 // ========== Test 5: ForEach inside a module scope ==========
@@ -404,9 +409,9 @@ fn test_multiple_named_modules_coexist() {
     // WHEN: Render tree with elements from all three modules
     let root = scoped_column(
         vec![
-            text_element_with_binding("page"),            // App: "home"
-            scoped_text_binding("query", "search"),       // Search: "rust"
-            scoped_text_binding("name", "profile"),       // Profile: "Alice"
+            text_element_with_binding("page"),      // App: "home"
+            scoped_text_binding("query", "search"), // Search: "rust"
+            scoped_text_binding("name", "profile"), // Profile: "Alice"
         ],
         None,
     );
@@ -505,10 +510,7 @@ fn test_conditional_branch_activates_module_scope() {
     // GIVEN: An engine with App module (currentView: "feed") and Search module (searchQuery: "hello")
     let mut engine = hypen_engine::Engine::new();
 
-    let app_module = ModuleInstance::new(
-        Module::new("App"),
-        json!({"currentView": "feed"}),
-    );
+    let app_module = ModuleInstance::new(Module::new("App"), json!({"currentView": "feed"}));
     engine.set_module(app_module);
 
     let search_module = ModuleInstance::new(
@@ -611,14 +613,17 @@ fn test_conditional_module_with_array_state() {
 
     // Search module with array data
     let search = Module::new("Search");
-    let search_inst = ModuleInstance::new(search, json!({
-        "searchQuery": "",
-        "explorePosts": [
-            {"id": "1", "imageUrl": "https://example.com/1.jpg"},
-            {"id": "2", "imageUrl": "https://example.com/2.jpg"},
-            {"id": "3", "imageUrl": "https://example.com/3.jpg"}
-        ]
-    }));
+    let search_inst = ModuleInstance::new(
+        search,
+        json!({
+            "searchQuery": "",
+            "explorePosts": [
+                {"id": "1", "imageUrl": "https://example.com/1.jpg"},
+                {"id": "2", "imageUrl": "https://example.com/2.jpg"},
+                {"id": "3", "imageUrl": "https://example.com/3.jpg"}
+            ]
+        }),
+    );
     engine.register_module("search", search_inst);
 
     // Component resolver
@@ -632,7 +637,8 @@ fn test_conditional_module_with_array_state() {
                             Image(src: "@{item.imageUrl}")
                         }
                     }
-                }"#.to_string(),
+                }"#
+                .to_string(),
                 path: "Search.hypen".to_string(),
                 passthrough: false,
                 lazy: false,
@@ -663,9 +669,10 @@ fn test_conditional_module_with_array_state() {
     engine.render_ir_node(&ir);
 
     let initial_patches = patches.lock().unwrap().clone();
-    let initial_images: Vec<_> = initial_patches.iter().filter(|p| {
-        matches!(p, Patch::Create { element_type, .. } if element_type == "Image")
-    }).collect();
+    let initial_images: Vec<_> = initial_patches
+        .iter()
+        .filter(|p| matches!(p, Patch::Create { element_type, .. } if element_type == "Image"))
+        .collect();
     println!("Initial images: {}", initial_images.len());
     assert_eq!(initial_images.len(), 0, "No images in feed view");
 
@@ -674,23 +681,39 @@ fn test_conditional_module_with_array_state() {
     engine.update_state(None, json!({"currentView": "search"}));
 
     let search_patches = patches.lock().unwrap().clone();
-    let search_images: Vec<_> = search_patches.iter().filter(|p| {
-        matches!(p, Patch::Create { element_type, .. } if element_type == "Image")
-    }).collect();
+    let search_images: Vec<_> = search_patches
+        .iter()
+        .filter(|p| matches!(p, Patch::Create { element_type, .. } if element_type == "Image"))
+        .collect();
     println!("Search images after navigate: {}", search_images.len());
 
     // Check Text shows correct query
-    let texts: Vec<_> = search_patches.iter().filter_map(|p| {
-        if let Patch::Create { element_type, props, .. } = p {
-            if element_type == "Text" {
-                return props.get("text").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let texts: Vec<_> = search_patches
+        .iter()
+        .filter_map(|p| {
+            if let Patch::Create {
+                element_type,
+                props,
+                ..
+            } = p
+            {
+                if element_type == "Text" {
+                    return props
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+                }
             }
-        }
-        None
-    }).collect();
+            None
+        })
+        .collect();
     println!("Text props: {:?}", texts);
 
-    assert!(search_images.len() >= 3, "Should have 3 images from explorePosts, got {}", search_images.len());
+    assert!(
+        search_images.len() >= 3,
+        "Should have 3 images from explorePosts, got {}",
+        search_images.len()
+    );
 }
 
 #[test]
@@ -705,10 +728,13 @@ fn test_double_state_update_doesnt_null_module_state() {
     engine.set_module(app_inst);
 
     let search = Module::new("Search");
-    let search_inst = ModuleInstance::new(search, json!({
-        "searchQuery": "test",
-        "explorePosts": [{"id": "1", "imageUrl": "http://img/1"}]
-    }));
+    let search_inst = ModuleInstance::new(
+        search,
+        json!({
+            "searchQuery": "test",
+            "explorePosts": [{"id": "1", "imageUrl": "http://img/1"}]
+        }),
+    );
     engine.register_module("search", search_inst);
 
     engine.set_component_resolver(|name, _ctx| {
@@ -723,7 +749,9 @@ fn test_double_state_update_doesnt_null_module_state() {
 
     let patches = Arc::new(Mutex::new(Vec::new()));
     let capture = patches.clone();
-    engine.set_render_callback(move |p| { capture.lock().unwrap().extend_from_slice(p); });
+    engine.set_render_callback(move |p| {
+        capture.lock().unwrap().extend_from_slice(p);
+    });
 
     // Initial render (feed)
     let source = r#"module App { Column { If(condition: "@{state.currentView == 'search'}") { Search() } } }"#;
@@ -735,9 +763,12 @@ fn test_double_state_update_doesnt_null_module_state() {
     // First update: navigate to search
     engine.update_state(None, json!({"currentView": "search"}));
     let first_patches = patches.lock().unwrap().clone();
-    
+
     // Check: should have Images
-    let images1: Vec<_> = first_patches.iter().filter(|p| matches!(p, Patch::Create { element_type, .. } if element_type == "Image")).collect();
+    let images1: Vec<_> = first_patches
+        .iter()
+        .filter(|p| matches!(p, Patch::Create { element_type, .. } if element_type == "Image"))
+        .collect();
     println!("After first update: {} images", images1.len());
     assert!(images1.len() >= 1, "Should have images after navigate");
 
@@ -746,21 +777,35 @@ fn test_double_state_update_doesnt_null_module_state() {
         matches!(p, Patch::SetProp { name, value, .. } if name == "value" && value.is_null())
     }).collect();
     println!("Null value SetProps: {}", null_setprops.len());
-    
+
     patches.lock().unwrap().clear();
 
     // Second update: same state change (simulates SDK double-notify)
     engine.update_state(None, json!({"currentView": "search"}));
     let second_patches = patches.lock().unwrap().clone();
-    
+
     let null_setprops2: Vec<_> = second_patches.iter().filter(|p| {
         matches!(p, Patch::SetProp { name, value, .. } if name == "value" && value.is_null())
     }).collect();
-    println!("After second update - null value SetProps: {}", null_setprops2.len());
-    println!("After second update - total patches: {}", second_patches.len());
-    
-    assert_eq!(null_setprops.len(), 0, "First update should NOT produce value=null SetProp");
-    assert_eq!(null_setprops2.len(), 0, "Second update should NOT produce value=null SetProp");
+    println!(
+        "After second update - null value SetProps: {}",
+        null_setprops2.len()
+    );
+    println!(
+        "After second update - total patches: {}",
+        second_patches.len()
+    );
+
+    assert_eq!(
+        null_setprops.len(),
+        0,
+        "First update should NOT produce value=null SetProp"
+    );
+    assert_eq!(
+        null_setprops2.len(),
+        0,
+        "Second update should NOT produce value=null SetProp"
+    );
 }
 
 #[test]
@@ -769,7 +814,10 @@ fn test_parse_component_with_leading_whitespace() {
     let result = hypen_parser::parse_component(source);
     match result {
         Ok(spec) => {
-            println!("Parsed OK: name={} declaration_type={:?}", spec.name, spec.declaration_type);
+            println!(
+                "Parsed OK: name={} declaration_type={:?}",
+                spec.name, spec.declaration_type
+            );
         }
         Err(e) => {
             println!("PARSE FAILED: {:?}", e);
@@ -777,7 +825,10 @@ fn test_parse_component_with_leading_whitespace() {
             let source2 = "module Search {\n    Column {\n        Text(\"hello\")\n    }\n}";
             let result2 = hypen_parser::parse_component(source2);
             match result2 {
-                Ok(spec2) => println!("Without newline OK: name={} declaration_type={:?}", spec2.name, spec2.declaration_type),
+                Ok(spec2) => println!(
+                    "Without newline OK: name={} declaration_type={:?}",
+                    spec2.name, spec2.declaration_type
+                ),
                 Err(e2) => println!("Without newline also FAILED: {:?}", e2),
             }
         }
@@ -806,14 +857,17 @@ fn test_no_create_then_remove_for_module_grid() {
 
     // Search module with array data
     let search = Module::new("Search");
-    let search_inst = ModuleInstance::new(search, json!({
-        "searchQuery": "",
-        "explorePosts": [
-            {"id": "1", "imageUrl": "https://example.com/1.jpg"},
-            {"id": "2", "imageUrl": "https://example.com/2.jpg"},
-            {"id": "3", "imageUrl": "https://example.com/3.jpg"}
-        ]
-    }));
+    let search_inst = ModuleInstance::new(
+        search,
+        json!({
+            "searchQuery": "",
+            "explorePosts": [
+                {"id": "1", "imageUrl": "https://example.com/1.jpg"},
+                {"id": "2", "imageUrl": "https://example.com/2.jpg"},
+                {"id": "3", "imageUrl": "https://example.com/3.jpg"}
+            ]
+        }),
+    );
     engine.register_module("search", search_inst);
 
     // Component resolver — same path as production servers
@@ -830,7 +884,8 @@ fn test_no_create_then_remove_for_module_grid() {
                         .gridColumns(3)
                         .gap(4)
                     }
-                }"#.to_string(),
+                }"#
+                .to_string(),
                 path: "Search.hypen".to_string(),
                 passthrough: false,
                 lazy: false,
@@ -878,7 +933,9 @@ fn test_no_create_then_remove_for_module_grid() {
 
     for p in &patches {
         match p {
-            Patch::Create { id, element_type, .. } => {
+            Patch::Create {
+                id, element_type, ..
+            } => {
                 created_ids.push(id.clone());
                 if element_type == "Image" {
                     println!("  CREATE Image id={}", id);
@@ -892,25 +949,37 @@ fn test_no_create_then_remove_for_module_grid() {
     }
 
     // The critical assertion: NO removes should target just-created IDs
-    let created_set: std::collections::HashSet<&str> = created_ids.iter().map(|s| s.as_str()).collect();
-    let removes_of_created: Vec<&str> = removed_ids.iter()
+    let created_set: std::collections::HashSet<&str> =
+        created_ids.iter().map(|s| s.as_str()).collect();
+    let removes_of_created: Vec<&str> = removed_ids
+        .iter()
         .filter(|id| created_set.contains(id.as_str()))
         .map(|s| s.as_str())
         .collect();
 
-    let image_creates: Vec<&Patch> = patches.iter().filter(|p| {
-        matches!(p, Patch::Create { element_type, .. } if element_type == "Image")
-    }).collect();
+    let image_creates: Vec<&Patch> = patches
+        .iter()
+        .filter(|p| matches!(p, Patch::Create { element_type, .. } if element_type == "Image"))
+        .collect();
 
     println!("Total patches: {}", patches.len());
-    println!("Creates: {}, Removes: {}", created_ids.len(), removed_ids.len());
+    println!(
+        "Creates: {}, Removes: {}",
+        created_ids.len(),
+        removed_ids.len()
+    );
     println!("Images created: {}", image_creates.len());
-    println!("Removes targeting just-created: {}", removes_of_created.len());
+    println!(
+        "Removes targeting just-created: {}",
+        removes_of_created.len()
+    );
 
     assert_eq!(
-        removes_of_created.len(), 0,
+        removes_of_created.len(),
+        0,
         "BUG: {} elements were created then immediately removed in the same batch: {:?}",
-        removes_of_created.len(), removes_of_created
+        removes_of_created.len(),
+        removes_of_created
     );
 
     assert!(
@@ -954,12 +1023,19 @@ fn test_preregistered_component_module_grid() {
 
     // Check: does search_element have module_scope?
     println!("Search root element_type: {}", search_element.element_type);
-    println!("Search root module_scope: {:?}", search_element.module_scope);
+    println!(
+        "Search root module_scope: {:?}",
+        search_element.module_scope
+    );
 
     // Check: does the component detect is_module?
     let is_module = search_spec.declaration_type == hypen_parser::DeclarationType::Module;
     println!("Search declaration_type is Module: {}", is_module);
-    let module_name = if is_module { Some(search_spec.name.to_lowercase()) } else { None };
+    let module_name = if is_module {
+        Some(search_spec.name.to_lowercase())
+    } else {
+        None
+    };
     println!("Module name: {:?}", module_name);
 
     // Register as component (pre-registration path)
@@ -978,14 +1054,17 @@ fn test_preregistered_component_module_grid() {
 
     // Search module state
     let search = Module::new("Search");
-    let search_inst = ModuleInstance::new(search, json!({
-        "searchQuery": "",
-        "explorePosts": [
-            {"id": "1", "imageUrl": "https://example.com/1.jpg"},
-            {"id": "2", "imageUrl": "https://example.com/2.jpg"},
-            {"id": "3", "imageUrl": "https://example.com/3.jpg"}
-        ]
-    }));
+    let search_inst = ModuleInstance::new(
+        search,
+        json!({
+            "searchQuery": "",
+            "explorePosts": [
+                {"id": "1", "imageUrl": "https://example.com/1.jpg"},
+                {"id": "2", "imageUrl": "https://example.com/2.jpg"},
+                {"id": "3", "imageUrl": "https://example.com/3.jpg"}
+            ]
+        }),
+    );
     engine.register_module("search", search_inst);
 
     // Capture patches
@@ -1016,30 +1095,58 @@ fn test_preregistered_component_module_grid() {
     engine.update_state(None, json!({"currentView": "search"}));
 
     let patches = all_patches.lock().unwrap().clone();
-    let created_ids: std::collections::HashSet<String> = patches.iter()
-        .filter_map(|p| if let Patch::Create { id, .. } = p { Some(id.clone()) } else { None })
+    let created_ids: std::collections::HashSet<String> = patches
+        .iter()
+        .filter_map(|p| {
+            if let Patch::Create { id, .. } = p {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
         .collect();
-    let removed_ids: Vec<&str> = patches.iter()
-        .filter_map(|p| if let Patch::Remove { id } = p { Some(id.as_str()) } else { None })
+    let removed_ids: Vec<&str> = patches
+        .iter()
+        .filter_map(|p| {
+            if let Patch::Remove { id } = p {
+                Some(id.as_str())
+            } else {
+                None
+            }
+        })
         .collect();
-    let removes_of_created: Vec<&&str> = removed_ids.iter()
+    let removes_of_created: Vec<&&str> = removed_ids
+        .iter()
         .filter(|id| created_ids.contains(**id))
         .collect();
-    let image_creates: usize = patches.iter()
+    let image_creates: usize = patches
+        .iter()
         .filter(|p| matches!(p, Patch::Create { element_type, .. } if element_type == "Image"))
         .count();
 
     println!("Total patches: {}", patches.len());
-    println!("Creates: {}, Removes: {}", created_ids.len(), removed_ids.len());
+    println!(
+        "Creates: {}, Removes: {}",
+        created_ids.len(),
+        removed_ids.len()
+    );
     println!("Images created: {}", image_creates);
-    println!("Removes targeting just-created: {}", removes_of_created.len());
+    println!(
+        "Removes targeting just-created: {}",
+        removes_of_created.len()
+    );
 
     assert_eq!(
-        removes_of_created.len(), 0,
+        removes_of_created.len(),
+        0,
         "BUG: {} elements created then removed in same batch",
         removes_of_created.len()
     );
-    assert!(image_creates >= 3, "Expected 3+ Images, got {}", image_creates);
+    assert!(
+        image_creates >= 3,
+        "Expected 3+ Images, got {}",
+        image_creates
+    );
 }
 
 /// Simulates the TS SDK double-render: update_state followed by a second
@@ -1058,14 +1165,17 @@ fn test_double_render_via_notify_state_change() {
     engine.set_module(app_inst);
 
     let search = Module::new("Search");
-    let search_inst = ModuleInstance::new(search, json!({
-        "searchQuery": "",
-        "explorePosts": [
-            {"id": "1", "imageUrl": "https://example.com/1.jpg"},
-            {"id": "2", "imageUrl": "https://example.com/2.jpg"},
-            {"id": "3", "imageUrl": "https://example.com/3.jpg"}
-        ]
-    }));
+    let search_inst = ModuleInstance::new(
+        search,
+        json!({
+            "searchQuery": "",
+            "explorePosts": [
+                {"id": "1", "imageUrl": "https://example.com/1.jpg"},
+                {"id": "2", "imageUrl": "https://example.com/2.jpg"},
+                {"id": "3", "imageUrl": "https://example.com/3.jpg"}
+            ]
+        }),
+    );
     engine.register_module("search", search_inst);
 
     engine.set_component_resolver(|name, _ctx| {
@@ -1079,11 +1189,15 @@ fn test_double_render_via_notify_state_change() {
                         }
                         .gridColumns(3)
                     }
-                }"#.to_string(),
+                }"#
+                .to_string(),
                 path: "Search.hypen".to_string(),
-                passthrough: false, lazy: false,
+                passthrough: false,
+                lazy: false,
             })
-        } else { None }
+        } else {
+            None
+        }
     });
 
     let all_patches = Arc::new(Mutex::new(Vec::new()));
@@ -1113,25 +1227,50 @@ fn test_double_render_via_notify_state_change() {
     engine.notify_state_change(&change);
 
     let patches = all_patches.lock().unwrap().clone();
-    let created_ids: std::collections::HashSet<String> = patches.iter()
-        .filter_map(|p| if let Patch::Create { id, .. } = p { Some(id.clone()) } else { None })
+    let created_ids: std::collections::HashSet<String> = patches
+        .iter()
+        .filter_map(|p| {
+            if let Patch::Create { id, .. } = p {
+                Some(id.clone())
+            } else {
+                None
+            }
+        })
         .collect();
-    let removes_of_created: Vec<&str> = patches.iter()
-        .filter_map(|p| if let Patch::Remove { id } = p { Some(id.as_str()) } else { None })
+    let removes_of_created: Vec<&str> = patches
+        .iter()
+        .filter_map(|p| {
+            if let Patch::Remove { id } = p {
+                Some(id.as_str())
+            } else {
+                None
+            }
+        })
         .filter(|id| created_ids.contains(*id))
         .collect();
-    let image_creates: usize = patches.iter()
+    let image_creates: usize = patches
+        .iter()
         .filter(|p| matches!(p, Patch::Create { element_type, .. } if element_type == "Image"))
         .count();
 
     println!("Total patches: {}", patches.len());
     println!("Images created: {}", image_creates);
-    println!("Removes targeting just-created: {}", removes_of_created.len());
+    println!(
+        "Removes targeting just-created: {}",
+        removes_of_created.len()
+    );
 
-    assert_eq!(removes_of_created.len(), 0,
+    assert_eq!(
+        removes_of_created.len(),
+        0,
         "BUG: Double render caused {} create-then-remove",
-        removes_of_created.len());
-    assert!(image_creates >= 3, "Expected 3+ Images, got {}", image_creates);
+        removes_of_created.len()
+    );
+    assert!(
+        image_creates >= 3,
+        "Expected 3+ Images, got {}",
+        image_creates
+    );
 }
 
 /// After replacing the primary module via `set_module`, a subsequent

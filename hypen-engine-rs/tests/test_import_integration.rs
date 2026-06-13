@@ -300,8 +300,10 @@ fn test_nested_import_chain_a_imports_b() {
     // Register Header (depends on Logo)
     let header = Component::new("Header", |_props| {
         let mut row = Element::new("Row");
-        row.ir_children.push(hypen_engine::ir::IRNode::Element(Element::new("Logo")));
-        row.ir_children.push(hypen_engine::ir::IRNode::Element(text_element("App Title")));
+        row.ir_children
+            .push(hypen_engine::ir::IRNode::Element(Element::new("Logo")));
+        row.ir_children
+            .push(hypen_engine::ir::IRNode::Element(text_element("App Title")));
         row
     });
     engine.register_component(header);
@@ -404,8 +406,10 @@ fn test_three_level_component_chain() {
     // Section (uses Widget)
     let section = Component::new("Section", |_props| {
         let mut col = Element::new("Column");
-        col.ir_children.push(hypen_engine::ir::IRNode::Element(Element::new("Widget")));
-        col.ir_children.push(hypen_engine::ir::IRNode::Element(text_element("section")));
+        col.ir_children
+            .push(hypen_engine::ir::IRNode::Element(Element::new("Widget")));
+        col.ir_children
+            .push(hypen_engine::ir::IRNode::Element(text_element("section")));
         col
     });
     engine.register_component(section);
@@ -413,8 +417,10 @@ fn test_three_level_component_chain() {
     // Page (uses Section)
     let page = Component::new("Page", |_props| {
         let mut col = Element::new("Column");
-        col.ir_children.push(hypen_engine::ir::IRNode::Element(Element::new("Section")));
-        col.ir_children.push(hypen_engine::ir::IRNode::Element(text_element("page")));
+        col.ir_children
+            .push(hypen_engine::ir::IRNode::Element(Element::new("Section")));
+        col.ir_children
+            .push(hypen_engine::ir::IRNode::Element(text_element("page")));
         col
     });
     engine.register_component(page);

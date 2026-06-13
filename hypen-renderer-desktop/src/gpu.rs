@@ -202,10 +202,7 @@ fn load_pipeline_cache(device: &wgpu::Device) -> Option<wgpu::PipelineCache> {
     // bypass `RenderContext` to request the feature on Vulkan / D3D12
     // (Metal doesn't have it; CoreGraphics caches at the driver
     // level), launches will start populating the file.
-    if !device
-        .features()
-        .contains(wgpu::Features::PIPELINE_CACHE)
-    {
+    if !device.features().contains(wgpu::Features::PIPELINE_CACHE) {
         log::debug!(
             "pipeline cache: device lacks PIPELINE_CACHE feature (backend doesn't \
              support it, or feature not requested at device creation) — skipping"

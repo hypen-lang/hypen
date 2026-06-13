@@ -47,10 +47,7 @@ pub fn version() -> String {
 /// array of `{"path": "...", "value": <json>}` objects describing every
 /// leaf that changed. Replaces per-host `diffState` ports.
 #[uniffi::export]
-pub fn portable_diff_paths(
-    old_json: String,
-    new_json: String,
-) -> Result<String, HypenError> {
+pub fn portable_diff_paths(old_json: String, new_json: String) -> Result<String, HypenError> {
     let old: serde_json::Value = serde_json::from_str(&old_json)
         .map_err(|e| HypenError::StateError(format!("diff_paths: bad old JSON: {e}")))?;
     let new: serde_json::Value = serde_json::from_str(&new_json)
@@ -78,8 +75,9 @@ pub fn portable_diff_paths(
 /// repeat the route table in host code.
 #[uniffi::export]
 pub fn discover_routers(source: String) -> Result<String, HypenError> {
-    let doc = hypen_parser::parse_document(&source)
-        .map_err(|e| HypenError::StateError(format!("discover_routers: parse error: {}", e.len())))?;
+    let doc = hypen_parser::parse_document(&source).map_err(|e| {
+        HypenError::StateError(format!("discover_routers: parse error: {}", e.len()))
+    })?;
     let mut routers = Vec::new();
     for component in &doc.components {
         let ir = crate::ir::ast_to_ir_node(component);
@@ -190,10 +188,7 @@ pub fn portable_build_url(path: String, query_json: String) -> Result<String, Hy
 /// `SessionEvent` from the portable module. Returns the serialised
 /// `SessionEffect`.
 #[uniffi::export]
-pub fn portable_session_step(
-    state_json: String,
-    event_json: String,
-) -> Result<String, HypenError> {
+pub fn portable_session_step(state_json: String, event_json: String) -> Result<String, HypenError> {
     let state: crate::portable::SessionState = serde_json::from_str(&state_json)
         .map_err(|e| HypenError::StateError(format!("session_step: bad state JSON: {e}")))?;
     let event: crate::portable::SessionEvent = serde_json::from_str(&event_json)
@@ -631,8 +626,7 @@ impl HypenEngine {
     pub fn register_module(&self, config: ModuleConfig) {
         if let Ok(mut state) = self.state.lock() {
             let initial_state: serde_json::Value =
-                serde_json::from_str(&config.initial_state_json)
-                    .unwrap_or(serde_json::Value::Null);
+                serde_json::from_str(&config.initial_state_json).unwrap_or(serde_json::Value::Null);
             let name = config.name.clone();
             let instance = ModuleInstance::from_config(
                 &name,
@@ -653,11 +647,7 @@ impl HypenEngine {
     ///
     /// Mirrors WASI's `hypen_set_context` and JS's `setContext`: the call
     /// auto-renders dirty nodes and returns any resulting patches.
-    pub fn set_context(
-        &self,
-        name: String,
-        data_json: String,
-    ) -> Result<Vec<Patch>, HypenError> {
+    pub fn set_context(&self, name: String, data_json: String) -> Result<Vec<Patch>, HypenError> {
         let data: serde_json::Value = serde_json::from_str(&data_json)
             .map_err(|e| HypenError::StateError(format!("invalid context JSON: {}", e)))?;
 
@@ -825,8 +815,7 @@ impl HypenEngine {
                 ));
             }
         };
-        let is_module = component_spec.declaration_type
-            == hypen_parser::DeclarationType::Module;
+        let is_module = component_spec.declaration_type == hypen_parser::DeclarationType::Module;
         let module_name = if is_module {
             Some(component_spec.name.to_lowercase())
         } else {
@@ -874,7 +863,10 @@ mod tests {
         // set_context with a fresh provider should succeed even without any
         // bindings registered (no dirty nodes, empty patch list).
         let patches = engine
-            .set_context("spacetime".to_string(), r#"{"user":{"name":"Alice"}}"#.to_string())
+            .set_context(
+                "spacetime".to_string(),
+                r#"{"user":{"name":"Alice"}}"#.to_string(),
+            )
             .expect("set_context");
         assert!(patches.is_empty(), "no bound nodes → no patches yet");
 
@@ -967,8 +959,14 @@ mod tests {
         // binding must invalidate when the whole provider is replaced.
         let saw_bob = patches.iter().any(|p| {
             p.text.as_deref() == Some("Bob")
-                || p.value_json.as_deref().map(|s| s.contains("Bob")).unwrap_or(false)
-                || p.props_json.as_deref().map(|s| s.contains("Bob")).unwrap_or(false)
+                || p.value_json
+                    .as_deref()
+                    .map(|s| s.contains("Bob"))
+                    .unwrap_or(false)
+                || p.props_json
+                    .as_deref()
+                    .map(|s| s.contains("Bob"))
+                    .unwrap_or(false)
         });
         assert!(
             saw_bob,
@@ -977,4 +975,3 @@ mod tests {
         );
     }
 }
-

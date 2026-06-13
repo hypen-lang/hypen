@@ -139,11 +139,11 @@ impl<S: State> StateContainer<S> {
 /// deserializes back to `S`. Errors out if the resulting JSON doesn't
 /// fit the type.
 pub(crate) fn apply_bind<S: State>(current: &S, path: &str, value: Value) -> Result<S> {
-    let mut json = serde_json::to_value(current).map_err(|e| SdkError::StateSerde(e.to_string()))?;
+    let mut json =
+        serde_json::to_value(current).map_err(|e| SdkError::StateSerde(e.to_string()))?;
     hypen_engine::path_set(&mut json, path, value);
-    serde_json::from_value(json).map_err(|e| {
-        SdkError::StateSerde(format!("__hypen_bind apply at '{path}': {e}"))
-    })
+    serde_json::from_value(json)
+        .map_err(|e| SdkError::StateSerde(format!("__hypen_bind apply at '{path}': {e}")))
 }
 
 /// JSON-side variant of [`apply_bind`] for the remote session. Returns
@@ -347,9 +347,7 @@ mod tests {
 
         let mut container = StateContainer::new(S {
             user: User {
-                profile: Profile {
-                    name: "old".into(),
-                },
+                profile: Profile { name: "old".into() },
                 age: 30,
             },
         })

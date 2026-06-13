@@ -24,8 +24,10 @@
 //! bar again.
 
 pub mod browser;
+pub mod devlog;
 pub mod shell;
 pub mod storage;
 
 pub use browser::BrowserModule;
+pub use devlog::init_logging;
 pub use storage::{normalize_url, pretty_name, RecentApp, Storage};

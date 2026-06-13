@@ -30,8 +30,7 @@ type SyncActionFn<S> = Box<dyn Fn(&mut S, Option<&Value>, Option<&GlobalContext>
 
 /// Async lifecycle callback: takes owned state, returns owned state after `.await`.
 #[cfg(feature = "async")]
-type AsyncLifecycleFn<S> =
-    Box<dyn Fn(S, Option<Arc<GlobalContext>>) -> BoxFuture<S> + Send + Sync>;
+type AsyncLifecycleFn<S> = Box<dyn Fn(S, Option<Arc<GlobalContext>>) -> BoxFuture<S> + Send + Sync>;
 
 /// Async action handler: takes owned state, optional raw JSON payload,
 /// and optional global context. Returns owned state after `.await`.
@@ -445,7 +444,6 @@ impl<S: State> ModuleBuilder<S> {
         self
     }
 
-
     /// Load SVG resources from a JSON file (name → SVG string map).
     ///
     /// ```json
@@ -724,14 +722,15 @@ impl<S: State> ModuleInstance<S> {
             .collect();
 
         engine.set_component_resolver(move |name, _ctx_path| {
-            entries.iter().find(|(n, _, _)| n == name).map(
-                |(_, source, path)| hypen_engine::ir::ResolvedComponent {
+            entries
+                .iter()
+                .find(|(n, _, _)| n == name)
+                .map(|(_, source, path)| hypen_engine::ir::ResolvedComponent {
                     source: source.clone(),
                     path: path.clone(),
                     passthrough: false,
                     lazy: false,
-                },
-            )
+                })
         });
 
         // Parse UI now so any syntax errors surface at construction;
@@ -963,9 +962,7 @@ impl<S: State> ModuleInstance<S> {
         }
         {
             let mut engine = self.engine.lock().unwrap();
-            engine
-                .dispatch_action(action)
-                .map_err(SdkError::Engine)?;
+            engine.dispatch_action(action).map_err(SdkError::Engine)?;
         }
 
         // Diff state and notify engine of changes
@@ -1642,8 +1639,7 @@ mod tests {
             .build();
 
         // With components — should succeed and resolve Card
-        let instance =
-            ModuleInstance::new_with_components(Arc::new(def), None, &registry).unwrap();
+        let instance = ModuleInstance::new_with_components(Arc::new(def), None, &registry).unwrap();
         instance.mount();
         assert_eq!(instance.get_state().name, "parent");
     }
@@ -1659,8 +1655,7 @@ mod tests {
             .ui(r#"Column { Text("Hello") }"#)
             .build();
 
-        let instance =
-            ModuleInstance::new_with_components(Arc::new(def), None, &registry).unwrap();
+        let instance = ModuleInstance::new_with_components(Arc::new(def), None, &registry).unwrap();
         instance.mount();
         assert!(instance.is_mounted());
     }
@@ -1682,8 +1677,7 @@ mod tests {
             .resource("heart", heart_svg)
             .build();
 
-        let instance =
-            ModuleInstance::new_with_components(Arc::new(def), None, &registry).unwrap();
+        let instance = ModuleInstance::new_with_components(Arc::new(def), None, &registry).unwrap();
 
         // Directly inspect the engine's resource registry — this is the
         // smoking-gun check for the fix. Before the fix, the registry was

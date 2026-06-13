@@ -44,3 +44,19 @@ export type {
 
 // Re-export Patch type
 export type { Patch } from "../types.js";
+
+// Transport-agnostic remote session. The engine is injected via
+// `SessionHost.createEngine`, so any runtime (Node/Bun, Cloudflare Durable
+// Objects, etc.) can reuse the Hypen remote protocol envelope.
+// `@hypen-space/server` re-exports these for back-compat.
+export {
+  RemoteSession,
+  AsyncQueueTransport,
+  createBunWebSocketTransport,
+} from "./remote-session.js";
+export type {
+  SessionTransport,
+  SessionHost,
+  RemoteSessionOptions,
+  OutgoingMessage,
+} from "./remote-session.js";

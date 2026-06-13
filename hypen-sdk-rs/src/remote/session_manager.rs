@@ -115,10 +115,7 @@ impl SessionManager {
     }
 
     /// Create a new active session.
-    pub fn create_session(
-        &self,
-        props: HashMap<String, serde_json::Value>,
-    ) -> SessionInfo {
+    pub fn create_session(&self, props: HashMap<String, serde_json::Value>) -> SessionInfo {
         let mut inner = self.inner.lock().unwrap();
         let mut id = (self.generate_id)();
         for _ in 0..10 {

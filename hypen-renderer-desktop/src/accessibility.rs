@@ -278,7 +278,11 @@ mod tests {
     #[test]
     fn button_node_has_role_button_and_click_action() {
         let pass = build_pass(|t| {
-            t.apply(&create("btn", "Button", &[("action", json!("@actions.save"))]));
+            t.apply(&create(
+                "btn",
+                "Button",
+                &[("action", json!("@actions.save"))],
+            ));
             t.apply(&insert(ROOT_ID, "btn"));
             t.apply(&create("lbl", "Text", &[("0", json!("Save"))]));
             t.apply(&insert("btn", "lbl"));

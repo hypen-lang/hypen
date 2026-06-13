@@ -26,9 +26,9 @@ pub mod app;
 pub(crate) mod damage;
 pub mod gpu;
 pub(crate) mod ime;
+pub mod layout;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
-pub mod layout;
 pub mod module;
 pub mod paint;
 pub mod painter;
@@ -41,8 +41,8 @@ pub mod window;
 
 pub use app::DesktopApp;
 pub use module::HypenModule;
-pub use remote::{ConnectionStatus, RemoteModule};
 pub use painter::{PaintTarget, Painter};
+pub use remote::{ConnectionStatus, RemoteModule};
 pub use tree::{Node, Tree};
 pub use window::Shortcut;
 

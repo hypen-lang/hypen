@@ -199,10 +199,8 @@ impl HypenRouter {
     /// exists to translate the SDK's `HashMap` return shape into the
     /// `BTreeMap` the engine takes.
     pub fn build_url(path: &str, query: &HashMap<String, String>) -> String {
-        let sorted: std::collections::BTreeMap<String, String> = query
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let sorted: std::collections::BTreeMap<String, String> =
+            query.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         hypen_engine::build_url(path, &sorted)
     }
 }
@@ -220,7 +218,6 @@ fn parse_path_and_query(full_path: &str) -> (String, HashMap<String, String>) {
     let (path, btree) = hypen_engine::parse_query(full_path);
     (path, btree.into_iter().collect())
 }
-
 
 #[cfg(test)]
 mod tests {

@@ -73,8 +73,7 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
         if let Some(dash) = rest.find('-') {
             let side = &rest[..dash];
             let size = &rest[dash + 1..];
-            if let (Some(props), Some(value)) =
-                (directional_radius_props(side), radius_value(size))
+            if let (Some(props), Some(value)) = (directional_radius_props(side), radius_value(size))
             {
                 return Some(props.iter().map(|p| CssProperty::new(p, value)).collect());
             }

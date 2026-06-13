@@ -196,12 +196,9 @@ mod tests {
         let s = "今日hello world";
         let kanji_bytes = "今日".len(); // 6 bytes
         let after_hello = kanji_bytes + "hello".len(); // 11 bytes
-        // Cursor inside "world" → range covers "world".
+                                                       // Cursor inside "world" → range covers "world".
         let world_start = after_hello + 1; // skip space
-        assert_eq!(
-            word_range_at(s, world_start + 2),
-            (world_start, s.len()),
-        );
+        assert_eq!(word_range_at(s, world_start + 2), (world_start, s.len()),);
         // Word_end starting in "今日hello" walks to the end of "hello".
         assert_eq!(word_end(s, 0), after_hello);
     }

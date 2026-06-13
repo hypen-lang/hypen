@@ -113,8 +113,7 @@ impl<S: State> ManagedModule for ModuleInstance<S> {
 /// `handle_route_change` and leaves the router in the "no active module"
 /// state for the failed route — same as the other SDKs when a definition
 /// can't be resolved.
-pub type ModuleFactory =
-    Arc<dyn Fn() -> Result<Arc<dyn ManagedModule>> + Send + Sync>;
+pub type ModuleFactory = Arc<dyn Fn() -> Result<Arc<dyn ManagedModule>> + Send + Sync>;
 
 /// A single route entry registered with [`ManagedRouter`].
 pub struct RouteDefinition {
@@ -266,7 +265,8 @@ impl ManagedRouter {
         if let Some(m) = active {
             m.deactivate();
             m.destroy();
-            self.global_context.unregister_module(&m.name().to_lowercase());
+            self.global_context
+                .unregister_module(&m.name().to_lowercase());
         }
         for (key, m) in persisted {
             m.destroy();
@@ -285,7 +285,9 @@ impl ManagedRouter {
 
     pub fn get_active_route_path(&self) -> Option<String> {
         let g = self.inner.lock().unwrap();
-        g.active.as_ref().map(|(idx, _)| g.routes[*idx].path.clone())
+        g.active
+            .as_ref()
+            .map(|(idx, _)| g.routes[*idx].path.clone())
     }
 
     /// Snapshot of currently-cached module keys (lowercase). Test-only

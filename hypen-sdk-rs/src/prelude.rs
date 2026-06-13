@@ -17,8 +17,8 @@ pub use crate::router::HypenRouter;
 pub use crate::state::State;
 
 pub use crate::remote::{
-    ModuleSessionConfig, RemoteMessage, RemoteSession, SessionConfig, SessionInfo,
-    SessionManager, SessionManagerConfig,
+    ModuleSessionConfig, RemoteMessage, RemoteSession, SessionConfig, SessionInfo, SessionManager,
+    SessionManagerConfig,
 };
 
 // Re-export engine types that users commonly need

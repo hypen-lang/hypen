@@ -8,7 +8,7 @@ plugins {
 }
 
 group = "space.hypen"
-version = "0.4.949"
+version = "0.5.0"
 
 repositories {
     mavenCentral()

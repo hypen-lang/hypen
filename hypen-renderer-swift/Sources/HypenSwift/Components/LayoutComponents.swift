@@ -926,21 +926,30 @@ public struct ListComponent: ComponentHandler {
         // this, Lists declared via Tailwind classes (e.g. AddFood's
         // horizontal category-tab list) stacked vertically because
         // only the `direction.0` applicator path was checked.
-        let flexDirection = context.element.getStringProp("flex-direction")
+        let flexDirection = context.element.getStringProp("flexDirection.0")
+            ?? context.element.getStringProp("flex-direction.0")
+            ?? context.element.getStringProp("flex-direction")
             ?? context.element.getStringProp("flexDirection")
         let gap = modifier.gap ?? context.element.getCGFloatProp("gap.0") ?? 0
         let isHorizontal = direction.lowercased() == "horizontal"
             || flexDirection?.lowercased() == "row"
             || flexDirection?.lowercased() == "row-reverse"
 
-        // Propagate expansion permissions to children, like Column/Row do
-        let allowsHorizontalExpansion = modifier.fillMaxWidth || modifier.width != nil
+        // Propagate expansion permissions to children, like Column/Row do.
+        // A horizontal List always lays children out in a row, so children's
+        // flex/weight expansion should resolve against the row's width even
+        // when the list itself has no explicit width — same contract as Row.
+        let allowsHorizontalExpansion = isHorizontal || modifier.fillMaxWidth || modifier.width != nil
         let allowsVerticalExpansion = modifier.fillMaxHeight || modifier.height != nil
         let explicitWidth = modifier.width
 
         return AnyView(
-            ScrollView(isHorizontal ? .horizontal : .vertical, showsIndicators: true) {
+            Group {
                 if isHorizontal {
+                    // Non-scrolling HStack so weight/flex-1 children distribute
+                    // evenly across the available width (like Row). Switch back
+                    // to a horizontal ScrollView if the caller opts in via
+                    // overflow-x scroll/auto in the future.
                     HStack(spacing: gap) {
                         ForEach(childElements, id: \.id) { childElement in
                             HypenElementView(
@@ -953,17 +962,20 @@ public struct ListComponent: ComponentHandler {
                             .environment(\.parentExplicitWidth, explicitWidth)
                         }
                     }
+                    .frame(maxWidth: .infinity)
                 } else {
-                    VStack(alignment: .leading, spacing: gap) {
-                        ForEach(childElements, id: \.id) { childElement in
-                            HypenElementView(
-                                elementId: childElement.id,
-                                renderer: context.renderer,
-                                actionDispatcher: context.actionDispatcher
-                            )
-                            .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
-                            .environment(\.parentAllowsVerticalExpansion, allowsVerticalExpansion)
-                            .environment(\.parentExplicitWidth, explicitWidth)
+                    ScrollView(.vertical, showsIndicators: true) {
+                        VStack(alignment: .leading, spacing: gap) {
+                            ForEach(childElements, id: \.id) { childElement in
+                                HypenElementView(
+                                    elementId: childElement.id,
+                                    renderer: context.renderer,
+                                    actionDispatcher: context.actionDispatcher
+                                )
+                                .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                                .environment(\.parentAllowsVerticalExpansion, allowsVerticalExpansion)
+                                .environment(\.parentExplicitWidth, explicitWidth)
+                            }
                         }
                     }
                 }

@@ -629,8 +629,8 @@ fn test_render_tree_with_many_children() {
 fn test_set_module_primary_action_scope_is_none() {
     // GIVEN: Engine with primary module that declares actions
     let mut engine = Engine::new();
-    let module_meta = Module::new("Counter")
-        .with_actions(vec!["increment".to_string(), "decrement".to_string()]);
+    let module_meta =
+        Module::new("Counter").with_actions(vec!["increment".to_string(), "decrement".to_string()]);
     let module = ModuleInstance::new(module_meta, json!({"count": 0}));
 
     // WHEN: Install via set_module
@@ -657,7 +657,10 @@ fn test_register_module_named_action_scope() {
     engine.register_module("search", module);
 
     // THEN: action_scope_for reports the named scope
-    assert_eq!(engine.action_scope_for("submit"), Some("search".to_string()));
+    assert_eq!(
+        engine.action_scope_for("submit"),
+        Some("search".to_string())
+    );
     assert_eq!(engine.action_scope_for("clear"), Some("search".to_string()));
 }
 
@@ -704,7 +707,10 @@ fn test_register_module_twice_evicts_previous_named_actions() {
         json!({}),
     );
     engine.register_module("search", first);
-    assert_eq!(engine.action_scope_for("submit"), Some("search".to_string()));
+    assert_eq!(
+        engine.action_scope_for("submit"),
+        Some("search".to_string())
+    );
     assert_eq!(engine.action_scope_for("clear"), Some("search".to_string()));
 
     // WHEN: Re-register under the same key with a different action set
@@ -786,13 +792,11 @@ fn test_set_context_invalidates_deep_data_source_bindings() {
     //       (or SetText) patch carrying "Bob".
     let captured = patches.lock().unwrap();
     let saw_bob = captured.iter().any(|p| match p {
-        hypen_engine::reconcile::Patch::SetProp { value, .. } => {
-            value == &json!("Bob")
-        }
+        hypen_engine::reconcile::Patch::SetProp { value, .. } => value == &json!("Bob"),
         hypen_engine::reconcile::Patch::SetText { text, .. } => text == "Bob",
-        hypen_engine::reconcile::Patch::Create { props, .. } => props
-            .values()
-            .any(|v| v == &json!("Bob")),
+        hypen_engine::reconcile::Patch::Create { props, .. } => {
+            props.values().any(|v| v == &json!("Bob"))
+        }
         _ => false,
     });
     assert!(

@@ -8,9 +8,10 @@ const SESSION_KEY = "hypen-calorie-counter-session";
 const WS_URL = "ws://localhost:3000";
 
 const appContainer = document.getElementById("app")!;
-const statusEl = document.getElementById("status")!;
+const statusEl = document.getElementById("status");
 
 function updateStatus(status: string) {
+  if (!statusEl) return;
   statusEl.textContent = status;
   statusEl.className = `status ${status}`;
 }

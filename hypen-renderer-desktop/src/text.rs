@@ -62,12 +62,7 @@ impl TextEngine {
     /// Measure `text` at `font_size` (physical px). When `wrap_width` is
     /// `Some`, lines wrap to fit; otherwise text stays on one line.
     /// Returns `(width, height)` in physical pixels.
-    pub fn measure(
-        &mut self,
-        text: &str,
-        font_size: f32,
-        wrap_width: Option<f32>,
-    ) -> (f32, f32) {
+    pub fn measure(&mut self, text: &str, font_size: f32, wrap_width: Option<f32>) -> (f32, f32) {
         self.measure_weighted(text, font_size, wrap_width, 400)
     }
 
@@ -97,7 +92,9 @@ impl TextEngine {
 
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
-        let attrs = Attrs::new().family(Family::SansSerif).weight(Weight(weight));
+        let attrs = Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
         // Match CSS `overflow-wrap: normal`: only break at word
@@ -169,14 +166,7 @@ impl TextEngine {
     /// Lay out `text` and rasterise it into `pixmap` in black at `(x, y)`.
     /// Convenience over [`Self::draw_text_colored`] for callers that don't
     /// need a custom colour.
-    pub fn draw_text(
-        &mut self,
-        pixmap: &mut Pixmap,
-        text: &str,
-        x: f32,
-        y: f32,
-        font_size: f32,
-    ) {
+    pub fn draw_text(&mut self, pixmap: &mut Pixmap, text: &str, x: f32, y: f32, font_size: f32) {
         self.draw_text_colored(pixmap, text, x, y, font_size, Rgba::BLACK, None);
     }
 
@@ -221,7 +211,9 @@ impl TextEngine {
         }
         let metrics = Metrics::new(font_size, font_size * 1.3);
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
-        let attrs = Attrs::new().family(Family::SansSerif).weight(Weight(weight));
+        let attrs = Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
         // Mirror the wrap policy in `measure_weighted` — without
@@ -359,9 +351,8 @@ impl TextEngine {
         // produces a 1:1 unblurred blit. Vello's default
         // `ImageQuality::Medium` (bilinear) re-samples the already-AA
         // glyph coverage and visibly softens every line of body text.
-        let brush = vello::peniko::ImageBrush::from(img).with_quality(
-            vello::peniko::ImageQuality::Low,
-        );
+        let brush =
+            vello::peniko::ImageBrush::from(img).with_quality(vello::peniko::ImageQuality::Low);
         let transform = vello::kurbo::Affine::translate((x.round() as f64, y.round() as f64));
         scene.draw_image(&brush, transform);
     }
@@ -433,11 +424,15 @@ impl TextEngine {
             let mut tile = match Pixmap::new(cw, ch) {
                 Some(p) => p,
                 None => {
-                    self.draw_text_weighted(target, text, x, y, font_size, color, wrap_width, weight);
+                    self.draw_text_weighted(
+                        target, text, x, y, font_size, color, wrap_width, weight,
+                    );
                     return;
                 }
             };
-            self.draw_text_weighted(&mut tile, text, 0.0, 0.0, font_size, color, wrap_width, weight);
+            self.draw_text_weighted(
+                &mut tile, text, 0.0, 0.0, font_size, color, wrap_width, weight,
+            );
             if self.raster_cache.len() >= RASTER_CACHE_CAP {
                 // FIFO single-entry eviction; wholesale clear was
                 // catastrophic on text-heavy screens (every miss
@@ -569,7 +564,11 @@ mod tests {
         t.draw_text_cached(&mut a, "Hi", 0.0, 0.0, 18.0, Rgba(0, 0, 0, 0xff), None);
         // Reference render via the direct path.
         t.draw_text_colored(&mut b, "Hi", 0.0, 0.0, 18.0, Rgba(0, 0, 0, 0xff), None);
-        assert_eq!(a.data(), b.data(), "cached miss-render should match uncached");
+        assert_eq!(
+            a.data(),
+            b.data(),
+            "cached miss-render should match uncached"
+        );
 
         // Second call → cache hit, must still match.
         let mut c = Pixmap::new(64, 32).unwrap();
@@ -588,7 +587,11 @@ mod tests {
         pm.fill(tiny_skia::Color::WHITE);
         let before = pm.data().to_vec();
         t.draw_text_cached(&mut pm, "Hi", 0.0, 0.0, 18.0, Rgba::TRANSPARENT, None);
-        assert_eq!(pm.data(), before.as_slice(), "transparent draw must not mutate");
+        assert_eq!(
+            pm.data(),
+            before.as_slice(),
+            "transparent draw must not mutate"
+        );
     }
 
     #[test]
@@ -608,7 +611,10 @@ mod tests {
         assert!(w > 0.0);
         // Without wrap, height should match a single line + descenders —
         // generously bound at 2x the metric height.
-        assert!(h <= 18.0 * 2.6, "single-line height should not exceed 2x font-size, got {h}");
+        assert!(
+            h <= 18.0 * 2.6,
+            "single-line height should not exceed 2x font-size, got {h}"
+        );
     }
 
     #[test]

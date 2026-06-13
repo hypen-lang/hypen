@@ -61,6 +61,16 @@ pub struct Tree {
     /// scanning every children list. Maintained in lockstep with
     /// `children` by every patch handler.
     parent_by_child: HashMap<String, String>,
+    /// Roots of subtrees unlinked by `Detach` and not yet reattached
+    /// or removed, in detach order (oldest first). `Detach` keeps the
+    /// whole subtree alive (it backs the engine's Router keep-alive
+    /// cache, which reattaches via `Attach`), so nothing here frees on
+    /// its own — the engine's Router LRU is expected to emit `Remove`
+    /// on eviction. This list backs [`Tree::evict_detached_over`], a
+    /// safety backstop so a host that detaches without ever
+    /// re-Attaching or Removing (a looping / buggy server) can't grow
+    /// the node arena without bound.
+    detached: Vec<String>,
 }
 
 impl Tree {
@@ -71,6 +81,7 @@ impl Tree {
             nodes: HashMap::new(),
             children,
             parent_by_child: HashMap::new(),
+            detached: Vec::new(),
         }
     }
 
@@ -81,10 +92,7 @@ impl Tree {
     }
 
     pub fn root_children(&self) -> &[String] {
-        self.children
-            .get(ROOT_ID)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        self.children.get(ROOT_ID).map(Vec::as_slice).unwrap_or(&[])
     }
 
     pub fn children_of(&self, id: &str) -> &[String] {
@@ -156,6 +164,7 @@ impl Tree {
                 let siblings = self.children.entry(parent_id.clone()).or_default();
                 Self::insert_at(siblings, id.clone(), before_id.as_deref());
                 self.parent_by_child.insert(id.clone(), parent_id.clone());
+                self.clear_detached(id);
             }
             Patch::Move {
                 parent_id,
@@ -172,6 +181,7 @@ impl Tree {
                 let siblings = self.children.entry(parent_id.clone()).or_default();
                 Self::insert_at(siblings, id.clone(), before_id.as_deref());
                 self.parent_by_child.insert(id.clone(), parent_id.clone());
+                self.clear_detached(id);
             }
             Patch::Remove { id } => {
                 // O(1) parent lookup replaces the previous full
@@ -181,6 +191,7 @@ impl Tree {
                         siblings.retain(|c| c != id);
                     }
                 }
+                self.clear_detached(id);
                 self.remove_subtree(id);
             }
             Patch::Detach { id } => {
@@ -192,6 +203,7 @@ impl Tree {
                         siblings.retain(|c| c != id);
                     }
                 }
+                self.note_detached(id);
             }
             Patch::Attach {
                 parent_id,
@@ -201,6 +213,7 @@ impl Tree {
                 let siblings = self.children.entry(parent_id.clone()).or_default();
                 Self::insert_at(siblings, id.clone(), before_id.as_deref());
                 self.parent_by_child.insert(id.clone(), parent_id.clone());
+                self.clear_detached(id);
             }
         }
     }
@@ -224,6 +237,65 @@ impl Tree {
             }
         }
         self.nodes.remove(id);
+    }
+
+    /// Like [`Tree::remove_subtree`] but records every removed node id
+    /// (root + descendants) into `out` so the caller can mirror the
+    /// teardown into the Taffy tree.
+    fn remove_subtree_collecting(&mut self, id: &str, out: &mut Vec<String>) {
+        if let Some(children) = self.children.remove(id) {
+            for child in &children {
+                self.parent_by_child.remove(child);
+                self.remove_subtree_collecting(child, out);
+            }
+        }
+        self.nodes.remove(id);
+        out.push(id.to_string());
+    }
+
+    /// Record `id` as a detached subtree root (most-recent last).
+    fn note_detached(&mut self, id: &str) {
+        self.detached.retain(|d| d != id);
+        self.detached.push(id.to_string());
+    }
+
+    /// Drop `id` from the detached list — it's live again (Attach /
+    /// Insert / Move) or gone (Remove).
+    fn clear_detached(&mut self, id: &str) {
+        if !self.detached.is_empty() {
+            self.detached.retain(|d| d != id);
+        }
+    }
+
+    /// Backstop against an unbounded detached arena. Tears down the
+    /// oldest detached subtrees until at most `cap` remain, returning
+    /// every removed node id so the caller can free the matching Taffy
+    /// nodes. Returns empty in the common case (under cap).
+    ///
+    /// This should never fire in normal operation: the engine's Router
+    /// keep-alive cache is itself a bounded LRU that emits `Remove` on
+    /// eviction. It only catches a host that detaches without ever
+    /// re-Attaching or Removing. Evicting a subtree the host still
+    /// believes is cached makes a later `Attach` a no-op (that route
+    /// renders blank until the host rebuilds it) — an acceptable
+    /// degradation for an already-misbehaving server, and the reason
+    /// the cap is set far above any sane Router LRU.
+    pub fn evict_detached_over(&mut self, cap: usize) -> Vec<String> {
+        let mut removed = Vec::new();
+        while self.detached.len() > cap {
+            let root = self.detached.remove(0);
+            // Skip if it somehow became live without clearing the list.
+            if self.parent_by_child.contains_key(&root) {
+                continue;
+            }
+            self.remove_subtree_collecting(&root, &mut removed);
+        }
+        removed
+    }
+
+    /// Number of detached subtree roots currently held alive.
+    pub fn detached_len(&self) -> usize {
+        self.detached.len()
     }
 
     /// Apply a batch in order. Convenience wrapper.
@@ -314,10 +386,7 @@ mod tests {
         // before_id refers to a sibling that doesn't exist — graceful append.
         tree.apply(&insert(ROOT_ID, "b", Some("ghost")));
 
-        assert_eq!(
-            tree.root_children(),
-            &["a".to_string(), "b".to_string()]
-        );
+        assert_eq!(tree.root_children(), &["a".to_string(), "b".to_string()]);
     }
 
     #[test]
@@ -536,5 +605,66 @@ mod tests {
         });
         assert_eq!(tree.parent_of("post"), Some("col"));
         assert!(tree.children_of("col").contains(&"post".to_string()));
+    }
+
+    #[test]
+    fn attach_and_remove_clear_the_detached_backstop() {
+        let mut tree = Tree::new();
+        tree.apply(&create("col", "Column", &[]));
+        tree.apply(&insert("root", "col", None));
+        tree.apply(&create("a", "Container", &[]));
+        tree.apply(&insert("col", "a", None));
+        tree.apply(&create("b", "Container", &[]));
+        tree.apply(&insert("col", "b", None));
+
+        tree.apply(&Patch::Detach { id: "a".into() });
+        tree.apply(&Patch::Detach { id: "b".into() });
+        assert_eq!(tree.detached_len(), 2);
+
+        // Reattaching one and removing the other both drop their
+        // detached-list entries so the backstop doesn't double-count.
+        tree.apply(&Patch::Attach {
+            parent_id: "col".into(),
+            id: "a".into(),
+            before_id: None,
+        });
+        tree.apply(&Patch::Remove { id: "b".into() });
+        assert_eq!(tree.detached_len(), 0);
+    }
+
+    #[test]
+    fn evict_detached_over_tears_down_oldest_subtrees() {
+        let mut tree = Tree::new();
+        tree.apply(&create("col", "Column", &[]));
+        tree.apply(&insert("root", "col", None));
+
+        // Detach 5 single-child subtrees: parent `pN` with child `cN`.
+        for i in 0..5 {
+            let p = format!("p{i}");
+            let c = format!("c{i}");
+            tree.apply(&create(&p, "Container", &[]));
+            tree.apply(&insert("col", &p, None));
+            tree.apply(&create(&c, "Text", &[("0", json!("x"))]));
+            tree.apply(&insert(&p, &c, None));
+            tree.apply(&Patch::Detach { id: p.clone() });
+        }
+        assert_eq!(tree.detached_len(), 5);
+
+        // Keep at most 2 — the 3 oldest roots (p0..p2) and their
+        // children get torn down; the returned ids cover both.
+        let removed = tree.evict_detached_over(2);
+        assert_eq!(tree.detached_len(), 2);
+        for i in 0..3 {
+            assert!(tree.get(&format!("p{i}")).is_none(), "p{i} freed");
+            assert!(tree.get(&format!("c{i}")).is_none(), "c{i} freed");
+            assert!(removed.contains(&format!("p{i}")));
+            assert!(removed.contains(&format!("c{i}")));
+        }
+        // The two most-recently-detached survive for re-Attach.
+        assert!(tree.get("p3").is_some());
+        assert!(tree.get("p4").is_some());
+
+        // Under-cap eviction is a no-op.
+        assert!(tree.evict_detached_over(2).is_empty());
     }
 }

@@ -19,8 +19,7 @@ struct CounterState {
 }
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
-        .init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let app = HypenApp::default();
     let def = HypenApp::module::<CounterState>("Counter")

@@ -177,7 +177,8 @@ mod tests {
     /// character.
     #[test]
     fn array_index_past_nine_uses_full_decimal() {
-        let mut old_items: Vec<Value> = (0..12).map(|i| json!({"title": format!("t{i}")})).collect();
+        let mut old_items: Vec<Value> =
+            (0..12).map(|i| json!({"title": format!("t{i}")})).collect();
         let new_items = old_items.clone();
         // Only mutate index 10's title.
         old_items[10] = json!({"title": "OLD"});

@@ -23,7 +23,13 @@ fn test_create_tree_tracks_single_binding() {
     let state = json!({"count": 42});
 
     // WHEN: Create tree
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
 
     // THEN: Dependency should be tracked
@@ -62,7 +68,13 @@ fn test_create_tree_tracks_multiple_bindings_same_node() {
     });
 
     // WHEN: Create tree
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
 
     // THEN: Both dependencies should be tracked
@@ -106,7 +118,13 @@ fn test_create_tree_tracks_nested_children_separately() {
     });
 
     // WHEN: Create tree
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(parent.clone()), None, &state, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(parent.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let parent_id = tree.root().expect("Should have root");
 
     // THEN: Parent depends on layout.width
@@ -146,7 +164,13 @@ fn test_create_tree_prefix_tracking() {
     let state = json!({"user": {"profile": {"name": "Charlie"}}});
 
     // WHEN: Create tree
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
 
     // THEN: Should track full path
@@ -184,7 +208,13 @@ fn test_create_tree_generates_correct_patches() {
     let state = json!({"message": "Hello World"});
 
     // WHEN: Create tree
-    let patches = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: Should generate Create and InsertRoot patches
     assert!(
@@ -215,7 +245,13 @@ fn test_create_tree_resolves_bindings_to_values() {
     let state = json!({"greeting": "Hello, Test!"});
 
     // WHEN: Create tree
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
 
     // THEN: Node should have resolved prop value
@@ -249,7 +285,13 @@ fn test_create_tree_mixed_static_and_bindings() {
     let state = json!({"dynamic": "Dynamic Text"});
 
     // WHEN: Create tree
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
     let node_id = tree.root().expect("Should have root");
 
     // THEN: Should only track binding, not static props
@@ -282,7 +324,13 @@ fn test_create_tree_no_bindings_no_dependencies() {
     let state = json!({});
 
     // WHEN: Create tree
-    let _ = reconcile_ir(&mut tree, &IRNode::Element(element.clone()), None, &state, &mut dependencies);
+    let _ = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(element.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
 
     // THEN: Should have no dependencies tracked
     let affected = dependencies.get_affected_nodes("anything");

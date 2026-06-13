@@ -390,7 +390,12 @@ pub fn paint_image_cached(
             build_rounded_rect_mask(
                 cw,
                 ch,
-                LayoutRect { x: 0.0, y: 0.0, w: cw as f32, h: ch as f32 },
+                LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w: cw as f32,
+                    h: ch as f32,
+                },
                 radius,
             )
         } else {
@@ -429,12 +434,7 @@ pub fn paint_image_cached(
 /// the tile's intrinsic size is smaller than `rect` (the per-side
 /// `MAX_TILE_DIM` cap kicked in) and tiny-skia's bilinear sampler
 /// scales it up at composite time.
-fn composite_tile(
-    pixmap: &mut Pixmap,
-    tile: &Pixmap,
-    rect: LayoutRect,
-    upscaled: bool,
-) {
+fn composite_tile(pixmap: &mut Pixmap, tile: &Pixmap, rect: LayoutRect, upscaled: bool) {
     let transform = if upscaled {
         let sx = rect.w / tile.width() as f32;
         let sy = rect.h / tile.height() as f32;
@@ -453,21 +453,14 @@ fn composite_tile(
     pixmap.draw_pixmap(
         0,
         0,
-        PixmapRef::from_bytes(tile.data(), tile.width(), tile.height())
-            .expect("tile bytes valid"),
+        PixmapRef::from_bytes(tile.data(), tile.width(), tile.height()).expect("tile bytes valid"),
         &paint,
         transform,
         None,
     );
 }
 
-fn render_cache_key(
-    src: &str,
-    w: u32,
-    h: u32,
-    fit: crate::layout::ObjectFit,
-    radius: f32,
-) -> u64 {
+fn render_cache_key(src: &str, w: u32, h: u32, fit: crate::layout::ObjectFit, radius: f32) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     src.hash(&mut hasher);
@@ -578,10 +571,7 @@ fn run_image_worker(rx: mpsc::Receiver<String>) {
             None => CacheEntry::Failed,
         };
         {
-            let mut entries = cache()
-                .entries
-                .lock()
-                .expect("image cache poisoned");
+            let mut entries = cache().entries.lock().expect("image cache poisoned");
             // `IndexMap::insert` keeps an existing key in place; the
             // entry was Loading, we want the newly-decoded result at
             // the back so it counts as freshly used. shift_remove +
@@ -617,10 +607,7 @@ fn run_image_worker(rx: mpsc::Receiver<String>) {
 /// Returns `None` on any failure (timeout, non-2xx, oversize body).
 /// Decode validation happens in the worker loop.
 fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
-    let response = match ureq::get(url)
-        .timeout(Duration::from_secs(10))
-        .call()
-    {
+    let response = match ureq::get(url).timeout(Duration::from_secs(10)).call() {
         Ok(r) => r,
         Err(e) => {
             log::warn!("image: HTTP failed for {url}: {e}");
@@ -630,7 +617,11 @@ fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
     let mut bytes = Vec::with_capacity(64 * 1024);
     // 20 MB hard cap per image. Keeps a misbehaving server from
     // wedging the worker thread on a giant body.
-    if let Err(e) = response.into_reader().take(20 * 1024 * 1024).read_to_end(&mut bytes) {
+    if let Err(e) = response
+        .into_reader()
+        .take(20 * 1024 * 1024)
+        .read_to_end(&mut bytes)
+    {
         log::warn!("image: read failed for {url}: {e}");
         return None;
     }
@@ -738,7 +729,14 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia
     pb.line_to(x + w - rx, y);
     pb.cubic_to(x + w - rx + cx, y, x + w, y + ry - cy, x + w, y + ry);
     pb.line_to(x + w, y + h - ry);
-    pb.cubic_to(x + w, y + h - ry + cy, x + w - rx + cx, y + h, x + w - rx, y + h);
+    pb.cubic_to(
+        x + w,
+        y + h - ry + cy,
+        x + w - rx + cx,
+        y + h,
+        x + w - rx,
+        y + h,
+    );
     pb.line_to(x + rx, y + h);
     pb.cubic_to(x + rx - cx, y + h, x, y + h - ry + cy, x, y + h - ry);
     pb.line_to(x, y + ry);
@@ -864,7 +862,14 @@ mod tests {
             w: 64.0,
             h: 64.0,
         };
-        paint_image(&mut pm, rect, None, 1.0, 0.0, crate::layout::ObjectFit::Fill);
+        paint_image(
+            &mut pm,
+            rect,
+            None,
+            1.0,
+            0.0,
+            crate::layout::ObjectFit::Fill,
+        );
         assert_ne!(pm.data(), before.as_slice());
     }
 
@@ -945,10 +950,7 @@ mod tests {
         let img = image::RgbaImage::from_pixel(1, 1, image::Rgba([0xff, 0xff, 0xff, 0xff]));
         let mut buf = Vec::new();
         image::DynamicImage::ImageRgba8(img)
-            .write_to(
-                &mut std::io::Cursor::new(&mut buf),
-                image::ImageFormat::Png,
-            )
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
             .expect("encode 1×1 white png");
         buf
     }

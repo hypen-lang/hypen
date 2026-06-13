@@ -255,12 +255,27 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
 
 /// Parse arbitrary effect values like `opacity-[0.5]`, `z-[999]`
 pub fn parse_arbitrary(prefix: &str, value: &str) -> Option<Vec<CssProperty>> {
-    let property = match prefix {
-        "opacity" => "opacity",
-        "z" => "z-index",
-        _ => return None,
-    };
-    Some(vec![CssProperty::new(property, value)])
+    match prefix {
+        "opacity" => Some(vec![CssProperty::new("opacity", value)]),
+        "z" => Some(vec![CssProperty::new("z-index", value)]),
+        "blur" => Some(vec![CssProperty::new(
+            "filter",
+            &format_filter_value("blur", value),
+        )]),
+        "backdrop-blur" => Some(vec![CssProperty::new(
+            "backdrop-filter",
+            &format_filter_value("blur", value),
+        )]),
+        _ => None,
+    }
+}
+
+fn format_filter_value(function: &str, value: &str) -> String {
+    if value.contains('(') {
+        value.to_string()
+    } else {
+        format!("{}({})", function, value)
+    }
 }
 
 #[cfg(test)]
@@ -297,5 +312,12 @@ mod tests {
     fn test_transition() {
         let props = parse("transition").unwrap();
         assert_eq!(props.len(), 3);
+    }
+
+    #[test]
+    fn test_arbitrary_backdrop_blur() {
+        let props = parse_arbitrary("backdrop-blur", "18px").unwrap();
+        assert_eq!(props[0].property, "backdrop-filter");
+        assert_eq!(props[0].value, "blur(18px)");
     }
 }

@@ -128,10 +128,7 @@ mod tests {
 
     #[test]
     fn union_rect_covers_both_inputs() {
-        let u = union_rect(
-            rect(0.0, 0.0, 10.0, 10.0),
-            rect(20.0, 30.0, 5.0, 5.0),
-        );
+        let u = union_rect(rect(0.0, 0.0, 10.0, 10.0), rect(20.0, 30.0, 5.0, 5.0));
         assert_eq!(u.x, 0.0);
         assert_eq!(u.y, 0.0);
         assert_eq!(u.x + u.w, 25.0);

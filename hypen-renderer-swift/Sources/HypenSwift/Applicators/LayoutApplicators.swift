@@ -156,4 +156,109 @@ public struct ZIndexApplicator: ApplicatorHandler {
     }
 }
 
+// MARK: - align-items / justify-content
+//
+// Container components (Column, Row) read `alignItems` / `justifyContent`
+// directly from the element props to drive VStack/HStack alignment and
+// override `modifier.alignment` themselves — so on those components these
+// applicators are clobbered and harmless. On leaf-ish containers (Button,
+// Box, the implicit frame inside `hypenModifier`) there is no override, so
+// these applicators are what make `tw("items-center justify-center")`
+// actually center the content inside the expanded frame.
+//
+// Semantically `align-items` controls the cross-axis and `justify-content`
+// controls the main axis, which depends on parent direction. Without that
+// context here we use the leaf-container reading (center = center on the
+// corresponding axis of the frame's alignment). That matches how the
+// classes are used in practice — typically together to mean "center the
+// content in this box".
+
+public struct AlignItemsApplicator: ApplicatorHandler {
+    public let name = "alignitems"
+
+    public init() {}
+
+    public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        guard let str = value as? String else { return }
+        let v: VerticalAlignment = {
+            switch str.lowercased() {
+            case "center": return .center
+            case "end", "flex-end", "bottom": return .bottom
+            case "start", "flex-start", "top": return .top
+            default: return .top
+            }
+        }()
+        let h = modifier.alignment?.horizontal ?? .leading
+        modifier.alignment = Alignment(horizontal: h, vertical: v)
+    }
+}
+
+public struct JustifyContentApplicator: ApplicatorHandler {
+    public let name = "justifycontent"
+
+    public init() {}
+
+    public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        guard let str = value as? String else { return }
+        let h: HorizontalAlignment = {
+            switch str.lowercased() {
+            case "center": return .center
+            case "end", "flex-end", "right": return .trailing
+            case "start", "flex-start", "left": return .leading
+            default: return .leading
+            }
+        }()
+        let v = modifier.alignment?.vertical ?? .top
+        modifier.alignment = Alignment(horizontal: h, vertical: v)
+    }
+}
+
+// Hypen-native `.verticalAlignment(...)` / `.horizontalAlignment(...)`
+// applicators. Column/Row already read these props directly so they can
+// drive VStack/HStack alignment, but on every other container (Button,
+// Box, Stack, plain frames) the props had no handler and were dropped.
+// Mapping them onto `modifier.alignment` here makes them work uniformly,
+// matching the Android renderer's behaviour where these are first-class
+// applicators on any component.
+
+public struct VerticalAlignmentApplicator: ApplicatorHandler {
+    public let name = "verticalalignment"
+
+    public init() {}
+
+    public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        guard let str = value as? String else { return }
+        let v: VerticalAlignment = {
+            switch str.lowercased() {
+            case "center", "centervertically": return .center
+            case "bottom", "end": return .bottom
+            case "top", "start": return .top
+            default: return .top
+            }
+        }()
+        let h = modifier.alignment?.horizontal ?? .leading
+        modifier.alignment = Alignment(horizontal: h, vertical: v)
+    }
+}
+
+public struct HorizontalAlignmentApplicator: ApplicatorHandler {
+    public let name = "horizontalalignment"
+
+    public init() {}
+
+    public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        guard let str = value as? String else { return }
+        let h: HorizontalAlignment = {
+            switch str.lowercased() {
+            case "center", "centerhorizontally": return .center
+            case "right", "trailing", "end": return .trailing
+            case "left", "leading", "start": return .leading
+            default: return .leading
+            }
+        }()
+        let v = modifier.alignment?.vertical ?? .top
+        modifier.alignment = Alignment(horizontal: h, vertical: v)
+    }
+}
+
 // parseCGFloat is provided by SizeApplicators.swift (public)

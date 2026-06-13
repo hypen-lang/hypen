@@ -208,8 +208,8 @@ mod tests {
 
     #[test]
     fn remove_by_url_drops_matching_entry_and_persists() {
-        let dir = std::env::temp_dir()
-            .join(format!("hypen-browser-remove-test-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("hypen-browser-remove-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("recent.json");
 
@@ -238,8 +238,7 @@ mod tests {
 
     #[test]
     fn record_visit_dedupes_and_caps_at_six() {
-        let dir = std::env::temp_dir()
-            .join(format!("hypen-browser-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("hypen-browser-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("recent.json");
 
@@ -256,7 +255,13 @@ mod tests {
         s.record_visit("App5 again", "ws://h5.test");
         assert_eq!(s.recent().len(), 6);
         assert_eq!(s.recent()[0].url, "ws://h5.test");
-        assert!(s.recent().iter().filter(|a| a.url == "ws://h5.test").count() == 1);
+        assert!(
+            s.recent()
+                .iter()
+                .filter(|a| a.url == "ws://h5.test")
+                .count()
+                == 1
+        );
 
         // Reload from disk to confirm persistence.
         let s2 = Storage::at_path(path);

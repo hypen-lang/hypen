@@ -15,7 +15,9 @@ use std::collections::HashMap;
 use crate::{
     engine_core::EngineCore,
     ir::{IRNode, NodeId},
-    reconcile::{create_ir_node_tree_impl, node_id_str, reconcile_ir_node_impl, Patch, ReconcileCtx},
+    reconcile::{
+        create_ir_node_tree_impl, node_id_str, reconcile_ir_node_impl, Patch, ReconcileCtx,
+    },
 };
 
 /// Maps compact node-ID strings (as emitted in patches) back to their

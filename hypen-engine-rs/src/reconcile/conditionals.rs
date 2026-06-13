@@ -63,9 +63,7 @@ pub(crate) fn evaluate_value(
 ) -> serde_json::Value {
     match value {
         Value::Static(v) => v.clone(),
-        Value::Binding(binding) => {
-            resolve_binding(binding, state, data_sources)
-        }
+        Value::Binding(binding) => resolve_binding(binding, state, data_sources),
         Value::TemplateString { template, .. } => {
             // For pure expressions (entire template is @{...}), preserve the typed
             // result so that boolean/numeric comparisons work correctly.
@@ -76,11 +74,7 @@ pub(crate) fn evaluate_value(
                 && !trimmed[2..trimmed.len() - 1].contains("@{")
             {
                 let expr = &trimmed[2..trimmed.len() - 1];
-                let context = crate::reactive::build_expression_context(
-                    state,
-                    None,
-                    data_sources,
-                );
+                let context = crate::reactive::build_expression_context(state, None, data_sources);
                 match crate::reactive::evaluate_expression(expr, &context) {
                     Ok(result) => result,
                     Err(e) => {
@@ -268,9 +262,9 @@ fn values_match(
 ) -> bool {
     match pattern {
         // Array pattern - match any value in the array
-        serde_json::Value::Array(patterns) => {
-            patterns.iter().any(|p| values_match(value, p, data_sources))
-        }
+        serde_json::Value::Array(patterns) => patterns
+            .iter()
+            .any(|p| values_match(value, p, data_sources)),
 
         // String pattern with special syntax
         serde_json::Value::String(pattern_str) => {
@@ -334,14 +328,22 @@ mod tests {
             bindings: vec![],
         };
         let result = evaluate_value(&value, &state, None);
-        assert_eq!(result, json!(true), "Expression should evaluate to Bool(true), not String(\"true\")");
+        assert_eq!(
+            result,
+            json!(true),
+            "Expression should evaluate to Bool(true), not String(\"true\")"
+        );
 
         let value = Value::TemplateString {
             template: "@{state.currentView == 'profile'}".to_string(),
             bindings: vec![],
         };
         let result = evaluate_value(&value, &state, None);
-        assert_eq!(result, json!(false), "Expression should evaluate to Bool(false)");
+        assert_eq!(
+            result,
+            json!(false),
+            "Expression should evaluate to Bool(false)"
+        );
     }
 
     #[test]
@@ -459,10 +461,7 @@ mod tests {
         assert!(pattern_matches(&evaluated, &pattern, &state, Some(&ds)));
 
         // Missing data source provider -> null -> should not match
-        let pattern = Value::Binding(Binding::data_source(
-            "firebase",
-            vec!["ready".to_string()],
-        ));
+        let pattern = Value::Binding(Binding::data_source("firebase", vec!["ready".to_string()]));
         assert!(!pattern_matches(&evaluated, &pattern, &state, Some(&ds)));
     }
 }
