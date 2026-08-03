@@ -1,8 +1,8 @@
-// Animation applicator lowering — .transition/.enter/.exit/.layout/.animate → "__anim.*" props
+// Animation applicator lowering — .transition/.enter/.exit/.layout/.animate/.motion → "__anim.*" props
 //
 // Each animation applicator lowers into ONE reserved prop carrying ONE JSON
 // object (`"__anim.transition"`, `"__anim.enter"`, `"__anim.exit"`,
-// `"__anim.layout"`, `"__anim.animate"`). Renderers route on a single `startsWith("__anim.")`
+// `"__anim.layout"`, `"__anim.animate"`, `"__anim.motion"`). Renderers route on a single `startsWith("__anim.")`
 // check; renderers that don't understand the channel ignore the unknown prop
 // and snap — graceful degradation by construction. The originals never become
 // `<name>.<idx>` props (they are intercepted in `expand::process_applicators`
@@ -63,16 +63,221 @@ pub const ANIMATABLE_PROPS: &[&str] = &[
     "fontSize",
 ];
 
+/// Reserved prop key carrying the `.motion(essential)` reduced-motion
+/// opt-out: `{"essential": true}`. Marks the rare animation that carries
+/// meaning (a progress indicator, a status pulse) so animation-aware
+/// renderers keep playing it when the platform asks for reduced motion.
+/// The only valid token is `essential` — anything else warns and omits the
+/// channel entirely (there is no "non-essential" marker to emit).
+pub(crate) const ANIM_MOTION_PROP: &str = "__anim.motion";
+
 /// Reserved prop key carrying the `.exit(...)` spec. The reconciler reads it
 /// off a removal root's resolved props (before any tree mutation) to decide
 /// whether to flag the root `Remove` with `transition: true` — see the
 /// ordering contract on `Patch::Remove`.
 pub(crate) const ANIM_EXIT_PROP: &str = "__anim.exit";
 
-/// True when the applicator name is one of the five animation applicators
+/// The `.states { onState(...) }` applicator name (Option C). Intercepted in
+/// `process_applicators` like the other animation applicators, but *applied*
+/// only after every other applicator has merged into props, so pose defaults
+/// capture the node's final base values.
+pub(crate) const STATES_APPLICATOR: &str = "states";
+
+/// Reserved prop key for a node's `.transition(...)` spec. `.states`
+/// synthesizes one scoped to its animatable overridden props — but only when
+/// the author didn't write an explicit `.transition` (explicit wins).
+pub(crate) const ANIM_TRANSITION_PROP: &str = "__anim.transition";
+
+/// Prop key the deprecated legacy string form
+/// `.transition("opacity 0.3s ease")` lowers to (the generic applicator
+/// path, see [`is_legacy_transition_string`]). Still an EXPLICIT
+/// `.transition` for the `.states` precedence rule: synthesizing an
+/// `__anim.transition` next to it would make the DOM applicator's
+/// `style.transition` shorthand and the animator's longhands clobber each
+/// other per patch order.
+pub(crate) const LEGACY_TRANSITION_PROP: &str = "transition.0";
+
+/// Reserved prop key carrying the active `.states` pose label as
+/// `{"label": "<label>"}` (default `null`). Lowered as a `StateSwitch` over
+/// the labels themselves, so renderers observe pose changes as an ordinary
+/// `SetProp` — used to attach the label to completion payloads and to time
+/// the settle window. Renderers that ignore it lose nothing.
+pub(crate) const ANIM_STATES_PROP: &str = "__anim.states";
+
+/// Reserved prop carrying the `.sharedElement` identity KEY (Option H).
+/// Unlike every other animation argument the key is allowed to bind —
+/// identity is data ("cover-@{item.id}") — so it lowers through the standard
+/// parser-value conversion (String/TemplateString/Binding preserved) and
+/// re-resolves per render, flowing as `SetProp` on state change.
+pub(crate) const ANIM_SHARED_KEY_PROP: &str = "__anim.sharedKey";
+
+/// Reserved prop carrying the `.sharedElement` timing spec (Option H) —
+/// a static `{"duration", "curve"}` object like every other channel.
+pub(crate) const ANIM_SHARED_PROP: &str = "__anim.shared";
+
+/// Default duration (ms) filled into a batch-animation spec that doesn't
+/// carry one (Option D cheap subset — see `Patch::BatchAnimation`).
+pub(crate) const BATCH_ANIMATION_DEFAULT_DURATION: f64 = 250.0;
+
+/// Normalize a host-supplied batch-animation context (Option D) into the
+/// complete spec object renderers receive on `Patch::BatchAnimation`.
+///
+/// Accepted inputs:
+/// - a bare curve string from the [`CURVES`] vocabulary — normalized to
+///   `{"curve": <s>, "duration": 250}`;
+/// - a JSON object — validated loosely: a missing `duration` is filled with
+///   250, every other field (known or unknown) passes through untouched.
+///   Renderers own interpretation.
+///
+/// Anything else (unknown curve string, number, array, bool, null) warns
+/// and returns `None` — the update proceeds unstamped, never a hard error.
+pub(crate) fn normalize_batch_animation(spec: serde_json::Value) -> Option<serde_json::Value> {
+    match spec {
+        serde_json::Value::String(s) => {
+            if CURVES.contains(&s.as_str()) {
+                let mut map = serde_json::Map::new();
+                map.insert("curve".to_string(), serde_json::json!(s));
+                map.insert(
+                    "duration".to_string(),
+                    json_ms(BATCH_ANIMATION_DEFAULT_DURATION),
+                );
+                Some(serde_json::Value::Object(map))
+            } else {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    "batch animation: unknown curve '{}' (expected one of {}); update proceeds unstamped",
+                    s,
+                    CURVES.join("|")
+                );
+                None
+            }
+        }
+        serde_json::Value::Object(mut map) => {
+            map.entry("duration".to_string())
+                .or_insert_with(|| json_ms(BATCH_ANIMATION_DEFAULT_DURATION));
+            Some(serde_json::Value::Object(map))
+        }
+        other => {
+            crate::log_warn!(
+                LogScope::Engine,
+                "batch animation: spec must be an object or a curve string, got {}; update proceeds unstamped",
+                other
+            );
+            None
+        }
+    }
+}
+
+/// True when the applicator name is one of the six animation applicators
 /// intercepted in `process_applicators`.
 pub(crate) fn is_anim_applicator(name: &str) -> bool {
-    matches!(name, "transition" | "enter" | "exit" | "layout" | "animate")
+    matches!(
+        name,
+        "transition" | "enter" | "exit" | "layout" | "animate" | "motion"
+    )
+}
+
+/// True for `.sharedElement` (Option H). Intercepted separately from
+/// [`is_anim_applicator`] because its lowering splits into TWO props
+/// (identity + timing) and its key argument — alone among animation
+/// arguments — is allowed to carry bindings.
+pub(crate) fn is_shared_element_applicator(name: &str) -> bool {
+    name == "sharedElement"
+}
+
+/// Lower `.sharedElement(<key>, curve: ..., duration: ...)` (Option H).
+///
+/// Returns the RAW key parser value (first positional; the caller runs it
+/// through the standard parser-value conversion so String/TemplateString/
+/// Binding forms all resolve through the existing machinery) plus the static
+/// timing spec `{"duration", "curve"}` with defaults `{350, "spring"}`.
+///
+/// A missing, empty, or non-string-ish key warns and returns `None` — the
+/// caller omits BOTH props. Invalid timing arguments degrade to the defaults
+/// with a warning, never a hard error. Timing modifiers are named-only.
+pub(crate) fn lower_shared_element(
+    applicator: &ApplicatorSpecification,
+) -> Option<(&ParserValue, serde_json::Value)> {
+    let channel = "sharedElement";
+
+    let mut positionals = applicator
+        .arguments
+        .arguments
+        .iter()
+        .filter_map(|arg| match arg {
+            Argument::Positioned { value, .. } => Some(value),
+            Argument::Named { .. } => None,
+        });
+    let key = match positionals.next() {
+        Some(value @ ParserValue::String(s)) => {
+            if unquote(s).is_empty() {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".{}: key must be a non-empty string; applicator ignored",
+                    channel
+                );
+                return None;
+            }
+            value
+        }
+        // A pure reference key (`@state.heroKey`) is a binding — allowed:
+        // identity is data. Conversion downstream turns it into Value::Binding.
+        Some(value @ (ParserValue::Reference(_) | ParserValue::DataSourceReference(_))) => value,
+        Some(other) => {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: key must be a string (bindings allowed), got {:?}; applicator ignored",
+                channel,
+                other
+            );
+            return None;
+        }
+        None => {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: missing key (first positional argument); applicator ignored",
+                channel
+            );
+            return None;
+        }
+    };
+    for extra in positionals {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".{}: unsupported positional argument {:?}; ignored (timing is named: duration/curve)",
+            channel,
+            extra
+        );
+    }
+
+    let mut duration = 350.0;
+    let mut curve = "spring".to_string();
+    for arg in &applicator.arguments.arguments {
+        let Argument::Named { key: name, value } = arg else {
+            continue;
+        };
+        match name.as_str() {
+            "duration" => {
+                if let Some(ms) = named_ms(channel, "duration", value) {
+                    duration = ms;
+                }
+            }
+            "curve" => apply_named_curve(channel, value, &mut curve),
+            other => {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".{}: unknown argument '{}'; ignored",
+                    channel,
+                    other
+                );
+            }
+        }
+    }
+
+    let mut spec = serde_json::Map::new();
+    spec.insert("duration".to_string(), json_ms(duration));
+    spec.insert("curve".to_string(), serde_json::json!(curve));
+    Some((key, serde_json::Value::Object(spec)))
 }
 
 /// Detect the legacy web-only string form `.transition("opacity 0.3s ease")`:
@@ -96,15 +301,19 @@ pub(crate) fn is_legacy_transition_string(applicator: &ApplicatorSpecification) 
 /// Returns `None` for non-animation applicator names; for
 /// transition/enter/exit/layout the channel is always emitted (invalid
 /// arguments degrade to the channel's defaults with a warning, never to a
-/// hard error). `.animate` is the one exception: an unknown or missing
-/// preset warns and omits the channel entirely — there is nothing sensible
-/// to play without one.
+/// hard error). `.animate` and `.motion` are the exceptions: an unknown or
+/// missing `.animate` preset — or any `.motion` token other than
+/// `essential` — warns and omits the channel entirely, there is nothing
+/// sensible to emit without one.
 pub(crate) fn lower_anim_applicator(
     applicator: &ApplicatorSpecification,
 ) -> Option<(String, serde_json::Value)> {
     let channel = applicator.name.as_str();
     if channel == "animate" {
         return lower_animate(applicator);
+    }
+    if channel == "motion" {
+        return lower_motion(applicator);
     }
     let (default_duration, default_curve) = match channel {
         "transition" => (200.0, "easeOut"),
@@ -392,6 +601,88 @@ fn lower_animate(applicator: &ApplicatorSpecification) -> Option<(String, serde_
     ))
 }
 
+/// Lower `.motion(essential)` into `("__anim.motion", {"essential": true})`.
+///
+/// The reduced-motion opt-out (#149): the flag marks the rare animation that
+/// carries meaning, so animation-aware renderers exempt the node from their
+/// reduced-motion snap paths. `essential` is the ONLY valid token — a
+/// missing, unknown, or non-token argument warns and omits the channel
+/// entirely (like `.animate` with an unknown preset: there is no meaningful
+/// spec to emit without it). Extra arguments warn and are ignored.
+fn lower_motion(applicator: &ApplicatorSpecification) -> Option<(String, serde_json::Value)> {
+    let channel = "motion";
+
+    let mut positionals = applicator
+        .arguments
+        .arguments
+        .iter()
+        .filter_map(|arg| match arg {
+            Argument::Positioned { value, .. } => Some(value),
+            Argument::Named { .. } => None,
+        });
+    match positionals.next() {
+        Some(ParserValue::String(s)) => {
+            let token = unquote(s);
+            if is_binding_like(&token) {
+                warn_binding(channel, &token);
+                return None;
+            }
+            if token != "essential" {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".{}: unknown token '{}' (the only valid token is 'essential'); applicator omitted",
+                    channel,
+                    token
+                );
+                return None;
+            }
+        }
+        Some(ParserValue::Reference(r)) | Some(ParserValue::DataSourceReference(r)) => {
+            warn_binding(channel, r);
+            return None;
+        }
+        Some(other) => {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: expected the token 'essential', got {:?}; applicator omitted",
+                channel,
+                other
+            );
+            return None;
+        }
+        None => {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: missing token (expected 'essential'); applicator omitted",
+                channel
+            );
+            return None;
+        }
+    }
+    for extra in positionals {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".{}: unsupported positional argument {:?}; ignored",
+            channel,
+            extra
+        );
+    }
+    for arg in &applicator.arguments.arguments {
+        if let Argument::Named { key, .. } = arg {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: unknown argument '{}'; ignored",
+                channel,
+                key
+            );
+        }
+    }
+
+    let mut spec = serde_json::Map::new();
+    spec.insert("essential".to_string(), serde_json::json!(true));
+    Some((ANIM_MOTION_PROP.to_string(), serde_json::Value::Object(spec)))
+}
+
 /// Parse a `repeat:` argument — the token `loop` or a positive integer count.
 /// Invalid values warn and return `None` (keep the preset default).
 fn lower_repeat(channel: &str, value: &ParserValue) -> Option<serde_json::Value> {
@@ -522,6 +813,646 @@ fn lower_scoped_props(value: &ParserValue) -> Option<Vec<String>> {
         return None;
     }
     Some(kept)
+}
+
+// ---------------------------------------------------------------------------
+// `.states { onState(...) }` — Option C named visual states
+// ---------------------------------------------------------------------------
+
+/// Parsed `.states(...)` header + pose blocks, ready for lowering in
+/// `expand::apply_states_applicator`. Timing defaults are {easeOut, 250, 0}.
+pub(crate) struct StatesSpec {
+    /// The driving state path (from the mandatory first positional
+    /// `@state.xxx` reference).
+    pub path: String,
+    pub duration: f64,
+    pub curve: String,
+    /// Only `Some` when the author passed `delay:` — the synthesized spec
+    /// omits the key otherwise, mirroring `.transition`'s wire format.
+    pub delay: Option<f64>,
+    /// Pose label → that pose's applicator chain. Duplicate labels warn and
+    /// the last occurrence wins.
+    pub poses: indexmap::IndexMap<String, Vec<ApplicatorSpecification>>,
+}
+
+/// Collect a `.states(...) { onState(label)... }` applicator into a
+/// [`StatesSpec`]. Returns `None` (with a warning) when the whole applicator
+/// must be ignored: a first positional that is not a state reference, or no
+/// valid `onState` entry at all. Malformed *entries* degrade individually.
+pub(crate) fn collect_states(applicator: &ApplicatorSpecification) -> Option<StatesSpec> {
+    let channel = STATES_APPLICATOR;
+
+    // --- header: first positional MUST be a state reference/binding ---
+    let mut positionals = applicator
+        .arguments
+        .arguments
+        .iter()
+        .filter_map(|arg| match arg {
+            Argument::Positioned { value, .. } => Some(value),
+            Argument::Named { .. } => None,
+        });
+    let path = match positionals.next() {
+        Some(value) => match crate::ir::expand::parser_value_to_ir(value) {
+            crate::ir::Value::Binding(binding) if binding.is_state() => binding.full_path(),
+            _ => {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".{}: first argument must be a state reference (e.g. @state.cardState), got {:?}; applicator ignored",
+                    channel,
+                    value
+                );
+                return None;
+            }
+        },
+        None => {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: missing state reference (e.g. .states(@state.cardState) {{ ... }}); applicator ignored",
+                channel
+            );
+            return None;
+        }
+    };
+    for extra in positionals {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".{}: unsupported positional argument {:?}; ignored (modifiers are named: transition/duration/delay)",
+            channel,
+            extra
+        );
+    }
+
+    let mut duration = 250.0;
+    let mut curve = "easeOut".to_string();
+    let mut delay: Option<f64> = None;
+
+    for arg in &applicator.arguments.arguments {
+        let Argument::Named { key, value } = arg else {
+            continue;
+        };
+        match key.as_str() {
+            "transition" => apply_named_curve(channel, value, &mut curve),
+            "duration" => {
+                if let Some(ms) = named_ms(channel, "duration", value) {
+                    duration = ms;
+                }
+            }
+            "delay" => {
+                delay = named_ms(channel, "delay", value).or(delay);
+            }
+            other => {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".{}: unknown argument '{}'; ignored",
+                    channel,
+                    other
+                );
+            }
+        }
+    }
+
+    // --- block: only `onState(<label>)` entries with applicators ---
+    let mut poses: indexmap::IndexMap<String, Vec<ApplicatorSpecification>> =
+        indexmap::IndexMap::new();
+    for child in &applicator.children {
+        if child.name != "onState" {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: only onState(<label>) entries are allowed in the block, got '{}'; ignored",
+                channel,
+                child.name
+            );
+            continue;
+        }
+        if !child.children.is_empty() {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: onState takes applicators, not children; entry ignored",
+                channel
+            );
+            continue;
+        }
+        let label = child
+            .arguments
+            .arguments
+            .iter()
+            .find_map(|arg| match arg {
+                Argument::Positioned {
+                    value: ParserValue::String(s),
+                    ..
+                } => Some(unquote(s)),
+                _ => None,
+            })
+            .filter(|l| !l.is_empty() && !is_binding_like(l));
+        let Some(label) = label else {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: onState requires one positional label (bare identifier or string); entry ignored",
+                channel
+            );
+            continue;
+        };
+        if poses.contains_key(&label) {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: duplicate onState label '{}'; last one wins",
+                channel,
+                label
+            );
+        }
+        poses.insert(label, child.applicators.clone());
+    }
+
+    if poses.is_empty() {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".{}: no valid onState entries in the block; applicator ignored",
+            channel
+        );
+        return None;
+    }
+
+    Some(StatesSpec {
+        path,
+        duration,
+        curve,
+        delay,
+        poses,
+    })
+}
+
+/// True for applicators that must not appear inside an `onState` pose:
+/// animation applicators (including nested `.states` and the Option G
+/// `.scrub`/`.settle` pair), `.bind`, and event applicators (`/^on[A-Z]/`).
+/// Excluded entries warn and are dropped.
+pub(crate) fn is_pose_excluded_applicator(name: &str) -> bool {
+    is_anim_applicator(name)
+        || name == STATES_APPLICATOR
+        || name == SCRUB_APPLICATOR
+        || name == SETTLE_APPLICATOR
+        || name == "bind"
+        || {
+            name.strip_prefix("on")
+                .and_then(|rest| rest.chars().next())
+                .is_some_and(|c| c.is_ascii_uppercase())
+        }
+}
+
+/// The Hypen prop name a lowered prop key belongs to: everything before the
+/// first `.` (arg index / named arg), `@` (breakpoint variant) or `:` (state
+/// variant) — e.g. `cornerRadius.0` → `cornerRadius`,
+/// `backgroundColor:hover.0` → `backgroundColor`. Used to scope the
+/// synthesized `.states` transition spec against [`ANIMATABLE_PROPS`].
+pub(crate) fn base_prop_name(key: &str) -> &str {
+    let end = key.find(['.', '@', ':']).unwrap_or(key.len());
+    &key[..end]
+}
+
+/// Build the `__anim.transition` spec `.states` synthesizes for its
+/// animatable overridden props. Same wire shape as `.transition(...)`:
+/// `{duration, curve, delay?, props}`.
+pub(crate) fn synthesize_states_transition(
+    spec: &StatesSpec,
+    animatable_props: Vec<String>,
+) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("duration".to_string(), json_ms(spec.duration));
+    map.insert("curve".to_string(), serde_json::json!(spec.curve));
+    if let Some(d) = spec.delay {
+        map.insert("delay".to_string(), json_ms(d));
+    }
+    map.insert("props".to_string(), serde_json::json!(animatable_props));
+    serde_json::Value::Object(map)
+}
+
+// ---------------------------------------------------------------------------
+// `.scrub` / `.settle` — Option G scrub bindings (renderer-resident sources)
+// ---------------------------------------------------------------------------
+//
+// Scrub interpolates between TWO of the node's `.states` poses (`from:` /
+// `to:` name pose labels — author-defined timelines were rejected with the
+// Option E decision), driven by a renderer-resident source; the per-frame
+// loop never touches the engine. `.settle` names the release animation and
+// binds the winning pose label back to a `@state.*` path — the same dotted
+// path-string idiom as the `.bind` applicator.
+//
+// Both applicators are intercepted in `process_applicators` and applied in
+// the SAME deferred end-phase as `.states` — strictly AFTER it, because
+// cross-validation reads the collected pose labels. Lowered wire props (all
+// `Value::Static`; renderers own interpretation):
+//   "__anim.scrub"       {"from","to","source","axis","over":[p0,p1],"rubberBand"} (+"of" w/ scroll)
+//   "__anim.scrubSettle" {"curve","duration"}
+//   "__anim.scrubBind"   "<dotted state path>"
+//   "__anim.scrubPoses"  {"<propKey>": [fromValue, toValue], ...}
+//
+// `over` is the DIRECTED input range [inputAtProgress0, inputAtProgress1] —
+// direction matters (an upward-opening sheet uses [0, -400]); only equal or
+// non-finite endpoints are rejected. `__anim.scrubPoses` materializes the
+// pose endpoint values at lowering (the renderer cannot interpolate without
+// them): for every prop key overridden by the from- or to-pose, both
+// endpoint values resolve as pose override, else the node's static base
+// default; keys resolvable on only one end warn and are skipped.
+// Any hard violation (missing/unknown pose label, missing/invalid `over`,
+// missing/invalid `.settle` or its bind, no `.states` on the node) warns
+// ONCE naming the reason and omits ALL FOUR props — the node degrades to
+// plain `.states` behavior, never a hard error.
+
+/// The `.scrub(...)` applicator name (Option G).
+pub(crate) const SCRUB_APPLICATOR: &str = "scrub";
+
+/// The `.settle(...)` companion applicator name (Option G).
+pub(crate) const SETTLE_APPLICATOR: &str = "settle";
+
+/// Scrub source vocabulary. Closed and small BY DESIGN — every new source
+/// is an implementation in all five renderers (see the §G tradeoffs).
+pub const SCRUB_SOURCES: &[&str] = &["gesture", "scroll"];
+
+/// Scrub axis vocabulary.
+pub const SCRUB_AXES: &[&str] = &["x", "y"];
+
+/// Default rubber-band resistance applied beyond the `over` range.
+pub(crate) const SCRUB_DEFAULT_RUBBER_BAND: f64 = 0.4;
+
+/// Default `.settle` duration (ms).
+pub(crate) const SETTLE_DEFAULT_DURATION: f64 = 300.0;
+
+/// Reserved prop carrying the scrub source spec.
+pub(crate) const ANIM_SCRUB_PROP: &str = "__anim.scrub";
+
+/// Reserved prop carrying the settle timing spec.
+pub(crate) const ANIM_SCRUB_SETTLE_PROP: &str = "__anim.scrubSettle";
+
+/// Reserved prop carrying the settle write target — the dotted state path
+/// string, module-scope semantics identical to the `.bind` applicator's
+/// `"bind"` prop.
+pub(crate) const ANIM_SCRUB_BIND_PROP: &str = "__anim.scrubBind";
+
+/// Reserved prop carrying the materialized pose endpoint values:
+/// `{"<propKey>": [fromValue, toValue], ...}` — one entry per prop key the
+/// from- or to-pose overrides, with each endpoint resolved as pose override,
+/// else the node's static base default. Keys resolvable on only one end are
+/// skipped (with a warning) at lowering.
+pub(crate) const ANIM_SCRUB_POSES_PROP: &str = "__anim.scrubPoses";
+
+/// Parsed `.scrub(...)` arguments, validated except for the pose-label
+/// cross-check (which needs the node's collected `.states` labels — done in
+/// `expand::apply_scrub_applicators`).
+pub(crate) struct ScrubSpec {
+    pub from: String,
+    pub to: String,
+    /// One of [`SCRUB_SOURCES`]; defaults to `"gesture"`.
+    pub source: String,
+    /// One of [`SCRUB_AXES`]; defaults to `"y"`.
+    pub axis: String,
+    /// The `[inputAtProgress0, inputAtProgress1]` input range mapping onto
+    /// progress 0..1. Directed — `[0, -400]` (upward travel) is as valid as
+    /// `[0, 400]`; only equal endpoints are rejected.
+    pub over: (f64, f64),
+    /// Resistance factor 0..=1 beyond the range; defaults to 0.4.
+    pub rubber_band: f64,
+    /// Named scroll container — only kept when `source` is `scroll`.
+    pub of: Option<String>,
+}
+
+/// Parsed `.settle(...)` arguments. Timing defaults are {spring, 300}.
+pub(crate) struct SettleSpec {
+    pub curve: String,
+    pub duration: f64,
+    /// Dotted state path the winning pose label is written to on settle.
+    pub bind: String,
+}
+
+/// A pose-label argument value: a bare token or quoted string, non-empty and
+/// not binding-like. `None` for anything else.
+fn scrub_label(value: &ParserValue) -> Option<String> {
+    match value {
+        ParserValue::String(s) => {
+            let token = unquote(s);
+            (!token.is_empty() && !is_binding_like(&token)).then_some(token)
+        }
+        _ => None,
+    }
+}
+
+/// A closed-vocabulary token argument (`source:` / `axis:`). Unknown or
+/// non-token values warn and return `None` (keep the default).
+fn scrub_token(channel: &str, field: &str, value: &ParserValue, vocab: &[&str]) -> Option<String> {
+    match value {
+        ParserValue::String(s) => {
+            let token = unquote(s);
+            if is_binding_like(&token) {
+                warn_binding(channel, &token);
+                None
+            } else if vocab.contains(&token.as_str()) {
+                Some(token)
+            } else {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".{}: unknown {} '{}' (expected one of {}); using the default",
+                    channel,
+                    field,
+                    token,
+                    vocab.join("|")
+                );
+                None
+            }
+        }
+        ParserValue::Reference(r) | ParserValue::DataSourceReference(r) => {
+            warn_binding(channel, r);
+            None
+        }
+        other => {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: {} must be a token (one of {}), got {:?}; using the default",
+                channel,
+                field,
+                vocab.join("|"),
+                other
+            );
+            None
+        }
+    }
+}
+
+/// Collect a `.scrub(from:, to:, source:, axis:, over:, rubberBand:, of:)`
+/// applicator into a [`ScrubSpec`]. `Err` carries the ONE hard-failure
+/// reason (missing/invalid `from`/`to`/`over`) for the caller's single
+/// omit-all warning; every other malformed argument degrades to its default
+/// with its own warning.
+pub(crate) fn collect_scrub(applicator: &ApplicatorSpecification) -> Result<ScrubSpec, String> {
+    let channel = SCRUB_APPLICATOR;
+
+    if !applicator.children.is_empty() {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".{}: children block ignored (.{} takes only named arguments)",
+            channel,
+            channel
+        );
+    }
+
+    let mut from: Option<String> = None;
+    let mut to: Option<String> = None;
+    let mut source = "gesture".to_string();
+    let mut axis = "y".to_string();
+    let mut over: Option<(f64, f64)> = None;
+    let mut over_invalid = false;
+    let mut rubber_band = SCRUB_DEFAULT_RUBBER_BAND;
+    let mut of: Option<String> = None;
+
+    for arg in &applicator.arguments.arguments {
+        let Argument::Named { key, value } = arg else {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: unsupported positional argument {:?}; ignored (arguments are named: from/to/source/axis/over/rubberBand/of)",
+                channel,
+                arg
+            );
+            continue;
+        };
+        match key.as_str() {
+            "from" => from = scrub_label(value),
+            "to" => to = scrub_label(value),
+            "source" => {
+                if let Some(token) = scrub_token(channel, "source", value, SCRUB_SOURCES) {
+                    source = token;
+                }
+            }
+            "axis" => {
+                if let Some(token) = scrub_token(channel, "axis", value, SCRUB_AXES) {
+                    axis = token;
+                }
+            }
+            "over" => match value {
+                ParserValue::List(items) => {
+                    let nums: Option<Vec<f64>> = items
+                        .iter()
+                        .map(|v| match v {
+                            ParserValue::Number(n) => Some(*n),
+                            _ => None,
+                        })
+                        .collect();
+                    // `over` is [inputAtProgress0, inputAtProgress1] — a
+                    // DIRECTED range, not a min/max pair. Direction matters:
+                    // an upward-opening sheet maps travel [0, -400] onto
+                    // progress 0..1. Only equal or non-finite endpoints are
+                    // rejected (a zero-length range cannot map to progress).
+                    match nums.as_deref() {
+                        Some([a, b]) if a.is_finite() && b.is_finite() && a != b => {
+                            over = Some((*a, *b));
+                        }
+                        _ => over_invalid = true,
+                    }
+                }
+                _ => over_invalid = true,
+            },
+            "rubberBand" => match value {
+                ParserValue::Number(n) if n.is_finite() => {
+                    let clamped = n.clamp(0.0, 1.0);
+                    if clamped != *n {
+                        crate::log_warn!(
+                            LogScope::Engine,
+                            ".{}: rubberBand {} is outside 0..=1; clamped to {}",
+                            channel,
+                            n,
+                            clamped
+                        );
+                    }
+                    rubber_band = clamped;
+                }
+                ParserValue::Reference(r) | ParserValue::DataSourceReference(r) => {
+                    warn_binding(channel, r);
+                }
+                other => {
+                    crate::log_warn!(
+                        LogScope::Engine,
+                        ".{}: rubberBand must be a number in 0..=1, got {:?}; using {}",
+                        channel,
+                        other,
+                        SCRUB_DEFAULT_RUBBER_BAND
+                    );
+                }
+            },
+            "of" => match value {
+                ParserValue::String(s) => {
+                    let name = unquote(s);
+                    if name.is_empty() || is_binding_like(&name) {
+                        crate::log_warn!(
+                            LogScope::Engine,
+                            ".{}: of must be a non-empty static string, got '{}'; ignored",
+                            channel,
+                            name
+                        );
+                    } else {
+                        of = Some(name);
+                    }
+                }
+                other => {
+                    crate::log_warn!(
+                        LogScope::Engine,
+                        ".{}: of must be a string naming a scroll container, got {:?}; ignored",
+                        channel,
+                        other
+                    );
+                }
+            },
+            other => {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".{}: unknown argument '{}'; ignored",
+                    channel,
+                    other
+                );
+            }
+        }
+    }
+
+    let Some(from) = from else {
+        return Err("from: is required and must name a .states pose label (token or string)".into());
+    };
+    let Some(to) = to else {
+        return Err("to: is required and must name a .states pose label (token or string)".into());
+    };
+    let Some(over) = over else {
+        return Err(if over_invalid {
+            "over: must be [inputAtProgress0, inputAtProgress1] — two finite, non-equal numbers"
+                .into()
+        } else {
+            "over: is required ([inputAtProgress0, inputAtProgress1] input range)".into()
+        });
+    };
+
+    // `of:` names a scroll container — meaningless for a gesture source.
+    if of.is_some() && source != "scroll" {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".{}: of: is only meaningful with source: scroll; ignored",
+            channel
+        );
+        of = None;
+    }
+
+    Ok(ScrubSpec {
+        from,
+        to,
+        source,
+        axis,
+        over,
+        rubber_band,
+        of,
+    })
+}
+
+/// Collect a `.settle(curve:, duration:, bind:)` applicator into a
+/// [`SettleSpec`]. `Err` carries the ONE hard-failure reason (missing or
+/// non-`@state.*` bind); invalid timing degrades to the defaults with a
+/// warning.
+pub(crate) fn collect_settle(applicator: &ApplicatorSpecification) -> Result<SettleSpec, String> {
+    let channel = SETTLE_APPLICATOR;
+
+    if !applicator.children.is_empty() {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".{}: children block ignored (.{} takes only named arguments)",
+            channel,
+            channel
+        );
+    }
+
+    let mut curve = "spring".to_string();
+    let mut duration = SETTLE_DEFAULT_DURATION;
+    let mut bind: Option<String> = None;
+
+    for arg in &applicator.arguments.arguments {
+        let Argument::Named { key, value } = arg else {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".{}: unsupported positional argument {:?}; ignored (arguments are named: curve/duration/bind)",
+                channel,
+                arg
+            );
+            continue;
+        };
+        match key.as_str() {
+            "curve" => apply_named_curve(channel, value, &mut curve),
+            "duration" => {
+                if let Some(ms) = named_ms(channel, "duration", value) {
+                    duration = ms;
+                }
+            }
+            // Exactly the `.bind` applicator's path-string convention: a
+            // `@state.*` reference stored as its dotted path ("sheetPhase").
+            "bind" => match crate::ir::expand::parser_value_to_ir(value) {
+                crate::ir::Value::Binding(binding) if binding.is_state() => {
+                    bind = Some(binding.full_path());
+                }
+                _ => {
+                    // Leave `bind` unset — the missing/invalid Err below is
+                    // the node's single omit-all warning.
+                }
+            },
+            other => {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".{}: unknown argument '{}'; ignored",
+                    channel,
+                    other
+                );
+            }
+        }
+    }
+
+    let Some(bind) = bind else {
+        return Err(
+            ".settle requires bind: with a @state.* reference (e.g. bind: @state.sheetPhase)"
+                .into(),
+        );
+    };
+
+    Ok(SettleSpec {
+        curve,
+        duration,
+        bind,
+    })
+}
+
+/// Wire spec for `"__anim.scrub"`:
+/// `{"from","to","source","axis","over":[atProgress0,atProgress1],"rubberBand"}`
+/// plus `"of"` only when given with a scroll source.
+pub(crate) fn scrub_spec_json(spec: &ScrubSpec) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("from".to_string(), serde_json::json!(spec.from));
+    map.insert("to".to_string(), serde_json::json!(spec.to));
+    map.insert("source".to_string(), serde_json::json!(spec.source));
+    map.insert("axis".to_string(), serde_json::json!(spec.axis));
+    map.insert(
+        "over".to_string(),
+        serde_json::Value::Array(vec![json_num(spec.over.0), json_num(spec.over.1)]),
+    );
+    map.insert("rubberBand".to_string(), json_num(spec.rubber_band));
+    if let Some(of) = &spec.of {
+        map.insert("of".to_string(), serde_json::json!(of));
+    }
+    serde_json::Value::Object(map)
+}
+
+/// Wire spec for `"__anim.scrubSettle"`: `{"curve","duration"}`.
+pub(crate) fn settle_spec_json(spec: &SettleSpec) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    map.insert("curve".to_string(), serde_json::json!(spec.curve));
+    map.insert("duration".to_string(), json_ms(spec.duration));
+    serde_json::Value::Object(map)
+}
+
+/// Like [`json_ms`] but sign-preserving: whole numbers serialize as JSON
+/// integers (an `over` range may be negative, e.g. `[-100, 0]`).
+fn json_num(n: f64) -> serde_json::Value {
+    if n.fract() == 0.0 && n >= i64::MIN as f64 && n <= i64::MAX as f64 {
+        serde_json::Value::from(n as i64)
+    } else {
+        serde_json::json!(n)
+    }
 }
 
 fn named_ms(channel: &str, field: &str, value: &ParserValue) -> Option<f64> {
@@ -1083,6 +2014,242 @@ mod tests {
             spec,
             json!({"preset": "pulse", "duration": 1200, "repeat": "loop", "curve": "easeInOut"})
         );
+    }
+
+    // ------------------------------------------------------------------
+    // .motion(essential) — reduced-motion opt-out (#149)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn motion_essential_lowers_to_flag_object() {
+        let (key, spec) = lower(
+            "motion",
+            vec![positional(ParserValue::String("essential".to_string()))],
+        );
+        assert_eq!(key, "__anim.motion");
+        // Pin the lowered key to the constant renderers consume.
+        assert_eq!(key, ANIM_MOTION_PROP);
+        assert_eq!(spec, json!({"essential": true}));
+        assert!(is_anim_applicator("motion"));
+    }
+
+    #[test]
+    fn motion_quoted_token_also_lowers() {
+        let (_, spec) = lower(
+            "motion",
+            vec![positional(ParserValue::String("\"essential\"".to_string()))],
+        );
+        assert_eq!(spec, json!({"essential": true}));
+    }
+
+    #[test]
+    fn motion_unknown_token_omits_channel() {
+        assert!(lower_anim_applicator(&applicator(
+            "motion",
+            vec![positional(ParserValue::String("decorative".to_string()))],
+        ))
+        .is_none());
+        // Missing token omits too — there is no meaningful default.
+        assert!(lower_anim_applicator(&applicator("motion", vec![])).is_none());
+        // Non-token values omit.
+        assert!(lower_anim_applicator(&applicator(
+            "motion",
+            vec![positional(ParserValue::Number(1.0))],
+        ))
+        .is_none());
+        assert!(lower_anim_applicator(&applicator(
+            "motion",
+            vec![positional(ParserValue::Boolean(true))],
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn motion_binding_token_omits_channel() {
+        assert!(lower_anim_applicator(&applicator(
+            "motion",
+            vec![positional(ParserValue::Reference("state.essential".to_string()))],
+        ))
+        .is_none());
+        assert!(lower_anim_applicator(&applicator(
+            "motion",
+            vec![positional(ParserValue::String("@{state.essential}".to_string()))],
+        ))
+        .is_none());
+    }
+
+    #[test]
+    fn motion_extra_arguments_ignored() {
+        let (_, spec) = lower(
+            "motion",
+            vec![
+                positional(ParserValue::String("essential".to_string())),
+                positional(ParserValue::String("decorative".to_string())),
+                named("duration", ParserValue::Number(200.0)),
+            ],
+        );
+        assert_eq!(spec, json!({"essential": true}));
+    }
+
+    // ------------------------------------------------------------------
+    // .sharedElement(<key>) — Option H identity + timing
+    // ------------------------------------------------------------------
+
+    fn shared(args: Vec<Argument>) -> Option<(ParserValue, serde_json::Value)> {
+        let applicator = applicator("sharedElement", args);
+        lower_shared_element(&applicator).map(|(k, s)| (k.clone(), s))
+    }
+
+    #[test]
+    fn shared_element_defaults_and_raw_key() {
+        let (key, spec) =
+            shared(vec![positional(ParserValue::String("hero-cover".to_string()))]).unwrap();
+        assert_eq!(key, ParserValue::String("hero-cover".to_string()));
+        assert_eq!(spec, json!({"duration": 350, "curve": "spring"}));
+    }
+
+    #[test]
+    fn shared_element_template_key_preserved_raw() {
+        // The key is returned RAW — template bindings survive for the
+        // standard parser-value conversion downstream. Identity is data.
+        let raw = "\"cover-@{item.id}\"".to_string();
+        let (key, _) = shared(vec![positional(ParserValue::String(raw.clone()))]).unwrap();
+        assert_eq!(key, ParserValue::String(raw));
+
+        // Pure reference keys are bindings — also allowed.
+        let (key, _) =
+            shared(vec![positional(ParserValue::Reference("state.heroKey".to_string()))]).unwrap();
+        assert_eq!(key, ParserValue::Reference("state.heroKey".to_string()));
+    }
+
+    #[test]
+    fn shared_element_named_timing_overrides() {
+        let (_, spec) = shared(vec![
+            positional(ParserValue::String("hero".to_string())),
+            named("curve", ParserValue::String("easeOut".to_string())),
+            named("duration", ParserValue::Number(500.0)),
+        ])
+        .unwrap();
+        assert_eq!(spec, json!({"duration": 500, "curve": "easeOut"}));
+    }
+
+    #[test]
+    fn shared_element_invalid_timing_degrades_to_defaults() {
+        let (_, spec) = shared(vec![
+            positional(ParserValue::String("hero".to_string())),
+            named("curve", ParserValue::String("wobble".to_string())),
+            named("duration", ParserValue::Number(-5.0)),
+            named("delay", ParserValue::Number(100.0)), // timing only — unknown arg
+        ])
+        .unwrap();
+        assert_eq!(spec, json!({"duration": 350, "curve": "spring"}));
+    }
+
+    #[test]
+    fn shared_element_missing_or_invalid_key_omits() {
+        // Missing key
+        assert!(shared(vec![]).is_none());
+        // Named-only args, no positional key
+        assert!(shared(vec![named("duration", ParserValue::Number(350.0))]).is_none());
+        // Empty key
+        assert!(shared(vec![positional(ParserValue::String("\"\"".to_string()))]).is_none());
+        // Non-string-ish keys
+        assert!(shared(vec![positional(ParserValue::Number(42.0))]).is_none());
+        assert!(shared(vec![positional(ParserValue::Boolean(true))]).is_none());
+        assert!(shared(vec![positional(ParserValue::List(vec![]))]).is_none());
+    }
+
+    #[test]
+    fn shared_element_extra_positionals_ignored() {
+        let (key, spec) = shared(vec![
+            positional(ParserValue::String("hero".to_string())),
+            positional(ParserValue::Number(500.0)),
+            positional(ParserValue::String("easeOut".to_string())),
+        ])
+        .unwrap();
+        assert_eq!(key, ParserValue::String("hero".to_string()));
+        assert_eq!(spec, json!({"duration": 350, "curve": "spring"}));
+    }
+
+    #[test]
+    fn shared_element_prop_key_constants() {
+        // Pin the two reserved keys the expand interception writes.
+        assert_eq!(ANIM_SHARED_KEY_PROP, "__anim.sharedKey");
+        assert_eq!(ANIM_SHARED_PROP, "__anim.shared");
+        assert!(is_shared_element_applicator("sharedElement"));
+        assert!(!is_shared_element_applicator("shared"));
+        // NOT part of the single-prop channel set.
+        assert!(!is_anim_applicator("sharedElement"));
+    }
+
+    // ------------------------------------------------------------------
+    // normalize_batch_animation — Option D batch stamp (cheap subset)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn batch_animation_bare_curve_normalizes_with_default_duration() {
+        assert_eq!(
+            normalize_batch_animation(json!("spring")),
+            Some(json!({"curve": "spring", "duration": 250}))
+        );
+        // Every curve in the shared vocabulary normalizes the same way.
+        for curve in CURVES {
+            assert_eq!(
+                normalize_batch_animation(json!(curve)),
+                Some(json!({"curve": curve, "duration": 250}))
+            );
+        }
+    }
+
+    #[test]
+    fn batch_animation_unknown_curve_string_rejected() {
+        assert_eq!(normalize_batch_animation(json!("wobble")), None);
+    }
+
+    #[test]
+    fn batch_animation_object_missing_duration_filled() {
+        assert_eq!(
+            normalize_batch_animation(json!({"curve": "easeOut"})),
+            Some(json!({"curve": "easeOut", "duration": 250}))
+        );
+        // An empty object is still a valid (loose) spec — duration filled.
+        assert_eq!(
+            normalize_batch_animation(json!({})),
+            Some(json!({"duration": 250}))
+        );
+    }
+
+    #[test]
+    fn batch_animation_object_existing_duration_untouched() {
+        assert_eq!(
+            normalize_batch_animation(json!({"curve": "spring", "duration": 400})),
+            Some(json!({"curve": "spring", "duration": 400}))
+        );
+    }
+
+    #[test]
+    fn batch_animation_unknown_fields_pass_through() {
+        // Loose validation: renderers own interpretation of extra fields —
+        // even an unknown curve inside an OBJECT passes through untouched.
+        assert_eq!(
+            normalize_batch_animation(
+                json!({"curve": "customBezier", "stiffness": 180, "damping": 12})
+            ),
+            Some(json!({
+                "curve": "customBezier",
+                "stiffness": 180,
+                "damping": 12,
+                "duration": 250
+            }))
+        );
+    }
+
+    #[test]
+    fn batch_animation_non_object_non_string_rejected() {
+        assert_eq!(normalize_batch_animation(json!(250)), None);
+        assert_eq!(normalize_batch_animation(json!(["spring"])), None);
+        assert_eq!(normalize_batch_animation(json!(true)), None);
+        assert_eq!(normalize_batch_animation(serde_json::Value::Null), None);
     }
 
     #[test]

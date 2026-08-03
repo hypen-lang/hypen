@@ -408,7 +408,7 @@ Applicators are chained with dot notation after components. Any unrecognized app
 .filter("brightness(1.2)")
 .backdropFilter("blur(10px)")
 .transform("rotate(45deg)")
-.transition("all 0.2s ease")
+.transition(200, easeOut)                          // portable form: duration (ms), curve token
 .cursor("pointer")
 ```
 

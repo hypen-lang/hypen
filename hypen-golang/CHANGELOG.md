@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Remote dispatch now strips the reserved `__hypenAnimate` payload key
+  (the TS renderers' transaction-animation stamp, Option D) before module
+  handlers run — handlers no longer observe renderer-internal directives.
+
+### Known limitations
+- The `animate:` event argument (transaction-scoped animation) is
+  **TypeScript-host-only** for now. The Go host strips the stamp: the
+  dispatch works, the resulting state flush snaps. Go's state-sync path
+  (`NotifyStateChange` → `hypen_update_state`) has no animation envelope
+  and the Go observable notifies synchronously per mutation, so honest
+  stamping needs engine/interface work tracked separately. The
+  `Patch.Spec` relay field remains so engine-emitted `batchAnimation`
+  preludes survive transit.
+
 ### Changed
 - **BREAKING:** Removed `IconPack`, the internal `svg.go` parser, and the `.Icons()` / `.IconsFromDir()` / `.IconFromFile()` builder methods. Use `Resources(map)` / `ResourcesDir(dir)` / `ResourcesFile(path)` instead — they forward raw SVG strings to the Rust engine, which now owns all SVG parsing. The `Icon("name")` / `Icon(@resources.name)` DSL syntax is unchanged.
 

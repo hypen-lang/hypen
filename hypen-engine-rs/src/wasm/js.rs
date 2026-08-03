@@ -31,6 +31,27 @@ use crate::{
     wasm::shared::{format_parse_errors, render_subtree_into, NodeIdIndex},
 };
 
+/// Convert the optional trailing `animation` argument of `updateState` /
+/// `updateStateSparse` into the engine-side context.
+///
+/// JS callers using the old arity pass nothing — wasm-bindgen hands us
+/// `undefined`, which (like an explicit `null`) means "no animation" and
+/// keeps the old behavior byte-for-byte. Anything else is deserialized as
+/// JSON (an object or a bare curve string); a value that can't be
+/// deserialized at all is a `stateError`, while structurally-invalid specs
+/// are warned about and dropped later by the engine's loose validation.
+fn convert_animation(animation: Option<JsValue>) -> Result<Option<serde_json::Value>, JsValue> {
+    let Some(animation) = animation else {
+        return Ok(None);
+    };
+    if animation.is_undefined() || animation.is_null() {
+        return Ok(None);
+    }
+    from_value(animation)
+        .map(Some)
+        .map_err(|e| structured_error("stateError", &format!("Invalid animation spec: {}", e)))
+}
+
 /// The main Hypen engine interface for JavaScript/WASM runtimes.
 ///
 /// `WasmEngine` manages the full lifecycle of a Hypen UI: parsing DSL source,
@@ -677,30 +698,41 @@ impl WasmEngine {
     /// `scope` selects the target module:
     /// - empty string / null / undefined → primary module set via [`set_module`](Self::set_module)
     /// - any other string → named module registered via [`register_module`] (lowercased)
+    ///
+    /// `animation` is the optional batch-animation context (Option D cheap
+    /// subset): a spec object (`{curve: "spring", ...}`) or a bare curve
+    /// string (`"spring"`). Omitted / `undefined` / `null` → unstamped
+    /// update, byte-identical to the pre-animation wire format. When the
+    /// update changes state and the render cycle emits patches, the batch is
+    /// prefixed with a `{"type": "batchAnimation", "spec": {...}}` prelude.
     #[wasm_bindgen(js_name = updateState)]
     pub fn update_state(
         &mut self,
         scope: Option<String>,
         state_patch: JsValue,
+        animation: Option<JsValue>,
     ) -> Result<(), JsValue> {
         let patch: serde_json::Value = from_value(state_patch)
             .map_err(|e| structured_error("stateError", &format!("Invalid state patch: {}", e)))?;
 
+        let animation = convert_animation(animation)?;
+
         let normalized = scope.as_deref().filter(|s| !s.is_empty());
-        if self.core.update_state(normalized, patch) {
+        if self.core.update_state(normalized, patch, animation) {
             self.render_dirty();
         }
         Ok(())
     }
 
     /// Apply a sparse state update using explicit path-value pairs.
-    /// See [`update_state`] for `scope` semantics.
+    /// See [`update_state`] for `scope` and `animation` semantics.
     #[wasm_bindgen(js_name = updateStateSparse)]
     pub fn update_state_sparse(
         &mut self,
         scope: Option<String>,
         paths_js: JsValue,
         values_js: JsValue,
+        animation: Option<JsValue>,
     ) -> Result<(), JsValue> {
         let paths: Vec<String> = from_value(paths_js)
             .map_err(|e| structured_error("stateError", &format!("Invalid paths array: {}", e)))?;
@@ -709,8 +741,10 @@ impl WasmEngine {
             structured_error("stateError", &format!("Invalid values object: {}", e))
         })?;
 
+        let animation = convert_animation(animation)?;
+
         let normalized = scope.as_deref().filter(|s| !s.is_empty());
-        if self.core.update_state_sparse(normalized, &paths, &values) {
+        if self.core.update_state_sparse(normalized, &paths, &values, animation) {
             self.render_dirty();
         }
         Ok(())

@@ -152,6 +152,9 @@ export class CanvasRenderer implements Renderer {
         while (current.parent) current = current.parent;
         return current === this.rootNode;
       },
+      // Option F `.onAnimationComplete` completions dispatch through the
+      // same engine channel as pointer/keyboard events.
+      dispatchAction: (name, payload) => this.engine.dispatchAction(name, payload),
     });
 
     // Initialize subsystems
@@ -282,6 +285,14 @@ export class CanvasRenderer implements Renderer {
   applyPatches(patches: Patch[]): void {
     const hadRoot = this.rootNode !== null;
 
+    // Transaction-scoped animation stamp (Option D): honored ONLY as the
+    // batch's FIRST patch (engine wire contract; the DOMRenderer replicates
+    // a routed stamp at index 0 of each canvas sub-batch). Mid-array
+    // occurrences are not stamps for this batch.
+    if (patches.length > 0 && patches[0]!.type === "batchAnimation") {
+      this.animator.beginBatchAnimation(patches[0]!.spec);
+    }
+
     for (const patch of patches) {
       this.applyPatch(patch);
     }
@@ -349,6 +360,13 @@ export class CanvasRenderer implements Renderer {
 
       case "setSemantics":
         this.onSetSemantics(patch.id!, patch.semantics);
+        break;
+
+      case "batchAnimation":
+        // Transaction-scoped animation stamp (Option D): scopes the batch,
+        // addresses no node. Handled at the head of applyPatches — only the
+        // batch's FIRST patch is a valid stamp; mid-array occurrences are
+        // deliberately ignored.
         break;
     }
   }

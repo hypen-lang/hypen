@@ -92,6 +92,12 @@ pub struct ActionPayload {
 pub struct SparseStateUpdate {
     pub paths: Vec<String>,
     pub values: serde_json::Value,
+    /// Optional batch-animation context (Option D cheap subset): a spec
+    /// object or a bare curve string. Absent from the envelope → unstamped
+    /// update (backward compatible with pre-animation hosts). Skipped on
+    /// serialize when `None` so round-trips stay byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
@@ -584,6 +590,7 @@ mod tests {
                 "user.name": "Bob",
                 "count": 42
             }),
+            animation: None,
         };
 
         let json = serde_json::to_string(&update).unwrap();
@@ -598,6 +605,7 @@ mod tests {
         let update = SparseStateUpdate {
             paths: vec![],
             values: json!({}),
+            animation: None,
         };
 
         let json = serde_json::to_string(&update).unwrap();
@@ -612,6 +620,7 @@ mod tests {
                 "a.b.c.d": "deep value",
                 "x.y.z": 123
             }),
+            animation: None,
         };
 
         let json = serde_json::to_string(&update).unwrap();
@@ -630,6 +639,7 @@ mod tests {
                 "user": {"id": 1, "name": "Alice"},
                 "items": [{"id": 1}, {"id": 2}]
             }),
+            animation: None,
         };
 
         let json = serde_json::to_string(&update).unwrap();
@@ -637,6 +647,26 @@ mod tests {
 
         assert_eq!(parsed.values["user"]["id"], 1);
         assert_eq!(parsed.values["items"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_sparse_state_update_animation_field() {
+        // Pre-animation envelopes (no "animation" key) still parse — and a
+        // None round-trips to the same wire bytes (skip_serializing_if).
+        let legacy = r#"{"paths":["count"],"values":{"count":1}}"#;
+        let parsed: SparseStateUpdate = serde_json::from_str(legacy).unwrap();
+        assert!(parsed.animation.is_none());
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), legacy);
+
+        // Stamped envelopes carry the context through — both spec-object and
+        // bare-curve-string forms (normalization happens engine-side).
+        let stamped = r#"{"paths":["count"],"values":{"count":1},"animation":{"curve":"spring"}}"#;
+        let parsed: SparseStateUpdate = serde_json::from_str(stamped).unwrap();
+        assert_eq!(parsed.animation, Some(json!({"curve": "spring"})));
+
+        let bare = r#"{"paths":["count"],"values":{"count":1},"animation":"spring"}"#;
+        let parsed: SparseStateUpdate = serde_json::from_str(bare).unwrap();
+        assert_eq!(parsed.animation, Some(json!("spring")));
     }
 
     // =========================================================================

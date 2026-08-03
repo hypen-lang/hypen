@@ -955,9 +955,32 @@ func (s *RemoteSession) registerActionHandlers(
 	}
 }
 
+// reservedAnimateKey is the cross-boundary payload key TypeScript renderers
+// use to carry an event applicator's `animate:` transaction-animation stamp
+// (Option D) across dispatchAction. It is a renderer→host directive, never
+// handler data: TS hosts lift it into a distinct Action field; the Go host
+// does not implement transaction stamping (its state-sync path has no
+// animation envelope), so the key is stripped here — module handlers must
+// never observe it either way.
+const reservedAnimateKey = "__hypenAnimate"
+
+// stripReservedAnimateKey removes the reserved transaction-animation stamp
+// from a decoded dispatch payload, if present. Non-map payloads pass through.
+func stripReservedAnimateKey(payload any) any {
+	if m, ok := payload.(map[string]any); ok {
+		delete(m, reservedAnimateKey)
+	}
+	return payload
+}
+
 // handleDispatchAction routes a client dispatch into the engine (or, for
 // the legacy no-sourceDir path, the ModuleConfig.OnAction shim).
 func (s *RemoteSession) handleDispatchAction(actionName string, payload any) {
+	// Strip the reserved transaction-animation stamp BEFORE either path —
+	// engine-routed handlers and the legacy OnAction shim both receive the
+	// payload from here.
+	payload = stripReservedAnimateKey(payload)
+
 	s.mu.Lock()
 	engine := s.engine
 	s.mu.Unlock()

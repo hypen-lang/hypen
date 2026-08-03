@@ -20,6 +20,9 @@ type Patch struct {
 	// Transition relays the engine's exit-animation flag on "remove"
 	// patches to animation-capable remote clients (see core.Patch).
 	Transition bool `json:"transition,omitempty"`
+	// Spec relays the "batchAnimation" prelude's animation spec to
+	// animation-capable remote clients (see core.Patch).
+	Spec map[string]any `json:"spec,omitempty"`
 }
 
 // MessageType represents the type of remote message

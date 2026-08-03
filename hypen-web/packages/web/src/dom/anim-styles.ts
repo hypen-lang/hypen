@@ -48,6 +48,15 @@ export const animateClassFor = (preset: AnimatePreset): string =>
   `hypen-anim-${preset}`;
 
 /**
+ * The `@keyframes` name the stylesheet defines for one preset — what a
+ * native `animationend` event reports as `animationName`. The completion
+ * listener (Option F) matches against this so bubbled or foreign animations
+ * on the same element never masquerade as a preset completing.
+ */
+export const animateKeyframesFor = (preset: AnimatePreset): string =>
+  `hypen-${preset}`;
+
+/**
  * CSS properties each preset's keyframes animate ON THE ELEMENT ITSELF.
  * A running CSS animation sits above inline styles in the cascade for the
  * properties it animates, so a preset that keyframes `opacity`/`transform`
@@ -122,8 +131,10 @@ const ANIM_CSS = `
 }
 @media (prefers-reduced-motion: reduce) {
   /* The a11y sheet's [data-hypen-id] { animation: none !important } covers
-     the element itself but cannot select the shimmer overlay pseudo. */
-  .hypen-anim-shimmer::after {
+     the element itself but cannot select the shimmer overlay pseudo. Like
+     that rule, nodes stamped data-hypen-motion-essential (.motion(essential),
+     #149) are exempt — their shimmer keeps sweeping. */
+  .hypen-anim-shimmer:not([data-hypen-motion-essential])::after {
     animation: none !important;
     content: none;
   }

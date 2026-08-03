@@ -1,0 +1,81 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "states-fallback",
+  "description": "A driving-state value no pose declares falls back to the node's base values: switched props resolve to their final static base, a pose-only prop with no base default resolves to ABSENT (key omitted on create, RemoveProp when leaving a pose), and __anim.states falls back to its explicit null default. The synthesized __anim.transition is static and present regardless of the matched label",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "golang: animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Box().width(100).cornerRadius(4).states(@state.cardState, transition: spring, duration: 250) {\n    onState(collapsed).cornerRadius(8).width(48).opacity(0.9)\n    onState(expanded).cornerRadius(16).width(240)\n}",
+    "initialState": { "cardState": "mystery" },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["cardState"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render with an unmatched label resolves base props, omits the pose-only key, and nulls the active label",
+      "action": "initialRender",
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["create", "insert"],
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Box",
+          "props": {
+            "width.0": 100,
+            "cornerRadius.0": 4,
+            "__anim.states": null,
+            "__anim.transition": {
+              "curve": "spring",
+              "duration": 250,
+              "props": ["cornerRadius", "width", "opacity"]
+            }
+          },
+          "absentProps": ["opacity.0", "states.0", "onState.0"]
+        },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Entering a declared pose from the fallback sets every pose prop (including the pose-only one) and the label",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["cardState"],
+        "newValues": { "cardState": "collapsed" }
+      },
+      "expectedPatchCount": 4,
+      "expectedPatches": [
+        { "type": "setProp", "name": "width.0", "value": 48 },
+        { "type": "setProp", "name": "cornerRadius.0", "value": 8 },
+        { "type": "setProp", "name": "opacity.0", "value": 0.9 },
+        { "type": "setProp", "name": "__anim.states", "value": { "label": "collapsed" } }
+      ],
+      "forbiddenPatchTypes": ["create", "insert", "remove", "move", "removeProp"]
+    },
+    {
+      "description": "Leaving for another unmatched label restores base values, removes the pose-only prop, and nulls the label",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["cardState"],
+        "newValues": { "cardState": "nonesuch" }
+      },
+      "expectedPatchCount": 4,
+      "expectedPatches": [
+        { "type": "setProp", "name": "width.0", "value": 100 },
+        { "type": "setProp", "name": "cornerRadius.0", "value": 4 },
+        { "type": "setProp", "name": "__anim.states", "valueIsNull": true },
+        { "type": "removeProp", "name": "opacity.0" }
+      ],
+      "forbiddenPatchTypes": ["create", "insert", "remove", "move"]
+    }
+  ]
+}

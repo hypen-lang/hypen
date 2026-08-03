@@ -14,6 +14,8 @@ import {
   ANIM_EXIT_PROP,
   ANIM_LAYOUT_PROP,
   ANIM_PROP_ANIMATE,
+  ANIM_MOTION_PROP,
+  parseMotionEssential,
   ANIM_CURVES,
   ANIM_PRESETS,
   ANIM_DIRECTIONS,
@@ -40,15 +42,40 @@ describe("channel keys", () => {
     expect(ANIM_EXIT_PROP).toBe("__anim.exit");
     expect(ANIM_LAYOUT_PROP).toBe("__anim.layout");
     expect(ANIM_PROP_ANIMATE).toBe("__anim.animate");
+    expect(ANIM_MOTION_PROP).toBe("__anim.motion");
     for (const key of [
       ANIM_TRANSITION_PROP,
       ANIM_ENTER_PROP,
       ANIM_EXIT_PROP,
       ANIM_LAYOUT_PROP,
       ANIM_PROP_ANIMATE,
+      ANIM_MOTION_PROP,
     ]) {
       expect(key.startsWith(ANIM_PROP_PREFIX)).toBe(true);
     }
+  });
+});
+
+describe("parseMotionEssential (#149 reduced-motion opt-out)", () => {
+  test("the engine's wire shape parses to true", () => {
+    expect(parseMotionEssential({ essential: true })).toBe(true);
+  });
+
+  test("a JSON-stringified object is tolerated (Remote UI wire)", () => {
+    expect(parseMotionEssential('{"essential": true}')).toBe(true);
+  });
+
+  test("everything else defensively degrades to false", () => {
+    expect(parseMotionEssential({ essential: false })).toBe(false);
+    expect(parseMotionEssential({ essential: "true" })).toBe(false); // strictly boolean
+    expect(parseMotionEssential({ essential: 1 })).toBe(false);
+    expect(parseMotionEssential({})).toBe(false);
+    expect(parseMotionEssential(true)).toBe(false); // bare boolean is not the wire shape
+    expect(parseMotionEssential("essential")).toBe(false);
+    expect(parseMotionEssential(null)).toBe(false);
+    expect(parseMotionEssential(undefined)).toBe(false);
+    expect(parseMotionEssential([true])).toBe(false);
+    expect(parseMotionEssential("{not json")).toBe(false);
   });
 });
 
@@ -803,6 +830,26 @@ describe("barrel export", () => {
         duration: 800,
         repeat: "loop",
         curve: "linear",
+      });
+      // `.states` + `.sharedElement` vocabulary: the browser barrel maps to
+      // its own dist entry at runtime while `types` points at index.d.ts —
+      // a symbol missing here typechecks in browser bundles and is
+      // undefined at runtime.
+      expect(mod.ANIM_STATES_PROP).toBe("__anim.states");
+      expect(mod.ANIM_SHARED_KEY_PROP).toBe("__anim.sharedKey");
+      expect(mod.ANIM_SHARED_PROP).toBe("__anim.shared");
+      expect(mod.ANIM_MOTION_PROP).toBe("__anim.motion");
+      expect(typeof mod.parseMotionEssential).toBe("function");
+      expect(mod.parseMotionEssential({ essential: true })).toBe(true);
+      expect(mod.parseMotionEssential({ essential: false })).toBe(false);
+      expect(typeof mod.parseStatesLabel).toBe("function");
+      expect(typeof mod.parseSharedKey).toBe("function");
+      expect(typeof mod.parseSharedSpec).toBe("function");
+      expect(mod.parseSharedKey("hero")).toBe("hero");
+      expect(mod.parseStatesLabel({ label: "expanded" })).toBe("expanded");
+      expect(mod.parseSharedSpec({ duration: 300, curve: "spring" })).toEqual({
+        duration: 300,
+        curve: "spring",
       });
     }
   });

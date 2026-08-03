@@ -325,6 +325,32 @@ fn test_deserialize_patch() {
 }
 
 #[test]
+fn test_batch_animation_patch_serde_round_trip() {
+    // GIVEN: the batch-scoped animation prelude (Option D cheap subset)
+    let spec = json!({"curve": "spring", "duration": 250, "custom": "passes-through"});
+    let patch = Patch::batch_animation(spec.clone());
+
+    // WHEN: Serialize to JSON
+    let serialized = serde_json::to_value(&patch).unwrap();
+
+    // THEN: exact wire shape — {"type": "batchAnimation", "spec": {...}}
+    assert_eq!(
+        serialized,
+        json!({
+            "type": "batchAnimation",
+            "spec": {"curve": "spring", "duration": 250, "custom": "passes-through"}
+        })
+    );
+
+    // AND: it deserializes back to the same variant with the same spec
+    let round_tripped: Patch = serde_json::from_value(serialized).unwrap();
+    match round_tripped {
+        Patch::BatchAnimation { spec: s } => assert_eq!(s, spec),
+        other => panic!("Expected BatchAnimation patch, got {other:?}"),
+    }
+}
+
+#[test]
 fn test_remove_prop_patch() {
     // GIVEN: NodeId and prop name
     let node_id = test_node_id();

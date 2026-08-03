@@ -71,6 +71,7 @@ const COMPONENT_HTML_ATTRS: Record<string, Set<string>> = {
 import { ComponentRegistry } from "./components/index.js";
 import { ApplicatorRegistry } from "./applicators/index.js";
 import { DomAnimator } from "./anim.js";
+import { DomScrubber } from "./scrub.js";
 import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
 import { applySemantics } from "./semantics.js";
 import {
@@ -174,6 +175,23 @@ export class DOMRenderer {
    */
   private animator = new DomAnimator();
 
+  /**
+   * `__anim.scrub*` runtime (Option G): renderer-resident gesture/scroll
+   * scrubbing between `.states` poses, velocity-projected settle, and the
+   * `.bind`-channel settle write. See `scrub.ts`. Deferred engine writes
+   * flush back through `onSetProp` (the scrubber is idle by then, so
+   * nothing re-defers).
+   */
+  private scrubber = new DomScrubber({
+    applyProp: (id, name, value) => this.onSetProp(id, name, value),
+    // Option G × `.animate`: a running preset's CSS animation beats the
+    // scrub's inline styles — engagement suspends it via the animator's
+    // suspend machinery; cleanup resumes it.
+    suspendPresets: (id, element, targets) =>
+      this.animator.suspendPresetsForScrub(id, element, targets),
+    resumePresets: (element) => this.animator.resumePresetsAfterScrub(element),
+  });
+
   constructor(
     container: HTMLElement,
     engine: IEngine,
@@ -186,6 +204,10 @@ export class DOMRenderer {
     this.applicators = new ApplicatorRegistry();
     this.debugTracker = new RerenderTracker({ ...defaultDebugConfig, ...debugConfig });
     this.routeFocus = options?.routeFocus ?? "auto";
+
+    // Option G precedence: a scrub-active node is excluded from transaction
+    // application and enter/FLIP participation (scrub owns it).
+    this.animator.setScrubActiveCheck((id) => this.scrubber.ownsNode(id));
 
     // Inject the global reduced-motion + focus-visible stylesheet once.
     ensureA11yStyles();
@@ -223,6 +245,16 @@ export class DOMRenderer {
    * the DOMRenderer or the owning CanvasRenderer.
    */
   applyPatches(patches: Patch[]): void {
+    // Transaction-scoped animation stamp (Option D): honored ONLY as the
+    // batch's FIRST patch — the engine's wire contract emits the prelude at
+    // index 0, and a `batchAnimation` anywhere else is not a stamp for this
+    // batch (e.g. accumulated/concatenated batches must not over-scope).
+    const stamp =
+      patches.length > 0 && patches[0]!.type === "batchAnimation" ? patches[0]! : null;
+    if (stamp) {
+      this.animator.beginBatchAnimation(stamp.spec);
+    }
+
     // Canvas routing only matters once a canvas root exists; the common
     // no-canvas case applies the batch directly with no extra passes.
     let canvasBatches: Map<string, Patch[]> | null = null;
@@ -265,6 +297,17 @@ export class DOMRenderer {
           domPatches.push(patch);
         }
       }
+
+      // A batchAnimation stamp scopes the WHOLE batch, not one node — the
+      // id-less patch routes to the DOM side above, so replicate it at the
+      // head of every canvas sub-batch so canvas-subtree prop changes glide
+      // with the same transaction spec. Only the index-0 prelude counts
+      // (first-patch contract).
+      if (stamp) {
+        for (const batch of canvasBatches.values()) {
+          batch.unshift(stamp);
+        }
+      }
     }
 
     // Route-change detection for the focus contract: a batch with a detach
@@ -299,6 +342,12 @@ export class DOMRenderer {
     // FLIP pre-pass: record First rects for `.layout`-animated moves before
     // the batch mutates the DOM (Last is measured in `animator.flush()`).
     this.animator.prepareMoves(domPatches, (nodeId) => this.nodes.get(nodeId));
+
+    // Shared-element pre-pass (Option H): on navigation-shaped batches
+    // (detach + attach/insert), snapshot source rects for `__anim.sharedKey`
+    // nodes at-or-under the batch's detach roots before the DOM mutates;
+    // matching and playback happen in `animator.flush()`.
+    this.animator.prepareShared(domPatches, (nodeId) => this.nodes.get(nodeId));
 
     // Apply DOM patches normally
     for (const patch of domPatches) {
@@ -556,6 +605,12 @@ export class DOMRenderer {
       case "setSemantics":
         this.onSetSemantics(id!, patch.semantics);
         break;
+      case "batchAnimation":
+        // Transaction-scoped animation stamp (Option D): scopes the batch,
+        // addresses no node. Handled at the head of applyPatches — ONLY the
+        // batch's first patch is a valid stamp, so a mid-array occurrence
+        // is deliberately ignored here.
+        break;
     }
   }
 
@@ -664,6 +719,7 @@ export class DOMRenderer {
 
     if (animProps) {
       this.animator.registerCreate(id, element, animProps);
+      this.scrubber.registerCreate(id, element, animProps);
     }
 
     this.applicators.applyAll(element, propsObj);
@@ -713,11 +769,30 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (!element) return;
 
-    // `__anim.*` channel props route to the animator, never to applicators.
+    // `__anim.*` channel props route to the animator + scrubber, never to
+    // applicators. The scrubber consumes the `__anim.scrub*` channels and
+    // watches `__anim.states` (its cleanup signal); the animator ignores
+    // the scrub channels.
     if (name.startsWith(ANIM_PROP_PREFIX)) {
+      this.scrubber.setAnimProp(id, element, name, value);
       this.animator.setAnimProp(id, element, name, value);
       return;
     }
+
+    // Scrub conflict rule (Option G, gesture wins): while a drag/settle is
+    // active on this node, engine writes to its SCRUBBED prop keys are
+    // deferred — latest value stored, applied at cleanup. Other props flow
+    // normally.
+    if (this.scrubber.deferEngineProp(id, name, value)) {
+      return;
+    }
+
+    // Transaction-scoped animation (Option D): in a batch stamped by a
+    // leading batchAnimation patch, whitelisted prop changes glide with the
+    // transaction spec on ANY node — the animator sets the transaction
+    // transition styles BEFORE the prop write below lands. No-op for
+    // unstamped batches.
+    this.animator.noteTransactionProp(id, element, name);
 
     this.debugTracker.trackRerender(id, element, `setProp:${name}`);
 
@@ -819,6 +894,7 @@ export class DOMRenderer {
     if (!element) return;
 
     if (name.startsWith(ANIM_PROP_PREFIX)) {
+      this.scrubber.removeAnimProp(id, element, name);
       this.animator.removeAnimProp(id, element, name);
       return;
     }
@@ -901,6 +977,10 @@ export class DOMRenderer {
     // (the animator checks), so a cached `attach` — routed through here —
     // never enter-animates.
     this.animator.noteInsert(id, child);
+
+    // Scroll-source scrubs resolve their container at insert time (their
+    // ancestors don't exist before this).
+    this.scrubber.noteInsert(id, child);
   }
 
   /**
@@ -922,6 +1002,10 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (element) {
       this.animator.noteAttach(element);
+      // Scroll-source scrubs anywhere in the re-attached subtree re-arm:
+      // the attach patch names only the root, but descendants' scroll
+      // listeners were detached with the route (Option G).
+      this.scrubber.noteAttach(element);
     }
   }
 
@@ -946,6 +1030,13 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (!element) return;
     const previousParent = element.parentNode;
+
+    // A detach mid-drag cancels the scrub interaction cleanly (capture
+    // released, styles restored, deferred writes applied) for EVERY scrubbed
+    // node in the leaving subtree — a descendant's scroll listener on a
+    // persistent app-shell scroller must not keep scrubbing an off-document
+    // route. Entries survive for a cached re-attach (see onAttach).
+    this.scrubber.cancelSubtree(element);
 
     // Remember where focus was inside the leaving route, so a cached
     // re-`attach` of this subtree can restore it (route-focus contract).
@@ -1009,6 +1100,13 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (!element) return;
 
+    // Option G: an exiting/removed node's scrub sources detach IMMEDIATELY —
+    // cancel fully (release capture, stop the settle rAF, never dispatch the
+    // bind write) BEFORE any exit playback can begin, so the live gesture
+    // and the exit never fight and a mid-settle arrival cannot write into a
+    // dead node's bind path.
+    this.scrubber.cancel(id);
+
     if (
       transition &&
       this.animator.beginExit(id, element, () => this.finalizeRemove(id, element))
@@ -1065,6 +1163,8 @@ export class DOMRenderer {
     this.textBindings.delete(id);
     this.dialogIds.delete(id);
     this.animator.forget(id);
+    // A remove mid-drag cancels everything and releases capture cleanly.
+    this.scrubber.forget(id);
     // Router LRU eviction: this subtree is gone for good — focus restore
     // must never target it again (route-focus contract).
     this.routeFocusMemory.delete(id);
@@ -1102,6 +1202,7 @@ export class DOMRenderer {
       this.textBindings.delete(descId);
       this.dialogIds.delete(descId);
       this.animator.forget(descId);
+      this.scrubber.forget(descId);
       this.routeFocusMemory.delete(descId);
     }
   }
@@ -1126,6 +1227,15 @@ export class DOMRenderer {
   }
 
   /**
+   * The `__anim.scrub*` runtime (Option G) — exposed for tests, which
+   * override its injectable clock/rAF fields to drive drags and settles
+   * deterministically (the canvas animator's `animator.now` pattern).
+   */
+  getScrubber(): DomScrubber {
+    return this.scrubber;
+  }
+
+  /**
    * Clear all nodes
    */
   clear(): void {
@@ -1147,6 +1257,7 @@ export class DOMRenderer {
     this.nodes.clear();
     this.textBindings.clear();
     this.animator.reset();
+    this.scrubber.reset();
     this.rootId = null;
     this.dialogIds.clear();
     this.dialogOpeners.clear();

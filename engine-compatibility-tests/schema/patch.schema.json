@@ -50,7 +50,11 @@
         "type": { "const": "setProp" },
         "id": { "type": "string", "description": "Element ID to update" },
         "name": { "type": "string", "description": "Property name" },
-        "value": { "description": "New property value" }
+        "value": { "description": "New property value" },
+        "valueIsNull": {
+          "type": "boolean",
+          "description": "Fixture-assertion-only field (never on the wire): requires the matched patch's value to be EXPLICIT JSON null. Needed because `\"value\": null` in a fixture is indistinguishable from omitting the key (which matches ANY value) once deserialized — null contracts (e.g. __anim.states nulling its label on fallback) are otherwise unassertable."
+        }
       },
       "required": ["type", "id", "name", "value"],
       "additionalProperties": false
@@ -98,6 +102,19 @@
         }
       },
       "required": ["type", "id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "batchAnimation" },
+        "spec": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Batch-scoped animation spec (Option D transaction-scoped animation). Always a complete object by the time it reaches the wire — the engine normalizes a bare curve string into {curve, duration: 250} and fills a missing duration with 250; unknown fields pass through (renderers own interpretation). This patch is the FIRST entry of a render batch triggered by a state update that carried an animation context: renderers that understand it animate every prop change in the batch (precedence: batch spec > node .transition > none); renderers that don't know the type ignore it and snap. A cycle producing no patches emits no prelude either — no stamp without patches."
+        }
+      },
+      "required": ["type", "spec"],
       "additionalProperties": false
     },
     {

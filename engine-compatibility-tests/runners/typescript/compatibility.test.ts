@@ -24,6 +24,7 @@ interface EnginePatch {
   eventName?: string;
   semantics?: Record<string, any>;
   transition?: boolean;
+  spec?: Record<string, any>;
 }
 
 // Test case types
@@ -45,6 +46,9 @@ interface ExpectedPatch {
   text?: string;
   semantics?: Record<string, any>;
   transition?: boolean;
+  /** Batch-animation spec on `batchAnimation` patches (deep partial match
+   *  like `value` — the fixture pins the normalized `{curve, duration}`). */
+  spec?: Record<string, any>;
 }
 
 interface TestStep {
@@ -52,6 +56,14 @@ interface TestStep {
   action: "initialRender" | "updateState" | "dispatchAction" | "renderSource";
   source?: string;
   stateChange?: StateChange;
+  /**
+   * Optional batch-animation context for this step's state update (Option D
+   * transaction-scoped animation): a spec object or bare curve string,
+   * forwarded as the engine's `animation` argument — for updateState steps
+   * directly, and for the state update a dispatchAction step's handler
+   * produces (mirrors the rust runner's `update_state_with_animation`).
+   */
+  animation?: any;
   dispatchAction?: Action;
   expectedPatches?: ExpectedPatch[];
   expectedPatchCount?: number;
@@ -90,6 +102,11 @@ interface TestCase {
 
 // State management for action handlers
 let currentState: Record<string, any> = {};
+
+// The current step's optional batch-animation context (Option D) — set per
+// step so both the direct updateState path and the dispatchAction handler's
+// state sync stamp their engine update with it (rust-runner parity).
+let currentStepAnimation: any = undefined;
 
 // Action handler implementations for tests
 const actionHandlers: Record<string, (action: Action, state: Record<string, any>) => Record<string, any>> = {
@@ -208,6 +225,9 @@ function patchMatches(actual: EnginePatch, expected: ExpectedPatch): boolean {
   if (expected.name !== undefined && actual.name !== expected.name) return false;
   if (expected.value !== undefined && !deepEquals(actual.value, expected.value)) return false;
 
+  // Check the animation spec on batchAnimation patches
+  if (expected.spec !== undefined && !deepEquals(actual.spec, expected.spec)) return false;
+
   // Check the exit-animation flag on remove patches. `transition: true`
   // requires the flag on the wire; `transition: false` requires it absent
   // or false (the flag is skip-serialized when false).
@@ -299,13 +319,14 @@ describe("Engine Compatibility Tests", async () => {
               const handler = actionHandlers[actionName];
               if (handler) {
                 currentState = handler(action, currentState);
-                // Notify engine of state change
+                // Notify engine of state change, stamped with the current
+                // step's optional batch-animation context (Option D).
                 const paths = Object.keys(currentState);
                 const values: Record<string, any> = {};
                 for (const path of paths) {
                   values[path] = currentState[path];
                 }
-                engine.updateStateSparse(null, paths, values);
+                engine.updateStateSparse(null, paths, values, currentStepAnimation);
               }
             });
           }
@@ -346,6 +367,7 @@ describe("Engine Compatibility Tests", async () => {
         if (testCase.steps) {
           for (const step of testCase.steps) {
             collectedPatches = []; // Reset for each step
+            currentStepAnimation = step.animation;
 
             switch (step.action) {
               case "initialRender":
@@ -364,7 +386,14 @@ describe("Engine Compatibility Tests", async () => {
                   for (const [path, value] of Object.entries(step.stateChange.newValues)) {
                     setNestedValue(currentState, path, value);
                   }
-                  engine.updateStateSparse(null, step.stateChange.paths, step.stateChange.newValues);
+                  // Forward the step's optional batch-animation context
+                  // (Option D) as the engine's `animation` argument.
+                  engine.updateStateSparse(
+                    null,
+                    step.stateChange.paths,
+                    step.stateChange.newValues,
+                    step.animation
+                  );
                 }
                 break;
 

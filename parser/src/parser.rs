@@ -297,22 +297,58 @@ pub fn component_parser<'a>(
             .labelled("children block {...}")
             .or_not();
 
-        // Applicators: .applicator1() .applicator2(args)
-        // Each applicator's end offset is captured before padding; the last
-        // one is where `MetaData::expr_range` ends for an applicator chain.
+        // Applicator children block: .states(...) { onState(a).size(48) }
+        // Shares the recursive component parser with the component children
+        // block above, so block entries are full component specifications
+        // (with their own applicator chains, nesting, etc.). The leading
+        // padding on '{' allows whitespace/newlines between ')' and '{'
+        // exactly as for component blocks; the closing brace's end offset is
+        // captured before padding so span accounting stays exact.
+        let applicator_block = just('{')
+            .padded_with_comments()
+            .ignore_then(
+                component
+                    .clone()
+                    .padded_with_comments()
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .then(
+                just('}')
+                    .labelled("closing brace '}' for applicator block")
+                    .map_with(|_, e| {
+                        let span: chumsky::span::SimpleSpan = e.span();
+                        span.end
+                    }),
+            )
+            .labelled("applicator children block {...}");
+
+        // Applicators: .applicator1() .applicator2(args) .applicator3(args) { children }
+        // Each applicator's end offset is captured before padding (the block's
+        // closing brace when present); the last one is where
+        // `MetaData::expr_range` ends for an applicator chain. The chain may
+        // continue after a block: .states(...) { ... }.padding(4).
         let applicators = just('.')
             .ignore_then(text::ascii::ident().labelled("applicator name"))
             .then(arg_parser.clone())
             .map_with(|(name, args), e| {
                 let span: chumsky::span::SimpleSpan = e.span();
+                (name, args, span.end)
+            })
+            .then(applicator_block.or_not())
+            .map(|((name, args, head_end), block)| {
+                let (children, end) = match block {
+                    Some((children, block_end)) => (fold_applicators(children), block_end),
+                    None => (Vec::new(), head_end),
+                };
                 (
                     ApplicatorSpecification {
                         name: name.to_string(),
                         arguments: args,
-                        children: vec![],
+                        children,
                         internal_id: String::new(),
                     },
-                    span.end,
+                    end,
                 )
             })
             .labelled("applicator (.name(...))")

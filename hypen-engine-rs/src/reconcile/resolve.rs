@@ -134,11 +134,50 @@ pub fn resolve_props_full(
                 // Resource references are kept as @resources.name for the icon resolver
                 serde_json::Value::String(format!("@resources.{}", name))
             }
+            Value::StateSwitch {
+                path,
+                cases,
+                default,
+            } => {
+                // `.states` pose switch: no matching case and no default
+                // means the prop is ABSENT — omit the key entirely, exactly
+                // as if it were never set. Resolution always yields plain
+                // JSON, so the variant never reaches the wire.
+                match resolve_state_switch(path, cases, default.as_ref(), state) {
+                    Some(v) => v,
+                    None => continue,
+                }
+            }
         };
         resolved.insert(key.clone(), resolved_value);
     }
 
     Arc::new(resolved)
+}
+
+/// Resolve a [`Value::StateSwitch`]: read the state at `path`, stringify a
+/// scalar result (string as-is, number/bool via `to_string`), and pick the
+/// matching case. A missing path, non-scalar value, or unmatched label falls
+/// back to `default`; `None` means the prop resolves to absent.
+pub fn resolve_state_switch(
+    path: &str,
+    cases: &IndexMap<String, serde_json::Value>,
+    default: Option<&serde_json::Value>,
+    state: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    let mut current = Some(state);
+    for segment in path.split('.') {
+        current = current.and_then(|v| v.get(segment));
+    }
+    let label = match current {
+        Some(serde_json::Value::String(s)) => Some(s.clone()),
+        Some(serde_json::Value::Number(n)) => Some(n.to_string()),
+        Some(serde_json::Value::Bool(b)) => Some(b.to_string()),
+        _ => None,
+    };
+    label
+        .and_then(|l| cases.get(&l).cloned())
+        .or_else(|| default.cloned())
 }
 
 #[cfg(test)]

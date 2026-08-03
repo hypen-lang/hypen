@@ -235,6 +235,32 @@ pub enum Patch {
         /// Insert before this sibling, or `null` to append
         before_id: Option<String>,
     },
+
+    /// Batch-scoped animation prelude (Option D cheap subset — transaction-
+    /// scoped animation).
+    ///
+    /// Emitted as the **FIRST** patch of a render cycle whose triggering
+    /// state update carried an animation context (`update_state` /
+    /// `update_state_sparse` with `animation: Some(spec)`). It addresses no
+    /// node — it scopes the *batch*: renderers that understand it animate
+    /// every prop change in the patches that follow using `spec`
+    /// (precedence: batch spec > node `.transition` default > none).
+    ///
+    /// Additive protocol: renderers that don't know the type ignore it and
+    /// snap — the rest of the batch is wire-identical to an unstamped one.
+    /// A cycle that produces no patches emits no prelude either (no stamp
+    /// without patches).
+    ///
+    /// `spec` is always a JSON object by the time it reaches the wire — the
+    /// engine normalizes a bare curve string (`"spring"`) into
+    /// `{"curve": "spring", "duration": 250}` and fills a missing
+    /// `duration` with 250. Unknown fields pass through untouched;
+    /// renderers own interpretation.
+    #[serde(rename_all = "camelCase")]
+    BatchAnimation {
+        /// Animation spec object, e.g. `{"curve": "spring", "duration": 250}`
+        spec: Value,
+    },
 }
 
 impl Patch {
@@ -347,6 +373,13 @@ impl Patch {
             id: node_id_str(id),
             before_id: before_id.map(node_id_str),
         }
+    }
+
+    /// Construct the batch-scoped animation prelude carrying an
+    /// already-normalized spec object. See [`Patch::BatchAnimation`] for
+    /// the batch-stamping contract.
+    pub fn batch_animation(spec: Value) -> Self {
+        Self::BatchAnimation { spec }
     }
 
     /// Emit an `Attach` patch targeting the `"root"` container. Used when

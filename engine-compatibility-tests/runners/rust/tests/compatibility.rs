@@ -66,6 +66,11 @@ struct Step {
     source: Option<String>,
     state_change: Option<StateChange>,
     dispatch_action: Option<DispatchAction>,
+    /// Optional batch-animation context for this step's state update
+    /// (Option D): a spec object or bare curve string, forwarded to
+    /// `update_state_with_animation` so a changed-state render cycle is
+    /// prefixed with a `batchAnimation` prelude.
+    animation: Option<Value>,
     expected_patches: Option<Vec<ExpectedPatch>>,
     expected_patch_count: Option<usize>,
     expected_patch_types: Option<Vec<String>>,
@@ -102,6 +107,12 @@ struct ExpectedPatch {
     absent_props: Option<Vec<String>>,
     name: Option<String>,
     value: Option<Value>,
+    /// Requires the matched patch's `value` to be EXPLICIT JSON `null` on
+    /// the wire. Needed because `"value": null` in a fixture deserializes to
+    /// the same `None` as omitting the key entirely (which matches ANY
+    /// value) — null contracts (e.g. `__anim.states` nulling its label on
+    /// fallback) are otherwise unassertable.
+    value_is_null: Option<bool>,
     #[allow(dead_code)]
     text: Option<String>,
     /// Accessibility semantics block on `create`/`setSemantics` patches.
@@ -112,6 +123,10 @@ struct ExpectedPatch {
     /// the wire; `false` requires it absent or false (the flag is
     /// skip-serialized when false, so absence is the non-animated wire form).
     transition: Option<bool>,
+    /// Batch-animation spec on `batchAnimation` patches. Matched as a
+    /// complete object (exact equality) — the fixture pins the normalized
+    /// wire spec, so an extra or missing field is a mismatch.
+    spec: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -291,6 +306,15 @@ fn matches_expected_patch(actual: &Value, expected: &ExpectedPatch) -> bool {
         }
     }
 
+    if expected.value_is_null == Some(true) {
+        // The key must be present AND carry explicit null — a missing key or
+        // any non-null value (e.g. a stale label object) is a mismatch.
+        match actual.get("value") {
+            Some(Value::Null) => {}
+            _ => return false,
+        }
+    }
+
     if let Some(transition) = expected.transition {
         let actual_flag = actual
             .get("transition")
@@ -298,6 +322,14 @@ fn matches_expected_patch(actual: &Value, expected: &ExpectedPatch) -> bool {
             .unwrap_or(false);
         if actual_flag != transition {
             return false;
+        }
+    }
+
+    if let Some(ref spec) = expected.spec {
+        // Exact object equality pins the complete normalized wire spec.
+        match actual.get("spec") {
+            Some(av) if json_values_equal(av, spec) => {}
+            _ => return false,
         }
     }
 
@@ -492,8 +524,13 @@ fn run_fixture(tc: &TestCase) {
                         }
                         *state_cell.lock().unwrap() = current_state.clone();
 
-                        // Notify engine
-                        engine.update_state(None, change.new_values.clone());
+                        // Notify engine, forwarding the step's optional
+                        // batch-animation context (Option D).
+                        engine.update_state_with_animation(
+                            None,
+                            change.new_values.clone(),
+                            step.animation.clone(),
+                        );
                     }
                 }
                 "dispatchAction" => {
@@ -505,11 +542,17 @@ fn run_fixture(tc: &TestCase) {
                         };
                         let _ = engine.dispatch_action(engine_action);
 
-                        // After action, sync state back and update engine
+                        // After action, sync state back and update engine,
+                        // stamping the update with the step's optional
+                        // batch-animation context (Option D).
                         let handler_state = state_cell.lock().unwrap().clone();
                         if handler_state != current_state {
                             current_state = handler_state;
-                            engine.update_state(None, current_state.clone());
+                            engine.update_state_with_animation(
+                                None,
+                                current_state.clone(),
+                                step.animation.clone(),
+                            );
                         }
                     }
                 }

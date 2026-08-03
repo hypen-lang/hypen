@@ -22,11 +22,16 @@ export interface IEngine {
    *               target the primary module set via `setModule`.
    * @param paths  Changed state paths (relative to the targeted module).
    * @param values Map of `path -> new value`.
+   * @param animation Optional transaction-scoped animation context (Option D
+   *               cheap subset): a spec object or bare curve token string.
+   *               When present, the engine stamps the resulting patch batch
+   *               with a leading `batchAnimation` patch. Omitted = unstamped.
    */
   updateStateSparse(
     scope: string | null,
     paths: string[],
-    values: Record<string, unknown>
+    values: Record<string, unknown>,
+    animation?: unknown
   ): void;
 }
 
@@ -662,6 +667,22 @@ export class HypenModuleInstance<T extends object = any> {
    * for anonymous modules (which back the engine's primary module slot).
    */
   private moduleKey: string = "";
+  /**
+   * Pending transaction-scoped animation stamp (Option D cheap subset).
+   *
+   * Set from `Action.animate` just before an action handler is invoked and
+   * consumed by the FIRST observable-state flush that reaches
+   * `updateStateSparse` afterwards — that flush passes the stamp's spec as
+   * the engine's `animation` argument and clears it, so any later flush in
+   * the same handler is unstamped. See the clearing rules where this is
+   * written.
+   *
+   * The spec is wrapped in a unique token object PER DISPATCH: all
+   * set/compare/clear operations use token identity, never spec value
+   * identity — two dispatches stamping the same curve string (`"spring"`)
+   * must not be able to clear each other's pending stamp.
+   */
+  private pendingAnimation: { spec: unknown } | null = null;
 
   constructor(
     engine: IEngine,
@@ -688,10 +709,17 @@ export class HypenModuleInstance<T extends object = any> {
     // the DSL.
     this.state = createObservableState<T>(definition.initialState as T & object, {
       onChange: (change: StateChange) => {
+        // Consume the pending transaction-animation stamp (Option D): the
+        // FIRST flush after an action handler starts carries it to the
+        // engine (which emits a leading batchAnimation patch), and it is
+        // cleared here so every subsequent flush is unstamped.
+        const pending = this.pendingAnimation;
+        this.pendingAnimation = null;
         this.engine.updateStateSparse(
           moduleKey || null,
           change.paths,
-          change.newValues
+          change.newValues,
+          pending ? pending.spec : undefined
         );
         this.stateChangeCallbacks.forEach(cb => cb());
         this.persistIfNeeded();
@@ -734,13 +762,68 @@ export class HypenModuleInstance<T extends object = any> {
           ? this.createGlobalContextAPI()
           : undefined;
 
-        // Use Result type for error handling
-        const result = await this.executeAction(actionName, handler, {
+        // Transaction-scoped animation (Option D cheap subset): the action's
+        // `animate` stamp becomes pending BEFORE the handler runs, so the
+        // first observable flush it produces is stamped. Wrapped in a fresh
+        // token object so clears compare by dispatch identity (see
+        // pendingAnimation).
+        const stamp = action.animate ?? null;
+        const token = stamp != null ? { spec: stamp } : null;
+        if (token) {
+          // Drain any PRE-QUEUED observable flush synchronously first (e.g.
+          // a `.bind` mutation earlier in this same task): those mutations
+          // predate this dispatch and must go out UNSTAMPED — and if they
+          // came from an earlier stamped dispatch in the same task, they
+          // flush here still carrying THAT dispatch's pending stamp.
+          (this.state as { __flushNow?: () => void }).__flushNow?.();
+          // Overwrite semantics: if an earlier dispatch's stamp is STILL
+          // pending here (its handler never mutated, so the drain above had
+          // nothing to flush), the LAST stamped dispatch wins — its spec
+          // replaces the unconsumed one.
+          this.pendingAnimation = token;
+        }
+
+        // Use Result type for error handling. Invoke WITHOUT awaiting yet:
+        // the handler's synchronous portion runs inside this call (its
+        // mutations schedule the observable flush microtask first), and the
+        // clear below must be queued AFTER that but BEFORE any awaited
+        // continuation of the handler resumes.
+        const resultPromise = this.executeAction(actionName, handler, {
           action: actionCtx,
           state: this.state,
           context: context!,
           dataSources: this.dataSourceAccessor,
         });
+
+        if (token) {
+          // Clearing rules for the pending stamp (all compares are TOKEN
+          // identity — another dispatch's stamp is never cleared here):
+          // 1. Consumed by the first flush (see the onChange callback) — a
+          //    handler that mutates synchronously stamps exactly one flush,
+          //    because that flush's microtask was queued during the handler
+          //    call, i.e. before this clear.
+          // 2. Cleared one microtask after the handler's SYNCHRONOUS portion
+          //    — so mutations after an `await` are unstamped: the awaited
+          //    continuation (and the flush it schedules) runs after this
+          //    microtask has already cleared the stamp.
+          // 3. A handler that never mutates schedules no flush, so this
+          //    clear (which also covers handler completion for the sync
+          //    case) leaves nothing pending.
+          queueMicrotask(() => {
+            if (this.pendingAnimation === token) {
+              this.pendingAnimation = null;
+            }
+          });
+        }
+
+        const result = await resultPromise;
+
+        // Belt-and-braces for handler completion (async handlers outlive the
+        // microtask above only via awaits, whose mutations must be unstamped
+        // anyway): never let this action's stamp leak past its own run.
+        if (token && this.pendingAnimation === token) {
+          this.pendingAnimation = null;
+        }
 
         if (!result.ok) {
           const shouldRethrow = await this.handleError(result.error, { actionName });

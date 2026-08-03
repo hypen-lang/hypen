@@ -47,6 +47,13 @@ export interface ApplicatorNode {
   name: string;
   arguments: ArgumentNode[];
   range: Range;
+  /**
+   * Components nested in an applicator children block, e.g. the
+   * `onState(...)` entries of `.states(@state.x) { onState(a).size(48) }`.
+   * Present (possibly empty) when parsed via WASM; the regex fallback
+   * parser cannot see applicator blocks and never sets it.
+   */
+  children?: ComponentNode[];
 }
 
 export interface ParseResult {
@@ -178,11 +185,19 @@ function convertWasmComponent(text: string, comp: WasmComponent): ComponentNode 
           range: { start: startPos, end: endPos },
         };
       });
-      return {
+      const applicatorNode: ApplicatorNode = {
         name: app.name,
         arguments: args,
         range: { start: blockStart, end: blockEnd },
       };
+      // Applicator children blocks (.states { onState(...) }) carry full
+      // component specifications — convert them so document-model consumers
+      // (diagnostics, references, future completion) see inside the block.
+      // Guard for stale WASM builds predating applicator children.
+      if (app.children && app.children.length > 0) {
+        applicatorNode.children = app.children.map(c => convertWasmComponent(text, c));
+      }
+      return applicatorNode;
     });
   }
 

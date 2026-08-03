@@ -34,6 +34,23 @@ type Patch struct {
 	// Carried even though Go renders nothing itself — dropping it here
 	// would silently strip exit animations from every Go-hosted app.
 	Transition bool `json:"transition,omitempty"`
+	// Spec carries the "batchAnimation" prelude's animation spec (Option D
+	// transaction-scoped animation): a patch batch whose first entry is
+	// {"type":"batchAnimation","spec":{...}} animates every prop change in
+	// the batch on animation-capable renderers. Like Transition, it is
+	// relayed even though Go renders nothing itself — dropping it here
+	// would strip batch animation from every Go-hosted app's remote
+	// clients.
+	//
+	// NOTE: this field is pure relay plumbing today. The Go host does not
+	// implement dispatch-side stamping — the `animate:` event argument is
+	// TS-host-only for now: Go strips the reserved "__hypenAnimate" payload
+	// key before handlers run (remote/session.go), and Go's state-sync path
+	// (NotifyStateChange → hypen_update_state) has no animation envelope,
+	// so a Go-hosted engine never emits a batchAnimation prelude. The field
+	// exists so that IF the engine ever produces one (or patches transit a
+	// Go relay), it survives the trip.
+	Spec map[string]any `json:"spec,omitempty"`
 }
 
 // Patch type constants
@@ -47,6 +64,9 @@ const (
 	PatchRemoveProp  = "removeProp"
 	PatchAttachEvent = "attachEvent"
 	PatchDetachEvent = "detachEvent"
+	// PatchBatchAnimation is the batch-scoped animation prelude — always
+	// the FIRST patch of a stamped batch; carries only Spec.
+	PatchBatchAnimation = "batchAnimation"
 )
 
 // IEngine interface for engine compatibility

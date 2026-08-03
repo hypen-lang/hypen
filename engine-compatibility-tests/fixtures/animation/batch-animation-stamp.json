@@ -1,0 +1,64 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "batch-animation-stamp",
+  "description": "A state update carrying an animation context (Option D transaction-scoped animation) stamps the resulting patch batch: batchAnimation is emitted FIRST with the normalized spec (bare curve string -> {curve, duration: 250}), then the SetProps. The stamp is consumed by that one cycle — a following unstamped update emits no batchAnimation.",
+  "category": "animation",
+  "priority": "P1",
+
+  "skip": {
+    "reason": "batchAnimation stamping not yet implemented (golang)",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Text(\"@{state.label}\")",
+    "initialState": { "label": "a" },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["label"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render is never stamped — no batchAnimation on a full render",
+      "action": "initialRender",
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["create", "insert"],
+      "forbiddenPatchTypes": ["batchAnimation"],
+      "expectedPatches": [
+        { "type": "create", "elementType": "Text", "props": { "0": "a" } },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "A stamped update emits batchAnimation FIRST (bare curve normalized to {curve, duration: 250}), then the SetProps",
+      "action": "updateState",
+      "animation": "spring",
+      "stateChange": {
+        "paths": ["label"],
+        "newValues": { "label": "b" }
+      },
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["batchAnimation", "setProp"],
+      "strictPatchOrder": true,
+      "expectedPatches": [
+        { "type": "batchAnimation", "spec": { "curve": "spring", "duration": 250 } },
+        { "type": "setProp", "name": "0", "value": "b" }
+      ]
+    },
+    {
+      "description": "The stamp is consumed by its cycle — the next unstamped update emits no batchAnimation",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["label"],
+        "newValues": { "label": "c" }
+      },
+      "expectedPatchCount": 1,
+      "expectedPatchTypes": ["setProp"],
+      "forbiddenPatchTypes": ["batchAnimation"],
+      "expectedPatches": [{ "type": "setProp", "name": "0", "value": "c" }]
+    }
+  ]
+}

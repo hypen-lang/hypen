@@ -70,7 +70,7 @@ Button("Hover Me")
   .color("#fff")
   .padding(10, 20)
   .borderRadius(4)
-  .transition("all 0.3s ease")
+  .transition(300, easeOut)
 ```
 
 **Rendered as:** `<button>`

@@ -3,7 +3,11 @@
  *
  * Injects a single <style> element (idempotent, guarded by id) that:
  *  - honours `prefers-reduced-motion: reduce` by disabling transitions,
- *    animations and smooth scrolling on Hypen-rendered nodes;
+ *    animations and smooth scrolling on Hypen-rendered nodes — EXCEPT nodes
+ *    carrying the `data-hypen-motion-essential` attribute, the DOM face of
+ *    the `.motion(essential)` opt-out (#149): the renderer stamps it when a
+ *    node's `__anim.motion` prop is `{essential: true}`, and those nodes
+ *    keep animating (their motion carries meaning);
  *  - renders a visible `:focus-visible` outline so keyboard users can see
  *    which element is focused;
  *  - keeps that focus indicator visible under `forced-colors: active`
@@ -18,7 +22,7 @@ const STYLE_ID = "hypen-a11y-styles";
 
 const A11Y_CSS = `
 @media (prefers-reduced-motion: reduce) {
-  [data-hypen-id] {
+  [data-hypen-id]:not([data-hypen-motion-essential]) {
     transition: none !important;
     animation: none !important;
     scroll-behavior: auto !important;

@@ -11,6 +11,15 @@ import kotlinx.serialization.json.*
 import java.util.concurrent.ConcurrentHashMap
 
 /**
+ * Reserved cross-boundary payload key TypeScript renderers use to carry an
+ * event applicator's `animate:` transaction-animation stamp (Option D)
+ * through `dispatchAction`. A renderer→host directive, never handler data:
+ * the Kotlin host strips it before module handlers run (Kotlin does not
+ * implement transaction stamping yet).
+ */
+internal const val RESERVED_ANIMATE_KEY = "__hypenAnimate"
+
+/**
  * Per-client data managed by HypenServer.
  */
 class ClientState(
@@ -375,7 +384,21 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
                 val actionName = msg["action"]?.jsonPrimitive?.contentOrNull
                     ?: msg["name"]?.jsonPrimitive?.contentOrNull
                     ?: return
-                val payload = msg["payload"]?.takeIf { it !is JsonNull }
+                // Strip the reserved transaction-animation stamp (Option D):
+                // TS renderers carry the `animate:` event argument across the
+                // dispatch boundary under "__hypenAnimate". It is a
+                // renderer→host directive, never handler data — the Kotlin
+                // host does not implement transaction stamping, and module
+                // handlers must never observe the key either way.
+                val payload = msg["payload"]
+                    ?.takeIf { it !is JsonNull }
+                    ?.let { raw ->
+                        if (raw is JsonObject && raw.containsKey(RESERVED_ANIMATE_KEY)) {
+                            JsonObject(raw.filterKeys { it != RESERVED_ANIMATE_KEY })
+                        } else {
+                            raw
+                        }
+                    }
 
                 val client = clients[connectionKey] ?: return
 

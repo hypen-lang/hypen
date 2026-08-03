@@ -636,6 +636,11 @@ impl TaffyState {
                 }
                 true
             }
+            // Batch-scoped animation prelude: addresses no node and never
+            // affects layout. The desktop renderer doesn't animate batch
+            // stamps yet — ignoring it snaps, which is the protocol's
+            // sanctioned degradation.
+            Patch::BatchAnimation { .. } => false,
         }
     }
 

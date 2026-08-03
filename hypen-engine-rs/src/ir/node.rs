@@ -28,6 +28,27 @@ pub enum Value {
     Action(String),
     /// Resource reference: @resources.heart
     Resource(String),
+    /// State-switched value, produced only by `.states { onState(...) }`
+    /// lowering (Option C) — never by the parser. The state value at `path`
+    /// is stringified (string as-is, number/bool via `to_string`) and picks
+    /// the matching case; a miss falls back to `default` (the node's static
+    /// base value for the key), and with no default the prop resolves to
+    /// *absent* — the key is omitted, exactly as if the prop were never set.
+    ///
+    /// Engine-internal: resolution always yields plain JSON (`cases` /
+    /// `default` values are already `serde_json::Value`), so resolved props
+    /// and every patch stay wire-identical to today — renderers never see
+    /// this variant. The serde derive only serves debug/IR serialization.
+    StateSwitch {
+        /// Bound state path driving the switch (e.g. `"cardState"`).
+        /// Registers in the dependency graph exactly like a state Binding.
+        path: String,
+        /// Pose label → lowered static value for this prop.
+        cases: IndexMap<String, serde_json::Value>,
+        /// The node's base value for this key, when it had a static one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<serde_json::Value>,
+    },
 }
 
 /// First-class IR node - distinguishes between regular elements and control flow constructs

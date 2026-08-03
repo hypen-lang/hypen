@@ -244,9 +244,24 @@ pub struct Patch {
     pub semantics_json: Option<String>,
 }
 
-impl From<InternalPatch> for Patch {
-    fn from(p: InternalPatch) -> Self {
-        match p {
+impl Patch {
+    /// Convert an engine patch into the flat FFI record, or `None` for
+    /// variants that don't cross the uniffi boundary.
+    ///
+    /// Call sites use `filter_map(Patch::from_internal)` so dropped variants
+    /// simply vanish from the batch handed to Kotlin/Swift.
+    fn from_internal(p: InternalPatch) -> Option<Self> {
+        Some(match p {
+            // DROPPED at this boundary: the batch-animation prelude (Option
+            // D cheap subset). Mobile renderers snap on batch-stamped
+            // updates — the same spec-sanctioned degradation as the Remove
+            // `transition` flag below, and with the same Remote-UI-relay
+            // caveat: a browser client served by a Kotlin/Swift-hosted app
+            // will not receive the stamp. Forwarding it means growing this
+            // flat record (a `spec_json` field), regenerating both binding
+            // sets, and threading it through each SDK's relay — deferred
+            // with the rest of the non-web animation work.
+            InternalPatch::BatchAnimation { .. } => return None,
             InternalPatch::Create {
                 id,
                 element_type,
@@ -405,7 +420,7 @@ impl From<InternalPatch> for Patch {
                 before_id,
                 semantics_json: None,
             },
-        }
+        })
     }
 }
 
@@ -578,7 +593,7 @@ impl HypenEngine {
         let ir_node = ast_to_ir_node(component);
         let patches = state.core.render_ir_node(&ir_node);
 
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().filter_map(Patch::from_internal).collect())
     }
 
     /// Update engine state with a JSON patch and re-render affected nodes.
@@ -604,12 +619,14 @@ impl HypenEngine {
             .map_err(|e| HypenError::StateError(e.to_string()))?;
 
         let scope = if scope.is_empty() { None } else { Some(scope) };
-        if !state.core.update_state(scope.as_deref(), patch) {
+        // No batch-animation context across the uniffi boundary: mobile
+        // snaps, and `Patch::from_internal` drops the prelude anyway.
+        if !state.core.update_state(scope.as_deref(), patch, None) {
             return Ok(Vec::new());
         }
 
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().filter_map(Patch::from_internal).collect())
     }
 
     /// Apply a sparse state update with explicit dotted path → value pairs.
@@ -643,15 +660,17 @@ impl HypenEngine {
             .map_err(|e| HypenError::StateError(e.to_string()))?;
 
         let scope = if scope.is_empty() { None } else { Some(scope) };
+        // No batch-animation context across the uniffi boundary: mobile
+        // snaps, and `Patch::from_internal` drops the prelude anyway.
         if !state
             .core
-            .update_state_sparse(scope.as_deref(), &paths, &values)
+            .update_state_sparse(scope.as_deref(), &paths, &values, None)
         {
             return Ok(Vec::new());
         }
 
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().filter_map(Patch::from_internal).collect())
     }
 
     /// Set module configuration
@@ -706,7 +725,7 @@ impl HypenEngine {
 
         state.core.set_context(&name, data);
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().filter_map(Patch::from_internal).collect())
     }
 
     /// Remove a data source context and re-render bound nodes.
@@ -721,7 +740,7 @@ impl HypenEngine {
 
         state.core.remove_context(&name);
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().filter_map(Patch::from_internal).collect())
     }
 
     /// Look up which named module owns an action.

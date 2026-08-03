@@ -13,6 +13,7 @@ import {
   type Disposable,
 } from "@hypen-space/core/disposable";
 import { frameworkLoggers } from "@hypen-space/core/logger";
+import { ACTION_ANIMATE_KEY } from "@hypen-space/core/types";
 import {
   type IEngine,
   getEngine,
@@ -25,6 +26,7 @@ import {
   setMeta,
 } from "../element-data.js";
 import { isInExitingSubtree } from "../anim.js";
+import { setAnimationCompleteAction } from "../anim-complete.js";
 
 const log = frameworkLoggers.events;
 
@@ -78,11 +80,22 @@ function toPlainObject(value: unknown): unknown {
 }
 
 /**
- * Extract action name and custom payload from an applicator value
+ * Extract action name and custom payload from an applicator value.
+ *
+ * The `animate:` named argument (transaction-scoped animation, Option D) is
+ * pulled OUT of the payload and returned as the distinct `animate` field —
+ * it stamps the dispatched action (`Action.animate`) and must never reach a
+ * module handler's payload. Both the token form (`animate: spring` → a bare
+ * string) and the object form (`animate: {curve: spring, duration: 300}`)
+ * arrive under the `"animate"` key of the applicator's argument object.
+ * ONLY that named-argument position is reserved: an `animate` key inside a
+ * POSITIONAL payload object (`.onClick("@a", {animate: false})` → arg "1")
+ * is user data and reaches the handler untouched.
  */
 function extractActionDetails(value: unknown): {
   actionName: string | null;
   payload: Record<string, unknown>;
+  animate?: unknown;
 } {
   // String format: "@actions.doSomething" or "@doSomething"
   if (typeof value === "string") {
@@ -112,8 +125,15 @@ function extractActionDetails(value: unknown): {
         }
       }
 
+      // Transaction-animation stamp: ONLY the applicator's own named
+      // `animate:` argument (the args object's `animate` key, before any
+      // positional-payload merging) is reserved. An `animate` key inside a
+      // merged positional payload object is user data, not a stamp.
+      const hasAnimate = Object.prototype.hasOwnProperty.call(plain, "animate");
+      const animate = hasAnimate ? plain["animate"] : undefined;
+
       for (const [key, val] of Object.entries(plain)) {
-        if (key !== "0") {
+        if (key !== "0" && !(hasAnimate && key === "animate")) {
           // If the key is numeric (like "1", "2") and the value is an object,
           // merge the object's keys into the payload directly.
           // This handles: .onClick("@actions.foo", { id: "123" })
@@ -127,12 +147,30 @@ function extractActionDetails(value: unknown): {
           }
         }
       }
+
+      if (hasAnimate) {
+        return { actionName, payload, animate };
+      }
     }
 
     return { actionName, payload };
   }
 
   return { actionName: null, payload: {} };
+}
+
+/**
+ * Attach a transaction-animation stamp to a dispatch payload under the
+ * reserved cross-boundary key (see `ACTION_ANIMATE_KEY` in core types).
+ * `BaseEngine.onAction` lifts it back out into `Action.animate`; module
+ * handlers never see the key. No-op (same payload object) without a stamp.
+ */
+function withAnimateStamp(
+  payload: Record<string, unknown>,
+  animate: unknown
+): Record<string, unknown> {
+  if (animate === undefined) return payload;
+  return { ...payload, [ACTION_ANIMATE_KEY]: animate };
 }
 
 /**
@@ -202,7 +240,7 @@ function createEventHandler(
 ): ApplicatorHandler {
   const actionMetaKey = `event:${eventType}`;
   return (element: HTMLElement, value: unknown) => {
-    const { actionName, payload: customPayload } = extractActionDetails(value);
+    const { actionName, payload: customPayload, animate } = extractActionDetails(value);
 
     if (!actionName) {
       log.warn(`${eventType} requires an action reference starting with @, got:`, value);
@@ -212,7 +250,7 @@ function createEventHandler(
     // Store the current action on the element; the persistent listener reads
     // it per event, so re-applying with a different action (e.g. a keyed-
     // reused node) replaces the dispatch target instead of stacking listeners.
-    setMeta(element, actionMetaKey, { actionName, customPayload });
+    setMeta(element, actionMetaKey, { actionName, customPayload, animate });
 
     const disposables = getElementDisposables(element);
 
@@ -230,10 +268,11 @@ function createEventHandler(
 
     // Create the event listener
     const listener = (event: Event) => {
-      const current = getMeta<{ actionName: string; customPayload: Record<string, unknown> }>(
-        element,
-        actionMetaKey,
-      );
+      const current = getMeta<{
+        actionName: string;
+        customPayload: Record<string, unknown>;
+        animate?: unknown;
+      }>(element, actionMetaKey);
       if (!current) return;
 
       // Exit-animating subtrees are visually leaving and their engine-side
@@ -268,7 +307,10 @@ function createEventHandler(
       const engine = getEngine(element);
       if (engine) {
         try {
-          engine.dispatchAction(current.actionName, payload);
+          engine.dispatchAction(
+            current.actionName,
+            withAnimateStamp(payload, current.animate)
+          );
         } catch (err) {
           log.error(`Error dispatching action "${current.actionName}":`, err);
         }
@@ -299,12 +341,12 @@ function createEventHandler(
  * the element has no engine.
  */
 export function triggerElementAction(element: HTMLElement, value: unknown): void {
-  const { actionName, payload } = extractActionDetails(value);
+  const { actionName, payload, animate } = extractActionDetails(value);
   if (!actionName) return;
   const engine = getEngine(element);
   if (!engine) return;
   try {
-    engine.dispatchAction(actionName, payload);
+    engine.dispatchAction(actionName, withAnimateStamp(payload, animate));
   } catch (err) {
     log.error(`Error dispatching action "${actionName}":`, err);
   }
@@ -315,7 +357,7 @@ export function triggerElementAction(element: HTMLElement, value: unknown): void
  */
 function createKeyHandler(defaultKey: string = "Enter"): ApplicatorHandler {
   return (element: HTMLElement, value: unknown) => {
-    const { actionName, payload: customPayload } = extractActionDetails(value);
+    const { actionName, payload: customPayload, animate } = extractActionDetails(value);
 
     if (!actionName) {
       log.warn(`onKey requires an action reference starting with @, got:`, value);
@@ -361,7 +403,7 @@ function createKeyHandler(defaultKey: string = "Enter"): ApplicatorHandler {
 
       const engine = getEngine(element);
       if (engine) {
-        engine.dispatchAction(actionName, payload);
+        engine.dispatchAction(actionName, withAnimateStamp(payload, animate));
       }
     };
 
@@ -377,7 +419,7 @@ function createKeyHandler(defaultKey: string = "Enter"): ApplicatorHandler {
  */
 function createLongClickHandler(thresholdMs: number = 500): ApplicatorHandler {
   return (element: HTMLElement, value: unknown) => {
-    const { actionName, payload: customPayload } = extractActionDetails(value);
+    const { actionName, payload: customPayload, animate } = extractActionDetails(value);
 
     if (!actionName) {
       log.warn(`onLongClick requires an action reference starting with @, got:`, value);
@@ -410,7 +452,7 @@ function createLongClickHandler(thresholdMs: number = 500): ApplicatorHandler {
 
         const engine = getEngine(element);
         if (engine) {
-          engine.dispatchAction(actionName, payload);
+          engine.dispatchAction(actionName, withAnimateStamp(payload, animate));
         }
 
         longClickTimer = null;
@@ -533,6 +575,20 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
   onMouseEnter: createEventHandler("mouseenter", { extractPayload: mousePayload }),
   onMouseLeave: createEventHandler("mouseleave", { extractPayload: mousePayload }),
   onHover: createEventHandler("mouseenter", { extractPayload: mousePayload }), // Alias for onMouseEnter
+
+  // Animation completion (Option F). Registered here so the event-applicator
+  // path (`/^on[A-Z]/`, aggregate arg merging) matches it, but unlike every
+  // other event it attaches NO DOM listener: it stores the action on the
+  // element, and the DomAnimator dispatches it when a playback settles
+  // naturally (see anim-complete.ts). A value without an action (e.g. the
+  // removeProp path merging the args away) clears the stored action.
+  onAnimationComplete: ((element: HTMLElement, value: unknown) => {
+    const { actionName, payload } = extractActionDetails(value);
+    setAnimationCompleteAction(
+      element,
+      actionName ? { actionName, customPayload: payload } : null
+    );
+  }) as ApplicatorHandler,
 
   // Two-way binding for .bind(@state.x)
   bind: ((element: HTMLElement, value: unknown) => {

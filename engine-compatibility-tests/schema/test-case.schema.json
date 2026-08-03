@@ -113,6 +113,10 @@
             "$ref": "action.schema.json",
             "description": "Action to dispatch (for dispatchAction action)"
           },
+          "animation": {
+            "type": ["object", "string"],
+            "description": "Optional batch-animation context for this step's state update (Option D transaction-scoped animation) — applies to updateState steps and to the state update a dispatchAction step's handler produces. Either a spec object (e.g. {\"curve\": \"spring\"}; a missing duration is filled with 250 engine-side) or a bare curve string (\"linear\"|\"easeIn\"|\"easeOut\"|\"easeInOut\"|\"spring\", normalized to {curve, duration: 250}). When the update changes state and emits patches, the engine prepends a batchAnimation patch as the batch's first entry."
+          },
           "expectedPatches": {
             "type": "array",
             "items": { "$ref": "patch.schema.json" },
@@ -132,6 +136,11 @@
             "type": "boolean",
             "default": false,
             "description": "When true, `expectedPatches` must match the emitted patches index-by-index (exact emission order) instead of structurally. Use for steps whose contract IS the ordering, e.g. the flagged-root-first deferred-remove protocol"
+          },
+          "forbiddenPatchTypes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Patch types that must NOT appear in this step's emitted patches (e.g. [\"create\", \"remove\"] to pin that an update reconciles in place)"
           },
           "forbiddenPatches": {
             "type": "array",

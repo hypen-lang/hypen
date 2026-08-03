@@ -398,28 +398,37 @@ class WasmEngine {
      * `scope` selects the target module:
      * - empty string / null / undefined → primary module set via [`set_module`](Self::set_module)
      * - any other string → named module registered via [`register_module`] (lowercased)
+     *
+     * `animation` is the optional batch-animation context (Option D cheap
+     * subset): a spec object (`{curve: "spring", ...}`) or a bare curve
+     * string (`"spring"`). Omitted / `undefined` / `null` → unstamped
+     * update, byte-identical to the pre-animation wire format. When the
+     * update changes state and the render cycle emits patches, the batch is
+     * prefixed with a `{"type": "batchAnimation", "spec": {...}}` prelude.
      * @param {string | null | undefined} scope
      * @param {any} state_patch
+     * @param {any | null} [animation]
      */
-    updateState(scope, state_patch) {
+    updateState(scope, state_patch, animation) {
         var ptr0 = isLikeNone(scope) ? 0 : passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmengine_updateState(this.__wbg_ptr, ptr0, len0, state_patch);
+        const ret = wasm.wasmengine_updateState(this.__wbg_ptr, ptr0, len0, state_patch, isLikeNone(animation) ? 0 : addToExternrefTable0(animation));
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
     }
     /**
      * Apply a sparse state update using explicit path-value pairs.
-     * See [`update_state`] for `scope` semantics.
+     * See [`update_state`] for `scope` and `animation` semantics.
      * @param {string | null | undefined} scope
      * @param {any} paths_js
      * @param {any} values_js
+     * @param {any | null} [animation]
      */
-    updateStateSparse(scope, paths_js, values_js) {
+    updateStateSparse(scope, paths_js, values_js, animation) {
         var ptr0 = isLikeNone(scope) ? 0 : passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len0 = WASM_VECTOR_LEN;
-        const ret = wasm.wasmengine_updateStateSparse(this.__wbg_ptr, ptr0, len0, paths_js, values_js);
+        const ret = wasm.wasmengine_updateStateSparse(this.__wbg_ptr, ptr0, len0, paths_js, values_js, isLikeNone(animation) ? 0 : addToExternrefTable0(animation));
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -1070,6 +1079,10 @@ function __wbg_get_imports() {
             table.set(offset + 1, null);
             table.set(offset + 2, true);
             table.set(offset + 3, false);
+        },
+        __wbindgen_object_is_undefined: function(arg0) {
+            const ret = arg0 === undefined;
+            return ret;
         },
     };
     return {

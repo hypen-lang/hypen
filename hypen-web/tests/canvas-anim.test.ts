@@ -942,6 +942,436 @@ describe("canvas tickless-host degradation", () => {
 });
 
 // ---------------------------------------------------------------------------
+// `.onAnimationComplete` completion events (Option F) — canvas twins of the
+// DOM firing-point tests in dom.renderer.anim.test.ts. Natural settles only:
+// the tick clock (or the exit timeout backbone) is the settle signal, and
+// interrupted / superseded / reduced-motion-skipped playbacks fire nothing.
+// ---------------------------------------------------------------------------
+
+describe("canvas `.onAnimationComplete` completion events (Option F)", () => {
+  const DONE = "onAnimationComplete.0";
+  const enterSpec = { presets: ["fade"], duration: 200, curve: "linear" };
+  const exitSpec = { presets: ["fade"], duration: 1000, curve: "linear" };
+
+  test("enter settling naturally dispatches { animation: 'enter' }", () => {
+    const { renderer, engine, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("toast", "column", { "__anim.enter": enterSpec, [DONE]: "@actions.animDone" }),
+      insert("root", "toast"),
+    ]);
+    advance(100); // mid-flight: nothing yet
+    expect(engine.dispatched.length).toBe(0);
+
+    advance(100); // t = 1 → the playback group settles naturally
+    expect(engine.dispatched).toEqual([
+      { name: "animDone", payload: { animation: "enter" } },
+    ]);
+  });
+
+  test("extra applicator args merge under the payload; completion fields win", () => {
+    const { renderer, engine, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("toast", "column", {
+        "__anim.enter": enterSpec,
+        [DONE]: "@actions.animDone",
+        "onAnimationComplete.id": "toast-1",
+      }),
+      insert("root", "toast"),
+    ]);
+    advance(250);
+    expect(engine.dispatched).toEqual([
+      { name: "animDone", payload: { id: "toast-1", animation: "enter" } },
+    ]);
+  });
+
+  test("no onAnimationComplete prop dispatches nothing on any settle", () => {
+    const { renderer, engine, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("toast", "column", { "__anim.enter": enterSpec, "__anim.exit": exitSpec }),
+      insert("root", "toast"),
+    ]);
+    advance(250); // enter settles
+    renderer.applyPatches([remove("toast", true)]);
+    advance(1100); // exit settles + finalizes
+
+    expect(renderer.getNode("toast")).toBeUndefined();
+    expect(engine.dispatched.length).toBe(0);
+  });
+
+  test("exit settling naturally dispatches { animation: 'exit' } just before finalize", () => {
+    const { renderer, engine, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("toast", "column", { "__anim.exit": exitSpec, [DONE]: "@actions.animDone" }),
+      insert("root", "toast"),
+    ]);
+
+    // Record whether the node was still alive at dispatch time (the "just
+    // before finalize" contract).
+    const aliveAtDispatch: boolean[] = [];
+    const record = engine.dispatchAction.bind(engine);
+    engine.dispatchAction = (name: string, payload?: any) => {
+      aliveAtDispatch.push(renderer.getNode("toast") !== undefined);
+      record(name, payload);
+    };
+
+    renderer.applyPatches([remove("toast", true)]);
+    advance(500); // mid-exit: nothing yet
+    expect(engine.dispatched.length).toBe(0);
+
+    advance(600); // past the settle window → dispatch, then finalize
+    expect(engine.dispatched).toEqual([
+      { name: "animDone", payload: { animation: "exit" } },
+    ]);
+    expect(aliveAtDispatch).toEqual([true]);
+    expect(renderer.getNode("toast")).toBeUndefined();
+  });
+
+  test("the timeout backbone settle also dispatches exit (natural, not interrupted)", async () => {
+    const { renderer, engine } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("toast", "column", {
+        "__anim.exit": { presets: ["fade"], duration: 40, curve: "linear" },
+        [DONE]: "@actions.animDone",
+      }),
+      insert("root", "toast"),
+    ]);
+    renderer.applyPatches([remove("toast", true)]);
+    // The fake clock never advances: only the real-time backbone
+    // (40 + 0 + 80 = 120ms) settles — the playback still ran its course.
+    await sleep(200);
+    expect(renderer.getNode("toast")).toBeUndefined();
+    expect(engine.dispatched).toEqual([
+      { name: "animDone", payload: { animation: "exit" } },
+    ]);
+  });
+
+  test("interrupted enter fires nothing; the superseding exit still fires", () => {
+    const { renderer, engine, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("toast", "column", {
+        "__anim.enter": enterSpec,
+        "__anim.exit": { presets: ["fade"], duration: 400, curve: "linear" },
+        [DONE]: "@actions.animDone",
+      }),
+      insert("root", "toast"),
+    ]);
+    advance(50); // enter mid-flight
+
+    // The exit replaces the enter's opacity animation — the enter's playback
+    // group is broken and must never report completion.
+    renderer.applyPatches([remove("toast", true)]);
+    expect(engine.dispatched.length).toBe(0);
+
+    advance(400); // exit settles + finalizes
+    expect(engine.dispatched).toEqual([
+      { name: "animDone", payload: { animation: "exit" } },
+    ]);
+    expect(renderer.getNode("toast")).toBeUndefined();
+  });
+
+  test("reduced-motion exit snap fires nothing", () => {
+    const { renderer, engine, animator } = createHarness();
+    animator.reducedMotionOverride = true;
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("toast", "column", { "__anim.exit": exitSpec, [DONE]: "@actions.animDone" }),
+      insert("root", "toast"),
+    ]);
+    renderer.applyPatches([remove("toast", true)]); // synchronous snap teardown
+    expect(renderer.getNode("toast")).toBeUndefined();
+    expect(engine.dispatched.length).toBe(0);
+  });
+
+  test("finite `.animate` preset completion dispatches the preset name", () => {
+    const { renderer, engine, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("alert", "column", {
+        "__anim.animate": { preset: "shake", duration: 400, repeat: 1, curve: "linear" },
+        [DONE]: "@actions.animDone",
+      }),
+      insert("root", "alert"),
+    ]);
+    advance(200); // mid-iteration: nothing
+    expect(engine.dispatched.length).toBe(0);
+
+    advance(250); // iterations exhausted → props restored + completion
+    expect(renderer.getNode("alert")!.props.translateX).toBeUndefined();
+    expect(engine.dispatched).toEqual([
+      { name: "animDone", payload: { animation: "shake" } },
+    ]);
+  });
+
+  test("looping presets never fire completion", () => {
+    const { renderer, engine, advance, animator } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("spinner", "column", {
+        "__anim.animate": { preset: "spin", duration: 800, repeat: "loop", curve: "linear" },
+        [DONE]: "@actions.animDone",
+      }),
+      insert("root", "spinner"),
+    ]);
+    advance(4000); // many iterations
+    expect(engine.dispatched.length).toBe(0);
+    expect(animator.hasActive()).toBe(true); // still looping
+  });
+
+  test("interrupting a finite preset (channel removed mid-flight) fires nothing", () => {
+    const { renderer, engine, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("alert", "column", {
+        "__anim.animate": { preset: "shake", duration: 400, repeat: 1, curve: "linear" },
+        [DONE]: "@actions.animDone",
+      }),
+      insert("root", "alert"),
+    ]);
+    advance(200);
+    renderer.applyPatches([removeProp("alert", "__anim.animate")]); // stop + restore
+    advance(500); // well past where the iteration would have exhausted
+    expect(engine.dispatched.length).toBe(0);
+  });
+
+  test("preset exhaustion on an exit-animating node fires nothing (dead engine-side); the exit still fires", () => {
+    const { renderer, engine, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("badge", "column", {
+        // translateX preset vs opacity exit: no prop conflict, so the
+        // ambient keeps ticking on the corpse and exhausts mid-exit.
+        "__anim.animate": { preset: "shake", duration: 100, repeat: 1, curve: "linear" },
+        "__anim.exit": exitSpec,
+        [DONE]: "@actions.animDone",
+      }),
+      insert("root", "badge"),
+    ]);
+    renderer.applyPatches([remove("badge", true)]);
+
+    advance(150); // shake exhausts while the node is exiting → nothing
+    expect(engine.dispatched.length).toBe(0);
+
+    advance(900); // the exit's own natural settle still reports
+    expect(engine.dispatched).toEqual([
+      { name: "animDone", payload: { animation: "exit" } },
+    ]);
+  });
+
+  describe("`.states` settle (tick clock)", () => {
+    const statesNodeProps = {
+      "__anim.transition": { duration: 200, curve: "linear" },
+      "__anim.states": { label: "collapsed" },
+      [DONE]: "@actions.animDone",
+    };
+    const statesLabel = (label: string): Patch =>
+      setProp("card", "__anim.states", { label });
+
+    test("a label change settles after duration+delay with the label in the payload", () => {
+      const { renderer, engine, advance, animator } = createHarness();
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", statesNodeProps),
+        insert("root", "card"),
+      ]);
+      // Create-time resolution is not a transition — nothing settles.
+      advance(300);
+      expect(engine.dispatched.length).toBe(0);
+
+      renderer.applyPatches([statesLabel("expanded")]);
+      // The window rides the tick clock, so it must keep the ticker armed
+      // even when every switched prop snapped (nothing else in flight).
+      expect(animator.hasActive()).toBe(true);
+      advance(100); // window open, not settled
+      expect(engine.dispatched.length).toBe(0);
+
+      advance(150); // past duration (200) + delay (0)
+      expect(engine.dispatched).toEqual([
+        { name: "animDone", payload: { animation: "states", state: "expanded" } },
+      ]);
+      expect(animator.hasActive()).toBe(false);
+    });
+
+    test("a superseding label change cancels the pending settle — only the last fires", () => {
+      const { renderer, engine, advance } = createHarness();
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", statesNodeProps),
+        insert("root", "card"),
+      ]);
+      renderer.applyPatches([statesLabel("expanded")]);
+      advance(50);
+      renderer.applyPatches([statesLabel("collapsed")]);
+
+      advance(400); // past both windows
+      expect(engine.dispatched).toEqual([
+        { name: "animDone", payload: { animation: "states", state: "collapsed" } },
+      ]);
+    });
+
+    test("re-resolving to the same label opens no new window and cancels nothing", () => {
+      const { renderer, engine, advance } = createHarness();
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", statesNodeProps),
+        insert("root", "card"),
+      ]);
+      renderer.applyPatches([statesLabel("expanded")]);
+      advance(50);
+      // Same label again (e.g. an unrelated re-resolve): NOT a pose switch.
+      renderer.applyPatches([statesLabel("expanded")]);
+
+      advance(200); // the ORIGINAL window (opened at t=0) fires exactly once
+      expect(engine.dispatched).toEqual([
+        { name: "animDone", payload: { animation: "states", state: "expanded" } },
+      ]);
+    });
+
+    test("falling back to the default pose (no matched label) fires nothing and cancels a pending window", () => {
+      const { renderer, engine, advance } = createHarness();
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", statesNodeProps),
+        insert("root", "card"),
+      ]);
+      renderer.applyPatches([statesLabel("expanded")]);
+      advance(50);
+      renderer.applyPatches([removeProp("card", "__anim.states")]);
+
+      advance(400);
+      expect(engine.dispatched.length).toBe(0);
+    });
+
+    test("a label change without a transition spec snaps and fires nothing", () => {
+      const { renderer, engine, advance, animator } = createHarness();
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", {
+          "__anim.states": { label: "collapsed" },
+          [DONE]: "@actions.animDone",
+        }),
+        insert("root", "card"),
+      ]);
+      renderer.applyPatches([statesLabel("expanded")]);
+      expect(animator.hasActive()).toBe(false); // no window opened
+      advance(400);
+      expect(engine.dispatched.length).toBe(0);
+    });
+
+    test("reduced motion snaps pose switches and fires nothing", () => {
+      const { renderer, engine, advance, animator } = createHarness();
+      animator.reducedMotionOverride = true;
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", statesNodeProps),
+        insert("root", "card"),
+      ]);
+      renderer.applyPatches([statesLabel("expanded")]);
+      advance(400);
+      expect(engine.dispatched.length).toBe(0);
+    });
+
+    test("a remove during the settle window fires nothing for the states transition", () => {
+      const { renderer, engine, advance } = createHarness();
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", statesNodeProps),
+        insert("root", "card"),
+      ]);
+      renderer.applyPatches([statesLabel("expanded")]);
+      renderer.applyPatches([remove("card")]);
+
+      advance(400);
+      expect(engine.dispatched.length).toBe(0);
+    });
+
+    test("wire-shape tolerance: `__anim.states` arriving as a Map still settles", () => {
+      const { renderer, engine, advance } = createHarness();
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", statesNodeProps),
+        insert("root", "card"),
+      ]);
+      renderer.applyPatches([
+        setProp("card", "__anim.states", new Map<string, any>([["label", "expanded"]])),
+      ]);
+
+      advance(250);
+      expect(engine.dispatched).toEqual([
+        { name: "animDone", payload: { animation: "states", state: "expanded" } },
+      ]);
+    });
+
+    test("a pose flip reconciled into a Router-detached (cached) subtree fires nothing", () => {
+      const { renderer, engine, advance, animator } = createHarness();
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", statesNodeProps),
+        insert("root", "card"),
+      ]);
+
+      // Route leaves: the engine detaches the subtree but deliberately keeps
+      // reconciling it — SetProps for the off-screen card still arrive. A
+      // detached node is never painted (ambient parity: "no writes, no dirty
+      // rects"), so a pose switch there owes no completion and must not arm
+      // the ticker.
+      renderer.applyPatches([{ type: "detach", id: "card" } as any]);
+      renderer.applyPatches([statesLabel("expanded")]);
+      expect(animator.hasActive()).toBe(false); // no window opened
+
+      advance(400);
+      expect(engine.dispatched.length).toBe(0);
+    });
+
+    test("a detach during the settle window suppresses the pending completion", () => {
+      const { renderer, engine, advance } = createHarness();
+      mountRoot(renderer);
+      renderer.applyPatches([
+        create("card", "column", statesNodeProps),
+        insert("root", "card"),
+      ]);
+
+      // Window opens while attached…
+      renderer.applyPatches([statesLabel("expanded")]);
+      advance(50);
+      // …then the route leaves mid-window: the entry survives but must fire
+      // nothing (re-checked at dispatch time in tick).
+      renderer.applyPatches([{ type: "detach", id: "card" } as any]);
+
+      advance(400);
+      expect(engine.dispatched.length).toBe(0);
+    });
+  });
+
+  test("`onAnimationComplete` never makes the node clickable or hit-test dispatchable", () => {
+    const { renderer, canvas, engine, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("toast", "column", {
+        width: 100,
+        height: 40,
+        "__anim.enter": enterSpec,
+        [DONE]: "@actions.animDone",
+      }),
+      insert("root", "toast"),
+    ]);
+    advance(250); // enter settles (one completion dispatch expected below)
+
+    const node = renderer.getNode("toast")!;
+    expect(node.clickable).toBe(false); // the event prop is not a pointer handler
+    synthesizeClick(canvas, 10, 10); // hit-test click dispatches nothing extra
+    expect(engine.dispatched).toEqual([
+      { name: "animDone", payload: { animation: "enter" } },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Ticker lifecycle (fake rAF)
 // ---------------------------------------------------------------------------
 
@@ -989,5 +1419,443 @@ describe("canvas animation ticker", () => {
       delete globals.requestAnimationFrame;
       delete globals.cancelAnimationFrame;
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Shared-element props (Option H) — canvas ignores them in v1
+// ---------------------------------------------------------------------------
+
+describe("canvas ignores shared-element props (Option H v1)", () => {
+  test("__anim.sharedKey / __anim.shared no-op: no crash, no animation state", () => {
+    const { renderer, animator } = createHarness();
+    mountRoot(renderer);
+
+    renderer.applyPatches([
+      create("a", "column", {
+        width: 100,
+        height: 50,
+        "__anim.sharedKey": "cover-42",
+        "__anim.shared": { duration: 350, curve: "spring" },
+      }),
+      insert("root", "a"),
+    ]);
+    expect(animator.hasActive()).toBe(false);
+    expect(renderer.getNode("a")!.props.width).toBe(100);
+
+    // Live re-resolution and channel updates route through setAnimProp and
+    // must fall through the channel switch untouched.
+    renderer.applyPatches([setProp("a", "__anim.sharedKey", "cover-7")]);
+    renderer.applyPatches([setProp("a", "__anim.shared", { duration: 200, curve: "linear" })]);
+    renderer.applyPatches([removeProp("a", "__anim.sharedKey")]);
+    renderer.applyPatches([removeProp("a", "__anim.shared")]);
+    expect(animator.hasActive()).toBe(false);
+
+    // The node keeps behaving like a plain node (removal included).
+    renderer.applyPatches([remove("a")]);
+    expect(renderer.getNode("a")).toBeUndefined();
+    expect(animator.hasActive()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// batchAnimation transaction stamps (Option D)
+// ---------------------------------------------------------------------------
+
+const batchAnim = (spec: any): Patch => ({ type: "batchAnimation", spec }) as any;
+
+describe("canvas batchAnimation transaction stamps", () => {
+  test("a stamped batch interpolates whitelisted props on a node WITHOUT __anim.transition", () => {
+    const { renderer, animator, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([create("a", "column", { width: 100 }), insert("root", "a")]);
+    const node = renderer.getNode("a")!;
+
+    renderer.applyPatches([
+      batchAnim({ curve: "linear", duration: 200 }),
+      setProp("a", "width", 200),
+    ]);
+
+    // Rewound to the previous value; the transaction spec drives the glide.
+    expect(node.props.width).toBe(100);
+    expect(animator.hasActive()).toBe(true);
+
+    advance(100); // t = 0.5, linear
+    expect(node.props.width).toBeCloseTo(150, 5);
+    advance(100);
+    expect(node.props.width).toBe(200);
+    expect(animator.hasActive()).toBe(false);
+  });
+
+  test("the transaction spec OVERRIDES a node's own .transition for the batch", () => {
+    const { renderer, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("b", "column", { width: 100, "__anim.transition": { duration: 100, curve: "linear" } }),
+      insert("root", "b"),
+    ]);
+    const node = renderer.getNode("b")!;
+
+    renderer.applyPatches([
+      batchAnim({ curve: "linear", duration: 400 }),
+      setProp("b", "width", 200),
+    ]);
+
+    // With the node's own 100ms spec this would have settled by now; the
+    // 400ms transaction spec is still mid-flight at t = 0.25.
+    advance(100);
+    expect(node.props.width).toBeCloseTo(125, 5);
+    advance(300);
+    expect(node.props.width).toBe(200);
+  });
+
+  test("the spec never outlives its batch — the next unstamped batch snaps a spec-less node", () => {
+    const { renderer, animator } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([create("c", "column", { width: 100 }), insert("root", "c")]);
+
+    // A stamped batch with no whitelisted SetProps: the spec must be dropped
+    // at flush, not carried into the next batch.
+    renderer.applyPatches([batchAnim({ curve: "linear", duration: 200 })]);
+
+    renderer.applyPatches([setProp("c", "width", 300)]);
+    expect(renderer.getNode("c")!.props.width).toBe(300); // snap
+    expect(animator.hasActive()).toBe(false);
+  });
+
+  test("after a stamped batch settles, later unstamped changes on the same node snap again", () => {
+    const { renderer, animator, advance } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([create("d", "column", { width: 100 }), insert("root", "d")]);
+    const node = renderer.getNode("d")!;
+
+    renderer.applyPatches([
+      batchAnim({ curve: "linear", duration: 200 }),
+      setProp("d", "width", 200),
+    ]);
+    advance(200);
+    expect(node.props.width).toBe(200);
+
+    renderer.applyPatches([setProp("d", "width", 400)]);
+    expect(node.props.width).toBe(400); // no spec of its own → snap
+    expect(animator.hasActive()).toBe(false);
+  });
+
+  test("reduced motion ignores stamps entirely (snap)", () => {
+    const { renderer, animator } = createHarness();
+    animator.reducedMotionOverride = true;
+    mountRoot(renderer);
+    renderer.applyPatches([create("e", "column", { width: 100 }), insert("root", "e")]);
+
+    renderer.applyPatches([
+      batchAnim({ curve: "linear", duration: 200 }),
+      setProp("e", "width", 200),
+    ]);
+    expect(renderer.getNode("e")!.props.width).toBe(200);
+    expect(animator.hasActive()).toBe(false);
+  });
+
+  test("a malformed spec degrades to an unstamped batch (snap)", () => {
+    const { renderer, animator } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([create("f", "column", { width: 100 }), insert("root", "f")]);
+
+    renderer.applyPatches([
+      batchAnim({ curve: "not-a-curve" }),
+      setProp("f", "width", 200),
+    ]);
+    expect(renderer.getNode("f")!.props.width).toBe(200);
+    expect(animator.hasActive()).toBe(false);
+  });
+
+  test("a mid-array batchAnimation is NOT a stamp (first-patch contract): later SetProps snap", () => {
+    const { renderer, animator } = createHarness();
+    mountRoot(renderer);
+    renderer.applyPatches([create("g", "column", { width: 100 }), insert("root", "g")]);
+
+    renderer.applyPatches([
+      setProp("g", "height", 50),
+      batchAnim({ curve: "linear", duration: 200 }),
+      setProp("g", "width", 200), // AFTER the buried patch — still snaps
+    ]);
+    expect(renderer.getNode("g")!.props.width).toBe(200);
+    expect(animator.hasActive()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Same-batch create + SetProp: the enter owns a freshly-created node
+// ---------------------------------------------------------------------------
+
+describe("canvas same-batch create + SetProp", () => {
+  test("a same-batch SetProp on an enter-driven prop lands the engine's value (enter settle target uncorrupted)", () => {
+    const { renderer, advance } = createHarness();
+    mountRoot(renderer);
+
+    renderer.applyPatches([
+      create("n", "column", {
+        opacity: 0.4,
+        "__anim.enter": { presets: ["fade"], duration: 100, curve: "linear" },
+        "__anim.transition": { duration: 200, curve: "linear" },
+      }),
+      insert("root", "n"),
+      // Same batch as the create: must NOT start a `.transition` glide — the
+      // rewind-to-previous write would poison the enter's base/restore.
+      setProp("n", "opacity", 0.9),
+    ]);
+    const node = renderer.getNode("n")!;
+
+    // The enter's hidden pose is showing after flush (not a rewound 0.4).
+    expect(node.props.opacity).toBe(0);
+
+    advance(50); // mid-enter: fading toward the ENGINE's value
+    expect(node.props.opacity as number).toBeCloseTo(0.45, 5);
+
+    advance(60); // settle: enter restores the engine's 0.9, not the stale 0.4
+    expect(node.props.opacity).toBe(0.9);
+  });
+
+  test("a stamped same-batch SetProp on a freshly-created node snaps (DOM parity: nothing to glide from pre-paint)", () => {
+    const { renderer, animator } = createHarness();
+    mountRoot(renderer);
+
+    renderer.applyPatches([
+      batchAnim({ curve: "linear", duration: 200 }),
+      create("m", "column", { width: 100 }),
+      insert("root", "m"),
+      setProp("m", "width", 250),
+    ]);
+    expect(renderer.getNode("m")!.props.width).toBe(250);
+    expect(animator.hasActive()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Scrub channels (Option G) — canvas ignores all four props in v1
+// ---------------------------------------------------------------------------
+
+describe("canvas scrub channels (Option G, v1 no-op)", () => {
+  test("all four __anim.scrub* props are ignored: no playback, no listener, no engine traffic", () => {
+    const { renderer, animator, engine, advance } = createHarness();
+    mountRoot(renderer);
+
+    const scrubProps = {
+      "__anim.scrub": {
+        from: "closed",
+        to: "open",
+        source: "gesture",
+        axis: "y",
+        over: [0, 400],
+        rubberBand: 0.4,
+      },
+      "__anim.scrubSettle": { curve: "spring", duration: 300 },
+      "__anim.scrubBind": "sheetPhase",
+      "__anim.scrubPoses": { "translateY.0": [400, 0] },
+    };
+
+    renderer.applyPatches([
+      create("sheet", "column", { width: 100, height: 50, ...scrubProps }),
+      insert("root", "sheet"),
+    ]);
+    expect(animator.hasActive()).toBe(false);
+
+    // Live channel updates and removals are equally inert.
+    renderer.applyPatches([
+      setProp("sheet", "__anim.scrub", { ...scrubProps["__anim.scrub"], over: [0, 200] }),
+      removeProp("sheet", "__anim.scrubPoses"),
+    ]);
+    advance(50);
+    expect(animator.hasActive()).toBe(false);
+    expect(engine.dispatched.length).toBe(0);
+
+    // The node itself renders and lays out normally.
+    const node = renderer.getNode("sheet")!;
+    expect(node.props.width).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `.motion(essential)` reduced-motion opt-out (#149)
+// ---------------------------------------------------------------------------
+
+describe("canvas `.motion(essential)` reduced-motion opt-out (#149)", () => {
+  const ESSENTIAL = { "__anim.motion": { essential: true } };
+
+  test("essential transition glides under reduced motion; non-essential snaps", () => {
+    const { renderer, animator, advance } = createHarness();
+    animator.reducedMotionOverride = true;
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("e", "column", { width: 100, "__anim.transition": LINEAR_TRANSITION, ...ESSENTIAL }),
+      create("p", "column", { width: 100, "__anim.transition": LINEAR_TRANSITION }),
+      insert("root", "e"),
+      insert("root", "p"),
+    ]);
+
+    renderer.applyPatches([setProp("e", "width", 200), setProp("p", "width", 200)]);
+    // Essential: interpolating. Non-essential: already snapped to the target.
+    expect(renderer.getNode("p")!.props.width).toBe(200);
+    expect(renderer.getNode("e")!.props.width).toBe(100);
+    expect(animator.hasActive()).toBe(true);
+
+    advance(100);
+    expect(renderer.getNode("e")!.props.width).toBeCloseTo(150, 5);
+    advance(100);
+    expect(renderer.getNode("e")!.props.width).toBe(200);
+    expect(animator.hasActive()).toBe(false);
+  });
+
+  test("essential enter plays under reduced motion; non-essential skips", () => {
+    const { renderer, animator, advance } = createHarness();
+    animator.reducedMotionOverride = true;
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("e", "column", {
+        "__anim.enter": { presets: ["fade"], duration: 200, curve: "linear" },
+        ...ESSENTIAL,
+      }),
+      create("p", "column", {
+        "__anim.enter": { presets: ["fade"], duration: 200, curve: "linear" },
+      }),
+      insert("root", "e"),
+      insert("root", "p"),
+    ]);
+    // Essential: hidden pose landed, enter in flight. Non-essential: skipped.
+    expect(renderer.getNode("e")!.props.opacity).toBe(0);
+    expect(renderer.getNode("p")!.props.opacity).toBeUndefined();
+
+    advance(100);
+    expect(renderer.getNode("e")!.props.opacity).toBeCloseTo(0.5, 5);
+    advance(100);
+    expect(renderer.getNode("e")!.props.opacity).toBeUndefined(); // original restored
+    expect(animator.hasActive()).toBe(false);
+  });
+
+  test("essential exit defers under reduced motion; non-essential tears down synchronously", () => {
+    const { renderer, animator, advance } = createHarness();
+    animator.reducedMotionOverride = true;
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("e", "column", {
+        "__anim.exit": { presets: ["fade"], duration: 200, curve: "linear" },
+        ...ESSENTIAL,
+      }),
+      create("p", "column", {
+        "__anim.exit": { presets: ["fade"], duration: 200, curve: "linear" },
+      }),
+      insert("root", "e"),
+      insert("root", "p"),
+    ]);
+
+    renderer.applyPatches([remove("p", true)]);
+    expect(renderer.getNode("p")).toBeUndefined(); // snap: immediate teardown
+
+    renderer.applyPatches([remove("e", true)]);
+    const node = renderer.getNode("e")!;
+    expect(node.exiting).toBe(true); // deferred: exit playback owns teardown
+    advance(100);
+    expect(node.props.opacity).toBeCloseTo(0.5, 5);
+    advance(150); // past settle
+    expect(renderer.getNode("e")).toBeUndefined();
+    expect(animator.hasActive()).toBe(false);
+  });
+
+  test("essential `.animate` preset runs under reduced motion; non-essential never starts", () => {
+    const { renderer, animator, advance } = createHarness();
+    animator.reducedMotionOverride = true;
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("e", "column", {
+        "__anim.animate": { preset: "pulse", duration: 1000, repeat: "loop", curve: "linear" },
+        ...ESSENTIAL,
+      }),
+      create("p", "column", {
+        "__anim.animate": { preset: "pulse", duration: 1000, repeat: "loop", curve: "linear" },
+      }),
+      insert("root", "e"),
+      insert("root", "p"),
+    ]);
+    expect(animator.hasActive()).toBe(true); // the essential ambient ticks
+
+    advance(500); // mid-iteration: opacity dipped
+    expect(renderer.getNode("e")!.props.opacity).toBeCloseTo(0.5, 5);
+    expect(renderer.getNode("p")!.props.opacity).toBeUndefined();
+  });
+
+  test("transaction stamps glide essential nodes under reduced motion; others snap", () => {
+    const { renderer, animator, advance } = createHarness();
+    animator.reducedMotionOverride = true;
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("e", "column", { width: 100, ...ESSENTIAL }),
+      create("p", "column", { width: 100 }),
+      insert("root", "e"),
+      insert("root", "p"),
+    ]);
+
+    renderer.applyPatches([
+      { type: "batchAnimation", spec: { curve: "linear", duration: 200 } } as any,
+      setProp("e", "width", 200),
+      setProp("p", "width", 200),
+    ]);
+    expect(renderer.getNode("p")!.props.width).toBe(200); // snap
+    expect(renderer.getNode("e")!.props.width).toBe(100); // gliding
+    advance(100);
+    expect(renderer.getNode("e")!.props.width).toBeCloseTo(150, 5);
+    advance(100);
+    expect(renderer.getNode("e")!.props.width).toBe(200);
+  });
+
+  test("flag removal under reduced motion snaps the node's in-flight work (reverts)", () => {
+    const { renderer, animator, advance } = createHarness();
+    animator.reducedMotionOverride = true;
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("e", "column", {
+        width: 100,
+        "__anim.transition": LINEAR_TRANSITION,
+        "__anim.animate": { preset: "pulse", duration: 1000, repeat: "loop", curve: "linear" },
+        ...ESSENTIAL,
+      }),
+      insert("root", "e"),
+    ]);
+    renderer.applyPatches([setProp("e", "width", 200)]);
+    advance(100);
+    const node = renderer.getNode("e")!;
+    expect(node.props.width).toBeCloseTo(150, 5);
+    expect(animator.hasActive()).toBe(true);
+
+    // Un-stamping the flag re-applies reduced motion to the node NOW: the
+    // glide lands its target, the ambient stops and restores (DOM parity
+    // with the stylesheet kill re-applying on attribute removal).
+    renderer.applyPatches([removeProp("e", "__anim.motion")]);
+    expect(node.props.width).toBe(200);
+    expect(node.props.opacity).toBeUndefined(); // ambient restored
+    expect(animator.hasActive()).toBe(false);
+
+    // And later work snaps like any non-essential node.
+    renderer.applyPatches([setProp("e", "width", 300)]);
+    expect(node.props.width).toBe(300);
+    expect(animator.hasActive()).toBe(false);
+  });
+
+  test("`.states` settle fires the completion for essential nodes under reduced motion", () => {
+    const { renderer, animator, engine, advance } = createHarness();
+    animator.reducedMotionOverride = true;
+    mountRoot(renderer);
+    renderer.applyPatches([
+      create("card", "column", {
+        "__anim.transition": { duration: 100, curve: "linear" },
+        "__anim.states": { label: "collapsed" },
+        onAnimationComplete: "@actions.animDone",
+        ...ESSENTIAL,
+      }),
+      insert("root", "card"),
+    ]);
+    renderer.applyPatches([setProp("card", "__anim.states", { label: "expanded" })]);
+    advance(150);
+    expect(engine.dispatched).toEqual([
+      { name: "animDone", payload: { animation: "states", state: "expanded" } },
+    ]);
   });
 });

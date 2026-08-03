@@ -240,6 +240,11 @@ impl Tree {
                 self.parent_by_child.insert(id.clone(), parent_id.clone());
                 self.clear_detached(id);
             }
+            // Batch-scoped animation prelude: batch metadata, not a node
+            // op — nothing to record in the tree. The desktop renderer
+            // doesn't animate batch stamps yet, so it snaps (the
+            // protocol's sanctioned degradation for unaware renderers).
+            Patch::BatchAnimation { .. } => {}
         }
     }
 

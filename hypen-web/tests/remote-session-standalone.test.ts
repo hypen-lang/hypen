@@ -150,6 +150,83 @@ function makeInlineRouterHost(engine: BaseEngine): SessionHost {
   };
 }
 
+/**
+ * initialTree accumulation must DROP `batchAnimation` preludes: the stamp's
+ * wire contract scopes it to exactly ONE batch (first patch), and the
+ * session concatenates every pre-ready render batch (initial tree + any
+ * onCreated re-render) into a single initialTree array — a surviving
+ * prelude would over-scope onto patches from other batches.
+ */
+class StampingFakeEngine extends BaseEngine {
+  private renderCb: ((patches: unknown[]) => void) | null = null;
+
+  async init(): Promise<void> {
+    const self = this;
+    this.wasmEngine = new Proxy(
+      {},
+      {
+        get(_t, prop: string) {
+          if (prop === "setRenderCallback") {
+            return (cb: (patches: unknown[]) => void) => {
+              self.renderCb = cb;
+            };
+          }
+          if (prop === "renderSource") {
+            return () => {
+              // Two stamped batches accumulate into one initialTree array.
+              self.renderCb?.([
+                { type: "batchAnimation", spec: { curve: "spring", duration: 250 } },
+                { type: "create", id: "n1", elementType: "Text", props: {} },
+                { type: "insert", parentId: "root", id: "n1" },
+              ]);
+              self.renderCb?.([
+                { type: "batchAnimation", spec: { curve: "linear", duration: 100 } },
+                { type: "setProp", id: "n1", name: "opacity", value: 1 },
+              ]);
+            };
+          }
+          if (prop === "discoverRouters") {
+            return () => [];
+          }
+          return () => undefined;
+        },
+      }
+    );
+    this.initialized = true;
+  }
+  protected unwrapForWasm<T>(value: T): T {
+    return value;
+  }
+}
+
+describe("RemoteSession initialTree accumulation", () => {
+  it("strips batchAnimation preludes from accumulated initial batches", async () => {
+    const engine = new StampingFakeEngine();
+    const host = makeInlineRouterHost(engine);
+    host.ui = 'Text("hi")';
+    const transport = new AsyncQueueTransport();
+    const session = new RemoteSession(host, transport, { helloGraceMs: null });
+
+    await session.receive({ type: "hello" } as never);
+    await session.ready;
+
+    // Drain the outgoing queue and find initialTree.
+    const messages: any[] = [];
+    transport.close();
+    for await (const msg of transport.stream()) {
+      messages.push(msg);
+    }
+    const initial = messages.find((m) => m.type === "initialTree");
+    expect(initial).toBeDefined();
+
+    const types = initial.patches.map((p: any) => p.type);
+    // The real content of BOTH batches survived…
+    expect(types).toEqual(["create", "insert", "setProp"]);
+    // …but no prelude did (mid-array stamps are contract violations).
+    expect(types.includes("batchAnimation")).toBe(false);
+  });
+});
+
 describe("RemoteSession inline router (no app registry)", () => {
   it("installs @router.push for an inline Router even with app:null", async () => {
     const engine = new RouterFakeEngine();

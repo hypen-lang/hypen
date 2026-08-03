@@ -138,7 +138,7 @@ class CompatibilityTest {
                     "actions" -> runActionTest(testCase)
                     "lifecycle" -> runLifecycleTest(testCase)
                     "state" -> runStateTest(testCase)
-                    "rendering", "reconciliation", "control-flow" -> {
+                    "rendering", "reconciliation", "control-flow", "animation" -> {
                         // These require a full engine implementation
                         println("Skipped: Test category '${testCase.category}' requires full engine (parser/renderer)")
                     }

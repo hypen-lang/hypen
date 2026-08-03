@@ -192,6 +192,7 @@ fn test_sparse_state_update_flow() {
             "user.preferences.theme": "dark",
             "user.preferences.language": "en"
         }),
+        animation: None,
     };
 
     let json = serde_json::to_string(&update).unwrap();

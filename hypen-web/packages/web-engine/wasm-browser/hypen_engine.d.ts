@@ -212,13 +212,20 @@ export class WasmEngine {
      * `scope` selects the target module:
      * - empty string / null / undefined → primary module set via [`set_module`](Self::set_module)
      * - any other string → named module registered via [`register_module`] (lowercased)
+     *
+     * `animation` is the optional batch-animation context (Option D cheap
+     * subset): a spec object (`{curve: "spring", ...}`) or a bare curve
+     * string (`"spring"`). Omitted / `undefined` / `null` → unstamped
+     * update, byte-identical to the pre-animation wire format. When the
+     * update changes state and the render cycle emits patches, the batch is
+     * prefixed with a `{"type": "batchAnimation", "spec": {...}}` prelude.
      */
-    updateState(scope: string | null | undefined, state_patch: any): void;
+    updateState(scope: string | null | undefined, state_patch: any, animation?: any | null): void;
     /**
      * Apply a sparse state update using explicit path-value pairs.
-     * See [`update_state`] for `scope` semantics.
+     * See [`update_state`] for `scope` and `animation` semantics.
      */
-    updateStateSparse(scope: string | null | undefined, paths_js: any, values_js: any): void;
+    updateStateSparse(scope: string | null | undefined, paths_js: any, values_js: any, animation?: any | null): void;
     /**
      * Validate that the engine is in a consistent state.
      */
@@ -349,8 +356,8 @@ export interface InitOutput {
     readonly wasmengine_setModule: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => [number, number];
     readonly wasmengine_setRenderCallback: (a: number, b: any) => void;
     readonly wasmengine_treeSize: (a: number) => number;
-    readonly wasmengine_updateState: (a: number, b: number, c: number, d: any) => [number, number];
-    readonly wasmengine_updateStateSparse: (a: number, b: number, c: number, d: any, e: any) => [number, number];
+    readonly wasmengine_updateState: (a: number, b: number, c: number, d: any, e: number) => [number, number];
+    readonly wasmengine_updateStateSparse: (a: number, b: number, c: number, d: any, e: any, f: number) => [number, number];
     readonly wasmengine_validate: (a: number) => any;
     readonly wasmengine_renderSource: (a: number, b: number, c: number) => [number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;

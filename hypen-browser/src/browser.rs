@@ -732,6 +732,7 @@ fn summarize_patches(patches: &[Patch]) -> String {
             Patch::Detach { .. } => "Detach",
             Patch::Attach { .. } => "Attach",
             Patch::SetSemantics { .. } => "SetSemantics",
+            Patch::BatchAnimation { .. } => "BatchAnimation",
         };
         *counts.entry(kind).or_default() += 1;
     }
@@ -1039,6 +1040,10 @@ fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec
                 before_id: before_id.map(|b| prefix_id(prefix, &b)),
             }
         }
+        // Batch-scoped animation prelude: carries no node ids, so the
+        // namespacing rewrite has nothing to touch — pass it through
+        // untouched at the head of its batch.
+        p @ Patch::BatchAnimation { .. } => p,
     }
 }
 

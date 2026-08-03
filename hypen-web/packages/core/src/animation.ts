@@ -37,6 +37,66 @@ export const ANIM_EXIT_PROP = "__anim.exit";
 export const ANIM_LAYOUT_PROP = "__anim.layout";
 /** `.animate(preset, ...)` → `{ preset, duration, repeat, curve, delay? }`. */
 export const ANIM_PROP_ANIMATE = "__anim.animate";
+/**
+ * `.motion(essential)` → `{ essential: true }` (#149 reduced-motion opt-out).
+ * Marks the rare animation that carries meaning (a progress indicator, a
+ * status pulse): animation-aware renderers exempt the node from their
+ * reduced-motion snap paths — enters play, exits defer, presets run,
+ * transitions glide — while every unmarked node keeps snapping. Renderers
+ * that ignore the prop lose nothing (they snap everything, as before).
+ */
+export const ANIM_MOTION_PROP = "__anim.motion";
+/**
+ * `.states(...)` → `{ label: "<matched label>" }` (Option C/F). Synthesized by
+ * the engine as a StateSwitch over the pose labels themselves (default null),
+ * so the active label re-resolves — and reaches renderers as an ordinary
+ * SetProp — whenever the driving state path changes pose. Renderers use it to
+ * time the states-settle window and attach the label to `.onAnimationComplete`
+ * payloads (`{ animation: "states", state: "<label>" }`); renderers that
+ * ignore it lose nothing.
+ */
+export const ANIM_STATES_PROP = "__anim.states";
+/**
+ * `.sharedElement(key, ...)` identity half (Option H) → the RESOLVED key
+ * string (e.g. `"cover-42"`). Emitted on `create` and re-resolved as an
+ * ordinary `setProp` when the driving state changes. Renderers use it to
+ * match an outgoing node to an incoming one across a navigation batch; the
+ * engine knows nothing about geometry — matching, measuring, and the FLIP
+ * are entirely renderer-side. Renderers that ignore it lose nothing
+ * (sanctioned degradation: plain navigation).
+ */
+export const ANIM_SHARED_KEY_PROP = "__anim.sharedKey";
+/**
+ * `.sharedElement(...)` timing half (Option H) → `{ duration, curve, delay? }`
+ * (engine-filled defaults: 350ms spring). The incoming (target) node's spec
+ * times the shared-element FLIP playback.
+ */
+export const ANIM_SHARED_PROP = "__anim.shared";
+
+/**
+ * `.scrub(...)` source spec (Option G) →
+ * `{ from, to, source, axis, over: [p0, p1], rubberBand, of? }`. `over` is
+ * the DIRECTED input range `[inputAtProgress0, inputAtProgress1]` — an
+ * upward-opening sheet uses `[0, -400]`. Renderer-resident: the per-frame
+ * loop never touches the engine.
+ */
+export const ANIM_SCRUB_PROP = "__anim.scrub";
+/** `.settle(...)` timing half (Option G) → `{ curve, duration }`. */
+export const ANIM_SCRUB_SETTLE_PROP = "__anim.scrubSettle";
+/**
+ * `.settle(bind: @state.x)` write target (Option G) → the dotted state path
+ * string. The winning pose LABEL is dispatched through the exact `.bind`
+ * channel (`__hypen_bind { path, value }`) when the settle arrives.
+ */
+export const ANIM_SCRUB_BIND_PROP = "__anim.scrubBind";
+/**
+ * Materialized pose endpoints (Option G) →
+ * `{ "<propKey>": [fromValue, toValue], ... }` — one entry per prop key the
+ * from- or to-pose overrides, endpoints resolved at engine lowering (pose
+ * override, else the node's static base default). This is what the renderer
+ * interpolates between per frame.
+ */
+export const ANIM_SCRUB_POSES_PROP = "__anim.scrubPoses";
 
 // ============================================================================
 // VOCABULARY
@@ -418,6 +478,17 @@ export type LayoutSpec = {
   delay?: number;
 };
 
+/**
+ * `__anim.shared` — shared-element FLIP timing (Option H). Same shape as
+ * {@link LayoutSpec}; carried alongside `__anim.sharedKey`, which supplies
+ * the identity the renderer matches across a navigation batch.
+ */
+export type SharedSpec = {
+  duration: number;
+  curve: AnimCurve;
+  delay?: number;
+};
+
 /** `__anim.animate` — ambient preset timeline playback (Option E). */
 export type AnimateSpec = {
   preset: AnimatePreset;
@@ -582,10 +653,304 @@ const parseAnimate = (value: unknown): AnimateSpec | null => {
 };
 
 /**
+ * Parse an `__anim.states` channel value to its active pose label. Defensive
+ * like the channel parsers: anything that isn't an object (or JSON-stringified
+ * object) with a string `label` degrades to `null` — "no matched label", the
+ * same as the engine's default-pose resolution.
+ */
+export function parseStatesLabel(value: unknown): string | null {
+  const obj = channelObject(value);
+  if (!obj) return null;
+  return typeof obj.label === "string" ? obj.label : null;
+}
+
+/**
+ * Parse an `__anim.motion` channel value to its essential flag. Defensive
+ * like the channel parsers: only an object (or JSON-stringified object)
+ * whose `essential` field is exactly `true` opts the node out of reduced
+ * motion — anything else degrades to `false`, the default snap behavior.
+ */
+export function parseMotionEssential(value: unknown): boolean {
+  const obj = channelObject(value);
+  if (!obj) return false;
+  return obj.essential === true;
+}
+
+/**
+ * Parse an `__anim.sharedKey` channel value to its resolved identity key.
+ * Defensive: anything that isn't a nonempty string degrades to `null` — no
+ * identity, the node never participates in shared-element matching (silent
+ * skip, the spec-sanctioned degradation).
+ */
+export function parseSharedKey(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Parse an `__anim.shared` channel value into a {@link SharedSpec}.
+ * Defensive like the other channel parsers: a malformed value degrades to
+ * `null` (no timing → no shared-element playback; the navigation snaps).
+ */
+export function parseSharedSpec(value: unknown): SharedSpec | null {
+  const obj = channelObject(value);
+  if (!obj) return null;
+  return parseTiming(obj);
+}
+
+// ============================================================================
+// SCRUB BINDINGS (Option G — renderer-resident continuous input)
+// ============================================================================
+
+export type ScrubSource = "gesture" | "scroll";
+export type ScrubAxis = "x" | "y";
+
+/** Closed source vocabulary — every new source is five renderer implementations. */
+export const SCRUB_SOURCES: readonly ScrubSource[] = ["gesture", "scroll"];
+export const SCRUB_AXES: readonly ScrubAxis[] = ["x", "y"];
+
+/** `__anim.scrub` — the source spec. See {@link ANIM_SCRUB_PROP}. */
+export type ScrubSpec = {
+  /** Pose label at progress 0. */
+  from: string;
+  /** Pose label at progress 1. */
+  to: string;
+  source: ScrubSource;
+  axis: ScrubAxis;
+  /**
+   * Directed input range `[inputAtProgress0, inputAtProgress1]` in px of
+   * gesture travel / scroll offset. Direction matters; endpoints are finite
+   * and non-equal by engine validation.
+   */
+  over: [number, number];
+  /** Resistance factor 0..=1 applied beyond the range (0 = hard clamp). */
+  rubberBand: number;
+  /** Named scroll container (scroll source only). */
+  of?: string;
+};
+
+/** `__anim.scrubSettle` — release animation timing. */
+export type ScrubSettleSpec = {
+  curve: AnimCurve;
+  duration: number;
+};
+
+/**
+ * `__anim.scrubPoses` — materialized `[fromValue, toValue]` endpoints per
+ * pose-overridden prop key (full engine prop keys, e.g. `"translateY.0"`).
+ */
+export type ScrubPoses = Record<string, [unknown, unknown]>;
+
+/**
+ * Parse an `__anim.scrub` channel value. Defensive like the other channel
+ * parsers: the engine always emits every required field (defaults filled at
+ * lowering), so a missing/invalid one marks the channel malformed → `null`
+ * (the node degrades to plain `.states` behavior). A missing/invalid
+ * `rubberBand` alone degrades to the 0.4 default rather than voiding the
+ * channel (it only shapes overshoot feel).
+ */
+export function parseScrubSpec(value: unknown): ScrubSpec | null {
+  const obj = channelObject(value);
+  if (!obj) return null;
+  const { from, to, source, axis, over } = obj;
+  if (typeof from !== "string" || from.length === 0) return null;
+  if (typeof to !== "string" || to.length === 0) return null;
+  if (!(SCRUB_SOURCES as readonly string[]).includes(source as string)) return null;
+  if (!(SCRUB_AXES as readonly string[]).includes(axis as string)) return null;
+  if (
+    !Array.isArray(over) ||
+    over.length !== 2 ||
+    typeof over[0] !== "number" ||
+    typeof over[1] !== "number" ||
+    !Number.isFinite(over[0]) ||
+    !Number.isFinite(over[1]) ||
+    over[0] === over[1]
+  ) {
+    return null;
+  }
+  const rubberBand =
+    typeof obj.rubberBand === "number" && Number.isFinite(obj.rubberBand)
+      ? Math.min(1, Math.max(0, obj.rubberBand))
+      : 0.4;
+  const spec: ScrubSpec = {
+    from,
+    to,
+    source: source as ScrubSource,
+    axis: axis as ScrubAxis,
+    over: [over[0], over[1]],
+    rubberBand,
+  };
+  if (typeof obj.of === "string" && obj.of.length > 0 && spec.source === "scroll") {
+    spec.of = obj.of;
+  }
+  return spec;
+}
+
+/**
+ * Parse an `__anim.scrubSettle` channel value (`{curve, duration}` — the
+ * shared timing core, no delay in this channel).
+ */
+export function parseScrubSettle(value: unknown): ScrubSettleSpec | null {
+  const obj = channelObject(value);
+  if (!obj) return null;
+  if (!isDuration(obj.duration) || !isCurve(obj.curve)) return null;
+  return { curve: obj.curve, duration: obj.duration };
+}
+
+/**
+ * Parse an `__anim.scrubBind` channel value to its dotted state path.
+ * Anything but a nonempty string degrades to `null` — no write target, the
+ * scrub cannot settle-write and the renderer must not activate it.
+ */
+export function parseScrubBind(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+/**
+ * Parse an `__anim.scrubPoses` channel value. Entries whose value is not a
+ * two-element array are dropped; an empty (or non-object) map degrades to
+ * `null` — nothing to interpolate, the scrub is inert.
+ */
+export function parseScrubPoses(value: unknown): ScrubPoses | null {
+  const obj = channelObject(value);
+  if (!obj) return null;
+  const poses: ScrubPoses = {};
+  let count = 0;
+  for (const [key, entry] of Object.entries(obj)) {
+    if (Array.isArray(entry) && entry.length === 2) {
+      poses[key] = [entry[0], entry[1]];
+      count += 1;
+    }
+  }
+  return count > 0 ? poses : null;
+}
+
+/**
+ * Map raw input travel to scrub progress (Option G, normative formula):
+ * `p = (travel - over[0]) / (over[1] - over[0])` — correct for any `over`
+ * direction — then rubber-banded beyond `[0, 1]`:
+ * `p' = bound + (p - bound) * rubberBand`.
+ */
+export function scrubProgress(
+  travel: number,
+  over: readonly [number, number],
+  rubberBand: number
+): number {
+  const p = (travel - over[0]) / (over[1] - over[0]);
+  if (p < 0) return p * rubberBand;
+  if (p > 1) return 1 + (p - 1) * rubberBand;
+  return p;
+}
+
+/**
+ * Resolve an engine prop key (`"translateY.0"`, `"backgroundColor"`) to its
+ * animatable base prop, or `null` when it is variant-scoped
+ * (`"width@md.0"`, `"color:hover"`) or off the whitelist. The scrubbed-pose
+ * interpolation and the transaction glide share this rule.
+ */
+export function animatableBaseProp(name: string): string | null {
+  const dot = name.indexOf(".");
+  const base = dot === -1 ? name : name.slice(0, dot);
+  if (base.includes("@") || base.includes(":")) return null;
+  return base in ANIMATABLE_PROPS ? base : null;
+}
+
+// ============================================================================
+// COLOR INTERPOLATION (shared by scrub + non-CSS renderers)
+// ============================================================================
+
+/** An RGBA color: 0-255 channels, 0-1 alpha. */
+export type RgbaColor = [number, number, number, number];
+
+/**
+ * Small named-color table for the DSL's bare color tokens (`color(blue)`).
+ * Anything not listed (and not hex / rgb()) is not interpolatable — the
+ * consumer snaps, the sanctioned degradation.
+ */
+const NAMED_COLORS: Record<string, RgbaColor> = {
+  black: [0, 0, 0, 1],
+  white: [255, 255, 255, 1],
+  red: [255, 0, 0, 1],
+  green: [0, 128, 0, 1],
+  blue: [0, 0, 255, 1],
+  yellow: [255, 255, 0, 1],
+  orange: [255, 165, 0, 1],
+  purple: [128, 0, 128, 1],
+  pink: [255, 192, 203, 1],
+  gray: [128, 128, 128, 1],
+  grey: [128, 128, 128, 1],
+  cyan: [0, 255, 255, 1],
+  magenta: [255, 0, 255, 1],
+  teal: [0, 128, 128, 1],
+  navy: [0, 0, 128, 1],
+  silver: [192, 192, 192, 1],
+  maroon: [128, 0, 0, 1],
+  olive: [128, 128, 0, 1],
+  lime: [0, 255, 0, 1],
+  transparent: [0, 0, 0, 0],
+};
+
+/** Parse `#rgb[a]` / `#rrggbb[aa]` / `rgb()` / `rgba()` / basic named colors. */
+export function parseColorValue(value: unknown): RgbaColor | null {
+  if (typeof value !== "string") return null;
+  const raw = value.trim().toLowerCase();
+  if (raw in NAMED_COLORS) return [...NAMED_COLORS[raw]!] as RgbaColor;
+  if (raw.startsWith("#")) {
+    const hex = raw.slice(1);
+    if (!/^[0-9a-f]+$/.test(hex)) return null;
+    if (hex.length === 3 || hex.length === 4) {
+      const r = parseInt(hex[0]! + hex[0]!, 16);
+      const g = parseInt(hex[1]! + hex[1]!, 16);
+      const b = parseInt(hex[2]! + hex[2]!, 16);
+      const a = hex.length === 4 ? parseInt(hex[3]! + hex[3]!, 16) / 255 : 1;
+      return [r, g, b, a];
+    }
+    if (hex.length === 6 || hex.length === 8) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      const a = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1;
+      return [r, g, b, a];
+    }
+    return null;
+  }
+  const fn = raw.match(/^rgba?\(([^)]+)\)$/);
+  if (fn) {
+    const parts = fn[1]!.split(",").map((p) => parseFloat(p.trim()));
+    if (parts.length < 3 || parts.some((p) => !Number.isFinite(p))) return null;
+    const [r, g, b] = parts;
+    const a = parts.length >= 4 ? parts[3]! : 1;
+    return [r!, g!, b!, a];
+  }
+  return null;
+}
+
+const clamp01 = (v: number): number => (v < 0 ? 0 : v > 1 ? 1 : v);
+
+/**
+ * Interpolate two RGBA colors at `t` (unclamped — overshoot curves may pass
+ * `t` outside `[0,1]`; each CHANNEL clamps, matching the "clamp the result
+ * of interpolation, not `t`" rule) and format as an `rgba()` string.
+ */
+export function interpolateColor(
+  from: RgbaColor,
+  to: RgbaColor,
+  t: number
+): string {
+  const mix = (a: number, b: number): number => a + (b - a) * t;
+  const r = Math.round(Math.min(255, Math.max(0, mix(from[0], to[0]))));
+  const g = Math.round(Math.min(255, Math.max(0, mix(from[1], to[1]))));
+  const b = Math.round(Math.min(255, Math.max(0, mix(from[2], to[2]))));
+  const a = clamp01(mix(from[3], to[3]));
+  return `rgba(${r}, ${g}, ${b}, ${Math.round(a * 1000) / 1000})`;
+}
+
+/**
  * Parse a node's `__anim.*` props into typed channel specs. Defensive by
  * contract: malformed input never throws — each channel validates
  * independently and degrades to `null` (snap), so one bad channel can't
  * poison the others.
+ * (`__anim.states` is deliberately not part of {@link NodeAnimSpecs} — it is
+ * a label feed, not a playback channel; parse it with {@link parseStatesLabel}.)
  */
 export function parseAnimProps(
   props: Record<string, unknown> | null | undefined

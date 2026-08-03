@@ -29,7 +29,8 @@ export type Patch = {
     | "detachEvent"
     | "detach"
     | "attach"
-    | "setSemantics";
+    | "setSemantics"
+    | "batchAnimation";
   id?: string;
   elementType?: string;
   props?: Record<string, any>;
@@ -60,6 +61,20 @@ export type Patch = {
    * that don't understand the flag — removal is immediate (sanctioned snap).
    */
   transition?: boolean;
+  /**
+   * On `batchAnimation` (Option D cheap subset — transaction-scoped
+   * animation): the normalized animation spec object, e.g.
+   * `{ curve: "spring", duration: 250 }`. A `batchAnimation` patch is
+   * emitted as the FIRST patch of a render cycle whose triggering state
+   * update carried an animation context (`updateState` /
+   * `updateStateSparse` with the optional `animation` argument). It
+   * addresses no node — it scopes the *batch*: renderers that understand
+   * it animate every whitelisted prop change in the patches that follow
+   * using this spec (precedence: batch spec > node `.transition` default >
+   * snap). Renderers that don't know the type ignore it and snap — the
+   * rest of the batch is wire-identical to an unstamped one.
+   */
+  spec?: any;
 };
 
 /**
@@ -184,7 +199,30 @@ export type Action = {
   name: string;
   payload?: any;
   sender?: string;
+  /**
+   * Transaction-scoped animation stamp (Option D cheap subset): the
+   * `animate:` argument of the event applicator that dispatched this action
+   * (`.onClick(@actions.toggle, animate: spring)`) — either a bare curve
+   * token string or a `{ curve, duration, ... }` spec object. Carried as a
+   * DISTINCT field, never inside `payload`: the renderer extracts it from
+   * the applicator args before dispatch (crossing the WASM boundary under
+   * {@link ACTION_ANIMATE_KEY}) and `BaseEngine.onAction` lifts it back out,
+   * so module handlers never see it in their payload. The SDK's module
+   * runtime consumes it as the pending animation for the FIRST state flush
+   * the handler produces (see `HypenModuleInstance`).
+   */
+  animate?: any;
 };
+
+/**
+ * Reserved payload key that carries an event's `animate:` stamp across the
+ * engine dispatch boundary. `dispatchAction(name, payload)` is the only
+ * channel through the WASM engine, so renderers smuggle the stamp inside the
+ * payload under this key; `BaseEngine.onAction` strips it back out into
+ * `Action.animate` before any handler sees the payload. Handlers therefore
+ * never observe this key — it exists only on the wire.
+ */
+export const ACTION_ANIMATE_KEY = "__hypenAnimate";
 
 export type RenderCallback = (patches: Patch[]) => void;
 export type ActionHandler = (action: Action) => void | Promise<void>;

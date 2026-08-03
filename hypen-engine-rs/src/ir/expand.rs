@@ -166,7 +166,49 @@ fn process_applicators(
     props: &mut Props,
     element_type: &str,
 ) {
+    // `.states { onState(...) }` is collected here but applied only AFTER
+    // every other applicator has merged into props: pose lowering captures
+    // the node's *final* base value per overridden key as the switch default,
+    // so a `.cornerRadius(4)` later in the chain still wins as the base.
+    let mut states_applicators: Vec<&hypen_parser::ApplicatorSpecification> = Vec::new();
+    // `.scrub`/`.settle` (Option G) are likewise deferred, and apply strictly
+    // AFTER the states end-phase below: their cross-validation reads the pose
+    // labels `.states` collects. Interception here also guarantees neither
+    // ever lowers to a `scrub.<idx>`/`settle.<idx>` prop.
+    let mut scrub_applicators: Vec<&hypen_parser::ApplicatorSpecification> = Vec::new();
+    let mut settle_applicators: Vec<&hypen_parser::ApplicatorSpecification> = Vec::new();
+
     for applicator in applicators {
+        if applicator.name == crate::ir::anim::STATES_APPLICATOR {
+            states_applicators.push(applicator);
+            continue;
+        }
+        if applicator.name == crate::ir::anim::SCRUB_APPLICATOR {
+            scrub_applicators.push(applicator);
+            continue;
+        }
+        if applicator.name == crate::ir::anim::SETTLE_APPLICATOR {
+            settle_applicators.push(applicator);
+            continue;
+        }
+
+        // The parser accepts a children block on ANY applicator
+        // (`.name(...) { ... }`), but only `.states` consumes one. Every
+        // other path below (tw/bind/anim/variant-map/generic) ignores
+        // `applicator.children`, so a block here — e.g. a SwiftUI-style
+        // `Card().theme(dark) { Text("hi") }` where the body was meant as
+        // component children — would silently vanish. Warn loudly instead.
+        if !applicator.children.is_empty() {
+            crate::log_warn!(
+                crate::logger::LogScope::Engine,
+                ".{}: children block ignored — only .states consumes a block; \
+                 if these were meant as UI children, place the block before \
+                 the applicator chain (Component {{ ... }}.{}(...))",
+                applicator.name,
+                applicator.name
+            );
+        }
+
         // .tw(classes) → expand Tailwind to individual CSS props
         if applicator.name == "tw" {
             if let Some(arg) = applicator.arguments.arguments.first() {
@@ -219,11 +261,12 @@ fn process_applicators(
             continue;
         }
 
-        // .transition/.enter/.exit/.layout/.animate → lower into the
+        // .transition/.enter/.exit/.layout/.animate/.motion → lower into the
         // reserved "__anim.*" prop channel (one JSON object per channel;
         // renderers that don't understand it ignore the prop and snap). The
         // original applicator never becomes a `<name>.<idx>` prop — an
-        // `.animate` with an unknown preset lowers to nothing at all. Must
+        // `.animate` with an unknown preset (or a `.motion` with anything
+        // but `essential`) lowers to nothing at all. Must
         // run BEFORE the variant-map branch below so an animation map
         // argument isn't misread as variant props. The legacy web-only
         // string form `.transition("opacity 0.3s ease")` (single positional
@@ -243,6 +286,43 @@ fn process_applicators(
                 }
                 continue;
             }
+        }
+
+        // .sharedElement(<key>, ...) → Option H shared-element identity.
+        // Splits into TWO reserved props: "__anim.sharedKey" carries the raw
+        // key through the standard parser-value conversion — UNLIKE every
+        // other animation argument the key may bind ("cover-@{item.id}"),
+        // identity is data, so it resolves per render and re-resolves as
+        // SetProp on state change — while "__anim.shared" is the static
+        // timing object (defaults filled at lowering). A missing/empty/
+        // non-string-ish key warns and omits BOTH props; either way the
+        // applicator is consumed (never a "sharedElement.0" prop).
+        if crate::ir::anim::is_shared_element_applicator(&applicator.name) {
+            if let Some((raw_key, spec)) = crate::ir::anim::lower_shared_element(applicator) {
+                let key_value = parser_value_to_ir(raw_key);
+                match key_value {
+                    Value::Static(serde_json::Value::String(_))
+                    | Value::Binding(_)
+                    | Value::TemplateString { .. } => {
+                        props.insert(
+                            crate::ir::anim::ANIM_SHARED_KEY_PROP.to_string(),
+                            key_value,
+                        );
+                        props.insert(
+                            crate::ir::anim::ANIM_SHARED_PROP.to_string(),
+                            Value::Static(spec),
+                        );
+                    }
+                    other => {
+                        crate::log_warn!(
+                            crate::logger::LogScope::Engine,
+                            ".sharedElement: key must resolve to a string or binding, got {:?}; applicator ignored",
+                            other
+                        );
+                    }
+                }
+            }
+            continue;
         }
 
         // Value-map variant form: .padding({ default: 8, md: 16, hover: "x" })
@@ -304,6 +384,326 @@ fn process_applicators(
             }
         }
     }
+
+    // Deferred `.states` application — base values above are now final.
+    // Only the first valid `.states` applies; extras warn and are dropped.
+    let mut applied = false;
+    for applicator in states_applicators {
+        if applied {
+            crate::log_warn!(
+                crate::logger::LogScope::Engine,
+                ".states: only one .states applicator is supported per node; extra ignored"
+            );
+            continue;
+        }
+        applied = apply_states_applicator(applicator, props, element_type);
+    }
+
+    // Deferred `.scrub`/`.settle` application (Option G) — runs after the
+    // states phase so the pose-label cross-validation sees the collected
+    // labels (via the "__anim.states" switch the states phase inserts).
+    apply_scrub_applicators(&scrub_applicators, &settle_applicators, props);
+}
+
+/// Apply the node's `.scrub`/`.settle` pair (Option G) to its final props.
+///
+/// Success inserts FOUR static props — `"__anim.scrub"`,
+/// `"__anim.scrubSettle"`, `"__anim.scrubBind"`, `"__anim.scrubPoses"` (see
+/// `ir::anim`'s Option G section for the wire shapes). Any hard violation —
+/// invalid `.scrub`
+/// arguments, missing/invalid `.settle` or its `bind:`, no `.states` block
+/// on the node, or a `from:`/`to:` label no pose declares — warns ONCE
+/// naming the reason and inserts NOTHING: the node degrades to plain
+/// `.states` behavior. A `.settle` without a `.scrub` warns and is ignored.
+fn apply_scrub_applicators(
+    scrubs: &[&hypen_parser::ApplicatorSpecification],
+    settles: &[&hypen_parser::ApplicatorSpecification],
+    props: &mut Props,
+) {
+    use crate::ir::anim;
+    use crate::logger::LogScope;
+
+    if scrubs.is_empty() {
+        if !settles.is_empty() {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".settle: no .scrub on this node; applicator ignored"
+            );
+        }
+        return;
+    }
+    if scrubs.len() > 1 {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".scrub: only one .scrub applicator is supported per node; extras ignored"
+        );
+    }
+    if settles.len() > 1 {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".settle: only one .settle applicator is supported per node; extras ignored"
+        );
+    }
+
+    // ONE warn naming the reason, then omit ALL scrub-related props.
+    let omit = |reason: &str| {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".scrub: {}; scrub omitted (node keeps plain .states behavior)",
+            reason
+        );
+    };
+
+    let scrub = match anim::collect_scrub(scrubs[0]) {
+        Ok(spec) => spec,
+        Err(reason) => return omit(&reason),
+    };
+    let Some(settle_applicator) = settles.first() else {
+        return omit("a .settle(bind: @state.…) must accompany .scrub");
+    };
+    let settle = match anim::collect_settle(settle_applicator) {
+        Ok(spec) => spec,
+        Err(reason) => return omit(&reason),
+    };
+
+    // Cross-validate against the node's collected `.states` pose labels —
+    // the "__anim.states" switch is inserted iff a valid `.states` applied,
+    // and its cases are exactly the pose labels.
+    let (states_path, labels): (String, Vec<String>) = match props.get(anim::ANIM_STATES_PROP) {
+        Some(Value::StateSwitch { path, cases, .. }) => {
+            (path.clone(), cases.keys().cloned().collect())
+        }
+        _ => {
+            return omit("the node carries no .states block whose poses scrub could interpolate")
+        }
+    };
+    for (field, label) in [("from", &scrub.from), ("to", &scrub.to)] {
+        if !labels.iter().any(|l| l == label) {
+            return omit(&format!(
+                "{}: '{}' is not one of the node's .states labels ({})",
+                field,
+                label,
+                labels.join("|")
+            ));
+        }
+    }
+
+    // Materialize the pose ENDPOINT values the renderer interpolates between
+    // ("__anim.scrubPoses"). The states phase already turned every
+    // pose-overridden prop key into a StateSwitch driven by the same state
+    // path — reuse those switches: for each key the from- OR to-pose
+    // overrides, both endpoints resolve as pose override, else the node's
+    // static base default (the switch default). A key resolvable on only one
+    // end cannot interpolate — warn and skip it (the pose switch itself
+    // still flips it, it just snaps under scrub).
+    let mut pose_map = serde_json::Map::new();
+    for (key, value) in props.iter() {
+        if key == anim::ANIM_STATES_PROP {
+            continue;
+        }
+        let Value::StateSwitch {
+            path,
+            cases,
+            default,
+        } = value
+        else {
+            continue;
+        };
+        if path != &states_path {
+            continue;
+        }
+        if !cases.contains_key(&scrub.from) && !cases.contains_key(&scrub.to) {
+            continue; // overridden only by uninvolved poses
+        }
+        let from_value = cases.get(&scrub.from).or(default.as_ref());
+        let to_value = cases.get(&scrub.to).or(default.as_ref());
+        match (from_value, to_value) {
+            (Some(from), Some(to)) => {
+                pose_map.insert(
+                    key.clone(),
+                    serde_json::Value::Array(vec![from.clone(), to.clone()]),
+                );
+            }
+            _ => {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".scrub: prop '{}' resolves on only one of the from/to poses (no pose override or static base default for the other end); excluded from scrub interpolation",
+                    key
+                );
+            }
+        }
+    }
+
+    props.insert(
+        anim::ANIM_SCRUB_PROP.to_string(),
+        Value::Static(anim::scrub_spec_json(&scrub)),
+    );
+    props.insert(
+        anim::ANIM_SCRUB_SETTLE_PROP.to_string(),
+        Value::Static(anim::settle_spec_json(&settle)),
+    );
+    props.insert(
+        anim::ANIM_SCRUB_BIND_PROP.to_string(),
+        Value::Static(serde_json::Value::String(settle.bind)),
+    );
+    props.insert(
+        anim::ANIM_SCRUB_POSES_PROP.to_string(),
+        Value::Static(serde_json::Value::Object(pose_map)),
+    );
+}
+
+/// Apply one `.states(...) { onState(label)... }` applicator to a node's
+/// final props (Option C). Returns `false` when the applicator was ignored
+/// entirely (already warned in [`crate::ir::anim::collect_states`]).
+///
+/// Each pose's applicators are lowered through the ordinary
+/// [`process_applicators`] machinery (so `.tw`, directional forms and
+/// variant maps all work per-state) minus the pose exclusions: animation
+/// applicators, `.bind`, and `on[A-Z]*` event applicators. Every prop key
+/// any pose overrides becomes a [`Value::StateSwitch`]; the node also gains
+/// a synthesized `__anim.transition` scoped to the animatable overridden
+/// props (an explicit `.transition` on the node wins) and the
+/// `__anim.states` active-label prop.
+fn apply_states_applicator(
+    applicator: &hypen_parser::ApplicatorSpecification,
+    props: &mut Props,
+    element_type: &str,
+) -> bool {
+    use crate::ir::anim;
+    use crate::logger::LogScope;
+
+    let Some(spec) = anim::collect_states(applicator) else {
+        return false;
+    };
+
+    // Lower each pose to static prop values via the normal applicator path.
+    let mut poses: Vec<(String, indexmap::IndexMap<String, serde_json::Value>)> =
+        Vec::with_capacity(spec.poses.len());
+    for (label, pose_applicators) in &spec.poses {
+        let mut allowed: Vec<hypen_parser::ApplicatorSpecification> = Vec::new();
+        for pose_applicator in pose_applicators {
+            if anim::is_pose_excluded_applicator(&pose_applicator.name) {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".states: '.{}' is not allowed inside onState({}) (animation, .bind and event applicators are excluded from poses); ignored",
+                    pose_applicator.name,
+                    label
+                );
+            } else {
+                allowed.push(pose_applicator.clone());
+            }
+        }
+
+        let mut pose_props = Props::new();
+        process_applicators(&allowed, &mut pose_props, element_type);
+
+        let mut static_props = indexmap::IndexMap::new();
+        for (key, value) in &pose_props {
+            match value {
+                Value::Static(v) => {
+                    static_props.insert(key.clone(), v.clone());
+                }
+                _ => {
+                    crate::log_warn!(
+                        LogScope::Engine,
+                        ".states: pose values must be static — bindings are not supported inside onState({}); prop '{}' ignored",
+                        label,
+                        key
+                    );
+                }
+            }
+        }
+        poses.push((label.clone(), static_props));
+    }
+
+    // Union of overridden prop keys, in first-appearance order.
+    let mut union: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+    for (_, pose) in &poses {
+        union.extend(pose.keys().cloned());
+    }
+
+    // Each overridden key becomes a StateSwitch whose default is the node's
+    // (final) static base value for that key, when it has one.
+    for key in &union {
+        let default = match props.get(key.as_str()) {
+            Some(Value::Static(v)) => Some(v.clone()),
+            Some(_) => {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".states: base value of '{}' is not static; the pose switch replaces it without a default",
+                    key
+                );
+                None
+            }
+            None => None,
+        };
+        let mut cases = indexmap::IndexMap::new();
+        for (label, pose) in &poses {
+            if let Some(v) = pose.get(key.as_str()) {
+                cases.insert(label.clone(), v.clone());
+            }
+        }
+        props.insert(
+            key.clone(),
+            Value::StateSwitch {
+                path: spec.path.clone(),
+                cases,
+                default,
+            },
+        );
+    }
+
+    // Synthesize "__anim.transition" scoped to the animatable overridden
+    // props. An explicit .transition on the node already inserted the key
+    // (the main applicator loop ran first) — explicit wins, skip. The
+    // deprecated legacy string form (.transition("opacity 0.3s ease")) is
+    // ALSO an explicit .transition, but lowers to the plain "transition.0"
+    // prop instead of the channel — synthesizing next to it would put the
+    // applicator's `style.transition` shorthand and the animator's longhands
+    // in a patch-order race, so it suppresses synthesis too (pose switches
+    // then run on the author's CSS; no completion timing is available).
+    // When no overridden prop is animatable there is nothing to animate:
+    // emit no spec, everything snaps.
+    let mut animatable: Vec<String> = Vec::new();
+    for key in &union {
+        let base = anim::base_prop_name(key);
+        if anim::ANIMATABLE_PROPS.contains(&base) && !animatable.iter().any(|p| p == base) {
+            animatable.push(base.to_string());
+        }
+    }
+    let has_legacy_transition = props.contains_key(anim::LEGACY_TRANSITION_PROP);
+    if !animatable.is_empty()
+        && !props.contains_key(anim::ANIM_TRANSITION_PROP)
+        && !has_legacy_transition
+    {
+        props.insert(
+            anim::ANIM_TRANSITION_PROP.to_string(),
+            Value::Static(anim::synthesize_states_transition(&spec, animatable)),
+        );
+    } else if !animatable.is_empty() && has_legacy_transition {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".states: the legacy .transition(\"<css shorthand>\") on this node takes precedence over the synthesized states transition; pose switches animate with the author's CSS and fire no completion events"
+        );
+    }
+
+    // Synthesize the "__anim.states" active-label prop: a StateSwitch over
+    // the labels themselves ({"label": <label>}, default null) so renderers
+    // see pose changes as an ordinary SetProp.
+    let mut label_cases = indexmap::IndexMap::new();
+    for (label, _) in &poses {
+        label_cases.insert(label.clone(), serde_json::json!({ "label": label }));
+    }
+    props.insert(
+        anim::ANIM_STATES_PROP.to_string(),
+        Value::StateSwitch {
+            path: spec.path.clone(),
+            cases: label_cases,
+            default: Some(serde_json::Value::Null),
+        },
+    );
+
+    true
 }
 
 /// Convert parser AST to engine IRNode (first-class control flow constructs)
@@ -1145,7 +1545,7 @@ fn convert_router(component: &ComponentSpecification) -> IRNode {
 }
 
 /// Convert parser Value to engine Value
-fn parser_value_to_ir(value: &ParserValue) -> Value {
+pub(crate) fn parser_value_to_ir(value: &ParserValue) -> Value {
     match value {
         ParserValue::String(s) => {
             // Remove surrounding quotes if present
@@ -1205,6 +1605,9 @@ fn parser_value_to_ir(value: &ParserValue) -> Value {
                     Value::TemplateString { template, .. } => serde_json::json!(template),
                     Value::Action(s) => serde_json::json!(format!("@{}", s)),
                     Value::Resource(s) => serde_json::json!(format!("@resources.{}", s)),
+                    // Unreachable: parser_value_to_ir never produces a
+                    // StateSwitch — it only exists via `.states` lowering.
+                    Value::StateSwitch { .. } => serde_json::Value::Null,
                 })
                 .collect();
             Value::Static(serde_json::json!(converted))
@@ -1234,6 +1637,9 @@ fn parser_value_to_ir(value: &ParserValue) -> Value {
                     Value::Resource(s) => {
                         json_map.insert(k.clone(), serde_json::json!(format!("@resources.{}", s)));
                     }
+                    // Unreachable: parser_value_to_ir never produces a
+                    // StateSwitch — it only exists via `.states` lowering.
+                    Value::StateSwitch { .. } => {}
                 }
             }
             Value::Static(serde_json::Value::Object(json_map))

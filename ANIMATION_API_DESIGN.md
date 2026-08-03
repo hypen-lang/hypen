@@ -1,11 +1,30 @@
 # Animation API Design — DX Exploration
 
-Status: **Layers 1–3 implemented** — Options A + B and the presets-only slice
-of Option E are shipped (engine + DOM renderer + Canvas 2D renderer; iOS,
-Android, and desktop snap by ignoring the new props/flag). The normative
-as-shipped surface is the *Shipped v1* section in §3 — including the Canvas
-parity note recording what still snaps there (`.layout` FLIP, `cornerRadius`,
-`shimmer`); author-defined `animation` blocks and Layers 4+ remain proposal.
+Status: **Layers 1–7 implemented** — Options A + B, the presets-only slice
+of Option E, Option C (`.states { onState(...) }` named visual states), the
+`.onAnimationComplete` completion-event slice of Option F, Option H
+shared-element transitions (`.sharedElement`), the **cheap subset of
+Option D** transaction scope (`animate:` on event applicators, stamped onto
+the patch batch via a `batchAnimation` prelude), and **Option G scrub
+bindings** (`.scrub`/`.settle` between `.states` poses, renderer-resident)
+are shipped (engine + DOM renderer + Canvas 2D renderer for A/B/C/D/E/F;
+H and G are DOM-only so far — Canvas, iOS, Android, and desktop snap by
+ignoring the new props/flag/prelude, which for H means a plain navigation
+and for G a node that flips poses only when its bound state changes by
+other means, and never dispatch completions; D's stamping is additionally
+**TS-host-only** — Go and Kotlin hosts strip the dispatch stamp, see the
+host matrix in §3).
+The normative as-shipped surface is the *Shipped v1* section in §3 —
+including the Canvas parity note recording what still snaps there (`.layout`
+FLIP, `cornerRadius`, `shimmer`), the as-shipped H contract recording its
+v1 cuts against the normative §H protocol, the as-shipped D contract
+(wire prelude, binding signatures, stamp lifecycle, precedence, host
+matrix), and the as-shipped G contract (four wire props, the interaction
+formulas, and its v1 narrowings); author-defined `animation` blocks are
+**rejected** (maintainer decision — no custom keyframe DSL; presets are
+the timeline surface); C's stagger/group envelope and `.inState` chain
+form stay deferred, and **D's full SDK `animate()` block is the sole
+remaining proposal item**.
 Scope: how animation should *look and feel* in the Hypen DSL and module SDK, what
 each candidate shape costs us architecturally, and what we should learn (and
 refuse to repeat) from CSS, React, Android, SwiftUI, and Rive.
@@ -25,9 +44,13 @@ Before comparing APIs, five facts about Hypen bound the design space:
 
 2. **The DSL is purely declarative; applicators are the idiom.** Styling is
    `.padding(16)`, `.tw("...")`. Any animation syntax that doesn't read like an
-   applicator chain will feel foreign. Notably, the parser *already* supports
-   applicators with block bodies (`ApplicatorSpecification.children`), so
-   `.states { ... }` requires no grammar work.
+   applicator chain will feel foreign. The AST *modeled* applicators with
+   block bodies from the start (`ApplicatorSpecification.children`) — but,
+   contrary to what this constraint originally claimed, the grammar could not
+   parse them, so `.states { ... }` did require grammar work. *(Since
+   shipped: the applicator-block production landed with Option C — any
+   applicator may take a `{ }` block of full component children, and the
+   chain may continue after the block — see Shipped v1 in §3.)*
 
 3. **State is the only dynamic input.** Everything visual derives from
    `@{state.*}` through path-based dependency tracking. Animation is therefore
@@ -261,16 +284,23 @@ treatment for route transitions.
 
 ---
 
-### Shipped v1 — Layers 1–3 (normative as implemented)
+### Shipped v1 — Layers 1–6 + completion events (normative as implemented)
 
-Options A and B are implemented, plus the presets-only slice of Option E
-(see the `.animate` block below): engine lowering (`ir/anim.rs`), the deferred
-remove protocol, the shared TS animation module (`@hypen-space/core`), the
-DOM renderer (`packages/web/src/dom/anim.ts` + `anim-styles.ts`), and the
-Canvas 2D renderer (`packages/web/src/canvas/anim.ts` — see the Canvas parity
-note below). iOS, Android, and desktop degrade to snap by ignoring the
-`__anim.*` props and the `transition` flag — the spec-sanctioned behavior, no
-changes required there.
+Options A, B and C are implemented, plus the presets-only slice of Option E
+(see the `.animate` block below), the `.onAnimationComplete` slice of
+Option F (see the `.states` and completion blocks below), Option H
+shared-element transitions (see the `.sharedElement` block below), and the
+cheap subset of Option D transaction scope (see the `animate:` block at the
+end of this section): engine
+lowering (`ir/anim.rs` + `ir/expand.rs`), the deferred remove protocol, the
+shared TS animation module (`@hypen-space/core`), the DOM renderer
+(`packages/web/src/dom/anim.ts` + `anim-styles.ts` + `anim-complete.ts`),
+and the Canvas 2D renderer (`packages/web/src/canvas/anim.ts` — see the
+Canvas parity note below; Canvas does not play H). iOS, Android, and
+desktop degrade to snap by ignoring the `__anim.*` props and the
+`transition` flag — the spec-sanctioned behavior, no changes required there
+(they also never dispatch completion events: nothing plays, nothing
+completes; for H, ignoring the props means a plain navigation).
 Where this section deviates from the sketches above, this section wins.
 
 **Flat syntax only.** Nested calls do not parse — `slide(from: bottom)` and
@@ -341,9 +371,10 @@ same six, `width`, `height`, `gap`, `fontSize`.
 **`.animate` presets (Option E, presets-only).** The built-in-timelines slice
 of Option E is shipped: `.animate(<preset>, ...)` with the closed preset
 vocabulary `pulse|spin|shimmer|shake`. Author-defined `animation { }` blocks
-(the new parser production, keyframe applicator blocks, and the `when:`
-trigger) remain **deferred** — a preset under an `If` plays on enter, which
-covers the shake-on-error case without binding plumbing. Flat syntax, same
+are **rejected** (maintainer decision — see §E; the presets are the entire
+timeline surface), and the `when:` trigger is likewise not shipped — a
+preset under an `If` plays on enter, which covers the shake-on-error case
+without binding plumbing. Flat syntax, same
 rules as the other channels — the first positional token names the preset,
 modifiers are named-only:
 
@@ -430,9 +461,476 @@ Canvas caveat shared with static transform props: enter/exit transforms are
 paint-time, so an entering node hit-tests at its final layout box for the
 brief playback.
 
+**`.states { onState(...) }` (Option C, shipped).** Named visual states via a
+block applicator with `onState(<label>)` heads — this syntax **supersedes the
+§C sketch's per-node `.inState(label) { ... }` chain form** (deferred, along
+with the sketch's `stagger:` group envelope — see below):
+
+```hypen
+Image(src: "@{state.cover}")
+    .width(100)
+    .cornerRadius(4)
+    .states(@state.cardState, transition: spring, duration: 250) {
+        onState(collapsed).width(48).cornerRadius(8).opacity(0.9)
+        onState(expanded).width(240).cornerRadius(16).tw("shadow-lg")
+    }
+```
+
+Grammar note (correcting constraint #2's original assumption): the
+`ApplicatorSpecification.children` field and the fold path predate Option C,
+but the grammar could not parse a `{ }` block on an applicator when the
+engine lowering first landed — the applicator-block production shipped with
+Option C and the form above now parses directly from `.hypen` source. The
+production is generic, not `.states`-specific: any applicator may be
+followed by a block (whitespace/newlines/comments allowed between `)` and
+`{`, exactly as for component blocks); block entries are full recursive
+component specifications with their own applicator chains; the chain may
+continue after a block (`.states(...) { ... }.padding(4)`); and a zero-arg
+applicator with a block (`.modifier { ... }`) parses too. The conformance
+fixtures now express `.states` inline in `source` — the interim
+`input.applicators` fold-path escape hatch in the Rust runner has been
+removed.
+
+Header: the first positional MUST be a state reference (else warn + ignore
+the whole applicator); named modifiers `transition:` (curve token —
+deliberately not `curve:`), `duration:`/`delay:` (ms) with defaults
+`{easeOut, 250, 0}`; one `.states` per node (extras warn + drop). Block:
+only `onState(<label>)` entries — label is a bare identifier or string, pose
+props chain as applicators on the head; a non-`onState` child, a label-less
+`onState`, or an `onState` with children warns and skips that entry;
+duplicate labels warn, last wins. Pose lowering reuses the ordinary
+applicator→prop machinery (`.tw`, directional forms, variants all work
+per-state) minus three exclusions that warn + drop: animation applicators
+(including nested `.states`), `.bind`, and `on[A-Z]*` event applicators;
+pose values must be static (bindings warn + drop that prop).
+
+Mechanics, as implemented (not the sketch's "conditional IR" guess): each
+prop key any pose overrides becomes an **engine-internal
+`Value::StateSwitch`** — `{path, cases: label→JSON, default: the node's
+final static base value for that key}`. `.states` is applied AFTER every
+other applicator on the node, so the base/default is the chain's final
+value regardless of where `.states` sits. Resolution
+(`reconcile/resolve.rs`): read the state at `path`, stringify scalars
+(string as-is, number/bool via `to_string`), pick the matching case, else
+the default, else the prop resolves to **absent** (key omitted / RemoveProp
+— fallback-to-base semantics). The driving path registers in the dependency
+graph exactly like a `@{state.*}` binding (module-scope aware), so pose
+flips flow out as ordinary `SetProp`/`RemoveProp`. `StateSwitch` never
+reaches the wire — resolved props are plain JSON, zero renderer changes, and
+snapping renderers always show the correct pose.
+
+Two props are synthesized: `__anim.transition` from the header timing,
+scoped via `props:` to the overridden keys on the animatable whitelist
+(non-whitelist overridden props still switch, they just snap; no animatable
+override → no spec, everything snaps) — an **explicit `.transition` on the
+node wins** over the synthesized one, and the deprecated legacy string form
+counts as explicit (suppresses synthesis with a warning); and
+`__anim.states`, the active label as `{"label": "<label>"}` (a StateSwitch
+over the labels themselves, default `null`), so animation-aware renderers
+see pose changes as an ordinary SetProp — used to time the states settle
+and stamp completion payloads; renderers that ignore it lose nothing.
+
+```json
+"__anim.transition": {"duration":250,"curve":"spring","props":["cornerRadius","width","opacity"]}
+"__anim.states":     {"label":"collapsed"}        // null in the fallback-to-base pose
+```
+
+**`.onAnimationComplete` (Option F slice, shipped).** Exactly the §F design:
+an ordinary event applicator (engine cost: zero — the anim interception does
+not swallow it, pinned by a lowering test; it reaches renderers as the plain
+`onAnimationComplete.0` action prop). The DOM and Canvas renderers dispatch
+the action through the same channel clicks use when a playback on the node
+settles **naturally**; payload contract (normative):
+
+- finite `.animate` preset completes → `{ "animation": "<presetName>" }`
+- `.enter` settles → `{ "animation": "enter" }`
+- `.exit` settles (just before finalize — the node is still alive) →
+  `{ "animation": "exit" }`
+- a `.states` transition settles → `{ "animation": "states", "state":
+  "<matched label>" }` — the DOM animator times this with the transition
+  spec's duration+delay (per-prop `transitionend` is not a reliable settle
+  signal for a multi-prop pose switch); the canvas animator uses its tick
+  clock
+
+Extra named args on the applicator merge under the payload; the
+`animation`/`state` fields always win. Interrupted, superseded, and
+reduced-motion-skipped playbacks fire NOTHING (this removes most completion
+races by construction); looping presets never complete; a `.states` flip to
+the default pose (`null` label) fires nothing; playbacks on
+Router-detached (cached) or exit-animating subtrees fire nothing. The
+remaining race is handled as §F prescribed: the payload names the animation
+and pose so module machines drop stale completions — latest-wins. Nodes
+without the prop dispatch nothing (a single lookup is the entire overhead).
+Non-animating renderers never dispatch — completions are motion
+choreography, not a correctness channel.
+
+**`.sharedElement` shared-element transitions (Option H, shipped — DOM
+renderer).** Engine side, exactly the §H decision: identity + timing, zero
+geometry. `.sharedElement(<key>, curve: ..., duration: ...)` lowers to TWO
+reserved props — the only animation applicator that splits — because the key
+is the one animation argument where bindings are LEGAL (identity is data):
+
+```json
+"__anim.sharedKey": "cover-42"                        // the RESOLVED key string
+"__anim.shared":    {"duration":350,"curve":"spring"}
+```
+
+The key (mandatory first positional) goes through the standard parser-value
+conversion — plain string, template string (`"cover-@{item.id}"`), and pure
+reference (`@state.heroKey`) all legal — and re-resolves per render,
+reaching renderers as an ordinary `SetProp` when its driving state changes.
+`__anim.shared` is static like every other channel: named-only
+`duration:`/`curve:` with defaults `{350, "spring"}`; invalid timing
+degrades to the defaults; `delay:` is not part of the shape (unknown-arg
+warning); extra positionals warn and drop. A missing, empty, or
+non-string-ish key warns and omits BOTH props. The incoming (target) node's
+spec times the playback.
+
+The five-step §H protocol, as implemented in the DOM renderer
+(`packages/web/src/dom/anim.ts`):
+
+1. **Measure outgoing.** When a batch has navigation shape — BOTH a
+   `Detach` AND an `Attach`/`Insert` — a pre-pass snapshots the on-screen
+   rect of every connected keyed node **at-or-under one of the batch's
+   detach roots**, keyed by shared key, before the batch mutates the DOM.
+   Disconnected or zero-rect sources skip silently; duplicate source keys
+   keep the first. Per-batch shared state resets at the TOP of this
+   pre-pass as well as at the end of every flush, so a batch that throws
+   mid-apply cannot leak stale snapshots forward.
+2. **Apply the batch.** The incoming tree builds and lays out normally.
+3. **FLIP incoming.** Incoming keyed nodes — created this batch, or
+   at/under a re-attached (cached Router) root — that match a snapshot play
+   a FLIP: an inverted `translate(dx,dy) scale(sx,sy)` **prepended** to the
+   node's base transform (the viewport-space correction must compose
+   outside the base), `transform-origin` pinned to `top left` for the
+   flight (the pin is tracked and cleared on every superseding/teardown
+   path — enter, exit, `.layout` FLIP, forget, reset — not only the
+   flight's own settle), played with the target's `__anim.shared` timing.
+   Every match suppresses the node's own `.enter` for the batch — one
+   motion, not two. Exiting nodes never participate as targets (exit
+   wins); a snapshot matching its own node (a cached subtree persisting)
+   is no match. Natural settle restores the base transition and transform,
+   unpins the origin in the same synchronous update, and dispatches
+   `{ "animation": "sharedElement" }` (natural-settle-only, like every
+   other playback).
+4. **Degrade silently.** Unmatched or unmeasurable keys mean a plain
+   navigation — nothing errors. Dev diagnostics per §H's T-row: a key that
+   matched nothing this navigation (source-only or target-only) warns ONCE
+   per key, at WARN — visible at the logger's default level; duplicate
+   source/target keys likewise. A self-matching persisted node and a
+   matched target with no timing spec (sanctioned snap) are neither
+   matches nor typos and never warn.
+5. **Interruption retargets.** Falls out of step 1 for free: a mid-flight
+   second navigation's `getBoundingClientRect` reads the animated
+   presentation rect, so the next FLIP starts from where the element
+   visually is — never the original source, as §H step 5 requires.
+
+**Zero-delta completion semantics.** A match whose source and target rects
+coincide (< 0.5px translation, < 0.5% scale delta) plays nothing — which IS
+an instant natural settle: the enter stays suppressed AND
+`{ "animation": "sharedElement" }` dispatches immediately, so a module
+machine waiting on `.onAnimationComplete` never stalls
+geometry-dependently. Under reduced motion no snapshot is taken at all —
+no FLIP, no suppression, no completion.
+
+**v1 cuts, recorded against the normative §H text.** Step 3's
+"interpolating corner radius and opacity for visual continuity; crossfade
+content when the two nodes' content differs" is NOT shipped — v1 is
+transform-only continuity (translate + scale), an acknowledged deviation
+from the normative protocol; corner-radius/opacity interpolation and the
+content crossfade remain renderer roadmap. No overlay proxies: the incoming
+element itself animates, and the detached source is never resurrected or
+kept visible. Source scoping is a v1 NARROWING of step 1: "outgoing nodes
+carrying `__anim.shared` keys" became "keyed nodes inside the batch's
+detached subtree(s)" — a persistent app-shell node sharing a key stays
+on-screen after the navigation, so it must neither source a FLIP out of a
+still-visible element nor shadow the real outgoing source; still-visible
+keyed nodes are simply not sources. Rotation/scale base transforms make the
+prepended invert approximate (exact for identity and translate bases).
+Canvas, iOS, Android, and desktop ignore both props — plain navigation, the
+sanctioned total degradation — so H ships renderer-by-renderer exactly as
+its S-row predicted.
+
+**Feel check (visually verified in-browser).** The shipped defaults were
+confirmed in a real browser session driving the list→detail→back flow: the
+`spring` curve's overshoot measured ≈9.5% of travel past the target before
+settling — reads as intentional bounce, not error — and `{350ms, spring}`
+needed no tuning. Enter suppression on matched nodes, the once-per-key
+unmatched warning, and the interrupted-flight retarget from the animated
+position were all observed live.
+
+**`animate:` transaction scope (Option D cheap subset, shipped — TS
+hosts).** Exactly the §D O-row's "cheap, high-value subset": the `animate:`
+named argument on event applicators, shipped as an override layer above
+A–C so precedence never changes under authors. The full SDK `animate()`
+block (handler-side `await animate(spec, () => { ... })`) remains proposal
+— it waits on the dispatch pipeline growing general batch metadata.
+
+```hypen
+.onClick(@actions.toggleCart, animate: spring)
+.onClick(@actions.expand, animate: {curve: easeOut, duration: 400})
+```
+
+**Wire contract.** One new patch type, emitted as the FIRST patch of a
+render cycle whose triggering state update carried an animation context:
+
+```json
+{"type":"batchAnimation","spec":{"curve":"spring","duration":250}}
+```
+
+It addresses no node — it scopes the *batch*: every whitelisted prop
+change in the patches that follow glides with the spec, on any node,
+`.transition` or not. First-patch-only is normative on BOTH ends: the
+engine only ever emits the prelude at index 0, and both TS renderers
+honor it only at index 0 — a `batchAnimation` anywhere else is not a
+stamp for that batch, so accumulated/concatenated batches cannot
+over-scope (the remote session's initialTree accumulation drops preludes
+outright for the same reason: a stamp scopes exactly one live batch,
+never a replay). Renderers that don't know the type ignore it; the rest
+of the batch is wire-identical to an unstamped one. The spec shape is the
+`.transition` channel's; engine-side normalization
+(`ir/anim.rs::normalize_batch_animation`) turns a bare curve token into
+`{curve, duration: 250}` (unknown tokens warn and reject), fills a
+missing `duration` on object specs, and rejects any other value with a
+warning — the update proceeds unstamped, never a hard error. Conformance: the `batchAnimation`
+shape in `patch.schema.json` plus the stamped-emission fixture
+`fixtures/animation/batch-animation-stamp.json`, exercised by the Rust
+and TypeScript runners.
+
+**Binding signatures.** `updateState` / `updateStateSparse` gained an
+optional trailing `animation` argument at every layer — old arities
+unchanged, omitted/`null` = unstamped, byte-identical wire:
+
+- Rust core: `EngineCore::update_state(scope, patch, Option<Value>)` /
+  `update_state_sparse(scope, paths, values, Option<Value>)`
+- wasm-bindgen (`wasm/js.rs`): `update_state(scope, patch, animation?)` /
+  `update_state_sparse(scope, paths, values, animation?)`
+- TS: `BaseEngine.updateState(scope, statePatch, animation?)` /
+  `.updateStateSparse(scope, paths, values, animation?)`; the module
+  runtime's `IEngine` carries the sparse form (the one its observable
+  flush uses)
+- WASI: the `hypen_update_state_sparse` JSON envelope gains an optional
+  `animation` field; the full-patch `hypen_update_state` deliberately has
+  none (the payload IS the state patch — a reserved key would collide with
+  real state keys), so stamping is sparse-update-only on WASI.
+
+**Stamp lifecycle.** Engine side: the normalized spec is stored as
+`pending_animation` only when the update actually changed state (a no-op
+dispatch never stamps); the next render cycle consumes it — the prelude
+is prepended iff the cycle produced patches, and discarded silently
+otherwise. **No stamp without patches, no leak across cycles.**
+
+SDK side (`HypenModuleInstance` + the renderers): the renderer extracts
+`animate:` from the applicator's own named-argument position — BEFORE
+positional-payload merging, so a payload field named `animate` is user
+data and survives untouched — and smuggles it across the dispatch
+boundary under the reserved payload key `__hypenAnimate`
+(`ACTION_ANIMATE_KEY`; `dispatchAction(name, payload)` is the only
+channel through the WASM engine). `BaseEngine.onAction` lifts it back out
+into the distinct `Action.animate` field, so module handlers never
+observe the key. The module runtime then wraps the spec in a fresh token
+object PER DISPATCH — every set/compare/clear is token identity, never
+spec value identity, so two dispatches stamping the same `"spring"`
+string cannot clear each other — and:
+
+1. **Entry drain.** On dispatch entry it synchronously drains any
+   pre-queued observable flush: mutations that predate this dispatch go
+   out with the stamp of the dispatch that caused them, or none — a stamp
+   can never land on mutations the action didn't cause.
+2. **First-flush consumption.** The pending stamp is consumed by the
+   FIRST flush after the handler starts (passed as the engine's
+   `animation` argument) and cleared, so every later flush is unstamped.
+3. **Microtask clear.** A `queueMicrotask` after the handler's
+   synchronous portion clears an unconsumed stamp — the sync mutations'
+   flush microtask was queued during the handler call, so it always wins;
+   an awaited continuation always loses. After-`await` mutations are
+   unstamped by construction.
+4. **Last-unconsumed-stamp-wins.** A second stamped dispatch arriving
+   while an earlier stamp is still pending (its handler never mutated, so
+   the entry drain had nothing to flush) overwrites it.
+5. **Completion backstop.** Handler completion clears the token's stamp
+   if it somehow still pends — a dispatch's stamp never outlives its run.
+
+**Precedence (normative, recorded in the DOM animator):** structural
+playbacks (enter/exit/FLIP/shared) > transaction > node `.transition` >
+snap. A node whose active settle belongs to a structural playback is
+excluded from the transaction entirely — a stamped batch can never
+retarget an in-flight playback's `transition-property` and snap it; a
+node whose active settle is a *previous transaction's* is retargeted
+(back-to-back stamped batches glide seamlessly). The transaction's
+`transition-property` is scoped to exactly the props the stamped batch
+wrote on that node (accumulated as the SetProps land), never the whole
+whitelist; inline transition values are captured on first touch and
+restored verbatim on settle (which keeps legacy string `.transition`
+styling alive across a stamped batch); an UNSTAMPED write landing on a
+still-open transaction settle window's written prop restores base first
+and snaps — the snap-on-refresh guarantee holds mid-glide. Canvas: the
+stamp is the batch's tick-interpolation spec, overriding the node's
+`.transition` and animating nodes without one (same precedence;
+same-batch-created nodes skip the transaction's rewind-to-previous so
+their queued enter owns the first motion, and exiting nodes snap);
+cleared at flush. Reduced motion ignores stamps entirely in both
+renderers. Transaction glides dispatch no `.onAnimationComplete` —
+completions belong to node-level playbacks.
+
+**Host matrix.**
+
+| Host / renderer | Behavior |
+|---|---|
+| DOM renderer | Honors the prelude (scoped CSS transitions, restore-on-settle) |
+| Canvas 2D renderer | Honors the prelude (tick interpolation spec; canvas snap matrix still applies) |
+| uniffi (iOS/Android/desktop) | **Drops** the prelude (`InternalPatch::BatchAnimation → None`) — mobile snaps, matching the Remove-flag policy; carrying it needs a `spec_json` field on the flat FFI record and both binding sets regenerated, deferred with the rest of the non-web animation work |
+| Go SDK | **Relays but never generates**: `Patch.Spec` (`json:"spec,omitempty"`) exists so engine-emitted preludes survive transit, but dispatch-side stamping was evaluated and **declined** with recorded reasons — the Go observable notifies synchronously per mutation (no batch boundary to hang "first flush" on) and the Go host syncs state over the envelope-less full-patch WASI path (`NotifyStateChange` → `hypen_update_state`); the remote host strips the reserved `__hypenAnimate` dispatch key before handlers run. TS-host-only status documented in `hypen-golang/CHANGELOG.md` |
+| Kotlin host | Strips the reserved dispatch key before handlers run; no stamping |
+
+**Review hardening (adversarial pass, 22 regression tests).** Renderer:
+structural playbacks now outrank transactions (a stamped batch can no
+longer freeze a mid-enter preset or corrupt a shared flight's pinned
+origin); legacy string `.transition` inline styling captured and restored
+verbatim; transaction `transition-property` scoped to the props the batch
+actually wrote, with an unstamped follow-up write snapping immediately
+(the websocket-refresh guarantee); canvas skips the transaction rewind
+for same-batch creations; the stamp is honored at batch head only and
+remote initialTree accumulation drops preludes. Dispatch: per-dispatch
+token identity for the pending stamp; dispatch-entry synchronous drain of
+pending flushes; the reserved payload key stripped in the Go and Kotlin
+hosts; the named `animate:` argument extracted before positional-payload
+merging so user data named `animate` survives; Go stamping evaluated and
+declined with the reasons recorded above.
+
+**`.scrub`/`.settle` scrub bindings (Option G, shipped — engine + DOM
+renderer).** The §G re-anchoring held: scrub interpolates between TWO of
+the node's `.states` poses (`from:`/`to:` name pose labels), driven by a
+renderer-resident source, and `.settle(bind:)` writes the winning label to
+a `@state.*` path through the exact `.bind` channel. Syntax is **flat named
+arguments** — the §G sketch's nested `gesture(axis: y, over: [...])` form
+does not parse (the family rule); the source is a bare token:
+
+```hypen
+.scrub(from: closed, to: open, source: gesture, axis: y, over: [0, -400], rubberBand: 0.4)
+.scrub(from: expanded, to: collapsed, source: scroll, axis: y, over: [0, 120], of: "feed")
+.settle(curve: spring, duration: 300, bind: @state.sheetPhase)
+```
+
+Defaults: `source: gesture`, `axis: y`, `rubberBand: 0.4`, settle
+`{spring, 300ms}`. `from:`/`to:`/`over:`/`bind:` are required. `over` is
+the **DIRECTED** input range `[inputAtProgress0, inputAtProgress1]` — not
+a min/max pair: an upward-opening sheet uses `[0, -400]`; only equal or
+non-finite endpoints are rejected. `of:` (scroll only; warns and drops on
+gesture sources) names the container by its resolved `id` prop.
+
+**Wire contract — FOUR static reserved props**, applied in the same
+deferred end-phase as `.states` (strictly after it, because
+cross-validation reads the collected pose labels):
+
+```json
+"__anim.scrub":       {"from":"closed","to":"open","source":"gesture","axis":"y","over":[0,-400],"rubberBand":0.4}
+"__anim.scrubSettle": {"curve":"spring","duration":300}
+"__anim.scrubBind":   "sheetPhase"
+"__anim.scrubPoses":  {"translateY.0":[400,0]}
+```
+
+`__anim.scrubPoses` is the piece the renderer cannot derive itself: the
+engine **materializes both endpoint values per pose-overridden prop key**
+at lowering (pose override, else the node's static base default, reusing
+the StateSwitch values the states phase already built) so the renderer
+interpolates without knowing StateSwitch exists. A key resolvable on only
+one end warns and is skipped (it still flips with the pose — it just snaps
+under scrub). Any hard violation — invalid `.scrub` args, missing/invalid
+`.settle` or its `bind:`, no `.states` on the node, a `from:`/`to:` label
+no pose declares — warns ONCE naming the reason and omits ALL FOUR props:
+the node degrades to plain `.states` behavior, never a hard error. A
+`.settle` without a `.scrub` warns and is ignored; one pair per node.
+
+**DOM interaction contract** (normative, recorded in the `scrub.ts` module
+header; formulas pinned numerically per the §G T-row):
+
+- *Progress mapping.* `p = (input - over[0]) / (over[1] - over[0])`,
+  rubber-banded on the RESULT beyond `[0,1]`:
+  `p' = bound + (p - bound) · rubberBand` (`scrubProgress` in
+  `@hypen-space/core/animation` is the shared normative implementation).
+- *Gesture claim.* `pointerdown` opens a PENDING drag; the gesture claims
+  the pointer (capture + `dragging`) only once axis travel exceeds ~6px
+  slop — a tap is a total no-op (no capture, no settle, no bind write,
+  child clicks unaffected). Recorded deviation: grabbing a mid-settle
+  element claims immediately (the settle must not fight the finger). Only
+  the claiming `pointerId` drives move/up/cancel.
+- *Relative drag mapping.* `p = pAtGrab + travel / (over[1] - over[0])` —
+  the anchor is the node's LIVE progress at grab, seeded from the
+  `__anim.states` label (`from` → 0, `to` → 1) at create and on every
+  label feed that lands while no interaction owns the node. A settled-open
+  sheet re-drags from 1; a mid-settle catch continues from the settle's
+  current progress; offset `over` ranges never jump.
+- *Velocity + settle.* Last ~5 pointer samples, samples older than ~100ms
+  at release discarded (empty window = v 0); projected
+  `p* = p + v · 150ms` picks the target (`p* >= 0.5` → `to`, pinned). The
+  settle is a rAF-driven inline-style animation on the shared numeric
+  curves — deliberately NOT a CSS transition: it re-drives the drag's
+  exact interpolation path (pixel-consistent), arrival is an exact
+  observable event (the bind write fires ON arrival; `transitionend` is
+  unreliable), a mid-settle grab needs the tick loop's current progress,
+  and the injectable clock/rAF make tests deterministic.
+- *Cleanup handshake.* After the bind write the final inline styles are
+  KEPT until the engine's re-render lands (no flash): cleanup runs on the
+  FIRST `__anim.states` label SetProp — **any label, matching or not**
+  (any label proves the re-render landed; a raced different label must not
+  hold stale visuals) — with a ~500ms timeout fallback.
+- *Scroll source.* Listener on the `of:`-named ancestor (one-time dev warn
+  + nearest-scrollable fallback when it matches nothing) else the nearest
+  scrollable ancestor; offset maps ABSOLUTELY through `over`. No release
+  exists: the bind write fires when progress crosses AND RESTS at an
+  endpoint (~150ms debounce, cancelled on re-entry, same-label rewrites
+  suppressed). Deferral and ownership are bounded by ACTIVE input: after
+  ~150ms of mid-range quiescence, deferred engine writes flush (concede —
+  live data lands; the next scroll event re-derives from current progress)
+  and ownership releases until re-claimed.
+- *Conflicts (gesture wins) and precedence.* Engine SetProps to scrubbed
+  keys defer (latest value, applied at cleanup) while an interaction owns
+  the node; other props flow normally. **Precedence (normative): scrub >
+  structural playbacks > transaction > node `.transition`** — a
+  scrub-active node is excluded from transaction application and
+  enter/FLIP participation, and scrub engagement suspends a conflicting
+  `.animate` preset (resumed at cleanup). A remove/detach mid-drag cancels
+  everything and releases capture; an exiting node's scrub sources detach
+  BEFORE any exit playback (the §G W-row rule), and a cancelled settle
+  never dispatches its bind write; cached-route re-attach re-arms scroll
+  sources. Base transforms compose: the element's static transform minus
+  the scrub-owned function kinds is prefixed to every frame's transform.
+- *Reduced motion.* Dragging works unchanged (direct manipulation is the
+  user's own hand — the §G exemption); release settles INSTANTLY, then
+  writes. Zero engine traffic during any drag or scroll tracking — the
+  engine only ever hears the settle write, so remote-UI behavior is
+  identical by construction (§6.1).
+
+**Review hardening (adversarial pass, twelve findings, 19 regression
+tests).** The root defect both reviewers found independently: drags
+anchored at progress 0, so grabbing an open sheet snapped it closed —
+fixed by the relative mapping + label-seeded anchor above. The rest:
+6px slop gating claim (taps no longer steal child clicks or fire bind
+writes), pointer-id filtering, the 100ms velocity staleness window
+(drag-hold-release projects nothing), invalid reconfigures running full
+cleanup, detach cancelling subtree scrub sources with re-arm on attach,
+scroll deferral bounded by quiescence (collapsing headers can't dead-lock
+sibling updates), flagged removes cancelling scrub before exit (dead
+interactions never write state), base transforms composing through drags
+instead of vanishing, presets suspending under scrub per the precedence
+rule, ANY states label completing the awaitingCleanup handshake, and the
+`>= 0.5` settle tie pinned by test.
+
+**v1 narrowings, recorded against the §G sketch.** (1) **DOM-only**: the
+Canvas renderer ignores all four channels (pinned by test — no playback,
+no listeners, no engine traffic; iOS/Android/desktop likewise), so G ships
+renderer-by-renderer like H did. (2) **Multi-touch is noise**: only the
+claiming pointer participates; a second finger neither retargets nor
+cancels. (3) **`of:` degrades, never fails**: an unmatched container name
+warns once and falls back to the nearest scrollable ancestor. (4) The
+sketch's state-driven `progress: "@{state.step}"` coarse-scrub form is
+not shipped — sources are `gesture|scroll` only (the closed-vocabulary
+rule: every new source is five renderer implementations).
+
 ---
 
-### Option C — Named visual states / variants (`.states { }`)
+### Option C — Named visual states / variants (`.states { }`) **(shipped as `.states { onState(...) }` — see Shipped v1; `.inState` chain form and `stagger:` deferred)**
 
 Coordinated-transition school: Compose `updateTransition`, Framer `variants`,
 MotionLayout's ConstraintSets. A node (or subtree) declares named looks; a
@@ -458,14 +956,14 @@ grouped timing envelope.
 
 | | |
 |---|---|
-| **S** | The only option that expresses *choreography* (many elements moving as one gesture, staggered children); dramatically better than the string-interpolation ternaries (`"@{state.x ? 32 : 18}"`) it replaces; block applicators already parse. |
+| **S** | The only option that expresses *choreography* (many elements moving as one gesture, staggered children); dramatically better than the string-interpolation ternaries (`"@{state.x ? 32 : 18}"`) it replaces; block applicators parse (the AST modeled them from the start; the grammar production shipped with Option C). |
 | **W** | Biggest syntax surface of the six; overlaps confusingly with plain conditional props unless docs are opinionated about when to use which; two sources of truth for a prop (base chain vs. state blocks) needs a clear precedence rule (state block wins). |
 | **O** | This is the natural target for future *tooling* (a visual state editor à la Rive/MotionLayout writing DSL, not blobs) and for LSP support (rename-safe state names, completion inside `.inState`). Also the natural unit for design-system component libraries to ship (`Button` with `pressed`/`disabled` states). |
 | **T** | MotionLayout's fate: if authors need a GUI to reason about it, hand-written usage stalls. Must stay small (no per-property keyframes inside states in v1). Engine cost: every variant is extra conditional IR — needs care to not bloat `expand.rs`. |
 
 ---
 
-### Option D — Transaction-scoped animation (animate the *cause*)
+### Option D — Transaction-scoped animation (animate the *cause*) **(cheap subset shipped — `animate:` on event applicators, see Shipped v1; full SDK `animate()` block remains proposal)**
 
 SwiftUI's `withAnimation`, mapped onto Hypen's actual write paths: actions and
 module code. The animation rides the *state mutation batch*, so identical state
@@ -500,14 +998,21 @@ declaration needed.
 
 ---
 
-### Option E — Named keyframe timelines (`animation` declarations) **(presets shipped; author-defined blocks deferred)**
+### Option E — Named keyframe timelines (`animation` declarations) **(presets shipped; author-defined blocks REJECTED)**
 
 CSS `@keyframes` / Rive timelines, DSL-native: reusable, multi-step, loopable —
 for ambient and decorative motion that isn't driven by a state diff. *(Since
 shipped: the built-in presets `pulse|spin|shimmer|shake` via `.animate(...)` —
 exactly the "standard library" subset argued for in the O row below, minus
-`bounce` and the `when:` trigger. Author-defined `animation { }` declarations
-remain deferred. See Shipped v1 above for the normative surface.)*
+`bounce` and the `when:` trigger.)*
+
+**Decision (maintainer): author-defined `animation { }` declarations are
+REJECTED, not deferred — Hypen will not grow a custom keyframe-authoring DSL.**
+The presets ARE the timeline surface; anything a hand-written timeline would
+express is either ambient (a preset), state-driven (Option C poses), or
+structural (enter/exit) — and the T-row's MotionLayout scope-creep risk is
+avoided permanently by not opening the door. The example below is retained
+for the historical record of what was considered.
 
 ```hypen
 animation pulse {
@@ -540,7 +1045,7 @@ on a false→true edge of the binding.
 
 ---
 
-### Option F — Rive-inspired machine model **(decided: machine lives in the module)**
+### Option F — Rive-inspired machine model **(decided: machine lives in the module; `.onAnimationComplete` shipped — see Shipped v1)**
 
 Not embedding Rive artifacts — adopting Rive's *decomposition* natively:
 motion authored as named timelines (Option E), a state machine deciding which
@@ -593,25 +1098,39 @@ edges) without any DSL change.
 
 ---
 
-### Option G — Scrub bindings (continuous input, renderer-resident)
+### Option G — Scrub bindings (continuous input, renderer-resident) **(shipped as `.scrub`/`.settle` on the DOM renderer — see Shipped v1 for the as-implemented contract and v1 narrowings; flat named args, not the nested source form below)**
 
 The primitive for the entire gesture class: bottom sheets, pull-to-refresh,
-collapsing headers, fling. A timeline's *position* is bound to a continuous,
+collapsing headers, fling. A motion's *position* is bound to a continuous,
 **renderer-resident** input source; the per-frame loop never touches the
 engine (see §6.1 for why it must not).
+
+*(Re-anchored after the Option E decision: author-defined timelines are
+rejected, so scrub does NOT bind to a named timeline. Scrub interpolates
+between two of the node's `.states` poses — the same pose vocabulary Option C
+already ships — with `progress: 0` = the `from:` pose and `1` = the `to:`
+pose. This is the more Hypen-native shape anyway: the gesture scrubs between
+states the machine already owns, and the settle write lands on the same state
+path that drives them.)*
 
 ```hypen
 Sheet {
     ...
 }
-.scrub(sheetExpand,                                  // an Option E timeline
+.states(@state.sheetPhase) {
+    onState(closed).translateY(400)
+    onState(open).translateY(0)
+}
+.scrub(from: closed, to: open,                       // scrubs between C poses
        source: gesture(axis: y, over: [0, 400], rubberBand: 0.4))
-.settle(targets: { closed: 0, open: 1 },
-        curve: spring,
-        bind: @state.sheetPhase)                     // ONE write, after settling
+.settle(curve: spring, bind: @state.sheetPhase)      // ONE write, after settling
 
 Header { ... }
-    .scrub(collapseHeader, source: scroll(axis: y, over: [0, 120]))
+    .states(@state.headerMode) {
+        onState(expanded).height(120)
+        onState(collapsed).height(48)
+    }
+    .scrub(from: expanded, to: collapsed, source: scroll(axis: y, over: [0, 120]))
 ```
 
 Semantics:
@@ -642,7 +1161,7 @@ Semantics:
 
 ---
 
-### Option H — Shared-element transitions **(decided: engine tags, renderers match)**
+### Option H — Shared-element transitions **(shipped on the DOM renderer — see Shipped v1 for the as-implemented contract and v1 cuts; engine tags, renderers match)**
 
 The list-thumbnail-becomes-detail-hero effect. **Decision: geometry lives
 entirely with the renderers.** The engine knows nothing about frames or
@@ -689,9 +1208,10 @@ Renderer protocol (normative — the spec each renderer implements):
 
 - **Patch protocol.** All options lower into: (a) reserved `__anim.*` entries in
   `ResolvedProps` (cheap: `Arc`-shared, travels once on `Create`), (b) a batch
-  animation stamp (Option D), (c) `RemoveAfterTransition` semantics (Option B).
-  Renderers that don't understand `__anim` snap — every option degrades
-  gracefully by construction.
+  animation stamp (Option D) *(since shipped: the first-patch `batchAnimation`
+  prelude — see the D contract in §3)*, (c) `RemoveAfterTransition` semantics
+  (Option B). Renderers that don't understand `__anim` snap — every option
+  degrades gracefully by construction.
 - **Never tick in the engine.** The engine declares; renderers interpolate.
   The Canvas and Vello renderers need a shared ticker/interpolator module — the
   one place we hand-write animation math; DOM/iOS/Android delegate to the
@@ -709,7 +1229,10 @@ Renderer protocol (normative — the spec each renderer implements):
   desktop). Android's View-animation bug is the cautionary tale.
 - **Serialization.** The Remote UI protocol carries patches; `__anim` props ride
   along for free, but the batch stamp (D) and deferred remove (B) need explicit
-  protocol-version treatment in `src/serialize/remote.rs`.
+  protocol-version treatment in `src/serialize/remote.rs`. *(Since shipped for
+  D: the prelude is an unknown-type no-op for old clients, and the remote
+  session's initialTree accumulation drops preludes — a stamp scopes exactly
+  one live batch, never a replay.)*
 
 ## 5. Recommendation: a layered path
 
@@ -721,21 +1244,24 @@ coordination construct**. Hypen should follow that spine, in dependency order:
 |---|---|---|
 | 1 | **A** `.transition` — **shipped** | Smallest surface; establishes the `__anim` prop channel, the animatable-prop whitelist, curves vocabulary, reduced-motion and interruption semantics that every later layer reuses. Replaces the web-only string passthrough with a portable equivalent. |
 | 2 | **B** `.enter`/`.exit`/`.layout` — **shipped** | The one thing only the engine can do (deferred remove). With A+B, Hypen matches the daily-driver animation DX of SwiftUI/Compose. |
-| 3 | **E (presets only)** — **shipped** | Built-in `pulse`/`spin`/`shimmer`/`shake` applied via `.animate(name, ...)`; author-defined `animation` blocks stay deferred until demand proves out. |
-| 4 | **C** `.states` | Choreography, once A's semantics are proven. Its group-timing envelope builds on A's channel. |
-| 5 | **D** transaction scope | Ship the cheap subset first (`animate:` on `.onClick`), full SDK `animate()` block after the dispatch pipeline grows batch metadata. Defined from day one as an *override* of node defaults so precedence never changes under authors. |
-| 6 | **F** machine model | Decided: machines live in module code. Ship `.onAnimationComplete` **together with** C/E — it's the piece that makes module-resident machines work. |
-| 7 | **H** shared elements | Pure renderer track — needs only A's `__anim` channel and the existing Detach/Attach seam, so it can start early and ship renderer-by-renderer (silent degradation covers the stragglers). |
-| 8 | **G** scrub bindings | After B and E (needs timelines + renderer animation infra); the largest renderer work item — schedule per-renderer, DOM first. Its measurement/FLIP machinery overlaps H's and B's `.layout` — build them as one effort. |
+| 3 | **E (presets only)** — **shipped** | Built-in `pulse`/`spin`/`shimmer`/`shake` applied via `.animate(name, ...)`; author-defined `animation` blocks are **rejected** (maintainer decision — no custom keyframe DSL, see §E). |
+| 4 | **C** `.states` — **shipped** (`onState` heads) | Choreography, once A's semantics are proven. Shipped as per-node pose switches lowering to A's channel (StateSwitch props + a synthesized `.transition`); the group-timing/stagger envelope stays deferred. |
+| 5 | **H** shared elements — **shipped** (DOM) | Pure renderer track — needs only A's `__anim` channel and the existing Detach/Attach seam, so it started early and shipped renderer-by-renderer as predicted: DOM first, silent degradation covering the stragglers (Canvas/iOS/Android/desktop pending). Shipped ahead of D/F/G precisely because it cost the engine nothing. |
+| 6 | **D** transaction scope — **cheap subset shipped** | The cheap subset shipped first exactly as planned (`animate:` on event applicators → the `batchAnimation` prelude; TS hosts only — see the as-shipped D contract in §3); the full SDK `animate()` block waits on the dispatch pipeline growing batch metadata. Defined from day one as an *override* of node defaults so precedence never changes under authors. |
+| 7 | **F** machine model — **`.onAnimationComplete` shipped** | Decided: machines live in module code. `.onAnimationComplete` shipped together with C, as argued — it's the piece that makes module-resident machines work. |
+| 8 | **G** scrub bindings — **shipped** (DOM) | Shipped after C exactly as re-anchored: `.scrub` interpolates between two `.states` poses (engine materializes the endpoint values as `__anim.scrubPoses`), `.settle(bind:)` writes the winning label through the `.bind` channel. Per-renderer as predicted — engine lowering everywhere, DOM renderer first; Canvas/iOS/Android/desktop ignore the four channels (see the as-shipped G contract in §3). |
 
 The deliberate rejections, for the record: no ambient unscoped implicit
 animation (SwiftUI's deprecated modifier), no wrapper components for exit
 (React's `AnimatePresence`), no frame ticking through the state/patch pipeline
 (React's per-frame `setState` trap), no GUI-required declarative format
-(MotionLayout), and no DSL-resident state machines (`animationMachine` was
+(MotionLayout), no DSL-resident state machines (`animationMachine` was
 considered and rejected — machines are logic, and logic lives in modules; see
-§F) — Rive's *decomposition* is adopted, its editor-locked artifact model and
-view-layer machine are not.
+§F), and **no custom keyframe-authoring DSL** (author-defined `animation { }`
+blocks rejected by maintainer decision — the built-in presets are the entire
+timeline surface; ambient motion is a preset, state-driven motion is a C pose,
+structural motion is enter/exit) — Rive's *decomposition* is adopted, its
+editor-locked artifact model and view-layer machine are not.
 
 ---
 
@@ -748,16 +1274,16 @@ How far does A–H actually stretch? Scenario coverage, honestly scored:
 | Prop change glide (expand card, fade image in) | A | ✅ core case |
 | Toast/dialog/menu enter & exit | B | ✅ core case |
 | List add/remove/reorder (FLIP) | B | ✅ engine's keyed differ makes this a marquee |
-| Snap on data refresh, glide on user tap | D | ✅ uniquely expressible |
+| Snap on data refresh, glide on user tap | D | ✅ shipped (cheap subset) — `animate:` on the dispatching event stamps the first flush; TS hosts only |
 | Spinner, shimmer, pulse, shake | E | ✅ presets |
-| Coordinated multi-element + stagger | C | ✅ |
-| Staggered *entrance* of a list | B+C | ⚠️ needs `stagger:` on a container's `.enter` — trivial extension, spec it in B |
-| Sequencing ("draw check, then pulse, then fade") | F | ✅ `.onAnimationComplete` advances the module-resident machine |
+| Coordinated multi-element + stagger | C | ⚠️ per-node pose switches shipped; the `stagger:`/group envelope is **deferred** — sibling nodes driven by the same path flip together but with no offset choreography |
+| Staggered *entrance* of a list | B+C | ⚠️ needs `stagger:` on a container's `.enter` — trivial extension, spec it in B (**deferred** with C's stagger envelope) |
+| Sequencing ("draw check, then pulse, then fade") | F | ✅ shipped — `.onAnimationComplete` advances the module-resident machine |
 | Motion with memory (press-release vs hover-leave paths) | F | ✅ machine in module code |
-| Gesture-driven scrubbing (bottom sheet drag, pull-to-refresh) | G | ✅ scrub bindings, renderer-resident |
-| Scroll-linked (collapsing header, parallax) | G | ✅ `scroll(...)` source |
-| Shared-element / hero transitions | H | ✅ engine tags identity, renderers match geometry |
-| Fling/decay physics | G | ✅ velocity-projected `.settle` |
+| Gesture-driven scrubbing (bottom sheet drag, pull-to-refresh) | G | ✅ shipped (DOM) — `.scrub`/`.settle` between `.states` poses, renderer-resident; other renderers ignore the channels |
+| Scroll-linked (collapsing header, parallax) | G | ✅ shipped (DOM) — `source: scroll` maps a container offset through the same progress formula, with rest-debounced endpoint writes |
+| Shared-element / hero transitions | H | ✅ shipped (DOM) — engine tags identity, the renderer matches geometry; transform-only in v1 |
+| Fling/decay physics | G | ✅ shipped (DOM) — velocity-projected `.settle` (100ms sample window, 150ms projection) |
 | Text/blur/path-morph animation | — | ❌ outside the animatable whitelist by design |
 | Character/mascot-grade motion | — | ❌ wrong tool; hand-writing this in any DSL is, too |
 

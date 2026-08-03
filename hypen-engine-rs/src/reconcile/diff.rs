@@ -204,6 +204,16 @@ fn create_element_node(
                         .add_dependency(node_id, binding, module_scope_ref);
                 }
             }
+            Value::StateSwitch { path, .. } => {
+                // `.states` driving path registers exactly like a Binding —
+                // state changes dirty the node and pose flips flow out as
+                // ordinary SetProp/RemoveProp.
+                ctx.dependencies.add_dependency(
+                    node_id,
+                    &state_switch_binding(path),
+                    module_scope_ref,
+                );
+            }
             _ => {}
         }
     }
@@ -444,6 +454,13 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
                         .add_dependency(node_id, binding, module_scope_ref);
                 }
             }
+            Value::StateSwitch { path, .. } => {
+                ctx.dependencies.add_dependency(
+                    node_id,
+                    &state_switch_binding(path),
+                    module_scope_ref,
+                );
+            }
             _ => {}
         }
     }
@@ -567,6 +584,13 @@ fn collect_subtree_ids(tree: &InstanceTree, root_id: NodeId) -> Vec<NodeId> {
     }
 
     result
+}
+
+/// The state `Binding` equivalent of a `Value::StateSwitch` driving path,
+/// so `.states` nodes register in the dependency graph exactly like a
+/// `@{state.<path>}` binding (including module-scope namespacing).
+fn state_switch_binding(path: &str) -> crate::reactive::Binding {
+    crate::reactive::Binding::state(path.split('.').map(str::to_string).collect())
 }
 
 /// Engine-internal carrier props: kept in `InstanceNode` resolved props so

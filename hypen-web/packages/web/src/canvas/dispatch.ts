@@ -7,6 +7,7 @@
  * activation) so both produce identical action payloads.
  */
 
+import { ACTION_ANIMATE_KEY } from "@hypen-space/core/types";
 import type { VirtualNode } from "./types.js";
 import { resolveEventAction } from "./props.js";
 
@@ -68,11 +69,18 @@ export function dispatchNodeEvent(
   const resolved = resolveEventAction(spec);
   if (!resolved) return;
 
-  engine.dispatchAction(resolved.actionName, {
+  const payload: Record<string, any> = {
     type: eventType,
     nodeId: node.id,
     timestamp: Date.now(),
     ...resolved.payload,
     ...data,
-  });
+  };
+  // Transaction-animation stamp (Option D): carried across the dispatch
+  // boundary under the reserved key; BaseEngine.onAction lifts it into
+  // Action.animate, so handlers never see it in the payload.
+  if (resolved.animate !== undefined) {
+    payload[ACTION_ANIMATE_KEY] = resolved.animate;
+  }
+  engine.dispatchAction(resolved.actionName, payload);
 }
