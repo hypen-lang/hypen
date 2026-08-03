@@ -79,7 +79,15 @@ fn extract_bindings_from_template(s: &str) -> Option<Vec<Binding>> {
             let binding_str = &s[abs_start..=abs_end];
 
             // Try to parse as a simple binding first
-            if let Some(binding) = parse_binding(binding_str) {
+            if let Some(mut binding) = parse_binding(binding_str) {
+                // `.length` is computed FROM the container, not stored in it —
+                // state diffs never emit a "...length" path (an unshift changes
+                // tasks.0, tasks.3, …). Depend on the container itself so
+                // element-level changes invalidate the template. (Same remap
+                // as extract_bindings_from_expression.)
+                if binding.path.len() >= 2 && binding.path.last().is_some_and(|s| s == "length") {
+                    binding.path.pop();
+                }
                 let path = binding.full_path_with_source();
                 if !seen_paths.contains(&path) {
                     seen_paths.insert(path);
@@ -158,7 +166,49 @@ fn process_applicators(
     props: &mut Props,
     element_type: &str,
 ) {
+    // `.states { onState(...) }` is collected here but applied only AFTER
+    // every other applicator has merged into props: pose lowering captures
+    // the node's *final* base value per overridden key as the switch default,
+    // so a `.cornerRadius(4)` later in the chain still wins as the base.
+    let mut states_applicators: Vec<&hypen_parser::ApplicatorSpecification> = Vec::new();
+    // `.scrub`/`.settle` (Option G) are likewise deferred, and apply strictly
+    // AFTER the states end-phase below: their cross-validation reads the pose
+    // labels `.states` collects. Interception here also guarantees neither
+    // ever lowers to a `scrub.<idx>`/`settle.<idx>` prop.
+    let mut scrub_applicators: Vec<&hypen_parser::ApplicatorSpecification> = Vec::new();
+    let mut settle_applicators: Vec<&hypen_parser::ApplicatorSpecification> = Vec::new();
+
     for applicator in applicators {
+        if applicator.name == crate::ir::anim::STATES_APPLICATOR {
+            states_applicators.push(applicator);
+            continue;
+        }
+        if applicator.name == crate::ir::anim::SCRUB_APPLICATOR {
+            scrub_applicators.push(applicator);
+            continue;
+        }
+        if applicator.name == crate::ir::anim::SETTLE_APPLICATOR {
+            settle_applicators.push(applicator);
+            continue;
+        }
+
+        // The parser accepts a children block on ANY applicator
+        // (`.name(...) { ... }`), but only `.states` consumes one. Every
+        // other path below (tw/bind/anim/variant-map/generic) ignores
+        // `applicator.children`, so a block here — e.g. a SwiftUI-style
+        // `Card().theme(dark) { Text("hi") }` where the body was meant as
+        // component children — would silently vanish. Warn loudly instead.
+        if !applicator.children.is_empty() {
+            crate::log_warn!(
+                crate::logger::LogScope::Engine,
+                ".{}: children block ignored — only .states consumes a block; \
+                 if these were meant as UI children, place the block before \
+                 the applicator chain (Component {{ ... }}.{}(...))",
+                applicator.name,
+                applicator.name
+            );
+        }
+
         // .tw(classes) → expand Tailwind to individual CSS props
         if applicator.name == "tw" {
             if let Some(arg) = applicator.arguments.arguments.first() {
@@ -211,6 +261,107 @@ fn process_applicators(
             continue;
         }
 
+        // .transition/.enter/.exit/.layout/.animate/.motion → lower into the
+        // reserved "__anim.*" prop channel (one JSON object per channel;
+        // renderers that don't understand it ignore the prop and snap). The
+        // original applicator never becomes a `<name>.<idx>` prop — an
+        // `.animate` with an unknown preset (or a `.motion` with anything
+        // but `essential`) lowers to nothing at all. Must
+        // run BEFORE the variant-map branch below so an animation map
+        // argument isn't misread as variant props. The legacy web-only
+        // string form `.transition("opacity 0.3s ease")` (single positional
+        // string with whitespace) falls through to the generic path
+        // (→ "transition.0") for back-compat, with a deprecation warning.
+        if crate::ir::anim::is_anim_applicator(&applicator.name) {
+            if crate::ir::anim::is_legacy_transition_string(applicator) {
+                crate::log_warn!(
+                    crate::logger::LogScope::Engine,
+                    ".transition(\"<css shorthand>\") is deprecated and web-only; \
+                     use .transition(duration, curve) instead"
+                );
+                // fall through to the generic applicator handling below
+            } else {
+                if let Some((key, spec)) = crate::ir::anim::lower_anim_applicator(applicator) {
+                    props.insert(key, Value::Static(spec));
+                }
+                continue;
+            }
+        }
+
+        // .sharedElement(<key>, ...) → Option H shared-element identity.
+        // Splits into TWO reserved props: "__anim.sharedKey" carries the raw
+        // key through the standard parser-value conversion — UNLIKE every
+        // other animation argument the key may bind ("cover-@{item.id}"),
+        // identity is data, so it resolves per render and re-resolves as
+        // SetProp on state change — while "__anim.shared" is the static
+        // timing object (defaults filled at lowering). A missing/empty/
+        // non-string-ish key warns and omits BOTH props; either way the
+        // applicator is consumed (never a "sharedElement.0" prop).
+        if crate::ir::anim::is_shared_element_applicator(&applicator.name) {
+            if let Some((raw_key, spec)) = crate::ir::anim::lower_shared_element(applicator) {
+                let key_value = parser_value_to_ir(raw_key);
+                match key_value {
+                    Value::Static(serde_json::Value::String(_))
+                    | Value::Binding(_)
+                    | Value::TemplateString { .. } => {
+                        props.insert(
+                            crate::ir::anim::ANIM_SHARED_KEY_PROP.to_string(),
+                            key_value,
+                        );
+                        props.insert(
+                            crate::ir::anim::ANIM_SHARED_PROP.to_string(),
+                            Value::Static(spec),
+                        );
+                    }
+                    other => {
+                        crate::log_warn!(
+                            crate::logger::LogScope::Engine,
+                            ".sharedElement: key must resolve to a string or binding, got {:?}; applicator ignored",
+                            other
+                        );
+                    }
+                }
+            }
+            continue;
+        }
+
+        // Value-map variant form: .padding({ default: 8, md: 16, hover: "x" })
+        // When the applicator has a SINGLE positional Map argument whose keys
+        // are ALL variant tokens, lower it into suffixed variant props exactly
+        // like the tailwind path:
+        //   "default" -> "<name>.0"
+        //   "md"      -> "<name>@md.0"
+        //   "hover"   -> "<name>:hover.0"
+        // Map values still flow through parser_value_to_ir so @{state.x}
+        // bindings inside continue to work. If not all keys are variant tokens,
+        // fall through to the default applicator handling unchanged.
+        if applicator.arguments.arguments.len() == 1 {
+            if let hypen_parser::Argument::Positioned {
+                value: ParserValue::Map(map),
+                ..
+            } = &applicator.arguments.arguments[0]
+            {
+                if !map.is_empty()
+                    && map
+                        .keys()
+                        .all(|k| crate::portable::variant::is_variant_token(k))
+                {
+                    for (variant, value) in map {
+                        let prop_key = if variant == crate::portable::variant::DEFAULT_KEY {
+                            format!("{}.0", applicator.name)
+                        } else if crate::portable::variant::is_breakpoint(variant) {
+                            format!("{}@{}.0", applicator.name, variant)
+                        } else {
+                            // state token
+                            format!("{}:{}.0", applicator.name, variant)
+                        };
+                        props.insert(prop_key, parser_value_to_ir(value));
+                    }
+                    continue;
+                }
+            }
+        }
+
         // All other applicators become namespaced props
         if applicator.arguments.arguments.is_empty() {
             // Zero-argument applicators default to boolean true
@@ -233,6 +384,326 @@ fn process_applicators(
             }
         }
     }
+
+    // Deferred `.states` application — base values above are now final.
+    // Only the first valid `.states` applies; extras warn and are dropped.
+    let mut applied = false;
+    for applicator in states_applicators {
+        if applied {
+            crate::log_warn!(
+                crate::logger::LogScope::Engine,
+                ".states: only one .states applicator is supported per node; extra ignored"
+            );
+            continue;
+        }
+        applied = apply_states_applicator(applicator, props, element_type);
+    }
+
+    // Deferred `.scrub`/`.settle` application (Option G) — runs after the
+    // states phase so the pose-label cross-validation sees the collected
+    // labels (via the "__anim.states" switch the states phase inserts).
+    apply_scrub_applicators(&scrub_applicators, &settle_applicators, props);
+}
+
+/// Apply the node's `.scrub`/`.settle` pair (Option G) to its final props.
+///
+/// Success inserts FOUR static props — `"__anim.scrub"`,
+/// `"__anim.scrubSettle"`, `"__anim.scrubBind"`, `"__anim.scrubPoses"` (see
+/// `ir::anim`'s Option G section for the wire shapes). Any hard violation —
+/// invalid `.scrub`
+/// arguments, missing/invalid `.settle` or its `bind:`, no `.states` block
+/// on the node, or a `from:`/`to:` label no pose declares — warns ONCE
+/// naming the reason and inserts NOTHING: the node degrades to plain
+/// `.states` behavior. A `.settle` without a `.scrub` warns and is ignored.
+fn apply_scrub_applicators(
+    scrubs: &[&hypen_parser::ApplicatorSpecification],
+    settles: &[&hypen_parser::ApplicatorSpecification],
+    props: &mut Props,
+) {
+    use crate::ir::anim;
+    use crate::logger::LogScope;
+
+    if scrubs.is_empty() {
+        if !settles.is_empty() {
+            crate::log_warn!(
+                LogScope::Engine,
+                ".settle: no .scrub on this node; applicator ignored"
+            );
+        }
+        return;
+    }
+    if scrubs.len() > 1 {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".scrub: only one .scrub applicator is supported per node; extras ignored"
+        );
+    }
+    if settles.len() > 1 {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".settle: only one .settle applicator is supported per node; extras ignored"
+        );
+    }
+
+    // ONE warn naming the reason, then omit ALL scrub-related props.
+    let omit = |reason: &str| {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".scrub: {}; scrub omitted (node keeps plain .states behavior)",
+            reason
+        );
+    };
+
+    let scrub = match anim::collect_scrub(scrubs[0]) {
+        Ok(spec) => spec,
+        Err(reason) => return omit(&reason),
+    };
+    let Some(settle_applicator) = settles.first() else {
+        return omit("a .settle(bind: @state.…) must accompany .scrub");
+    };
+    let settle = match anim::collect_settle(settle_applicator) {
+        Ok(spec) => spec,
+        Err(reason) => return omit(&reason),
+    };
+
+    // Cross-validate against the node's collected `.states` pose labels —
+    // the "__anim.states" switch is inserted iff a valid `.states` applied,
+    // and its cases are exactly the pose labels.
+    let (states_path, labels): (String, Vec<String>) = match props.get(anim::ANIM_STATES_PROP) {
+        Some(Value::StateSwitch { path, cases, .. }) => {
+            (path.clone(), cases.keys().cloned().collect())
+        }
+        _ => {
+            return omit("the node carries no .states block whose poses scrub could interpolate")
+        }
+    };
+    for (field, label) in [("from", &scrub.from), ("to", &scrub.to)] {
+        if !labels.iter().any(|l| l == label) {
+            return omit(&format!(
+                "{}: '{}' is not one of the node's .states labels ({})",
+                field,
+                label,
+                labels.join("|")
+            ));
+        }
+    }
+
+    // Materialize the pose ENDPOINT values the renderer interpolates between
+    // ("__anim.scrubPoses"). The states phase already turned every
+    // pose-overridden prop key into a StateSwitch driven by the same state
+    // path — reuse those switches: for each key the from- OR to-pose
+    // overrides, both endpoints resolve as pose override, else the node's
+    // static base default (the switch default). A key resolvable on only one
+    // end cannot interpolate — warn and skip it (the pose switch itself
+    // still flips it, it just snaps under scrub).
+    let mut pose_map = serde_json::Map::new();
+    for (key, value) in props.iter() {
+        if key == anim::ANIM_STATES_PROP {
+            continue;
+        }
+        let Value::StateSwitch {
+            path,
+            cases,
+            default,
+        } = value
+        else {
+            continue;
+        };
+        if path != &states_path {
+            continue;
+        }
+        if !cases.contains_key(&scrub.from) && !cases.contains_key(&scrub.to) {
+            continue; // overridden only by uninvolved poses
+        }
+        let from_value = cases.get(&scrub.from).or(default.as_ref());
+        let to_value = cases.get(&scrub.to).or(default.as_ref());
+        match (from_value, to_value) {
+            (Some(from), Some(to)) => {
+                pose_map.insert(
+                    key.clone(),
+                    serde_json::Value::Array(vec![from.clone(), to.clone()]),
+                );
+            }
+            _ => {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".scrub: prop '{}' resolves on only one of the from/to poses (no pose override or static base default for the other end); excluded from scrub interpolation",
+                    key
+                );
+            }
+        }
+    }
+
+    props.insert(
+        anim::ANIM_SCRUB_PROP.to_string(),
+        Value::Static(anim::scrub_spec_json(&scrub)),
+    );
+    props.insert(
+        anim::ANIM_SCRUB_SETTLE_PROP.to_string(),
+        Value::Static(anim::settle_spec_json(&settle)),
+    );
+    props.insert(
+        anim::ANIM_SCRUB_BIND_PROP.to_string(),
+        Value::Static(serde_json::Value::String(settle.bind)),
+    );
+    props.insert(
+        anim::ANIM_SCRUB_POSES_PROP.to_string(),
+        Value::Static(serde_json::Value::Object(pose_map)),
+    );
+}
+
+/// Apply one `.states(...) { onState(label)... }` applicator to a node's
+/// final props (Option C). Returns `false` when the applicator was ignored
+/// entirely (already warned in [`crate::ir::anim::collect_states`]).
+///
+/// Each pose's applicators are lowered through the ordinary
+/// [`process_applicators`] machinery (so `.tw`, directional forms and
+/// variant maps all work per-state) minus the pose exclusions: animation
+/// applicators, `.bind`, and `on[A-Z]*` event applicators. Every prop key
+/// any pose overrides becomes a [`Value::StateSwitch`]; the node also gains
+/// a synthesized `__anim.transition` scoped to the animatable overridden
+/// props (an explicit `.transition` on the node wins) and the
+/// `__anim.states` active-label prop.
+fn apply_states_applicator(
+    applicator: &hypen_parser::ApplicatorSpecification,
+    props: &mut Props,
+    element_type: &str,
+) -> bool {
+    use crate::ir::anim;
+    use crate::logger::LogScope;
+
+    let Some(spec) = anim::collect_states(applicator) else {
+        return false;
+    };
+
+    // Lower each pose to static prop values via the normal applicator path.
+    let mut poses: Vec<(String, indexmap::IndexMap<String, serde_json::Value>)> =
+        Vec::with_capacity(spec.poses.len());
+    for (label, pose_applicators) in &spec.poses {
+        let mut allowed: Vec<hypen_parser::ApplicatorSpecification> = Vec::new();
+        for pose_applicator in pose_applicators {
+            if anim::is_pose_excluded_applicator(&pose_applicator.name) {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".states: '.{}' is not allowed inside onState({}) (animation, .bind and event applicators are excluded from poses); ignored",
+                    pose_applicator.name,
+                    label
+                );
+            } else {
+                allowed.push(pose_applicator.clone());
+            }
+        }
+
+        let mut pose_props = Props::new();
+        process_applicators(&allowed, &mut pose_props, element_type);
+
+        let mut static_props = indexmap::IndexMap::new();
+        for (key, value) in &pose_props {
+            match value {
+                Value::Static(v) => {
+                    static_props.insert(key.clone(), v.clone());
+                }
+                _ => {
+                    crate::log_warn!(
+                        LogScope::Engine,
+                        ".states: pose values must be static — bindings are not supported inside onState({}); prop '{}' ignored",
+                        label,
+                        key
+                    );
+                }
+            }
+        }
+        poses.push((label.clone(), static_props));
+    }
+
+    // Union of overridden prop keys, in first-appearance order.
+    let mut union: indexmap::IndexSet<String> = indexmap::IndexSet::new();
+    for (_, pose) in &poses {
+        union.extend(pose.keys().cloned());
+    }
+
+    // Each overridden key becomes a StateSwitch whose default is the node's
+    // (final) static base value for that key, when it has one.
+    for key in &union {
+        let default = match props.get(key.as_str()) {
+            Some(Value::Static(v)) => Some(v.clone()),
+            Some(_) => {
+                crate::log_warn!(
+                    LogScope::Engine,
+                    ".states: base value of '{}' is not static; the pose switch replaces it without a default",
+                    key
+                );
+                None
+            }
+            None => None,
+        };
+        let mut cases = indexmap::IndexMap::new();
+        for (label, pose) in &poses {
+            if let Some(v) = pose.get(key.as_str()) {
+                cases.insert(label.clone(), v.clone());
+            }
+        }
+        props.insert(
+            key.clone(),
+            Value::StateSwitch {
+                path: spec.path.clone(),
+                cases,
+                default,
+            },
+        );
+    }
+
+    // Synthesize "__anim.transition" scoped to the animatable overridden
+    // props. An explicit .transition on the node already inserted the key
+    // (the main applicator loop ran first) — explicit wins, skip. The
+    // deprecated legacy string form (.transition("opacity 0.3s ease")) is
+    // ALSO an explicit .transition, but lowers to the plain "transition.0"
+    // prop instead of the channel — synthesizing next to it would put the
+    // applicator's `style.transition` shorthand and the animator's longhands
+    // in a patch-order race, so it suppresses synthesis too (pose switches
+    // then run on the author's CSS; no completion timing is available).
+    // When no overridden prop is animatable there is nothing to animate:
+    // emit no spec, everything snaps.
+    let mut animatable: Vec<String> = Vec::new();
+    for key in &union {
+        let base = anim::base_prop_name(key);
+        if anim::ANIMATABLE_PROPS.contains(&base) && !animatable.iter().any(|p| p == base) {
+            animatable.push(base.to_string());
+        }
+    }
+    let has_legacy_transition = props.contains_key(anim::LEGACY_TRANSITION_PROP);
+    if !animatable.is_empty()
+        && !props.contains_key(anim::ANIM_TRANSITION_PROP)
+        && !has_legacy_transition
+    {
+        props.insert(
+            anim::ANIM_TRANSITION_PROP.to_string(),
+            Value::Static(anim::synthesize_states_transition(&spec, animatable)),
+        );
+    } else if !animatable.is_empty() && has_legacy_transition {
+        crate::log_warn!(
+            LogScope::Engine,
+            ".states: the legacy .transition(\"<css shorthand>\") on this node takes precedence over the synthesized states transition; pose switches animate with the author's CSS and fire no completion events"
+        );
+    }
+
+    // Synthesize the "__anim.states" active-label prop: a StateSwitch over
+    // the labels themselves ({"label": <label>}, default null) so renderers
+    // see pose changes as an ordinary SetProp.
+    let mut label_cases = indexmap::IndexMap::new();
+    for (label, _) in &poses {
+        label_cases.insert(label.clone(), serde_json::json!({ "label": label }));
+    }
+    props.insert(
+        anim::ANIM_STATES_PROP.to_string(),
+        Value::StateSwitch {
+            path: spec.path.clone(),
+            cases: label_cases,
+            default: Some(serde_json::Value::Null),
+        },
+    );
+
+    true
 }
 
 /// Convert parser AST to engine IRNode (first-class control flow constructs)
@@ -267,6 +738,17 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
         _ => {
             // Regular element - convert children to IRNodes recursively
             let mut element = Element::new(&component.name);
+
+            // Carry the parser's name-token byte span so diagnostics
+            // (conformance checker, LSP) can point at file:line:col, and the
+            // full-expression span so suppression directives can trail any
+            // line of a multiline applicator chain.
+            element.span = Some(crate::ir::SourceSpan::from_range(
+                &component.metadata.name_range,
+            ));
+            element.expr_span = Some(crate::ir::SourceSpan::from_range(
+                &component.metadata.expr_range,
+            ));
 
             // Convert arguments to props
             for (i, arg) in component.arguments.arguments.iter().enumerate() {
@@ -332,9 +814,406 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
             // Convert children recursively as IRNodes to preserve ForEach/When/If
             element.ir_children = component.children.iter().map(ast_to_ir_node).collect();
 
+            // Derive accessibility semantics once, here in the engine, and
+            // carry them to every renderer via the Create patch. Runs after
+            // props AND children are populated so prop-dependent semantics
+            // (heading level) and content-dependent semantics (accessible
+            // name) are both available.
+            element.semantics = crate::ir::Semantics::derive(&element);
+
+            // Tabs auto-wiring: a tablist with an explicit `.id(...)` gets
+            // its tab↔panel id graph minted for it, so authors don't
+            // hand-assemble `.id`/`.controls`/`.labelledby` per pair.
+            if element.semantics.as_ref().and_then(|s| s.role)
+                == Some(crate::ir::semantics::Role::Tablist)
+            {
+                wire_tablist(&mut element);
+            }
+
+            // Listitem derivation: `.role("list")` is an author's statement
+            // that this container really is a semantic list, which is only
+            // true to assistive tech when its children are listitems. Wire
+            // the direct, role-less element children.
+            if element.semantics.as_ref().and_then(|s| s.role)
+                == Some(crate::ir::semantics::Role::List)
+            {
+                wire_list_items(&mut element);
+            }
+
+            // Form-control ↔ label auto-association: an unlabeled form
+            // control whose immediately-preceding sibling is a static Text
+            // gets that Text wired as its label, so authors don't need an
+            // explicit `.label(...)` for the ubiquitous label-then-field
+            // layout. See `wire_form_labels` for the (deliberately narrow)
+            // conditions.
+            wire_form_labels(&mut element);
+
+            // A content-named element whose nameable text is dynamic and
+            // spans children (`Button { Text("@{state.x}") }`) cannot resolve
+            // its name from its own props at reconcile. Hoist the recovered
+            // template onto the parent as the synthetic `__a11yName` prop:
+            // its bindings register as parent dependencies (a child text
+            // change re-emits SetSemantics) and `with_resolved_name` reads
+            // the resolved value. Renderers drop the unknown prop.
+            if let Some(hoisted) = crate::ir::semantics::hoisted_name_template(&element) {
+                element.props.insert("__a11yName".to_string(), hoisted);
+            }
+
+            // Intent applicators (.label/.hidden/.role/.landmark) are consumed
+            // into the semantics block above; strip them so they don't travel
+            // on as junk props (which would otherwise be silently dropped by
+            // the renderer's CSS fallback).
+            element.props.remove("label.0");
+            element.props.remove("hidden.0");
+            element.props.remove("description.0");
+            // NOTE: .role/.landmark (role.0/landmark.0) and .dir (dir.0) are
+            // intentionally NOT stripped — the conformance checker reads them
+            // to flag an unrecognised token (a typo like `.role("buton")` or
+            // `.dir("rlt")`) rather than
+            // silently ignoring it. Likewise .expanded/.pressed/.selected/
+            // .current/.invalid AND the id-reference applicators (.id/.controls/
+            // .describedby/.labelledby/.owns/.activedescendant) must survive
+            // so a bound or templated value (`.expanded(@state.open)`,
+            // `.id("opt-@{item.id}")` inside a ForEach) resolves at
+            // reconcile. The leftover props are harmless (dropped by the
+            // renderer's CSS fallback).
+
             IRNode::Element(element)
         }
     }
+}
+
+/// Auto-wire the id graph of a tablist's tab/panel pairs, and restructure
+/// mixed children so the tablist role never owns a tabpanel.
+///
+/// A hand-assembled accessible Tabs needs four references per pair —
+/// `tab.id`, `tab.controls → panel.id`, `panel.id`, `panel.labelledby →
+/// tab.id`. When the tablist declares an explicit `.id("settings")` (the
+/// deterministic namespace) and its direct children contain an equal,
+/// non-zero number of tab-role and tabpanel-role elements, the pairs are
+/// wired positionally with minted ids `<tablistId>-tab-<i>` /
+/// `<tablistId>-panel-<i>`. Author-supplied values always win (`??=`
+/// semantics), and selection state stays author-driven via `.selected`.
+///
+/// ARIA constrains the shape: `role="tablist"` may own only `role="tab"`
+/// children, and `role="tab"` requires a tablist parent. So when tabs and
+/// panels are mixed under one container, the container CANNOT be the
+/// tablist — it becomes a plain group (role cleared, id and everything
+/// else kept), a synthetic inner `Tabs` element (same DOM flex-row host)
+/// carries `role="tablist"` and ONLY the tab children in their original
+/// relative order, positioned where the first tab was, and the panels stay
+/// direct children of the outer container. The restructured outer defaults
+/// to column layout (strip above panels; an author `flexDirection` wins)
+/// and an author `gap` is mirrored onto the strip, so the widget lays out
+/// as the author wrote it. The minted id namespace is the outer container's
+/// author id either way, so the wired graph is identical in both shapes. When children are ALL tabs (panels portaled elsewhere),
+/// the container itself stays the tablist. The restructured shape is pinned
+/// against axe-core in `hypen-web/tests/a11y.axe.test.ts` and mirrored by
+/// `tabs_mixed_children_restructure_into_tab_only_tablist` in
+/// `tests/test_a11y_conformance.rs`.
+///
+/// Deliberately conservative: count mismatch → no wiring and no
+/// restructuring (panels may be portaled elsewhere and hand-wired — minting
+/// `controls` references to panels that don't exist here would manufacture
+/// dangling references, and the conformance pass explains the skip via
+/// `TablistWiringSkipped` against the unrestructured shape); no tablist id
+/// → no wiring (no deterministic namespace to mint from), but a mixed
+/// matched shape is still restructured so the ARIA ownership rule holds.
+fn wire_tablist(element: &mut Element) {
+    use crate::ir::semantics::{Role, Semantics};
+
+    let role_of = |node: &IRNode| -> Option<Role> {
+        node.as_element()
+            .and_then(|e| e.semantics.as_ref())
+            .and_then(|s| s.role)
+    };
+
+    let tab_indices: Vec<usize> = element
+        .ir_children
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| role_of(c) == Some(Role::Tab))
+        .map(|(i, _)| i)
+        .collect();
+    let panel_indices: Vec<usize> = element
+        .ir_children
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| role_of(c) == Some(Role::Tabpanel))
+        .map(|(i, _)| i)
+        .collect();
+
+    // All-tabs (panels portaled elsewhere): the container IS the tablist.
+    // Mismatch: no wiring and no restructuring — TablistWiringSkipped reads
+    // the unrestructured shape to explain why.
+    if tab_indices.is_empty()
+        || panel_indices.is_empty()
+        || tab_indices.len() != panel_indices.len()
+    {
+        return;
+    }
+
+    if let Some(tablist_id) = element.semantics.as_ref().and_then(|s| s.id.clone()) {
+        for (pair, (&tab_idx, &panel_idx)) in tab_indices.iter().zip(&panel_indices).enumerate() {
+            let tab_id = format!("{tablist_id}-tab-{pair}");
+            let panel_id = format!("{tablist_id}-panel-{pair}");
+
+            if let Some(IRNode::Element(tab)) = element.ir_children.get_mut(tab_idx) {
+                if let Some(sem) = tab.semantics.as_mut() {
+                    sem.id.get_or_insert_with(|| tab_id.clone());
+                    sem.controls.get_or_insert_with(|| panel_id.clone());
+                }
+            }
+            if let Some(IRNode::Element(panel)) = element.ir_children.get_mut(panel_idx) {
+                if let Some(sem) = panel.semantics.as_mut() {
+                    sem.id.get_or_insert_with(|| panel_id.clone());
+                    sem.labelledby.get_or_insert_with(|| tab_id.clone());
+                }
+            }
+        }
+    }
+
+    // Restructure: tabs move into a synthetic inner tablist at the first
+    // tab's position; everything else (panels included) keeps its relative
+    // order under the outer container. The inner element carries no id of
+    // its own — the outer keeps the author id (a copy would be a DuplicateId)
+    // and the minted references never target the tablist element itself.
+    let mut tablist = Element::new("Tabs");
+    tablist.semantics = Some(Semantics {
+        role: Some(Role::Tablist),
+        ..Semantics::default()
+    });
+
+    // Restructuring must not change how the widget lays out: both hosts
+    // default to flex-row on DOM, so untouched the panels would sit BESIDE
+    // the tab strip and the author's `.gap` would stop spacing tab from tab.
+    // The outer defaults to column (strip above panels — what every tabs UI
+    // does) unless the author set a direction, and the author's gap is
+    // copied (not moved) onto the strip: tabs keep their pre-restructure
+    // spacing, and the outer gap separates strip from panels.
+    if !element.props.contains_key("flexDirection.0")
+        && !element.props.contains_key("flexDirection")
+    {
+        element.props.insert(
+            "flexDirection.0".to_string(),
+            Value::Static(serde_json::json!("column")),
+        );
+    }
+    if let Some(gap) = element.props.get("gap.0").cloned() {
+        if !tablist.props.contains_key("gap.0") {
+            tablist.props.insert("gap.0".to_string(), gap);
+        }
+    }
+
+    let mut new_children = Vec::with_capacity(element.ir_children.len() + 1 - tab_indices.len());
+    let mut insert_at = None;
+    for child in std::mem::take(&mut element.ir_children) {
+        if role_of(&child) == Some(Role::Tab) {
+            insert_at.get_or_insert(new_children.len());
+            tablist.ir_children.push(child);
+        } else {
+            new_children.push(child);
+        }
+    }
+    new_children.insert(
+        insert_at.expect("tab_indices is non-empty"),
+        IRNode::Element(tablist),
+    );
+    element.ir_children = new_children;
+
+    if let Some(sem) = element.semantics.as_mut() {
+        sem.role = None;
+        if *sem == Semantics::default() {
+            element.semantics = None;
+        }
+    }
+}
+
+/// Derive `listitem` for the direct children of an explicit list.
+///
+/// Deliberately conservative, mirroring [`wire_tablist`]: only *direct*
+/// `Element` children, and only those that derive no role of their own — an
+/// element with any role (structural or opted-in) has a different job, and
+/// content behind control flow (`ForEach`/`When`) is left untouched rather
+/// than guessed. Hidden children stay decorative.
+fn wire_list_items(element: &mut Element) {
+    use crate::ir::semantics::{Role, Semantics};
+
+    for child in &mut element.ir_children {
+        let IRNode::Element(item) = child else { continue };
+        if item
+            .semantics
+            .as_ref()
+            .is_some_and(|s| s.role.is_some() || s.hidden == Some(true))
+        {
+            continue;
+        }
+        item.semantics.get_or_insert_with(Semantics::default).role = Some(Role::Listitem);
+    }
+}
+
+/// Auto-associate unlabeled form controls with an immediately-preceding
+/// static Text sibling.
+///
+/// The ubiquitous form layout — `Text("Name")` directly followed by an
+/// `Input` — is, in the unambiguous case, a label/field pair. Wiring it
+/// mints what an author would hand-assemble: the Text gets an `id`, the
+/// control gets `labelledby` → that id, **and** the Text's static content
+/// becomes the control's `name` (non-explicit), so renderers without an
+/// id-reference vocabulary (iOS/Android) still speak the label.
+///
+/// Deliberately conservative — a wrong auto-label is worse than none:
+/// - Only roles that *need* an external label are wired
+///   ([`Role::needs_external_label`]); Checkbox/Switch self-label and are
+///   never touched.
+/// - Only the control's *immediately preceding* element sibling counts, and
+///   only when it is a bare `Text` with fully-static content and no other
+///   semantic job (a role/label/hidden Text is presumed to have one). A
+///   templated Text resolves at reconcile — its value is unknown here, and a
+///   stale name is worse than none.
+/// - Ids are minted only inside a deterministic namespace: the parent's
+///   explicit `.id("signup")` yields `signup-label-<i>`; a Text carrying its
+///   own author `.id(...)` is referenced as-is. No parent id and no Text id
+///   → no wiring (ids invented without a namespace would not be stable
+///   across rebuilds, which is worse than no association).
+/// - An author `.label(...)` / `.labelledby(...)` on the control — static
+///   or bound — always wins.
+/// - The Text's content must pass [`looks_like_label`]: instructional prose
+///   ("All fields are required.") meets every structural guard above, and
+///   wiring it would both mis-name the control *and* silence
+///   `FormControlMissingLabel`. Declining to wire only re-fires that rule,
+///   which points the author at an explicit `.label` — false-negative-safe.
+fn wire_form_labels(element: &mut Element) {
+    use crate::ir::semantics::Semantics;
+
+    if element.ir_children.len() < 2 {
+        return;
+    }
+
+    let parent_id = element.semantics.as_ref().and_then(|s| s.id.clone());
+    let mut minted = 0usize;
+
+    for i in 1..element.ir_children.len() {
+        let (left, right) = element.ir_children.split_at_mut(i);
+        let Some(IRNode::Element(control)) = right.first_mut() else {
+            continue;
+        };
+
+        let wirable = control
+            .semantics
+            .as_ref()
+            .and_then(|s| s.role)
+            .is_some_and(|r| r.needs_external_label());
+        let unlabeled = control
+            .semantics
+            .as_ref()
+            .is_some_and(|s| s.name.is_none() && s.labelledby.is_none());
+        // A bound/templated `.label(...)` or `.labelledby(...)` contributes
+        // nothing at derive but is author intent resolving at reconcile —
+        // never wire over it.
+        if !wirable
+            || !unlabeled
+            || control.props.contains_key("label.0")
+            || control.props.contains_key("labelledby.0")
+        {
+            continue;
+        }
+
+        let Some(IRNode::Element(text)) = left.last_mut() else {
+            continue;
+        };
+        if text.element_type != "Text" || !text.ir_children.is_empty() {
+            continue;
+        }
+        // The Text must carry no semantics of its own beyond (possibly) an
+        // author `.id(...)` — anything else means it has another job.
+        let text_is_plain = match text.semantics.as_ref() {
+            None => true,
+            Some(s) => {
+                *s == Semantics {
+                    id: s.id.clone(),
+                    ..Semantics::default()
+                }
+            }
+        };
+        // A bound/templated `.id(...)` re-resolves at reconcile and would
+        // clobber a minted id, leaving the labelledby reference dangling.
+        let text_id_deferred = matches!(
+            text.props.get("id.0"),
+            Some(Value::Binding(_)) | Some(Value::TemplateString { .. })
+        );
+        if !text_is_plain || text_id_deferred {
+            continue;
+        }
+        let Some(label_text) = static_text(&text.props) else {
+            continue;
+        };
+        // Prose preceding a control satisfies every structural guard above;
+        // only its shape gives it away. Declining to wire is always safe —
+        // the control stays unlabeled and `FormControlMissingLabel` fires.
+        if !looks_like_label(&label_text) {
+            continue;
+        }
+
+        let text_id = match text.semantics.as_ref().and_then(|s| s.id.clone()) {
+            Some(author_id) => author_id,
+            None => match &parent_id {
+                Some(parent) => {
+                    let id = format!("{parent}-label-{minted}");
+                    minted += 1;
+                    id
+                }
+                None => continue,
+            },
+        };
+
+        text.semantics
+            .get_or_insert_with(Semantics::default)
+            .id
+            .get_or_insert_with(|| text_id.clone());
+        if let Some(sem) = control.semantics.as_mut() {
+            sem.labelledby = Some(text_id);
+            // name_explicit stays unset: DOM keeps relying on the labelledby
+            // reference (no aria-label), while name-only renderers get the
+            // spoken label.
+            sem.name = Some(label_text);
+        }
+    }
+}
+
+/// Shape test for auto-association: does this (trimmed) Text content look
+/// like a form label rather than prose?
+///
+/// Labels are short noun phrases ("Email", "Full name:"); prose that happens
+/// to precede a control ("All fields are required.") is long, many-worded,
+/// or sentence-punctuated. Rejects when the text
+/// - exceeds 40 characters, or
+/// - has more than 5 whitespace-separated words, or
+/// - ends with sentence punctuation (`.`, `!`, `?`) — a trailing `:` is
+///   label-like and stays wireable.
+///
+/// Every rejection is false-negative-safe: an unwired control falls back to
+/// `FormControlMissingLabel`, guiding the author to an explicit `.label`.
+fn looks_like_label(text: &str) -> bool {
+    text.chars().count() <= 40
+        && text.split_whitespace().count() <= 5
+        && !text.ends_with(['.', '!', '?'])
+}
+
+/// A Text element's own fully-static content (`0`/`text` prop), trimmed.
+/// `None` for templated, empty, or non-string content.
+fn static_text(props: &Props) -> Option<String> {
+    for key in ["0", "text"] {
+        if let Some(value) = props.get(key) {
+            return match value {
+                Value::Static(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+                    Some(s.trim().to_string())
+                }
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -487,6 +1366,12 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
     // Applicator props (flex, backgroundColor, etc.) go on the wrapper element
     // so the renderer can style the container.
     let mut list_element = Element::new(element_type);
+    list_element.span = Some(crate::ir::SourceSpan::from_range(
+        &component.metadata.name_range,
+    ));
+    list_element.expr_span = Some(crate::ir::SourceSpan::from_range(
+        &component.metadata.expr_range,
+    ));
     // Copy applicator props onto the wrapper (e.g. flex.0, backgroundColor.0)
     for (key, value) in &foreach_props {
         list_element.props.insert(key.clone(), value.clone());
@@ -660,7 +1545,7 @@ fn convert_router(component: &ComponentSpecification) -> IRNode {
 }
 
 /// Convert parser Value to engine Value
-fn parser_value_to_ir(value: &ParserValue) -> Value {
+pub(crate) fn parser_value_to_ir(value: &ParserValue) -> Value {
     match value {
         ParserValue::String(s) => {
             // Remove surrounding quotes if present
@@ -720,6 +1605,9 @@ fn parser_value_to_ir(value: &ParserValue) -> Value {
                     Value::TemplateString { template, .. } => serde_json::json!(template),
                     Value::Action(s) => serde_json::json!(format!("@{}", s)),
                     Value::Resource(s) => serde_json::json!(format!("@resources.{}", s)),
+                    // Unreachable: parser_value_to_ir never produces a
+                    // StateSwitch — it only exists via `.states` lowering.
+                    Value::StateSwitch { .. } => serde_json::Value::Null,
                 })
                 .collect();
             Value::Static(serde_json::json!(converted))
@@ -749,6 +1637,9 @@ fn parser_value_to_ir(value: &ParserValue) -> Value {
                     Value::Resource(s) => {
                         json_map.insert(k.clone(), serde_json::json!(format!("@resources.{}", s)));
                     }
+                    // Unreachable: parser_value_to_ir never produces a
+                    // StateSwitch — it only exists via `.states` lowering.
+                    Value::StateSwitch { .. } => {}
                 }
             }
             Value::Static(serde_json::Value::Object(json_map))
@@ -840,6 +1731,23 @@ mod tests {
             IRNode::Element(e) => e,
             other => panic!("Expected Element, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn looks_like_label_thresholds() {
+        // Label-shaped: short, few words, no sentence punctuation.
+        assert!(looks_like_label("Email"));
+        assert!(looks_like_label("Email:"));
+        assert!(looks_like_label("Full legal name"));
+        assert!(looks_like_label("One two three four five")); // 5 words: boundary in
+        assert!(looks_like_label(&"x".repeat(40))); // 40 chars: boundary in
+
+        // Prose-shaped: any single threshold rejects.
+        assert!(!looks_like_label("All fields are required."));
+        assert!(!looks_like_label("Required!"));
+        assert!(!looks_like_label("What is your name?"));
+        assert!(!looks_like_label("One two three four five six")); // 6 words
+        assert!(!looks_like_label(&"x".repeat(41))); // 41 chars
     }
 
     #[test]
@@ -1169,6 +2077,100 @@ mod tests {
                 other => panic!("Expected static prop {key}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_value_map_variant_breakpoints() {
+        // .padding({ default: 8, md: 16 }) lowers to padding.0 + padding@md.0
+        let input = r#"Text("Hi").padding({default: 8, md: 16})"#;
+        let element = parse_to_element(input);
+
+        assert!(
+            element.props.contains_key("padding.0"),
+            "Should have padding.0 prop"
+        );
+        assert!(
+            element.props.contains_key("padding@md.0"),
+            "Should have padding@md.0 prop"
+        );
+
+        if let Value::Static(val) = element.props.get("padding.0").unwrap() {
+            assert_eq!(val.as_f64().unwrap(), 8.0);
+        } else {
+            panic!("expected static padding.0");
+        }
+        if let Value::Static(val) = element.props.get("padding@md.0").unwrap() {
+            assert_eq!(val.as_f64().unwrap(), 16.0);
+        } else {
+            panic!("expected static padding@md.0");
+        }
+    }
+
+    #[test]
+    fn test_value_map_variant_state() {
+        // .backgroundColor({ default: "red", hover: "blue" })
+        let input = r#"Box {}.backgroundColor({default: "red", hover: "blue"})"#;
+        let element = parse_to_element(input);
+
+        assert!(
+            element.props.contains_key("backgroundColor.0"),
+            "Should have backgroundColor.0 prop"
+        );
+        assert!(
+            element.props.contains_key("backgroundColor:hover.0"),
+            "Should have backgroundColor:hover.0 prop"
+        );
+
+        if let Value::Static(val) = element.props.get("backgroundColor:hover.0").unwrap() {
+            assert_eq!(val.as_str().unwrap(), "blue");
+        } else {
+            panic!("expected static backgroundColor:hover.0");
+        }
+    }
+
+    #[test]
+    fn test_value_map_variant_preserves_binding() {
+        // Bindings inside a variant map value must survive lowering.
+        let input = r#"Text("Hi").padding({default: 8, md: "@{state.gap}"})"#;
+        let element = parse_to_element(input);
+
+        assert!(element.props.contains_key("padding@md.0"));
+        assert!(
+            matches!(
+                element.props.get("padding@md.0").unwrap(),
+                Value::Binding(_)
+            ),
+            "binding inside variant map should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_non_variant_map_is_passthrough() {
+        // A map whose keys are NOT all variant tokens must NOT be hijacked;
+        // it falls through to default applicator handling as a single .0 prop.
+        let input = r#"Box {}.gradient({from: "red", to: "blue"})"#;
+        let element = parse_to_element(input);
+
+        // Default handling: single positional arg -> "gradient.0" holding a map.
+        assert!(
+            element.props.contains_key("gradient.0"),
+            "non-variant map should remain a single gradient.0 prop"
+        );
+        // And it must NOT have produced variant-suffixed keys.
+        assert!(!element.props.contains_key("gradient@from.0"));
+        assert!(!element.props.contains_key("gradient:to.0"));
+    }
+
+    #[test]
+    fn test_named_arg_applicator_unaffected() {
+        // .padding(top: 8) is a Named arg, not a Map; must stay padding.top.
+        let input = r#"Text("Hi").padding(top: 8)"#;
+        let element = parse_to_element(input);
+        assert!(
+            element.props.contains_key("padding.top"),
+            "named-arg applicator must remain padding.top"
+        );
+        assert!(!element.props.contains_key("padding.0"));
     }
 
     #[test]

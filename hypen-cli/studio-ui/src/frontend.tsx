@@ -14,12 +14,26 @@ import { CellViewer } from "./components/preview-frame/CellViewer";
 import { TestMode } from "./components/studio/TestMode";
 
 /** Standalone Test Mode — same component the Studio overlay renders, but
- *  full-screen with its close button wired to `window.close()`. Active file
- *  comes from `?file=<path>` so the pop-out inherits whatever the Studio
- *  tab was on when the user clicked "Open in new window". */
+ *  full-screen. Active file comes from `?file=<path>` so the pop-out
+ *  inherits whatever the Studio tab was on when the user clicked
+ *  "Open in new window". Close behaviour:
+ *  - When this window was opened by `window.open(...)` (pop-out from the
+ *    Toolbar), `window.close()` is allowed and tears it down.
+ *  - When this is the *only* tab — opened by `hypen test` via the OS
+ *    URL handler — browsers reject `window.close()`. Fall back to
+ *    navigating to the full Studio at `/` so the X button always does
+ *    something useful instead of looking broken. */
 function StandaloneTestMode() {
   const file = new URLSearchParams(window.location.search).get("file");
-  return <TestMode activeFile={file} onClose={() => window.close()} />;
+  const handleClose = () => {
+    // `window.opener` is non-null only for tabs created by another tab.
+    if (window.opener) {
+      window.close();
+    } else {
+      window.location.assign("/");
+    }
+  };
+  return <TestMode activeFile={file} onClose={handleClose} />;
 }
 
 const elem = document.getElementById("root")!;

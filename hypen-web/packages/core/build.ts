@@ -36,6 +36,7 @@ const entrypoints = [
   "./src/disposable.ts",
   "./src/logger.ts",
   "./src/types.ts",
+  "./src/animation.ts",
   "./src/result.ts",
   "./src/retry.ts",
   "./src/engine-base.ts",

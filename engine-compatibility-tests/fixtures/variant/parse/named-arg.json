@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "parse-named-arg", "description": "Named arg, no variant.", "function": "parse_prop_key", "input": { "key": "padding.top" }, "expected": { "base": "padding", "breakpoint": null, "state": null, "arg": "top" } }

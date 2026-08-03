@@ -55,8 +55,24 @@ describe("servePage", () => {
     expect(js.headers.get("cache-control")).toContain("max-age");
   });
 
-  it("returns null for an unmatched path or a non-GET", () => {
-    expect(servePage(pages, new Request("http://x/nope"))).toBeNull();
+  it("serves the root shell for unmatched document navigations", async () => {
+    const html = servePage(
+      pages,
+      new Request("http://x/search", { headers: { accept: "text/html" } }),
+    )!;
+
+    expect(html.status).toBe(200);
+    expect(html.headers.get("content-type")).toContain("text/html");
+    expect(await html.text()).toContain('src="/client.js"');
+  });
+
+  it("returns null for unmatched non-document paths or a non-GET", () => {
+    expect(
+      servePage(
+        pages,
+        new Request("http://x/favicon.ico", { headers: { accept: "image/avif,image/webp,*/*" } }),
+      ),
+    ).toBeNull();
     expect(servePage(pages, new Request("http://x/", { method: "POST" }))).toBeNull();
   });
 });

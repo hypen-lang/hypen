@@ -1,20 +1,16 @@
 import SwiftUI
 
-/// A SwiftUI view that renders a single Hypen element and its children
+/// A SwiftUI view that renders a single Hypen element and its children.
+///
+/// This is a thin, equatable wrapper: it holds no observed state, so a
+/// parent re-render skips unchanged children. The actual rendering (and
+/// the per-element observation that drives invalidation) lives in
+/// `HypenElementContentView`, which observes only its own `HypenElement`.
 @MainActor
 public struct HypenElementView: View {
     let elementId: String
-    @ObservedObject var renderer: HypenRenderer
+    let renderer: HypenRenderer
     let actionDispatcher: ActionDispatcher
-
-    @Environment(\.componentRegistry) private var componentRegistry
-    @Environment(\.applicatorRegistry) private var applicatorRegistry
-    @Environment(\.stretchCrossAxis) private var stretchCrossAxis
-    @Environment(\.parentAllowsHorizontalExpansion) private var parentAllowsHorizontalExpansion
-    @Environment(\.parentAllowsVerticalExpansion) private var parentAllowsVerticalExpansion
-    @Environment(\.parentExplicitHeight) private var parentExplicitHeight
-    @Environment(\.parentExplicitWidth) private var parentExplicitWidth
-    @Environment(\.proportionalWidth) private var proportionalWidth
 
     public init(
         elementId: String,
@@ -28,8 +24,44 @@ public struct HypenElementView: View {
 
     public var body: some View {
         if let element = renderer.getElement(elementId) {
-            renderElement(element)
+            HypenElementContentView(
+                element: element,
+                renderer: renderer,
+                actionDispatcher: actionDispatcher
+            )
         }
+    }
+}
+
+extension HypenElementView: Equatable {
+    // The dispatcher is fixed per HypenView and flows down uniformly, so
+    // element id plus renderer identity fully determine this wrapper.
+    nonisolated public static func == (lhs: HypenElementView, rhs: HypenElementView) -> Bool {
+        lhs.elementId == rhs.elementId && lhs.renderer === rhs.renderer
+    }
+}
+
+/// Renders one element, observing it directly: a patch that mutates this
+/// element re-evaluates only this view's body, not the whole tree.
+@MainActor
+struct HypenElementContentView: View {
+    @ObservedObject var element: HypenElement
+    let renderer: HypenRenderer
+    let actionDispatcher: ActionDispatcher
+
+    @Environment(\.componentRegistry) private var componentRegistry
+    @Environment(\.applicatorRegistry) private var applicatorRegistry
+    @Environment(\.screenWidth) private var screenWidth
+    @Environment(\.viewportHeight) private var viewportHeight
+    @Environment(\.stretchCrossAxis) private var stretchCrossAxis
+    @Environment(\.parentAllowsHorizontalExpansion) private var parentAllowsHorizontalExpansion
+    @Environment(\.parentAllowsVerticalExpansion) private var parentAllowsVerticalExpansion
+    @Environment(\.parentExplicitHeight) private var parentExplicitHeight
+    @Environment(\.parentExplicitWidth) private var parentExplicitWidth
+    @Environment(\.proportionalWidth) private var proportionalWidth
+
+    var body: some View {
+        renderElement(element)
     }
 
     @ViewBuilder
@@ -39,21 +71,43 @@ public struct HypenElementView: View {
         if !isVisible {
             EmptyView()
         } else {
+            // Engine-derived accessibility semantics wrap the whole rendered
+            // element (label/traits/state → VoiceOver). Re-applied on every
+            // re-render, so a `setSemantics` reactive re-emit lands here too.
+            //
+            // The `__anim.*` layer wraps that in turn: the `.animate`
+            // preset playback sits inside so it decorates the rendered
+            // element, and the pose/glide/exclusion state sits outside so
+            // an exiting subtree's accessibility exclusion outranks the
+            // element's own semantics block.
             renderVisibleElement(element)
+                .applyHypenSemantics(element.semantics)
+                .hypenAnimatePreset(element, animator: renderer.animator)
+                .hypenAnimationState(element)
         }
     }
 
     @ViewBuilder
     private func renderVisibleElement(_ element: HypenElement) -> some View {
+        // Event-dispatch plane of the exiting-subtree exclusion: the
+        // engine-side ids under an exit are already dead, so every action
+        // this element could raise is a ghost. Swapping the dispatcher at
+        // context construction is the single chokepoint — component
+        // handlers and applicators both capture it from here.
+        let dispatcher: ActionDispatcher = element.isAnimationExcluded
+            ? HypenSuppressedActionDispatcher.shared
+            : actionDispatcher
+
         let context = ComponentContext(
             element: element,
             renderer: renderer,
-            actionDispatcher: actionDispatcher
+            actionDispatcher: dispatcher
         )
 
         let applicatorContext = ApplicatorContext(
             element: element,
-            actionDispatcher: actionDispatcher
+            actionDispatcher: dispatcher,
+            viewportSize: CGSize(width: screenWidth, height: viewportHeight)
         )
 
         // Build modifier and variants from applicators
@@ -64,20 +118,22 @@ public struct HypenElementView: View {
 
         let hasResponsiveVariants = !applicatorResult.variants.responsive.isEmpty
         let hasStateVariants = !applicatorResult.variants.states.isEmpty
+        let hasCombinedVariants = !applicatorResult.variants.combined.isEmpty
+        // `disabled` interaction state (mirrors Android's derivation): an explicit
+        // `disabled` prop, or `enabled: false`. Fed to VariantAwareView so
+        // `:disabled` / `@bp:disabled` variants apply on iOS too.
+        let isDisabled =
+            (element.getBoolProp("disabled.0") ?? element.getBoolProp("disabled") ?? false)
+            || !(element.getBoolProp("enabled.0") ?? element.getBoolProp("enabled") ?? true)
 
         // Get component handler or use fallback
-        let _ = {
-            let handler = componentRegistry.getHandler(for: element.elementType)
-            if handler == nil || element.elementType.lowercased() == "grid" || element.elementType.lowercased() == "image" {
-                print("[HypenElementView] type=\(element.elementType) id=\(element.id) handler=\(handler?.typeName ?? "nil") props=\(element.props.keys.sorted()) children=\(element.children)")
-            }
-        }()
         if let handler = componentRegistry.getHandler(for: element.elementType) {
-            if hasResponsiveVariants || hasStateVariants {
+            if hasResponsiveVariants || hasStateVariants || hasCombinedVariants {
                 // Use variant-aware rendering
                 VariantAwareView(
                     baseModifier: applicatorResult.baseModifier,
                     variants: applicatorResult.variants,
+                    isDisabled: isDisabled,
                     content: {
                         handler.render(
                             context: context,
@@ -102,10 +158,11 @@ public struct HypenElementView: View {
             }
         } else {
             // Fallback: render as a container with top-leading alignment (like Web/Android)
-            if hasResponsiveVariants || hasStateVariants {
+            if hasResponsiveVariants || hasStateVariants || hasCombinedVariants {
                 VariantAwareView(
                     baseModifier: applicatorResult.baseModifier,
                     variants: applicatorResult.variants,
+                    isDisabled: isDisabled,
                     content: {
                         ZStack(alignment: .topLeading) {
                             renderChildren(element)
@@ -151,6 +208,7 @@ public struct HypenElementView: View {
 struct VariantAwareView<Content: View>: View {
     let baseModifier: HypenModifier
     let variants: VariantModifiers
+    var isDisabled: Bool = false
     let content: () -> Content
 
     @State private var isPressed = false
@@ -178,19 +236,57 @@ struct VariantAwareView<Content: View>: View {
         // Compute responsive modifier
         var effectiveModifier = variants.modifierForWidth(screenWidth, base: baseModifier)
 
-        // Apply state-based overrides
+        // Apply combined `@bp:state` overrides for `state` whose breakpoint is
+        // active at the current width, smallest→largest so a higher breakpoint
+        // wins the within-band tiebreak (matches the engine precedence). Layered
+        // right after the plain state override so a combined `@md:hover` beats a
+        // plain `:hover`, while a higher state band still wins overall.
+        func applyCombined(_ state: StateVariant, into mod: HypenModifier) -> HypenModifier {
+            guard variants.hasCombined else { return mod }
+            var out = mod
+            for bp in Breakpoint.allCases.sorted() where screenWidth >= bp.minWidth {
+                if let m = variants.combined[CombinedVariantKey(breakpoint: bp, state: state)] {
+                    out = HypenModifier.mergeOverride(base: out, override: m)
+                }
+            }
+            return out
+        }
+
+        // State-based overrides, lowest→highest precedence: disabled < hover < focus < active.
+        if isDisabled {
+            if let disabledMod = variants.states[.disabled] {
+                effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: disabledMod)
+            }
+            effectiveModifier = applyCombined(.disabled, into: effectiveModifier)
+        }
+
         #if os(macOS) || targetEnvironment(macCatalyst)
-        if isHovered, let hoverMod = variants.states[.hover] {
-            effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: hoverMod)
+        if isHovered {
+            if let hoverMod = variants.states[.hover] {
+                effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: hoverMod)
+            }
+            effectiveModifier = applyCombined(.hover, into: effectiveModifier)
         }
         #endif
 
-        if isFocused, let focusMod = variants.states[.focus] {
-            effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: focusMod)
+        if isFocused {
+            // focus, focus-visible, and focus-within share the focus band (the
+            // native renderer has no keyboard-vs-pointer / descendant-focus
+            // distinction, matching how the engine ranks all three at the focus
+            // slot). Apply each plain state then its combined overrides.
+            for st in [StateVariant.focus, .focusVisible, .focusWithin] {
+                if let mod = variants.states[st] {
+                    effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: mod)
+                }
+                effectiveModifier = applyCombined(st, into: effectiveModifier)
+            }
         }
 
-        if isPressed, let activeMod = variants.states[.active] {
-            effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: activeMod)
+        if isPressed {
+            if let activeMod = variants.states[.active] {
+                effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: activeMod)
+            }
+            effectiveModifier = applyCombined(.active, into: effectiveModifier)
         }
 
         return effectiveModifier
@@ -254,11 +350,6 @@ extension View {
     /// Proportional widths from flex distribution override other width calculations.
     @ViewBuilder
     func applyWeightExpansion(modifier: HypenModifier, allowsHorizontal: Bool, allowsVertical: Bool, parentHeight: CGFloat? = nil, parentWidth: CGFloat? = nil, proportionalWidth: CGFloat? = nil) -> some View {
-        let _ = {
-            if modifier.fillMaxWidth || modifier.aspectRatio != nil {
-                print("[WeightExpansion] fillMaxWidth=\(modifier.fillMaxWidth) fillMaxWidthFraction=\(modifier.fillMaxWidthFraction) allowsHorizontal=\(allowsHorizontal) parentWidth=\(String(describing: parentWidth)) proportionalWidth=\(String(describing: proportionalWidth)) aspectRatio=\(String(describing: modifier.aspectRatio)) weight=\(String(describing: modifier.weight))")
-            }
-        }()
         // Proportional width from Row's flex distribution takes precedence
         // This handles flex(1), flex(2), etc. proportional distribution
         let effectiveWidth: CGFloat? = proportionalWidth ?? {
@@ -274,14 +365,24 @@ extension View {
         }()
 
         // Should expand horizontally with .infinity (only when no exact calculated width and no proportional width)
-        let shouldExpandHorizontal = effectiveWidth == nil && allowsHorizontal && (
+        //
+        // A declared `maxWidth` opts the element out: in CSS `max-width` beats
+        // `width`, so `width:100%; max-width:250px` means "fill, but never
+        // past 250". Expanding to `.infinity` out here would wrap the
+        // already-capped frame in a full-width one and leave the content
+        // aligned inside it — which is what made the home-screen launcher's
+        // icon grid sit flush left instead of centred under its parent's
+        // `items-center`. `FillExpansionModifier` (HypenModifier.swift) has
+        // always applied this rule; this expansion simply didn't honour it.
+        let shouldExpandHorizontal = effectiveWidth == nil && allowsHorizontal && modifier.maxWidth == nil && (
             (modifier.weight != nil && modifier.weight! > 0) ||
             (modifier.flexGrow != nil && modifier.flexGrow! > 0) ||
             modifier.fillMaxWidth
         )
 
-        // Check if we should expand to fill available height
-        let shouldExpandVertical = modifier.fillMaxHeight && modifier.fillMaxHeightFraction >= 1.0 && parentHeight == nil
+        // Check if we should expand to fill available height (same max-bound rule).
+        let shouldExpandVertical = modifier.fillMaxHeight && modifier.fillMaxHeightFraction >= 1.0
+            && parentHeight == nil && modifier.maxHeight == nil
 
         // Check if flexShrink(0) - element should not shrink below its size
         let preventShrink = modifier.flexShrink == 0
@@ -504,6 +605,13 @@ private struct ScreenWidthKey: EnvironmentKey {
     static let defaultValue: CGFloat = 0
 }
 
+/// Height of the area the Hypen root was actually given.
+///
+/// Zero means "not measured yet"; callers fall back to the physical screen.
+private struct ViewportHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
 extension EnvironmentValues {
     @MainActor
     var componentRegistry: ComponentRegistry {
@@ -556,6 +664,12 @@ extension EnvironmentValues {
     var screenWidth: CGFloat {
         get { self[ScreenWidthKey.self] }
         set { self[ScreenWidthKey.self] = newValue }
+    }
+
+    /// Height of the area the Hypen root was given, for `vh` units.
+    var viewportHeight: CGFloat {
+        get { self[ViewportHeightKey.self] }
+        set { self[ViewportHeightKey.self] = newValue }
     }
 }
 

@@ -28,26 +28,49 @@ export class FakeCSSStyleSheet {
   }
 }
 
+/**
+ * Canonicalise a style property name the way a real `CSSStyleDeclaration`
+ * does: `el.style.backgroundColor` and `el.style.setProperty("background-color")`
+ * address the SAME declaration. Without this the fake stores them under two
+ * separate keys, so code that writes camelCase and reads/removes kebab-case
+ * (every applicator handler + the variant machinery) behaves differently in
+ * tests than in a browser. Custom properties (`--x`) pass through untouched.
+ */
+function toStyleKey(name: string): string {
+  if (name.startsWith("--")) return name;
+  return name.replace(/([A-Z])/g, "-$1").toLowerCase();
+}
+
 export class FakeStyle {
   private store: Record<string, string> = {};
 
   constructor() {
     return new Proxy(this, {
       get: (target, prop, receiver) => {
-        if (prop === "setProperty" || prop === "getProperty") {
+        if (
+          prop === "setProperty" ||
+          prop === "getProperty" ||
+          prop === "getPropertyValue" ||
+          prop === "removeProperty"
+        ) {
           return (target as any)[prop].bind(target);
         }
         if (typeof prop === "string") {
+          // Indexed access (`style.length` / `style[i]`) mirrors the real
+          // CSSStyleDeclaration, which is how the declaration set of an
+          // element is enumerated.
+          if (prop === "length") return Object.keys(target.store).length;
+          if (/^\d+$/.test(prop)) return Object.keys(target.store)[Number(prop)];
           if (prop in target) {
             return Reflect.get(target, prop, receiver);
           }
-          return target.store[prop];
+          return target.store[toStyleKey(prop)];
         }
         return Reflect.get(target, prop, receiver);
       },
       set: (target, prop, value) => {
         if (typeof prop === "string") {
-          target.store[prop] = String(value);
+          target.store[toStyleKey(prop)] = String(value);
           return true;
         }
         return false;
@@ -63,11 +86,19 @@ export class FakeStyle {
   }
 
   setProperty(name: string, value: string): void {
-    this.store[name] = value;
+    this.store[toStyleKey(name)] = value;
   }
 
   getProperty(name: string): string | undefined {
-    return this.store[name];
+    return this.store[toStyleKey(name)];
+  }
+
+  getPropertyValue(name: string): string {
+    return this.store[toStyleKey(name)] ?? "";
+  }
+
+  removeProperty(name: string): void {
+    delete this.store[toStyleKey(name)];
   }
 }
 
@@ -98,9 +129,31 @@ export class FakeElement {
   public value = "";
   public placeholder = "";
   public type = "";
+  public selectionStart: number | null = null;
+  public selectionEnd: number | null = null;
+
+  setSelectionRange(start: number, end: number, _direction?: string): void {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  }
   public ownerDocument: FakeDocument | null = null;
   public id = "";
   public sheet: FakeCSSStyleSheet | null = null;
+
+  /**
+   * Settable measurement hook for FLIP tests: a plain property, so a test
+   * can overwrite it per-element (`el.getBoundingClientRect = () => rect`)
+   * or even swap it between the renderer's First and Last reads. Defaults
+   * to the all-zero rect a detached real element would report.
+   */
+  public getBoundingClientRect: () => {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+    width: number;
+    height: number;
+  } = () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 });
 
   private listeners: Map<string, Set<Listener>> = new Map();
 
@@ -186,6 +239,51 @@ export class FakeElement {
     this.attributes[name] = value;
   }
 
+  removeAttribute(name: string): void {
+    delete this.attributes[name];
+  }
+
+  /**
+   * Minimal focus support: records this element as document.activeElement
+   * and fires bubbling focusout (on the previous holder) / focusin — enough
+   * for delegated focus handlers (e.g. the canvas mirror's FocusManager).
+   */
+  focus(_options?: unknown): void {
+    const doc = (globalThis as any).document;
+    if (!doc) return;
+    const prev = doc.activeElement ?? null;
+    if (prev === this) return;
+    doc.activeElement = this;
+    if (prev instanceof FakeElement) {
+      prev.dispatchEvent("blur", { target: prev, relatedTarget: this });
+      prev.bubbleEvent("focusout", { target: prev, relatedTarget: this });
+    }
+    this.bubbleEvent("focusin", { target: this, relatedTarget: prev });
+  }
+
+  blur(): void {
+    const doc = (globalThis as any).document;
+    if (!doc || doc.activeElement !== this) return;
+    doc.activeElement = null;
+    this.dispatchEvent("blur", { target: this, relatedTarget: null });
+    this.bubbleEvent("focusout", { target: this, relatedTarget: null });
+  }
+
+  /** Dispatch an event on this element and every FakeElement ancestor. */
+  bubbleEvent(type: string, event: any = {}): void {
+    if (!("target" in event)) event.target = this;
+    if (!("type" in event)) event.type = type;
+    let el: FakeElement | FakeDocument | null = this;
+    while (el instanceof FakeElement) {
+      el.dispatchEvent(type, event);
+      el = el.parentNode;
+    }
+  }
+
+  getAttribute(name: string): string | null {
+    return name in this.attributes ? this.attributes[name] : null;
+  }
+
   get firstElementChild(): FakeElement | null {
     return this.children[0] ?? null;
   }
@@ -203,6 +301,8 @@ export class FakeDocument {
   private nodes: FakeElement[] = [];
   public head: FakeElement;
   public body: FakeElement;
+  /** Set by FakeElement.focus(); null until anything is focused. */
+  public activeElement: FakeElement | null = null;
 
   constructor() {
     this.head = new FakeElement("HEAD");
@@ -223,6 +323,14 @@ export class FakeDocument {
     if (index >= 0) {
       this.nodes.splice(index, 1);
     }
+  }
+
+  getElementById(id: string): FakeElement | null {
+    return (
+      [this.head, this.body, ...this.head.children, ...this.body.children, ...this.nodes].find(
+        (node) => node.id === id
+      ) ?? null
+    );
   }
 
   querySelectorAll(selector: string): FakeElement[] {

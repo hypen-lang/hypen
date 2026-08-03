@@ -194,10 +194,13 @@ object ColorParser {
         return parseHex(trimmed)
     }
 
+    // Compiled once — these run per color-bearing prop per recomposition
+    private val RGB_PATTERN = Regex("""rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)""")
+    private val HSL_PATTERN = Regex("""hsla?\s*\(\s*(\d+)\s*,\s*(\d+)%?\s*,\s*(\d+)%?\s*(?:,\s*([\d.]+))?\s*\)""")
+
     private fun parseRgb(value: String): Color? {
         // Match rgb(r, g, b) or rgba(r, g, b, a)
-        val pattern = Regex("""rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)""")
-        val match = pattern.find(value) ?: return null
+        val match = RGB_PATTERN.find(value) ?: return null
 
         val r = match.groupValues[1].toIntOrNull() ?: return null
         val g = match.groupValues[2].toIntOrNull() ?: return null
@@ -215,8 +218,7 @@ object ColorParser {
 
     private fun parseHsl(value: String): Color? {
         // Match hsl(h, s%, l%) or hsla(h, s%, l%, a)
-        val pattern = Regex("""hsla?\s*\(\s*(\d+)\s*,\s*(\d+)%?\s*,\s*(\d+)%?\s*(?:,\s*([\d.]+))?\s*\)""")
-        val match = pattern.find(value) ?: return null
+        val match = HSL_PATTERN.find(value) ?: return null
 
         val h = match.groupValues[1].toFloatOrNull() ?: return null
         val s = match.groupValues[2].toFloatOrNull() ?: return null
@@ -348,7 +350,16 @@ class ForegroundColorApplicator : ApplicatorHandler {
 }
 
 /**
- * Alias for backgroundColor.
+ * The CSS `background` shorthand.
+ *
+ * This was an alias for `backgroundColor`, so anything that wasn't a flat
+ * colour — a gradient, an image, or a layered combination of both —
+ * silently vanished. The home-screen example's wallpaper arrives as
+ * `linear-gradient(…), url('data:image/png;base64,…') center / cover
+ * no-repeat`, which is exactly that case.
+ *
+ * A bare colour still takes the colour path, so `background("#fff")` is
+ * unchanged.
  */
 class BackgroundApplicator : ApplicatorHandler {
     override val name: String = "background"
@@ -359,5 +370,9 @@ class BackgroundApplicator : ApplicatorHandler {
         modifier: Modifier,
         value: Any?,
         context: ApplicatorContext,
-    ): Modifier = delegate.apply(modifier, value, context)
+    ): Modifier {
+        val layers = CssBackground.parse(value)
+            ?: return delegate.apply(modifier, value, context)
+        return modifier.paintCssBackground(layers)
+    }
 }

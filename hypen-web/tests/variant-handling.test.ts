@@ -214,3 +214,28 @@ describe("Variant handling - combined and edge cases", () => {
     expect(element.classList.toString()).toContain("hypen-padding-lg");
   });
 });
+
+describe("Variant handling - combined @bp:state variants", () => {
+  let registry: ApplicatorRegistry;
+  let element: HTMLElement;
+
+  beforeEach(() => {
+    registry = new ApplicatorRegistry();
+    element = document.createElement("div") as unknown as HTMLElement;
+  });
+
+  test("combined variant adds a class (previously dropped)", () => {
+    // Before the fix the '@' branch sliced breakpoint="md:hover", failed the
+    // BREAKPOINTS lookup, and added no class at all.
+    registry.apply(element, "backgroundColor@md:hover", "#fff");
+    const fakeElement = element as unknown as FakeElement;
+    expect(fakeElement.classList.toString()).toContain("hypen-background-color-md-hover");
+  });
+
+  test("combined variant with invalid breakpoint or state adds nothing", () => {
+    registry.apply(element, "backgroundColor@bogus:hover", "#fff");
+    registry.apply(element, "backgroundColor@md:bogus", "#fff");
+    const fakeElement = element as unknown as FakeElement;
+    expect(fakeElement.classList.toString()).not.toContain("bogus");
+  });
+});

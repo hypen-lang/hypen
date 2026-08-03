@@ -51,6 +51,12 @@ module Comments {
                 }
                 .padding(10, 16)
                 .verticalAlignment("top")
+                // Posting a comment appends a ForEach item — the one place in
+                // this app where a list genuinely grows at runtime, so it is
+                // the one place an enter animation earns its keep. No
+                // `.layout()` here: comments only ever append, so no sibling
+                // ever reflows and a FLIP spec would never fire.
+                .enter(slide, fade, from: bottom, duration: 260, curve: easeOut)
             }
         }
         .flex(1)

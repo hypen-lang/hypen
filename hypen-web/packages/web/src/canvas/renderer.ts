@@ -21,10 +21,13 @@ import type {
   LayoutFunction,
 } from "./types.js";
 import { computeLayout, initTaffyLayout } from "./layout.js";
-import { paintNode, registerPainter } from "./paint.js";
+import { clearTextCache } from "./text.js";
+import { paintNode, registerPainter, clearCharAdvanceCache } from "./paint.js";
 import { CanvasEventManager } from "./events.js";
-import { InputOverlay } from "./input.js";
 import { AccessibilityLayer } from "./accessibility.js";
+import { FocusManager } from "./focus.js";
+import { TextEditController, isEditableNode } from "./editing.js";
+import { setTextEditor } from "./paint.js";
 import { findNodeById } from "./utils.js";
 import { ScrollManager } from "./scroll.js";
 import { SelectionManager } from "./selection.js";
@@ -35,13 +38,15 @@ import {
   refreshApplicator,
   parseApplicatorBase,
 } from "./props.js";
+import { applyVariants, invalidateVariantCache, deriveNodeComputed } from "./variants.js";
+import { CanvasAnimator } from "./anim.js";
+import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
 
 const DEFAULT_OPTIONS: CanvasRendererOptions = {
   devicePixelRatio: typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
   backgroundColor: "#ffffff",
   enableAccessibility: true,
   enableHitTesting: true,
-  enableInputOverlay: true,
   enableDirtyRects: false,
   enableLayerCaching: false,
   maxLayerCacheSize: 10,
@@ -65,16 +70,40 @@ export class CanvasRenderer implements Renderer {
   private eventManager: CanvasEventManager;
   private scrollManager: ScrollManager;
   private selectionManager: SelectionManager;
-  private inputOverlay: InputOverlay;
   private accessibilityLayer: AccessibilityLayer;
+  private focusManager: FocusManager;
+  private textEditor: TextEditController;
   
   private dirtyTracker: DirtyRectTracker;
+
+  /**
+   * `__anim.*` runtime: per-frame numeric ticker that writes interpolated
+   * values into the real VirtualNode props (see `anim.ts`). Exposed to tests
+   * via `getAnimator()` for deterministic clock control.
+   */
+  private animator: CanvasAnimator;
 
   private rafId: number | null = null;
   private needsRedraw = false;
 
+  // Whether the next frame must re-run layout. Patches, resize, font loads,
+  // and image decodes set it; pure paint frames (scroll, hover, caret blink,
+  // scrollbar fade) leave it clear so the frame skips the Taffy solve.
+  private layoutDirty = true;
+
   private frameCount = 0;
   private lastFrameTime = 0;
+
+  private boundFontsLoaded = () => {
+    // Metrics measured against the fallback font are stale now — both the
+    // wrapped-text metrics and the per-glyph advances used by the manual
+    // letter-spacing path (keyed by CSS font string, which does not change
+    // when the real font replaces the fallback).
+    clearTextCache();
+    clearCharAdvanceCache();
+    this.layoutDirty = true;
+    this.scheduleRedraw();
+  };
 
   constructor(canvas: HTMLCanvasElement, engine: IEngine, options?: Partial<CanvasRendererOptions>) {
     this.canvas = canvas;
@@ -96,47 +125,121 @@ export class CanvasRenderer implements Renderer {
     const rect = canvas.getBoundingClientRect();
     this.dirtyTracker = new DirtyRectTracker(rect.width, rect.height);
 
+    // Animation ticker: mutates real node props each frame; the renderer
+    // supplies dirty accounting, layout invalidation, and real teardown.
+    this.animator = new CanvasAnimator({
+      markNodeDirty: (node) => {
+        if (this.options.enableDirtyRects) {
+          this.dirtyTracker.markNodeDirty(node);
+        }
+      },
+      markLayoutDirty: () => {
+        this.layoutDirty = true;
+        // Animated layout moves geometry Taffy has not solved yet: per-node
+        // pre-layout rects under-mark (reflowed siblings, a growing node's
+        // new extent). Promote the frame to a full-canvas dirty region —
+        // correct pixels over clipped repaints while the animation runs.
+        if (this.options.enableDirtyRects) {
+          this.dirtyTracker.markFullDirty();
+        }
+      },
+      scheduleRedraw: () => this.scheduleRedraw(),
+      removeNode: (id) => this.onRemove(id),
+      getNode: (id) => this.nodes.get(id),
+      isNodeAttached: (node) => {
+        if (this.rootNode === null) return false;
+        let current: VirtualNode = node;
+        while (current.parent) current = current.parent;
+        return current === this.rootNode;
+      },
+      // Option F `.onAnimationComplete` completions dispatch through the
+      // same engine channel as pointer/keyboard events.
+      dispatchAction: (name, payload) => this.engine.dispatchAction(name, payload),
+    });
+
     // Initialize subsystems
     this.eventManager = new CanvasEventManager(canvas, engine);
     this.scrollManager = new ScrollManager(canvas, () => this.scheduleRedraw());
     this.selectionManager = new SelectionManager(canvas, () => this.scheduleRedraw());
     setSelectionManager(this.selectionManager);
-    this.inputOverlay = new InputOverlay(
-      (canvas as any).parentElement || (typeof document !== "undefined" ? document.body : null)
-    );
+    // The mirror is a transparent positioned overlay above the canvas: its
+    // elements are exposed to AT with REAL geometry (screen-reader browse
+    // modes are geometry-driven) and join the native tab order, while the
+    // canvas paints all pixels and keeps all pointer events.
     this.accessibilityLayer = new AccessibilityLayer(
-      (canvas as any).parentElement || (typeof document !== "undefined" ? document.body : null),
+      canvas as unknown as HTMLElement,
       this.options.enableAccessibility || false
     );
 
-    // Bridge focus changes from the hit-tester to the HTML input overlay.
-    // Without this, `Input`/`Textarea` painted on the canvas but clicking
-    // one did nothing — the overlay never got mounted.
-    this.eventManager.setFocusChangeHandler((next) => {
-      const t = next ? next.type.toLowerCase() : null;
-      if (next && (t === "input" || t === "textarea")) {
-        const rect = this.canvas.getBoundingClientRect();
-        this.inputOverlay.showInput(
-          next,
-          rect,
-          (value) => {
-            // Local mirror so the next paint sees the typed text even
-            // before the engine echoes it back via SetProp.
-            next.props.value = value;
-            this.scheduleRedraw();
-          },
-          this.engine,
-        );
-      } else {
-        this.inputOverlay.hideInput();
-      }
+    // Text editing happens IN the focused mirror element (the browser owns
+    // value/caret/selection/IME there); the controller reads that state and
+    // the canvas paints text, selection, and caret natively.
+    this.textEditor = new TextEditController(canvas, engine, {
+      scheduleRedraw: () => this.scheduleRedraw(),
+      markDirty: (node) => {
+        if (this.options.enableDirtyRects) {
+          this.dirtyTracker.markNodeDirty(node);
+        }
+      },
+      // Proxy blurred to somewhere outside the canvas: node.focused follows.
+      onEditBlur: () => this.focusManager.clearFocus(),
+    });
+    setTextEditor(this.textEditor);
+
+    // DOM focus on mirror elements (canvas fallback content) is the single
+    // source of truth for focus: Tab/Shift+Tab traverse the mirror natively,
+    // and the pointer path (hit-test in CanvasEventManager) funnels into the
+    // same place by focusing the node's mirror element.
+    this.focusManager = new FocusManager(this.accessibilityLayer, engine, {
+      getNode: (id) => this.nodes.get(id),
+      isAuxFocusTarget: (el) => this.textEditor.isProxyElement(el),
+      onFocusChange: (next) => {
+        if (next && isEditableNode(next)) {
+          const el = this.accessibilityLayer.getElement(next.id);
+          if (el) {
+            this.textEditor.beginEditing(
+              next,
+              el as HTMLInputElement | HTMLTextAreaElement,
+            );
+          }
+        } else {
+          this.textEditor.endEditing();
+        }
+        // Repaint so focus styling (input border, button ring) updates.
+        this.scheduleRedraw();
+      },
+    });
+    this.eventManager.setFocusManager(this.focusManager);
+    this.eventManager.setEditablePointerHandler((node, point) => {
+      this.textEditor.placeCaretFromPoint(node, point);
     });
 
-    // Listen for redraw requests from event manager
-    this.canvas.addEventListener("hypen:redraw", () => this.scheduleRedraw());
+    // Listen for redraw requests from event manager (paint-only) and image
+    // loads (which carry `detail.layout` — a decoded intrinsic size can
+    // change the layout, see `getImageNaturalAspect`).
+    this.canvas.addEventListener("hypen:redraw", (e: Event) => {
+      if ((e as CustomEvent).detail?.layout) {
+        this.layoutDirty = true;
+      }
+      this.scheduleRedraw();
+    });
 
-    // Eagerly initialise Taffy WASM for layout (non-blocking — fallback used until ready)
-    initTaffyLayout();
+    // A late-loading web font changes every measurement made against the
+    // fallback font — re-run layout once the real metrics are available.
+    if (typeof document !== "undefined") {
+      (document as any).fonts?.addEventListener?.("loadingdone", this.boundFontsLoaded);
+    }
+
+    // Eagerly initialise Taffy WASM for layout (non-blocking — fallback used
+    // until ready). Repaint once it arrives: the fallback's first frame is
+    // approximate, and without this redraw its layout would stick until the
+    // next state change.
+    initTaffyLayout().then((ready) => {
+      if (ready) {
+        this.layoutDirty = true;
+        this.scheduleRedraw();
+      }
+    });
 
     // Don't schedule initial render - wait for patches
   }
@@ -172,6 +275,7 @@ export class CanvasRenderer implements Renderer {
     this.canvas.width = width;
     this.canvas.height = height;
     this.setupHiDPI();
+    this.layoutDirty = true;
     this.scheduleRedraw();
   }
 
@@ -180,6 +284,14 @@ export class CanvasRenderer implements Renderer {
    */
   applyPatches(patches: Patch[]): void {
     const hadRoot = this.rootNode !== null;
+
+    // Transaction-scoped animation stamp (Option D): honored ONLY as the
+    // batch's FIRST patch (engine wire contract; the DOMRenderer replicates
+    // a routed stamp at index 0 of each canvas sub-batch). Mid-array
+    // occurrences are not stamps for this batch.
+    if (patches.length > 0 && patches[0]!.type === "batchAnimation") {
+      this.animator.beginBatchAnimation(patches[0]!.spec);
+    }
 
     for (const patch of patches) {
       this.applyPatch(patch);
@@ -190,10 +302,16 @@ export class CanvasRenderer implements Renderer {
       this.dirtyTracker.markFullDirty();
     }
 
-    // Update accessibility layer
-    if (this.rootNode) {
-      this.accessibilityLayer.syncTree(this.rootNode);
-    }
+    // The accessibility mirror is synced incrementally by the per-patch
+    // handlers above — no per-batch rebuild, so mirror element identity
+    // (and with it AT focus/virtual-cursor position) survives updates.
+
+    // Post-batch animation hook: play queued enters (first batch suppressed,
+    // cached attaches excluded) and reset the animator's per-batch state.
+    this.animator.flush();
+
+    // Any patch can affect layout (props, tree shape, text).
+    this.layoutDirty = true;
 
     // Schedule redraw
     this.scheduleRedraw();
@@ -205,7 +323,7 @@ export class CanvasRenderer implements Renderer {
   private applyPatch(patch: Patch): void {
     switch (patch.type) {
       case "create":
-        this.onCreate(patch.id!, patch.elementType!, patch.props || {});
+        this.onCreate(patch.id!, patch.elementType!, patch.props || {}, patch.semantics);
         break;
 
       case "setProp":
@@ -229,7 +347,7 @@ export class CanvasRenderer implements Renderer {
         break;
 
       case "remove":
-        this.onRemove(patch.id!);
+        this.onRemoveMaybeDeferred(patch.id!, patch.transition === true);
         break;
 
       case "detach":
@@ -239,13 +357,50 @@ export class CanvasRenderer implements Renderer {
       case "attach":
         this.onInsert(patch.parentId!, patch.id!, patch.beforeId);
         break;
+
+      case "setSemantics":
+        this.onSetSemantics(patch.id!, patch.semantics);
+        break;
+
+      case "batchAnimation":
+        // Transaction-scoped animation stamp (Option D): scopes the batch,
+        // addresses no node. Handled at the head of applyPatches — only the
+        // batch's FIRST patch is a valid stamp; mid-array occurrences are
+        // deliberately ignored.
+        break;
     }
+  }
+
+  /**
+   * Reactive accessibility update: swap in the node's complete re-resolved
+   * semantics block and re-apply it to the shadow element. This is the only
+   * channel that keeps the canvas shadow tree's accessible name/state live —
+   * painted text is invisible to AT, so prop deltas alone can't do it.
+   */
+  private onSetSemantics(
+    id: string,
+    semantics?: import("@hypen-space/core/types").Semantics,
+  ): void {
+    const node = this.nodes.get(id);
+    if (!node) return;
+    node.semantics = semantics;
+    this.accessibilityLayer.updateNode(node);
   }
 
   /**
    * Create new virtual node
    */
-  private onCreate(id: string, elementType: string, props: Record<string, any>): void {
+  private onCreate(
+    id: string,
+    elementType: string,
+    props: Record<string, any>,
+    semantics?: import("@hypen-space/core/types").Semantics,
+  ): void {
+    // Defensive: if this id is still exit-animating (ids never recycle, but
+    // the corpse must not shadow a new node), finalize the old subtree now —
+    // before the map entry below replaces it.
+    this.animator.finalizeNow(id);
+
     // Engine may send a Map (from WASM) or a plain object. Copy either way so
     // we own the prop bag and can mutate it during applicator normalisation.
     const rawProps: Record<string, any> =
@@ -262,6 +417,7 @@ export class CanvasRenderer implements Renderer {
       id,
       type: elementType,
       props: rawProps,
+      semantics,
       children: [],
       parent: null,
       visible: true,
@@ -278,6 +434,13 @@ export class CanvasRenderer implements Renderer {
     };
 
     this.nodes.set(id, node);
+
+    // Cache the node's `__anim.*` channel specs and start any ambient
+    // `.animate` preset (enter eligibility is marked here too).
+    this.animator.registerCreate(node);
+
+    // Mirror the create (element stays detached until its insert patch).
+    this.accessibilityLayer.createNode(node);
   }
 
   /**
@@ -287,6 +450,21 @@ export class CanvasRenderer implements Renderer {
     const node = this.nodes.get(id);
     if (!node) return;
 
+    // `__anim.*` channel props configure the animator, never layout/paint —
+    // route them there and skip the applicator/variant machinery (which
+    // would otherwise synthesize a junk `__anim` aggregate).
+    if (name.startsWith(ANIM_PROP_PREFIX)) {
+      node.props[name] = value;
+      this.animator.setAnimProp(node, name, value);
+      return;
+    }
+
+    // Applicator base (e.g. `flex.0` → `flex`) — computed up front so the
+    // transition channel can capture the previous FLAT value (which, for a
+    // mid-flight retarget, is the animator's last interpolated write).
+    const base = parseApplicatorBase(name);
+    const previousFlat = node.props[base ?? name];
+
     // Mark dirty before prop change (old bounds)
     if (this.options.enableDirtyRects) {
       this.dirtyTracker.markNodeDirty(node);
@@ -294,10 +472,13 @@ export class CanvasRenderer implements Renderer {
 
     node.props[name] = value;
 
+    // A new key may introduce a variant marker (e.g. `padding@md.0`) — drop the
+    // cached variant-base set so the next frame rescans.
+    invalidateVariantCache(node);
+
     // If this is an applicator-namespaced key (e.g. `flex.0`, `onClick.to`),
     // rebuild the derived flat/aggregate entry under the base name so layout,
     // paint, and event dispatch see the updated value.
-    const base = parseApplicatorBase(name);
     if (base !== null) {
       refreshApplicator(node.props, base);
     }
@@ -327,6 +508,17 @@ export class CanvasRenderer implements Renderer {
 
     // Update accessibility
     this.accessibilityLayer.updateNode(node);
+
+    // Transition channel: if the node carries `__anim.transition` and the
+    // flat prop is whitelisted + interpolable, the animator rewinds the prop
+    // to `previousFlat` and interpolates toward the value just written.
+    this.animator.notePropSet(node, base ?? name, previousFlat);
+
+    // Engine value echo for an actively edited input: same value → no-op
+    // (the caret must not move); a rewritten value re-seeds the element.
+    if (name === "value") {
+      this.textEditor.onEngineValueEcho(node);
+    }
   }
 
   /**
@@ -336,13 +528,24 @@ export class CanvasRenderer implements Renderer {
     const node = this.nodes.get(id);
     if (!node) return;
 
+    // `__anim.*` channel props route to the animator (clearing `.animate`
+    // stops playback and restores the touched props).
+    if (name.startsWith(ANIM_PROP_PREFIX)) {
+      delete node.props[name];
+      this.animator.removeAnimProp(node, name);
+      return;
+    }
+
+    const base = parseApplicatorBase(name);
+
     if (this.options.enableDirtyRects) {
       this.dirtyTracker.markNodeDirty(node);
     }
 
     delete node.props[name];
 
-    const base = parseApplicatorBase(name);
+    invalidateVariantCache(node);
+
     if (base !== null) {
       refreshApplicator(node.props, base);
     }
@@ -368,6 +571,9 @@ export class CanvasRenderer implements Renderer {
     }
 
     this.accessibilityLayer.updateNode(node);
+
+    // A removed animatable prop snaps any in-flight transition on it.
+    this.animator.notePropRemoved(node, base ?? name);
   }
 
   /**
@@ -397,6 +603,15 @@ export class CanvasRenderer implements Renderer {
   private onInsert(parentId: string, id: string, beforeId?: string): void {
     const child = this.nodes.get(id);
     if (!child) return;
+
+    // Queue an enter playback for the post-batch flush. The animator only
+    // accepts nodes created in this same batch, so a cached Router `attach`
+    // (routed through this method) never enter-animates.
+    this.animator.noteInsert(child);
+
+    // Mirror the insert/attach/move — insertNode resolves root addressing
+    // and unknown-beforeId fallback with the same rules as the code below.
+    this.accessibilityLayer.insertNode(parentId, id, beforeId);
 
     // Check if this is setting the root node (parent_id === id === "root" or similar)
     if (parentId === "root" && id === "root") {
@@ -481,6 +696,15 @@ export class CanvasRenderer implements Renderer {
     const node = this.nodes.get(id);
     if (!node) return;
 
+    // An edit session inside the detached subtree ends (flushing any
+    // pending composition value) before the subtree leaves the tree, and
+    // focus state follows.
+    this.textEditor.endIfWithin(node);
+    this.focusManager.clearIfWithin(node);
+
+    // Mirror keeps the element (and subtree ids) alive for re-attach.
+    this.accessibilityLayer.detachNode(id);
+
     // Mark dirty so the next paint doesn't leave stale pixels behind.
     if (this.options.enableDirtyRects) {
       this.dirtyTracker.markNodeDirty(node);
@@ -506,11 +730,52 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * Handle a `remove` patch, deferring teardown when the exit protocol asks:
+   * a flagged root carrying an `__anim.exit` spec starts an exit playback
+   * (subtree stays painted, excluded from hit-testing, finalized on settle
+   * or the timeout backbone); a plain remove under an exiting root defers
+   * with that root (root-first wire ordering). Everything else — including
+   * flagged removes without a spec, and all removes under reduced motion —
+   * tears down immediately: the sanctioned snap.
+   */
+  private onRemoveMaybeDeferred(id: string, transition: boolean): void {
+    const node = this.nodes.get(id);
+    if (!node) return;
+    if (transition && this.animator.beginExit(node, () => this.onRemove(id))) {
+      // The subtree is a corpse: engine-side these ids are already dead, so
+      // keyboard/AT interaction must die NOW, not at finalize (DOM parity:
+      // beginExit sets `inert` + the exiting attr on the root immediately).
+      // End any edit session inside it (flushing composition state), evict
+      // focus, and make the accessibility-mirror subtree inert so Tab and
+      // AT activation can no longer reach it during the exit window.
+      this.textEditor.endIfWithin(node);
+      this.focusManager.clearIfWithin(node);
+      this.accessibilityLayer.markExiting(id);
+      return;
+    }
+    if (this.animator.deferToExitingAncestor(node, () => this.onRemove(id))) {
+      return;
+    }
+    this.onRemove(id);
+  }
+
+  /**
    * Remove node from tree
    */
   private onRemove(id: string): void {
     const node = this.nodes.get(id);
     if (!node) return;
+
+    // Drop all animator state for the id (specs, in-flight animations,
+    // ambient playback, any exit bookkeeping).
+    this.animator.forget(id);
+
+    // End any edit session inside the removed subtree; focus state follows.
+    this.textEditor.endIfWithin(node);
+    this.focusManager.clearIfWithin(node);
+
+    // Drop the mirror element and its subtree's id mappings.
+    this.accessibilityLayer.removeNode(node);
 
     // Mark dirty before removal
     if (this.options.enableDirtyRects) {
@@ -546,8 +811,11 @@ export class CanvasRenderer implements Renderer {
     // Use requestAnimationFrame if available (browser), otherwise render immediately (tests)
     if (typeof requestAnimationFrame !== "undefined") {
       this.rafId = requestAnimationFrame(() => {
-        this.render();
+        // Null BEFORE rendering so the end-of-render animation re-arm (and
+        // any redraw requested during paint) can schedule the next frame
+        // instead of being swallowed by the coalescing guard above.
         this.rafId = null;
+        this.render();
       });
     } else {
       // In non-browser environments (tests), render immediately
@@ -562,10 +830,46 @@ export class CanvasRenderer implements Renderer {
     const startTime = performance.now();
     const dpr = this.options.devicePixelRatio || 1;
 
+    // Advance animations FIRST: interpolated values land in the real node
+    // props before layout runs and before the dirty region is read, so this
+    // frame's layout, paint, and hit-testing all see the animated state
+    // (layout-affecting animations mark layoutDirty via the host hook).
+    this.animator.tick();
+
     if (this.options.enableDirtyRects) {
       this.renderWithDirtyRects(dpr);
     } else {
       this.renderFull(dpr);
+    }
+
+    // Layout may have moved the edited input — keep the IME proxy (and with
+    // it the IME candidate window) pinned to the painted caret.
+    if (this.textEditor.isActive()) {
+      this.textEditor.syncProxyPosition();
+    }
+
+    // Keep the semantics overlay's element boxes on the painted bounds so
+    // screen-reader browse modes (geometry-driven) track layout changes.
+    this.accessibilityLayer.syncPositions(this.rootNode);
+
+    // Ticker: while animations are in flight, keep the coalescing scheduler
+    // re-armed; when the last one settles this stops firing — no runaway
+    // rAF. Guarded to the rAF path only: the synchronous fallback would
+    // recurse.
+    if (this.animator.hasActive()) {
+      if (typeof requestAnimationFrame !== "undefined") {
+        this.scheduleRedraw();
+      } else if (!this.animator.manualFrameDriver) {
+        // No frame clock at all (headless/server hosts): nothing will ever
+        // advance these animations, so an entering node would freeze at its
+        // hidden pose — content vanishing is NOT the sanctioned degradation,
+        // snapping to final values is. Tests that drive frames manually opt
+        // out via `manualFrameDriver`. The follow-up synchronous render
+        // paints the settled state; `hasActive()` is false afterwards, so
+        // it cannot recurse further.
+        this.animator.snapAll();
+        this.scheduleRedraw();
+      }
     }
 
     // Performance logging
@@ -578,6 +882,51 @@ export class CanvasRenderer implements Renderer {
         this.lastFrameTime = performance.now();
       }
     }
+  }
+
+  /**
+   * Re-derive cached computed fields that may have been overridden by variant
+   * resolution. `node.opacity` is read straight off `node.props.opacity` in
+   * paint, but it is cached on the node at create/setProp time — after a
+   * variant pass changes `props.opacity` (e.g. `opacity:disabled`), the cache
+   * must be refreshed or the paint would use the stale value.
+   */
+  private refreshComputedProps(node: VirtualNode): void {
+    deriveNodeComputed(node);
+    for (const child of node.children) {
+      this.refreshComputedProps(child);
+    }
+  }
+
+  /**
+   * Resolve variants and re-run layout when (and only when) something that
+   * affects layout changed since the last frame. Variants are resolved every
+   * frame — hover/focus/pressed winners must reach paint — but the Taffy
+   * solve, computed-prop refresh, and scroll-bounds pass only run when a
+   * patch/resize/font/image marked the layout dirty or a variant winner
+   * actually changed (variants can rewrite spacing/size props).
+   */
+  private runLayoutIfNeeded(dpr: number): void {
+    if (!this.rootNode) return;
+
+    // Resolve responsive + state variants against the current content width
+    // BEFORE layout so spacing/size winners feed the layout engine and
+    // colour/opacity winners feed paint.
+    const contentWidth = this.canvas.width / dpr;
+    const variantsChanged = applyVariants(this.rootNode, contentWidth);
+    if (!variantsChanged && !this.layoutDirty) return;
+
+    this.refreshComputedProps(this.rootNode);
+
+    computeLayout(
+      this.ctx,
+      this.rootNode,
+      contentWidth,
+      this.canvas.height / dpr
+    );
+
+    ScrollManager.updateScrollBounds(this.rootNode);
+    this.layoutDirty = false;
   }
 
   /**
@@ -595,14 +944,7 @@ export class CanvasRenderer implements Renderer {
 
     // Layout and paint
     if (this.rootNode) {
-      computeLayout(
-        this.ctx,
-        this.rootNode,
-        this.canvas.width / dpr,
-        this.canvas.height / dpr
-      );
-
-      ScrollManager.updateScrollBounds(this.rootNode);
+      this.runLayoutIfNeeded(dpr);
 
       paintNode(this.ctx, this.rootNode);
 
@@ -616,16 +958,7 @@ export class CanvasRenderer implements Renderer {
    * Optimized render that only repaints dirty regions
    */
   private renderWithDirtyRects(dpr: number): void {
-    // Always run layout so nodes have up-to-date bounds
-    if (this.rootNode) {
-      computeLayout(
-        this.ctx,
-        this.rootNode,
-        this.canvas.width / dpr,
-        this.canvas.height / dpr
-      );
-      ScrollManager.updateScrollBounds(this.rootNode);
-    }
+    this.runLayoutIfNeeded(dpr);
 
     const dirtyRegion = this.dirtyTracker.getDirtyRegion();
     this.dirtyTracker.clear();
@@ -651,9 +984,11 @@ export class CanvasRenderer implements Renderer {
       this.ctx.fillRect(dirtyRegion.x, dirtyRegion.y, dirtyRegion.width, dirtyRegion.height);
     }
 
-    // Repaint the full tree — clip path ensures only dirty pixels are touched
+    // Repaint the tree — the clip path bounds rasterized pixels and the
+    // dirty region is threaded through paintNode so subtrees that cannot
+    // reach it are pruned from the traversal entirely.
     if (this.rootNode) {
-      paintNode(this.ctx, this.rootNode);
+      paintNode(this.ctx, this.rootNode, dirtyRegion);
 
       if (this.options.showLayoutBounds) {
         this.drawLayoutBounds(this.rootNode);
@@ -699,14 +1034,25 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * The `__anim.*` animation runtime. Exposed for tests (deterministic clock
+   * via `animator.now`, reduced-motion override) and diagnostics.
+   */
+  getAnimator(): CanvasAnimator {
+    return this.animator;
+  }
+
+  /**
    * Clear renderer
    */
   clear(): void {
+    this.animator.reset();
+    this.textEditor.endEditing();
     this.rootNode = null;
     this.nodes.clear();
     this.eventManager.setRootNode(null);
     this.scrollManager.setRootNode(null);
     this.selectionManager.setRootNode(null);
+    this.accessibilityLayer.rebuild(null);
     this.dirtyTracker.clear();
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
@@ -723,20 +1069,32 @@ export class CanvasRenderer implements Renderer {
    */
   setOptions(options: Partial<CanvasRendererOptions>): void {
     this.options = { ...this.options, ...options };
-    this.accessibilityLayer.setEnabled(this.options.enableAccessibility || false);
+    // Re-enabling rebuilds the mirror from the current tree — incremental
+    // sync has no history to replay for the disabled period.
+    this.accessibilityLayer.setEnabled(
+      this.options.enableAccessibility || false,
+      this.rootNode,
+    );
   }
 
   /**
    * Destroy renderer
    */
   destroy(): void {
+    this.animator.destroy();
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
+    }
+    if (typeof document !== "undefined") {
+      (document as any).fonts?.removeEventListener?.("loadingdone", this.boundFontsLoaded);
     }
     this.eventManager.destroy();
     this.scrollManager.destroy();
     this.selectionManager.destroy();
     setSelectionManager(null);
+    this.textEditor.destroy();
+    setTextEditor(null);
+    this.focusManager.destroy();
     this.accessibilityLayer.destroy();
   }
 }

@@ -423,6 +423,16 @@ private fun NativePatch.toPatch(): Patch {
             // (`ComposeRenderer.onDetach` / `onAttach`).
             NativePatchType.DETACH -> PatchType.DETACH
             NativePatchType.ATTACH -> PatchType.ATTACH
+            // Reactive accessibility re-emit — see the Rust engine's
+            // `Patch::SetSemantics` (`reconcile/patch.rs`). The updated
+            // block rides `semanticsJson` → `Patch.semantics`.
+            NativePatchType.SET_SEMANTICS -> PatchType.SET_SEMANTICS
+            // Animation transaction prelude — see the Rust engine's
+            // `Patch::BatchAnimation` (`reconcile/patch.rs`). The spec
+            // rides `specJson` → `Patch.spec`; renderers honor it at
+            // batch index 0 only (protocol invariant 3, see
+            // `.notes/ANIMATION_ANDROID.md`).
+            NativePatchType.BATCH_ANIMATION -> PatchType.BATCH_ANIMATION
         },
         id = id,
         elementType = elementType,
@@ -443,6 +453,25 @@ private fun NativePatch.toPatch(): Patch {
         },
         text = text,
         parentId = parentId,
-        beforeId = beforeId
+        beforeId = beforeId,
+        semantics = semanticsJson?.let {
+            try {
+                Json.decodeFromString<JsonElement>(it)
+            } catch (e: Exception) {
+                null
+            }
+        },
+        // Animation protocol: the exit flag on a `remove` and the
+        // batch-animation prelude's spec. Both must survive this relay or
+        // a Kotlin-hosted app cannot animate exits/transactions on ANY
+        // client — including browser clients served over Remote UI.
+        transition = transition,
+        spec = specJson?.let {
+            try {
+                Json.decodeFromString<JsonElement>(it)
+            } catch (e: Exception) {
+                null
+            }
+        }
     )
 }

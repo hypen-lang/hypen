@@ -43,6 +43,13 @@ pub(crate) struct EngineCore {
         allow(dead_code)
     )]
     pub registered_actions: Vec<String>,
+    /// Normalized batch-animation spec stored by an `update_state` /
+    /// `update_state_sparse` call that carried an animation context (Option
+    /// D cheap subset). Consumed (taken) by the NEXT [`render_dirty`] cycle:
+    /// if that cycle produced patches, `Patch::BatchAnimation` is prepended
+    /// as the batch's first patch; if it produced none, the stamp is
+    /// discarded silently — no stamp without patches.
+    pub pending_animation: Option<serde_json::Value>,
 }
 
 impl EngineCore {
@@ -59,6 +66,7 @@ impl EngineCore {
             data_sources: IndexMap::new(),
             action_module_map: IndexMap::new(),
             registered_actions: Vec::new(),
+            pending_animation: None,
         }
     }
 
@@ -152,7 +160,18 @@ impl EngineCore {
     /// rendering when the patch was a no-op). Affected nodes are looked up
     /// using the same scope: primary updates invalidate raw paths, named
     /// updates invalidate `mod:name:path`.
-    pub fn update_state(&mut self, scope: Option<&str>, patch: serde_json::Value) -> bool {
+    ///
+    /// `animation` is the optional batch-animation context (Option D cheap
+    /// subset): a spec object or bare curve string. When the update actually
+    /// changed state, the normalized spec is stored as pending and the next
+    /// [`render_dirty`](Self::render_dirty) cycle emits it as a
+    /// `Patch::BatchAnimation` prelude. A no-op update never stamps.
+    pub fn update_state(
+        &mut self,
+        scope: Option<&str>,
+        patch: serde_json::Value,
+        animation: Option<serde_json::Value>,
+    ) -> bool {
         let scope = Self::canon_scope(scope);
         let changed = match scope.as_deref() {
             Some(name) => match self.modules.get_mut(name) {
@@ -177,6 +196,8 @@ impl EngineCore {
             return false;
         }
 
+        self.stamp_pending_animation(animation);
+
         let change = StateChange::from_json(&patch);
         self.schedule_dirty_for_paths(scope.as_deref(), change.paths());
         true
@@ -184,14 +205,15 @@ impl EngineCore {
 
     /// Apply a sparse state patch (path-value pairs) and schedule re-render.
     ///
-    /// See [`update_state`] for `scope` semantics. Sparse updates only touch
-    /// the listed paths, which is more efficient than passing a deep clone of
-    /// the full state when only a few leaves changed.
+    /// See [`update_state`] for `scope` and `animation` semantics. Sparse
+    /// updates only touch the listed paths, which is more efficient than
+    /// passing a deep clone of the full state when only a few leaves changed.
     pub fn update_state_sparse(
         &mut self,
         scope: Option<&str>,
         paths: &[String],
         values: &serde_json::Value,
+        animation: Option<serde_json::Value>,
     ) -> bool {
         let scope = Self::canon_scope(scope);
         let changed = match scope.as_deref() {
@@ -217,8 +239,20 @@ impl EngineCore {
             return false;
         }
 
+        self.stamp_pending_animation(animation);
+
         self.schedule_dirty_for_paths(scope.as_deref(), paths.iter().map(|s| s.as_str()));
         true
+    }
+
+    /// Loosely validate and normalize a host-supplied animation context and
+    /// store it as the pending batch stamp. Called only after an update
+    /// actually changed state — a no-op dispatch never stamps. An invalid
+    /// spec warns (inside the normalizer) and leaves the engine unstamped.
+    fn stamp_pending_animation(&mut self, animation: Option<serde_json::Value>) {
+        if let Some(spec) = animation.and_then(crate::ir::anim::normalize_batch_animation) {
+            self.pending_animation = Some(spec);
+        }
     }
 
     /// Mark every node bound to one of `paths` (under `scope`) as dirty.
@@ -365,7 +399,14 @@ impl EngineCore {
     }
 
     /// Render only dirty nodes and return the resulting patches.
+    ///
+    /// Consumes the pending batch-animation stamp (if any): a cycle that
+    /// produced patches gets `Patch::BatchAnimation` prepended as its FIRST
+    /// patch; a cycle that produced none discards the stamp silently — a
+    /// stamped update whose diff is empty must not leak the stamp into a
+    /// later, unrelated render.
     pub fn render_dirty(&mut self) -> Vec<Patch> {
+        let animation = self.pending_animation.take();
         let ds = if self.data_sources.is_empty() {
             None
         } else {
@@ -376,7 +417,7 @@ impl EngineCore {
         } else {
             Some(&self.modules)
         };
-        let patches = crate::render::render_dirty_nodes_full(
+        let mut patches = crate::render::render_dirty_nodes_full(
             &mut self.scheduler,
             &mut self.tree,
             self.module.as_ref(),
@@ -387,6 +428,9 @@ impl EngineCore {
 
         if !patches.is_empty() {
             self.revision += 1;
+            if let Some(spec) = animation {
+                patches.insert(0, Patch::batch_animation(spec));
+            }
         }
 
         patches
@@ -408,7 +452,7 @@ impl EngineCore {
             .collect();
         if !created_ids.is_empty() {
             patches.retain(|p| {
-                if let Patch::Remove { id } = p {
+                if let Patch::Remove { id, .. } = p {
                     !created_ids.contains(id)
                 } else {
                     true
@@ -492,5 +536,74 @@ fn collect_module_scopes_ir(node: &IRNode, scopes: &mut HashSet<String>) {
 impl Default for EngineCore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn filter_spurious_removes_drops_flagged_remove_for_created_id() {
+        let mut patches = vec![
+            Patch::Create {
+                id: "7".to_string(),
+                element_type: "Row".to_string(),
+                props: Arc::new(IndexMap::new()),
+                semantics: None,
+            },
+            Patch::Remove {
+                id: "7".to_string(),
+                transition: true,
+            },
+            Patch::Remove {
+                id: "9".to_string(),
+                transition: true,
+            },
+        ];
+
+        EngineCore::filter_spurious_removes(&mut patches);
+
+        // The created-in-batch Remove is dropped — its exit flag goes with
+        // the pair. The unrelated flagged Remove survives intact.
+        assert_eq!(patches.len(), 2);
+        assert!(matches!(&patches[0], Patch::Create { id, .. } if id == "7"));
+        assert!(
+            matches!(&patches[1], Patch::Remove { id, transition: true } if id == "9"),
+            "unrelated flagged Remove must keep its transition flag: {:?}",
+            patches[1]
+        );
+    }
+
+    #[test]
+    fn filter_spurious_removes_leaves_batch_animation_untouched() {
+        // The batch-animation prelude is batch metadata, not a node op —
+        // the spurious-remove filter must pass it through in position
+        // (FIRST), even when the filter actually drops a Create/Remove pair.
+        let spec = serde_json::json!({"curve": "spring", "duration": 250});
+        let mut patches = vec![
+            Patch::batch_animation(spec.clone()),
+            Patch::Create {
+                id: "7".to_string(),
+                element_type: "Row".to_string(),
+                props: Arc::new(IndexMap::new()),
+                semantics: None,
+            },
+            Patch::Remove {
+                id: "7".to_string(),
+                transition: false,
+            },
+        ];
+
+        EngineCore::filter_spurious_removes(&mut patches);
+
+        assert_eq!(patches.len(), 2);
+        assert!(
+            matches!(&patches[0], Patch::BatchAnimation { spec: s } if *s == spec),
+            "BatchAnimation must survive the filter as the first patch: {:?}",
+            patches[0]
+        );
+        assert!(matches!(&patches[1], Patch::Create { id, .. } if id == "7"));
     }
 }

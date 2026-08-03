@@ -5,11 +5,13 @@
 //! via the shared `PatchQueue`; we drain on every redraw and request a
 //! repaint whenever new patches show up.
 
-use crate::accessibility::{renderer_id_for, tree_update_for_layout};
+use crate::accessibility::{renderer_id_for, tree_update_for_layout_excluding};
+use crate::anim::{DesktopAnimator, DesktopScrubber, ScrubPointerUp, TickOutcome};
 use crate::damage::Damage;
 use crate::gpu::Gpu;
 use crate::ime::{apply_ime_transition, ImeEffect};
 use crate::layout::{ItemKind, LayoutPass, TaffyState};
+use crate::style::Viewport;
 use crate::module::HypenModule;
 use crate::paint::vello_painter::VelloPainter;
 use crate::tree::Tree;
@@ -229,6 +231,22 @@ pub struct App {
     ak: Option<AkAdapter>,
     painter: VelloPainter,
     tree: Tree,
+    /// Animation runtime for the `__anim.*` prop channel: every patch
+    /// batch routes through [`DesktopAnimator::ingest`] (deferred exits,
+    /// enter queuing, batch-animation preludes), and each redraw ticks
+    /// it BEFORE layout so interpolated values written into the real
+    /// tree props reach Taffy and hit-testing the same frame. While it
+    /// has active work the redraw path re-requests a frame (Fifo
+    /// presents pace that at vsync); idle, the loop stays demand-driven.
+    animator: DesktopAnimator,
+    /// Renderer-resident scrub source for the `__anim.scrub*` channel
+    /// (Option G). Fed the window's winit pointer/wheel events; interpolates
+    /// pose props into the same real [`Tree`] the animator writes. Its owned
+    /// ids are synced into the animator each flush for scrub precedence
+    /// (scrub > playbacks > transaction > `.transition`), its settle rides
+    /// the same demand-driven redraw tick, and its settle writes are drained
+    /// into the `__hypen_bind` channel. See [`DesktopScrubber`].
+    scrubber: DesktopScrubber,
     /// Retained Taffy structure. Reused across frames; rebuilt only
     /// when its structure-key (tree generation, viewport, scale)
     /// stops matching the current redraw inputs. Saves the per-
@@ -300,6 +318,13 @@ pub struct App {
     /// Feeds the layout cache key — patches mutate the tree, so any
     /// non-empty patch batch invalidates the cached layout.
     tree_generation: u64,
+    /// `true` when the current renderer tree has at least one node
+    /// carrying a layout-affecting interaction-state variant
+    /// (`padding:hover`, `width:focus`, …). Recomputed after every
+    /// patch flush. When `false` (the overwhelmingly common case),
+    /// hover/press/focus transitions never enter the layout cache key,
+    /// so they stay on the repaint-only fast path with zero relayout.
+    has_layout_state_variants: bool,
     /// Hash of the inputs that fed the most recent successful layout
     /// pass — excluding page `scroll_y`. Page scroll is applied as a
     /// uniform post-pass shift, so a scroll-only frame can re-shift
@@ -397,6 +422,8 @@ impl App {
             ak: None,
             painter: VelloPainter::new(),
             tree: Tree::new(),
+            animator: DesktopAnimator::new(),
+            scrubber: DesktopScrubber::new(),
             taffy: TaffyState::new(),
             layout: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
@@ -416,6 +443,7 @@ impl App {
             ime_active: false,
             damage: Damage::Full,
             tree_generation: 0,
+            has_layout_state_variants: false,
             last_layout_key: None,
             last_scroll_y_in_layout: 0.0,
             last_scroll_y_emitted: 0.0,
@@ -464,13 +492,103 @@ impl App {
     /// (specifically the occluded path, which is where queue
     /// accumulation hurts most).
     fn flush_patches(&mut self) -> usize {
-        let patches = self.queue.drain();
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let viewport = self.logical_viewport();
+        let mut patches = self.queue.drain();
         let n = patches.len();
         if n == 0 {
+            // Overdue-exit backbone: even a patch-less flush (occluded
+            // Wake / about_to_wait drain) finalizes deferred exits whose
+            // `duration + delay + 80ms` window elapsed while the redraw
+            // ticker was stalled — the corpse must not outlive its
+            // grace period just because no frames are being painted.
+            self.finalize_overdue_exits(scale, viewport);
+            self.dispatch_animation_completions();
             return 0;
         }
-        self.tree.apply_batch(&patches);
+        // Scrub source gets first crack at the batch (Option G, gesture
+        // wins): it registers `__anim.scrub*` channels, cancels on
+        // remove/detach, cleans up on the matching `__anim.states` label,
+        // and SWALLOWS engine SetProps to a scrub-owned node's scrubbed keys
+        // (removing them here so neither the tree nor the animator applies
+        // them; the latest value replays at cleanup). Then sync the owned
+        // set into the animator so this batch's transaction/pose/FLIP/shared
+        // paths exclude scrub-active nodes (scrub > playbacks > transaction >
+        // `.transition`).
+        self.scrubber.pre_ingest(&mut patches, &mut self.tree);
+        self.animator.set_scrub_active(self.scrubber.owned_ids());
+        self.dispatch_scrub_binds();
+        // FLIP pre-pass (before the batch mutates the tree): snapshot
+        // First rects off the still-current PRE-batch layout for every
+        // `Move` patch whose node carries a `.layout` spec, AND (#146) for
+        // the `.layout` siblings sharing a parent with any `Remove` in the
+        // batch — a removal reflows those siblings but emits no `Move`
+        // patch for them. The Last measurement and the playback run in
+        // `redraw`, once the post-batch layout exists
+        // (`play_pending_flips`). For flagged/exit removes the sibling FLIP
+        // measures zero here (the node holds flow until it settles) and
+        // runs at exit finalize instead (`queue_removal_sibling_flips`).
+        {
+            let prev_layout = &self.layout;
+            let tree = &self.tree;
+            self.animator.prepare_moves(tree, &patches, |id| {
+                prev_layout
+                    .as_ref()
+                    .and_then(|l| l.item_by_id(id))
+                    .map(|it| (it.rect.x, it.rect.y))
+            });
+            // Shared-element pre-pass (Option H, protocol step 1): snapshot
+            // the on-screen `visual_rect` of every keyed node under a batch
+            // detach root off the still-current PRE-batch layout, BEFORE
+            // the batch mutates the tree. The Last measurement and the FLIP
+            // run in `redraw`, once the post-batch layout exists
+            // (`play_shared_flips`). `visual_rect` (not `rect`) is the
+            // desktop `getBoundingClientRect`: it reflects any in-flight
+            // transform, so a mid-flight second navigation retargets for
+            // free (protocol step 5).
+            self.animator.prepare_shared(tree, &patches, |id| {
+                prev_layout.as_ref().and_then(|l| l.item_by_id(id)).map(|it| {
+                    let r = it.visual_rect();
+                    (r.x, r.y, r.w, r.h)
+                })
+            });
+        }
+        // Route the batch through the animation runtime: it honors the
+        // batch-head `batchAnimation` prelude, defers flagged Removes
+        // whose roots carry playable exit specs, queues enters, and
+        // applies everything else to the Tree. `outcome.forwarded` is
+        // what actually reached the tree — the Taffy mirror below must
+        // see exactly that (withheld exit removals reach Taffy later,
+        // when the exit finalizes), and `outcome.restyle` carries the
+        // end-of-batch essential-snap writes whose Taffy styles must
+        // follow immediately.
+        let outcome = self.animator.ingest(&patches, &mut self.tree);
+        // Exit-animating subtrees are engine-side dead the moment their
+        // flagged Remove arrived: focus must not stay on (or under)
+        // one. Clear it now and never restore onto it — Tab traversal
+        // and every hit-test path exclude exiting ids, so nothing can
+        // re-select the corpse while its exit plays.
+        if clear_focus_if_exiting(
+            &self.animator,
+            &self.tree,
+            &mut self.focused,
+            &mut self.focus_visible,
+        ) {
+            self.ime_preedit = None;
+        }
         self.tree_generation = self.tree_generation.wrapping_add(1);
+        // Dropping the cached layout unconditionally on any non-empty
+        // batch is LOAD-BEARING for `.layout` FLIP correctness, not just a
+        // cache hygiene nicety: `play_pending_flips` (in `redraw`) needs a
+        // fresh cache-MISS so the post-batch `Last` rect is measured off
+        // newly-solved Taffy geometry rather than a stale cached pass. If a
+        // future change makes this conditional (e.g. keep the layout when a
+        // batch "looks" paint-only), the First/Last delta collapses to zero
+        // and every Move/removal-sibling FLIP silently stops inverting.
         self.layout = None;
         // Patches changed something somewhere in the tree, so the
         // painter's subtree scene cache is potentially stale: a prop
@@ -517,36 +635,155 @@ impl App {
         // structural rebuild on the next compute. `apply_patches`
         // returns false only on patches it didn't handle — fall
         // back to a bulk rebuild then.
+        if !self
+            .taffy
+            .apply_patches(&outcome.forwarded, &self.tree, scale, viewport)
+        {
+            self.taffy.mark_needs_rebuild();
+        }
+        // End-of-batch essential snaps landed layout-affecting targets
+        // directly in the tree (no SetProp for `apply_patches` to see):
+        // restyle their Taffy nodes so geometry leaves the mid-flight
+        // pose now, not at the next unrelated restyle.
+        for id in &outcome.restyle {
+            self.taffy.restyle_node(id, &self.tree, scale, viewport);
+        }
+        // Backstop: if detached subtrees have piled up past the cap
+        // (host detaching without ever re-Attaching or Removing), tear
+        // down the oldest and mirror the teardown into Taffy AND the
+        // animator. No-op in the common case.
+        for evicted in evict_detached_backstop(
+            &mut self.tree,
+            &mut self.taffy,
+            &mut self.animator,
+            DETACHED_SUBTREE_CAP,
+        ) {
+            // The scrub source keeps per-node records too; an evicted
+            // detached root's subtree leaves the arena, so its entries go.
+            self.scrubber.forget(&evicted);
+        }
+        // Recompute the layout-state-variant gate for the new tree.
+        // Cheap whole-tree scan, runs only on patch flush (not per
+        // frame). Drives whether interaction transitions participate in
+        // the layout cache key + are threaded into the layout pass.
+        self.has_layout_state_variants = self
+            .tree
+            .nodes()
+            .any(crate::style::node_has_layout_state_variant);
+        self.damage.add_full();
+        self.finalize_overdue_exits(scale, viewport);
+        // Route any `.onAnimationComplete` dispatches queued by this batch's
+        // exit finalizes (defensive re-Create supersede fires none) and the
+        // overdue backbone to the module.
+        self.dispatch_animation_completions();
+        n
+    }
+
+    /// Timeout backbone for deferred exits (`duration + delay + 80ms`):
+    /// finalizes exits whose grace window elapsed even when the redraw
+    /// ticker stalled (occluded window drains still call this via
+    /// `flush_patches`). The normal settle path is `DesktopAnimator::
+    /// tick` inside `redraw`.
+    /// Viewport width in LOGICAL CSS pixels, for Tailwind breakpoint
+    /// selection.
+    ///
+    /// The GPU surface is sized in PHYSICAL pixels, but the breakpoints it
+    /// gets compared against (`sm` 640 … `xl` 1280) are CSS pixels. Feeding
+    /// the surface width straight in doubled the apparent viewport on a 2x
+    /// display, so a 520pt window reported 1040 and matched `lg` — the
+    /// home-screen launcher picked `lg:max-w-[300px]` for its dock and
+    /// `lg:max-w-[290px]` for its icon grid instead of the base widths, and
+    /// the dock's fourth icon overflowed its container.
+    ///
+    /// Lengths stay physical (taffy styles multiply by `scale`); only the
+    /// breakpoint comparison is logical.
+    /// The window content box in logical (CSS) px — the basis for
+    /// Tailwind breakpoints and `vh`/`vw`/`vmin`/`vmax`. wgpu reports
+    /// the surface in physical px, so this divides by the scale factor.
+    fn logical_viewport(&self) -> Viewport {
+        let physical = self
+            .gpu
+            .as_ref()
+            .map(|g| (g.size.0 as f32, g.size.1 as f32))
+            .unwrap_or((0.0, 0.0));
         let scale = self
             .window
             .as_ref()
             .map(|w| w.scale_factor() as f32)
             .unwrap_or(1.0);
-        let viewport_w = self.gpu.as_ref().map(|g| g.size.0 as f32).unwrap_or(0.0);
+        crate::layout::logical_viewport((physical.0 as u32, physical.1 as u32), scale)
+    }
+
+    fn finalize_overdue_exits(&mut self, scale: f32, viewport: Viewport) {
+        let overdue = self.animator.finalize_overdue(&mut self.tree);
+        if overdue.is_empty() {
+            return;
+        }
+        // #146 sibling-shift: an overdue exit finalize reflows the exiting
+        // root's `.layout` siblings. Snapshot their First off the
+        // still-current pre-teardown layout before it is dropped just
+        // below, so the next redraw's fresh-layout `play_pending_flips`
+        // slides them.
+        {
+            let prev_layout = &self.layout;
+            self.animator.queue_removal_sibling_flips(|id| {
+                prev_layout
+                    .as_ref()
+                    .and_then(|l| l.item_by_id(id))
+                    .map(|it| (it.rect.x, it.rect.y))
+            });
+        }
+        self.tree_generation = self.tree_generation.wrapping_add(1);
+        self.layout = None;
+        self.painter.invalidate_subtree_cache();
         if !self
             .taffy
-            .apply_patches(&patches, &self.tree, scale, viewport_w)
+            .apply_patches(&overdue, &self.tree, scale, viewport)
         {
             self.taffy.mark_needs_rebuild();
         }
-        // Backstop: if detached subtrees have piled up past the cap
-        // (host detaching without ever re-Attaching or Removing), tear
-        // down the oldest and mirror the teardown into Taffy. No-op in
-        // the common case.
-        let evicted = self.tree.evict_detached_over(DETACHED_SUBTREE_CAP);
-        if !evicted.is_empty() {
-            log::warn!(
-                "evicted {} detached node(s) over the {DETACHED_SUBTREE_CAP}-root \
-                 backstop — the host is detaching subtrees without re-Attaching or \
-                 Removing them (likely a render loop / Router cache that never evicts)",
-                evicted.len(),
-            );
-            for id in &evicted {
-                self.taffy.remove_node(id);
-            }
-        }
         self.damage.add_full();
-        n
+    }
+
+    /// Programmatic reduced-motion toggle (see the `HYPEN_REDUCED_MOTION`
+    /// env var on [`DesktopAnimator`] for the config-flag default). The
+    /// live toggle mirrors the web renderers: ON snaps all in-flight
+    /// work except `.motion(essential)` nodes, OFF restarts `.animate`
+    /// presets.
+    pub fn set_reduced_motion(&mut self, on: bool) {
+        // Scrub follows the same per-node rule as `.states`: dragging is
+        // direct manipulation (always live), only the release settle snaps
+        // under reduced motion (with the `.motion(essential)` per-node
+        // exemption). Mirror the flag onto the scrubber.
+        self.scrubber.set_reduced_motion(on);
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        let viewport = self.logical_viewport();
+        let frame = drive_reduced_motion_toggle(
+            &mut self.animator,
+            &mut self.tree,
+            &mut self.taffy,
+            scale,
+            viewport,
+            on,
+        );
+        if frame.invalidate {
+            self.tree_generation = self.tree_generation.wrapping_add(1);
+            self.layout = None;
+            self.painter.invalidate_subtree_cache();
+        }
+        // Request a frame when the toggle wrote anything OR left work
+        // in flight. The second condition is what wakes an idle window
+        // after toggling OFF: restarting `.animate` presets writes
+        // nothing yet (the outcome is empty), but the restarted
+        // ambients need frames — without this the pulses stay frozen
+        // until an unrelated event nudges a redraw.
+        if frame.invalidate || frame.rearm {
+            self.request_redraw_full();
+        }
     }
 
     fn redraw(&mut self) {
@@ -556,6 +793,70 @@ impl App {
             (Some(gpu), Some(window)) => (gpu.size.0, gpu.size.1, window.scale_factor() as f32),
             _ => return,
         };
+
+        // Animation tick — BEFORE layout, so interpolated values written
+        // into the real tree props reach Taffy, item emission, and
+        // hit-testing this same frame (constraint #5: geometry and hit
+        // targets follow the animated values). Any write invalidates the
+        // layout cache (item styling is baked at emit time) and the
+        // painter's subtree scene cache; layout-affecting props also
+        // restyle their Taffy nodes so Taffy re-solves.
+        //
+        // PERF DEBT (bounded): every tick with a write drops the WHOLE
+        // painter subtree cache, even when the writes are paint-only
+        // (opacity/color) and confined to one subtree. Scoping the
+        // invalidation would need (a) `TickOutcome` to carry the ids it
+        // wrote, and (b) each cache entry to record its subtree root so
+        // "entry is on the same root-to-leaf path as a written id" can
+        // be answered (opacity inherits DOWNWARD, so an animating
+        // ancestor invalidates cached descendants too — containment
+        // alone is not enough). Neither exists today; a wrong retain
+        // here paints stale frames, the worst failure mode, so the
+        // wholesale drop stays until the cache records coverage. Cost
+        // is bounded: it only recurs while animations are in flight,
+        // and the next paint re-encodes only visible subtrees.
+        let frame = drive_animation_frame(
+            &mut self.animator,
+            &mut self.tree,
+            &mut self.taffy,
+            scale,
+            crate::layout::logical_viewport((w, h), scale),
+        );
+        // Scrub source tick: advance any in-flight settle and fire elapsed
+        // deadlines (the no-flash cleanup window, the scroll rest-debounce
+        // write, the scroll-quiescence release). Writes land in the same
+        // real tree props the animator writes, so a dirty scrub frame
+        // invalidates layout/paint exactly like an animation frame; its
+        // settle writes drain into the `__hypen_bind` channel below.
+        let scrub_dirty = self.scrubber.tick(&mut self.tree);
+        let scrub_active = self.scrubber.has_active();
+        if scrub_dirty {
+            self.tree_generation = self.tree_generation.wrapping_add(1);
+            self.layout = None;
+            self.painter.invalidate_subtree_cache();
+            self.damage.add_full();
+        }
+        self.dispatch_scrub_binds();
+        // #146 sibling-shift for flagged/exit removes: any exit that
+        // finalized in the tick above recorded its `.layout` siblings.
+        // Measure their First off the STILL-CURRENT pre-teardown layout
+        // (dropped just below when `frame.invalidate` is set) and queue
+        // them, so the fresh-layout `play_pending_flips` slides them.
+        {
+            let prev_layout = &self.layout;
+            self.animator.queue_removal_sibling_flips(|id| {
+                prev_layout
+                    .as_ref()
+                    .and_then(|l| l.item_by_id(id))
+                    .map(|it| (it.rect.x, it.rect.y))
+            });
+        }
+        if frame.invalidate {
+            self.tree_generation = self.tree_generation.wrapping_add(1);
+            self.layout = None;
+            self.painter.invalidate_subtree_cache();
+            self.damage.add_full();
+        }
         let mut hovered_set: HashSet<String> = HashSet::new();
         if let Some(id) = self.hovered.clone() {
             hovered_set.insert(id);
@@ -595,6 +896,24 @@ impl App {
             });
         }
 
+        // Feed the live interaction snapshot into the retained Taffy
+        // state so layout-affecting state variants (`padding:hover`, …)
+        // resolve against the node actually under the pointer / pressed
+        // / focused. Gated on `has_layout_state_variants`: when the tree
+        // has none, pass the default (all-`None`) so the layout pass's
+        // interaction key stays constant and a hover/press/focus
+        // transition never forces a relayout.
+        let layout_interaction = if self.has_layout_state_variants {
+            crate::layout::LayoutInteraction {
+                hovered: self.hovered.clone(),
+                pressed: self.pressed.clone(),
+                focused: self.focused.clone(),
+            }
+        } else {
+            crate::layout::LayoutInteraction::default()
+        };
+        self.taffy.set_interaction(layout_interaction);
+
         // Layout cache. Hover / press / focus / caret-only frames
         // don't change anything that feeds Taffy or cosmic-text, so a
         // matching key lets us skip the entire layout pass and reuse
@@ -623,6 +942,7 @@ impl App {
         let scroll_outside_buffer = !key_match
             || (self.scroll_y - self.last_scroll_y_emitted).abs() > scroll_recompute_threshold;
         let cache_miss = self.layout.is_none() || !key_match || scroll_outside_buffer;
+        let mut flips_played = false;
         if cache_miss {
             let pass = LayoutPass::compute_with_state(
                 &mut self.taffy,
@@ -639,6 +959,49 @@ impl App {
             self.last_scroll_y_in_layout = self.scroll_y;
             self.last_scroll_y_emitted = self.scroll_y;
             self.layout_generation = self.layout_generation.wrapping_add(1);
+            // `.layout` FLIP playback: the fresh pass provides the Last
+            // rects for any First snapshots `flush_patches` took off the
+            // pre-batch layout. Starting a playback writes the invert
+            // translate props into the tree AFTER this pass's transform
+            // post-pass already ran — refresh the per-item transforms in
+            // place (cheap: transforms are paint/hit-only, Taffy
+            // geometry is untouched) so this same frame paints AND
+            // hit-tests the node at its First position.
+            if self.animator.has_pending_flips() {
+                flips_played |= {
+                    let layout_ref = self.layout.as_ref().expect("layout populated above");
+                    self.animator.play_pending_flips(&mut self.tree, scale, |id| {
+                        layout_ref.item_by_id(id).map(|it| (it.rect.x, it.rect.y))
+                    })
+                };
+            }
+            // Shared-element FLIP resolution (Option H, protocol steps 3/4):
+            // the fresh pass provides the incoming nodes' Last `visual_rect`
+            // for any source snapshots `prepare_shared` took. Matched nodes
+            // pose over the source rect via transform writes and play back
+            // to base — same invert-then-refresh dance as `.layout` FLIPs.
+            if self.animator.has_pending_shared() {
+                flips_played |= {
+                    let layout_ref = self.layout.as_ref().expect("layout populated above");
+                    self.animator.play_shared_flips(&mut self.tree, scale, |id| {
+                        layout_ref.item_by_id(id).map(|it| {
+                            let r = it.visual_rect();
+                            (r.x, r.y, r.w, r.h)
+                        })
+                    })
+                };
+            }
+            if flips_played {
+                if let Some(pass) = self.layout.as_mut() {
+                    pass.refresh_transforms(
+                        &self.tree,
+                        crate::layout::logical_viewport((w, h), scale),
+                        scale,
+                    );
+                }
+                self.painter.invalidate_subtree_cache();
+                self.damage.add_full();
+            }
         } else if (self.scroll_y - self.last_scroll_y_in_layout).abs() > f32::EPSILON {
             // Scroll-only fast path: re-shift the cached items by the
             // delta. Skips Taffy + cosmic-text + raster-cache key
@@ -656,11 +1019,25 @@ impl App {
                     if let Some(clip) = it.clip_to.as_mut() {
                         clip.y -= delta;
                     }
+                    // Cumulative transforms embed the emit-time rect
+                    // centers as origin terms; a uniform y-shift of
+                    // every rect conjugates every cumulative transform
+                    // by the same shift (exact — see
+                    // `Affine2::conjugate_translate`). Without this, a
+                    // scaled/rotated item would pivot about its stale
+                    // pre-scroll center on every fast-path frame.
+                    if !it.transform.is_identity() {
+                        it.transform = it.transform.conjugate_translate(0.0, -delta);
+                    }
                 }
             }
             self.last_scroll_y_in_layout = self.scroll_y;
             self.layout_generation = self.layout_generation.wrapping_add(1);
         }
+        // Route this frame's `.onAnimationComplete` dispatches to the module:
+        // enter/exit/finite-preset/states settles from the tick above, plus
+        // any zero-delta shared-element settle from `play_shared_flips`.
+        self.dispatch_animation_completions();
         // Vello rebuilds the whole scene every frame, so we don't
         // forward partial-damage rects to the painter. We still
         // consume `self.damage` here so callers that flag full /
@@ -700,6 +1077,21 @@ impl App {
         // mouse / AccessKit all converge here without per-callsite
         // bookkeeping.
         self.sync_ime_to_focus();
+
+        // Self-perpetuating ticker: while animations are in flight,
+        // request the next frame now — wgpu's Fifo present mode paces
+        // the resulting RedrawRequested cadence at vsync. When the last
+        // animation settles `rearm` goes false, nothing re-arms, and
+        // the loop stands down to pure demand-driven `Wait`. FLIP
+        // playbacks started after the tick (mid-frame, off the fresh
+        // layout) are the one post-tick animator mutation — they OR in
+        // via `flips_played` so a batch whose only motion is a FLIP
+        // still arms the ticker.
+        if frame.rearm || flips_played || scrub_active {
+            if let Some(win) = self.window.as_ref() {
+                win.request_redraw();
+            }
+        }
     }
 
     /// Mark the whole surface dirty and ask winit to redraw. Used by
@@ -722,13 +1114,16 @@ impl App {
         let layout = self.layout.as_ref()?;
         let item = layout.item_by_id(id)?;
         // 6 px is a comfortable cover for the 3 px outset focus ring +
-        // 2 px stroke and any 1 px border anti-aliasing.
+        // 2 px stroke and any 1 px border anti-aliasing. The VISUAL
+        // rect (transform-aware AABB) is what actually painted, so
+        // damage must cover it — not the untransformed layout rect.
         const PAD: f32 = 6.0;
+        let rect = item.visual_rect();
         Some(crate::layout::Rect {
-            x: item.rect.x - PAD,
-            y: item.rect.y - PAD,
-            w: item.rect.w + 2.0 * PAD,
-            h: item.rect.h + 2.0 * PAD,
+            x: rect.x - PAD,
+            y: rect.y - PAD,
+            w: rect.w + 2.0 * PAD,
+            h: rect.h + 2.0 * PAD,
         })
     }
 
@@ -753,21 +1148,17 @@ impl App {
     /// take the fast path in `redraw` and re-shift the cached items
     /// instead of recomputing Taffy + measure.
     fn layout_cache_key(&self, w: u32, h: u32, scale: f32) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h_hasher = std::collections::hash_map::DefaultHasher::new();
-        self.tree_generation.hash(&mut h_hasher);
-        w.hash(&mut h_hasher);
-        h.hash(&mut h_hasher);
-        scale.to_bits().hash(&mut h_hasher);
-        // Sorted iteration so two equivalent maps with different
-        // insertion order produce the same key.
-        let mut sorted: Vec<(&String, &f32)> = self.scrollables.iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(b.0));
-        for (id, off) in sorted {
-            id.hash(&mut h_hasher);
-            off.to_bits().hash(&mut h_hasher);
-        }
-        h_hasher.finish()
+        layout_cache_key_inner(
+            self.tree_generation,
+            w,
+            h,
+            scale,
+            &self.scrollables,
+            self.has_layout_state_variants,
+            self.hovered.as_deref(),
+            self.pressed.as_deref(),
+            self.focused.as_deref(),
+        )
     }
 
     fn publish_accessibility(&mut self) {
@@ -779,12 +1170,22 @@ impl App {
             return;
         }
         self.last_a11y_layout_generation = self.layout_generation;
-        let Some(adapter) = self.ak.as_mut() else {
-            return;
-        };
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
+        // Exit-animating subtrees are excluded from assistive tech the
+        // moment their exit begins: they still paint, but engine-side
+        // they are dead — a screen reader must not report or activate
+        // them (parity with the pointer/keyboard exclusion). Computed
+        // before the fingerprint and mixed into it, so an exit
+        // beginning under an otherwise identical layout still
+        // republishes.
+        let exit_excluded: Vec<String> = layout
+            .items
+            .iter()
+            .filter(|it| self.animator.is_exit_excluded(&self.tree, &it.node_id))
+            .map(|it| it.node_id.clone())
+            .collect();
         // Fingerprint the layout's a11y-relevant shape so we skip the
         // full TreeUpdate rebuild when nothing semantic changed (the
         // common case during scroll / hover bursts). The fingerprint
@@ -797,10 +1198,15 @@ impl App {
         for it in &layout.items {
             it.node_id.hash(&mut hasher);
             std::mem::discriminant(&it.kind).hash(&mut hasher);
-            (it.rect.x as i32).hash(&mut hasher);
-            (it.rect.y as i32).hash(&mut hasher);
-            (it.rect.w as i32).hash(&mut hasher);
-            (it.rect.h as i32).hash(&mut hasher);
+            // Fingerprint the VISUAL rect — the bounds AccessKit
+            // publishes. A transform-only change (mid-animation frame,
+            // static transform prop landing) must republish even when
+            // the Taffy rect is unchanged.
+            let rect = it.visual_rect();
+            (rect.x as i32).hash(&mut hasher);
+            (rect.y as i32).hash(&mut hasher);
+            (rect.w as i32).hash(&mut hasher);
+            (rect.h as i32).hash(&mut hasher);
             it.action.hash(&mut hasher);
             // `Text { content }` and `Input { value }` change the
             // accessible label without changing rect; mix those in.
@@ -815,18 +1221,33 @@ impl App {
                 _ => {}
             }
         }
+        exit_excluded.hash(&mut hasher);
         let fp = hasher.finish();
         if Some(fp) == self.last_a11y_fingerprint {
             return;
         }
         self.last_a11y_fingerprint = Some(fp);
-        adapter.update_if_active(|| tree_update_for_layout(layout));
+        let Some(adapter) = self.ak.as_mut() else {
+            return;
+        };
+        adapter.update_if_active(|| {
+            tree_update_for_layout_excluding(layout, &|id| {
+                exit_excluded.iter().any(|e| e == id)
+            })
+        });
+    }
+
+    /// Exit-animating subtrees are engine-side dead the moment the
+    /// flagged Remove was emitted — every hit-test path below excludes
+    /// them immediately, even while their exit still paints.
+    fn exit_excluded(&self, id: &str) -> bool {
+        self.animator.is_exit_excluded(&self.tree, id)
     }
 
     fn hit_actionable(&self, x: f32, y: f32) -> Option<String> {
         self.layout
             .as_ref()
-            .and_then(|l| l.hit(x, y))
+            .and_then(|l| l.hit_excluding(x, y, &|id| self.exit_excluded(id)))
             .map(|item| item.node_id.clone())
     }
 
@@ -843,7 +1264,7 @@ impl App {
         let new_subject = self
             .layout
             .as_ref()
-            .and_then(|l| l.hit_hoverable(x, y))
+            .and_then(|l| l.hit_hoverable_excluding(x, y, &|id| self.exit_excluded(id)))
             .map(|item| item.node_id.clone());
         if new_subject == self.hover_subject {
             return;
@@ -882,11 +1303,55 @@ impl App {
             .dispatch_action(action, Some(serde_json::Value::Object(payload_obj)));
     }
 
+    /// Forward every `.onAnimationComplete` dispatch the animator queued at
+    /// its natural-settle points (enter/exit/finite-preset/states/
+    /// sharedElement) to the mounted module — the same channel clicks and
+    /// hovers use. Called after each animator drive; empty (and cheap) in
+    /// the overwhelmingly common case where nothing settled.
+    fn dispatch_animation_completions(&mut self) {
+        for completion in self.animator.take_completions() {
+            log::debug!(
+                "dispatch (anim complete): {} payload={:?}",
+                completion.action,
+                completion.payload
+            );
+            self.module
+                .dispatch_action(&completion.action, Some(completion.payload));
+        }
+    }
+
+    /// Forward every scrub settle write the scrubber queued into the exact
+    /// two-way `.bind` channel — `module.dispatch_action("__hypen_bind",
+    /// {path, value})` — the same channel a bound `Input` uses. The `value`
+    /// is the winning pose LABEL. Called after every scrubber interaction
+    /// (flush / pointer release / redraw tick); empty and cheap otherwise.
+    fn dispatch_scrub_binds(&mut self) {
+        for bind in self.scrubber.take_binds() {
+            log::debug!("dispatch (scrub bind): {} = {}", bind.path, bind.value);
+            self.module.dispatch_action(
+                "__hypen_bind",
+                Some(json!({ "path": bind.path, "value": bind.value })),
+            );
+        }
+    }
+
     fn hit_focusable(&self, x: f32, y: f32) -> Option<String> {
         self.layout
             .as_ref()
-            .and_then(|l| l.hit_focusable(x, y))
+            .and_then(|l| l.hit_focusable_excluding(x, y, &|id| self.exit_excluded(id)))
             .map(|item| item.node_id.clone())
+    }
+
+    /// Map a viewport-space pointer position into `id`'s item-LOCAL
+    /// space (the space the layout rect, text metrics, and caret math
+    /// live in) by inverting the item's cumulative transform. Identity
+    /// (the common case) returns the point unchanged.
+    fn pointer_to_item_local(&self, id: &str, x: f32, y: f32) -> (f32, f32) {
+        self.layout
+            .as_ref()
+            .and_then(|l| l.item_by_id(id))
+            .map(|it| it.to_local(x, y))
+            .unwrap_or((x, y))
     }
 }
 
@@ -897,6 +1362,8 @@ impl App {
 // the rest of the methods.
 #[path = "window_input.rs"]
 mod input_impl;
+#[cfg(test)]
+pub(crate) use input_impl::focused_dispatch;
 
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
@@ -905,7 +1372,14 @@ impl ApplicationHandler<AppEvent> for App {
         }
         let attrs = WindowAttributes::default()
             .with_title(self.title.clone())
-            .with_inner_size(winit::dpi::PhysicalSize::new(
+            // LOGICAL, not physical: `DesktopApp::size(960, 720)` means a
+            // 960x720 *window*, the same units every other toolkit takes and
+            // the same units the UI is authored in. As `PhysicalSize` it was
+            // divided by the scale factor — a 2x display opened the window at
+            // 480x360pt, less than half the requested area, which is what
+            // cropped the home-screen launcher and pushed its dock out of
+            // view.
+            .with_inner_size(winit::dpi::LogicalSize::new(
                 self.initial_size.0,
                 self.initial_size.1,
             ))
@@ -940,7 +1414,14 @@ impl ApplicationHandler<AppEvent> for App {
                 AkWindowEvent::ActionRequested(req) => {
                     if matches!(req.action, AkAction::Click) {
                         if let Some(layout) = self.layout.as_ref() {
-                            if let Some(rid) = renderer_id_for(layout, req.target_node) {
+                            if let Some(rid) = renderer_id_for(layout, req.target_node)
+                                .filter(|rid| {
+                                    // Exit-animating ids are engine-side
+                                    // dead: no dispatch, and focus must
+                                    // never land (or be restored) on one.
+                                    !self.animator.is_exit_excluded(&self.tree, rid)
+                                })
+                            {
                                 if let Some(item) = layout.item_by_id(&rid) {
                                     if let Some(action) = item.action.clone() {
                                         let payload = item.action_payload.clone();
@@ -1023,11 +1504,30 @@ impl ApplicationHandler<AppEvent> for App {
                 self.cursor = position;
                 let (px, py) = (position.x as f32, position.y as f32);
 
+                // Scrub gesture: route the move to any active drag first. It
+                // claims on slop and interpolates the pose props straight
+                // into the tree, so a dirty move invalidates layout/paint
+                // exactly like an animation frame.
+                if self.scrubber.pointer_move(&mut self.tree, position.x, position.y) {
+                    self.tree_generation = self.tree_generation.wrapping_add(1);
+                    self.layout = None;
+                    self.painter.invalidate_subtree_cache();
+                    self.damage.add_full();
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+
                 // While drag-selecting, every move updates the head of
                 // the selection without touching the anchor.
                 if let Some(drag_id) = self.dragging_input.clone() {
                     if let Some((value, font_size, rect)) = self.lookup_input(&drag_id) {
-                        let local_x = (px - rect.x - 12.0).max(0.0);
+                        // Caret math lives in the item's LOCAL (layout
+                        // rect) space; inverse-transform the pointer
+                        // first so drag-select stays correct on a
+                        // transformed Input.
+                        let (lx, _) = self.pointer_to_item_local(&drag_id, px, py);
+                        let local_x = (lx - rect.x - 12.0).max(0.0);
                         let new_head = self
                             .painter
                             .text_engine_mut()
@@ -1091,6 +1591,18 @@ impl ApplicationHandler<AppEvent> for App {
                 let focus_target = self.hit_focusable(cx, cy);
                 let mut needs_redraw = false;
 
+                // Scrub gesture: open a PENDING drag if the press is inside a
+                // gesture-scrub node's bounds (a mid-settle catch claims
+                // immediately). It stays pending until slop is exceeded, so
+                // the normal press/focus bookkeeping below still runs — a
+                // below-slop tap remains an ordinary click (suppressed only
+                // when the drag actually claims, at release).
+                if let Some(layout) = self.layout.as_ref() {
+                    if self.scrubber.pointer_down(layout, self.cursor.x, self.cursor.y) {
+                        needs_redraw = true;
+                    }
+                }
+
                 // Compute multi-click count before the input
                 // mutations below — count==2 selects the word at
                 // cursor, count==3 selects the whole input.
@@ -1121,7 +1633,11 @@ impl ApplicationHandler<AppEvent> for App {
                 // entire input value.
                 if let Some(id) = focus_target.as_deref() {
                     if let Some((value, font_size, rect)) = self.lookup_input(id) {
-                        let local_x = (cx - rect.x - 12.0).max(0.0);
+                        // Same local-space mapping as drag-select: the
+                        // click position must be inverse-transformed
+                        // before caret byte-offset math.
+                        let (lx, _) = self.pointer_to_item_local(id, cx, cy);
+                        let local_x = (lx - rect.x - 12.0).max(0.0);
                         let byte = self
                             .painter
                             .text_engine_mut()
@@ -1165,7 +1681,26 @@ impl ApplicationHandler<AppEvent> for App {
                 button: MouseButton::Left,
                 ..
             } => {
-                self.handle_click();
+                // A claimed scrub drag consumes the release: it begins the
+                // settle (or, under reduced motion, arrives instantly) and
+                // the click is SUPPRESSED — a drag is not a tap. A below-slop
+                // pointer never claimed, so the ordinary click path runs and
+                // the child's action fires.
+                match self.scrubber.pointer_up(&mut self.tree) {
+                    ScrubPointerUp::Claimed => {
+                        self.pressed = None;
+                        self.dragging_input = None;
+                        self.tree_generation = self.tree_generation.wrapping_add(1);
+                        self.layout = None;
+                        self.painter.invalidate_subtree_cache();
+                        self.damage.add_full();
+                        self.dispatch_scrub_binds();
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
+                    }
+                    ScrubPointerUp::NoOp => self.handle_click(),
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let dy = match delta {
@@ -1177,7 +1712,14 @@ impl ApplicationHandler<AppEvent> for App {
                     let cy = self.cursor.y as f32;
                     // Topmost scrollable Container under the cursor wins
                     // — fall back to page scroll when there isn't one.
-                    let target = self.layout.as_ref().and_then(|l| l.hit_scrollable(cx, cy));
+                    let target = self
+                        .layout
+                        .as_ref()
+                        .and_then(|l| {
+                            l.hit_scrollable_excluding(cx, cy, &|id| {
+                                self.animator.is_exit_excluded(&self.tree, id)
+                            })
+                        });
                     let mut container_damage: Option<crate::layout::Rect> = None;
                     let mut full_damage = false;
                     if let Some(item) = target {
@@ -1230,6 +1772,25 @@ impl ApplicationHandler<AppEvent> for App {
                         // layout instead of forcing a full recompute.
                         // Damage stays Full because every item moves.
                         self.request_redraw_full();
+                    }
+                    // Scroll-source scrub: re-derive every scroll entry's
+                    // progress from its resolved container's freshly-updated
+                    // offset (absolute mapping). Runs after the offset write
+                    // above so it reads the new value; a dirty re-derive
+                    // invalidates layout like any tree write.
+                    let mut scrub_dirty = false;
+                    if let Some(layout) = self.layout.as_ref() {
+                        scrub_dirty =
+                            self.scrubber.on_scroll(&mut self.tree, layout, &self.scrollables);
+                    }
+                    if scrub_dirty {
+                        self.tree_generation = self.tree_generation.wrapping_add(1);
+                        self.layout = None;
+                        self.painter.invalidate_subtree_cache();
+                        self.damage.add_full();
+                        if let Some(w) = self.window.as_ref() {
+                            w.request_redraw();
+                        }
                     }
                 }
             }
@@ -1285,6 +1846,27 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::Focused(false) => {
+                // A claimed scrub drag has no OS pointer-capture on desktop
+                // (winit exposes none — see anim.rs' scrub narrowings), so a
+                // focus loss mid-drag is the winit analog of the DOM's
+                // `pointercancel`, which the DOM scrubber routes straight to
+                // its pointer-up settle path. Forward it the same way: without
+                // this the grab STRANDS — `active_pointer` stays set (blocking
+                // every future gesture until an unrelated release consumes it),
+                // the node holds its mid-drag pose, and engine writes to its
+                // scrubbed keys defer indefinitely (the ticker is not armed
+                // during a drag, so it can never self-heal). A pending
+                // below-slop drag is simply discarded (NoOp).
+                if let ScrubPointerUp::Claimed = self.scrubber.pointer_up(&mut self.tree) {
+                    self.pressed = None;
+                    self.dragging_input = None;
+                    self.tree_generation = self.tree_generation.wrapping_add(1);
+                    self.layout = None;
+                    self.painter.invalidate_subtree_cache();
+                    self.damage.add_full();
+                    self.dispatch_scrub_binds();
+                    self.animator.set_scrub_active(self.scrubber.owned_ids());
+                }
                 // Clear `pressed` too — losing focus mid-press would
                 // otherwise leave a stale pressed id that the next
                 // mouse-up could match against.
@@ -1394,11 +1976,194 @@ impl ApplicationHandler<AppEvent> for App {
     }
 }
 
+/// Outcome of one animation-frame step (or reduced-motion toggle) —
+/// see [`drive_animation_frame`] / [`drive_reduced_motion_toggle`].
+/// Extracted as data so the redraw glue is testable without a
+/// GPU-backed `App`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct FrameAnim {
+    /// The animator wrote into the tree / finalized removals: the
+    /// caller must bump the tree generation, drop the cached layout,
+    /// invalidate the painter subtree cache, and mark full damage.
+    pub invalidate: bool,
+    /// Animations remain in flight after this step: the caller must
+    /// request another frame (the vsync re-arm). `false` on idle steps
+    /// so the demand-driven loop stands down.
+    pub rearm: bool,
+}
+
+/// Mirror a [`TickOutcome`] into the retained Taffy state: finalized
+/// removal patches replay through `apply_patches` (bulk rebuild on any
+/// unhandled patch), and layout-affecting animated writes restyle
+/// their nodes so Taffy re-solves off the interpolated values.
+pub(crate) fn mirror_tick_outcome(
+    outcome: &TickOutcome,
+    tree: &Tree,
+    taffy: &mut TaffyState,
+    scale: f32,
+    viewport: Viewport,
+) {
+    if !outcome.finalized.is_empty()
+        && !taffy.apply_patches(&outcome.finalized, tree, scale, viewport)
+    {
+        taffy.mark_needs_rebuild();
+    }
+    for id in &outcome.restyle {
+        taffy.restyle_node(id, tree, scale, viewport);
+    }
+}
+
+/// One animation-frame step, extracted from [`App::redraw`] so the
+/// window wiring is testable headless: tick the animator against the
+/// tree — the caller runs this BEFORE computing the LayoutPass, so
+/// animated geometry reaches Taffy, item emission, and hit-testing the
+/// same frame — and mirror the outcome into the retained Taffy state.
+pub(crate) fn drive_animation_frame(
+    animator: &mut DesktopAnimator,
+    tree: &mut Tree,
+    taffy: &mut TaffyState,
+    scale: f32,
+    viewport: Viewport,
+) -> FrameAnim {
+    let outcome = animator.tick(tree);
+    let invalidate = !outcome.is_empty();
+    if invalidate {
+        mirror_tick_outcome(&outcome, tree, taffy, scale, viewport);
+    }
+    FrameAnim {
+        invalidate,
+        rearm: animator.has_active(tree),
+    }
+}
+
+/// Reduced-motion toggle step, extracted from
+/// [`App::set_reduced_motion`] for the same headless-testability
+/// reason. `rearm` is decided off `has_active`, NOT off the toggle's
+/// outcome: toggling OFF restarts `.animate` presets without writing
+/// anything yet, so an empty outcome must still wake the redraw loop
+/// or restarted pulses stay frozen on an idle window.
+pub(crate) fn drive_reduced_motion_toggle(
+    animator: &mut DesktopAnimator,
+    tree: &mut Tree,
+    taffy: &mut TaffyState,
+    scale: f32,
+    viewport: Viewport,
+    on: bool,
+) -> FrameAnim {
+    let outcome = animator.set_reduced_motion(on, tree);
+    let invalidate = !outcome.is_empty();
+    if invalidate {
+        mirror_tick_outcome(&outcome, tree, taffy, scale, viewport);
+    }
+    FrameAnim {
+        invalidate,
+        rearm: animator.has_active(tree),
+    }
+}
+
+/// Detached-subtree eviction backstop (see [`DETACHED_SUBTREE_CAP`]):
+/// tear down the oldest detached roots past `cap` and mirror the
+/// teardown into Taffy AND the animator — every evicted id leaves the
+/// node arena, so its animator records (specs, ambients, …) must go
+/// with it or they accumulate for the process lifetime.
+pub(crate) fn evict_detached_backstop(
+    tree: &mut Tree,
+    taffy: &mut TaffyState,
+    animator: &mut DesktopAnimator,
+    cap: usize,
+) -> Vec<String> {
+    let evicted = tree.evict_detached_over(cap);
+    if !evicted.is_empty() {
+        log::warn!(
+            "evicted {} detached node(s) over the {cap}-root \
+             backstop — the host is detaching subtrees without re-Attaching or \
+             Removing them (likely a render loop / Router cache that never evicts)",
+            evicted.len(),
+        );
+        for id in &evicted {
+            taffy.remove_node(id);
+            animator.forget(id);
+        }
+    }
+    evicted
+}
+
+/// Clear `focused` (and the `:focus-visible` ring flag) when it sits
+/// on or under an exit-animating subtree — those ids are engine-side
+/// dead, so keyboard activation, typing, and IME must stop the moment
+/// the exit begins. Returns `true` when focus was cleared.
+pub(crate) fn clear_focus_if_exiting(
+    animator: &DesktopAnimator,
+    tree: &Tree,
+    focused: &mut Option<String>,
+    focus_visible: &mut bool,
+) -> bool {
+    let Some(id) = focused.as_deref() else {
+        return false;
+    };
+    if animator.is_exit_excluded(tree, id) {
+        *focused = None;
+        *focus_visible = false;
+        true
+    } else {
+        false
+    }
+}
+
 /// Clamp `y` into the legal scroll range for `content_h` content
 /// against a `viewport_h` viewport.
 pub(crate) fn clamp_scroll(y: f32, content_h: f32, viewport_h: f32) -> f32 {
     let max = (content_h - viewport_h).max(0.0);
     y.clamp(0.0, max)
+}
+
+/// Pure layout-cache-key hash. Folds the live interaction state
+/// (hovered / pressed / focused) into the key ONLY when
+/// `has_layout_state_variants` is set — so a tree with no layout-
+/// affecting state variant produces a key independent of hover/press/
+/// focus, keeping interaction transitions on the repaint-only fast path
+/// (no relayout). Extracted as a free function so the guard is unit-
+/// testable without constructing a full `App` (which needs a GPU).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn layout_cache_key_inner(
+    tree_generation: u64,
+    w: u32,
+    h: u32,
+    scale: f32,
+    scrollables: &HashMap<String, f32>,
+    has_layout_state_variants: bool,
+    hovered: Option<&str>,
+    pressed: Option<&str>,
+    focused: Option<&str>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h_hasher = std::collections::hash_map::DefaultHasher::new();
+    tree_generation.hash(&mut h_hasher);
+    w.hash(&mut h_hasher);
+    h.hash(&mut h_hasher);
+    scale.to_bits().hash(&mut h_hasher);
+    // Sorted iteration so two equivalent maps with different insertion
+    // order produce the same key.
+    let mut sorted: Vec<(&String, &f32)> = scrollables.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    for (id, off) in sorted {
+        id.hash(&mut h_hasher);
+        off.to_bits().hash(&mut h_hasher);
+    }
+    // Interaction state participates ONLY when the tree has a layout-
+    // affecting state variant. In the common case the branch is skipped
+    // entirely, so the key is byte-identical to the pre-feature
+    // behaviour and hover/press/focus transitions never trigger a
+    // relayout. When a layout state variant IS present, a transition on
+    // (or off) the hovered / pressed / focused node bumps the key,
+    // forcing `redraw` to recompute the LayoutPass with the new active
+    // states (Taffy's per-node dirty tracking keeps that incremental).
+    if has_layout_state_variants {
+        hovered.hash(&mut h_hasher);
+        pressed.hash(&mut h_hasher);
+        focused.hash(&mut h_hasher);
+    }
+    h_hasher.finish()
 }
 
 /// Step `cursor` left to the start of the previous UTF-8 codepoint.

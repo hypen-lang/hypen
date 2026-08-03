@@ -1,0 +1,126 @@
+Column {
+    Row {
+        Button {
+            Icon(@resources.arrow-left)
+                .size(22)
+                .color("#111827")
+        }
+        .tw("bg-transparent p-2")
+        .opacity({ default: 1, active: 0.6 })
+        .transition(150, easeOut)
+        .onClick(@router.push, to: "/")
+
+        Text("Your Cart")
+            .tw("text-[15px] font-semibold flex-1 text-center")
+
+        Column {}
+            .tw("w-10")
+    }
+    .tw("py-2.5 px-2 items-center bg-white border-b border-gray-100")
+
+    If(condition: "@{length(state.cartItems) == 0}") {
+        Column {
+            Icon(@resources.bag)
+                .size(72)
+                .color("#d1d5db")
+            Text("Your cart is empty")
+                .tw("text-base font-semibold mt-3 text-gray-500")
+            Text("Add some delicious food to get started")
+                .tw("text-sm text-gray-400 mt-1")
+
+            Button {
+                Text("Browse restaurants")
+                    .tw("text-sm font-bold text-white")
+            }
+            .tw("bg-orange-500 rounded-full px-6 py-3 mt-6")
+            .opacity({ default: 1, active: 0.8 })
+            .transition(160, easeOut)
+            .onClick(@router.push, to: "/")
+        }
+        .tw("flex-1 items-center justify-center px-4")
+        .enter(fade, duration: 300)
+    }
+
+    If(condition: "@{length(state.cartItems) > 0}") {
+        Column {
+            Column {
+                Row {
+                    Icon(@resources.map-pin)
+                        .size(16)
+                        .color("#f97316")
+                    Column {
+                        Text("Delivering to")
+                            .tw("text-xs text-gray-500")
+                        Text("@{state.currentUser.address}")
+                            .tw("text-sm font-semibold")
+                    }
+                    .tw("pl-2 flex-1")
+                }
+                .tw("items-center")
+            }
+            .tw("bg-white px-4 py-3 border-b border-gray-100")
+
+            If(condition: "@{state.cartRestaurantName}") {
+                Row {
+                    Text("From ")
+                        .tw("text-xs text-gray-500")
+                    Text("@{state.cartRestaurantName}")
+                        .tw("text-xs font-semibold")
+                }
+                .tw("px-4 py-2 bg-gray-50")
+            }
+
+            Column {
+                ForEach(items: @state.cartItems, key: "id") {
+                    CartItem()
+                }
+            }
+            .tw("bg-white")
+
+            Column {
+                Text("Order summary")
+                    .tw("text-sm font-bold")
+
+                Row {
+                    Text("Subtotal")
+                        .tw("text-sm text-gray-600 flex-1")
+                    Text("$@{state.cartSubtotal}")
+                        .tw("text-sm")
+                }
+                .tw("mt-3 items-center")
+
+                Row {
+                    Text("Delivery fee")
+                        .tw("text-sm text-gray-600 flex-1")
+                    Text("$@{state.cartDeliveryFee}")
+                        .tw("text-sm")
+                }
+                .tw("mt-2 items-center")
+
+                Column {}
+                    .tw("h-px bg-gray-200 my-3")
+
+                Row {
+                    Text("Total")
+                        .tw("text-base font-bold flex-1")
+                    Text("$@{state.cartTotal}")
+                        .tw("text-base font-bold")
+                }
+                .tw("items-center")
+            }
+            .tw("bg-white px-4 py-4 mt-2")
+
+            Button {
+                Text("Place order · $@{state.cartTotal}")
+                    .tw("text-base font-bold text-white")
+            }
+            .tw("mx-4 my-4 py-4 bg-orange-500 rounded-full items-center justify-center")
+            .opacity({ default: 1, active: 0.8 })
+            .transition(160, easeOut)
+            .onClick(@actions.placeOrder)
+        }
+        .scrollable(true)
+        .tw("flex-1")
+    }
+}
+.tw("flex-1 w-full bg-gray-50")

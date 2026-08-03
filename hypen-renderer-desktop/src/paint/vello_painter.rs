@@ -243,7 +243,10 @@ impl VelloPainter {
         while i < items.len() {
             match items[i].subtree_root.as_deref() {
                 None => {
-                    if rects_intersect(items[i].rect, viewport_rect) {
+                    // Cull against the VISUAL rect (transform-aware
+                    // AABB) — a transformed item paints where its
+                    // transform puts it, not where Taffy laid it out.
+                    if rects_intersect(items[i].visual_rect(), viewport_rect) {
                         self.draw_item(&items[i], scale_factor);
                     }
                     i += 1;
@@ -448,6 +451,36 @@ impl VelloPainter {
     }
 
     fn draw_item(&mut self, item: &crate::layout::LayoutItem, scale_factor: f32) {
+        // Per-item transform (static `translateX` / `translateY` /
+        // `scale` / `rotate` props and animator-driven writes alike —
+        // one resolution path, composed in the layout transform
+        // post-pass; see `LayoutItem::transform`). The item's WHOLE
+        // draw — alpha layer, bg, border, content, focus ring — is
+        // encoded into a sub-scene and spliced back under the item's
+        // affine, so glyphs / images / icons / rings all move together
+        // without threading a transform through every draw helper. The
+        // OUTER clip (a scrollable ancestor's rect) is pushed on the
+        // main scene, OUTSIDE the transform — CSS semantics: an
+        // ancestor's overflow clip crops the transformed descendant in
+        // the ancestor's own (untransformed) space. Hit-testing reads
+        // the same cumulative affine (`LayoutItem::hit_contains`), so
+        // pixels and hit targets move identically by construction.
+        if !item.transform.is_identity() {
+            let outer_clip = item.clip_to;
+            let mut inner = item.clone();
+            inner.clip_to = None;
+            inner.transform = crate::layout::Affine2::IDENTITY;
+            let prev_scene = std::mem::replace(&mut self.scene, Scene::new());
+            self.draw_item(&inner, scale_factor);
+            let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
+            let pushed = push_outer_clip(&mut self.scene, outer_clip);
+            self.scene
+                .append(&sub_scene, Some(affine2_to_kurbo(item.transform)));
+            if pushed {
+                self.scene.pop_layer();
+            }
+            return;
+        }
         // Outer clip for items inside a `.scrollable(...)` container:
         // wraps the entire draw (bg + border + content + focus ring)
         // so anything that has scrolled past the container's edge is
@@ -474,45 +507,84 @@ impl VelloPainter {
             );
         }
 
-        // Background and border resolution mirrors the CPU painter:
-        // Buttons get hover / press tints; other kinds keep their
-        // explicit fills.
-        let mut background = item.background;
-        let mut border_color = item.border.color;
-        let pressed = self.interaction.pressed.contains(&item.node_id);
-        let hovered = self.interaction.hovered.contains(&item.node_id);
-
-        // Declarative `hover:` styling (tw `hover:bg-*` / `hover:border-*`,
-        // expanded by the engine into `backgroundColor:hover` /
-        // `borderColor:hover`). Applies to any hovered item — only
-        // actionables ever land in the `hovered` set, so this naturally
-        // covers Buttons / Links / Cards. Wins over the auto-tint below.
-        if hovered && !pressed {
-            if let Some(bg) = item.hover.background {
-                background = Some(bg);
-            }
-            if let Some(bc) = item.hover.border_color {
-                border_color = bc;
-            }
+        // Per-item opacity (the `opacity` prop, inherited down the tree
+        // at emit time — see `LayoutItem::opacity`). Wraps the item's
+        // whole draw (bg + border + content + focus ring) in an alpha
+        // layer. This is the paint half of the animation runtime's
+        // `fade` / `pulse` / opacity-transition support; static
+        // `.opacity(...)` props ride the same path. The layer's clip is
+        // the item rect padded generously so borders / focus rings /
+        // glyph anti-aliasing aren't cropped by the alpha layer itself.
+        let alpha_layer_active = item.opacity < 0.999;
+        if alpha_layer_active {
+            const ALPHA_PAD: f32 = 8.0;
+            let pad = ALPHA_PAD * scale_factor;
+            let r = vello::kurbo::Rect::new(
+                (item.rect.x - pad) as f64,
+                (item.rect.y - pad) as f64,
+                (item.rect.x + item.rect.w + pad) as f64,
+                (item.rect.y + item.rect.h + pad) as f64,
+            );
+            self.scene.push_layer(
+                vello::peniko::Fill::NonZero,
+                vello::peniko::BlendMode::default(),
+                item.opacity.clamp(0.0, 1.0),
+                Affine::IDENTITY,
+                &r,
+            );
         }
 
-        // Automatic pseudo-state tint for Buttons that didn't declare
-        // their own `hover:` style. Buttons with an opaque fill get
-        // lightened / darkened; transparent ones (icon buttons like the
-        // browser toolbar's home / reload / pin) get a subtle neutral
-        // overlay — otherwise hover / press read as nothing at all.
+        // Background and border resolution mirrors the CPU painter:
+        // explicit paint-time state variants
+        // (`backgroundColor:hover.0`, ...) win first, then the legacy
+        // Button hover / press tint fills in whichever channel a variant
+        // did NOT already override.
+        let hovered = self.interaction.hovered.contains(&item.node_id);
+        let pressed = self.interaction.pressed.contains(&item.node_id);
+        let focused = self.interaction.focused.as_deref() == Some(&item.node_id);
+        let mut background = item.background;
+        let mut border_color = item.border.color;
+        let mut bg_from_variant = false;
+        let mut border_from_variant = false;
+        // Resolve background / border / foreground state variants in one pass.
+        // `active_states` is computed once and reused; `fg_override` is the
+        // foreground `color` variant applied to Text / Input / Icon below.
+        let fg_override = if item.state_variants.is_empty() {
+            None
+        } else {
+            let states = item.state_variants.active_states(hovered, pressed, focused);
+            if let Some(c) = item.state_variants.background_color_for(&states) {
+                background = Some(c);
+                bg_from_variant = true;
+            }
+            if let Some(c) = item.state_variants.border_color_for(&states) {
+                border_color = c;
+                border_from_variant = true;
+            }
+            item.state_variants.color_for(&states)
+        };
+        // Automatic pseudo-state tint for Buttons that didn't declare their own
+        // `hover:`/`active:` state variant. An explicit variant always wins
+        // first (gated by `bg_from_variant`/`border_from_variant`); otherwise
+        // buttons with an opaque fill get lightened/darkened, while transparent
+        // ones (icon buttons like a toolbar's home/reload) get a subtle neutral
+        // overlay so hover/press still read as something (restored from main).
         if matches!(item.kind, ItemKind::Button) {
             const HOVER_FILL: Rgba = Rgba(100, 116, 139, 28);
             const PRESS_FILL: Rgba = Rgba(100, 116, 139, 48);
             let has_fill = background.is_some_and(|b| b.3 > 0);
             if pressed {
-                background = if has_fill {
-                    background.map(|b| darken(b, 0.85))
-                } else {
-                    Some(PRESS_FILL)
-                };
-                border_color = darken(border_color, 0.7);
-            } else if hovered && item.hover.background.is_none() {
+                if !bg_from_variant {
+                    background = if has_fill {
+                        background.map(|b| darken(b, 0.85))
+                    } else {
+                        Some(PRESS_FILL)
+                    };
+                }
+                if !border_from_variant {
+                    border_color = darken(border_color, 0.7);
+                }
+            } else if hovered && !bg_from_variant {
                 background = if has_fill {
                     background.map(|b| lighten(b, 1.05))
                 } else {
@@ -522,7 +594,20 @@ impl VelloPainter {
         }
 
         let radius = item.border.radius * scale_factor;
-        if let Some(grad) = item.background_gradient.as_ref() {
+        // CSS layer order for a `background` value: colour at the bottom,
+        // then the image, then the gradient on top. The wallpaper is exactly
+        // that stack — a darkening `linear-gradient(...)` over a photo.
+        if let Some(src) = item.background_image.as_deref() {
+            if let Some(bg) = background {
+                fill_rect(&mut self.scene, item.rect, bg, radius);
+            }
+            // `center / cover` is what the shorthand asks for and what
+            // `ObjectFit::Cover` does: fill the box, crop the overflow.
+            self.draw_image(item.rect, Some(src), crate::layout::ObjectFit::Cover, radius);
+            if let Some(grad) = item.background_gradient.as_ref() {
+                fill_gradient_rect(&mut self.scene, item.rect, grad, radius);
+            }
+        } else if let Some(grad) = item.background_gradient.as_ref() {
             // Gradient takes precedence over solid `background` when
             // the DSL declared one (`bg-gradient-to-br from-* to-*` or
             // an explicit `linear-gradient(...)`). CSS layers solid
@@ -595,7 +680,7 @@ impl VelloPainter {
                     item,
                     content,
                     *font_size * scale_factor,
-                    *color,
+                    fg_override.unwrap_or(*color),
                     *align,
                     item.font_weight,
                     *max_lines,
@@ -617,7 +702,7 @@ impl VelloPainter {
                     value,
                     placeholder.as_deref(),
                     *font_size * scale_factor,
-                    *color,
+                    fg_override.unwrap_or(*color),
                     item.font_weight,
                     scale_factor,
                 );
@@ -630,7 +715,7 @@ impl VelloPainter {
                 view_box,
                 tint,
             } => {
-                draw_icon(&mut self.scene, item.rect, paths, *view_box, *tint);
+                draw_icon(&mut self.scene, item.rect, paths, *view_box, fg_override.or(*tint));
             }
         }
 
@@ -644,6 +729,9 @@ impl VelloPainter {
             draw_focus_ring(&mut self.scene, item.rect, scale_factor, radius);
         }
 
+        if alpha_layer_active {
+            self.scene.pop_layer();
+        }
         if outer_clip_active {
             self.scene.pop_layer();
         }
@@ -1194,18 +1282,28 @@ fn rects_intersect(a: LayoutRect, b: LayoutRect) -> bool {
     a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h
 }
 
-/// Bounding box of every item's rect in the subtree slice. Used as
-/// the visibility test for the whole slice — if this is off-screen
-/// the painter skips the cache lookup and the draw entirely.
+/// Convert the layout-side [`crate::layout::Affine2`] into a kurbo
+/// `Affine` — both store `[a, b, c, d, e, f]` mapping
+/// `(x, y) → (a·x + c·y + e, b·x + d·y + f)`, so the conversion is a
+/// widening copy.
+fn affine2_to_kurbo(t: crate::layout::Affine2) -> Affine {
+    let [a, b, c, d, e, f] = t.0;
+    Affine::new([a as f64, b as f64, c as f64, d as f64, e as f64, f as f64])
+}
+
+/// Bounding box of every item's VISUAL rect (transform-aware AABB) in
+/// the subtree slice. Used as the visibility test for the whole slice —
+/// if this is off-screen the painter skips the cache lookup and the
+/// draw entirely.
 fn subtree_bounding_rect(items: &[crate::layout::LayoutItem]) -> LayoutRect {
     debug_assert!(!items.is_empty());
-    let first = &items[0].rect;
+    let first = items[0].visual_rect();
     let mut min_x = first.x;
     let mut min_y = first.y;
     let mut max_x = first.x + first.w;
     let mut max_y = first.y + first.h;
     for item in &items[1..] {
-        let r = item.rect;
+        let r = item.visual_rect();
         min_x = min_x.min(r.x);
         min_y = min_y.min(r.y);
         max_x = max_x.max(r.x + r.w);
@@ -1520,6 +1618,10 @@ mod tests {
             clip_to: None,
             subtree_root: None,
             background_gradient: None,
+            background_image: None,
+            state_variants: crate::style::StateVariants::default(),
+            opacity: 1.0,
+            transform: crate::layout::Affine2::IDENTITY,
         }
     }
 
@@ -1545,6 +1647,7 @@ mod tests {
             focusable_ids: vec![],
             scrollable_ids: vec![],
             hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
         };
         // Build is the side effect we're testing — just verify it
         // doesn't panic and produces a non-empty scene for visible
@@ -1578,6 +1681,7 @@ mod tests {
             focusable_ids: vec![],
             scrollable_ids: vec![],
             hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
         }
     }
 
@@ -1654,6 +1758,7 @@ mod tests {
             focusable_ids: vec![],
             scrollable_ids: vec![],
             hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(scene.encoding().path_tags.len(), 0);
@@ -1693,6 +1798,7 @@ mod tests {
             focusable_ids: vec![],
             scrollable_ids: vec![],
             hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 200.0);
         // At least one path encoded (the on-screen item) — and the
@@ -1770,6 +1876,127 @@ mod tests {
         assert!(
             !scene.encoding().path_tags.is_empty(),
             "icon produced empty scene — stroke not encoded"
+        );
+    }
+
+    #[test]
+    fn transformed_item_encodes_under_its_affine() {
+        // Painter-level transform composition: the item's whole draw is
+        // spliced into the frame scene under its cumulative affine, so
+        // the ENCODING carries that transform (Vello applies transforms
+        // per draw in the encoding stream, not by moving path points —
+        // asserting the encoded transform IS asserting the painted
+        // position).
+        use crate::layout::Affine2;
+        let mut painter = VelloPainter::new();
+        let mut it = item("moved", 100.0, 100.0, 50.0, 50.0);
+        it.transform = Affine2::translate(37.0, 19.0);
+        let layout = LayoutPass {
+            items: vec![it],
+            content_size: (200.0, 200.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+        };
+        let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert!(!scene.encoding().path_tags.is_empty(), "content encoded");
+        let found = scene.encoding().transforms.iter().any(|t| {
+            (t.translation[0] - 37.0).abs() < 0.01
+                && (t.translation[1] - 19.0).abs() < 0.01
+                && (t.matrix[0] - 1.0).abs() < 0.01
+                && (t.matrix[3] - 1.0).abs() < 0.01
+        });
+        assert!(
+            found,
+            "the item's affine must appear in the encoding transform stream: {:?}",
+            scene.encoding().transforms
+        );
+    }
+
+    #[test]
+    fn transformed_item_encodes_rotation_matrix() {
+        use crate::layout::Affine2;
+        let mut painter = VelloPainter::new();
+        let mut it = item("spun", 100.0, 100.0, 50.0, 50.0);
+        // Compose like the layout post-pass does: rotate about center.
+        let (cx, cy) = (125.0, 125.0);
+        it.transform = Affine2::translate(cx, cy)
+            .mul(&Affine2::rotate_deg(90.0))
+            .mul(&Affine2::translate(-cx, -cy));
+        let layout = LayoutPass {
+            items: vec![it],
+            content_size: (200.0, 200.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+        };
+        let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        // cos 90° = 0, sin 90° = 1 → matrix [0, 1, -1, 0].
+        let found = scene.encoding().transforms.iter().any(|t| {
+            t.matrix[0].abs() < 0.01
+                && (t.matrix[1] - 1.0).abs() < 0.01
+                && (t.matrix[2] + 1.0).abs() < 0.01
+                && t.matrix[3].abs() < 0.01
+        });
+        assert!(
+            found,
+            "rotation must reach the encoding: {:?}",
+            scene.encoding().transforms
+        );
+    }
+
+    #[test]
+    fn transform_does_not_drop_content_and_offscreen_transform_culls() {
+        use crate::layout::Affine2;
+        // Same item painted plain vs transformed encodes the same
+        // number of paths (nothing dropped by the sub-scene splice)...
+        let count_paths = |transform: Affine2| {
+            let mut painter = VelloPainter::new();
+            let mut it = item("x", 10.0, 10.0, 50.0, 50.0);
+            it.transform = transform;
+            let layout = LayoutPass {
+                items: vec![it],
+                content_size: (200.0, 200.0),
+                by_node_id: std::collections::HashMap::new(),
+                actionable_ids: vec![],
+                focusable_ids: vec![],
+                scrollable_ids: vec![],
+                hoverable_ids: vec![],
+                a11y: std::collections::HashMap::new(),
+            };
+            painter.build_scene(&layout, (800, 600), 1.0, 0.0).encoding().n_paths
+        };
+        let plain = count_paths(Affine2::IDENTITY);
+        let moved = count_paths(Affine2::translate(30.0, 30.0));
+        assert!(plain > 0);
+        assert_eq!(plain, moved, "transform must not drop content");
+        // ...and a transform that carries the item off-screen culls it,
+        // while one that carries an off-screen rect ON-screen paints it.
+        let gone = count_paths(Affine2::translate(5000.0, 5000.0));
+        assert_eq!(gone, 0, "transformed-away item culls");
+        let mut painter = VelloPainter::new();
+        let mut it = item("back", 5000.0, 5000.0, 50.0, 50.0);
+        it.transform = Affine2::translate(-4950.0, -4950.0);
+        let layout = LayoutPass {
+            items: vec![it],
+            content_size: (200.0, 200.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+        };
+        let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert!(
+            scene.encoding().n_paths > 0,
+            "transformed-into-view item must paint"
         );
     }
 

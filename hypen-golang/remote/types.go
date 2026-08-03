@@ -17,6 +17,12 @@ type Patch struct {
 	ParentID    string         `json:"parentId,omitempty"`
 	BeforeID    string         `json:"beforeId,omitempty"`
 	EventName   string         `json:"eventName,omitempty"`
+	// Transition relays the engine's exit-animation flag on "remove"
+	// patches to animation-capable remote clients (see core.Patch).
+	Transition bool `json:"transition,omitempty"`
+	// Spec relays the "batchAnimation" prelude's animation spec to
+	// animation-capable remote clients (see core.Patch).
+	Spec map[string]any `json:"spec,omitempty"`
 }
 
 // MessageType represents the type of remote message
@@ -100,6 +106,23 @@ type Client struct {
 type ServerConfig struct {
 	Port     int
 	Hostname string
+
+	// DisableCompression opts out of WebSocket permessage-deflate
+	// (RFC 7692), which is negotiated per connection and ON by default.
+	//
+	// The option is phrased negatively because a Go struct field can't
+	// express "default true": the zero value has to mean "leave the
+	// default alone", so `ServerConfig{Port: 3000}` keeps compression
+	// enabled. This mirrors the `autoRouter` / `DisableAutoRouter()`
+	// convention used elsewhere in this package.
+	//
+	// Compression is negotiated during the handshake — clients that
+	// don't advertise `permessage-deflate` transparently fall back to
+	// uncompressed frames. Note that gorilla/websocket (v1.5.1)
+	// implements the extension in "no context takeover" mode only, so
+	// each message is deflated in isolation without a shared sliding
+	// window across messages.
+	DisableCompression bool
 }
 
 // ConnectionState represents the client connection state
@@ -117,6 +140,14 @@ type EngineOptions struct {
 	AutoReconnect        bool
 	ReconnectInterval    time.Duration
 	MaxReconnectAttempts int
+
+	// DisableCompression opts out of offering WebSocket
+	// permessage-deflate (RFC 7692) during the handshake. Compression is
+	// ON by default, so the zero value keeps it enabled — see
+	// ServerConfig.DisableCompression for why the option is negative.
+	// A server that doesn't accept the extension simply answers without
+	// it and the connection stays uncompressed.
+	DisableCompression bool
 }
 
 // DefaultEngineOptions returns sensible defaults

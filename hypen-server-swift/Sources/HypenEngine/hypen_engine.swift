@@ -435,6 +435,30 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterString: FfiConverter {
     typealias SwiftType = String
     typealias FfiType = RustBuffer
@@ -1320,10 +1344,65 @@ public struct Patch: Equatable, Hashable {
     public var text: String?
     public var parentId: String?
     public var beforeId: String?
+    /**
+     * Serialized `Semantics` block (camelCase JSON, same shape as the web
+     * wire format). Present on `Create` for nodes with derivable a11y and
+     * on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+     * constructors keep compiling.
+     */
+    public var semanticsJson: String?
+    /**
+     * Roots an animated exit: set on the **root** `Remove` of a subtree
+     * whose node carried an `"__anim.exit"` spec. The renderer may play
+     * the exit and finalize teardown itself; the engine-side node is
+     * dead the moment the patch is emitted (no ack round-trip). `false`
+     * on every other patch type — which matches the wire default, where
+     * the field is skip-if-false, so relays that re-serialize this
+     * record stay byte-identical for unflagged removes.
+     */
+    public var transition: Bool
+    /**
+     * Animation spec for `PatchType::BatchAnimation`, as a JSON *string*
+     * (UniFFI has no arbitrary-JSON type, so the engine's `serde_json`
+     * object is stringified at this boundary and consumers parse it).
+     * Always a JSON object, e.g. `{"curve":"spring","duration":250}`.
+     * `None` on every other patch type.
+     *
+     * **Both fields are appended last on purpose.** The generated
+     * Kotlin/Swift record readers are positional, so inserting a field
+     * anywhere but the tail silently mis-reads every field after it.
+     */
+    public var specJson: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(patchType: PatchType, id: String, elementType: String?, propsJson: String?, name: String?, valueJson: String?, text: String?, parentId: String?, beforeId: String?) {
+    public init(patchType: PatchType, id: String, elementType: String?, propsJson: String?, name: String?, valueJson: String?, text: String?, parentId: String?, beforeId: String?, 
+        /**
+         * Serialized `Semantics` block (camelCase JSON, same shape as the web
+         * wire format). Present on `Create` for nodes with derivable a11y and
+         * on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+         * constructors keep compiling.
+         */semanticsJson: String? = nil, 
+        /**
+         * Roots an animated exit: set on the **root** `Remove` of a subtree
+         * whose node carried an `"__anim.exit"` spec. The renderer may play
+         * the exit and finalize teardown itself; the engine-side node is
+         * dead the moment the patch is emitted (no ack round-trip). `false`
+         * on every other patch type — which matches the wire default, where
+         * the field is skip-if-false, so relays that re-serialize this
+         * record stay byte-identical for unflagged removes.
+         */transition: Bool = false, 
+        /**
+         * Animation spec for `PatchType::BatchAnimation`, as a JSON *string*
+         * (UniFFI has no arbitrary-JSON type, so the engine's `serde_json`
+         * object is stringified at this boundary and consumers parse it).
+         * Always a JSON object, e.g. `{"curve":"spring","duration":250}`.
+         * `None` on every other patch type.
+         *
+         * **Both fields are appended last on purpose.** The generated
+         * Kotlin/Swift record readers are positional, so inserting a field
+         * anywhere but the tail silently mis-reads every field after it.
+         */specJson: String? = nil) {
         self.patchType = patchType
         self.id = id
         self.elementType = elementType
@@ -1333,6 +1412,9 @@ public struct Patch: Equatable, Hashable {
         self.text = text
         self.parentId = parentId
         self.beforeId = beforeId
+        self.semanticsJson = semanticsJson
+        self.transition = transition
+        self.specJson = specJson
     }
 
     
@@ -1359,7 +1441,10 @@ public struct FfiConverterTypePatch: FfiConverterRustBuffer {
                 valueJson: FfiConverterOptionString.read(from: &buf), 
                 text: FfiConverterOptionString.read(from: &buf), 
                 parentId: FfiConverterOptionString.read(from: &buf), 
-                beforeId: FfiConverterOptionString.read(from: &buf)
+                beforeId: FfiConverterOptionString.read(from: &buf), 
+                semanticsJson: FfiConverterOptionString.read(from: &buf), 
+                transition: FfiConverterBool.read(from: &buf), 
+                specJson: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1373,6 +1458,9 @@ public struct FfiConverterTypePatch: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.text, into: &buf)
         FfiConverterOptionString.write(value.parentId, into: &buf)
         FfiConverterOptionString.write(value.beforeId, into: &buf)
+        FfiConverterOptionString.write(value.semanticsJson, into: &buf)
+        FfiConverterBool.write(value.transition, into: &buf)
+        FfiConverterOptionString.write(value.specJson, into: &buf)
     }
 }
 
@@ -1544,6 +1632,27 @@ public enum PatchType: Equatable, Hashable {
      * Emitted by the engine's Router subtree cache on navigation-back.
      */
     case attach
+    /**
+     * Replace a node's accessibility semantics after a reactive change
+     * (templated accessible name, bound self-state, bound checked). The
+     * updated block rides `semantics_json`; renderers re-apply it with the
+     * same translation they run at create, clearing attributes the new
+     * block no longer sets. `semantics_json == None` clears everything.
+     */
+    case setSemantics
+    /**
+     * Batch-scoped animation prelude (transaction-scoped animation).
+     * Addresses no node — it scopes the *batch*: renderers that
+     * understand it animate every prop change in the patches that
+     * follow using the spec carried on `spec_json`. Only ever valid at
+     * batch index 0; a prelude anywhere else is not a stamp.
+     *
+     * **Appended last on purpose.** UniFFI enum discriminants are
+     * positional (the generated Kotlin does `PatchType.values()[i - 1]`
+     * and Swift switches on the same ordinal), so new variants must go
+     * at the end or every existing case shifts.
+     */
+    case batchAnimation
 
 
 
@@ -1582,6 +1691,10 @@ public struct FfiConverterTypePatchType: FfiConverterRustBuffer {
         case 8: return .detach
         
         case 9: return .attach
+        
+        case 10: return .setSemantics
+        
+        case 11: return .batchAnimation
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -1625,6 +1738,14 @@ public struct FfiConverterTypePatchType: FfiConverterRustBuffer {
         
         case .attach:
             writeInt(&buf, Int32(9))
+        
+        
+        case .setSemantics:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .batchAnimation:
+            writeInt(&buf, Int32(11))
         
         }
     }

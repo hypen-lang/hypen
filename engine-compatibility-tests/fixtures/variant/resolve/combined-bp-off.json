@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-combined-bp-off", "description": "Combined fails when breakpoint inactive.", "function": "resolve_variant", "input": { "base": "padding", "props": { "padding.0": 8, "padding@md:hover.0": 24 }, "width": 500, "activeStates": ["hover"] }, "expected": 8 }

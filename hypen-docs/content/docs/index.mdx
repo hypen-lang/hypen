@@ -25,7 +25,7 @@ module HelloWorld {
             .fontWeight("bold")
 
         Input(placeholder: "Enter your name")
-            .value(@{state.name})
+            .value(@state.name)
             .onInput(@actions.updateName)
             .padding(12)
             .borderRadius(8)

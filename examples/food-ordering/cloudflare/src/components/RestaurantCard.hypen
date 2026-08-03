@@ -1,0 +1,51 @@
+Button {
+    Column {
+        Stack {
+            Image(src: "@{item.imageUrl}")
+                .tw("w-full h-40 md:h-44")
+                .objectFit("cover")
+                .tw("rounded-t-2xl bg-gray-100")
+
+            Row {
+                Icon(@resources.star)
+                    .size(11)
+                    .color("#F59E0B")
+                Text("@{item.rating}")
+                    .tw("text-xs font-bold ml-1")
+                    .color("#111827")
+            }
+            .tw("absolute bottom-2 left-2 bg-white rounded-full px-2 py-1 items-center shadow-sm")
+
+            If(condition: "@{!item.isOpen}") {
+                Column {
+                    Text("Closed")
+                        .tw("text-[10px] font-bold text-white px-2 py-0.5 bg-gray-900/80 rounded-full")
+                }
+                .tw("absolute top-2 left-2")
+            }
+        }
+
+        Column {
+            Text("@{item.name}")
+                .tw("text-[15px] font-bold text-left")
+                .color("#111827")
+
+            Text("@{item.cuisine} · @{item.deliveryTimeMin}–@{item.deliveryTimeMax} min · @{item.distanceKm} km")
+                .tw("text-xs text-gray-500 mt-1 text-left")
+
+            Text("@{item.deliveryFee == 0 ? 'Free delivery' : '$' + item.deliveryFee + ' delivery'}")
+                .tw("text-xs font-semibold mt-2 text-left")
+                .color("@{item.deliveryFee == 0 ? '#16A34A' : '#6B7280'}")
+        }
+        .tw("p-3.5 items-start")
+    }
+    .display("flex")
+    .flexDirection("column")
+    .tw("bg-white rounded-2xl border border-gray-100 items-stretch w-full h-full overflow-hidden")
+    .boxShadow("0 1px 3px rgba(17, 24, 39, 0.06)")
+}
+.tw("bg-transparent border-0 p-0 w-full")
+.opacity({ default: 1, active: 0.75 })
+.transition(160, easeOut)
+.enter(fade, duration: 300)
+.onClick(@router.push, to: "/restaurant/@{item.id}")

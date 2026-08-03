@@ -107,6 +107,7 @@ jobs:
             tailwind-parse
             hypen-engine-rs
             hypen-sdk-rs
+            engine-compatibility-tests/runners/rust
 
       - name: Test parser
         run: cargo test
@@ -123,6 +124,14 @@ jobs:
       - name: Test hypen-server
         run: cargo test
         working-directory: hypen-sdk-rs
+
+      # Cross-SDK compatibility runner (Rust side): runs the variant, portable,
+      # and rendering/state fixtures through the engine's canonical Rust impls.
+      # Without this the Rust half of the cross-SDK contract is never enforced in
+      # CI (the TypeScript half already runs via `bun test`).
+      - name: Test compatibility runner (Rust)
+        run: cargo test
+        working-directory: engine-compatibility-tests/runners/rust
 
   wasm-build:
     name: WASM Build

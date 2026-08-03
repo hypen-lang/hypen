@@ -13,6 +13,9 @@
 //!   accessible label and support `Action::Click` so screen readers can
 //!   trigger the underlying engine action.
 //! - Other elements fall back to `GenericContainer`.
+//! - When the engine attached a semantics block with a role (structural
+//!   like `Heading`, or author opt-in like `.role("tab")`), that role
+//!   overrides the structural mapping above; actions are unaffected.
 //!
 //! Coordinates are physical pixels matching the painter's frame buffer.
 //!
@@ -64,15 +67,51 @@ pub fn renderer_id_for(pass: &LayoutPass, target: NodeId) -> Option<String> {
 /// the renderer doesn't track per-frame deltas and AccessKit accepts
 /// full updates without complaint.
 pub fn tree_update_for_layout(pass: &LayoutPass) -> TreeUpdate {
+    tree_update_for_layout_excluding(pass, &|_| false)
+}
+
+/// [`tree_update_for_layout`] with an exclusion predicate, mirroring
+/// [`LayoutPass::hit_excluding`]: excluded items — exit-animating
+/// subtrees, which still paint but are engine-side dead — are dropped
+/// from the published tree entirely, so assistive tech can neither
+/// report nor activate them while the exit plays. Author-id
+/// relationships targeting an excluded node drop with it (same rule as
+/// off-screen targets: dropped rather than dangling).
+pub fn tree_update_for_layout_excluding(
+    pass: &LayoutPass,
+    excluded: &dyn Fn(&str) -> bool,
+) -> TreeUpdate {
     let mut nodes: Vec<(NodeId, Node)> = Vec::with_capacity(pass.items.len() + 1);
 
-    // First pass: emit a node for every layout item, recording its
-    // AccessKit id alongside the original renderer id so the second
-    // pass can build the parent's children list.
+    // Author-declared id (`.id("panel-1")`) → AccessKit NodeId, for the
+    // cross-node relationships (`controls`/`describedby`/`labelledby`/
+    // `owns`/`activeDescendant`). Rebuilt from the live pass on every
+    // update, so — unlike a persistent registry — it cannot go stale across
+    // reconcile / Router detach-attach / keyed reorder, and it only ever
+    // resolves to nodes that exist in *this* TreeUpdate (a reference to an
+    // off-screen target is dropped rather than dangling).
+    let author_ids: std::collections::HashMap<&str, NodeId> = pass
+        .items
+        .iter()
+        .filter(|it| !excluded(&it.node_id))
+        .filter_map(|it| {
+            pass.a11y
+                .get(&it.node_id)
+                .and_then(|s| s.id.as_deref())
+                .map(|author_id| (author_id, ak_node_id(&it.node_id)))
+        })
+        .collect();
+
+    // First pass: emit a node for every non-excluded layout item,
+    // recording its AccessKit id alongside the original renderer id so
+    // the second pass can build the parent's children list.
     let mut item_ak_ids: Vec<(NodeId, &LayoutItem)> = Vec::with_capacity(pass.items.len());
     for item in &pass.items {
+        if excluded(&item.node_id) {
+            continue;
+        }
         let id = ak_node_id(&item.node_id);
-        let mut node = build_node_for(item, pass);
+        let mut node = build_node_for(item, pass, &author_ids);
         node.set_bounds(item_rect(item));
         item_ak_ids.push((id, item));
         nodes.push((id, node));
@@ -95,8 +134,53 @@ pub fn tree_update_for_layout(pass: &LayoutPass) -> TreeUpdate {
     }
 }
 
-fn build_node_for(item: &LayoutItem, pass: &LayoutPass) -> Node {
-    match &item.kind {
+/// Map an engine semantic role ([`hypen_engine::ir::Role`]) to its AccessKit
+/// counterpart. Every current engine role has a faithful AccessKit 0.24
+/// variant, so the match is total; keeping it exhaustive (no `_` arm) means a
+/// new engine role fails compilation here instead of silently falling back to
+/// the structural role.
+fn ak_role(role: hypen_engine::ir::Role) -> Role {
+    use hypen_engine::ir::Role as SemRole;
+    match role {
+        SemRole::Button => Role::Button,
+        SemRole::Link => Role::Link,
+        SemRole::Paragraph => Role::Paragraph,
+        SemRole::Heading => Role::Heading,
+        SemRole::Img => Role::Image,
+        // The engine's `Textbox` covers single- and multi-line inputs but
+        // doesn't say which; `TextInput` matches the structural `Input`
+        // mapping, and AccessKit treats multiline-ness as a refinement.
+        SemRole::Textbox => Role::TextInput,
+        SemRole::Checkbox => Role::CheckBox,
+        SemRole::Switch => Role::Switch,
+        SemRole::Listbox => Role::ListBox,
+        SemRole::Slider => Role::Slider,
+        SemRole::Progressbar => Role::ProgressIndicator,
+        SemRole::Status => Role::Status,
+        SemRole::Navigation => Role::Navigation,
+        SemRole::Main => Role::Main,
+        SemRole::Region => Role::Region,
+        SemRole::Search => Role::Search,
+        SemRole::Banner => Role::Banner,
+        SemRole::Contentinfo => Role::ContentInfo,
+        SemRole::Complementary => Role::Complementary,
+        SemRole::List => Role::List,
+        SemRole::Listitem => Role::ListItem,
+        SemRole::Dialog => Role::Dialog,
+        SemRole::Tablist => Role::TabList,
+        SemRole::Tab => Role::Tab,
+        SemRole::Tabpanel => Role::TabPanel,
+        SemRole::OptionItem => Role::ListBoxOption,
+        SemRole::Combobox => Role::ComboBox,
+    }
+}
+
+fn build_node_for(
+    item: &LayoutItem,
+    pass: &LayoutPass,
+    author_ids: &std::collections::HashMap<&str, NodeId>,
+) -> Node {
+    let mut node = match &item.kind {
         ItemKind::Text { content, .. } => {
             let mut node = Node::new(Role::Label);
             node.set_value(content.clone());
@@ -156,7 +240,56 @@ fn build_node_for(item: &LayoutItem, pass: &LayoutPass) -> Node {
             }
             node
         }
+    };
+
+    // Prefer the engine-derived accessibility semantics over the layout
+    // heuristics above: the accessible name handles `.label(...)`, icon
+    // exclusion, image `alt`, and bound/templated text that the structural
+    // fallbacks can't see. `.description(...)` becomes a supplementary
+    // AccessKit description.
+    if let Some(sem) = pass.a11y.get(&item.node_id) {
+        // The engine role (structural like Heading/Checkbox, or author opt-in
+        // like `.role("tab")` / `.landmark("navigation")`) is more specific
+        // than the ItemKind heuristic, so it wins. Overriding the role leaves
+        // the node's actions intact — a Button keeps its Click action.
+        if let Some(role) = sem.role {
+            node.set_role(ak_role(role));
+        }
+        if let Some(name) = sem.name.as_deref() {
+            node.set_label(name);
+        }
+        if let Some(desc) = sem.description.as_deref() {
+            node.set_description(desc);
+        }
+
+        // Cross-node relationships: resolve the author-declared target id to
+        // the AccessKit NodeId of the item that declared it (`.id(...)`).
+        // AccessKit models these natively (unlike SwiftUI's string hints);
+        // the OS bridges (UIA/AT-SPI/macOS AX) degrade unevenly, but a
+        // resolved relationship is strictly better than none. Unresolvable
+        // targets (off-screen, undeclared) are dropped — a dangling AccessKit
+        // NodeId reference would be worse than the missing relationship.
+        let resolve = |target: &Option<String>| -> Option<NodeId> {
+            target.as_deref().and_then(|t| author_ids.get(t)).copied()
+        };
+        if let Some(target) = resolve(&sem.controls) {
+            node.set_controls(vec![target]);
+        }
+        if let Some(target) = resolve(&sem.describedby) {
+            node.set_described_by(vec![target]);
+        }
+        if let Some(target) = resolve(&sem.labelledby) {
+            node.set_labelled_by(vec![target]);
+        }
+        if let Some(target) = resolve(&sem.owns) {
+            node.set_owns(vec![target]);
+        }
+        if let Some(target) = resolve(&sem.active_descendant) {
+            node.set_active_descendant(target);
+        }
     }
+
+    node
 }
 
 /// Find the first `Text` item that paints inside `parent`'s rect. Used
@@ -184,11 +317,16 @@ fn rect_contains_rect(outer: &crate::layout::Rect, inner: &crate::layout::Rect) 
 }
 
 fn item_rect(item: &LayoutItem) -> AkRect {
+    // Published bounds are the VISUAL rect — the transform-aware AABB
+    // of the layout box. A transformed item's pixels are where its
+    // assistive-tech bounds are (the same constraint-#5 rule the
+    // pointer hit paths follow via `hit_contains`).
+    let rect = item.visual_rect();
     AkRect::new(
-        item.rect.x as f64,
-        item.rect.y as f64,
-        (item.rect.x + item.rect.w) as f64,
-        (item.rect.y + item.rect.h) as f64,
+        rect.x as f64,
+        rect.y as f64,
+        (rect.x + rect.w) as f64,
+        (rect.y + rect.h) as f64,
     )
 }
 
@@ -216,6 +354,7 @@ mod tests {
             id: id.into(),
             element_type: et.into(),
             props: props(p),
+            semantics: None,
         }
     }
 
@@ -273,6 +412,38 @@ mod tests {
             .expect("root node");
         assert_eq!(root.role(), Role::Window);
         assert_eq!(root.children().len(), pass.items.len());
+    }
+
+    #[test]
+    fn tree_update_excludes_exit_animating_items() {
+        // Exit-animating subtrees still paint but are engine-side dead:
+        // the published AccessKit tree must not contain them, or a
+        // screen reader could focus and Click-activate a corpse.
+        let pass = build_pass(|t| {
+            t.apply(&create("keep", "Button", &[("action", json!("@actions.a"))]));
+            t.apply(&insert(ROOT_ID, "keep"));
+            t.apply(&create("dying", "Button", &[("action", json!("@actions.b"))]));
+            t.apply(&insert(ROOT_ID, "dying"));
+        });
+        assert!(pass.item_by_id("dying").is_some(), "still painted mid-exit");
+
+        let update = tree_update_for_layout_excluding(&pass, &|id| id == "dying");
+        let dying_id = ak_node_id("dying");
+        assert!(
+            !update.nodes.iter().any(|(id, _)| *id == dying_id),
+            "excluded item must not be published"
+        );
+        let root = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ROOT_NODE_ID)
+            .map(|(_, n)| n)
+            .expect("root node");
+        assert!(!root.children().contains(&dying_id));
+        assert!(root.children().contains(&ak_node_id("keep")));
+        // The no-op predicate keeps full parity with the plain builder.
+        let full = tree_update_for_layout(&pass);
+        assert_eq!(full.nodes.len(), update.nodes.len() + 1);
     }
 
     #[test]
@@ -344,6 +515,299 @@ mod tests {
     }
 
     #[test]
+    fn engine_semantic_name_overrides_layout_heuristic_label() {
+        use hypen_engine::ir::{Role, Semantics};
+        // An icon-only button named via `.label("Delete")`: the layout
+        // heuristic (first descendant text) finds nothing and would fall back
+        // to the action name, but the engine-derived accessible name wins.
+        let sem = Semantics {
+            role: Some(Role::Button),
+            name: Some("Delete".into()),
+            ..Default::default()
+        };
+        let pass = build_pass(|t| {
+            t.apply(&Patch::Create {
+                id: "btn".into(),
+                element_type: "Button".into(),
+                props: props(&[("action", json!("@actions.del"))]),
+                semantics: Some(sem),
+            });
+            t.apply(&insert(ROOT_ID, "btn"));
+        });
+
+        let update = tree_update_for_layout(&pass);
+        let btn = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ak_node_id("btn"))
+            .map(|(_, n)| n)
+            .expect("button node");
+        assert_eq!(btn.label(), Some("Delete"));
+    }
+
+    #[test]
+    fn set_semantics_updates_the_accesskit_label_on_the_next_pass() {
+        use hypen_engine::ir::{Role, Semantics};
+        // Reactive re-emit (Patch::SetSemantics): the renderer Tree swaps in
+        // the new block, and the next LayoutPass rebuild feeds it to the
+        // AccessKit translation — the stale-name case this patch exists for.
+        let named = |name: &str| Semantics {
+            role: Some(Role::Button),
+            name: Some(name.into()),
+            ..Default::default()
+        };
+
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "btn".into(),
+            element_type: "Button".into(),
+            props: props(&[("action", json!("@actions.save"))]),
+            semantics: Some(named("Save")),
+        });
+        tree.apply(&insert(ROOT_ID, "btn"));
+        tree.apply(&Patch::SetSemantics {
+            id: "btn".into(),
+            semantics: Some(named("Submit")),
+        });
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let update = tree_update_for_layout(&pass);
+        let btn = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ak_node_id("btn"))
+            .map(|(_, n)| n)
+            .expect("button node");
+        assert_eq!(btn.label(), Some("Submit"), "AccessKit must see the re-emitted name");
+
+        // Clearing (semantics: None) drops the engine block; the layout
+        // heuristics take over again rather than announcing a stale name.
+        tree.apply(&Patch::SetSemantics {
+            id: "btn".into(),
+            semantics: None,
+        });
+        assert!(tree.get("btn").unwrap().semantics.is_none());
+    }
+
+    #[test]
+    fn author_id_relationships_resolve_to_accesskit_node_ids() {
+        use hypen_engine::ir::{Role as SemRole, Semantics};
+
+        // A disclosure button controlling a panel: `.controls("panel-1")` on
+        // the button, `.id("panel-1")` on the panel. The AccessKit nodes must
+        // be linked by NodeId; an unresolvable reference must be dropped.
+        let button_sem = Semantics {
+            role: Some(SemRole::Button),
+            name: Some("Show details".into()),
+            controls: Some("panel-1".into()),
+            // Dangling on purpose — no element declares this id.
+            describedby: Some("nope".into()),
+            ..Default::default()
+        };
+        let panel_sem = Semantics {
+            id: Some("panel-1".into()),
+            labelledby: Some("btn-1".into()),
+            ..Default::default()
+        };
+        let button_with_id_sem = Semantics {
+            id: Some("btn-1".into()),
+            ..button_sem.clone()
+        };
+
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "btn".into(),
+            element_type: "Button".into(),
+            props: props(&[("action", json!("@actions.toggle"))]),
+            semantics: Some(button_with_id_sem),
+        });
+        tree.apply(&insert(ROOT_ID, "btn"));
+        tree.apply(&Patch::Create {
+            id: "panel".into(),
+            element_type: "Column".into(),
+            props: props(&[]),
+            semantics: Some(panel_sem),
+        });
+        tree.apply(&insert(ROOT_ID, "panel"));
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let update = tree_update_for_layout(&pass);
+
+        let node_of = |rid: &str| {
+            update
+                .nodes
+                .iter()
+                .find(|(id, _)| *id == ak_node_id(rid))
+                .map(|(_, n)| n)
+                .unwrap_or_else(|| panic!("no AccessKit node for {rid}"))
+        };
+
+        let btn = node_of("btn");
+        assert_eq!(
+            btn.controls(),
+            &[ak_node_id("panel")],
+            "controls must resolve to the panel's AccessKit NodeId"
+        );
+        assert!(
+            btn.described_by().is_empty(),
+            "a dangling reference must be dropped, not emitted"
+        );
+
+        let panel = node_of("panel");
+        assert_eq!(panel.labelled_by(), &[ak_node_id("btn")]);
+    }
+
+    #[test]
+    fn opt_in_role_on_container_overrides_generic_container() {
+        use hypen_engine::ir::{Role as SemRole, Semantics};
+        // `.role("tab")` on a plain Column: structurally a GenericContainer,
+        // but the author-declared role must reach the AccessKit tree.
+        let sem = Semantics {
+            role: Some(SemRole::Tab),
+            name: Some("Settings".into()),
+            ..Default::default()
+        };
+        let pass = build_pass(|t| {
+            t.apply(&Patch::Create {
+                id: "tab-1".into(),
+                element_type: "Column".into(),
+                props: props(&[]),
+                semantics: Some(sem),
+            });
+            t.apply(&insert(ROOT_ID, "tab-1"));
+        });
+
+        let update = tree_update_for_layout(&pass);
+        let tab = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ak_node_id("tab-1"))
+            .map(|(_, n)| n)
+            .expect("tab node");
+        assert_eq!(tab.role(), Role::Tab);
+        assert_eq!(tab.label(), Some("Settings"));
+    }
+
+    #[test]
+    fn structural_heading_role_reaches_accesskit() {
+        use hypen_engine::ir::{Role as SemRole, Semantics};
+        // The engine derives `role: heading` for a Heading element; the
+        // desktop layout has no Heading ItemKind (it falls into the container
+        // path), so without the semantics override this would announce as a
+        // generic container.
+        let sem = Semantics {
+            role: Some(SemRole::Heading),
+            name: Some("Billing".into()),
+            ..Default::default()
+        };
+        let pass = build_pass(|t| {
+            t.apply(&Patch::Create {
+                id: "h1".into(),
+                element_type: "Heading".into(),
+                props: props(&[]),
+                semantics: Some(sem),
+            });
+            t.apply(&insert(ROOT_ID, "h1"));
+        });
+
+        let update = tree_update_for_layout(&pass);
+        let heading = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ak_node_id("h1"))
+            .map(|(_, n)| n)
+            .expect("heading node");
+        assert_eq!(heading.role(), Role::Heading);
+    }
+
+    #[test]
+    fn button_without_engine_role_keeps_structural_button_and_click() {
+        use hypen_engine::ir::Semantics;
+        // A semantics block that carries a name but no role must not disturb
+        // the structural mapping: the ItemKind role stays and the Click
+        // action keeps routing to the engine.
+        let sem = Semantics {
+            name: Some("Delete".into()),
+            ..Default::default()
+        };
+        let pass = build_pass(|t| {
+            t.apply(&Patch::Create {
+                id: "btn".into(),
+                element_type: "Button".into(),
+                props: props(&[("action", json!("@actions.del"))]),
+                semantics: Some(sem),
+            });
+            t.apply(&insert(ROOT_ID, "btn"));
+        });
+
+        let update = tree_update_for_layout(&pass);
+        let btn = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ak_node_id("btn"))
+            .map(|(_, n)| n)
+            .expect("button node");
+        assert_eq!(btn.role(), Role::Button);
+        assert!(btn.supports_action(Action::Click));
+        assert_eq!(btn.label(), Some("Delete"));
+    }
+
+    #[test]
+    fn engine_role_override_preserves_button_click_action() {
+        use hypen_engine::ir::{Role as SemRole, Semantics};
+        // `.role("tab")` on a Button: the announced role changes but the
+        // element is still actionable — Click must survive the override.
+        let sem = Semantics {
+            role: Some(SemRole::Tab),
+            name: Some("General".into()),
+            ..Default::default()
+        };
+        let pass = build_pass(|t| {
+            t.apply(&Patch::Create {
+                id: "btn".into(),
+                element_type: "Button".into(),
+                props: props(&[("action", json!("@actions.select"))]),
+                semantics: Some(sem),
+            });
+            t.apply(&insert(ROOT_ID, "btn"));
+        });
+
+        let update = tree_update_for_layout(&pass);
+        let btn = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ak_node_id("btn"))
+            .map(|(_, n)| n)
+            .expect("button node");
+        assert_eq!(btn.role(), Role::Tab);
+        assert!(btn.supports_action(Action::Click));
+    }
+
+    #[test]
+    fn every_engine_role_maps_to_a_distinct_faithful_accesskit_role() {
+        use hypen_engine::ir::Role as SemRole;
+        // Spot-check the landmark and widget mappings whose AccessKit names
+        // differ from the engine spelling — a typo'd variant here would
+        // announce the wrong thing to every desktop screen reader.
+        for (sem, ak) in [
+            (SemRole::Img, Role::Image),
+            (SemRole::Textbox, Role::TextInput),
+            (SemRole::Checkbox, Role::CheckBox),
+            (SemRole::Listbox, Role::ListBox),
+            (SemRole::Progressbar, Role::ProgressIndicator),
+            (SemRole::Contentinfo, Role::ContentInfo),
+            (SemRole::Tablist, Role::TabList),
+            (SemRole::Tabpanel, Role::TabPanel),
+            (SemRole::OptionItem, Role::ListBoxOption),
+            (SemRole::Combobox, Role::ComboBox),
+        ] {
+            assert_eq!(ak_role(sem), ak, "mapping for {sem:?}");
+        }
+    }
+
+    #[test]
     fn text_node_carries_value_and_label() {
         let pass = build_pass(|t| {
             t.apply(&create("hi", "Text", &[("0", json!("Hello"))]));
@@ -360,6 +824,39 @@ mod tests {
         assert_eq!(txt.role(), Role::Label);
         assert_eq!(txt.value(), Some("Hello"));
         assert_eq!(txt.label(), Some("Hello"));
+    }
+
+    #[test]
+    fn published_bounds_follow_the_item_transform() {
+        // A transformed node's AccessKit bounds are the transform-aware
+        // AABB — assistive tech targets the pixels, not the stale Taffy
+        // rect (the same rule the pointer hit paths follow).
+        let pass = build_pass(|t| {
+            t.apply(&create(
+                "btn",
+                "Button",
+                &[
+                    ("action", json!("@actions.go")),
+                    ("width.0", json!(100.0)),
+                    ("height.0", json!(40.0)),
+                    ("translateX.0", json!(200.0)),
+                ],
+            ));
+            t.apply(&insert(ROOT_ID, "btn"));
+        });
+        let item = pass.item_by_id("btn").expect("item");
+        assert!(!item.transform.is_identity());
+        let update = tree_update_for_layout(&pass);
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ak_node_id("btn"))
+            .expect("button node");
+        let bounds = node.bounds().expect("bounds set");
+        assert!(
+            (bounds.x0 - (item.rect.x + 200.0) as f64).abs() < 0.5,
+            "published x0 must be the translated position, got {bounds:?}"
+        );
     }
 
     #[test]

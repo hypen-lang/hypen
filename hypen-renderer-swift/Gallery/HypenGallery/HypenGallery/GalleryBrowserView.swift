@@ -232,6 +232,7 @@ private func normalizeUrl(_ raw: String) -> String {
     return "ws://" + trimmed
 }
 
+
 private func extractNameFromUrl(_ url: String) -> String {
     var stripped = url
     for prefix in ["ws://", "wss://", "http://", "https://"] {

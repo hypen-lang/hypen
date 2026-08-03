@@ -1,0 +1,89 @@
+Column {
+    Image(src: "@{item.imageUrl}")
+        .tw("w-full h-36 md:h-44 rounded-2xl bg-stone-100")
+        .objectFit("cover")
+
+    Column {
+        Row {
+            If(condition: "@{item.isVegetarian}") {
+                Icon(@resources.leaf)
+                    .size(12)
+                    .color("#16a34a")
+            }
+            Text("@{item.name}")
+                .tw("text-sm font-semibold ml-1")
+                .color("@{item.isVegetarian ? '#111827' : '#111827'}")
+        }
+        .tw("items-center")
+
+        If(condition: "@{item.isPopular}") {
+            Row {
+                Icon(@resources.fire)
+                    .size(11)
+                    .color("#f97316")
+                Text("Popular")
+                    .tw("text-xs text-orange-500 ml-1 font-medium")
+            }
+            .tw("items-center mt-1")
+        }
+
+        Text("@{item.description}")
+            .tw("text-xs md:text-sm text-gray-500 mt-1 leading-5")
+
+        Row {
+            Text("$@{item.price}")
+                .tw("text-base md:text-lg font-bold text-gray-900 flex-1")
+
+            If(condition: "@{item.cartQuantity == 0}") {
+                Button {
+                    Row {
+                        Icon(@resources.plus)
+                            .size(15)
+                            .color("#ffffff")
+                        Text("Add")
+                            .tw("text-sm font-bold text-white ml-1")
+                    }
+                    .tw("items-center")
+                }
+                .tw("bg-orange-500 border border-orange-500 rounded-full px-4 py-2 shadow-sm")
+                .opacity({ default: 1, active: 0.7 })
+                .transition(150, easeOut)
+                .onClick(@actions.addToCart, itemId: "@{item.id}")
+            }
+
+            If(condition: "@{item.cartQuantity > 0}") {
+                Row {
+                    Button {
+                        Icon(@resources.minus)
+                            .size(15)
+                            .color("#ffffff")
+                    }
+                    .tw("w-8 h-8 rounded-full bg-orange-600 border-0 p-0 shrink-0 items-center justify-center")
+                    .opacity({ default: 1, active: 0.6 })
+                    .transition(150, easeOut)
+                    .onClick(@actions.decrementItem, itemId: "ci_@{item.id}")
+
+                    Text("@{item.cartQuantity}")
+                        .tw("text-sm font-bold text-white flex-1 text-center")
+
+                    Button {
+                        Icon(@resources.plus)
+                            .size(15)
+                            .color("#ffffff")
+                    }
+                    .tw("w-8 h-8 rounded-full bg-orange-600 border-0 p-0 shrink-0 items-center justify-center")
+                    .opacity({ default: 1, active: 0.6 })
+                    .transition(150, easeOut)
+                    .onClick(@actions.addToCart, itemId: "@{item.id}")
+                }
+                .tw("w-28 h-10 bg-orange-500 rounded-full px-1 items-center justify-between shadow-sm")
+                .enter(fade, duration: 200)
+            }
+        }
+        .tw("mt-4 items-center")
+    }
+    .tw("p-4")
+}
+.tw("bg-white rounded-2xl border border-gray-100 overflow-hidden")
+.boxShadow("0 1px 3px rgba(17, 24, 39, 0.06)")
+.enter(fade, duration: 300)

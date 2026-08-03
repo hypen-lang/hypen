@@ -314,7 +314,7 @@ module App {
             .borderColor("#E5E7EB")
 
         // Message area
-        List {
+        Column {
             ForEach(items: @state.messages, key: "id") {
                 Row {
                     Column {
@@ -334,6 +334,7 @@ module App {
         .padding(16)
         .weight(1)
         .gap(8)
+        .scrollable(true)
 
         // Input area
         Row {
@@ -510,7 +511,7 @@ module App {
         .verticalAlignment("center")
 
         // Message area
-        List {
+        Column {
             ForEach(items: @state.messages, key: "id") {
                 Row {
                     Column {
@@ -544,6 +545,7 @@ module App {
         .padding(16)
         .weight(1)
         .gap(8)
+        .scrollable(true)
 
         // Input area
         Row {
@@ -566,7 +568,7 @@ module App {
             .backgroundColor("@{state.isLoading ? '#93C5FD' : '#3B82F6'}")
             .padding(horizontal: 16, vertical: 12)
             .borderRadius(8)
-            .disabled(@{state.isLoading})
+            .disabled(@state.isLoading)
         }
         .gap(8)
         .padding(16)
@@ -878,7 +880,7 @@ module App {
         .verticalAlignment("center")
 
         // Message area
-        List {
+        Column {
             ForEach(items: @state.messages, key: "id") {
                 Row {
                     Column {
@@ -912,6 +914,7 @@ module App {
         .padding(16)
         .weight(1)
         .gap(8)
+        .scrollable(true)
 
         // Input area
         Row {
@@ -934,7 +937,7 @@ module App {
             .backgroundColor("@{state.isLoading ? '#93C5FD' : '#3B82F6'}")
             .padding(horizontal: 16, vertical: 12)
             .borderRadius(8)
-            .disabled(@{state.isLoading})
+            .disabled(@state.isLoading)
         }
         .gap(8)
         .padding(16)

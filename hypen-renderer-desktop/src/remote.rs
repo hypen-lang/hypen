@@ -11,6 +11,12 @@
 //! Phase 11 v1 ships the happy path: connect, hello, stream patches,
 //! dispatch actions. Reconnect-with-backoff and session resume land in
 //! a follow-up.
+//!
+//! The socket is **uncompressed**: `tokio-tungstenite` cannot negotiate
+//! `permessage-deflate`, so this client offers no WebSocket extensions.
+//! That is fully interoperable with compression-enabled Hypen servers —
+//! see the note at the `connect_async` call in `run_session` for the
+//! ecosystem status and what would change it.
 
 use crate::module::HypenModule;
 use hypen_engine::Patch;
@@ -254,6 +260,28 @@ async fn run_session(
         "remote: connecting to {url} (resume session={:?})",
         session_id.as_deref(),
     );
+    // NOTE: no `permessage-deflate` — this client always runs uncompressed.
+    //
+    // Hypen enables WebSocket compression by default in its other SDKs, but
+    // `tokio-tungstenite` (pinned at 0.24 here) cannot negotiate it. No
+    // published `tungstenite`/`tokio-tungstenite` release up to and including
+    // 0.30.0 exposes a `deflate`/compression feature or depends on a
+    // compression crate; the README still says "There is no support for
+    // permessage-deflate at the moment". Upstream issue
+    // https://github.com/snapview/tungstenite-rs/issues/2 has been open since
+    // 2017 — an implementation merged as PR #328 and was then reverted, and
+    // the re-land (PR #426) remains unmerged. So there is no version bump
+    // that would turn compression on; the dep is deliberately left alone.
+    //
+    // This is interoperable, not broken. `permessage-deflate` is negotiated
+    // per connection and optional (RFC 7692): we simply never send a
+    // `Sec-WebSocket-Extensions` offer, so a compression-enabled Hypen server
+    // has nothing to accept and both peers speak plain frames. Connecting to a
+    // server that compresses for browser/OkHttp clients works unchanged — this
+    // client just pays full bandwidth for the patch stream.
+    //
+    // Re-check on any `tokio-tungstenite` bump: if snapview/tungstenite-rs#426
+    // merges, enable the `deflate` feature and offer the extension here.
     let (ws_stream, _resp) = connect_async(url)
         .await
         .map_err(|e| format!("connect failed: {e}"))?;
@@ -425,6 +453,7 @@ mod tests {
             id: id.into(),
             element_type: kind.into(),
             props: Arc::new(IndexMap::new()),
+            semantics: None,
         }
     }
 

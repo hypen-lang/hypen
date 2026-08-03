@@ -52,6 +52,31 @@ enum class PatchType {
      */
     @Json(name = "attach")
     ATTACH,
+
+    /**
+     * Replace an element's accessibility semantics after a reactive change
+     * (templated accessible name, bound self-state, bound checked, reactive
+     * activedescendant). Carries the complete re-resolved block in
+     * [Patch.semantics]; the renderer re-applies it with the same
+     * translation it runs at create. A null block clears the semantics.
+     */
+    @Json(name = "setSemantics")
+    SET_SEMANTICS,
+
+    /**
+     * Animation transaction prelude: a batch-wide animation spec
+     * ([Patch.spec]) that applies to every whitelisted prop the batch
+     * writes, on any element.
+     *
+     * Honored at batch index 0 ONLY (protocol invariant 3,
+     * "first-patch-only preludes") — a prelude anywhere else, or inside a
+     * replayed initialTree, is not a stamp. Consumed by
+     * `AnimationCoordinator.beginBatch`; see
+     * `.notes/ANIMATION_ANDROID.md` ("`batchAnimation` — the
+     * transaction prelude").
+     */
+    @Json(name = "batchAnimation")
+    BATCH_ANIMATION,
 }
 
 /**
@@ -70,6 +95,28 @@ data class Patch(
     val parentId: String? = null,
     val beforeId: String? = null,
     val eventName: String? = null,
+    /**
+     * Engine-derived accessibility semantics block (camelCase JSON object —
+     * role/name/state/hidden/…, same shape as the web wire format). Present
+     * on CREATE for elements with derivable a11y and on every SET_SEMANTICS.
+     */
+    val semantics: Map<String, Any?>? = null,
+    /**
+     * Set on a REMOVE whose subtree root carried an `__anim.exit` spec:
+     * the renderer owns the corpse and may defer teardown to play the
+     * exit (protocol invariant 2, "renderers own corpses"). Only the
+     * flagged root carries it; descendants arrive as plain removes.
+     *
+     * The wire omits the key entirely when false (`serde` skip-if-false),
+     * hence the `false` default. Honoured by `ComposeRenderer.onRemove` —
+     * see `.notes/ANIMATION_ANDROID.md`.
+     */
+    val transition: Boolean = false,
+    /**
+     * Animation spec carried by a [PatchType.BATCH_ANIMATION] prelude
+     * (`{duration, curve, delay, props}`). Null on every other patch type.
+     */
+    val spec: Map<String, Any?>? = null,
 ) {
     companion object {
         /**
@@ -154,11 +201,27 @@ data class Patch(
 
         /**
          * Create a REMOVE patch to delete an element.
+         *
+         * [transition] flags the root of a subtree carrying an
+         * `__anim.exit` spec (see [Patch.transition]).
          */
-        fun remove(id: String) =
+        fun remove(
+            id: String,
+            transition: Boolean = false,
+        ) = Patch(
+            type = PatchType.REMOVE,
+            id = id,
+            transition = transition,
+        )
+
+        /**
+         * Create a BATCH_ANIMATION prelude carrying a batch-wide
+         * animation spec.
+         */
+        fun batchAnimation(spec: Map<String, Any?>?) =
             Patch(
-                type = PatchType.REMOVE,
-                id = id,
+                type = PatchType.BATCH_ANIMATION,
+                spec = spec,
             )
 
         /**
@@ -183,6 +246,18 @@ data class Patch(
             type = PatchType.DETACH_EVENT,
             id = id,
             eventName = eventName,
+        )
+
+        /**
+         * Create a SET_SEMANTICS patch replacing an element's semantics.
+         */
+        fun setSemantics(
+            id: String,
+            semantics: Map<String, Any?>?,
+        ) = Patch(
+            type = PatchType.SET_SEMANTICS,
+            id = id,
+            semantics = semantics,
         )
 
         /**

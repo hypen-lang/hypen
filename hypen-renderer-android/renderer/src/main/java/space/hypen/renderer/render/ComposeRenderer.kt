@@ -2,6 +2,12 @@ package space.hypen.renderer.render
 
 import androidx.compose.runtime.*
 import space.hypen.renderer.HypenLoggers
+import space.hypen.renderer.anim.ANIM_PROP_PREFIX
+import space.hypen.renderer.anim.AnimationCompletion
+import space.hypen.renderer.anim.AnimationCompletionSink
+import androidx.compose.ui.unit.DpSize
+import space.hypen.renderer.anim.AnimationCoordinator
+import space.hypen.renderer.anim.animationCompleteAction
 import space.hypen.renderer.applicators.ApplicatorContext
 import space.hypen.renderer.applicators.ApplicatorRegistry
 import space.hypen.renderer.applicators.createDefaultApplicatorRegistry
@@ -22,7 +28,23 @@ private val log = HypenLoggers.renderer
 class ComposeRenderer(
     private val componentRegistry: ComponentRegistry = createDefaultComponentRegistry(),
     private val applicatorRegistry: ApplicatorRegistry = createDefaultApplicatorRegistry(),
+    /**
+     * Owns every `__anim.*` decision (see [AnimationCoordinator]). Injectable
+     * so hosts can supply a live reduced-motion preference and tests can
+     * supply a deterministic scheduler.
+     */
+    private val animation: AnimationCoordinator = AnimationCoordinator(),
 ) : Renderer {
+    init {
+        // Naturally-settled playbacks dispatch the element's
+        // `.onAnimationComplete` action through the renderer's own action
+        // channel, ungated: an exit completion by definition fires from
+        // inside an exiting subtree.
+        animation.setCompletionSink(
+            AnimationCompletionSink { id, completion -> dispatchCompletion(id, completion) },
+        )
+    }
+
     // Lock for synchronizing access to elements and rootId across threads
     private val lock = Any()
 
@@ -39,9 +61,24 @@ class ComposeRenderer(
     // across the detach → attach cycle.
     private val detachedIds = mutableSetOf<String>()
 
-    private var rootId: String? = null
+    // Animation transaction prelude for the batch currently being applied
+    // (null when the batch carried no prelude). Guarded by [lock].
+    //
+    // Set from batch index 0 ONLY — protocol invariant 3,
+    // "first-patch-only preludes": a `batchAnimation` patch at any other
+    // index, or inside a replayed initialTree, is not a stamp. Each batch
+    // overwrites this (with null when unstamped), which is the protocol's
+    // "clear at flush" — the value must outlive `applyPatches` because the
+    // consumer is composition, which runs after this returns.
+    private var batchAnimationSpec: Map<String, Any?>? = null
 
-    // State for Compose recomposition
+    // Snapshot-backed so composables reading [getRootId] recompose when
+    // the root changes; per-element updates flow through each element's
+    // own snapshot state instead of a global version bump.
+    private var rootIdState: String? by mutableStateOf(null)
+
+    // Bumped once per batch. Kept for external observers and tests;
+    // composition no longer keys on it.
     private val _treeVersion = MutableStateFlow(0)
     val treeVersion: StateFlow<Int> = _treeVersion.asStateFlow()
 
@@ -73,14 +110,7 @@ class ComposeRenderer(
     }
 
     override fun applyPatches(patches: List<Patch>) {
-        android.util.Log.d("HypenTree", "=== applyPatches: ${patches.size} patches ===")
-        // Dump every patch in the batch to trace the exact sequence
-        if (patches.size in 200..500 && patches.any { it.type == PatchType.REMOVE }) {
-            for ((i, p) in patches.withIndex()) {
-                android.util.Log.d("HypenPatch", "[$i] ${p.type} id=${p.id ?: ""} parent=${p.parentId ?: ""} type=${p.elementType ?: ""} name=${p.name ?: ""}")
-            }
-        }
-        log.debug("Applying ${patches.size} patches")
+        log.debug { "Applying ${patches.size} patches" }
 
         // Collect notifications to invoke after releasing the lock,
         // preventing deadlock if listeners call back into renderer APIs.
@@ -92,12 +122,24 @@ class ComposeRenderer(
         // Snapshot listeners while holding the lock so the list cannot be
         // modified between the copy and the iteration.
         val listenersSnapshot = synchronized(lock) {
+            // Protocol invariant 3, "first-patch-only preludes": the stamp is
+            // read from batch index 0 ONLY — a `batchAnimation` patch at any
+            // other index, or inside a replayed initialTree, is not a stamp,
+            // which is what stops concatenated batches from over-scoping.
+            // Compose has no ambient transaction, so the spec is held for the
+            // batch and consulted per whitelisted prop write, DOM/canvas
+            // style, then cleared at flush.
+            batchAnimationSpec = patches.firstOrNull()
+                ?.takeIf { it.type == PatchType.BATCH_ANIMATION }
+                ?.spec
+            animation.beginBatch(batchAnimationSpec)
+
             // First pass: apply all patches, collecting any inserts that fail
             // because parent/child doesn't exist yet (patch ordering issue from engine)
             val deferredInserts = mutableListOf<Patch>()
 
             for (patch in patches) {
-                log.debug("Patch: type=${patch.type}, id=${patch.id}, name=${patch.name}, value=${patch.value}, text=${patch.text}")
+                log.debug { "Patch: type=${patch.type}, id=${patch.id}, name=${patch.name}, value=${patch.value}, text=${patch.text}" }
                 if (patch.type == PatchType.INSERT || patch.type == PatchType.MOVE) {
                     // Check if both parent and child exist before inserting
                     val parentId = patch.parentId
@@ -114,11 +156,15 @@ class ComposeRenderer(
 
             // Second pass: retry deferred inserts now that all Creates have been processed
             if (deferredInserts.isNotEmpty()) {
-                android.util.Log.d("HypenTree", "Retrying ${deferredInserts.size} deferred inserts")
+                log.debug { "Retrying ${deferredInserts.size} deferred inserts" }
                 for (patch in deferredInserts) {
                     applyPatch(patch, deferredNotifications)
                 }
             }
+
+            // Flush: queue the enters this batch earned and drop the
+            // transaction stamp (strictly batch-scoped).
+            animation.endBatch()
 
             stateListeners.toList()
         }
@@ -128,22 +174,6 @@ class ComposeRenderer(
             notification(listenersSnapshot)
         }
 
-        // Log tree state after patches
-        val rootEl = rootId?.let { elements[it] }
-        android.util.Log.d("HypenTree", "=== After patches: ${elements.size} elements, root=${rootId}(${rootEl?.elementType}), rootKids=${rootEl?.children?.size}")
-        // Log first 3 levels
-        rootEl?.children?.forEach { childId ->
-            val child = elements[childId]
-            if (child != null) {
-                android.util.Log.d("HypenTree", "  ${child.elementType}(${child.id}) kids=${child.children.size}")
-                child.children.take(5).forEach { gcId ->
-                    val gc = elements[gcId]
-                    if (gc != null) android.util.Log.d("HypenTree", "    ${gc.elementType}(${gc.id}) kids=${gc.children.size}")
-                }
-            }
-        }
-
-        // Trigger recomposition
         _treeVersion.value++
 
         // Notify listeners
@@ -163,40 +193,85 @@ class ComposeRenderer(
             PatchType.DETACH_EVENT -> onDetachEvent(patch)
             PatchType.DETACH -> onDetach(patch)
             PatchType.ATTACH -> onAttach(patch)
+            PatchType.SET_SEMANTICS -> onSetSemantics(patch)
+            PatchType.BATCH_ANIMATION -> onBatchAnimation(patch)
         }
+    }
+
+    /**
+     * Animation transaction prelude — mutates no tree state.
+     *
+     * The stamp is picked up in [applyPatches] from batch index 0 only;
+     * this handler runs for every prelude in the batch, and a prelude at
+     * any other index is deliberately inert (protocol invariant 3, which
+     * is what stops concatenated batches from over-scoping).
+     */
+    private fun onBatchAnimation(patch: Patch) {
+        log.debug { "Batch animation prelude: spec=${patch.spec}" }
+    }
+
+    /**
+     * Reactive accessibility re-emit: replace the element's whole semantics
+     * block (null clears). Semantics are snapshot-backed, so the write
+     * recomposes just the element, which re-applies `Modifier.semantics {}`
+     * from the new block — the same translation as at create, so a dropped
+     * field simply stops being applied.
+     */
+    private fun onSetSemantics(patch: Patch) {
+        val id = patch.id ?: return
+        val element = elements[id] ?: run {
+            log.debug { "SET_SEMANTICS: element not found: $id" }
+            return
+        }
+        element.semantics = patch.semantics
     }
 
     private fun onCreate(patch: Patch, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
         val id = patch.id ?: return
         val elementType = patch.elementType ?: return
 
-        log.debug("Creating element: $id (type: $elementType), props=${patch.props}")
+        log.debug { "Creating element: $id (type: $elementType), props=${patch.props}" }
 
-        // Log if replacing an existing element (which clears its children)
-        val existing = elements[id]
-        if (existing != null && existing.children.isNotEmpty()) {
-            android.util.Log.w("HypenTree", "CREATE: replacing ${existing.elementType}($id) that had ${existing.children.size} children!")
-        }
-
-        val props = patch.props?.toMutableMap() ?: mutableMapOf()
+        val props = patch.props ?: emptyMap()
 
         // Extract text content from props if present
         val textContent = props["0"]?.toString() ?: props["text"]?.toString()
 
-        val element =
+        val existing = elements[id]
+        val element = if (existing != null) {
+            // Reuse the live instance so composables already holding it
+            // observe the replacement through its snapshot state instead
+            // of rendering a stale node.
+            if (existing.children.isNotEmpty()) {
+                log.warn { "CREATE: replacing ${existing.elementType}($id) that had ${existing.children.size} children!" }
+            }
+            existing.elementType = elementType
+            existing.replaceProps(props)
+            existing.clearChildren()
+            existing.textContent = textContent
+            existing.semantics = patch.semantics
+            existing.bumpPropsRevision()
+            existing
+        } else {
             HypenElement(
                 id = id,
                 elementType = elementType,
                 props = props,
                 textContent = textContent,
-            )
-
-        elements[id] = element
+                semantics = patch.semantics,
+            ).also { elements[id] = it }
+        }
 
         // Set root if this is the first element
-        if (rootId == null) {
-            rootId = id
+        if (rootIdState == null) {
+            rootIdState = id
         }
+
+        // Parse every `__anim.*` channel and register enter eligibility. A
+        // node created in this batch is the ONLY node that may enter-animate
+        // (a cached Router attach never does), and the first-ever batch is
+        // suppressed so initial render doesn't cascade.
+        animation.noteCreate(id, props)
 
         deferred.add { listeners -> listeners.forEach { it.onElementCreated(element) } }
     }
@@ -206,7 +281,12 @@ class ComposeRenderer(
         val name = patch.name ?: return
 
         val element = elements[id] ?: return
-        element.props[name] = patch.value
+        // Captured BEFORE the write: it is the glide's start value.
+        val previous = element.rawProps[name]
+        element.setProp(name, patch.value)
+        element.bumpPropsRevision()
+
+        noteAnimation(id, name, patch.value, previous)
 
         // Handle special props
         if (name == "0" || name == "text") {
@@ -214,7 +294,20 @@ class ComposeRenderer(
             element.textContent = patch.value?.toString()
         }
 
-        log.debug("Set prop: $id.$name = ${patch.value}")
+        log.debug { "Set prop: $id.$name = ${patch.value}" }
+    }
+
+    /**
+     * Route one prop write to the animation coordinator: an `__anim.*` write
+     * re-parses that channel, anything else is a candidate for a glide
+     * (transaction stamp > node `.transition` > snap).
+     */
+    private fun noteAnimation(id: String, name: String, value: Any?, previous: Any?) {
+        if (name.startsWith(ANIM_PROP_PREFIX)) {
+            animation.noteAnimProp(id, name, value)
+        } else {
+            animation.noteSetProp(id, name, previous)
+        }
     }
 
     private fun onRemoveProp(patch: Patch) {
@@ -222,13 +315,18 @@ class ComposeRenderer(
         val name = patch.name ?: return
 
         val element = elements[id] ?: return
-        element.props.remove(name)
+        val previous = element.rawProps[name]
+        if (element.removeProp(name)) {
+            element.bumpPropsRevision()
+        }
+
+        noteAnimation(id, name, null, previous)
 
         if (name == "0" || name == "text") {
             element.textContent = null
         }
 
-        log.debug("Remove prop: $id.$name")
+        log.debug { "Remove prop: $id.$name" }
     }
 
     private fun onSetText(patch: Patch) {
@@ -238,50 +336,37 @@ class ComposeRenderer(
         val element = elements[id] ?: return
         element.textContent = text
 
-        log.debug("Set text: $id = $text")
+        log.debug { "Set text: $id = $text" }
     }
 
     private fun onInsert(patch: Patch) {
         val parentId = patch.parentId ?: run {
-            android.util.Log.w("HypenTree", "INSERT: missing parentId for id=${patch.id}")
+            log.warn { "INSERT: missing parentId for id=${patch.id}" }
             return
         }
         val id = patch.id ?: return
 
         val child = elements[id] ?: run {
-            android.util.Log.w("HypenTree", "INSERT: child $id NOT FOUND in elements (parent=$parentId)")
+            log.warn { "INSERT: child $id NOT FOUND in elements (parent=$parentId)" }
             return
         }
 
         // Handle root insertion
         if (parentId == "root") {
-            rootId = id
-            log.debug("Inserted as root: $id")
+            rootIdState = id
+            log.debug { "Inserted as root: $id" }
             return
         }
 
         val parent = elements[parentId] ?: run {
-            android.util.Log.w("HypenTree", "INSERT: parent $parentId NOT FOUND for child $id")
+            log.warn { "INSERT: parent $parentId NOT FOUND for child $id" }
             return
         }
         child.parentId = parentId
 
-        // Handle beforeId for ordering
-        val beforeId = patch.beforeId
-        if (beforeId != null) {
-            val index = parent.children.indexOf(beforeId)
-            if (index >= 0) {
-                parent.children.add(index, id)
-            } else {
-                parent.children.add(id)
-            }
-        } else {
-            if (!parent.children.contains(id)) {
-                parent.children.add(id)
-            }
-        }
+        parent.addChild(id, patch.beforeId)
 
-        log.debug("Inserted: $id into $parentId")
+        log.debug { "Inserted: $id into $parentId" }
     }
 
     private fun onMove(patch: Patch) {
@@ -293,39 +378,105 @@ class ComposeRenderer(
 
         // Remove from old parent
         child.parentId?.let { oldParentId ->
-            elements[oldParentId]?.children?.remove(id)
+            elements[oldParentId]?.removeChild(id)
         }
 
         // Insert into new parent (same as insert)
         onInsert(patch)
     }
 
+    /**
+     * The deferred-remove contract (protocol invariant 2, "renderers own
+     * corpses"): a `Remove{transition:true}` means the engine-side id is
+     * already dead — there is no ack round-trip. When the flagged root
+     * carries a usable `__anim.exit` spec the renderer keeps the subtree
+     * alive, excludes it from interaction immediately, plays the exit, and
+     * finalizes on natural settle OR the `duration + delay + 80ms` timeout
+     * backbone, whichever is first.
+     *
+     * Wire ordering is root-first: the flagged root arrives before its
+     * descendants' PLAIN removes, so a plain remove landing inside an
+     * already-exiting subtree defers to that root's finalize instead of
+     * tearing the subtree out from under the playback.
+     *
+     * A flagged root with no exit spec (or under reduced motion) falls
+     * through to the ordinary immediate teardown — the sanctioned snap.
+     */
     private fun onRemove(patch: Patch, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
         val id = patch.id ?: return
+        val element = elements[id] ?: return
 
+        if (patch.transition) {
+            val subtree = mutableSetOf(id)
+            collectSubtreeIds(element, subtree)
+            if (animation.beginExit(id, subtree) { finalizeDeferredRemove(id) }) {
+                log.debug { "REMOVE: exit deferred for $id (${subtree.size} ids held)" }
+                return
+            }
+            log.debug { "REMOVE: exit-flagged root $id has no usable exit spec — snapping" }
+        } else if (animation.deferToExitingAncestor(id) { finalizeDeferredRemove(id) }) {
+            log.debug { "REMOVE: $id defers to its exiting ancestor" }
+            return
+        }
+
+        evictSubtree(id, deferred)
+    }
+
+    /** Immediate teardown: the pre-animation behaviour, unchanged. */
+    private fun evictSubtree(id: String, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
         val element = elements.remove(id) ?: return
         detachedIds.remove(id)
+        animation.forget(id)
 
         // Remove from parent's children
         element.parentId?.let { parentId ->
-            elements[parentId]?.children?.remove(id)
+            elements[parentId]?.removeChild(id)
         }
 
         // Recursively remove all descendants
         removeDescendants(element, deferred)
 
-        if (rootId == id) {
-            rootId = null
+        if (rootIdState == id) {
+            rootIdState = null
         }
 
-        log.debug("Removed: $id")
+        log.debug { "Removed: $id" }
         deferred.add { listeners -> listeners.forEach { it.onElementRemoved(id) } }
+    }
+
+    /**
+     * Teardown for a remove the animation layer deferred. Runs off the patch
+     * thread (natural settle or the timeout backbone), so it takes the lock
+     * itself and notifies listeners after releasing it.
+     */
+    private fun finalizeDeferredRemove(id: String) {
+        val notifications = mutableListOf<(List<RendererStateListener>) -> Unit>()
+        val listenersSnapshot =
+            synchronized(lock) {
+                if (elements[id] == null) return
+                evictSubtree(id, notifications)
+                stateListeners.toList()
+            }
+        for (notification in notifications) {
+            notification(listenersSnapshot)
+        }
+        _treeVersion.value++
+        listenersSnapshot.forEach { it.onTreeChanged() }
+    }
+
+    /** Every id at-or-under [element], captured before any tree mutation. */
+    private fun collectSubtreeIds(element: HypenElement, into: MutableSet<String>) {
+        for (childId in element.children.toList()) {
+            if (!into.add(childId)) continue
+            elements[childId]?.let { collectSubtreeIds(it, into) }
+        }
     }
 
     private fun removeDescendants(element: HypenElement, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
         for (childId in element.children.toList()) {
             val child = elements.remove(childId) ?: continue
             detachedIds.remove(childId)
+            animation.forget(childId)
             deferred.add { listeners -> listeners.forEach { it.onElementRemoved(childId) } }
             removeDescendants(child, deferred)
         }
@@ -348,21 +499,21 @@ class ComposeRenderer(
             return
         }
         val element = elements[id] ?: run {
-            log.debug("DETACH: element not found: $id")
+            log.debug { "DETACH: element not found: $id" }
             return
         }
 
         element.parentId?.let { parentId ->
-            elements[parentId]?.children?.remove(id)
+            elements[parentId]?.removeChild(id)
         }
         element.parentId = null
         detachedIds.add(id)
 
-        if (rootId == id) {
-            rootId = null
+        if (rootIdState == id) {
+            rootIdState = null
         }
 
-        log.debug("Detached: $id")
+        log.debug { "Detached: $id" }
     }
 
     /**
@@ -375,11 +526,11 @@ class ComposeRenderer(
             return
         }
         val parentId = patch.parentId ?: run {
-            log.debug("ATTACH: missing parentId for id=$id")
+            log.debug { "ATTACH: missing parentId for id=$id" }
             return
         }
         val child = elements[id] ?: run {
-            android.util.Log.w("HypenTree", "ATTACH: element $id not found (was it removed?)")
+            log.warn { "ATTACH: element $id not found (was it removed?)" }
             return
         }
 
@@ -389,54 +540,44 @@ class ComposeRenderer(
         // be looked up in `elements`.
         if (parentId == "root" && elements[parentId] == null) {
             child.parentId?.let { oldParentId ->
-                elements[oldParentId]?.children?.remove(id)
+                elements[oldParentId]?.removeChild(id)
             }
             child.parentId = null
-            rootId = id
+            rootIdState = id
             detachedIds.remove(id)
-            log.debug("Attached at root: $id")
+            animation.noteAttach(id)
+            log.debug { "Attached at root: $id" }
             return
         }
 
         val parent = elements[parentId] ?: run {
-            android.util.Log.w("HypenTree", "ATTACH: parent $parentId not found for id=$id")
+            log.warn { "ATTACH: parent $parentId not found for id=$id" }
             return
         }
 
         // Defensive: if the element somehow still has a stale parent
         // link (engine bug), unlink it first.
         child.parentId?.let { oldParentId ->
-            elements[oldParentId]?.children?.remove(id)
+            elements[oldParentId]?.removeChild(id)
         }
 
         child.parentId = parentId
 
-        val beforeId = patch.beforeId
-        if (beforeId != null) {
-            val index = parent.children.indexOf(beforeId)
-            if (index >= 0) {
-                parent.children.add(index, id)
-            } else {
-                parent.children.add(id)
-            }
-        } else {
-            if (!parent.children.contains(id)) {
-                parent.children.add(id)
-            }
-        }
+        parent.addChild(id, patch.beforeId)
 
         detachedIds.remove(id)
-        log.debug("Attached: $id -> $parentId (before: ${patch.beforeId ?: "end"})")
+        animation.noteAttach(id)
+        log.debug { "Attached: $id -> $parentId (before: ${patch.beforeId ?: "end"})" }
     }
 
     private fun onAttachEvent(patch: Patch) {
         // Events are handled through props (onClick, etc.)
-        log.debug("Attach event: ${patch.id}.${patch.eventName}")
+        log.debug { "Attach event: ${patch.id}.${patch.eventName}" }
     }
 
     private fun onDetachEvent(patch: Patch) {
         // Events are handled through props
-        log.debug("Detach event: ${patch.id}.${patch.eventName}")
+        log.debug { "Detach event: ${patch.id}.${patch.eventName}" }
     }
 
     override fun getElement(id: String): HypenElement? = synchronized(lock) { elements[id] }
@@ -445,8 +586,12 @@ class ComposeRenderer(
         synchronized(lock) {
             elements.clear()
             detachedIds.clear()
-            rootId = null
+            batchAnimationSpec = null
+            rootIdState = null
         }
+        // Drops in-flight playbacks and their finalize timers without
+        // running them — the tree they would tear down is already gone.
+        animation.reset()
         _treeVersion.value++
     }
 
@@ -463,6 +608,34 @@ class ComposeRenderer(
         detachedIds.toList()
     }
 
+    /**
+     * Animation spec stamped on the most recently applied batch, or null
+     * if that batch carried no [PatchType.BATCH_ANIMATION] prelude at
+     * index 0. Consumed by [animation] during the batch; kept observable
+     * for tests and diagnostics.
+     */
+    fun getBatchAnimationSpec(): Map<String, Any?>? = synchronized(lock) {
+        batchAnimationSpec
+    }
+
+    /** The animation state machine driving this tree's `__anim.*` channels. */
+    fun getAnimationCoordinator(): AnimationCoordinator = animation
+
+    /**
+     * Fire an element's `.onAnimationComplete` action for a NATURALLY settled
+     * playback. Payload is the applicator's own named args with the
+     * completion fields written last, so `animation`/`state` can never be
+     * shadowed.
+     */
+    private fun dispatchCompletion(id: String, completion: AnimationCompletion) {
+        val element = getElement(id) ?: return
+        val action = animationCompleteAction(element.props) ?: return
+        val payload = LinkedHashMap<String, Any?>(action.payload)
+        payload.putAll(completion.toPayload())
+        log.debug { "Animation complete on $id: ${completion.animation}" }
+        actionDispatcher?.dispatch(action.actionName, payload)
+    }
+
     override fun dispatchAction(
         action: String,
         payload: Map<String, Any?>?,
@@ -471,12 +644,10 @@ class ComposeRenderer(
     }
 
     /**
-     * Get the root element ID.
+     * Get the root element ID. Snapshot-backed: calling this from
+     * composition subscribes the caller to root changes.
      */
-    fun getRootId(): String? = synchronized(lock) {
-        log.debug("getRootId() called, rootId=$rootId, elements.size=${elements.size}")
-        rootId
-    }
+    fun getRootId(): String? = synchronized(lock) { rootIdState }
 
     /**
      * Get the component registry.
@@ -498,11 +669,34 @@ class ComposeRenderer(
 
     /**
      * Create applicator context for an element.
+     *
+     * The dispatcher is wrapped in the exiting-subtree guard: an element
+     * inside a deferred (exiting) subtree is engine-side DEAD the moment the
+     * flagged Remove is emitted, so nothing under it may dispatch. Pointer
+     * gating alone is not enough — a handler can be invoked from focus, IME,
+     * or a timer — so this chokepoint checks at dispatch time.
      */
-    fun createApplicatorContext(element: HypenElement): ApplicatorContext =
-        ApplicatorContext(
+    fun createApplicatorContext(
+        element: HypenElement,
+        viewport: DpSize = DpSize.Unspecified,
+    ): ApplicatorContext {
+        val dispatcher = actionDispatcher
+        return ApplicatorContext(
             element = element,
-            actionDispatcher = actionDispatcher,
+            viewport = viewport,
+            actionDispatcher =
+                if (dispatcher == null) {
+                    null
+                } else {
+                    ActionDispatcher { action, payload ->
+                        if (animation.isInExitingSubtree(element.id)) {
+                            log.debug { "Dropping '$action' from exiting subtree ${element.id}" }
+                        } else {
+                            dispatcher.dispatch(action, payload)
+                        }
+                    }
+                },
         )
+    }
 
 }

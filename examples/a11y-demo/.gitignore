@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.hypen/
+
+# AI agent skills
+.claude/skills/
+.agent/skills/
+
+# Environment
+.env
+.env.*
+!.env.example
+.npmrc
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log

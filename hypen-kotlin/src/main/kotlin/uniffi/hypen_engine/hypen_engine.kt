@@ -1549,6 +1549,26 @@ public object FfiConverterULong : FfiConverter<ULong, Long> {
 /**
  * @suppress
  */
+public object FfiConverterBoolean : FfiConverter<Boolean, Byte> {
+  override fun lift(value: Byte): Boolean = value.toInt() != 0
+
+  override fun read(buf: ByteBuffer): Boolean = lift(buf.get())
+
+  override fun lower(value: Boolean): Byte = if (value) 1.toByte() else 0.toByte()
+
+  override fun allocationSize(value: Boolean) = 1UL
+
+  override fun write(
+    value: Boolean,
+    buf: ByteBuffer,
+  ) {
+    buf.put(lower(value))
+  }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterString : FfiConverter<String, RustBuffer.ByValue> {
   // Note: we don't inherit from FfiConverterRustBuffer, because we use a
   // special encoding when lowering/lifting.  We can use `RustBuffer.len` to
@@ -2587,6 +2607,35 @@ data class Patch(
   var `text`: kotlin.String?,
   var `parentId`: kotlin.String?,
   var `beforeId`: kotlin.String?,
+  /**
+   * Serialized `Semantics` block (camelCase JSON, same shape as the web
+   * wire format). Present on `Create` for nodes with derivable a11y and
+   * on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+   * constructors keep compiling.
+   */
+  var `semanticsJson`: kotlin.String? = null,
+  /**
+   * Roots an animated exit: set on the **root** `Remove` of a subtree
+   * whose node carried an `"__anim.exit"` spec. The renderer may play
+   * the exit and finalize teardown itself; the engine-side node is
+   * dead the moment the patch is emitted (no ack round-trip). `false`
+   * on every other patch type — which matches the wire default, where
+   * the field is skip-if-false, so relays that re-serialize this
+   * record stay byte-identical for unflagged removes.
+   */
+  var `transition`: kotlin.Boolean = false,
+  /**
+   * Animation spec for `PatchType::BatchAnimation`, as a JSON *string*
+   * (UniFFI has no arbitrary-JSON type, so the engine's `serde_json`
+   * object is stringified at this boundary and consumers parse it).
+   * Always a JSON object, e.g. `{"curve":"spring","duration":250}`.
+   * `None` on every other patch type.
+   *
+   * **Both fields are appended last on purpose.** The generated
+   * Kotlin/Swift record readers are positional, so inserting a field
+   * anywhere but the tail silently mis-reads every field after it.
+   */
+  var `specJson`: kotlin.String? = null,
 ) {
   companion object
 }
@@ -2606,6 +2655,9 @@ public object FfiConverterTypePatch : FfiConverterRustBuffer<Patch> {
       FfiConverterOptionalString.read(buf),
       FfiConverterOptionalString.read(buf),
       FfiConverterOptionalString.read(buf),
+      FfiConverterOptionalString.read(buf),
+      FfiConverterBoolean.read(buf),
+      FfiConverterOptionalString.read(buf),
     )
 
   override fun allocationSize(value: Patch) =
@@ -2618,7 +2670,10 @@ public object FfiConverterTypePatch : FfiConverterRustBuffer<Patch> {
         FfiConverterOptionalString.allocationSize(value.`valueJson`) +
         FfiConverterOptionalString.allocationSize(value.`text`) +
         FfiConverterOptionalString.allocationSize(value.`parentId`) +
-        FfiConverterOptionalString.allocationSize(value.`beforeId`)
+        FfiConverterOptionalString.allocationSize(value.`beforeId`) +
+        FfiConverterOptionalString.allocationSize(value.`semanticsJson`) +
+        FfiConverterBoolean.allocationSize(value.`transition`) +
+        FfiConverterOptionalString.allocationSize(value.`specJson`)
     )
 
   override fun write(
@@ -2634,6 +2689,9 @@ public object FfiConverterTypePatch : FfiConverterRustBuffer<Patch> {
     FfiConverterOptionalString.write(value.`text`, buf)
     FfiConverterOptionalString.write(value.`parentId`, buf)
     FfiConverterOptionalString.write(value.`beforeId`, buf)
+    FfiConverterOptionalString.write(value.`semanticsJson`, buf)
+    FfiConverterBoolean.write(value.`transition`, buf)
+    FfiConverterOptionalString.write(value.`specJson`, buf)
   }
 }
 
@@ -2843,6 +2901,29 @@ enum class PatchType {
    * Emitted by the engine's Router subtree cache on navigation-back.
    */
   ATTACH,
+
+  /**
+   * Replace a node's accessibility semantics after a reactive change
+   * (templated accessible name, bound self-state, bound checked). The
+   * updated block rides `semantics_json`; renderers re-apply it with the
+   * same translation they run at create, clearing attributes the new
+   * block no longer sets. `semantics_json == None` clears everything.
+   */
+  SET_SEMANTICS,
+
+  /**
+   * Batch-scoped animation prelude (transaction-scoped animation).
+   * Addresses no node — it scopes the *batch*: renderers that
+   * understand it animate every prop change in the patches that
+   * follow using the spec carried on `spec_json`. Only ever valid at
+   * batch index 0; a prelude anywhere else is not a stamp.
+   *
+   * **Appended last on purpose.** UniFFI enum discriminants are
+   * positional (the generated Kotlin does `PatchType.values()[i - 1]`
+   * and Swift switches on the same ordinal), so new variants must go
+   * at the end or every existing case shifts.
+   */
+  BATCH_ANIMATION,
 
   ;
 

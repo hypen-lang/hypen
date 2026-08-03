@@ -25,6 +25,8 @@ interface StudioOptions {
   open?: boolean;
   session?: SessionData | null;
   remoteUrl?: string;
+  /** Open the browser straight into Test Mode (`/test-mode`). Used by `hypen test`. */
+  testMode?: boolean;
 }
 
 /** Poll /health until 2xx or `timeoutMs` elapses. */
@@ -43,6 +45,38 @@ async function waitForStreamer(baseUrl: string, timeoutMs: number): Promise<bool
 }
 
 /**
+ * Find the first free TCP port at or after `start`. Tries up to `maxAttempts`
+ * consecutive ports, briefly binding each one to confirm availability. We
+ * also reserve `port + 1` (the iOS-streamer sidecar port) on darwin so the
+ * studio server and the streamer don't collide.
+ */
+async function findAvailablePort(start: number, maxAttempts = 20, reserveNext = false): Promise<number> {
+  const tryBind = (p: number): Promise<boolean> =>
+    new Promise((res) => {
+      try {
+        const srv = Bun.serve({ port: p, hostname: "127.0.0.1", fetch: () => new Response("") });
+        srv.stop(true);
+        res(true);
+      } catch {
+        res(false);
+      }
+    });
+
+  for (let i = 0; i < maxAttempts; i++) {
+    const candidate = start + i;
+    if (candidate > 65535) break;
+    const ok = await tryBind(candidate);
+    if (!ok) continue;
+    if (reserveNext && candidate + 1 <= 65535) {
+      const sidecarOk = await tryBind(candidate + 1);
+      if (!sidecarOk) continue;
+    }
+    return candidate;
+  }
+  throw new Error(`No free port found in range ${start}..${start + maxAttempts - 1}`);
+}
+
+/**
  * Start Hypen Studio server
  */
 export async function studio(options: StudioOptions) {
@@ -53,10 +87,16 @@ export async function studio(options: StudioOptions) {
 
   const cwd = process.cwd();
 
+  // Banner — swap "STUDIO" → "TEST" when launched as `hypen test` so the
+  // user gets honest feedback about what they ran. Both labels are padded
+  // to 24 visible columns so the box's right wall stays aligned.
+  const bannerLabel = options.testMode
+    ? `${dim("T E S T")}                 ` // 7 visible + 17 spaces = 24
+    : `${dim("S T U D I O")}             `; // 11 visible + 13 spaces = 24
   console.log(`
   ${pink("╔═══════════════════════════════════════╗")}
   ${pink("║")}                                       ${pink("║")}
-  ${pink("║")}   ${boldPink("H Y P E N")}   ${dim("S T U D I O")}             ${pink("║")}
+  ${pink("║")}   ${boldPink("H Y P E N")}   ${bannerLabel}${pink("║")}
   ${pink("║")}                                       ${pink("║")}
   ${pink("╚═══════════════════════════════════════╝")}
   `);
@@ -70,10 +110,26 @@ export async function studio(options: StudioOptions) {
   const studioUiPath = resolve(pkgRoot, "studio-ui");
   const studioServerPath = resolve(studioUiPath, "src/index.tsx");
 
+  // Find a free port for the studio-ui server. The studio-ui subprocess
+  // does Bun.serve({ port }) with no fallback of its own, so if the
+  // requested port is taken the subprocess crashes silently and Studio
+  // appears to "hang". On darwin we also need `port + 1` for the iOS
+  // streamer sidecar, so reserve both as a pair.
+  let studioPort: number;
+  try {
+    studioPort = await findAvailablePort(options.port, 20, process.platform === "darwin");
+  } catch (e: any) {
+    console.error(`  ${dim("Could not find a free port for Studio:")} ${e?.message ?? e}`);
+    process.exit(1);
+  }
+  if (studioPort !== options.port) {
+    console.log(`  ${dim(`Port ${options.port} in use, using ${studioPort} instead.`)}`);
+  }
+
   console.log(`  ${dim("Project:")}    ${cwd}`);
   console.log(`  ${dim("Components:")} ${options.components}`);
   console.log(`  ${dim("Entry:")}      ${options.entry}`);
-  console.log(`  ${dim("Port:")}       ${yellow(String(options.port))}`);
+  console.log(`  ${dim("Port:")}       ${yellow(String(studioPort))}`);
   if (options.session) {
     console.log(`  ${pink("Session:")}    loaded from teleport`);
   }
@@ -123,7 +179,7 @@ export async function studio(options: StudioOptions) {
   let iosStreamerProc: ReturnType<typeof Bun.spawn> | null = null;
   let iosStreamerUrl = "";
   if (process.platform === "darwin") {
-    const sidecarPort = options.port + 1;
+    const sidecarPort = studioPort + 1;
     const monorepoStreamer = resolve(dirname(import.meta.dir), "../../hypen-ios-streamer/bin/ios-streamer.ts");
     const useMonorepo = existsSync(monorepoStreamer);
     const cmd = useMonorepo
@@ -169,8 +225,8 @@ export async function studio(options: StudioOptions) {
       HYPEN_PROJECT_DIR: cwd,
       HYPEN_COMPONENTS_DIR: options.components,
       HYPEN_ENTRY: options.entry,
-      PORT: String(options.port),
-      HYPEN_STUDIO_PORT: String(options.port),
+      PORT: String(studioPort),
+      HYPEN_STUDIO_PORT: String(studioPort),
       HYPEN_SESSION_FILE: sessionFilePath || "",
       HYPEN_REMOTE_URL: options.remoteUrl || "",
       HYPEN_LSP_SERVER: lspServerPath,
@@ -205,12 +261,17 @@ export async function studio(options: StudioOptions) {
   process.on("SIGINT", () => cleanupAndExit(130));
   process.on("SIGTERM", () => cleanupAndExit(143));
 
-  const studioUrl = `http://localhost:${options.port}`;
+  const studioUrl = `http://localhost:${studioPort}`;
+  const openUrl = options.testMode ? `${studioUrl}/test-mode` : studioUrl;
   console.log(`  ${pink("Studio running at:")} ${yellow(studioUrl)}`);
+  if (options.testMode) {
+    console.log(`  ${dim("Test Mode:")}        ${yellow(openUrl)}`);
+  }
   console.log(`  ${dim("Press Ctrl+C to stop")}\n`);
 
-  // Open browser
-  if (options.open !== false) {
+  // Open browser. `HYPEN_NO_OPEN=1` opts out — used by integration tests
+  // so spawning the studio doesn't fling a real browser tab.
+  if (options.open !== false && process.env.HYPEN_NO_OPEN !== "1") {
     const openCmd = process.platform === "darwin"
       ? "open"
       : process.platform === "win32"
@@ -218,9 +279,9 @@ export async function studio(options: StudioOptions) {
         : "xdg-open";
 
     try {
-      Bun.spawn([openCmd, studioUrl]);
+      Bun.spawn([openCmd, openUrl]);
     } catch (e) {
-      console.log(`  Open ${studioUrl} in your browser`);
+      console.log(`  Open ${openUrl} in your browser`);
     }
   }
 

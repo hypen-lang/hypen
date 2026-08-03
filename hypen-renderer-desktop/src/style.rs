@@ -9,6 +9,41 @@
 //! Phase 3 covers the 80% applicators: padding (uniform + directional),
 //! gap, color, backgroundColor, fontSize, fontWeight. Borders, margins,
 //! transforms, gradients, and tw classes land in later phases.
+//!
+//! ## Variants (responsive + interaction state)
+//!
+//! Applicator values may carry a variant marker BETWEEN the camelCase
+//! base and the `.0` arg suffix, e.g. `padding@md.0`,
+//! `backgroundColor:hover.0`, `backgroundColor@md:hover.0`. Resolution
+//! is delegated wholesale to the engine's shared parser
+//! (`hypen_engine::portable::{parse_prop_key, pick_variant_base}`) so
+//! the desktop renderer matches the iOS / web reference precedence:
+//! `base < breakpoints (ascending min-width) < disabled < hover < focus
+//! < active`, with a combined `@bp:state` requiring both halves.
+//!
+//! - **Responsive (breakpoint) variants** resolve at layout time via the
+//!   `prop_*_at` / `padding_at` / `margin_at` / `border_at` family — the
+//!   `VariantState::layout` path (no interaction states).
+//! - **Interaction-state variants** (hover/focus/active/disabled) split
+//!   into two channels:
+//!   - PAINT-AFFECTING colour props (`backgroundColor`, `color`,
+//!     `borderColor`) are precomputed into [`StateVariants`] at
+//!     layout-build time and applied by the painter against the live
+//!     `InteractionState` — no relayout needed.
+//!   - LAYOUT-AFFECTING props (padding / margin / gap / width / height /
+//!     min-max sizes / border width / flex, …) participate in the Taffy
+//!     layout pass: the layout reads thread the node's *active*
+//!     interaction states through [`VariantState::paint`] so e.g.
+//!     `padding:hover` actually changes geometry. To keep the common
+//!     case fast, the window only relayouts on interaction transitions
+//!     that touch nodes carrying a layout-affecting state variant (see
+//!     [`node_has_layout_state_variant`] / [`tree_has_layout_state_variants`]);
+//!     a hover on a plainly-styled node stays on the repaint-only path.
+//!
+//! ### Out of scope
+//!
+//! Opacity and shadow state variants are not resolved here (the painter
+//! does not yet read those props at all).
 
 use crate::tree::Node;
 use serde_json::Value;
@@ -81,7 +116,16 @@ fn camel_to_kebab(name: &str) -> String {
 /// (`backgroundColor`), single-arg form (`backgroundColor.0`), then
 /// the kebab-case fallback (`background-color`) for tw-expanded
 /// classes.
+/// Viewport units (`vh`, `vw`, `vmin`, `vmax`) read as absent here —
+/// there is no viewport in scope to resolve them against. Call
+/// [`prop_f32_in`] from any path that has one.
 pub fn prop_f32(node: &Node, name: &str) -> Option<f32> {
+    prop_f32_in(node, name, None)
+}
+
+/// [`prop_f32`] with a viewport basis, so viewport-relative lengths
+/// resolve to logical px.
+pub fn prop_f32_in(node: &Node, name: &str, viewport: Option<Viewport>) -> Option<f32> {
     let direct = node.props.get(name);
     let dotted = node.props.get(&format!("{name}.0"));
     let kebab_name = camel_to_kebab(name);
@@ -90,7 +134,10 @@ pub fn prop_f32(node: &Node, name: &str) -> Option<f32> {
     } else {
         None
     };
-    direct.or(dotted).or(kebab).and_then(value_to_f32)
+    direct
+        .or(dotted)
+        .or(kebab)
+        .and_then(|v| value_to_f32(v, viewport))
 }
 
 /// Read a string prop, same fallback chain as [`prop_f32`].
@@ -106,8 +153,415 @@ pub fn prop_str<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
     direct.or(dotted).or(kebab).and_then(Value::as_str)
 }
 
-/// Tailwind-style breakpoint thresholds (px). Matches the defaults the
-/// engine's `hypen-tailwind-parse` emits in `name@bp` keys.
+/// The window's content box in **logical** (CSS) pixels.
+///
+/// Two things resolve against it and both want CSS pixels, not physical
+/// ones: Tailwind breakpoints (`sm` 640 … `2xl` 1536) and the CSS
+/// viewport length units (`vw`, `vh`, `vmin`, `vmax`). Lengths stay in
+/// physical pixels elsewhere — taffy styles multiply by `scale` — so
+/// this type is deliberately the only place the logical basis lives.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Viewport {
+    pub w: f32,
+    pub h: f32,
+}
+
+impl Viewport {
+    pub fn new(w: f32, h: f32) -> Self {
+        Self { w, h }
+    }
+
+    /// `1vmin` in logical px — the smaller axis, per CSS.
+    fn vmin(&self) -> f32 {
+        self.w.min(self.h)
+    }
+
+    /// `1vmax` in logical px — the larger axis, per CSS.
+    fn vmax(&self) -> f32 {
+        self.w.max(self.h)
+    }
+}
+
+/// Variant-resolution context for the viewport-aware prop getters.
+///
+/// Bundles the current viewport and the set of active interaction
+/// states (`hover`, `focus`, `active`, `disabled`, ...). Layout-time
+/// callers leave `active_states` empty (only responsive breakpoints
+/// resolve); the paint pass populates it from live `InteractionState`
+/// so state variants (`backgroundColor:hover.0`) win per the shared
+/// precedence rules.
+#[derive(Debug, Clone, Default)]
+pub struct VariantState<'a> {
+    pub viewport: Viewport,
+    pub active_states: Vec<&'a str>,
+}
+
+impl<'a> VariantState<'a> {
+    /// Layout-time context: responsive breakpoints only, no interaction
+    /// states. This is what `prop_*_at` / `padding_at` / `border_at`
+    /// resolve through.
+    pub fn layout(viewport: Viewport) -> Self {
+        Self {
+            viewport,
+            active_states: Vec::new(),
+        }
+    }
+
+    /// Paint-time context: breakpoints plus the supplied interaction
+    /// states.
+    pub fn paint(viewport: Viewport, active_states: Vec<&'a str>) -> Self {
+        Self {
+            viewport,
+            active_states,
+        }
+    }
+}
+
+/// The set of applicator bases whose value feeds the Taffy layout pass
+/// (box model, sizing, flex, grid). A state variant on any of these
+/// (e.g. `padding:hover`) must trigger a relayout when its interaction
+/// state toggles; a state variant on anything else (colours, opacity,
+/// shadow) only repaints. Kept in sync with the props actually consumed
+/// by `node_style` / `build_subtree` / the `apply_*` helpers in
+/// `layout.rs`. `rowGap` / `columnGap` are included for completeness
+/// (CSS layout props) even though only `gap` is read today.
+pub const LAYOUT_AFFECTING_PROPS: &[&str] = &[
+    // Box model — padding (uniform / directional / per-side).
+    "padding",
+    "paddingHorizontal",
+    "paddingVertical",
+    "paddingTop",
+    "paddingBottom",
+    "paddingLeft",
+    "paddingRight",
+    // Box model — margin.
+    "margin",
+    "marginHorizontal",
+    "marginVertical",
+    "marginTop",
+    "marginBottom",
+    "marginLeft",
+    "marginRight",
+    // Gaps.
+    "gap",
+    "rowGap",
+    "columnGap",
+    // Sizing.
+    "width",
+    "height",
+    "minWidth",
+    "minHeight",
+    "maxWidth",
+    "maxHeight",
+    "size",
+    "aspectRatio",
+    // Border width (the geometry-affecting part of a border; colour is
+    // a paint channel handled by `StateVariants`).
+    "border",
+    "borderWidth",
+    "borderTopWidth",
+    "borderBottomWidth",
+    "borderLeftWidth",
+    "borderRightWidth",
+    // Flex.
+    "flex",
+    "flexGrow",
+    "flexShrink",
+    "flexBasis",
+    "flexDirection",
+    // Grid.
+    "gridColumns",
+    // Positioning insets.
+    "inset",
+    "top",
+    "right",
+    "bottom",
+    "left",
+];
+
+/// True when `base` (a camelCase applicator base, no variant markers or
+/// arg suffix) names a layout-affecting prop — see
+/// [`LAYOUT_AFFECTING_PROPS`].
+pub fn is_layout_affecting_prop(base: &str) -> bool {
+    LAYOUT_AFFECTING_PROPS.contains(&base)
+}
+
+/// True when `node` carries at least one prop key that (a) parses to a
+/// non-`None` interaction `state` and (b) whose base is layout-affecting
+/// (e.g. `padding:hover.0`, `width@md:focus.0`). Breakpoint-only
+/// variants (`padding@md.0`) do NOT count — those already resolve at
+/// layout time without interaction input. This is the per-node gate the
+/// window uses to decide whether a hover/press/focus transition on this
+/// node should bump the layout cache key.
+pub fn node_has_layout_state_variant(node: &Node) -> bool {
+    node.props.keys().any(|key| {
+        let parsed = hypen_engine::portable::parse_prop_key(key);
+        parsed.state.is_some() && is_layout_affecting_prop(&parsed.base)
+    })
+}
+
+/// Build the active interaction-state list for layout-time prop
+/// resolution, in the same shape the painter feeds the colour resolver.
+/// Mirrors [`StateVariants::active_states`] (order is irrelevant —
+/// precedence lives in the shared resolver). `disabled` is derived from
+/// the node's `enabled` / `disabled` props; the rest reflect the live
+/// pointer / keyboard flags for this specific node.
+pub fn node_layout_active_states<'a>(
+    node: &Node,
+    hovered: bool,
+    pressed: bool,
+    focused: bool,
+) -> Vec<&'a str> {
+    let mut states = Vec::new();
+    if is_disabled(node) {
+        states.push("disabled");
+    }
+    if hovered {
+        states.push("hover");
+    }
+    if focused {
+        states.push("focus");
+    }
+    if pressed {
+        states.push("active");
+    }
+    states
+}
+
+/// A single state/breakpoint-decorated colour candidate for a paint
+/// prop, precomputed at layout-build time (where the node + viewport are
+/// available) so the painter — which only sees the `LayoutItem`, not the
+/// renderer tree — can still honour live interaction states.
+#[derive(Debug, Clone)]
+pub struct VariantCandidate {
+    /// The raw node prop key, e.g. `"backgroundColor:hover.0"`. Carried
+    /// so the painter can re-run the shared precedence resolver against
+    /// the *live* active-state set.
+    pub key: String,
+    /// Decorated base (no arg suffix), e.g. `"backgroundColor:hover"` —
+    /// what `pick_variant_base` returns and what the painter matches on.
+    pub decorated: String,
+    /// The resolved colour for this candidate.
+    pub value: Rgba,
+}
+
+/// Paint-time state-variant overrides for a single node, precomputed at
+/// layout-build time. Only the paint-affecting colour props are covered
+/// (`backgroundColor`, `color`/foreground, `borderColor`); layout-
+/// affecting state variants (e.g. `padding:hover`) are intentionally not
+/// resolved here — see the module-level limitation note.
+///
+/// Empty (the common case) means the node declared no state/breakpoint
+/// variants for any paint prop, and the painter takes its existing fast
+/// path with the base-resolved values already on the `LayoutItem`.
+#[derive(Debug, Clone, Default)]
+pub struct StateVariants {
+    pub viewport: Viewport,
+    /// Whether the node is disabled (`enabled: false` or `disabled:
+    /// true`). Folded into the live active-state set as `"disabled"` so
+    /// `backgroundColor:disabled.0` variants resolve. Derived at layout
+    /// time since the painter has no node handle.
+    pub disabled: bool,
+    pub background_color: Vec<VariantCandidate>,
+    pub color: Vec<VariantCandidate>,
+    pub border_color: Vec<VariantCandidate>,
+}
+
+impl StateVariants {
+    /// `true` when no paint prop carries any variant candidate — lets
+    /// the painter skip all state-variant work for the overwhelmingly
+    /// common plain-styled node. The `disabled` flag alone doesn't make
+    /// the node non-empty: with no `:disabled` candidates there's
+    /// nothing to resolve.
+    pub fn is_empty(&self) -> bool {
+        self.background_color.is_empty()
+            && self.color.is_empty()
+            && self.border_color.is_empty()
+    }
+
+    /// Build the live active-state list the painter feeds to the
+    /// resolver, from per-node disabled state plus the transient
+    /// pointer/keyboard flags. Order is irrelevant — precedence lives in
+    /// the shared resolver. `"active"` mirrors the pressed (pointer-
+    /// down) state; `"focus"` the keyboard focus.
+    pub fn active_states<'a>(&self, hovered: bool, pressed: bool, focused: bool) -> Vec<&'a str> {
+        let mut states = Vec::new();
+        if self.disabled {
+            states.push("disabled");
+        }
+        if hovered {
+            states.push("hover");
+        }
+        if focused {
+            states.push("focus");
+        }
+        if pressed {
+            states.push("active");
+        }
+        states
+    }
+
+    /// Resolve `backgroundColor` for the given live interaction states,
+    /// returning the winning variant colour when one beats the base.
+    /// `None` means "no state/breakpoint variant wins; use the base".
+    pub fn background_color_for(&self, active_states: &[&str]) -> Option<Rgba> {
+        self.resolve("backgroundColor", &self.background_color, active_states)
+    }
+
+    /// Resolve foreground `color` for the given live interaction states.
+    pub fn color_for(&self, active_states: &[&str]) -> Option<Rgba> {
+        self.resolve("color", &self.color, active_states)
+    }
+
+    /// Resolve `borderColor` for the given live interaction states.
+    pub fn border_color_for(&self, active_states: &[&str]) -> Option<Rgba> {
+        self.resolve("borderColor", &self.border_color, active_states)
+    }
+
+    fn resolve(
+        &self,
+        base: &str,
+        candidates: &[VariantCandidate],
+        active_states: &[&str],
+    ) -> Option<Rgba> {
+        if candidates.is_empty() {
+            return None;
+        }
+        let keys: Vec<&str> = candidates.iter().map(|c| c.key.as_str()).collect();
+        let picked =
+            hypen_engine::portable::pick_variant_base(base, &keys, self.viewport.w, active_states)?;
+        // Only override when a *variant-decorated* candidate won; a
+        // plain-base winner means the base value already on the item is
+        // correct (don't double-resolve).
+        if picked == base {
+            return None;
+        }
+        candidates
+            .iter()
+            .find(|c| c.decorated == picked)
+            .map(|c| c.value)
+    }
+}
+
+/// Collect the variant (state/breakpoint-decorated) colour candidates
+/// for a single paint prop off `node`. Only keys whose parsed base
+/// equals `base` AND that carry a variant marker (`@bp` or `:state`) are
+/// included — the plain base is handled by the existing
+/// `prop_color_at` path on the `LayoutItem`. Returns an empty vec for
+/// the common no-variant case.
+pub fn collect_color_variants(node: &Node, base: &str) -> Vec<VariantCandidate> {
+    let mut out = Vec::new();
+    for key in node.props.keys() {
+        let parsed = hypen_engine::portable::parse_prop_key(key);
+        if parsed.base != base {
+            continue;
+        }
+        if parsed.breakpoint.is_none() && parsed.state.is_none() {
+            continue; // plain base — handled elsewhere
+        }
+        // Build the decorated base (no arg suffix).
+        let mut decorated = parsed.base.clone();
+        if let Some(bp) = &parsed.breakpoint {
+            decorated.push('@');
+            decorated.push_str(bp);
+        }
+        if let Some(st) = &parsed.state {
+            decorated.push(':');
+            decorated.push_str(st);
+        }
+        if let Some(value) = node.props.get(key).and_then(Value::as_str).and_then(parse_color) {
+            out.push(VariantCandidate {
+                key: key.clone(),
+                decorated,
+                value,
+            });
+        }
+    }
+    out
+}
+
+/// Build the full [`StateVariants`] override set for `node` at the given
+/// viewport. Resolves `backgroundColor`, `color`, and `borderColor`
+/// variant candidates so the painter can apply state variants without
+/// the renderer tree.
+pub fn state_variants(node: &Node, viewport: Viewport) -> StateVariants {
+    StateVariants {
+        viewport,
+        disabled: is_disabled(node),
+        background_color: collect_color_variants(node, "backgroundColor"),
+        color: collect_color_variants(node, "color"),
+        border_color: collect_color_variants(node, "borderColor"),
+    }
+}
+
+/// Derive the node's disabled state from `enabled` / `disabled` props
+/// (each via the standard `.0` / direct chain). `disabled: true` or
+/// `enabled: false` both count; absent → not disabled.
+fn is_disabled(node: &Node) -> bool {
+    let as_bool = |name: &str| -> Option<bool> {
+        node.props
+            .get(name)
+            .or_else(|| node.props.get(&format!("{name}.0")))
+            .and_then(Value::as_bool)
+    };
+    if as_bool("disabled") == Some(true) {
+        return true;
+    }
+    if as_bool("enabled") == Some(false) {
+        return true;
+    }
+    false
+}
+
+/// Choose the winning variant-decorated base name for `name` on `node`
+/// given the current `viewport_w` / `active_states`, then return that
+/// decorated base (e.g. `"padding@md"`, `"backgroundColor:hover"`, or
+/// plain `"padding"`). Returns `None` only when no prop key on the node
+/// matches `name` at all.
+///
+/// The decorated base deliberately omits the `.0` arg suffix — callers
+/// feed it back to [`prop_f32`] / [`prop_str`] / [`prop_color`] which
+/// append the suffix themselves. This unifies the responsive + state
+/// resolution onto the engine's shared parser and fixes the historical
+/// `.0` mismatch (the old hand-rolled `lookup_breakpoint` built
+/// `"padding@md"` and raw-`get`'d it, missing the real `"padding@md.0"`).
+fn pick_base(node: &Node, name: &str, viewport_w: f32, active_states: &[&str]) -> Option<String> {
+    let candidate_keys: Vec<&str> = node.props.keys().map(String::as_str).collect();
+    hypen_engine::portable::pick_variant_base(name, &candidate_keys, viewport_w, active_states)
+}
+
+/// Read a string prop honouring Tailwind breakpoints + interaction
+/// states. Picks the winning variant-decorated base via the shared
+/// resolver, then defers to [`prop_str`] for the actual value read +
+/// fallback chain. The non-breakpoint variant ([`prop_str`]) is the
+/// right call for paths that don't have a viewport handy (e.g.
+/// accessibility serialisation).
+pub fn prop_str_with<'a>(node: &'a Node, name: &str, vs: &VariantState) -> Option<&'a str> {
+    if let Some(decorated) = pick_base(node, name, vs.viewport.w, &vs.active_states) {
+        if decorated != name {
+            // A variant-decorated key won — read its `.0` value
+            // directly. `prop_str` appends `.0` and also tries the bare
+            // key, so this resolves `backgroundColor@md:hover.0` etc.
+            if let Some(v) = prop_str(node, &decorated) {
+                return Some(v);
+            }
+        }
+    }
+    // Responsive *value-map* form: `.gridColumns({default: 2, md: 3})`
+    // lands as a single JSON object prop (not `name@md.0` suffix keys),
+    // so the variant resolver above won't see it. Honour it here.
+    if let Some(v) = lookup_responsive_object(node, name, vs.viewport.w).and_then(Value::as_str) {
+        return Some(v);
+    }
+    prop_str(node, name)
+}
+
+/// Tailwind-style breakpoint thresholds (px), largest-first. Matches the
+/// defaults the engine's `hypen-tailwind-parse` emits in `name@bp` keys.
+/// Used by [`lookup_responsive_object`] to pick the largest active band
+/// in a value-map (`.gridColumns({default: 2, md: 3})`). Suffix-keyed
+/// breakpoint props (`padding@md.0`) instead resolve through the shared
+/// `pick_variant_base` resolver.
 const BREAKPOINTS_DESC: &[(&str, f32)] = &[
     ("2xl", 1536.0),
     ("xl", 1280.0),
@@ -115,28 +569,6 @@ const BREAKPOINTS_DESC: &[(&str, f32)] = &[
     ("md", 768.0),
     ("sm", 640.0),
 ];
-
-/// Walk breakpoint suffixes from largest-active down to base, returning
-/// the first existing prop value. Used by [`prop_str_at`] /
-/// [`prop_f32_at`] so layout can resolve `padding@md = "2rem"` etc.
-fn lookup_breakpoint<'a>(node: &'a Node, name: &str, viewport_w: f32) -> Option<&'a Value> {
-    for (bp, threshold) in BREAKPOINTS_DESC {
-        if viewport_w >= *threshold {
-            // The engine emits responsive props with the positional `.0`
-            // suffix (`padding@md.0`); accept both that and the bare
-            // `padding@md` form so either reaches layout.
-            let key = format!("{name}@{bp}");
-            if let Some(v) = node.props.get(&key) {
-                return Some(v);
-            }
-            let dotted = format!("{name}@{bp}.0");
-            if let Some(v) = node.props.get(&dotted) {
-                return Some(v);
-            }
-        }
-    }
-    None
-}
 
 /// Resolve a *responsive-object* prop value: `.gridColumns({default: 2,
 /// md: 3, lg: 4})` (and any other applicator passed an object keyed by
@@ -164,35 +596,49 @@ fn lookup_responsive_object<'a>(
     obj.get("default").or_else(|| obj.get("base"))
 }
 
-/// Read a string prop honouring Tailwind breakpoints. Lookup order:
-/// largest-active `@bp` suffix → direct → `name.0` → kebab. The
-/// non-breakpoint variant ([`prop_str`]) is the right call for paths
-/// that don't have a viewport handy (e.g. accessibility serialisation).
-pub fn prop_str_at<'a>(node: &'a Node, name: &str, viewport_w: f32) -> Option<&'a str> {
-    if let Some(v) = lookup_breakpoint(node, name, viewport_w).and_then(Value::as_str) {
+/// Numeric counterpart of [`prop_str_with`].
+pub fn prop_f32_with(node: &Node, name: &str, vs: &VariantState) -> Option<f32> {
+    let viewport = Some(vs.viewport);
+    if let Some(decorated) = pick_base(node, name, vs.viewport.w, &vs.active_states) {
+        if decorated != name {
+            if let Some(v) = prop_f32_in(node, &decorated, viewport) {
+                return Some(v);
+            }
+        }
+    }
+    // Responsive *value-map* form (`.gridColumns({default: 2, md: 3})`).
+    if let Some(v) =
+        lookup_responsive_object(node, name, vs.viewport.w).and_then(|v| value_to_f32(v, viewport))
+    {
         return Some(v);
     }
-    if let Some(v) = lookup_responsive_object(node, name, viewport_w).and_then(Value::as_str) {
-        return Some(v);
-    }
-    prop_str(node, name)
+    // `_in`, not the bare `prop_f32`: this is the fallthrough every
+    // plain `height: "100vh"` takes, and dropping the viewport here
+    // would undo the whole resolution chain above it.
+    prop_f32_in(node, name, viewport)
+}
+
+/// Colour counterpart of [`prop_str_with`] — runs the result through
+/// [`parse_color`].
+pub fn prop_color_with(node: &Node, name: &str, vs: &VariantState) -> Option<Rgba> {
+    prop_str_with(node, name, vs).and_then(parse_color)
+}
+
+/// Read a string prop honouring Tailwind breakpoints (layout-time, no
+/// interaction states). Thin wrapper over [`prop_str_with`].
+pub fn prop_str_at<'a>(node: &'a Node, name: &str, viewport: Viewport) -> Option<&'a str> {
+    prop_str_with(node, name, &VariantState::layout(viewport))
 }
 
 /// Numeric counterpart of [`prop_str_at`].
-pub fn prop_f32_at(node: &Node, name: &str, viewport_w: f32) -> Option<f32> {
-    if let Some(v) = lookup_breakpoint(node, name, viewport_w).and_then(value_to_f32) {
-        return Some(v);
-    }
-    if let Some(v) = lookup_responsive_object(node, name, viewport_w).and_then(value_to_f32) {
-        return Some(v);
-    }
-    prop_f32(node, name)
+pub fn prop_f32_at(node: &Node, name: &str, viewport: Viewport) -> Option<f32> {
+    prop_f32_with(node, name, &VariantState::layout(viewport))
 }
 
 /// Colour counterpart of [`prop_str_at`] — same fallback chain, then
 /// runs the result through [`parse_color`].
-pub fn prop_color_at(node: &Node, name: &str, viewport_w: f32) -> Option<Rgba> {
-    prop_str_at(node, name, viewport_w).and_then(parse_color)
+pub fn prop_color_at(node: &Node, name: &str, viewport: Viewport) -> Option<Rgba> {
+    prop_color_with(node, name, &VariantState::layout(viewport))
 }
 
 /// Read a colour prop and parse it. Accepts CSS hex (`#rgb`, `#rgba`,
@@ -219,13 +665,26 @@ pub fn margin(node: &Node) -> Padding {
 }
 
 /// Viewport-aware [`padding`] — honours `padding@md` etc. tw classes.
-pub fn padding_at(node: &Node, viewport_w: f32) -> Padding {
-    read_box_props_at(node, "padding", viewport_w)
+pub fn padding_at(node: &Node, viewport: Viewport) -> Padding {
+    read_box_props_at(node, "padding", &VariantState::layout(viewport))
 }
 
 /// Viewport-aware [`margin`].
-pub fn margin_at(node: &Node, viewport_w: f32) -> Padding {
-    read_box_props_at(node, "margin", viewport_w)
+pub fn margin_at(node: &Node, viewport: Viewport) -> Padding {
+    read_box_props_at(node, "margin", &VariantState::layout(viewport))
+}
+
+/// Variant-aware [`padding`] — honours both `padding@md` breakpoints and
+/// interaction-state variants (`padding:hover`) per the active states in
+/// `vs`. The layout pass uses this so layout-affecting state variants
+/// reach Taffy.
+pub fn padding_with(node: &Node, vs: &VariantState) -> Padding {
+    read_box_props_at(node, "padding", vs)
+}
+
+/// Variant-aware [`margin`] — see [`padding_with`].
+pub fn margin_with(node: &Node, vs: &VariantState) -> Padding {
+    read_box_props_at(node, "margin", vs)
 }
 
 /// Shared box-model reader for `padding` / `margin`. The Hypen DSL gives
@@ -235,63 +694,96 @@ pub fn margin_at(node: &Node, viewport_w: f32) -> Padding {
 /// Viewport-aware variant of [`read_box_props`]. Mirrors the same
 /// precedence chain but every `prop_f32` lookup goes through the
 /// breakpoint-aware [`prop_f32_at`].
-fn read_box_props_at(node: &Node, prefix: &str, viewport_w: f32) -> Padding {
+/// Whether the node DECLARES any padding, regardless of its value.
+///
+/// [`padding_with`] resolves to a `Padding` whose unset edges are `0.0`, so
+/// callers that fall back to a default when they see zero cannot tell "no
+/// padding specified" from "padding explicitly set to zero". Buttons do
+/// exactly that, which made `.tw("p-0")` a no-op: the launcher's dock icons
+/// each kept the 16pt default and grew from 56pt to 88pt, so four of them
+/// overflowed the dock's `max-w-[260px]` container.
+///
+/// Checks the same key space as [`read_box_props_at`].
+pub fn declares_padding(node: &Node, vs: &VariantState) -> bool {
+    let viewport = Some(vs.viewport);
+    const SUFFIXES: &[&str] = &[
+        "", "Horizontal", "Vertical", "Top", "Bottom", "Left", "Right",
+    ];
+    if SUFFIXES
+        .iter()
+        .any(|suffix| prop_f32_with(node, &format!("padding{suffix}"), vs).is_some())
+    {
+        return true;
+    }
+    ["padding.top", "padding.right", "padding.bottom", "padding.left"]
+        .iter()
+        .any(|k| {
+            node.props
+                .get(*k)
+                .and_then(|v| value_to_f32(v, viewport))
+                .is_some()
+        })
+}
+
+fn read_box_props_at(node: &Node, prefix: &str, vs: &VariantState) -> Padding {
+    let viewport = Some(vs.viewport);
     let mut p = Padding::default();
-    if let Some(v) = prop_f32_at(node, prefix, viewport_w) {
+    if let Some(v) = prop_f32_with(node, prefix, vs) {
         p = Padding::uniform(v);
     }
-    if let Some(v) = prop_f32_at(node, &format!("{prefix}Horizontal"), viewport_w) {
+    if let Some(v) = prop_f32_with(node, &format!("{prefix}Horizontal"), vs) {
         p.left = v;
         p.right = v;
     }
-    if let Some(v) = prop_f32_at(node, &format!("{prefix}Vertical"), viewport_w) {
+    if let Some(v) = prop_f32_with(node, &format!("{prefix}Vertical"), vs) {
         p.top = v;
         p.bottom = v;
     }
     if let Some(v) = node
         .props
         .get(&format!("{prefix}.top"))
-        .and_then(value_to_f32)
+        .and_then(|v| value_to_f32(v, viewport))
     {
         p.top = v;
     }
     if let Some(v) = node
         .props
         .get(&format!("{prefix}.right"))
-        .and_then(value_to_f32)
+        .and_then(|v| value_to_f32(v, viewport))
     {
         p.right = v;
     }
     if let Some(v) = node
         .props
         .get(&format!("{prefix}.bottom"))
-        .and_then(value_to_f32)
+        .and_then(|v| value_to_f32(v, viewport))
     {
         p.bottom = v;
     }
     if let Some(v) = node
         .props
         .get(&format!("{prefix}.left"))
-        .and_then(value_to_f32)
+        .and_then(|v| value_to_f32(v, viewport))
     {
         p.left = v;
     }
-    if let Some(v) = prop_f32_at(node, &format!("{prefix}Top"), viewport_w) {
+    if let Some(v) = prop_f32_with(node, &format!("{prefix}Top"), vs) {
         p.top = v;
     }
-    if let Some(v) = prop_f32_at(node, &format!("{prefix}Bottom"), viewport_w) {
+    if let Some(v) = prop_f32_with(node, &format!("{prefix}Bottom"), vs) {
         p.bottom = v;
     }
-    if let Some(v) = prop_f32_at(node, &format!("{prefix}Left"), viewport_w) {
+    if let Some(v) = prop_f32_with(node, &format!("{prefix}Left"), vs) {
         p.left = v;
     }
-    if let Some(v) = prop_f32_at(node, &format!("{prefix}Right"), viewport_w) {
+    if let Some(v) = prop_f32_with(node, &format!("{prefix}Right"), vs) {
         p.right = v;
     }
     p
 }
 
 fn read_box_props(node: &Node, prefix: &str) -> Padding {
+    let viewport: Option<Viewport> = None;
     let mut p = Padding::default();
 
     if let Some(v) = prop_f32(node, prefix) {
@@ -308,28 +800,28 @@ fn read_box_props(node: &Node, prefix: &str) -> Padding {
     if let Some(v) = node
         .props
         .get(&format!("{prefix}.top"))
-        .and_then(value_to_f32)
+        .and_then(|v| value_to_f32(v, viewport))
     {
         p.top = v;
     }
     if let Some(v) = node
         .props
         .get(&format!("{prefix}.right"))
-        .and_then(value_to_f32)
+        .and_then(|v| value_to_f32(v, viewport))
     {
         p.right = v;
     }
     if let Some(v) = node
         .props
         .get(&format!("{prefix}.bottom"))
-        .and_then(value_to_f32)
+        .and_then(|v| value_to_f32(v, viewport))
     {
         p.bottom = v;
     }
     if let Some(v) = node
         .props
         .get(&format!("{prefix}.left"))
-        .and_then(value_to_f32)
+        .and_then(|v| value_to_f32(v, viewport))
     {
         p.left = v;
     }
@@ -404,6 +896,7 @@ impl Border {
 /// 2. `.border(width: N, color: ..., radius: N)` (named-object form).
 /// 3. `.border(N)` (single positional → width only).
 pub fn border(node: &Node) -> Border {
+    let viewport: Option<Viewport> = None;
     let mut width = 0.0_f32;
     let mut radius = 0.0_f32;
     // Track colour explicitly so an opaque-black default only kicks in
@@ -415,7 +908,11 @@ pub fn border(node: &Node) -> Border {
     if let Some(v) = prop_f32(node, "border") {
         width = v;
     }
-    if let Some(v) = node.props.get("border.width").and_then(value_to_f32) {
+    if let Some(v) = node
+        .props
+        .get("border.width")
+        .and_then(|v| value_to_f32(v, viewport))
+    {
         width = v;
     }
     if let Some(v) = node
@@ -426,7 +923,11 @@ pub fn border(node: &Node) -> Border {
     {
         color = Some(v);
     }
-    if let Some(v) = node.props.get("border.radius").and_then(value_to_f32) {
+    if let Some(v) = node
+        .props
+        .get("border.radius")
+        .and_then(|v| value_to_f32(v, viewport))
+    {
         radius = v;
     }
     if let Some(v) = prop_f32(node, "borderWidth") {
@@ -458,7 +959,18 @@ pub fn border(node: &Node) -> Border {
 }
 
 /// Viewport-aware [`border`] — honours `borderWidth@md` etc.
-pub fn border_at(node: &Node, viewport_w: f32) -> Border {
+pub fn border_at(node: &Node, viewport: Viewport) -> Border {
+    border_with(node, &VariantState::layout(viewport))
+}
+
+/// Variant-aware [`border`] — honours both breakpoints and interaction-
+/// state variants on the geometry-affecting border-width props. Border
+/// colour state variants are still handled by the painter via
+/// [`StateVariants`]; this resolves the *width* (and radius / sides)
+/// which feed Taffy.
+pub fn border_with(node: &Node, vs: &VariantState) -> Border {
+    let viewport = vs.viewport;
+    let viewport_opt = Some(viewport);
     let mut width = 0.0_f32;
     let mut radius = 0.0_f32;
     let mut color: Option<Rgba> = None;
@@ -471,11 +983,28 @@ pub fn border_at(node: &Node, viewport_w: f32) -> Border {
     let mut bottom: Option<f32> = None;
     let mut left: Option<f32> = None;
 
-    if let Some(v) = prop_f32_at(node, "border", viewport_w) {
+    if let Some(v) = prop_f32_with(node, "border", vs) {
         width = v;
         uniform_set = true;
     }
-    if let Some(v) = node.props.get("border.width").and_then(value_to_f32) {
+    // CSS `border` shorthand: `.border("1px solid #333")`. Not a bare
+    // length, so the numeric read above rejects it and the border was
+    // simply not drawn — todo's task rows lost their outline entirely
+    // while rendering correctly on web, where this is just CSS.
+    if let Some(sh) = prop_str_with(node, "border", vs).and_then(parse_border_shorthand) {
+        if let Some(w) = sh.0 {
+            width = w;
+            uniform_set = true;
+        }
+        if let Some(c) = sh.1 {
+            color = Some(c);
+        }
+    }
+    if let Some(v) = node
+        .props
+        .get("border.width")
+        .and_then(|v| value_to_f32(v, viewport_opt))
+    {
         width = v;
         uniform_set = true;
     }
@@ -487,28 +1016,33 @@ pub fn border_at(node: &Node, viewport_w: f32) -> Border {
     {
         color = Some(v);
     }
-    if let Some(v) = node.props.get("border.radius").and_then(value_to_f32) {
+    if let Some(v) = node
+        .props
+        .get("border.radius")
+        .and_then(|v| value_to_f32(v, viewport_opt))
+    {
         radius = v;
     }
-    if let Some(v) = prop_f32_at(node, "borderWidth", viewport_w) {
+    if let Some(v) = prop_f32_with(node, "borderWidth", vs) {
         width = v;
         uniform_set = true;
     }
-    if let Some(v) = prop_color_at(node, "borderColor", viewport_w) {
+    if let Some(v) = prop_color_at(node, "borderColor", viewport) {
         color = Some(v);
     }
-    if let Some(v) = prop_f32_at(node, "borderRadius", viewport_w) {
+    if let Some(v) = prop_f32_at(node, "borderRadius", viewport) {
         radius = v;
     }
-    if let Some(v) = prop_f32_at(node, "cornerRadius", viewport_w) {
+    if let Some(v) = prop_f32_at(node, "cornerRadius", viewport) {
         radius = v;
     }
     // Per-side: tw `border-b` → `border-bottom-width: 1px`. We accept
-    // both camelCase + kebab via the standard `prop_f32_at` chain.
-    top = prop_f32_at(node, "borderTopWidth", viewport_w);
-    right = prop_f32_at(node, "borderRightWidth", viewport_w);
-    bottom = prop_f32_at(node, "borderBottomWidth", viewport_w);
-    left = prop_f32_at(node, "borderLeftWidth", viewport_w);
+    // both camelCase + kebab via the standard `prop_f32_with` chain
+    // (variant-aware so `borderBottomWidth:hover` reaches layout).
+    top = prop_f32_with(node, "borderTopWidth", vs);
+    right = prop_f32_with(node, "borderRightWidth", vs);
+    bottom = prop_f32_with(node, "borderBottomWidth", vs);
+    left = prop_f32_with(node, "borderLeftWidth", vs);
 
     let sides = if uniform_set {
         BORDER_SIDES_ALL
@@ -575,16 +1109,21 @@ pub fn has_explicit_border(node: &Node) -> bool {
     KEYS.iter().any(|k| node.props.contains_key(*k))
 }
 
-fn value_to_f32(v: &Value) -> Option<f32> {
+/// `viewport: None` means no viewport basis is in scope at this call
+/// site. Viewport units then read as *absent* rather than silently
+/// collapsing to zero — a dropped prop is recoverable, a confidently
+/// wrong `0` is not.
+fn value_to_f32(v: &Value, viewport: Option<Viewport>) -> Option<f32> {
     match v {
         Value::Number(n) => n.as_f64().map(|f| f as f32),
-        Value::String(s) => parse_length(s),
+        Value::String(s) => parse_length(s, viewport),
         _ => None,
     }
 }
 
-/// Parse a CSS-ish length: `"16"`, `"16px"`. Phase 3 doesn't honour `%`
-/// or `em` — Taffy will deal with those once we expose width/height.
+/// Parse a CSS-ish length. `%` is *not* handled here — it is a
+/// container-relative unit, so it resolves in [`parse_percent`] /
+/// [`Dim::Percent`] where taffy can apply it against the real parent.
 ///
 /// Accepts:
 /// - `"16"`, `"16.5"` — bare numbers (treated as px).
@@ -593,8 +1132,35 @@ fn value_to_f32(v: &Value) -> Option<f32> {
 ///   default; Hypen doesn't expose a custom root font size yet).
 /// - `"1em"`, `"1.25em"` — same conversion as `rem` for now (we don't
 ///   track parent font-size during layout build).
-fn parse_length(s: &str) -> Option<f32> {
+/// - `"100vh"`, `"50vw"`, `"10vmin"`, `"10vmax"` — viewport units,
+///   resolved against `viewport` (logical px) and returned in logical
+///   px, matching every other length this function yields.
+///
+/// The viewport family matters more than its rarity suggests: Tailwind
+/// lowers `h-screen` to `height: "100vh"`, so before these suffixes were
+/// understood the parse failed and the height prop was dropped in
+/// silence rather than erroring.
+fn parse_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
     let trimmed = s.trim();
+    // Order matters: `vmin`/`vmax` must be tried before `vw`/`vh`, whose
+    // suffixes they do not share but whose *prefixes* they do — and `rem`
+    // before `em` for the same reason. A `None` viewport means the unit
+    // is unresolvable here, so fall through to `None` rather than 0.
+    if let Some(vp) = viewport {
+        for (suffix, basis) in [
+            ("vmin", vp.vmin()),
+            ("vmax", vp.vmax()),
+            ("vw", vp.w),
+            ("vh", vp.h),
+        ] {
+            if let Some(num) = trimmed.strip_suffix(suffix) {
+                return num.trim().parse::<f32>().ok().map(|v| v * basis * 0.01);
+            }
+        }
+    }
+    // With `viewport: None` a viewport-unit string falls through to the
+    // bare-number parse below and fails there, which is the intended
+    // "unresolvable" answer.
     if let Some(num) = trimmed.strip_suffix("rem") {
         return num.trim().parse::<f32>().ok().map(|v| v * 16.0);
     }
@@ -638,16 +1204,21 @@ pub fn parse_aspect_ratio(s: &str) -> Option<f32> {
 /// numerics, but with the CSS slash form (`"1 / 1"`) accepted on
 /// strings. Falls back to the bare-number reader so explicit
 /// `.aspectRatio(1.5)` still works.
-pub fn prop_aspect_ratio_at(node: &Node, name: &str, viewport_w: f32) -> Option<f32> {
+pub fn prop_aspect_ratio_at(node: &Node, name: &str, viewport: Viewport) -> Option<f32> {
+    prop_aspect_ratio_with(node, name, &VariantState::layout(viewport))
+}
+
+/// Variant-aware [`prop_aspect_ratio_at`].
+pub fn prop_aspect_ratio_with(node: &Node, name: &str, vs: &VariantState) -> Option<f32> {
     // String form (the kebab path that tw emits) — try every key
-    // variant `prop_f32_at` would check, but route through
+    // variant `prop_str_with` would check, but route through
     // `parse_aspect_ratio` so `"X / Y"` resolves.
-    if let Some(s) = prop_str_at(node, name, viewport_w) {
+    if let Some(s) = prop_str_with(node, name, vs) {
         if let Some(v) = parse_aspect_ratio(s) {
             return Some(v);
         }
     }
-    prop_f32_at(node, name, viewport_w)
+    prop_f32_with(node, name, vs)
 }
 
 // ---------------------------------------------------------------------------
@@ -944,36 +1515,193 @@ fn split_color_offset(s: &str) -> (&str, Option<&str>) {
 ///    `substitute_tw_gradient_vars`, then parsed.
 ///
 /// Returns `None` when neither path produces a gradient.
-pub fn prop_linear_gradient(node: &Node, viewport_w: f32) -> Option<LinearGradient> {
-    let _ = viewport_w; // gradients aren't viewport-keyed (yet)
+pub fn prop_linear_gradient(node: &Node, viewport: Viewport) -> Option<LinearGradient> {
+    let _ = viewport; // gradients aren't viewport-keyed (yet)
     if let Some(g) = read_linear_gradient_applicator(node) {
         return Some(g);
     }
-    let raw = node
-        .props
-        .get("background-image")
-        .or_else(|| node.props.get("backgroundImage"))
-        .and_then(|v| v.as_str())?;
+    // `prop_str` rather than a raw `props.get`: the engine flattens
+    // applicator args, so the wire key is `backgroundImage.0`, not
+    // `backgroundImage`. Reading the bare names missed every Tailwind
+    // `bg-gradient-to-*` tile — they arrived as
+    // `backgroundImage.0 = linear-gradient(...)` and rendered flat.
+    let raw = prop_str(node, "backgroundImage")?;
     let resolved = substitute_tw_gradient_vars(node, raw);
     parse_linear_gradient(&resolved)
 }
 
-/// First-class applicator path: read `.linearGradient(direction,
-/// colors)` props off the node. Engine flattens applicators to
-/// `linearGradient.0` (first positional) and `linearGradient.1`
-/// (second positional) or `linearGradient.direction` /
-/// `linearGradient.colors` if the user used named args. Both forms
-/// are accepted.
+/// Extract a background IMAGE source from a node.
+///
+/// Reads the CSS `background` shorthand as well as `background-image`,
+/// because a layered value puts both in one prop:
+///
+/// ```text
+/// background: linear-gradient(...), url('data:image/png;base64,...') center / cover no-repeat
+/// ```
+///
+/// Only the `url(...)` layer is returned — the gradient layer is handled by
+/// [`prop_linear_gradient`], and the trailing position/size/repeat keywords
+/// aren't expressible here (`cover` is what the painter does anyway).
+///
+/// Splitting is paren- and quote-aware: a layer list is comma-separated, but
+/// so are `rgba(3, 7, 18, 0.6)` and a gradient's colour stops, and a base64
+/// payload can contain anything. A naive `split(',')` shreds all three.
+pub fn prop_background_image_url(node: &Node) -> Option<String> {
+    for name in ["background", "backgroundImage"] {
+        let Some(raw) = prop_str(node, name) else {
+            continue;
+        };
+        for layer in split_top_level(raw) {
+            if let Some(url) = extract_url(layer.trim()) {
+                return Some(url);
+            }
+        }
+    }
+    None
+}
+
+/// Split on commas that are not nested inside parentheses or quotes.
+fn split_top_level(value: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in value.chars() {
+        match quote {
+            Some(q) => {
+                current.push(ch);
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '\'' | '"' => {
+                    current.push(ch);
+                    quote = Some(ch);
+                }
+                '(' => {
+                    depth += 1;
+                    current.push(ch);
+                }
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(ch);
+                }
+                ',' if depth == 0 => {
+                    parts.push(std::mem::take(&mut current));
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
+
+/// `url('...')` / `url(...)` anywhere in a layer -> the bare URI.
+fn extract_url(layer: &str) -> Option<String> {
+    let lower = layer.to_ascii_lowercase();
+    let start = lower.find("url(")? + 4;
+    let mut depth = 1usize;
+    let mut end = start;
+    for (i, ch) in layer[start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    let uri = layer[start..end].trim().trim_matches(['\'', '"']).trim();
+    if uri.is_empty() {
+        None
+    } else {
+        Some(uri.to_string())
+    }
+}
+
+/// Parse the CSS `border` shorthand — `1px solid #333`, `2px #f00`,
+/// `solid red`. Returns `(width, colour)`, either of which may be
+/// absent; the line style is deliberately dropped, since the painter
+/// only strokes solid.
+///
+/// Order-independent per CSS: whichever token parses as a length is the
+/// width, whichever parses as a colour is the colour, and the style
+/// keyword is ignored. Returns `None` when nothing usable was found, so
+/// callers can distinguish "not a shorthand" from "shorthand with
+/// defaults".
+fn parse_border_shorthand(s: &str) -> Option<(Option<f32>, Option<Rgba>)> {
+    const STYLES: &[&str] = &[
+        "none", "hidden", "solid", "dashed", "dotted", "double", "groove", "ridge", "inset",
+        "outset",
+    ];
+    let mut width = None;
+    let mut color = None;
+    for tok in s.split_whitespace() {
+        if STYLES.contains(&tok.to_ascii_lowercase().as_str()) {
+            continue;
+        }
+        if width.is_none() {
+            // No viewport: a viewport-relative border width is vanishingly
+            // rare and resolving it here would need threading one in.
+            if let Some(w) = parse_length(tok, None) {
+                width = Some(w);
+                continue;
+            }
+        }
+        if color.is_none() {
+            if let Some(c) = parse_color(tok) {
+                color = Some(c);
+            }
+        }
+    }
+    if width.is_none() && color.is_none() {
+        return None;
+    }
+    Some((width, color))
+}
+
+/// First-class applicator path: read `.linearGradient(..)` props off
+/// the node. The engine flattens applicators to `linearGradient.0` /
+/// `linearGradient.1` (positional) or `linearGradient.direction` /
+/// `linearGradient.colors` (named). Three forms are accepted:
+///
+/// - `.linearGradient(direction, [colors])` — two args, stops as a list.
+/// - `.linearGradient(direction: .., colors: ..)` — the same, named.
+/// - `.linearGradient("135deg, #EC4899 0%, #F472B6 100%")` — one arg
+///   holding the whole CSS gradient *body*, which is what the DOM
+///   renderer lowers to `linear-gradient(<body>)` and what
+///   movie-discovery's featured card and search button actually use.
+///
+/// The single-argument form used to fall through to `None` here (no
+/// `.1` prop) and then miss again on `backgroundImage`, so those
+/// surfaces painted no gradient at all on desktop while rendering
+/// correctly on web.
 fn read_linear_gradient_applicator(node: &Node) -> Option<LinearGradient> {
     let dir_str = node
         .props
         .get("linearGradient.direction")
         .or_else(|| node.props.get("linearGradient.0"))
         .and_then(|v| v.as_str())?;
-    let colors_val = node
+    let Some(colors_val) = node
         .props
         .get("linearGradient.colors")
-        .or_else(|| node.props.get("linearGradient.1"))?;
+        .or_else(|| node.props.get("linearGradient.1"))
+    else {
+        // One-argument form: hand the body to the CSS parser, which
+        // already understands angles, `to <side>`, and per-stop offsets.
+        return parse_linear_gradient(&format!("linear-gradient({})", dir_str.trim()));
+    };
     let direction = parse_direction(dir_str.trim())?;
     let colors = colors_val.as_array()?;
     let stops: Vec<GradientStop> = colors
@@ -1039,12 +1767,32 @@ pub fn substitute_tw_gradient_vars(node: &Node, raw: &str) -> String {
 /// `Dim`. Strings carrying `%` resolve to `Dim::Percent`; everything
 /// else (numbers, `"16px"`, `"1rem"`) resolves to `Dim::Length`.
 /// Returns `None` when the prop is absent or unparseable.
-pub fn prop_dim_at(node: &Node, name: &str, viewport_w: f32) -> Option<Dim> {
+pub fn prop_dim_at(node: &Node, name: &str, viewport: Viewport) -> Option<Dim> {
+    prop_dim_with(node, name, &VariantState::layout(viewport))
+}
+
+/// Variant-aware [`prop_dim_at`] — resolves percent strings off the
+/// winning variant-decorated key (so `width:hover` / `width@md:hover`
+/// participate in layout), falling back to the bare / dotted / kebab
+/// percent reads and finally the numeric length chain.
+pub fn prop_dim_with(node: &Node, name: &str, vs: &VariantState) -> Option<Dim> {
+    // If a variant-decorated key wins, prefer its percent value first so
+    // `width:hover.0 = "50%"` resolves as a percent rather than falling
+    // through to the length chain.
+    if let Some(decorated) = pick_base(node, name, vs.viewport.w, &vs.active_states) {
+        if decorated != name {
+            if let Some(s) = prop_str(node, &decorated) {
+                if let Some(pct) = parse_percent(s) {
+                    return Some(Dim::Percent(pct));
+                }
+            }
+        }
+    }
     // Percent strings are only meaningful as raw values; check the
     // bare prop and the dotted positional first. If neither is a
-    // string with `%`, fall through to the standard `prop_f32_at`
+    // string with `%`, fall through to the standard `prop_f32_with`
     // chain (which honours camelCase + dotted + kebab + tw
-    // breakpoints) as a length.
+    // breakpoints + states) as a length.
     if let Some(s) = node.props.get(name).and_then(|v| v.as_str()) {
         if let Some(pct) = parse_percent(s) {
             return Some(Dim::Percent(pct));
@@ -1069,7 +1817,15 @@ pub fn prop_dim_at(node: &Node, name: &str, viewport_w: f32) -> Option<Dim> {
             }
         }
     }
-    prop_f32_at(node, name, viewport_w).map(Dim::Length)
+    prop_f32_with(node, name, vs).map(Dim::Length)
+}
+
+/// Test-only viewport constructor. Breakpoint tests key off width
+/// alone, so the height is a fixed stand-in; anything exercising `vh`
+/// builds its own [`Viewport`] with a meaningful height.
+#[cfg(test)]
+pub(crate) fn vp(w: f32) -> Viewport {
+    Viewport::new(w, 800.0)
 }
 
 /// Length / percent / auto resolution for sizing props on Image and
@@ -1086,7 +1842,16 @@ pub fn parse_color(s: &str) -> Option<Rgba> {
     if let Some(hex) = s.strip_prefix('#') {
         return parse_hex(hex);
     }
-    Some(match s.to_ascii_lowercase().as_str() {
+    let lower = s.to_ascii_lowercase();
+    // `rgb()` / `rgba()` — what every Tailwind alpha-slash utility lowers to
+    // (`bg-black/25` -> `rgba(0, 0, 0, 0.25)`). Without this the whole family
+    // parsed to None and was dropped, so translucent surfaces like the
+    // home-screen dock's `bg-black/25` panel and its `border-white/15`
+    // hairline simply did not paint — desktop looked flatter than web and iOS.
+    if lower.starts_with("rgb(") || lower.starts_with("rgba(") {
+        return parse_rgb_func(&lower);
+    }
+    Some(match lower.as_str() {
         "transparent" => Rgba::TRANSPARENT,
         "black" => Rgba(0, 0, 0, 0xff),
         "white" => Rgba(0xff, 0xff, 0xff, 0xff),
@@ -1104,6 +1869,49 @@ pub fn parse_color(s: &str) -> Option<Rgba> {
         "magenta" | "fuchsia" => Rgba(0xff, 0, 0xff, 0xff),
         _ => return None,
     })
+}
+
+/// Parse `rgb(r, g, b)` / `rgba(r, g, b, a)`.
+///
+/// Channels are 0-255 (or percentages); alpha is 0..=1, matching what the
+/// Tailwind parser and the examples' CSS emit. Comma- or space-separated.
+fn parse_rgb_func(s: &str) -> Option<Rgba> {
+    let open = s.find('(')?;
+    let close = s.rfind(')')?;
+    if close <= open {
+        return None;
+    }
+    let parts: Vec<&str> = s[open + 1..close]
+        .split(|c| c == ',' || c == '/' || c == ' ')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let channel = |p: &str| -> Option<u8> {
+        let v = if let Some(pct) = p.strip_suffix('%') {
+            pct.trim().parse::<f32>().ok()? * 2.55
+        } else {
+            p.parse::<f32>().ok()?
+        };
+        Some(v.round().clamp(0.0, 255.0) as u8)
+    };
+    let r = channel(parts[0])?;
+    let g = channel(parts[1])?;
+    let b = channel(parts[2])?;
+    let a = match parts.get(3) {
+        Some(p) => {
+            let v = if let Some(pct) = p.strip_suffix('%') {
+                pct.trim().parse::<f32>().ok()? / 100.0
+            } else {
+                p.parse::<f32>().ok()?
+            };
+            (v.clamp(0.0, 1.0) * 255.0).round() as u8
+        }
+        None => 0xff,
+    };
+    Some(Rgba(r, g, b, a))
 }
 
 fn parse_hex(hex: &str) -> Option<Rgba> {
@@ -1149,6 +1957,7 @@ mod tests {
             id: "test".into(),
             element_type: "Container".into(),
             props: map,
+            semantics: None,
         }
     }
 
@@ -1274,7 +2083,7 @@ mod tests {
             ("--tw-gradient-from", Value::String("#3b82f6".into())),
             ("--tw-gradient-to", Value::String("#ec4899".into())),
         ]);
-        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        let g = prop_linear_gradient(&node, vp(800.0)).expect("resolves");
         assert_eq!(g.direction, GradientDirection::ToRight);
         assert_eq!(g.stops.len(), 2);
         assert_eq!(g.stops[0].color, Rgba(0x3b, 0x82, 0xf6, 0xff));
@@ -1300,7 +2109,7 @@ mod tests {
             ("--tw-gradient-from", Value::String("#3b82f6".into())),
             ("--tw-gradient-to", Value::String("#ec4899".into())),
         ]);
-        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        let g = prop_linear_gradient(&node, vp(800.0)).expect("resolves");
         assert_eq!(g.direction, GradientDirection::ToBottomRight);
         assert_eq!(g.stops.len(), 3);
         assert_eq!(g.stops[0].color, Rgba(0x3b, 0x82, 0xf6, 0xff));
@@ -1312,7 +2121,7 @@ mod tests {
     fn prop_linear_gradient_returns_none_without_background_image() {
         // Solid-colour node — gradient path is opt-in.
         let node = node_with(&[("background-color", Value::String("#ffffff".into()))]);
-        assert!(prop_linear_gradient(&node, 800.0).is_none());
+        assert!(prop_linear_gradient(&node, vp(800.0)).is_none());
     }
 
     #[test]
@@ -1327,7 +2136,7 @@ mod tests {
                 serde_json::json!(["#3b82f6", "#ec4899"]),
             ),
         ]);
-        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        let g = prop_linear_gradient(&node, vp(800.0)).expect("resolves");
         assert_eq!(g.direction, GradientDirection::ToRight);
         assert_eq!(g.stops.len(), 2);
         assert_eq!(g.stops[0].color, Rgba(0x3b, 0x82, 0xf6, 0xff));
@@ -1345,7 +2154,7 @@ mod tests {
                 serde_json::json!(["#ff0000", "#00ff00", "#0000ff"]),
             ),
         ]);
-        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        let g = prop_linear_gradient(&node, vp(800.0)).expect("resolves");
         match g.direction {
             GradientDirection::Angle(a) => assert!((a - 45.0).abs() < 1e-4),
             _ => panic!("expected angle"),
@@ -1373,7 +2182,7 @@ mod tests {
                 Value::String("#ff0000, #0000ff".into()),
             ),
         ]);
-        let g = prop_linear_gradient(&node, 800.0).expect("resolves");
+        let g = prop_linear_gradient(&node, vp(800.0)).expect("resolves");
         assert_eq!(g.direction, GradientDirection::ToBottom);
         assert_eq!(g.stops[0].color, Rgba(0, 0, 0, 0xff));
         assert_eq!(g.stops[1].color, Rgba(0xff, 0xff, 0xff, 0xff));
@@ -1516,9 +2325,9 @@ mod tests {
 
     #[test]
     fn parses_lengths_with_px_suffix() {
-        assert_eq!(parse_length("16"), Some(16.0));
-        assert_eq!(parse_length("16px"), Some(16.0));
-        assert_eq!(parse_length("  20px  "), Some(20.0));
+        assert_eq!(parse_length("16", Some(vp(1000.0))), Some(16.0));
+        assert_eq!(parse_length("16px", Some(vp(1000.0))), Some(16.0));
+        assert_eq!(parse_length("  20px  ", Some(vp(1000.0))), Some(20.0));
     }
 
     #[test]
@@ -1724,30 +2533,70 @@ mod tests {
 
     #[test]
     fn parse_length_accepts_rem_units() {
-        assert_eq!(parse_length("1rem"), Some(16.0));
-        assert_eq!(parse_length("1.5rem"), Some(24.0));
-        assert_eq!(parse_length("0.5rem"), Some(8.0));
-        assert_eq!(parse_length(" 2rem "), Some(32.0));
+        assert_eq!(parse_length("1rem", Some(vp(1000.0))), Some(16.0));
+        assert_eq!(parse_length("1.5rem", Some(vp(1000.0))), Some(24.0));
+        assert_eq!(parse_length("0.5rem", Some(vp(1000.0))), Some(8.0));
+        assert_eq!(parse_length(" 2rem ", Some(vp(1000.0))), Some(32.0));
     }
 
     #[test]
     fn parse_length_accepts_em_units() {
-        assert_eq!(parse_length("1em"), Some(16.0));
-        assert_eq!(parse_length("1.25em"), Some(20.0));
+        assert_eq!(parse_length("1em", Some(vp(1000.0))), Some(16.0));
+        assert_eq!(parse_length("1.25em", Some(vp(1000.0))), Some(20.0));
     }
 
     #[test]
     fn parse_length_accepts_bare_and_px() {
-        assert_eq!(parse_length("16"), Some(16.0));
-        assert_eq!(parse_length("16px"), Some(16.0));
-        assert_eq!(parse_length("16.5"), Some(16.5));
+        assert_eq!(parse_length("16", Some(vp(1000.0))), Some(16.0));
+        assert_eq!(parse_length("16px", Some(vp(1000.0))), Some(16.0));
+        assert_eq!(parse_length("16.5", Some(vp(1000.0))), Some(16.5));
     }
 
     #[test]
     fn parse_length_rejects_unknown_units() {
-        // Not yet supported: %, vh, vw, ch.
-        assert_eq!(parse_length("50%"), None);
-        assert_eq!(parse_length("1vh"), None);
+        // `%` is container-relative, so it is deliberately not a length:
+        // it resolves as `Dim::Percent` where taffy can apply it against
+        // the real parent. `ch` is genuinely unsupported.
+        assert_eq!(parse_length("50%", Some(vp(1000.0))), None);
+        assert_eq!(parse_length("4ch", Some(vp(1000.0))), None);
+    }
+
+    #[test]
+    fn parse_length_resolves_viewport_units() {
+        // vp(w) is 800 tall. Tailwind lowers `h-screen` to `100vh`,
+        // which used to fail this parse and drop the height in silence.
+        let v = Some(Viewport::new(1000.0, 800.0));
+        assert_eq!(parse_length("100vh", v), Some(800.0));
+        assert_eq!(parse_length("50vh", v), Some(400.0));
+        assert_eq!(parse_length("100vw", v), Some(1000.0));
+        assert_eq!(parse_length("10vw", v), Some(100.0));
+        // vmin/vmax key off the smaller/larger axis, not width/height.
+        assert_eq!(parse_length("100vmin", v), Some(800.0));
+        assert_eq!(parse_length("100vmax", v), Some(1000.0));
+        assert_eq!(parse_length(" 25vh ", v), Some(200.0));
+    }
+
+    #[test]
+    fn viewport_units_read_as_absent_without_a_viewport() {
+        // A dropped prop is recoverable; a confident `0` is not. Call
+        // sites with no viewport in scope must not silently collapse.
+        assert_eq!(parse_length("100vh", None), None);
+        assert_eq!(parse_length("50vw", None), None);
+        assert_eq!(parse_length("10vmin", None), None);
+        // Absolute units still resolve without a viewport.
+        assert_eq!(parse_length("16px", None), Some(16.0));
+        assert_eq!(parse_length("1rem", None), Some(16.0));
+    }
+
+    #[test]
+    fn h_screen_reaches_the_dim_resolver_as_a_length() {
+        // End-to-end for the actual Tailwind path: `h-screen` arrives as
+        // `height: "100vh"` and must survive all the way to `Dim`.
+        let node = node_with(&[("height", serde_json::json!("100vh"))]);
+        assert_eq!(
+            prop_dim_at(&node, "height", Viewport::new(1440.0, 900.0)),
+            Some(Dim::Length(900.0))
+        );
     }
 
     #[test]
@@ -1771,8 +2620,8 @@ mod tests {
         let node = node_with(&[("padding.0", serde_json::json!(8))]);
         // Any viewport — without any `padding@x` overlays, falls back
         // to the existing chain (returns base 8).
-        assert_eq!(prop_f32_at(&node, "padding", 320.0), Some(8.0));
-        assert_eq!(prop_f32_at(&node, "padding", 1920.0), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(320.0)), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(1920.0)), Some(8.0));
     }
 
     #[test]
@@ -1782,10 +2631,10 @@ mod tests {
             ("padding.0", serde_json::json!(8)),
             ("padding@md", serde_json::json!(16)),
         ]);
-        assert_eq!(prop_f32_at(&node, "padding", 320.0), Some(8.0));
-        assert_eq!(prop_f32_at(&node, "padding", 767.0), Some(8.0));
-        assert_eq!(prop_f32_at(&node, "padding", 768.0), Some(16.0));
-        assert_eq!(prop_f32_at(&node, "padding", 1024.0), Some(16.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(320.0)), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(767.0)), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(768.0)), Some(16.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(1024.0)), Some(16.0));
     }
 
     #[test]
@@ -1799,11 +2648,11 @@ mod tests {
             ("padding@xl", serde_json::json!(64)),
             ("padding@2xl", serde_json::json!(128)),
         ]);
-        assert_eq!(prop_f32_at(&node, "padding", 320.0), Some(8.0));
-        assert_eq!(prop_f32_at(&node, "padding", 768.0), Some(16.0));
-        assert_eq!(prop_f32_at(&node, "padding", 1024.0), Some(32.0));
-        assert_eq!(prop_f32_at(&node, "padding", 1280.0), Some(64.0));
-        assert_eq!(prop_f32_at(&node, "padding", 1536.0), Some(128.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(320.0)), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(768.0)), Some(16.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(1024.0)), Some(32.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(1280.0)), Some(64.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(1536.0)), Some(128.0));
     }
 
     #[test]
@@ -1814,8 +2663,8 @@ mod tests {
             ("padding.0", serde_json::json!(8)),
             ("padding@md", serde_json::json!(16)),
         ]);
-        assert_eq!(prop_f32_at(&node, "padding", 1024.0), Some(16.0));
-        assert_eq!(prop_f32_at(&node, "padding", 1920.0), Some(16.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(1024.0)), Some(16.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(1920.0)), Some(16.0));
     }
 
     #[test]
@@ -1825,11 +2674,11 @@ mod tests {
             ("backgroundColor@md", serde_json::json!("blue")),
         ]);
         assert_eq!(
-            prop_color_at(&node, "backgroundColor", 320.0),
+            prop_color_at(&node, "backgroundColor", vp(320.0)),
             Some(Rgba(0xff, 0xff, 0xff, 0xff))
         );
         assert_eq!(
-            prop_color_at(&node, "backgroundColor", 800.0),
+            prop_color_at(&node, "backgroundColor", vp(800.0)),
             Some(Rgba(0x00, 0x00, 0xff, 0xff))
         );
     }
@@ -1843,9 +2692,349 @@ mod tests {
             ("padding", serde_json::json!("1rem")),
             ("padding@md", serde_json::json!("2rem")),
         ]);
-        let small = padding_at(&node, 400.0);
+        let small = padding_at(&node, vp(400.0));
         assert_eq!(small.top, 16.0);
-        let medium = padding_at(&node, 800.0);
+        let medium = padding_at(&node, vp(800.0));
         assert_eq!(medium.top, 32.0);
+    }
+
+    // -----------------------------------------------------------------
+    // Variant phase: the `.0` breakpoint-key mismatch fix.
+    //
+    // The engine emits responsive applicator values with the variant
+    // marker BETWEEN the base and the `.0` arg suffix, e.g.
+    // `padding@md.0`. The old hand-rolled `lookup_breakpoint` built
+    // `padding@md` and raw-`get`'d it, so it never found the real
+    // `padding@md.0` key. These tests pin the canonical engine key
+    // format and prove the shared resolver now reads it.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn breakpoint_resolves_canonical_dot_zero_key_at_wide_viewport() {
+        // Canonical engine output: `padding.0` (base) + `padding@md.0`
+        // (md override). The `.0` sits AFTER the `@md` marker.
+        let node = node_with(&[
+            ("padding.0", serde_json::json!(8)),
+            ("padding@md.0", serde_json::json!(16)),
+        ]);
+        // Narrow: base wins.
+        assert_eq!(prop_f32_at(&node, "padding", vp(320.0)), Some(8.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(767.0)), Some(8.0));
+        // Wide (>= md): the `@md.0` override wins. This is the exact
+        // case the old `.0`-forgetting lookup missed.
+        assert_eq!(prop_f32_at(&node, "padding", vp(768.0)), Some(16.0));
+        assert_eq!(prop_f32_at(&node, "padding", vp(1280.0)), Some(16.0));
+    }
+
+    #[test]
+    fn breakpoint_color_resolves_canonical_dot_zero_key() {
+        let node = node_with(&[
+            ("backgroundColor.0", serde_json::json!("white")),
+            ("backgroundColor@md.0", serde_json::json!("blue")),
+        ]);
+        assert_eq!(
+            prop_color_at(&node, "backgroundColor", vp(320.0)),
+            Some(Rgba(0xff, 0xff, 0xff, 0xff))
+        );
+        assert_eq!(
+            prop_color_at(&node, "backgroundColor", vp(800.0)),
+            Some(Rgba(0x00, 0x00, 0xff, 0xff))
+        );
+    }
+
+    #[test]
+    fn padding_at_resolves_canonical_dot_zero_breakpoint_key() {
+        // End-to-end through `padding_at` (the layout consumer).
+        let node = node_with(&[
+            ("padding.0", serde_json::json!(8)),
+            ("padding@md.0", serde_json::json!(24)),
+        ]);
+        assert_eq!(padding_at(&node, vp(400.0)).top, 8.0);
+        assert_eq!(padding_at(&node, vp(900.0)).top, 24.0);
+    }
+
+    // -----------------------------------------------------------------
+    // Variant phase: paint-time state variants (hover/focus/active/
+    // disabled), resolved via the shared precedence rules.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn state_variant_hover_selected_only_when_hover_active() {
+        let node = node_with(&[
+            ("backgroundColor.0", serde_json::json!("white")),
+            ("backgroundColor:hover.0", serde_json::json!("blue")),
+        ]);
+        let sv = state_variants(&node, vp(800.0));
+        assert!(!sv.is_empty());
+        // No interaction → no override (base white is used by painter).
+        assert_eq!(sv.background_color_for(&[]), None);
+        // Hover active → blue wins.
+        assert_eq!(
+            sv.background_color_for(&["hover"]),
+            Some(Rgba(0x00, 0x00, 0xff, 0xff))
+        );
+        // Some other state alone (focus) → hover variant does NOT apply.
+        assert_eq!(sv.background_color_for(&["focus"]), None);
+    }
+
+    #[test]
+    fn state_variant_precedence_active_beats_hover_beats_base() {
+        let node = node_with(&[
+            ("backgroundColor.0", serde_json::json!("#000000")),
+            ("backgroundColor:hover.0", serde_json::json!("#ff0000")),
+            ("backgroundColor:active.0", serde_json::json!("#00ff00")),
+        ]);
+        let sv = state_variants(&node, vp(800.0));
+        // Hover only → red.
+        assert_eq!(
+            sv.background_color_for(&["hover"]),
+            Some(Rgba(0xff, 0, 0, 0xff))
+        );
+        // Both hover + active (pointer down over the element) → active
+        // wins per precedence (base < hover < active).
+        assert_eq!(
+            sv.background_color_for(&["hover", "active"]),
+            Some(Rgba(0, 0xff, 0, 0xff))
+        );
+    }
+
+    #[test]
+    fn state_variant_combined_breakpoint_and_state_needs_both() {
+        // `backgroundColor@md:hover.0` only wins when BOTH md is active
+        // (viewport >= 768) AND hover is active.
+        let node = node_with(&[
+            ("backgroundColor.0", serde_json::json!("#000000")),
+            ("backgroundColor:hover.0", serde_json::json!("#ff0000")),
+            ("backgroundColor@md:hover.0", serde_json::json!("#0000ff")),
+        ]);
+
+        // Narrow viewport + hover: only the plain `:hover` qualifies
+        // (the `@md` half fails), so red.
+        let sv_narrow = state_variants(&node, vp(400.0));
+        assert_eq!(
+            sv_narrow.background_color_for(&["hover"]),
+            Some(Rgba(0xff, 0, 0, 0xff))
+        );
+
+        // Wide viewport + hover: the combined `@md:hover` wins over the
+        // plain `:hover` (breakpoint min-width tiebreak among equal
+        // state rank), so blue.
+        let sv_wide = state_variants(&node, vp(900.0));
+        assert_eq!(
+            sv_wide.background_color_for(&["hover"]),
+            Some(Rgba(0, 0, 0xff, 0xff))
+        );
+
+        // Wide viewport but NO hover: neither hover variant qualifies →
+        // fall back to base (None override).
+        assert_eq!(sv_wide.background_color_for(&[]), None);
+    }
+
+    #[test]
+    fn state_variant_disabled_folds_into_active_states() {
+        // `enabled: false` should surface `"disabled"` in the live
+        // state set, selecting `backgroundColor:disabled.0`.
+        let node = node_with(&[
+            ("enabled", serde_json::json!(false)),
+            ("backgroundColor.0", serde_json::json!("#ffffff")),
+            ("backgroundColor:disabled.0", serde_json::json!("#888888")),
+        ]);
+        let sv = state_variants(&node, vp(800.0));
+        assert!(sv.disabled);
+        let states = sv.active_states(false, false, false);
+        assert!(states.contains(&"disabled"));
+        assert_eq!(
+            sv.background_color_for(&states),
+            Some(Rgba(0x88, 0x88, 0x88, 0xff))
+        );
+    }
+
+    #[test]
+    fn state_variant_color_and_border_channels_resolve_independently() {
+        let node = node_with(&[
+            ("color.0", serde_json::json!("#000000")),
+            ("color:hover.0", serde_json::json!("#ffffff")),
+            ("borderColor.0", serde_json::json!("#cccccc")),
+            ("borderColor:hover.0", serde_json::json!("#0000ff")),
+        ]);
+        let sv = state_variants(&node, vp(800.0));
+        assert_eq!(sv.color_for(&["hover"]), Some(Rgba(0xff, 0xff, 0xff, 0xff)));
+        assert_eq!(
+            sv.border_color_for(&["hover"]),
+            Some(Rgba(0, 0, 0xff, 0xff))
+        );
+        // No hover → both fall back to base (None override).
+        assert_eq!(sv.color_for(&[]), None);
+        assert_eq!(sv.border_color_for(&[]), None);
+    }
+
+    #[test]
+    fn no_variants_yields_empty_state_variants() {
+        let node = node_with(&[
+            ("backgroundColor.0", serde_json::json!("white")),
+            ("padding.0", serde_json::json!(8)),
+        ]);
+        let sv = state_variants(&node, vp(800.0));
+        assert!(sv.is_empty());
+        assert_eq!(sv.background_color_for(&["hover"]), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Layout-affecting interaction-state variants: detection + the
+    // variant-aware layout readers (`padding_with`, etc.).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn layout_state_variant_detection_only_for_layout_props() {
+        // `padding:hover` IS layout-affecting → detected.
+        let pad = node_with(&[
+            ("padding.0", serde_json::json!(8)),
+            ("padding:hover.0", serde_json::json!(16)),
+        ]);
+        assert!(node_has_layout_state_variant(&pad));
+
+        // `backgroundColor:hover` is a paint-only state variant → NOT
+        // detected (the painter handles it without relayout).
+        let bg = node_with(&[
+            ("backgroundColor.0", serde_json::json!("white")),
+            ("backgroundColor:hover.0", serde_json::json!("blue")),
+        ]);
+        assert!(!node_has_layout_state_variant(&bg));
+
+        // A breakpoint-only variant on a layout prop is NOT a *state*
+        // variant → NOT detected (it already resolves at layout time
+        // without interaction input).
+        let bp = node_with(&[
+            ("padding.0", serde_json::json!(8)),
+            ("padding@md.0", serde_json::json!(16)),
+        ]);
+        assert!(!node_has_layout_state_variant(&bp));
+
+        // Plain node → not detected.
+        let plain = node_with(&[("padding.0", serde_json::json!(8))]);
+        assert!(!node_has_layout_state_variant(&plain));
+    }
+
+    #[test]
+    fn padding_with_resolves_hover_only_when_active() {
+        // (a) `padding:hover` resolves to the larger padding in the
+        // layout read when hover is active, and the base padding when
+        // not.
+        let node = node_with(&[
+            ("padding.0", serde_json::json!(8)),
+            ("padding:hover.0", serde_json::json!(16)),
+        ]);
+        // No active states → base 8 on every side.
+        let base = padding_with(&node, &VariantState::layout(vp(800.0)));
+        assert_eq!(base.top, 8.0);
+        assert_eq!(base.left, 8.0);
+        // Hover active → 16 on every side.
+        let hovered = padding_with(&node, &VariantState::paint(vp(800.0), vec!["hover"]));
+        assert_eq!(hovered.top, 16.0);
+        assert_eq!(hovered.right, 16.0);
+        assert_eq!(hovered.bottom, 16.0);
+        assert_eq!(hovered.left, 16.0);
+        // Some other state (focus) alone → hover variant does NOT win.
+        let focused = padding_with(&node, &VariantState::paint(vp(800.0), vec!["focus"]));
+        assert_eq!(focused.top, 8.0);
+    }
+
+    #[test]
+    fn padding_with_combined_breakpoint_and_state_needs_both() {
+        // (b) `padding@md:hover` needs BOTH md (viewport >= 768) AND
+        // hover active to win.
+        let node = node_with(&[
+            ("padding.0", serde_json::json!(8)),
+            ("padding:hover.0", serde_json::json!(16)),
+            ("padding@md:hover.0", serde_json::json!(32)),
+        ]);
+
+        // Narrow + hover: only plain `:hover` qualifies → 16.
+        let narrow_hover = padding_with(&node, &VariantState::paint(vp(400.0), vec!["hover"]));
+        assert_eq!(narrow_hover.top, 16.0);
+
+        // Wide + hover: combined `@md:hover` wins over plain `:hover`
+        // (breakpoint min-width tiebreak among equal state rank) → 32.
+        let wide_hover = padding_with(&node, &VariantState::paint(vp(900.0), vec!["hover"]));
+        assert_eq!(wide_hover.top, 32.0);
+
+        // Wide but NO hover: neither hover variant qualifies → base 8.
+        let wide_no_hover = padding_with(&node, &VariantState::layout(vp(900.0)));
+        assert_eq!(wide_no_hover.top, 8.0);
+    }
+
+    #[test]
+    fn border_width_with_resolves_state_variant() {
+        // border width is layout-affecting; its state variant should
+        // reach the resolved `Border` used by Taffy.
+        let node = node_with(&[
+            ("borderWidth.0", serde_json::json!(1)),
+            ("borderWidth:hover.0", serde_json::json!(4)),
+        ]);
+        let base = border_with(&node, &VariantState::layout(vp(800.0)));
+        assert_eq!(base.width, 1.0);
+        let hovered = border_with(&node, &VariantState::paint(vp(800.0), vec!["hover"]));
+        assert_eq!(hovered.width, 4.0);
+    }
+
+    #[test]
+    fn dim_with_resolves_width_state_variant() {
+        let node = node_with(&[
+            ("width.0", serde_json::json!(100)),
+            ("width:focus.0", serde_json::json!(200)),
+        ]);
+        assert_eq!(
+            prop_dim_with(&node, "width", &VariantState::layout(vp(800.0))),
+            Some(Dim::Length(100.0))
+        );
+        assert_eq!(
+            prop_dim_with(&node, "width", &VariantState::paint(vp(800.0), vec!["focus"])),
+            Some(Dim::Length(200.0))
+        );
+    }
+}
+
+#[cfg(test)]
+mod rgb_color_tests {
+    use super::*;
+
+    #[test]
+    fn parses_rgba_with_fractional_alpha() {
+        // What `bg-black/25` and `border-white/15` lower to.
+        assert_eq!(parse_color("rgba(0, 0, 0, 0.25)"), Some(Rgba(0, 0, 0, 64)));
+        assert_eq!(
+            parse_color("rgba(255, 255, 255, 0.15)"),
+            Some(Rgba(255, 255, 255, 38))
+        );
+    }
+
+    #[test]
+    fn parses_rgb_without_alpha_as_opaque() {
+        assert_eq!(parse_color("rgb(1, 2, 3)"), Some(Rgba(1, 2, 3, 0xff)));
+    }
+
+    #[test]
+    fn tolerates_spacing_and_case() {
+        assert_eq!(
+            parse_color("  RGBA( 10 , 20 , 30 , 1 )  "),
+            Some(Rgba(10, 20, 30, 255))
+        );
+    }
+
+    #[test]
+    fn clamps_out_of_range_channels_and_alpha() {
+        assert_eq!(parse_color("rgba(300, 0, 0, 2)"), Some(Rgba(255, 0, 0, 255)));
+    }
+
+    #[test]
+    fn rejects_malformed_rather_than_guessing() {
+        assert_eq!(parse_color("rgb(1, 2)"), None);
+        assert_eq!(parse_color("rgba(a, b, c, d)"), None);
+    }
+
+    #[test]
+    fn hex_and_named_colors_still_work() {
+        assert_eq!(parse_color("#ff0000"), Some(Rgba(255, 0, 0, 255)));
+        assert_eq!(parse_color("transparent"), Some(Rgba::TRANSPARENT));
     }
 }

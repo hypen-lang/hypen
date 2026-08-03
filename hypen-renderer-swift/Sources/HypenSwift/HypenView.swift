@@ -47,6 +47,15 @@ public struct HypenView: View {
                 .environment(\.componentRegistry, componentRegistry)
                 .environment(\.applicatorRegistry, applicatorRegistry)
                 .environment(\.screenWidth, geometry.size.width)
+                // `vw`/`vh` resolve against the space the Hypen root was
+                // actually given, NOT `UIScreen.main.bounds`. A host that
+                // insets us (the Gallery's URL chrome takes 112pt) would
+                // otherwise make `min-h-screen` taller than the area it can
+                // occupy, pushing bottom-anchored content off the screen —
+                // which is exactly what hid the home-screen launcher's dock.
+                // Matches the web, where 100vh is the viewport hosting the
+                // app, not the display.
+                .environment(\.viewportHeight, geometry.size.height)
                 .onAppear {
                     viewModel.connect()
                 }
@@ -106,6 +115,13 @@ public struct HypenView: View {
             // Root element has no parent restricting it, so allow expansion
             .environment(\.parentAllowsHorizontalExpansion, true)
             .environment(\.parentAllowsVerticalExpansion, true)
+            // Rebuild the whole element view tree when the renderer is
+            // reset (initialTree replay on reconnect): element views
+            // observe individual HypenElement instances and the equatable
+            // HypenElementView wrapper skips body re-evaluation for
+            // unchanged ids, so without an identity change they would keep
+            // observing orphaned pre-reset instances.
+            .id(viewModel.renderer.resetEpoch)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
@@ -138,13 +154,44 @@ final class HypenViewModel: ObservableObject {
     private func setupBindings() {
         guard let engine = engine else { return }
         self.actionDispatcher = RemoteActionDispatcher(engine: engine)
+        // `.onAnimationComplete` dispatches ride the same channel as every
+        // other event applicator.
+        renderer.animator.actionDispatcher = self.actionDispatcher
 
-        // Forward renderer changes to trigger view updates
-        renderer.objectWillChange
+        // Element views observe their own HypenElement, so per-patch
+        // invalidation never goes through this view model. The HypenView
+        // root only needs to re-render when the root element changes
+        // (first mount, route swap at the root, clear).
+        renderer.$rootId
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
-                log.debug("Renderer changed, triggering view update")
+                log.debug("Root element changed, triggering view update")
                 self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        // A renderer reset (initialTree replay) must also re-render the
+        // root even if the root id ends up unchanged: the element view
+        // tree is keyed by resetEpoch so it rebuilds against the fresh
+        // HypenElement instances.
+        renderer.$resetEpoch
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        // Tree resets: the server re-sends the full tree (initialTree)
+        // on reconnect/session-restore under the SAME element ids. Drop
+        // the stale tree first so the subsequent patch batch rebuilds
+        // from scratch instead of orphaning observed elements.
+        engine.treeResets
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                log.debug("Initial tree (re)received, clearing renderer")
+                self?.renderer.clear()
             }
             .store(in: &cancellables)
 
@@ -161,9 +208,9 @@ final class HypenViewModel: ObservableObject {
         engine.patches
             .receive(on: DispatchQueue.main)
             .sink { [weak self] patches in
-                log.debug("Received %d patches from engine", patches.count)
+                log.debug("Received \(patches.count) patches from engine")
                 self?.renderer.applyPatches(patches)
-                log.debug("After applying patches, rootId: %@", self?.renderer.rootId ?? "nil")
+                log.debug("After applying patches, rootId: \(self?.renderer.rootId ?? "nil")")
             }
             .store(in: &cancellables)
 
@@ -171,7 +218,7 @@ final class HypenViewModel: ObservableObject {
         engine.state
             .receive(on: DispatchQueue.main)
             .sink { [weak self] state in
-                log.debug("State update received with %d keys", state.count)
+                log.debug("State update received with \(state.count) keys")
                 self?.renderer.updateState(state)
             }
             .store(in: &cancellables)

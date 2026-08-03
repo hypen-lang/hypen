@@ -121,7 +121,6 @@ async function main() {
     backgroundColor: "#ffffff",
     enableAccessibility: true,
     enableHitTesting: true,
-    enableInputOverlay: true,
     showLayoutBounds: false, // Set to true to debug layout
     logPerformance: true,
   });

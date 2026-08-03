@@ -282,7 +282,7 @@ async function renderPreview(forceFullRebuild = false) {
           console.log(`📸 [Observable onChange] First task type:`, snapshot.tasks[0]?.constructor?.name);
         }
         currentState = snapshot; // Preserve state for next render
-        engine.updateState(snapshot);
+        engine.updateState(null, snapshot);
       },
     });
 
@@ -309,7 +309,7 @@ async function renderPreview(forceFullRebuild = false) {
           const snapshot = convertMapsToObjects(getStateSnapshot(observableState));
           console.log(`📸 [Action ${actionName}] State snapshot after handler:`, snapshot);
           currentState = snapshot;
-          engine.updateState(snapshot);
+          engine.updateState(null, snapshot);
         });
       }
     }
@@ -345,7 +345,7 @@ async function renderPreview(forceFullRebuild = false) {
       console.log("📊 First task:", currentStateSnapshot.tasks[0]);
       console.log("📊 First task type:", currentStateSnapshot.tasks[0]?.constructor?.name);
     }
-    engine.updateState(currentStateSnapshot);
+    engine.updateState(null, currentStateSnapshot);
   } catch (error: any) {
     console.error("Playground error:", error);
     errorBanner.textContent = `Error: ${error.message || String(error)}`;

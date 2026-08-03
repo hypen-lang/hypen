@@ -331,3 +331,81 @@ export type { LogLevel, LoggerConfig, LogHandler } from "./logger.js";
 // elementTypes) in CI / smoke tests off the wire.
 export { validatePatches } from "./validate.js";
 export type { PatchValidationResult } from "./validate.js";
+
+// Accessibility conformance diagnostics — surface the engine's dev-mode
+// `checkAccessibility(source)` findings in a host dev console.
+export { logA11yDiagnostics, checkRuleDrift, EXPECTED_A11Y_RULES } from "./a11y.js";
+export type { A11yDiagnostic, A11ySourceSpan, A11yRuleDrift } from "./a11y.js";
+
+// ============================================================================
+// ANIMATION (__anim.* prop channel — shared renderer vocabulary)
+// ============================================================================
+
+export {
+  ANIM_PROP_PREFIX,
+  ANIM_TRANSITION_PROP,
+  ANIM_ENTER_PROP,
+  ANIM_EXIT_PROP,
+  ANIM_LAYOUT_PROP,
+  ANIM_PROP_ANIMATE,
+  ANIM_MOTION_PROP,
+  ANIM_STATES_PROP,
+  ANIM_SHARED_KEY_PROP,
+  ANIM_SHARED_PROP,
+  ANIM_SCRUB_PROP,
+  ANIM_SCRUB_SETTLE_PROP,
+  ANIM_SCRUB_BIND_PROP,
+  ANIM_SCRUB_POSES_PROP,
+  SCRUB_SOURCES,
+  SCRUB_AXES,
+  ANIM_CURVES,
+  ANIM_PRESETS,
+  ANIM_DIRECTIONS,
+  ANIMATE_PRESETS,
+  CURVE_TO_CSS,
+  ANIMATABLE_PROPS,
+  ENTER_EXIT_PRESETS,
+  SLIDE_OFFSET_PX,
+  SCALE_HIDDEN_FACTOR,
+  CURVE_BEZIER_POINTS,
+  cssPropertiesFor,
+  presetHiddenStyles,
+  parseAnimProps,
+  parseStatesLabel,
+  parseMotionEssential,
+  parseSharedKey,
+  parseSharedSpec,
+  parseScrubSpec,
+  parseScrubSettle,
+  parseScrubBind,
+  parseScrubPoses,
+  scrubProgress,
+  animatableBaseProp,
+  parseColorValue,
+  interpolateColor,
+  cubicBezier,
+  curveFunction,
+} from "./animation.js";
+export type {
+  AnimCurve,
+  EasingFunction,
+  AnimPreset,
+  AnimDirection,
+  AnimRepeat,
+  AnimatePreset,
+  AnimatePresetDefaults,
+  TransitionSpec,
+  EnterSpec,
+  ExitSpec,
+  LayoutSpec,
+  SharedSpec,
+  AnimateSpec,
+  NodeAnimSpecs,
+  PresetHiddenStyle,
+  ScrubSource,
+  ScrubAxis,
+  ScrubSpec,
+  ScrubSettleSpec,
+  ScrubPoses,
+  RgbaColor,
+} from "./animation.js";

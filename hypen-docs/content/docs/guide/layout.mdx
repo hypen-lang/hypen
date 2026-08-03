@@ -159,16 +159,14 @@ Stack {
 
 ## Grid
 
-Arranges children in a grid layout with specified columns.
+Arranges a bound collection in a grid. Like `List`, `Grid` is
+**data-driven**: pass an array binding and an item template, and one child is
+rendered per record. A static `Grid { ... }` with hand-written children
+renders an error — use nested `Row`s/`Column`s for fixed layouts.
 
 ```hypen
-Grid {
-    Card { Text("1") }
-    Card { Text("2") }
-    Card { Text("3") }
-    Card { Text("4") }
-    Card { Text("5") }
-    Card { Text("6") }
+Grid(@state.cells, key: "id") {
+    Card { Text("@{item.label}") }
 }
 .gridColumns(3)
 .gap(16)
@@ -178,18 +176,29 @@ Grid {
 
 ```hypen
 // Fixed number of columns
-Grid { }
+Grid(@state.cells, key: "id") {
+    Card { Text("@{item.label}") }
+}
 .gridColumns(2)
 
 // Custom column template (Web)
-Grid { }
+Grid(@state.cells, key: "id") {
+    Card { Text("@{item.label}") }
+}
 .gridTemplateColumns("1fr 2fr 1fr")
 
 // Separate row and column gaps
-Grid { }
+Grid(@state.cells, key: "id") {
+    Card { Text("@{item.label}") }
+}
 .rowGap(16)
 .columnGap(8)
 ```
+
+Items can span columns via `.gridColumn(...)` on the template — the value is
+bindable per record, e.g. `.gridColumn("@{item.span}")` with
+`span: "span 2"` in the data (see the calculator example's double-width
+`0` key).
 
 **Platform Support:** Web, Android, iOS
 
@@ -198,28 +207,37 @@ Grid { }
 A scrollable container optimized for displaying collections of items. On Android, uses virtualized rendering (LazyColumn) for performance with large lists.
 
 ```hypen
-List {
-    Text("Item 1")
-    Text("Item 2")
-    Text("Item 3")
+List(@state.items) {
+    Text("@{item.title}")
 }
 ```
+
+`List(@state.items)` is shorthand for
+`ForEach(items: @state.items, key: "id")` in a scrollable container — the
+array binding is required, and records need an `id` field (or pass `key:`
+explicitly).
 
 ### List Direction
 
 ```hypen
 // Vertical list (default)
-List { }
+List(@state.items) {
+    Text("@{item.title}")
+}
 
 // Horizontal list
-List { }
+List(@state.items) {
+    Text("@{item.title}")
+}
 .flexDirection("row")
 ```
 
 ### Scrolling
 
 ```hypen
-List { }
+List(@state.items) {
+    Text("@{item.title}")
+}
 .scrollable(true)
 .height(400)
 ```
@@ -390,7 +408,7 @@ Maintains a consistent width-to-height ratio regardless of container size. Usefu
 ```hypen
 // 16:9 widescreen ratio
 Image("photo.jpg")
-    .aspectRatio(16/9)
+    .aspectRatio("16/9")
 
 // Square
 Image("avatar.jpg")
@@ -467,19 +485,12 @@ Row {
 ### Card Grid
 
 ```hypen
-Grid {
+Grid(@state.products, key: "id") {
     Card {
         Column {
-            Image("product1.jpg")
-            Text("Product 1")
-            Text("$29.99")
-        }
-    }
-    Card {
-        Column {
-            Image("product2.jpg")
-            Text("Product 2")
-            Text("$39.99")
+            Image("@{item.image}")
+            Text("@{item.name}")
+            Text("@{item.price}")
         }
     }
 }

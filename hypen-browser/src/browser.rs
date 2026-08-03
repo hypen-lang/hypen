@@ -477,7 +477,10 @@ impl BrowserModule {
         let removes: Vec<Patch> = tab
             .app_root_ids
             .iter()
-            .map(|id| Patch::Remove { id: id.clone() })
+            .map(|id| Patch::Remove {
+                id: id.clone(),
+                transition: false,
+            })
             .collect();
         if !removes.is_empty() {
             forward(&self.inner, &removes);
@@ -728,6 +731,8 @@ fn summarize_patches(patches: &[Patch]) -> String {
             Patch::Remove { .. } => "Remove",
             Patch::Detach { .. } => "Detach",
             Patch::Attach { .. } => "Attach",
+            Patch::SetSemantics { .. } => "SetSemantics",
+            Patch::BatchAnimation { .. } => "BatchAnimation",
         };
         *counts.entry(kind).or_default() += 1;
     }
@@ -857,7 +862,7 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
                                     // Filter out roots that were
                                     // Removed in the same drain.
                                     for p in &rewritten {
-                                        if let Patch::Remove { id } = p {
+                                        if let Patch::Remove { id, .. } = p {
                                             t.app_root_ids.retain(|tr| tr != id);
                                         }
                                     }
@@ -918,7 +923,7 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
         // Filter out any roots that were just removed by the same
         // batch.
         for p in &rewritten {
-            if let Patch::Remove { id } = p {
+            if let Patch::Remove { id, .. } = p {
                 tab.app_root_ids.retain(|tracked| tracked != id);
                 // Also drop the matching pending new_root if the
                 // worker emitted Create + Insert + Remove all in the
@@ -960,10 +965,12 @@ fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec
             id,
             element_type,
             props,
+            semantics,
         } => Patch::Create {
             id: prefix_id(prefix, &id),
             element_type,
             props,
+            semantics,
         },
         Patch::SetProp { id, name, value } => Patch::SetProp {
             id: prefix_id(prefix, &id),
@@ -977,6 +984,10 @@ fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec
         Patch::SetText { id, text } => Patch::SetText {
             id: prefix_id(prefix, &id),
             text,
+        },
+        Patch::SetSemantics { id, semantics } => Patch::SetSemantics {
+            id: prefix_id(prefix, &id),
+            semantics,
         },
         Patch::Insert {
             parent_id,
@@ -1006,8 +1017,9 @@ fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec
                 before_id: before_id.map(|b| prefix_id(prefix, &b)),
             }
         }
-        Patch::Remove { id } => Patch::Remove {
+        Patch::Remove { id, transition } => Patch::Remove {
             id: prefix_id(prefix, &id),
+            transition,
         },
         Patch::Detach { id } => Patch::Detach {
             id: prefix_id(prefix, &id),
@@ -1028,6 +1040,10 @@ fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec
                 before_id: before_id.map(|b| prefix_id(prefix, &b)),
             }
         }
+        // Batch-scoped animation prelude: carries no node ids, so the
+        // namespacing rewrite has nothing to touch — pass it through
+        // untouched at the head of its batch.
+        p @ Patch::BatchAnimation { .. } => p,
     }
 }
 
@@ -1125,6 +1141,7 @@ mod tests {
                 id: "col".into(),
                 element_type: "Column".into(),
                 props: props(&[]),
+                semantics: None,
             },
             Patch::Insert {
                 parent_id: "root".into(),
@@ -1135,6 +1152,7 @@ mod tests {
                 id: "t".into(),
                 element_type: "Text".into(),
                 props: props(&[("0", json!("Hello"))]),
+                semantics: None,
             },
             Patch::Insert {
                 parent_id: "col".into(),
@@ -1282,7 +1300,7 @@ mod tests {
         let removes: Vec<&str> = after[before..]
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id } => Some(id.as_str()),
+                Patch::Remove { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
@@ -1331,7 +1349,7 @@ mod tests {
         let removes: Vec<&str> = after[before..]
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id } => Some(id.as_str()),
+                Patch::Remove { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
@@ -1458,7 +1476,7 @@ mod tests {
         let app_removes: Vec<&str> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id } if id.starts_with("a1:") || id.starts_with("a2:") => {
+                Patch::Remove { id, .. } if id.starts_with("a1:") || id.starts_with("a2:") => {
                     Some(id.as_str())
                 }
                 _ => None,
@@ -1508,7 +1526,7 @@ mod tests {
                     Patch::Attach { id, .. } if id.starts_with("a1:")
                 ) || matches!(
                     p,
-                    Patch::Remove { id } if id.starts_with("a1:")
+                    Patch::Remove { id, .. } if id.starts_with("a1:")
                 )
             })
             .count();
@@ -1530,6 +1548,7 @@ mod tests {
                 id: "1".into(),
                 element_type: "Column".into(),
                 props: Arc::new(IndexMap::new()),
+                semantics: None,
             },
             Patch::Insert {
                 parent_id: "root".into(),
@@ -1578,6 +1597,7 @@ mod tests {
                 id: "1".into(),
                 element_type: "Text".into(),
                 props: Arc::new(IndexMap::new()),
+                semantics: None,
             },
             Patch::Insert {
                 parent_id: "root".into(),
@@ -1612,7 +1632,7 @@ mod tests {
         let removed: Vec<&str> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id } => Some(id.as_str()),
+                Patch::Remove { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();

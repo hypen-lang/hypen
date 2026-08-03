@@ -25,6 +25,9 @@ Welcome to the Hypen component and applicator documentation. This reference guid
 - [Display Applicators](./applicators/display.md) - Display modes, visibility, overflow
 - [Event Applicators](./applicators/events.md) - Click, input, and other events
 
+### Guides
+- [Animation](./animation.md) - `.transition()`, `.enter()`/`.exit()`, `.layout()`, curves, presets, renderer support
+
 ## Quick Start
 
 ### Using Components

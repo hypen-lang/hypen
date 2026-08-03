@@ -20,7 +20,7 @@ module Header {
       .border("1px solid transparent")
       .borderRadius(8)
       .cursor("pointer")
-      .transition("all 0.3s ease")
+      .transition(300, easeOut)
 
     Button {
       Text("Products")
@@ -35,7 +35,7 @@ module Header {
       .border("1px solid transparent")
       .borderRadius(8)
       .cursor("pointer")
-      .transition("all 0.3s ease")
+      .transition(300, easeOut)
 
     Button {
       Text("About")
@@ -50,7 +50,7 @@ module Header {
       .border("1px solid transparent")
       .borderRadius(8)
       .cursor("pointer")
-      .transition("all 0.3s ease")
+      .transition(300, easeOut)
 
     Button {
       Text("Cart (@{state.cartCount})")
@@ -65,7 +65,7 @@ module Header {
       .borderRadius(8)
       .border("none")
       .cursor("pointer")
-      .transition("all 0.3s ease")
+      .transition(300, easeOut)
     }
     .gap(12)
   }

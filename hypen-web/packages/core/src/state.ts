@@ -211,12 +211,31 @@ export function createObservableState<T extends object>(
   // Track if we have a pending microtask notification
   let notificationPending = false;
 
+  /**
+   * Run the queued notification NOW (and neutralize the queued microtask).
+   * Exposed on the proxy as `__flushNow` so hosts can synchronously drain
+   * mutations that predate an event — e.g. the module runtime flushes
+   * pre-queued changes UNSTAMPED before arming a transaction-animation
+   * stamp for a dispatch (Option D). No-op when nothing is pending.
+   */
+  function flushNow() {
+    if (!notificationPending) return;
+    notificationPending = false;
+    if (batchDepth === 0) {
+      notifyChange();
+    }
+    // Inside a batch the batch's __endBatch performs the notify.
+  }
+
   function scheduleBatch() {
     if (batchDepth === 0) {
       // If not in a batch, schedule notification in next microtask to coalesce rapid changes
       if (!notificationPending) {
         notificationPending = true;
         queueMicrotask(() => {
+          // Already drained synchronously via __flushNow (or re-queued):
+          // this stale microtask stands down.
+          if (!notificationPending) return;
           notificationPending = false;
           if (batchDepth === 0) {
             notifyChange();
@@ -266,6 +285,9 @@ export function createObservableState<T extends object>(
         }
         if (prop === "__getSnapshot") {
           return () => deepClone(obj);
+        }
+        if (prop === "__flushNow") {
+          return flushNow;
         }
 
         const value = obj[prop];

@@ -1,0 +1,39 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "layout-lowering",
+  "description": "The .layout applicator lowers into a __anim.layout prop object with the {300, spring} channel defaults",
+  "category": "animation",
+  "priority": "P1",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Column { Text(\"Item\") }.layout(spring)",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 4,
+    "patchTypes": ["create", "insert", "create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Column",
+        "props": {
+          "__anim.layout": { "curve": "spring", "duration": 300 }
+        }
+      },
+      { "type": "create", "elementType": "Text", "props": { "0": "Item" } },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

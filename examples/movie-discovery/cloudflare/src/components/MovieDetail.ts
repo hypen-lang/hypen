@@ -36,7 +36,7 @@ async function refresh(state: DetailState, movieId: string) {
   const movie = await getMovie(user.id, movieId);
   state.loaded = Boolean(movie);
   state.movie = movie ?? EMPTY_MOVIE;
-  state.saveLabel = state.movie.saved ? "✓ Added to watchlist" : "Add to watchlist";
+  state.saveLabel = state.movie.saved ? "Saved to watchlist" : "Add to watchlist";
 }
 
 export default app
@@ -64,23 +64,29 @@ export default app
       Column {
         Row {
           Button {
-            Text("‹")
-              .tw("text-3xl leading-none")
+            Icon(@resources.chevron-left)
+              .size(20)
               .color("#F8FAFC")
           }
-          .tw("w-11 h-11 rounded-full bg-slate-900 border-0 items-center justify-center")
+          .tw("w-10 h-10 rounded-full border border-white/10 items-center justify-center")
+          .backgroundColor("rgba(255, 255, 255, 0.07)")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(160, easeOut)
           .onClick(@actions.back)
 
           Box {}
             .tw("flex-1")
 
           Button {
-            Text("@{state.movie.saved ? '✓' : '+'}")
-              .tw("text-xl font-black")
-              .color("@{state.movie.saved ? '#052E16' : '#F8FAFC'}")
+            Icon(@resources.bookmark)
+              .size(17)
+              .color("@{state.movie.saved ? '#34D399' : '#F8FAFC'}")
           }
-          .tw("w-11 h-11 rounded-full border border-slate-700 items-center justify-center")
-          .backgroundColor("@{state.movie.saved ? '#22C55E' : '#2A0B1B'}")
+          .tw("w-10 h-10 rounded-full border items-center justify-center")
+          .backgroundColor("@{state.movie.saved ? 'rgba(52, 211, 153, 0.12)' : 'rgba(255, 255, 255, 0.07)'}")
+          .borderColor("@{state.movie.saved ? 'rgba(52, 211, 153, 0.35)' : 'rgba(255, 255, 255, 0.10)'}")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(260, easeOut)
           .onClick(@actions.toggleSaved)
         }
         .tw("px-5 pt-6 pb-3 items-center")
@@ -88,72 +94,85 @@ export default app
         .width("100%")
         .alignSelf("center")
 
+        // The hero's shared key is STATIC on purpose. A key bound to
+        // \`state.movie.id\` would be a batch too late: the route's DOM is
+        // created in the navigation patch batch — the only batch in which
+        // the renderer matches shared-element keys — while this module's
+        // \`onActivated\` state write lands in the batch after it. The
+        // ambiguity a constant key would normally cause is resolved on the
+        // *source* side instead: the list module marks exactly one poster
+        // as "movie-hero" (via its own \`openingId\`) before it pushes.
         Image(src: "@{state.movie.posterUrl}")
           .objectFit("cover")
           .objectPosition("center")
           .aspectRatio(0.675)
           .tw("self-center mt-2 w-56 md:w-64 lg:w-72 rounded-3xl border border-white/10")
           .backgroundColor("@{state.movie.posterBg}")
+          .sharedElement("movie-hero", curve: spring, duration: 340)
 
         Column {
           Text("@{state.movie.title}")
-            .tw("text-4xl md:text-5xl font-black mt-6")
+            .tw("text-3xl md:text-4xl font-bold mt-6 text-center tracking-tight")
             .color("#F8FAFC")
-          Text("@{state.movie.tagline}")
-            .tw("text-base md:text-lg mt-3")
-            .color("#CBD5E1")
 
           Row {
-            Text("★ @{state.movie.ratingLabel}")
-              .tw("text-sm font-bold mr-3 px-3 py-1 rounded-full bg-yellow-300")
-              .color("#0F172A")
+            Icon(@resources.star)
+              .size(14)
+              .color("#F5C518")
+            Text("@{state.movie.ratingLabel}")
+              .tw("text-sm font-semibold ml-1")
+              .color("#F5C518")
             Text("@{state.movie.meta}")
-              .tw("text-sm")
-              .color("#94A3B8")
+              .tw("text-sm ml-2")
+              .color("#8E8E9A")
           }
-          .tw("mt-4 items-center")
+          .tw("mt-3 items-center justify-center self-center")
 
           Row {
             Text("@{state.movie.genre}")
-              .tw("text-xs font-bold mr-2 px-3 py-2 rounded-full bg-slate-800")
-              .color("#CBD5E1")
+              .tw("text-xs font-medium mr-2 px-3 py-1.5 rounded-full border border-white/10")
+              .backgroundColor("rgba(255, 255, 255, 0.06)")
+              .color("#C6C6D0")
             Text("@{state.movie.mood}")
-              .tw("text-xs font-bold px-3 py-2 rounded-full bg-slate-800")
-              .color("#CBD5E1")
+              .tw("text-xs font-medium px-3 py-1.5 rounded-full border border-white/10")
+              .backgroundColor("rgba(255, 255, 255, 0.06)")
+              .color("#C6C6D0")
           }
-          .tw("mt-4")
+          .tw("mt-4 self-center")
 
           Button {
             Text("@{state.saveLabel}")
-              .tw("text-base font-black")
-              .color("@{state.movie.saved ? '#052E16' : '#0F172A'}")
+              .tw("text-[15px] font-semibold")
+              .color("@{state.movie.saved ? '#052E16' : '#0B0B10'}")
           }
-          .tw("mt-6 h-14 rounded-2xl border-0 items-center justify-center")
-          .backgroundColor("@{state.movie.saved ? '#22C55E' : '#FACC15'}")
-          .boxShadow("@{state.movie.saved ? '0 18px 38px rgba(34, 197, 94, 0.24)' : '0 18px 38px rgba(250, 204, 21, 0.22)'}")
+          .tw("mt-6 h-12 rounded-2xl border-0 items-center justify-center")
+          .backgroundColor("@{state.movie.saved ? '#34D399' : '#F5C518'}")
+          .opacity({ default: 1, active: 0.75 })
+          .transition(280, easeOut)
           .onClick(@actions.toggleSaved)
 
           Text("Synopsis")
-            .tw("text-xl font-bold mt-8")
+            .tw("text-lg font-bold mt-8")
             .color("#F8FAFC")
           Text("@{state.movie.synopsis}")
-            .tw("text-sm md:text-base mt-3 leading-6")
-            .color("#CBD5E1")
+            .tw("text-sm md:text-[15px] mt-2.5 leading-6")
+            .color("#A6A6B3")
 
           Text("Cast")
-            .tw("text-xl font-bold mt-7")
+            .tw("text-lg font-bold mt-7")
             .color("#F8FAFC")
           Text("@{state.movie.cast}")
-            .tw("text-sm md:text-base mt-3 mb-10")
-            .color("#CBD5E1")
+            .tw("text-sm md:text-[15px] mt-2.5 mb-10")
+            .color("#A6A6B3")
         }
         .tw("px-5")
         .maxWidth(760)
         .width("100%")
         .alignSelf("center")
+        .enter(fade, duration: 320)
       }
       .scrollable(true)
       .tw("flex-1")
-      .linearGradient("180deg, #050505 0%, #190812 54%, #050505 100%")
+      .backgroundColor("#0B0B10")
     }
   `);

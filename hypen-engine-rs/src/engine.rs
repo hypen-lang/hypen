@@ -240,7 +240,27 @@ impl Engine {
     ///
     /// Skips rendering if the patch produces no actual state change.
     pub fn update_state(&mut self, scope: Option<&str>, state_patch: serde_json::Value) {
-        if self.core.update_state(scope, state_patch) {
+        self.update_state_with_animation(scope, state_patch, None)
+    }
+
+    /// [`update_state`](Self::update_state) with an optional batch-animation
+    /// context (Option D cheap subset — transaction-scoped animation).
+    ///
+    /// `animation` is either a spec object (`{"curve": "spring", ...}`) or a
+    /// bare curve string (`"spring"`, normalized to
+    /// `{"curve": "spring", "duration": 250}`). If the update changed state
+    /// and the resulting render cycle produced patches, the batch is
+    /// prefixed with a [`Patch::BatchAnimation`](crate::reconcile::Patch)
+    /// prelude carrying the normalized spec. A no-op update, an empty diff,
+    /// or an invalid spec (warned, never a hard error) all emit an
+    /// unstamped batch — no stamp without patches.
+    pub fn update_state_with_animation(
+        &mut self,
+        scope: Option<&str>,
+        state_patch: serde_json::Value,
+        animation: Option<serde_json::Value>,
+    ) {
+        if self.core.update_state(scope, state_patch, animation) {
             self.render_dirty();
         }
     }
@@ -253,7 +273,21 @@ impl Engine {
         paths: &[String],
         values: &serde_json::Value,
     ) {
-        if self.core.update_state_sparse(scope, paths, values) {
+        self.update_state_sparse_with_animation(scope, paths, values, None)
+    }
+
+    /// [`update_state_sparse`](Self::update_state_sparse) with an optional
+    /// batch-animation context. See
+    /// [`update_state_with_animation`](Self::update_state_with_animation)
+    /// for the stamping contract.
+    pub fn update_state_sparse_with_animation(
+        &mut self,
+        scope: Option<&str>,
+        paths: &[String],
+        values: &serde_json::Value,
+        animation: Option<serde_json::Value>,
+    ) {
+        if self.core.update_state_sparse(scope, paths, values, animation) {
             self.render_dirty();
         }
     }

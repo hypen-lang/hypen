@@ -1,20 +1,39 @@
 {
   "name": "@hypen-space/cf",
-  "version": "0.1.0",
+  "version": "0.6.2",
+  "description": "Hypen Cloudflare Workers SDK — HypenDurableObject, CFEngine, defineHypenWorker",
   "type": "module",
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./worker": "./src/worker-entry.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./worker": {
+      "types": "./dist/worker-entry.d.ts",
+      "import": "./src/worker-entry.ts",
+      "default": "./src/worker-entry.ts"
+    },
+    "./client": "./dist/client/generic.js"
   },
+  "files": [
+    "dist",
+    "src"
+  ],
   "scripts": {
+    "build": "bun run build.ts",
     "build:client": "bun build client/generic-client.ts --outdir dist/client --target browser --minify --entry-naming generic.js",
-    "typecheck": "bunx tsc --noEmit"
+    "build:types": "tsc --emitDeclarationOnly",
+    "prepublishOnly": "bun run build",
+    "typecheck": "bunx tsc --noEmit",
+    "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@hypen-space/core": "workspace:*",
-    "@hypen-space/web": "workspace:*"
+    "@hypen-space/core": "^0.6.2",
+    "@hypen-space/web": "^0.6.2"
   },
   "peerDependencies": {
     "hypen-engine": "*"
@@ -23,5 +42,27 @@
     "hypen-engine": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4",
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "keywords": [
+    "hypen",
+    "cloudflare",
+    "workers",
+    "durable-objects",
+    "wasm"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-web/packages/cf"
   }
 }

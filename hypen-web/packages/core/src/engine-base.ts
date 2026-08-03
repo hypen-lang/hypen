@@ -43,6 +43,7 @@ import type {
   ActionHandler,
   ComponentResolver,
 } from "./types.js";
+import { ACTION_ANIMATE_KEY } from "./types.js";
 
 const log = frameworkLoggers.engine;
 
@@ -226,12 +227,19 @@ export abstract class BaseEngine {
    *               target the primary module set via `setModule`.
    * @param paths  Changed state paths (relative to the targeted module).
    * @param values Map of `path -> new value`.
+   * @param animation Optional transaction-scoped animation context (Option D
+   *               cheap subset): a spec object (`{ curve, duration?, ... }`)
+   *               or a bare curve token string — the engine normalizes
+   *               either. When the update dirties nodes, the resulting patch
+   *               batch is stamped with a leading `batchAnimation` patch
+   *               carrying the normalized spec. Omitted/null = unstamped.
    * @throws {StateError} if the state patch is invalid
    */
   updateStateSparse(
     scope: string | null,
     paths: string[],
     values: Record<string, any>,
+    animation?: unknown,
   ): void {
     const engine = this.ensureInitialized();
 
@@ -240,7 +248,12 @@ export abstract class BaseEngine {
     }
 
     try {
-      engine.updateStateSparse(scope ?? "", paths, this.unwrapForWasm(values));
+      engine.updateStateSparse(
+        scope ?? "",
+        paths,
+        this.unwrapForWasm(values),
+        animation == null ? null : this.unwrapForWasm(animation),
+      );
     } catch (err) {
       throw classifyEngineError(err);
     }
@@ -248,12 +261,30 @@ export abstract class BaseEngine {
   }
 
   /**
-   * Apply a full-state patch. See [updateStateSparse] for `scope` semantics.
-   * Prefer the sparse form when only a few paths changed.
+   * Apply a full-state patch. See [updateStateSparse] for `scope` and
+   * `animation` semantics. Prefer the sparse form when only a few paths
+   * changed.
    */
-  updateState(scope: string | null, statePatch: Record<string, any>): void {
+  updateState(
+    scope: string | null,
+    statePatch: Record<string, any>,
+    animation?: unknown,
+  ): void {
+    if (scope !== null && typeof scope !== "string") {
+      // Legacy single-arg callers pass the state object as `scope`; letting it
+      // through corrupts WASM memory instead of failing (out-of-bounds in
+      // passStringToWasm0, hard tab crash in Chromium).
+      throw new TypeError(
+        "updateState(scope, statePatch): scope must be a string or null. " +
+          "The single-argument updateState(state) form was removed — pass null as the first argument.",
+      );
+    }
     const engine = this.ensureInitialized();
-    engine.updateState(scope ?? "", this.unwrapForWasm(statePatch));
+    engine.updateState(
+      scope ?? "",
+      this.unwrapForWasm(statePatch),
+      animation == null ? null : this.unwrapForWasm(animation),
+    );
   }
 
   /**
@@ -281,11 +312,37 @@ export abstract class BaseEngine {
   onAction(actionName: string, handler: ActionHandler): void {
     const engine = this.ensureInitialized();
     engine.onAction(actionName, (action: Action) => {
-      const normalized = this.normalizeAction(action);
+      const normalized = this.extractAnimate(this.normalizeAction(action));
       Promise.resolve(handler(normalized)).catch((err) => {
         log.error("Action handler error:", err);
       });
     });
+  }
+
+  /**
+   * Lift a transaction-animation stamp out of the payload (Option D cheap
+   * subset). Renderers carry the event applicator's `animate:` argument
+   * across the WASM dispatch boundary under the reserved
+   * {@link ACTION_ANIMATE_KEY} payload key (the only channel through
+   * `dispatchAction(name, payload)`); here it becomes the distinct
+   * `Action.animate` field and is REMOVED from the payload, so module
+   * handlers never observe the reserved key. Runs after `normalizeAction`,
+   * so the payload is already a plain object on every target.
+   */
+  private extractAnimate(action: Action): Action {
+    const payload = action.payload;
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      !(ACTION_ANIMATE_KEY in payload)
+    ) {
+      return action;
+    }
+    const { [ACTION_ANIMATE_KEY]: animate, ...rest } = payload as Record<
+      string,
+      unknown
+    >;
+    return { ...action, payload: rest, animate };
   }
 
   /**

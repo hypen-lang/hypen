@@ -43,6 +43,9 @@ export interface DurableObjectState {
 // consumer also pulling in `@cloudflare/workers-types` would hit a
 // duplicate-declaration error) and cast locally instead.
 type WebSocketPairCtor = { new (): { 0: WebSocket; 1: WebSocket } };
+
+/** Data carried on a hibernatable socket across a DO eviction. */
+type HibernationAttachment = { hypenSessionId?: string };
 function getWebSocketPair(): WebSocketPairCtor {
   return (globalThis as unknown as { WebSocketPair: WebSocketPairCtor }).WebSocketPair;
 }
@@ -131,6 +134,12 @@ export abstract class HypenDurableObject {
     }
 
     // Create a WebSocketPair — client goes to the caller, server stays here.
+    //
+    // Compression: there is no per-socket knob here. workerd handles
+    // permessage-deflate transparently when the Worker sets the
+    // `web_socket_compression` compatibility flag in wrangler.jsonc; without
+    // it, frames are always sent uncompressed. It is negotiated per-connection,
+    // so clients that don't offer the extension are unaffected.
     const pair = new (getWebSocketPair())();
     const client = pair[0];
     const server = pair[1];
@@ -174,11 +183,25 @@ export abstract class HypenDurableObject {
     // legacy client that never sent `hello`) sends a non-hello first message.
     // Synthesise the handshake so the session renders and ships its initial
     // tree before the real message is processed.
+    //
+    // The synthesised hello MUST carry the session id the client already
+    // established. Without it the wake path asks for a brand-new session
+    // (`sessionId: new` in the logs), so the engine restarts from its initial
+    // state, module state is discarded, and the client is sent a fresh
+    // `initialTree` that re-creates its entire element tree — which, being a
+    // first batch, also suppresses every enter animation. With it, the
+    // session RESUMES and the wake is invisible to the client.
     if (msg.type !== "hello" && !session.helloReceived) {
-      await session.receive({ type: "hello" } as RemoteMessage);
+      await session.receive({
+        type: "hello",
+        sessionId: this.rememberedSessionId(ws),
+      } as RemoteMessage);
     }
 
     await session.receive(msg);
+
+    // Keep the id beside the socket so the NEXT hibernation can resume too.
+    this.rememberSessionId(ws, session);
   }
 
   /**
@@ -243,6 +266,50 @@ export abstract class HypenDurableObject {
       },
     };
     return this._host;
+  }
+
+  /**
+   * Store the established session id beside the hibernatable socket.
+   *
+   * The DO's in-memory `sessions` map is emptied when the runtime evicts it,
+   * but the socket stays open at the edge — so the wake path has to rebuild
+   * the session, and needs the id to rebuild it as a RESUME rather than a
+   * fresh one. Cloudflare's hibernation attachment is the sanctioned place to
+   * keep a few bytes that outlive the eviction.
+   *
+   * Best-effort throughout: a host without the attachment API (tests, the
+   * non-CF stubs) simply degrades to the old reset-on-wake behaviour rather
+   * than failing a message.
+   */
+  private rememberSessionId(ws: WebSocket, session: RemoteSession): void {
+    const id = session.sessionId;
+    if (!id) return;
+    const sock = ws as WebSocket & {
+      serializeAttachment?: (value: unknown) => void;
+      deserializeAttachment?: () => unknown;
+    };
+    if (typeof sock.serializeAttachment !== "function") return;
+    try {
+      const current =
+        typeof sock.deserializeAttachment === "function"
+          ? ((sock.deserializeAttachment() as HibernationAttachment | null) ?? {})
+          : {};
+      if (current.hypenSessionId === id) return; // already current
+      sock.serializeAttachment({ ...current, hypenSessionId: id });
+    } catch {
+      // Attachment is an optimisation, never a correctness requirement.
+    }
+  }
+
+  /** The session id stashed by [rememberSessionId], if this host supports it. */
+  private rememberedSessionId(ws: WebSocket): string | undefined {
+    const sock = ws as WebSocket & { deserializeAttachment?: () => unknown };
+    if (typeof sock.deserializeAttachment !== "function") return undefined;
+    try {
+      return (sock.deserializeAttachment() as HibernationAttachment | null)?.hypenSessionId;
+    } catch {
+      return undefined;
+    }
   }
 
   /** Get or lazily (re)create the session for a WebSocket. */

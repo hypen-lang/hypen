@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-breakpoint-inactive", "description": "md does not apply below 768 -> base.", "function": "resolve_variant", "input": { "base": "padding", "props": { "padding.0": 8, "padding@md.0": 16 }, "width": 500, "activeStates": [] }, "expected": 8 }

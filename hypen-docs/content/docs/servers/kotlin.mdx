@@ -71,7 +71,7 @@ fun main() {
         onDisconnection { client -> println("Disconnected: ${client.id}") }
     }
 
-    // server.install(ktorApplication)
+    // Wire into Ktor — see "Integrating with Ktor" below
     println("Server ready")
 }
 
@@ -640,14 +640,65 @@ val server = HypenServer {
 
     // Watch for component file changes
     watchComponents("./src/components")
+
+    // WebSocket permessage-deflate — on by default, see below
+    compression = true
+}
+```
+
+### Compression
+
+Hypen streams JSON patch batches, which deflate very well, so WebSocket
+permessage-deflate (RFC 7692) is **enabled by default**. The `compression`
+flag defaults to `true` and is negotiated per connection — clients that
+don't advertise the extension keep receiving raw frames, so it is safe for
+every client.
+
+> **Important:** `HypenServer` is transport-agnostic — it exposes
+> `handleConnect` / `handleMessage` / `handleDisconnect` and **never installs
+> Ktor's `WebSockets` plugin itself**; your application does. That means the SDK
+> cannot apply `compression` on its own. Read the flag where you install the
+> plugin, as shown below.
+
+Set it to `false` to force raw, uncompressed frames. Useful when debugging
+the wire protocol, since a deflated payload is opaque to `tcpdump` and to
+most WebSocket frame inspectors:
+
+```kotlin
+val server = HypenServer {
+    module("Counter", counterModule)
+    compression = false
 }
 ```
 
 ### Integrating with Ktor
 
+`WebSocketDeflateExtension` ships with `io.ktor:ktor-server-websockets`, so
+no extra dependency is needed. `compressIfBiggerThan` skips tiny frames
+(session acks, single `setProp` patches) where deflate framing overhead
+outweighs the saving.
+
 ```kotlin
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
+import java.util.zip.Deflater
+import kotlin.time.Duration.Companion.seconds
+
+fun Application.configureSockets(hypenServer: HypenServer) {
+    install(WebSockets) {
+        pingPeriod = 15.seconds
+        timeout = 15.seconds
+
+        if (hypenServer.compression) {
+            extensions {
+                install(WebSocketDeflateExtension) {
+                    compressionLevel = Deflater.DEFAULT_COMPRESSION
+                    compressIfBiggerThan(bytes = 1024)
+                }
+            }
+        }
+    }
+}
 
 fun Application.configureRouting(hypenServer: HypenServer) {
     routing {
@@ -718,6 +769,7 @@ val module = hypen(AppState()) {
 server.getStats()        // { activeSessions, pendingSessions, totalConnections, ... }
 server.events()          // TypedEventEmitter for framework events
 server.getRoutes()       // registered route definitions
+server.compression       // whether permessage-deflate is wanted (read when installing WebSockets)
 server.shutdown()        // graceful shutdown
 ```
 

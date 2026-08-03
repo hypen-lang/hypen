@@ -1,10 +1,10 @@
 package space.hypen.renderer.components
 
-import android.util.Log
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
@@ -37,10 +37,11 @@ class TextComponent : ComponentHandler {
                 ?: element.textContent
                 ?: ""
 
-        Log.d("TextComponent", "Rendering Text id=${element.id}: '$text'")
-
-        // Apply all text styling via applicators
-        val textStyle = textApplicatorRegistry.applyAll(element.props)
+        // Apply all text styling via applicators, recomputed only when
+        // this element's props change
+        val textStyle = remember(element, element.propsRevision) {
+            textApplicatorRegistry.applyAll(element.props)
+        }
 
         // Apply text transform if set
         text = textStyle.applyTransform(text)

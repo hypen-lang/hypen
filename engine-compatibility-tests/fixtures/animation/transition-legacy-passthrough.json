@@ -1,0 +1,49 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "transition-legacy-passthrough",
+  "description": "Pins the legacy discriminator: a single positional whitespace string (.transition(\"opacity 0.3s ease\")) keeps the deprecated web-only transition.0 passthrough, while a bare token (.transition(easeOut)) takes the new __anim.transition path with channel defaults",
+  "category": "animation",
+  "priority": "P1",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Column { Text(\"Legacy\").transition(\"opacity 0.3s ease\") Text(\"New\").transition(easeOut) }",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 6,
+    "patchTypes": ["create", "insert", "create", "insert", "create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Column" },
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "Legacy",
+          "transition.0": "opacity 0.3s ease"
+        }
+      },
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "New",
+          "__anim.transition": { "curve": "easeOut", "duration": 200 }
+        }
+      },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

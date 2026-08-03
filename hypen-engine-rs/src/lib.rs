@@ -72,6 +72,10 @@ pub use engine::Engine;
 pub use error::EngineError;
 
 pub use ir::{ast_to_ir_node, Element, IRNode, Value};
+pub use ir::{
+    check_accessibility, check_accessibility_source, check_accessibility_source_located,
+    check_accessibility_trees, A11yDiagnostic, A11yRule, LineIndex, LocatedDiagnostic, SourceSpan,
+};
 pub use ir::{parse_svg, resolve_icons_in_ir, IconData, IconPath, ResourceRegistry};
 pub use lifecycle::{Module, ModuleInstance};
 pub use portable::{

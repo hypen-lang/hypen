@@ -151,6 +151,7 @@ mod tests {
                 id: str_a.clone(),
                 element_type: "Text".into(),
                 props: empty_props.clone(),
+                semantics: None,
             },
             // Duplicate of the same Create — must not bloat the index or
             // panic on a second insert.
@@ -158,14 +159,19 @@ mod tests {
                 id: str_a.clone(),
                 element_type: "Text".into(),
                 props: empty_props.clone(),
+                semantics: None,
             },
             Patch::Create {
                 id: str_b.clone(),
                 element_type: "Column".into(),
                 props: empty_props.clone(),
+                semantics: None,
             },
             // Non-Create patches must be ignored.
-            Patch::Remove { id: str_a.clone() },
+            Patch::Remove {
+                id: str_a.clone(),
+                transition: false,
+            },
         ];
         index.index_creates(&patches, &core);
 

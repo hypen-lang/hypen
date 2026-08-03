@@ -449,24 +449,29 @@ Box { }.transform("skewX(10deg)")
 
 ### transition
 
-Animates property changes smoothly over time. Essential for creating polished interactive experiences.
+Animates property changes smoothly over time. Declare it once on a node and every later change to an animatable property (a state binding update, a conditional value flip) glides instead of snapping.
 
 ```hypen
-Button { Text("Hover me") }
-    .transition("all 0.2s ease")
+// Defaults: 200ms, easeOut
+Button { Text("Hover me") }.transition()
 
-// Specific properties
-Box { }
-    .transition("background-color 0.3s ease, transform 0.2s ease-out")
+// Positional: number → duration (ms), token → curve
+Box { }.transition(200, easeOut)
 
-// Different timing functions
-Box { }.transition("opacity 0.5s linear")
-Box { }.transition("transform 0.3s ease-in-out")
+// Named arguments
+Box { }.transition(duration: 300, curve: spring, delay: 50)
+
+// Scope to specific properties
+Box { }.transition(props: [opacity, translateY])
 ```
 
-Common timing functions: `ease`, `linear`, `ease-in`, `ease-out`, `ease-in-out`
+Curve tokens: `linear`, `easeIn`, `easeOut`, `easeInOut`, `spring`. These are portable — the same declaration animates natively on every platform.
 
-**Platform Support:** Web only
+`.transition` is one of ten animation applicators — `.enter`/`.exit`, `.layout`, `.animate` presets, `.states { }`, `.sharedElement`, `.scrub`/`.settle`, and `.motion(essential)` cover appearance, removal, reorders, ambient motion, coordinated poses, cross-route continuity, and gestures. See the [Animation guide](/docs/guide/animation) for the full API.
+
+The legacy CSS string form `.transition("all 0.2s ease")` is **deprecated**: it still works on the web renderer with a warning, but means nothing on any other platform.
+
+**Platform Support:** Web, Android, iOS
 
 ## Cursor
 
@@ -545,7 +550,8 @@ A complete reference of all applicators and their platform support:
 | **Transforms** | rotate, scale, scaleX, scaleY | Yes | Yes | Yes |
 | **Transforms** | translateX, translateY | Yes | Yes | Yes |
 | **Transforms** | transform (CSS) | Yes | No | No |
-| **Animation** | transition | Yes | No | No |
+| **Animation** | transition, enter, exit, animate, states | Yes | Yes | Yes |
+| **Animation** | layout, sharedElement, scrub/settle | Yes | No | No |
 | **Cursor** | cursor | Yes | No | No |
 | **Gradients** | linearGradient, radialGradient | Yes | Yes | Yes |
 
@@ -611,6 +617,29 @@ Button { Text("Submit") }
 | `focus-within` | Child has focus |
 
 **Platform Support:** Web, Android, iOS
+
+### Variant Limitations
+
+On the web, variants are emitted as CSS rules (a media query for a breakpoint, a
+pseudo-class for a state) and the `default` value is emitted as a rule alongside
+them, so the normal CSS cascade decides which one wins. Precedence is
+`default` < breakpoints (ascending) < `disabled` < `hover` < `focus` < `active`.
+
+Two consequences are worth knowing:
+
+- **Transform applicators do not support variants.** `translateX`, `translateY`,
+  `scale`, `rotate`, `skew` and friends all compose into the single CSS
+  `transform` property, so they cannot be split into per-variant rules without
+  clobbering each other. Passing a value map to one of them applies the
+  `default` and logs a warning naming the applicator; the variants are ignored.
+  Use `.transform({default: "scale(1)", hover: "scale(1.05)"})` instead — the
+  full `transform` string does support variants.
+- **`.transition()` / `.animate()` do not support variants either.** The
+  animation runtime owns those inline styles directly.
+
+**Note:** a prop that carries variants is styled by a class rule rather than an
+inline style. Page-level CSS with higher specificity (an `#id` rule, for example)
+can therefore override it — inline styles could not be overridden that way.
 
 ## Tailwind CSS
 

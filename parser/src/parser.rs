@@ -169,20 +169,32 @@ fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, cha
 pub fn component_parser<'a>(
 ) -> impl Parser<'a, &'a str, ComponentSpecification, extra::Err<Rich<'a, char>>> + Clone {
     recursive(|component| {
-        // Optional declaration keyword: "module" or "component"
+        // Optional declaration keyword: "module" or "component". The keyword
+        // token's start offset is captured (before padding, like the name
+        // span) so `MetaData::expr_range` can begin at the keyword.
         let declaration_keyword = text::keyword("module")
             .to(DeclarationType::Module)
             .or(text::keyword("component").to(DeclarationType::ComponentKeyword))
+            .map_with(|decl, e| {
+                let span: chumsky::span::SimpleSpan = e.span();
+                (decl, span.start)
+            })
             .labelled("declaration keyword (module or component)")
             .padded_with_comments()
             .or_not();
 
-        // Component name (supports dot notation for applicators)
+        // Component name (supports dot notation for applicators).
+        // The name token's byte span is captured here (before padding) and
+        // recorded as `MetaData::name_range` so downstream diagnostics can
+        // point at file:line:col.
         let name = just('.')
             .or_not()
             .then(text::ascii::ident())
             .to_slice()
-            .map(|s: &str| s.to_string())
+            .map_with(|s: &str, e| {
+                let span: chumsky::span::SimpleSpan = e.span();
+                (s.to_string(), span.into_range())
+            })
             .labelled("component name")
             .padded_with_comments();
 
@@ -227,7 +239,16 @@ pub fn component_parser<'a>(
         // present, the parser must commit to parsing args_with_parens rather than
         // silently falling through. This ensures errors from inside argument
         // parsing (like unclosed strings) propagate correctly.
-        let args = args_with_parens.or(empty().and_is(just('(').not()).to(ArgumentList::empty()));
+        // The closing-paren end offset is kept for `MetaData::expr_range`; it
+        // is exact because the '(' ... ')' delimiters carry no padding.
+        let args = args_with_parens
+            .map_with(|args, e| {
+                let span: chumsky::span::SimpleSpan = e.span();
+                (args, Some(span.end))
+            })
+            .or(empty()
+                .and_is(just('(').not())
+                .to((ArgumentList::empty(), None)));
 
         // Also keep arg_parser for applicators
         let arg_parser = arg
@@ -252,6 +273,9 @@ pub fn component_parser<'a>(
 
         // Children block: { child1 child2 child3 }
         // Parse explicitly to handle empty braces { }
+        // The closing brace's end offset is captured before padding so
+        // `MetaData::expr_range` ends at '}' rather than at whatever trailing
+        // whitespace/comments the padding consumed.
         let children_block = just('{')
             .padded_with_comments()
             .ignore_then(
@@ -261,23 +285,71 @@ pub fn component_parser<'a>(
                     .repeated()
                     .collect::<Vec<_>>(),
             )
-            .then_ignore(
+            .then(
                 just('}')
                     .labelled("closing brace '}' for children block")
+                    .map_with(|_, e| {
+                        let span: chumsky::span::SimpleSpan = e.span();
+                        span.end
+                    })
                     .padded_with_comments(),
             )
             .labelled("children block {...}")
             .or_not();
 
-        // Applicators: .applicator1() .applicator2(args)
+        // Applicator children block: .states(...) { onState(a).size(48) }
+        // Shares the recursive component parser with the component children
+        // block above, so block entries are full component specifications
+        // (with their own applicator chains, nesting, etc.). The leading
+        // padding on '{' allows whitespace/newlines between ')' and '{'
+        // exactly as for component blocks; the closing brace's end offset is
+        // captured before padding so span accounting stays exact.
+        let applicator_block = just('{')
+            .padded_with_comments()
+            .ignore_then(
+                component
+                    .clone()
+                    .padded_with_comments()
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .then(
+                just('}')
+                    .labelled("closing brace '}' for applicator block")
+                    .map_with(|_, e| {
+                        let span: chumsky::span::SimpleSpan = e.span();
+                        span.end
+                    }),
+            )
+            .labelled("applicator children block {...}");
+
+        // Applicators: .applicator1() .applicator2(args) .applicator3(args) { children }
+        // Each applicator's end offset is captured before padding (the block's
+        // closing brace when present); the last one is where
+        // `MetaData::expr_range` ends for an applicator chain. The chain may
+        // continue after a block: .states(...) { ... }.padding(4).
         let applicators = just('.')
             .ignore_then(text::ascii::ident().labelled("applicator name"))
             .then(arg_parser.clone())
-            .map(|(name, args)| ApplicatorSpecification {
-                name: name.to_string(),
-                arguments: args,
-                children: vec![],
-                internal_id: String::new(),
+            .map_with(|(name, args), e| {
+                let span: chumsky::span::SimpleSpan = e.span();
+                (name, args, span.end)
+            })
+            .then(applicator_block.or_not())
+            .map(|((name, args, head_end), block)| {
+                let (children, end) = match block {
+                    Some((children, block_end)) => (fold_applicators(children), block_end),
+                    None => (Vec::new(), head_end),
+                };
+                (
+                    ApplicatorSpecification {
+                        name: name.to_string(),
+                        arguments: args,
+                        children,
+                        internal_id: String::new(),
+                    },
+                    end,
+                )
             })
             .labelled("applicator (.name(...))")
             .padded_with_comments()
@@ -289,7 +361,29 @@ pub fn component_parser<'a>(
             .then(args)
             .then(children_block)
             .then(applicators)
-            .map(|((((decl_type, name), args), children), applicators)| {
+            .map(|((((decl, (name, name_range)), (args, args_end)), children), applicators)| {
+                // Full-expression span, assembled from the pieces' unpadded
+                // end offsets (the raw combinator span would include trailing
+                // whitespace/comments consumed by padding, bleeding the range
+                // toward the next sibling's token).
+                let (children, children_end) = match children {
+                    Some((children, end)) => (Some(children), Some(end)),
+                    None => (None, None),
+                };
+                let expr_start = decl
+                    .as_ref()
+                    .map(|(_, start)| *start)
+                    .unwrap_or(name_range.start);
+                let expr_end = applicators
+                    .last()
+                    .map(|(_, end)| *end)
+                    .or(children_end)
+                    .or(args_end)
+                    .unwrap_or(name_range.end);
+                let decl_type = decl.map(|(decl_type, _)| decl_type);
+                let applicators: Vec<ApplicatorSpecification> =
+                    applicators.into_iter().map(|(spec, _)| spec).collect();
+
                 // Fold applicators into the component hierarchy
                 let base_component = ComponentSpecification::new(
                     id_gen::NodeId::next().to_string(),
@@ -299,8 +393,9 @@ pub fn component_parser<'a>(
                     fold_applicators(children.unwrap_or_default()),
                     MetaData {
                         internal_id: String::new(),
-                        name_range: 0..0,
+                        name_range,
                         block_range: None,
+                        expr_range: expr_start..expr_end,
                     },
                 )
                 .with_declaration_type(decl_type.unwrap_or(DeclarationType::Component));
@@ -326,8 +421,15 @@ fn fold_applicators(components: Vec<ComponentSpecification>) -> Vec<ComponentSpe
 
     for component in components {
         if component.name.starts_with('.') && !result.is_empty() {
-            // This is an applicator - attach it to the previous component
+            // This is an applicator - attach it to the previous component.
+            // The owner's expression now extends through the folded
+            // applicator's source text.
             let mut owner: ComponentSpecification = result.pop().unwrap();
+            owner.metadata.expr_range.end = owner
+                .metadata
+                .expr_range
+                .end
+                .max(component.metadata.expr_range.end);
             owner.applicators.push(component.to_applicator());
             result.push(owner);
         } else {

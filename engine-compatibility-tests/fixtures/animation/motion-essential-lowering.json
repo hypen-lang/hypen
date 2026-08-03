@@ -1,0 +1,40 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "motion-essential-lowering",
+  "description": "The .motion(essential) applicator lowers into a __anim.motion prop object {essential: true} (reduced-motion opt-out, #149); an unknown token would omit the channel entirely",
+  "category": "animation",
+  "priority": "P1",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Column { Text(\"Item\") }.motion(essential).enter(fade)",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 4,
+    "patchTypes": ["create", "insert", "create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Column",
+        "props": {
+          "__anim.motion": { "essential": true },
+          "__anim.enter": { "curve": "easeOut", "duration": 200, "presets": ["fade"] }
+        }
+      },
+      { "type": "create", "elementType": "Text", "props": { "0": "Item" } },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

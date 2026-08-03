@@ -4,6 +4,7 @@
 //! and patch-stream fixtures.
 
 use super::*;
+use crate::style::vp;
 use crate::tree::Tree;
 use hypen_engine::Patch;
 use indexmap::IndexMap;
@@ -21,6 +22,7 @@ fn create_patch(id: &str, element_type: &str, props: &[(&str, Value)]) -> Patch 
         id: id.into(),
         element_type: element_type.into(),
         props: Arc::new(map),
+        semantics: None,
     }
 }
 
@@ -1017,7 +1019,7 @@ fn taffy_state_apply_patches_builds_tree_incrementally() {
     let mut tree = Tree::new();
     tree.apply_batch(&patches);
     let mut taffy = TaffyState::new();
-    let applied = taffy.apply_patches(&patches, &tree, 1.0, 800.0);
+    let applied = taffy.apply_patches(&patches, &tree, 1.0, vp(800.0));
     assert!(
         applied,
         "all patch types should be handled by apply_patches"
@@ -1051,7 +1053,7 @@ fn taffy_state_setprop_recomputes_node_style_only() {
     let mut tree = Tree::new();
     tree.apply_batch(&initial);
     let mut taffy = TaffyState::new();
-    assert!(taffy.apply_patches(&initial, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(800.0)));
 
     let setprop = vec![hypen_engine::Patch::SetProp {
         id: "box".into(),
@@ -1059,7 +1061,7 @@ fn taffy_state_setprop_recomputes_node_style_only() {
         value: json!(40),
     }];
     tree.apply_batch(&setprop);
-    assert!(taffy.apply_patches(&setprop, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&setprop, &tree, 1.0, vp(800.0)));
 
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute_with_state(
@@ -1080,6 +1082,133 @@ fn taffy_state_setprop_recomputes_node_style_only() {
         item.rect.w >= 80.0 && item.rect.h >= 80.0,
         "padding(40) should produce ≥80×80 rect; got {:?}",
         item.rect,
+    );
+}
+
+#[test]
+fn padding_hover_state_variant_changes_geometry_when_hovered() {
+    // End-to-end: a Container with `padding:hover` larger than its
+    // base padding produces a larger rect once the interaction
+    // snapshot marks it hovered, and the base geometry when not.
+    let patches = vec![
+        create_patch(
+            "box",
+            "Container",
+            &[("padding.0", json!(8)), ("padding:hover.0", json!(40))],
+        ),
+        insert_patch("root", "box"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+
+    // Base (no hover): ~16-tall minimum from padding(8) top+bottom.
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let base = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    // The empty Container stretches to full width as a flex child,
+    // so height (padding top+bottom = 16) is the unambiguous signal.
+    let base_rect = base.item_by_id("box").expect("box laid out").rect;
+    assert!(
+        (base_rect.h - 16.0).abs() < 0.5,
+        "base padding(8) → 16-tall rect; got {base_rect:?}",
+    );
+
+    // Hover active on `box`: padding jumps to 40 → 80-tall rect.
+    taffy.set_interaction(crate::layout::LayoutInteraction {
+        hovered: Some("box".into()),
+        ..Default::default()
+    });
+    let hovered = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    let hovered_rect = hovered.item_by_id("box").expect("box laid out").rect;
+    assert!(
+        (hovered_rect.h - 80.0).abs() < 0.5,
+        "padding:hover(40) should produce an 80-tall rect once hovered; got {hovered_rect:?}",
+    );
+
+    // Back to no hover → base geometry restored.
+    taffy.set_interaction(crate::layout::LayoutInteraction::default());
+    let unhovered = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    let unhovered_rect = unhovered.item_by_id("box").expect("box laid out").rect;
+    assert!(
+        (unhovered_rect.h - base_rect.h).abs() < 0.5,
+        "leaving hover should restore base geometry; base={base_rect:?} now={unhovered_rect:?}",
+    );
+}
+
+#[test]
+fn padding_hover_only_applies_to_the_hovered_node() {
+    // Two boxes, both with `padding:hover`. Hovering one must not
+    // inflate the other (per-node active states).
+    let patches = vec![
+        create_patch(
+            "a",
+            "Container",
+            &[("padding.0", json!(8)), ("padding:hover.0", json!(40))],
+        ),
+        insert_patch("root", "a"),
+        create_patch(
+            "b",
+            "Container",
+            &[("padding.0", json!(8)), ("padding:hover.0", json!(40))],
+        ),
+        insert_patch("root", "b"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, vp(800.0)));
+    taffy.set_interaction(crate::layout::LayoutInteraction {
+        hovered: Some("a".into()),
+        ..Default::default()
+    });
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    let a = pass.item_by_id("a").expect("a laid out").rect;
+    let b = pass.item_by_id("b").expect("b laid out").rect;
+    assert!(
+        (a.h - 80.0).abs() < 0.5,
+        "hovered `a` should inflate; got {a:?}"
+    );
+    assert!(
+        (b.h - 16.0).abs() < 0.5,
+        "un-hovered `b` should keep base padding; got {b:?}"
     );
 }
 
@@ -1178,11 +1307,14 @@ fn taffy_state_remove_drops_node_from_tree_and_map() {
     let mut tree = Tree::new();
     tree.apply_batch(&patches);
     let mut taffy = TaffyState::new();
-    assert!(taffy.apply_patches(&patches, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, vp(800.0)));
 
-    let remove = vec![hypen_engine::Patch::Remove { id: "a".into() }];
+    let remove = vec![hypen_engine::Patch::Remove {
+        id: "a".into(),
+        transition: false,
+    }];
     tree.apply_batch(&remove);
-    assert!(taffy.apply_patches(&remove, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&remove, &tree, 1.0, vp(800.0)));
 
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute_with_state(
@@ -1404,14 +1536,14 @@ fn taffy_state_recreate_existing_id_does_not_orphan_old_node() {
     let mut tree = Tree::new();
     tree.apply_batch(&initial);
     let mut taffy = TaffyState::new();
-    assert!(taffy.apply_patches(&initial, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(800.0)));
     let baseline = taffy.total_node_count();
 
     // Re-Create the same id many times, as a render loop would.
     for _ in 0..50 {
         let recreate = vec![create_patch("a", "Text", &[("0", json!("a"))])];
         tree.apply_batch(&recreate);
-        assert!(taffy.apply_patches(&recreate, &tree, 1.0, 800.0));
+        assert!(taffy.apply_patches(&recreate, &tree, 1.0, vp(800.0)));
     }
 
     assert_eq!(
@@ -2091,6 +2223,144 @@ fn non_scrollable_container_does_not_emit_clip_to() {
 }
 
 // -----------------------------------------------------------------
+// clip_to is enforced in HIT-TESTING, not just paint (pixel/hit
+// parity, constraint #5). Paint pushes the scrollable ancestor's
+// `clip_to` (vello_painter::draw_item / push_outer_clip), so an item
+// scrolled or transformed past that clip is invisible — and must
+// therefore be unhittable, or a click on empty space would activate a
+// control the user cannot see.
+// -----------------------------------------------------------------
+
+/// Minimal actionable `LayoutItem`, with an optional viewport-space
+/// `clip_to` and a transform, registered so `hit()` considers it.
+fn actionable_clip_item(
+    id: &str,
+    rect: Rect,
+    clip_to: Option<Rect>,
+    transform: Affine2,
+) -> LayoutItem {
+    LayoutItem {
+        node_id: id.to_string(),
+        kind: ItemKind::Container,
+        rect,
+        action: Some("tap".to_string()),
+        action_payload: None,
+        hover_action: None,
+        hover_payload: None,
+        background: None,
+        hover: HoverStyle::default(),
+        border: crate::style::Border::default(),
+        scrollable: None,
+        font_weight: 400,
+        clip_to,
+        subtree_root: None,
+        background_gradient: None,
+        background_image: None,
+        state_variants: crate::style::StateVariants::default(),
+        opacity: 1.0,
+        transform,
+    }
+}
+
+fn single_actionable_pass(item: LayoutItem) -> LayoutPass {
+    let mut by_node_id = std::collections::HashMap::new();
+    by_node_id.insert(item.node_id.clone(), 0usize);
+    LayoutPass {
+        items: vec![item],
+        content_size: (0.0, 0.0),
+        by_node_id,
+        actionable_ids: vec![0],
+        focusable_ids: vec![0],
+        scrollable_ids: vec![],
+        hoverable_ids: vec![0],
+        a11y: std::collections::HashMap::new(),
+    }
+}
+
+#[test]
+fn hit_misses_in_clipped_away_region_hits_in_visible_region() {
+    // An actionable spanning y∈[30,90], clipped to y<50 by its
+    // scrollable ancestor: y∈[30,50) is painted (visible), y∈[50,90) is
+    // cropped away (invisible).
+    let rect = Rect {
+        x: 0.0,
+        y: 30.0,
+        w: 100.0,
+        h: 60.0,
+    };
+    let clip = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 50.0,
+    };
+    let pass = single_actionable_pass(actionable_clip_item(
+        "btn",
+        rect,
+        Some(clip),
+        Affine2::IDENTITY,
+    ));
+    assert_eq!(
+        pass.hit(50.0, 40.0).map(|it| it.node_id.as_str()),
+        Some("btn"),
+        "a click in the VISIBLE (unclipped) part of the item hits it",
+    );
+    assert!(
+        pass.hit(50.0, 70.0).is_none(),
+        "a click in the CLIPPED-AWAY (painted-nothing) part must miss — it is \
+         inside the rect but outside the clip the painter cropped to",
+    );
+    // Every hit lane shares hit_contains, so hover/focus/scroll agree.
+    assert!(pass.hit_hoverable(50.0, 70.0).is_none());
+    assert!(pass.hit_focusable(50.0, 70.0).is_none());
+    // Sanity: without the clip that exact point is a plain rect hit —
+    // proving the clip, not the rect, is what rejects it.
+    let unclipped =
+        single_actionable_pass(actionable_clip_item("btn", rect, None, Affine2::IDENTITY));
+    assert_eq!(
+        unclipped.hit(50.0, 70.0).map(|it| it.node_id.as_str()),
+        Some("btn"),
+        "with no clip the same point falls inside the rect and hits",
+    );
+}
+
+#[test]
+fn transform_pushing_item_wholly_outside_its_clip_is_unhittable() {
+    // Native rect sits inside the clip, but a +200px downward transform
+    // paints the whole item below the clip's bottom edge (y<50) — the
+    // painter shows nothing, so NO viewport point may hit it.
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 40.0,
+    };
+    let clip = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 50.0,
+    };
+    let pass = single_actionable_pass(actionable_clip_item(
+        "btn",
+        rect,
+        Some(clip),
+        Affine2::translate(0.0, 200.0),
+    ));
+    // Where the transformed pixels would land (y≈220): outside the clip.
+    assert!(
+        pass.hit(50.0, 220.0).is_none(),
+        "the transformed item paints at y≈220, outside the clip — nothing there to hit",
+    );
+    // Where the untransformed rect used to be (y≈20): inside the clip,
+    // but the transform-inverse maps it out of the rect — nothing painted.
+    assert!(
+        pass.hit(50.0, 20.0).is_none(),
+        "the item vacated its original slot (translated away) — no hit there either",
+    );
+}
+
+// -----------------------------------------------------------------
 // .onHover applicator
 // -----------------------------------------------------------------
 
@@ -2222,4 +2492,629 @@ fn resolve_hover_payload_strips_author_supplied_hovered_flag() {
         payload.as_object().unwrap().get("hovered").is_none(),
         "the author's hovered: literal must be stripped",
     );
+}
+
+// ---------------------------------------------------------------
+// Focus traversal exclusion (exit-animating subtrees leave the Tab
+// order the moment their exit begins)
+// ---------------------------------------------------------------
+
+#[test]
+fn focus_walk_skips_excluded_ids() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    for id in ["b1", "b2", "b3"] {
+        tree.apply(&create_patch(id, "Button", &[("action", json!("@actions.x"))]));
+        tree.apply(&insert_patch("col", id));
+    }
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+    // No-op predicate matches the plain walk exactly.
+    assert_eq!(pass.focus_next(None), Some("b1".into()));
+    assert_eq!(pass.focus_next_excluding(None, &|_| false), Some("b1".into()));
+    // Excluded ids are skipped, continuing to the next candidate…
+    assert_eq!(pass.focus_next_excluding(None, &|id| id == "b1"), Some("b2".into()));
+    assert_eq!(
+        pass.focus_next_excluding(Some("b1"), &|id| id == "b2"),
+        Some("b3".into())
+    );
+    // …including across the wrap.
+    assert_eq!(
+        pass.focus_next_excluding(Some("b3"), &|id| id == "b1"),
+        Some("b2".into())
+    );
+    assert_eq!(
+        pass.focus_prev_excluding(Some("b3"), &|id| id == "b2"),
+        Some("b1".into())
+    );
+    assert_eq!(
+        pass.focus_prev_excluding(Some("b1"), &|id| id == "b3"),
+        Some("b2".into())
+    );
+    // Every focusable excluded: None, never an infinite walk.
+    assert_eq!(pass.focus_next_excluding(Some("b1"), &|_| true), None);
+    assert_eq!(pass.focus_prev_excluding(None, &|_| true), None);
+}
+
+// ---------------------------------------------------------------
+// Effective-opacity gate must open for variant-decorated keys
+// ---------------------------------------------------------------
+
+#[test]
+fn decorated_opacity_key_opens_the_paint_gate() {
+    // A node styled ONLY by a breakpoint-decorated opacity key: the
+    // effective-opacity pass must still run (an exact-key gate left
+    // such a node painting fully opaque while `effective_opacity`
+    // itself resolves the decorated key fine).
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "col",
+        "Column",
+        &[("opacity@md.0", json!(0.5))],
+    ));
+    tree.apply(&insert_patch("root", "col"));
+    add_text(&mut tree, "col", "t", "faded");
+
+    let mut text = TextEngine::new();
+    // 800px viewport ≥ the 768px `md` threshold → the variant is active.
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let col = find_item(&pass, "col");
+    let t = find_item(&pass, "t");
+    assert!((col.opacity - 0.5).abs() < 1e-6, "decorated key must gate in: {}", col.opacity);
+    assert!((t.opacity - 0.5).abs() < 1e-6, "children inherit the decorated value");
+}
+
+// -----------------------------------------------------------------
+// Per-item transforms: static translateX/translateY/scale/rotate props
+// compose into `LayoutItem::transform`, and every hit path reads the
+// transformed geometry (constraint #5: pixels and hit targets agree).
+// -----------------------------------------------------------------
+
+#[test]
+fn static_translate_props_move_the_hit_target() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch(
+        "btn",
+        "Button",
+        &[
+            ("action", json!("@actions.go")),
+            ("width.0", json!(100.0)),
+            ("height.0", json!(40.0)),
+            ("translateX.0", json!(200.0)),
+            ("translateY.0", json!(50.0)),
+        ],
+    ));
+    tree.apply(&insert_patch("col", "btn"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    assert!(!btn.transform.is_identity(), "static transform props light up");
+    // Layout rect is untouched (transforms are paint/hit-only)...
+    assert!(btn.rect.x < 10.0, "Taffy geometry unmoved: {:?}", btn.rect);
+    // ...but the hit target follows the pixels: the untransformed
+    // position misses, the translated one hits.
+    let (cx, cy) = (btn.rect.x + 50.0, btn.rect.y + 20.0);
+    assert!(pass.hit(cx, cy).is_none(), "old position must not hit");
+    let hit = pass.hit(cx + 200.0, cy + 50.0).expect("translated position hits");
+    assert_eq!(hit.node_id, "btn");
+    // Visual rect is the translated AABB.
+    let vr = btn.visual_rect();
+    assert!((vr.x - (btn.rect.x + 200.0)).abs() < 0.5);
+    assert!((vr.y - (btn.rect.y + 50.0)).abs() < 0.5);
+}
+
+#[test]
+fn scale_transforms_hit_about_the_box_center() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch(
+        "btn",
+        "Button",
+        &[
+            ("action", json!("@actions.go")),
+            ("width.0", json!(100.0)),
+            ("height.0", json!(100.0)),
+            ("scale.0", json!(0.5)),
+        ],
+    ));
+    tree.apply(&insert_patch("col", "btn"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    let (cx, cy) = (btn.rect.x + 50.0, btn.rect.y + 50.0);
+    // Center is the transform origin — always inside.
+    assert!(pass.hit(cx, cy).is_some(), "center still hits at 0.5×");
+    // A point 40px from center was inside the unscaled box but is
+    // outside the half-size box (which extends only 25px from center).
+    assert!(pass.hit(cx + 40.0, cy).is_none(), "outside the scaled box");
+    assert!(pass.hit(cx + 20.0, cy).is_some(), "inside the scaled box");
+    // Visual rect shrinks about the center.
+    let vr = btn.visual_rect();
+    assert!((vr.w - 50.0).abs() < 0.5 && (vr.h - 50.0).abs() < 0.5);
+    assert!((vr.x - (btn.rect.x + 25.0)).abs() < 0.5);
+}
+
+#[test]
+fn rotate_transforms_hit_and_degenerate_scale_is_unhittable() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    // A wide flat button rotated 90°: its long axis becomes vertical.
+    tree.apply(&create_patch(
+        "rot",
+        "Button",
+        &[
+            ("action", json!("@actions.rot")),
+            ("width.0", json!(200.0)),
+            ("height.0", json!(20.0)),
+            ("rotate.0", json!(90.0)),
+        ],
+    ));
+    tree.apply(&insert_patch("col", "rot"));
+    tree.apply(&create_patch(
+        "gone",
+        "Button",
+        &[
+            ("action", json!("@actions.gone")),
+            ("width.0", json!(100.0)),
+            ("height.0", json!(100.0)),
+            ("scale.0", json!(0.0)),
+        ],
+    ));
+    tree.apply(&insert_patch("col", "gone"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let rot = find_item(&pass, "rot");
+    let (cx, cy) = (rot.rect.x + 100.0, rot.rect.y + 10.0);
+    // 90° about center: a point 80px right of center (inside the
+    // unrotated long axis) now misses; 80px BELOW center hits.
+    assert!(pass.hit(cx + 80.0, cy).is_none(), "unrotated axis misses");
+    let hit = pass.hit(cx, cy + 80.0).expect("rotated axis hits");
+    assert_eq!(hit.node_id, "rot");
+    // Rotated visual AABB swaps the axes (200×20 → 20×200).
+    let vr = rot.visual_rect();
+    assert!((vr.w - 20.0).abs() < 0.5 && (vr.h - 200.0).abs() < 0.5);
+    // Degenerate scale(0): nothing hittable anywhere on the item.
+    let gone = find_item(&pass, "gone");
+    let (gx, gy) = (gone.rect.x + 50.0, gone.rect.y + 50.0);
+    assert!(!gone.hit_contains(gx, gy), "scale(0) is unhittable");
+}
+
+#[test]
+fn nested_transforms_compose_down_the_tree() {
+    let mut tree = Tree::new();
+    // Parent translated +100 x; child rotated 90° about its own center.
+    tree.apply(&create_patch(
+        "wrap",
+        "Column",
+        &[("translateX.0", json!(100.0))],
+    ));
+    tree.apply(&insert_patch("root", "wrap"));
+    tree.apply(&create_patch(
+        "btn",
+        "Button",
+        &[
+            ("action", json!("@actions.n")),
+            ("width.0", json!(200.0)),
+            ("height.0", json!(20.0)),
+            ("rotate.0", json!(90.0)),
+        ],
+    ));
+    tree.apply(&insert_patch("wrap", "btn"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    // The child's rotation happens about its own (untranslated layout)
+    // center, then the parent's translate carries it +100 x.
+    let (cx, cy) = (btn.rect.x + 100.0, btn.rect.y + 10.0);
+    assert!(pass.hit(cx + 100.0, cy + 80.0).is_some(), "translated+rotated point hits");
+    assert!(pass.hit(cx, cy + 80.0).is_none(), "un-translated rotated point misses");
+    assert!(pass.hit(cx + 100.0 + 80.0, cy).is_none(), "un-rotated translated point misses");
+    // Container (wrap) itself carries a plain translate.
+    let wrap = find_item(&pass, "wrap");
+    let wr = wrap.visual_rect();
+    assert!((wr.x - (wrap.rect.x + 100.0)).abs() < 0.5);
+}
+
+#[test]
+fn transform_free_tree_keeps_identity_and_plain_hits() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch(
+        "btn",
+        "Button",
+        &[("action", json!("@actions.go")), ("width.0", json!(100.0)), ("height.0", json!(40.0))],
+    ));
+    tree.apply(&insert_patch("col", "btn"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    assert!(btn.transform.is_identity());
+    assert_eq!(btn.visual_rect(), btn.rect);
+    assert!(pass.hit(btn.rect.x + 1.0, btn.rect.y + 1.0).is_some());
+}
+
+#[test]
+fn rotate_accepts_deg_suffixed_strings() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch(
+        "r",
+        "Container",
+        &[("width.0", json!(100.0)), ("height.0", json!(20.0)), ("rotate.0", json!("90deg"))],
+    ));
+    tree.apply(&insert_patch("col", "r"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let r = find_item(&pass, "r");
+    let vr = r.visual_rect();
+    assert!((vr.w - 20.0).abs() < 0.5 && (vr.h - 100.0).abs() < 0.5, "\"90deg\" parses: {vr:?}");
+}
+
+#[test]
+fn affine2_inverse_round_trips_and_conjugation_matches_recompute() {
+    let m = Affine2::translate(30.0, -12.0)
+        .mul(&Affine2::translate(50.0, 40.0))
+        .mul(&Affine2::scale(1.5))
+        .mul(&Affine2::rotate_deg(37.0))
+        .mul(&Affine2::translate(-50.0, -40.0));
+    let inv = m.inverse().expect("invertible");
+    let (x, y) = m.apply(12.0, 34.0);
+    let (bx, by) = inv.apply(x, y);
+    assert!((bx - 12.0).abs() < 1e-3 && (by - 34.0).abs() < 1e-3);
+    // Scroll fast path: conjugating by the shift equals recomputing
+    // the transform against shifted rect centers.
+    let shifted = Affine2::translate(0.0, -25.0)
+        .mul(&Affine2::translate(50.0, 15.0))
+        .mul(&Affine2::scale(1.5))
+        .mul(&Affine2::rotate_deg(37.0))
+        .mul(&Affine2::translate(-50.0, -15.0));
+    let local = Affine2::translate(50.0, 40.0)
+        .mul(&Affine2::scale(1.5))
+        .mul(&Affine2::rotate_deg(37.0))
+        .mul(&Affine2::translate(-50.0, -40.0));
+    let conj = local.conjugate_translate(0.0, -25.0);
+    let want = Affine2::translate(50.0, 15.0)
+        .mul(&Affine2::scale(1.5))
+        .mul(&Affine2::rotate_deg(37.0))
+        .mul(&Affine2::translate(-50.0, -15.0));
+    let _ = shifted;
+    for (a, b) in conj.0.iter().zip(want.0.iter()) {
+        assert!((a - b).abs() < 1e-3, "conjugation mismatch: {conj:?} vs {want:?}");
+    }
+}
+
+#[test]
+fn logical_viewport_converts_physical_surface_to_css_pixels() {
+    use crate::layout::logical_viewport;
+    // A 960x752pt window on a 2x display: wgpu reports the surface in
+    // physical px, Tailwind breakpoints are CSS px.
+    let v = logical_viewport((1920, 1504), 2.0);
+    assert_eq!(v.w, 960.0);
+    assert_eq!(v.h, 752.0);
+    // 1x passes through untouched.
+    let v1 = logical_viewport((1280, 800), 1.0);
+    assert_eq!(v1.w, 1280.0);
+    assert_eq!(v1.h, 800.0);
+    // A zero scale must not divide by zero.
+    let v0 = logical_viewport((800, 600), 0.0);
+    assert_eq!(v0.w, 800.0);
+    assert_eq!(v0.h, 600.0);
+}
+
+#[test]
+fn breakpoints_resolve_against_logical_not_physical_width() {
+    use crate::layout::logical_viewport;
+    use crate::style::prop_f32_at;
+    // Base 8, md (>=768) 16, xl (>=1280) 64. A 960pt window on a 2x
+    // display is 1920 PHYSICAL px — which would wrongly match `xl`.
+    // It must resolve as `md`.
+    let mut props = std::collections::HashMap::new();
+    props.insert("padding".to_string(), serde_json::json!(8));
+    props.insert("padding@md.0".to_string(), serde_json::json!(16));
+    props.insert("padding@xl.0".to_string(), serde_json::json!(64));
+    let node = crate::tree::Node {
+        id: "n".into(),
+        element_type: "Box".into(),
+        props,
+        semantics: None,
+    };
+    let v = logical_viewport((1920, 1504), 2.0);
+    assert_eq!(prop_f32_at(&node, "padding", v), Some(16.0));
+}
+
+#[test]
+fn shrunk_text_in_a_row_keeps_a_box_tall_enough_for_its_wrapped_lines() {
+    // The movie-discovery featured card: two padded, rounded, coloured
+    // Text pills side by side in a Row. Their combined natural width
+    // exceeds the row, so flex shrinks them and the text re-wraps onto a
+    // second line. The laid-out box must grow to match, or the painter
+    // draws two lines of glyphs over a one-line background — the "8.8"
+    // and "Fi" spilling out from under their pills.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "row"));
+    add_text(&mut tree, "row", "a", "Action, Adventure, Sci-Fi");
+    add_text(&mut tree, "row", "b", "Drama, Thriller, Mystery");
+
+    let mut text = TextEngine::new();
+
+    // Roomy: both fit on one line each.
+    let roomy = LayoutPass::compute(&tree, &mut text, (1600, 600), 1.0);
+    let h_roomy = find_item(&roomy, "a").rect.h;
+
+    // Cramped: the row can't hold both, so they shrink and wrap.
+    let cramped = LayoutPass::compute(&tree, &mut text, (300, 600), 1.0);
+    let a = find_item(&cramped, "a");
+
+    assert!(
+        a.rect.w < 199.0,
+        "expected the pill to be shrunk below its natural width, got {}",
+        a.rect.w
+    );
+    assert!(
+        a.rect.h > h_roomy,
+        "shrunk-and-wrapped text box height ({}) must exceed the \
+         one-line height ({h_roomy}) — otherwise the background pill is \
+         a line shorter than the glyphs drawn into it",
+        a.rect.h
+    );
+}
+
+
+#[test]
+fn padded_text_pill_grows_to_fit_its_wrapped_lines() {
+    // Same as the unpadded case, but the pills carry `px-3 py-1` like
+    // movie-discovery's rating / genre chips. Padding must not stop the
+    // box from growing when the shrunk width forces a second line.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "row"));
+    for (id, content) in [("a", "Action, Adventure, Sci-Fi"), ("b", "Drama, Thriller, Mystery")] {
+        tree.apply(&create_patch(
+            id,
+            "Text",
+            &[
+                ("0", json!(content)),
+                ("paddingLeft", json!(12)),
+                ("paddingRight", json!(12)),
+                ("paddingTop", json!(4)),
+                ("paddingBottom", json!(4)),
+            ],
+        ));
+        tree.apply(&insert_patch("row", id));
+    }
+
+    let mut text = TextEngine::new();
+    let roomy = LayoutPass::compute(&tree, &mut text, (1600, 600), 1.0);
+    let h_roomy = find_item(&roomy, "a").rect.h;
+
+    let cramped = LayoutPass::compute(&tree, &mut text, (300, 600), 1.0);
+    let a = find_item(&cramped, "a");
+    assert!(
+        a.rect.h > h_roomy,
+        "padded pill height ({}) must exceed the one-line height ({h_roomy})",
+        a.rect.h
+    );
+}
+
+
+#[test]
+fn bold_text_is_measured_bold_so_its_box_fits_the_glyphs_drawn() {
+    // movie-discovery's `font-black` rating pill and `font-bold` genre
+    // chip. Layout used to measure every Text at weight 400 while the
+    // painter drew the node's real weight; bold glyphs are wider, so a
+    // line Taffy had sized as fitting wrapped when painted, and the "8.8"
+    // / "Fi" spilled out from under their background pills.
+    //
+    // The box for bold text must therefore be at least as wide as the
+    // box for the same string at regular weight.
+    // In a Row so each Text sizes to its own content rather than
+    // stretching to the root's full width.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "row"));
+    tree.apply(&create_patch("regular", "Text", &[("0", json!("Sci-Fi"))]));
+    tree.apply(&insert_patch("row", "regular"));
+    tree.apply(&create_patch(
+        "bold",
+        "Text",
+        &[("0", json!("Sci-Fi")), ("fontWeight", json!(900))],
+    ));
+    tree.apply(&insert_patch("row", "bold"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1600, 600), 1.0);
+    let regular = find_item(&pass, "regular").rect;
+    let bold = find_item(&pass, "bold").rect;
+
+    assert!(
+        bold.w > regular.w,
+        "black-weight text ({}) should measure wider than regular ({}) —          equal widths mean layout is still measuring at weight 400",
+        bold.w,
+        regular.w
+    );
+}
+
+#[test]
+fn single_argument_linear_gradient_applicator_resolves() {
+    // `.linearGradient("135deg, #EC4899 0%, #F472B6 100%")` — one string
+    // holding the whole CSS body, which is what the DOM renderer lowers
+    // to `linear-gradient(<body>)`. movie-discovery's search button and
+    // featured card both use this form; desktop used to require a second
+    // `colors` argument and painted no gradient at all.
+    use crate::style::{prop_linear_gradient, Viewport};
+    let mut props = std::collections::HashMap::new();
+    props.insert(
+        "linearGradient.0".to_string(),
+        json!("135deg, #EC4899 0%, #F472B6 100%"),
+    );
+    let node = crate::tree::Node {
+        id: "btn".into(),
+        element_type: "Button".into(),
+        props,
+        semantics: None,
+    };
+    let g = prop_linear_gradient(&node, Viewport::new(960.0, 752.0))
+        .expect("single-argument linearGradient must resolve");
+    assert_eq!(g.stops.len(), 2, "expected both colour stops, got {:?}", g.stops);
+    assert_eq!(g.stops[0].color, crate::style::Rgba(0xEC, 0x48, 0x99, 0xff));
+    assert_eq!(g.stops[1].color, crate::style::Rgba(0xF4, 0x72, 0xB6, 0xff));
+}
+
+#[test]
+fn single_argument_linear_gradient_keeps_rgba_stop_alpha() {
+    // The featured card's body uses rgba() stops with real alpha; those
+    // must survive, or the card paints opaque over the page background.
+    use crate::style::{prop_linear_gradient, Viewport};
+    let mut props = std::collections::HashMap::new();
+    props.insert(
+        "linearGradient.0".to_string(),
+        json!("135deg, rgba(236, 72, 153, 0.38) 0%, rgba(8, 8, 8, 0.98) 42%, rgba(244, 114, 182, 0.20) 100%"),
+    );
+    let node = crate::tree::Node {
+        id: "card".into(),
+        element_type: "Row".into(),
+        props,
+        semantics: None,
+    };
+    let g = prop_linear_gradient(&node, Viewport::new(960.0, 752.0))
+        .expect("rgba-stop gradient body must resolve");
+    assert_eq!(g.stops.len(), 3);
+    assert_eq!(g.stops[0].color.3, 97, "0.38 alpha should survive parsing");
+}
+
+#[test]
+fn semantic_alignment_aliases_map_by_axis_not_by_name() {
+    // `.horizontalAlignment` / `.verticalAlignment` name a geometric
+    // axis, so which flex property they drive flips with flex-direction
+    // — the Android and SwiftUI convention. todo's task rows rely on
+    // `horizontalAlignment("space-between")` in a Row to push "Remove"
+    // to the right edge.
+    use taffy::style::{AlignItems, JustifyContent};
+    let mk = |kind: &str| {
+        let mut props = std::collections::HashMap::new();
+        props.insert("horizontalAlignment".to_string(), json!("space-between"));
+        props.insert("verticalAlignment".to_string(), json!("center"));
+        let node = crate::tree::Node {
+            id: "n".into(),
+            element_type: kind.into(),
+            props,
+            semantics: None,
+        };
+        node_style_with(&node, 1.0, vp(960.0), &[])
+    };
+
+    // Row: horizontal is the MAIN axis.
+    let row = mk("Row");
+    assert_eq!(row.justify_content, Some(JustifyContent::SpaceBetween));
+    assert_eq!(row.align_items, Some(AlignItems::Center));
+
+    // Column: the mapping flips. `verticalAlignment` now drives the main
+    // axis, and `space-between` is not a legal align-items value so the
+    // cross axis is simply left alone rather than set to nonsense.
+    let col = mk("Column");
+    assert_eq!(col.justify_content, Some(JustifyContent::Center));
+    assert_eq!(col.align_items, None);
+}
+
+#[test]
+fn css_border_shorthand_sets_width_and_colour() {
+    // `.border("1px solid #333")` — todo's task-row outline. The numeric
+    // read rejects the string, so without shorthand parsing no border was
+    // drawn at all.
+    use crate::style::{border_at, Rgba, Viewport};
+    let mut props = std::collections::HashMap::new();
+    props.insert("border".to_string(), json!("1px solid #333"));
+    let node = crate::tree::Node {
+        id: "row".into(),
+        element_type: "Row".into(),
+        props,
+        semantics: None,
+    };
+    let b = border_at(&node, Viewport::new(960.0, 752.0));
+    assert_eq!(b.width, 1.0, "border width should come from the shorthand");
+    assert_eq!(b.color, Rgba(0x33, 0x33, 0x33, 0xff));
+
+    // Order-independent, and the style keyword is ignored.
+    let mut props2 = std::collections::HashMap::new();
+    props2.insert("border".to_string(), json!("red dashed 2px"));
+    let node2 = crate::tree::Node {
+        id: "r2".into(),
+        element_type: "Row".into(),
+        props: props2,
+        semantics: None,
+    };
+    let b2 = border_at(&node2, Viewport::new(960.0, 752.0));
+    assert_eq!(b2.width, 2.0);
+    assert_eq!(b2.color, Rgba(0xff, 0x00, 0x00, 0xff));
+}
+
+#[test]
+fn max_width_child_stays_centred_as_the_window_resizes() {
+    // The home-screen dock: a `w-full max-w-[280px]` Column centred by
+    // its parent's `items-center`, inside a `min-h-screen` shell. It must
+    // sit centred at every window size, not just the one it was tested
+    // at — this is the "UI is scaled to the window" guarantee, and it is
+    // also the regression guard for the dock drifting off-centre.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "shell",
+        "Column",
+        &[
+            ("alignItems", json!("center")),
+            ("width", json!("100%")),
+            // `min-h-screen` lowers to this; it silently parsed to nothing
+            // before viewport units were supported.
+            ("minHeight", json!("100vh")),
+        ],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "shell"));
+    tree.apply(&create_patch(
+        "dock",
+        "Column",
+        &[("width", json!("100%")), ("maxWidth", json!(280))],
+    ));
+    tree.apply(&insert_patch("shell", "dock"));
+
+    let mut text = TextEngine::new();
+    for (w, h) in [(960u32, 720u32), (1400, 900), (640, 480), (1920, 1080)] {
+        let pass = LayoutPass::compute(&tree, &mut text, (w, h), 1.0);
+        let dock = find_item(&pass, "dock").rect;
+        let shell = find_item(&pass, "shell").rect;
+
+        // Clamped by max-width, never wider than the window.
+        assert!(
+            dock.w <= 280.0 + 0.5,
+            "dock width {} exceeded its 280 max at {w}x{h}",
+            dock.w
+        );
+        assert!(dock.w <= w as f32, "dock wider than the window at {w}x{h}");
+
+        // Centred: equal slack either side, within a rounding pixel.
+        let left = dock.x - shell.x;
+        let right = (shell.x + shell.w) - (dock.x + dock.w);
+        assert!(
+            (left - right).abs() <= 1.0,
+            "dock off-centre at {w}x{h}: {left} left vs {right} right",
+        );
+
+        // The shell follows the window rather than collapsing to content.
+        assert!(
+            shell.h >= h as f32 - 1.0,
+            "shell height {} did not fill the {h}pt window (min-h-screen)",
+            shell.h
+        );
+    }
 }

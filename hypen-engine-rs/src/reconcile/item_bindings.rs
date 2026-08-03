@@ -193,6 +193,9 @@ pub fn replace_item_bindings_with_name(
         ir_children,
         key: Some(key),
         module_scope: element.module_scope.clone(),
+        semantics: element.semantics.clone(),
+        span: element.span,
+        expr_span: element.expr_span,
     }
 }
 
@@ -389,8 +392,27 @@ fn replace_template_string_item_bindings(
     use crate::reactive::{build_evaluator, evaluate_template_string};
 
     let has_item_bindings = bindings.iter().any(|b| b.is_item());
-    if !has_item_bindings {
+
+    // Custom `as:` names (e.g. `as: "opt"`) are deliberately rejected by
+    // `parse_binding` — unknown `@{...}` prefixes must not become data-source
+    // bindings — so the template carries no parsed item bindings for them.
+    // They are only detectable textually, and only here at substitution time
+    // where the iteration variable's name is known.
+    let has_named_refs = template.contains(&format!("@{{{}.", item_name))
+        || template.contains(&format!("@{{{}}}", item_name));
+
+    if !has_item_bindings && !has_named_refs {
         return original.clone();
+    }
+
+    // Whole-template item reference ("@{opt.id}") that expand could not parse
+    // into a `Value::Binding`: resolve to the item value directly, preserving
+    // its JSON type. Guarded on `!has_item_bindings` so the parsed-binding
+    // path (default "item" name) keeps its existing string-formatting shape.
+    if !has_item_bindings {
+        if let Some(val) = whole_template_item_value(template, item, item_name) {
+            return Value::Static(val);
+        }
     }
 
     // PHASE 1: Collect all replacements for explicit bindings (single pass)
@@ -418,6 +440,15 @@ fn replace_template_string_item_bindings(
     // PHASE 2: Apply explicit binding replacements
     let mut result = apply_replacements(template, replacements);
 
+    // PHASE 2.5: whole `@{<item_name>}` / `@{<item_name>.path}` occurrences
+    // that carry no parsed binding (custom `as:` names) — replace the entire
+    // `@{...}` with the raw value, mirroring PHASE 1's unquoted treatment so
+    // simple refs never round-trip through the expression evaluator.
+    if has_named_refs {
+        let named_replacements = collect_named_ref_replacements(&result, item, item_name);
+        result = apply_replacements(&result, named_replacements);
+    }
+
     // PHASE 3: Replace item.xxx references in expressions (e.g., ternary operators)
     // Uses the configurable item_name for custom iteration variables
     let expr_replacements = collect_item_replacements_with_name(&result, item, true, item_name);
@@ -442,6 +473,78 @@ fn replace_template_string_item_bindings(
             bindings: remaining_bindings,
         }
     }
+}
+
+/// If the entire template is one simple reference to the iteration variable
+/// (`"@{opt}"` / `"@{opt.path}"`), resolve it to the item's JSON value.
+/// Returns `None` (falling back to string substitution) for anything else,
+/// including refs whose path is absent from the item.
+fn whole_template_item_value(
+    template: &str,
+    item: &serde_json::Value,
+    item_name: &str,
+) -> Option<serde_json::Value> {
+    let trimmed = template.trim();
+    if !trimmed.starts_with("@{") || !trimmed.ends_with('}') {
+        return None;
+    }
+    let content = &trimmed[2..trimmed.len() - 1];
+    if content == item_name {
+        return Some(item.clone());
+    }
+    if content.starts_with(item_name)
+        && content[item_name.len()..].starts_with('.')
+        && is_simple_path_with_name(content, item_name)
+    {
+        let path = &content[item_name.len() + 1..];
+        return navigate_item_path(item, path).cloned();
+    }
+    None
+}
+
+/// Collect whole `@{...}` occurrences of the iteration variable — bare
+/// `@{opt}` or simple-path `@{opt.a.b}` — replacing the full `@{...}` span
+/// with the unquoted value. Complex expressions are left for the
+/// expression-level pass ([`collect_item_replacements_with_name`]).
+fn collect_named_ref_replacements(
+    s: &str,
+    item: &serde_json::Value,
+    item_name: &str,
+) -> Vec<Replacement> {
+    let mut replacements = Vec::new();
+    let mut pos = 0;
+
+    while let Some(rel_start) = s[pos..].find("@{") {
+        let abs_start = pos + rel_start;
+        let Some(end) = s[abs_start..].find('}') else {
+            break;
+        };
+        let abs_end = abs_start + end;
+        let content = &s[abs_start + 2..abs_end];
+
+        if content == item_name {
+            replacements.push(Replacement {
+                start: abs_start,
+                end: abs_end + 1,
+                text: format_value_for_replacement(item, false),
+            });
+        } else if content.starts_with(item_name)
+            && content[item_name.len()..].starts_with('.')
+            && is_simple_path_with_name(content, item_name)
+        {
+            let path = &content[item_name.len() + 1..];
+            if let Some(val) = navigate_item_path(item, path) {
+                replacements.push(Replacement {
+                    start: abs_start,
+                    end: abs_end + 1,
+                    text: format_value_for_replacement(val, false),
+                });
+            }
+        }
+        pos = abs_end + 1;
+    }
+
+    replacements
 }
 
 /// Find all item.xxx references in a string with configurable item name.

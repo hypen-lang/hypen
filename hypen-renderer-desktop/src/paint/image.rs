@@ -213,6 +213,12 @@ pub(crate) fn test_seed_decoded(src: &str, pm: Arc<Pixmap>) {
 }
 
 pub fn loaded_source(src: &str) -> Option<std::sync::Arc<Pixmap>> {
+    // Mirrors the `ensure_loaded` guard: an empty src is never cached,
+    // so this would miss both tiers anyway — return before paying two
+    // mutex acquisitions per paint for a node that draws nothing.
+    if src.trim().is_empty() {
+        return None;
+    }
     // Tier 1: decoded-pixmap cache hit. The hot path during resize
     // / scroll-out-and-back where the painter tile cache invalidated
     // for every visible image but the source decode is cached here.
@@ -492,6 +498,16 @@ fn build_rounded_rect_mask(
 /// thread and the entry sits in `Loading` until the worker reports
 /// back.
 fn ensure_loaded(src: &str) {
+    // An absent source is "no image", not a load failure. Without this
+    // an `Image(src: "")` — what a record with no poster/avatar
+    // serialises to — burned a cache slot, queued worker work, and made
+    // the worker `fs::read("")`, which logs
+    // `image: failed reading : No such file or directory` naming no
+    // file at all. Web treats `<img src="">` as nothing to fetch; so do
+    // we.
+    if src.trim().is_empty() {
+        return;
+    }
     {
         let mut entries = cache().entries.lock().expect("image cache poisoned");
         if entries.contains_key(src) {
@@ -519,6 +535,69 @@ fn ensure_loaded(src: &str) {
 
 fn is_http(src: &str) -> bool {
     src.starts_with("http://") || src.starts_with("https://")
+}
+
+fn is_data_uri(src: &str) -> bool {
+    src.len() >= 5 && src[..5].eq_ignore_ascii_case("data:")
+}
+
+/// Decode a `data:` URI's payload to the encoded image bytes.
+///
+/// The loader otherwise branches HTTP vs local file, so a `data:` URI fell
+/// to the file branch and failed as a filename — which is why the
+/// home-screen wallpaper (a base64 PNG inlined into the `background`
+/// shorthand) never appeared. Only base64 payloads are supported; a
+/// percent-encoded one returns None and degrades to "no image".
+fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
+    let comma = src.find(',')?;
+    let meta = &src[..comma];
+    if !meta.to_ascii_lowercase().contains("base64") {
+        log::warn!("image: non-base64 data URI is not supported");
+        return None;
+    }
+    let payload: String = src[comma + 1..].chars().filter(|c| !c.is_whitespace()).collect();
+    match base64_decode(&payload) {
+        Some(bytes) => Some(bytes),
+        None => {
+            log::warn!("image: malformed base64 in data URI");
+            None
+        }
+    }
+}
+
+/// Minimal standard-alphabet base64 decoder.
+///
+/// The crate graph has no base64 dependency and this is the only caller;
+/// tolerates missing padding, rejects anything outside the alphabet.
+fn base64_decode(input: &str) -> Option<Vec<u8>> {
+    fn val(c: u8) -> Option<u32> {
+        match c {
+            b'A'..=b'Z' => Some((c - b'A') as u32),
+            b'a'..=b'z' => Some((c - b'a') as u32 + 26),
+            b'0'..=b'9' => Some((c - b'0') as u32 + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = input.bytes().filter(|b| *b != b'=').collect();
+    let mut out = Vec::with_capacity(bytes.len() * 3 / 4);
+    for chunk in bytes.chunks(4) {
+        let mut acc = 0u32;
+        for (i, b) in chunk.iter().enumerate() {
+            acc |= val(*b)? << (18 - 6 * i);
+        }
+        let produced = match chunk.len() {
+            4 => 3,
+            3 => 2,
+            2 => 1,
+            _ => return None,
+        };
+        for i in 0..produced {
+            out.push(((acc >> (16 - 8 * i)) & 0xFF) as u8);
+        }
+    }
+    Some(out)
 }
 
 /// Worker loop. Receives src strings on the channel, fetches the
@@ -551,7 +630,9 @@ pub fn image_load_generation() -> u64 {
 
 fn run_image_worker(rx: mpsc::Receiver<String>) {
     while let Ok(src) = rx.recv() {
-        let bytes = if is_http(&src) {
+        let bytes = if is_data_uri(&src) {
+            decode_data_uri(&src)
+        } else if is_http(&src) {
             fetch_http_bytes(&src)
         } else {
             read_local_bytes(&src)
@@ -770,6 +851,26 @@ mod tests {
     #[test]
     fn read_local_bytes_returns_none_for_missing_file() {
         assert!(read_local_bytes("/tmp/__hypen_test_does_not_exist_xyz.png").is_none());
+    }
+
+    #[test]
+    fn empty_src_never_enters_the_cache_or_the_worker_queue() {
+        // A record with no poster serialises to `src: ""`. That must be
+        // a no-op, not a queued load that fails against no filename.
+        for blank in ["", "   ", "\t\n"] {
+            ensure_loaded(blank);
+            let entries = cache().entries.lock().expect("image cache poisoned");
+            assert!(
+                !entries.contains_key(blank),
+                "blank src {blank:?} took a cache slot"
+            );
+        }
+    }
+
+    #[test]
+    fn loaded_source_is_none_for_blank_src() {
+        assert!(loaded_source("").is_none());
+        assert!(loaded_source("   ").is_none());
     }
 
     #[test]

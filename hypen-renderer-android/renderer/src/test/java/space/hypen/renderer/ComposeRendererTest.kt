@@ -208,6 +208,57 @@ class ComposeRendererTest {
     }
 
     @Test
+    fun `props preserve engine-declared insertion order across patches`() {
+        // Modifier order is load-bearing: equal-priority applicators
+        // (e.g. background vs linearGradient) must apply in the order
+        // the engine declared them, which the stable priority sort in
+        // DefaultApplicatorRegistry only guarantees if props iterate
+        // in insertion order.
+        renderer.applyPatches(
+            listOf(
+                Patch.create(
+                    "1",
+                    "box",
+                    linkedMapOf<String, Any?>(
+                        "background.0" to "red",
+                        "linearGradient.0" to "blue",
+                        "rotate.0" to 45,
+                        "scaleX.0" to 2,
+                        "width.0" to 100,
+                        "size.0" to 50,
+                    ),
+                ),
+                Patch.insert("root", "1"),
+            ),
+        )
+
+        val element = renderer.getElement("1")!!
+        assertEquals(
+            listOf("background.0", "linearGradient.0", "rotate.0", "scaleX.0", "width.0", "size.0"),
+            element.props.keys.toList(),
+        )
+
+        // SET_PROP on an existing key keeps its position; a new key appends.
+        renderer.applyPatches(
+            listOf(
+                Patch.setProp("1", "rotate.0", 90),
+                Patch.setProp("1", "opacity.0", 0.5),
+            ),
+        )
+        assertEquals(
+            listOf("background.0", "linearGradient.0", "rotate.0", "scaleX.0", "width.0", "size.0", "opacity.0"),
+            element.props.keys.toList(),
+        )
+
+        // REMOVE_PROP leaves the remaining order intact.
+        renderer.applyPatches(listOf(Patch.removeProp("1", "scaleX.0")))
+        assertEquals(
+            listOf("background.0", "linearGradient.0", "rotate.0", "width.0", "size.0", "opacity.0"),
+            element.props.keys.toList(),
+        )
+    }
+
+    @Test
     fun `element props are accessible`() {
         val patches =
             listOf(

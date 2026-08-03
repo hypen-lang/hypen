@@ -1,0 +1,38 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "transition-lowering",
+  "description": "The .transition applicator lowers into a single __anim.transition prop object (duration/curve/delay), never a transition.N prop",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Text(\"Animated\").transition(duration: 300, curve: spring, delay: 50)",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "Animated",
+          "__anim.transition": { "curve": "spring", "delay": 50, "duration": 300 }
+        }
+      },
+      { "type": "insert" }
+    ]
+  }
+}

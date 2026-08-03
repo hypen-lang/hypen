@@ -48,14 +48,14 @@ module Column {
           .borderRadius(8)
           .cursor("pointer")
           .width("100%")
-          .transition("all 0.3s ease")
+          .transition(300, easeOut)
         }
         .backgroundColor("#1a1a1a")
         .borderRadius(16)
         .padding(20)
         .border("1px solid #2a2a2a")
         .width(320)
-        .transition("all 0.3s ease")
+        .transition(300, easeOut)
       }
     }
     .display("grid")

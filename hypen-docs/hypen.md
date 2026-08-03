@@ -351,8 +351,21 @@ resourcesDir("./resources")          // Kotlin
 ### Background Images
 `.backgroundImage("url")` `.backgroundSize("cover"|"contain")` `.backgroundPosition("center")`
 
-### Animation (Web only)
-`.transition("all 0.2s ease")` `.cursor("pointer")`
+### Animation (portable — plays natively on web, iOS, Android, desktop; snaps where unsupported)
+`.transition(200, easeOut)` `.transition(duration: 300, curve: spring, delay: 50, props: [opacity])` — animate future prop changes
+`.enter(slide, fade, from: bottom)` `.exit(fade, duration: 150)` — appearance/removal (presets: `fade|slide|scale`; directions: `top|bottom|leading|trailing`)
+`.layout(spring)` — FLIP keyed list reorders (web/desktop only)
+`.animate(spin)` `.animate(pulse, duration: 800, repeat: 3)` — preset timelines: `pulse|spin|shimmer|shake`; `repeat:` is `loop` or a count
+`.states(@state.phase, transition: spring, duration: 250) { onState(collapsed).width(48) onState(expanded).width(240) }` — named multi-prop poses driven by one state path
+`.sharedElement("cover-@{item.id}")` — same key on two routes = element continues across navigation (web/desktop only)
+`.scrub(from: closed, to: open, axis: y, over: [0, -400]).settle(bind: @state.phase)` — drag/scroll between two `.states` poses (web/desktop only)
+`.onAnimationComplete(@actions.done)` — dispatches on natural settle; payload `{ animation: "enter"|"exit"|"states"|"<preset>"|"sharedElement", state?: label }`
+`.onClick(@actions.toggle, animate: spring)` — transaction scope: that action's synchronous state changes glide, everything else snaps (TS hosts)
+`.motion(essential)` — opt a meaning-bearing animation out of reduced-motion snapping
+Curves: `linear|easeIn|easeOut|easeInOut|spring` (fixed overshoot). Flat syntax only — bare tokens + named args; `slide(from: bottom)` is invalid. Bindings in animation args are ignored (except the `.sharedElement` key). Deprecated: `.transition("all 0.2s ease")` CSS string (web-only, warns).
+
+### Cursor (Web only)
+`.cursor("pointer")`
 
 ### Responsive Breakpoints
 ```hypen
@@ -489,7 +502,9 @@ remote.NewRemoteServer().WithDefinition(counter).Listen(3000)
 | Router / Route / Link | Yes | Yes | Yes |
 | position (absolute/fixed) | Yes | Partial | Partial |
 | filter, backdropFilter | Yes | No | No |
-| transition, cursor | Yes | No | No |
+| transition, enter/exit, animate, states | Yes | Yes | Yes |
+| layout, sharedElement, scrub/settle | Yes | No | No |
+| cursor | Yes | No | No |
 | Responsive breakpoints | Yes | Yes | Yes |
 | State variants (:hover) | Yes | Partial | Partial |
 | Tailwind CSS (.tw) | Yes | Yes | Yes |

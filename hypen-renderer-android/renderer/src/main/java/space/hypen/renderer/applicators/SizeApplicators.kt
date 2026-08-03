@@ -29,7 +29,7 @@ class WidthApplicator : ApplicatorHandler {
         context: ApplicatorContext,
     ): Modifier {
         val size = parseSizeValue(value) ?: return modifier
-        return modifier.applyWidth(size)
+        return modifier.applyWidth(size, context.viewport)
     }
 }
 
@@ -45,7 +45,7 @@ class HeightApplicator : ApplicatorHandler {
         context: ApplicatorContext,
     ): Modifier {
         val size = parseSizeValue(value) ?: return modifier
-        return modifier.applyHeight(size)
+        return modifier.applyHeight(size, context.viewport)
     }
 }
 
@@ -61,7 +61,7 @@ class MinWidthApplicator : ApplicatorHandler {
         context: ApplicatorContext,
     ): Modifier {
         val size = parseSizeValue(value) ?: return modifier
-        return modifier.applyMinWidth(size)
+        return modifier.applyMinWidth(size, context.viewport)
     }
 }
 
@@ -77,7 +77,7 @@ class MaxWidthApplicator : ApplicatorHandler {
         context: ApplicatorContext,
     ): Modifier {
         val size = parseSizeValue(value) ?: return modifier
-        return modifier.applyMaxWidth(size)
+        return modifier.applyMaxWidth(size, context.viewport)
     }
 }
 
@@ -93,7 +93,7 @@ class MinHeightApplicator : ApplicatorHandler {
         context: ApplicatorContext,
     ): Modifier {
         val size = parseSizeValue(value) ?: return modifier
-        return modifier.applyMinHeight(size)
+        return modifier.applyMinHeight(size, context.viewport)
     }
 }
 
@@ -109,7 +109,7 @@ class MaxHeightApplicator : ApplicatorHandler {
         context: ApplicatorContext,
     ): Modifier {
         val size = parseSizeValue(value) ?: return modifier
-        return modifier.applyMaxHeight(size)
+        return modifier.applyMaxHeight(size, context.viewport)
     }
 }
 
@@ -130,17 +130,17 @@ class SizeApplicator : ApplicatorHandler {
             val widthVal = value["width"]
             val heightVal = value["height"]
             if (widthVal != null) {
-                parseSizeValue(widthVal)?.let { result = result.applyWidth(it) }
+                parseSizeValue(widthVal)?.let { result = result.applyWidth(it, context.viewport) }
             }
             if (heightVal != null) {
-                parseSizeValue(heightVal)?.let { result = result.applyHeight(it) }
+                parseSizeValue(heightVal)?.let { result = result.applyHeight(it, context.viewport) }
             }
             return result
         }
 
         // Single value applies to both
         val size = parseSizeValue(value) ?: return modifier
-        return modifier.applyWidth(size).applyHeight(size)
+        return modifier.applyWidth(size, context.viewport).applyHeight(size, context.viewport)
     }
 }
 

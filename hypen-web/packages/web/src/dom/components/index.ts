@@ -7,6 +7,12 @@
 export interface ComponentHandler {
   create(): HTMLElement;
   applyProps?(element: HTMLElement, props: Record<string, any>): void;
+  /**
+   * Called after the renderer changes this component's direct children.
+   * Native container components can use this instead of depending on an
+   * asynchronous MutationObserver to keep renderer-owned child state live.
+   */
+  onChildrenChanged?(element: HTMLElement): void;
 }
 
 export class ComponentRegistry {
@@ -47,6 +53,16 @@ export class ComponentRegistry {
   }
 
   /**
+   * Notify a native component that its direct child list or a child's slot
+   * assignment changed.
+   */
+  notifyChildrenChanged(element: HTMLElement): void {
+    const type = element.dataset.hypenType;
+    if (!type) return;
+    this.get(type)?.onChildrenChanged?.(element);
+  }
+
+  /**
    * Register all default Hypen components
    */
   private registerDefaults(): void {
@@ -84,8 +100,11 @@ export class ComponentRegistry {
     const { hypenAppHandler } = require("./hypenapp.js");
     const { appHandler } = require("./app.js");
     const { iconHandler } = require("./icon.js");
+    const { visuallyHiddenHandler } = require("./visuallyhidden.js");
+    const { tabsHandler, tabHandler, tabPanelHandler, optionHandler } = require("./tabs.js");
 
     this.register("app", appHandler);
+    this.register("visuallyhidden", visuallyHiddenHandler);
     this.register("icon", iconHandler);
     this.register("column", columnHandler);
     this.register("row", rowHandler);
@@ -116,6 +135,10 @@ export class ComponentRegistry {
     this.register("video", videoHandler);
     this.register("audio", audioHandler);
     this.register("paragraph", paragraphHandler);
+    this.register("tabs", tabsHandler);
+    this.register("tab", tabHandler);
+    this.register("tabpanel", tabPanelHandler);
+    this.register("option", optionHandler);
     this.register("router", routerHandler);
     this.register("route", routeHandler);
     this.register("hypenapp", hypenAppHandler);

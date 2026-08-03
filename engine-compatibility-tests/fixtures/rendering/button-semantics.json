@@ -1,0 +1,31 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "button-create-semantics",
+  "description": "Create patches carry the derived accessibility semantics block: Button(\"Save\") pins {role: button, name: Save} on the wire",
+  "category": "rendering",
+  "priority": "P0",
+
+  "input": {
+    "source": "Button(\"Save\")",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Button",
+        "props": { "0": "Save" },
+        "semantics": { "role": "button", "name": "Save" }
+      },
+      { "type": "insert" }
+    ]
+  }
+}

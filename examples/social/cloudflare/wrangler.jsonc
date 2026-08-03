@@ -7,7 +7,7 @@
 
   "rules": [
     { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
-    { "type": "Text", "globs": ["**/*.sql", "**/*.hypen", "**/*.svg", "**/dist/client/*.js"], "fallthrough": true }
+    { "type": "Text", "globs": ["**/*.sql", "**/*.hypen", "**/*.svg", "**/dist/client/*.js", "../../../../hypen-web/packages/cf/dist/client/*.js"], "fallthrough": true }
   ],
 
   "durable_objects": {

@@ -10,6 +10,14 @@ impl App {
     /// Find the focused Input (if any) and return `(node_id, value, bind_path)`.
     pub(super) fn focused_input(&self) -> Option<(String, String, String)> {
         let id = self.focused.clone()?;
+        // An Input inside an exit-animating subtree is engine-side
+        // dead: typing, IME composition, and `__hypen_bind` dispatch
+        // all stop the moment the exit begins. (Focus itself is cleared
+        // on the flush that starts the exit; this guards the window
+        // between events.)
+        if self.exit_excluded(&id) {
+            return None;
+        }
         let layout = self.layout.as_ref()?;
         let item = layout.item_by_id(&id)?;
         match &item.kind {
@@ -274,7 +282,16 @@ impl App {
             // individually but show up in profiles when called every
             // frame on a focused input that hasn't moved.
             if let Some(id) = self.focused.as_deref() {
-                if let Some((_, _, rect)) = self.lookup_input(id) {
+                if self.lookup_input(id).is_some() {
+                    // IME candidate windows position in SCREEN space —
+                    // use the transform-aware visual rect so a
+                    // transformed Input's candidates track the pixels.
+                    let rect = self
+                        .layout
+                        .as_ref()
+                        .and_then(|l| l.item_by_id(id))
+                        .map(|it| it.visual_rect())
+                        .expect("lookup_input implies layout item");
                     let target = (
                         id.to_string(),
                         (rect.x as i32, rect.y as i32, rect.w as u32, rect.h as u32),
@@ -294,14 +311,11 @@ impl App {
     }
 
     pub(super) fn dispatch_focused(&mut self) -> bool {
-        let resolved = (|| -> Option<(String, Option<serde_json::Value>)> {
-            let id = self.focused.as_deref()?;
-            let layout = self.layout.as_ref()?;
-            let item = layout.item_by_id(id)?;
-            item.action
-                .clone()
-                .map(|a| (a, item.action_payload.clone()))
-        })();
+        let resolved = self.layout.as_ref().and_then(|layout| {
+            focused_dispatch(layout, self.focused.as_deref(), &|id| {
+                self.exit_excluded(id)
+            })
+        });
         if let Some((action, payload)) = resolved {
             log::debug!("dispatch (kbd): {action} payload={payload:?}");
             self.module.dispatch_action(&action, payload);
@@ -364,10 +378,18 @@ impl App {
                     Some(l) => l,
                     None => return false,
                 };
+                // Exit-animating ids are excluded from the Tab order —
+                // they still paint (mid-exit) but are engine-side dead,
+                // so focus walks past them exactly like hit-testing
+                // walks past them.
                 let next = if shift {
-                    layout.focus_prev(self.focused.as_deref())
+                    layout.focus_prev_excluding(self.focused.as_deref(), &|id| {
+                        self.exit_excluded(id)
+                    })
                 } else {
-                    layout.focus_next(self.focused.as_deref())
+                    layout.focus_next_excluding(self.focused.as_deref(), &|id| {
+                        self.exit_excluded(id)
+                    })
                 };
                 if next != self.focused {
                     self.focused = next;
@@ -484,7 +506,13 @@ impl App {
             }
         }
         if let Some(layout) = self.layout.as_ref() {
-            if let Some(item) = layout.hit(px, py) {
+            // Exit-animating subtrees are excluded: their ids are
+            // engine-side dead, so a click during the exit playback
+            // must not dispatch (mirrors the DOM renderer's
+            // exiting-subtree event drop).
+            if let Some(item) = layout.hit_excluding(px, py, &|id| {
+                self.animator.is_exit_excluded(&self.tree, id)
+            }) {
                 // A click only fires when the press AND release land on
                 // the same actionable. `unwrap_or(false)` rejects the
                 // case where nothing was pressed (e.g. press landed on
@@ -515,4 +543,24 @@ impl App {
             w.request_redraw();
         }
     }
+}
+
+/// Resolve the keyboard-activation dispatch (Enter / Space) for the
+/// focused id. Exit-animating ids resolve to `None` — a focused button
+/// mid-exit dispatches nothing, mirroring the pointer paths'
+/// exclusion. Free function so the guard is testable without a
+/// GPU-backed `App`.
+pub(crate) fn focused_dispatch(
+    layout: &LayoutPass,
+    focused: Option<&str>,
+    excluded: &dyn Fn(&str) -> bool,
+) -> Option<(String, Option<serde_json::Value>)> {
+    let id = focused?;
+    if excluded(id) {
+        return None;
+    }
+    let item = layout.item_by_id(id)?;
+    item.action
+        .clone()
+        .map(|a| (a, item.action_payload.clone()))
 }

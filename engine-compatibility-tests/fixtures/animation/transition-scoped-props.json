@@ -1,0 +1,70 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "transition-scoped-props",
+  "description": "The .transition(props: [...]) scope list is filtered against the 27-entry animatable whitelist — every whitelisted prop survives in order, non-animatable entries are dropped. Pins the engine-side whitelist so it can't drift from @hypen-space/core's ANIMATABLE_PROPS (whose keys are pinned to this fixture by hypen-web/tests/animation-core.test.ts)",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Text(\"Scoped\").transition(200, easeOut, props: [opacity, translateX, translateY, scale, rotate, color, backgroundColor, borderColor, cornerRadius, padding, paddingTop, paddingBottom, paddingLeft, paddingRight, paddingHorizontal, paddingVertical, margin, marginTop, marginBottom, marginLeft, marginRight, marginHorizontal, marginVertical, width, height, gap, fontSize, zIndex])",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "Scoped",
+          "__anim.transition": {
+            "curve": "easeOut",
+            "duration": 200,
+            "props": [
+              "opacity",
+              "translateX",
+              "translateY",
+              "scale",
+              "rotate",
+              "color",
+              "backgroundColor",
+              "borderColor",
+              "cornerRadius",
+              "padding",
+              "paddingTop",
+              "paddingBottom",
+              "paddingLeft",
+              "paddingRight",
+              "paddingHorizontal",
+              "paddingVertical",
+              "margin",
+              "marginTop",
+              "marginBottom",
+              "marginLeft",
+              "marginRight",
+              "marginHorizontal",
+              "marginVertical",
+              "width",
+              "height",
+              "gap",
+              "fontSize"
+            ]
+          }
+        }
+      },
+      { "type": "insert" }
+    ]
+  }
+}

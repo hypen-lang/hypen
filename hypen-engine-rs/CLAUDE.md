@@ -20,6 +20,7 @@ hypen-engine-rs/src/
 ├── ir/                       # Intermediate Representation
 │   ├── node.rs               # Element, Value, Props, NodeId
 │   ├── component.rs          # ComponentRegistry, resolution
+│   ├── anim.rs               # .transition/.enter/.exit/.layout → "__anim.*" prop lowering
 │   └── expand.rs             # AST → IR lowering
 │
 ├── reactive/                 # Dependency Tracking
@@ -31,7 +32,7 @@ hypen-engine-rs/src/
 ├── reconcile/                # Virtual DOM Diffing
 │   ├── tree.rs               # Virtual instance tree; ControlFlowKind::Router carries the per-route subtree cache
 │   ├── diff.rs               # Keyed children diffing; Router reconcile emits Detach/Attach on nav
-│   ├── patch.rs              # Patch enum (Create, SetProp, RemoveProp, SetText, Insert, Move, Remove, Detach, Attach)
+│   ├── patch.rs              # Patch enum (Create, SetProp, RemoveProp, SetText, Insert, Move, Remove — optional transition flag roots an animated exit, Detach, Attach)
 │   ├── resolve.rs            # Value resolution during reconciliation
 │   ├── conditionals.rs       # When/If matching; Router matching via portable::route::match_path
 │   ├── keyed.rs              # Keyed list reconciliation
@@ -109,6 +110,7 @@ Platform Renderer (DOM, Canvas, iOS, Android)
 - **Arc-Based Cloning**: Both `Props` (raw, with bindings) and `ResolvedProps` (resolved JSON values, on `InstanceNode` and `Patch::Create`) are `Arc<IndexMap<...>>`. Cloning a node's props into a Create patch, or snapshotting old props before a dirty re-render, is an `Arc::clone` rather than a deep copy of the map.
 - **First-Class Control Flow**: ForEach/When/If/Router are IR-level types with exhaustive pattern matching.
 - **Keyed Reconciliation**: List diffing uses keys to produce minimal Create/Move/Remove patches.
+- **Animation Channel + Deferred Remove**: The `.transition`/`.enter`/`.exit`/`.layout` applicators lower in `ir/anim.rs` to reserved `"__anim.*"` resolved props (one JSON object per channel) that are renderer-facing — never strip them as engine-internal. When a removal root's props carry `"__anim.exit"`, the reconciler emits `Patch::Remove { transition: true }` for the root FIRST, then descendants as plain Removes (parent-remove-wins); non-animated removals keep post-order. The flag is serde skip-if-false, so unaware renderers see an unchanged wire format and snap.
 - **Router Subtree Cache**: `ControlFlowKind::Router` holds a per-instance `cache: IndexMap<String, Vec<NodeId>>` keyed by route pattern. On navigation, children of the leaving route are unlinked with `Patch::Detach` but kept in the `InstanceTree` + `DependencyGraph` (so state updates still reconcile through them while off-screen). On return, the cache hits and the reconciler emits `Patch::Attach` instead of rebuilding the subtree — renderers reinsert the same native element under the same NodeId. Insertion-ordered LRU, default cap `DEFAULT_ROUTER_CACHE_SIZE = 10`; evicted entries are torn down via `remove_subtree`. Route-pattern keying means `/profile/42 → /profile/99` (both matching `/profile/:id`) is a no-op, not a cache swap.
 - **Shared Route Matcher**: Router IR's `route_matches` delegates to `crate::portable::route::match_path`, the single source of truth that every SDK's `ManagedRouter` calls at runtime. Exact / `:param` / trailing `/*` semantics are uniform across the Router IR node and every platform router.
 

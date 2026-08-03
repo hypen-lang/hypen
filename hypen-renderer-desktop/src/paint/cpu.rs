@@ -194,17 +194,53 @@ impl CpuPainter {
                     continue;
                 }
             }
-            // Background and border apply to every element type. Buttons
-            // additionally tint based on hover/press state.
+            // Background and border apply to every element type. Two
+            // overlays compose here, in order:
+            //   1. Explicit paint-time state variants
+            //      (`backgroundColor:hover.0`, `borderColor@md:active.0`,
+            //      ...) resolved via the shared precedence rules from the
+            //      node's live interaction state. These are authoritative
+            //      when present.
+            //   2. The legacy hover/press TINT on Buttons — only applied
+            //      as a fallback for whichever channel the state variants
+            //      did NOT override, so we never double-apply.
+            let hovered = self.interaction.hovered.contains(&item.node_id);
+            let pressed = self.interaction.pressed.contains(&item.node_id);
+            let focused = self.interaction.focused.as_deref() == Some(&item.node_id);
             let mut background = item.background;
             let mut border_color = item.border.color;
+            let mut bg_from_variant = false;
+            let mut border_from_variant = false;
+            // Resolve background / border / foreground state variants in one
+            // pass. `active_states` is computed once and reused for all three.
+            // `fg_override` is the foreground `color` variant (Text / Icon /
+            // Input glyph colour); `None` → use the base colour baked into the
+            // ItemKind.
+            let fg_override = if item.state_variants.is_empty() {
+                None
+            } else {
+                let states = item.state_variants.active_states(hovered, pressed, focused);
+                if let Some(c) = item.state_variants.background_color_for(&states) {
+                    background = Some(c);
+                    bg_from_variant = true;
+                }
+                if let Some(c) = item.state_variants.border_color_for(&states) {
+                    border_color = c;
+                    border_from_variant = true;
+                }
+                item.state_variants.color_for(&states)
+            };
             if matches!(item.kind, ItemKind::Button) {
-                if self.interaction.pressed.contains(&item.node_id) {
-                    if let Some(bg) = background.as_mut() {
-                        *bg = darken(*bg, 0.85);
+                if pressed {
+                    if !bg_from_variant {
+                        if let Some(bg) = background.as_mut() {
+                            *bg = darken(*bg, 0.85);
+                        }
                     }
-                    border_color = darken(border_color, 0.7);
-                } else if self.interaction.hovered.contains(&item.node_id) {
+                    if !border_from_variant {
+                        border_color = darken(border_color, 0.7);
+                    }
+                } else if hovered && !bg_from_variant {
                     if let Some(bg) = background.as_mut() {
                         *bg = lighten(*bg, 1.05);
                     }
@@ -262,7 +298,7 @@ impl CpuPainter {
                         item.rect,
                         paths,
                         *view_box,
-                        *tint,
+                        fg_override.or(*tint),
                         &mut self.icon_cache,
                     );
                 }
@@ -296,7 +332,7 @@ impl CpuPainter {
                         item.rect.x + dx,
                         item.rect.y,
                         scaled_size,
-                        *color,
+                        fg_override.unwrap_or(*color),
                         Some(item.rect.w),
                         item.font_weight,
                     );
@@ -335,7 +371,7 @@ impl CpuPainter {
                             text_x,
                             text_y,
                             *font_size * scale_factor,
-                            *color,
+                            fg_override.unwrap_or(*color),
                             Some(inner_w),
                             item.font_weight,
                         );
@@ -876,6 +912,112 @@ mod tests {
             pm.data(),
             baseline.as_slice(),
             "stroke_rect with zero width must leave pixmap unchanged",
+        );
+    }
+}
+
+#[cfg(test)]
+mod paint_variant_tests {
+    //! End-to-end paint coverage: drive a real `Tree` through the CPU
+    //! painter and read back a pixel, proving interaction-state variants
+    //! actually reach the painted output (not just the resolver). The
+    //! Vello painter shares the same resolution path; only the raster
+    //! backend differs, so the CPU painter is the testable proxy.
+    use super::CpuPainter;
+    use crate::painter::PaintTarget;
+    use crate::tree::{Tree, ROOT_ID};
+    use hypen_engine::Patch;
+    use indexmap::IndexMap;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    fn props(entries: &[(&str, Value)]) -> Arc<IndexMap<String, Value>> {
+        let mut m = IndexMap::new();
+        for (k, v) in entries {
+            m.insert((*k).to_string(), v.clone());
+        }
+        Arc::new(m)
+    }
+
+    /// A 100×100 Container with a base + hover + md-breakpoint background.
+    fn tree_with_variant_box() -> Tree {
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "box".to_string(),
+            element_type: "Container".to_string(),
+            props: props(&[
+                ("width", json!(100)),
+                ("height", json!(100)),
+                ("backgroundColor.0", json!("#ff0000")), // base: red
+                ("backgroundColor:hover.0", json!("#0000ff")), // hover: blue
+                ("backgroundColor@md.0", json!("#00ff00")), // md: green
+            ]),
+            semantics: None,
+        });
+        tree.apply(&Patch::Insert {
+            parent_id: ROOT_ID.to_string(),
+            id: "box".to_string(),
+            before_id: None,
+        });
+        tree
+    }
+
+    /// Read pixel (x, y) as (r, g, b). tiny-skia stores premultiplied RGBA;
+    /// for the opaque (alpha = 255) fills here that equals straight RGB.
+    /// Sample a point inside the top-left 100×100 box (so it's box-interior
+    /// regardless of viewport width, unlike the pixmap center).
+    fn box_rgb(painter: &CpuPainter) -> (u8, u8, u8) {
+        let (w, _h) = painter.pixmap_size().expect("pixmap allocated");
+        let data = painter.pixmap_data().expect("pixmap data");
+        let (x, y) = (50u32, 50u32);
+        let i = ((y * w + x) * 4) as usize;
+        (data[i], data[i + 1], data[i + 2])
+    }
+
+    #[test]
+    fn hover_state_variant_changes_painted_background() {
+        let tree = tree_with_variant_box();
+        let mut painter = CpuPainter::new();
+
+        // Narrow viewport (md inactive), not hovered → base red.
+        painter.paint_with_scroll(&tree, PaintTarget::new(100, 100, 1.0), 0.0);
+        assert_eq!(
+            box_rgb(&painter),
+            (0xff, 0x00, 0x00),
+            "base background should be red"
+        );
+
+        // Hover the box → blue variant wins (state outranks breakpoint).
+        painter.interaction_mut().hovered.insert("box".to_string());
+        painter.paint_with_scroll(&tree, PaintTarget::new(100, 100, 1.0), 0.0);
+        assert_eq!(
+            box_rgb(&painter),
+            (0x00, 0x00, 0xff),
+            "hover background should be blue"
+        );
+
+        // Stop hovering → back to base red (variant is reversible per frame).
+        painter.interaction_mut().hovered.clear();
+        painter.paint_with_scroll(&tree, PaintTarget::new(100, 100, 1.0), 0.0);
+        assert_eq!(
+            box_rgb(&painter),
+            (0xff, 0x00, 0x00),
+            "clearing hover should restore the base background"
+        );
+    }
+
+    #[test]
+    fn breakpoint_variant_changes_painted_background_at_width() {
+        let tree = tree_with_variant_box();
+        let mut painter = CpuPainter::new();
+
+        // The viewport width feeds breakpoint resolution. The box is a fixed
+        // 100px, but a wide surface makes @md (>=768) active.
+        painter.paint_with_scroll(&tree, PaintTarget::new(800, 100, 1.0), 0.0);
+        assert_eq!(
+            box_rgb(&painter),
+            (0x00, 0xff, 0x00),
+            "at width >= 768 the @md background (green) should win"
         );
     }
 }

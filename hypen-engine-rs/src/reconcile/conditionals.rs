@@ -95,6 +95,16 @@ pub(crate) fn evaluate_value(
         }
         Value::Action(action) => serde_json::Value::String(format!("@{}", action)),
         Value::Resource(name) => serde_json::Value::String(format!("@resources.{}", name)),
+        Value::StateSwitch {
+            path,
+            cases,
+            default,
+        } => {
+            // `.states` lowering only ever targets element props, but resolve
+            // consistently if one ever reaches a conditional position.
+            crate::reconcile::resolve::resolve_state_switch(path, cases, default.as_ref(), state)
+                .unwrap_or(serde_json::Value::Null)
+        }
     }
 }
 
@@ -180,7 +190,8 @@ fn pattern_matches(
             // This allows: Case(when: "@{value > 100}") or Case(match: "@{value == 'loading'}")
             evaluate_expression_pattern(template, evaluated_value, data_sources)
         }
-        Value::Action(_) | Value::Resource(_) => false, // Actions/resources don't make sense as patterns
+        // Actions/resources/state-switches don't make sense as patterns
+        Value::Action(_) | Value::Resource(_) | Value::StateSwitch { .. } => false,
     }
 }
 

@@ -297,3 +297,67 @@ describe("RemoteServer syncActions + updateState", () => {
     expect(devicePatch.patches.length).toBeGreaterThan(0);
   });
 });
+
+describe("RemoteServer compression", () => {
+  let server: RemoteServer | null = null;
+  let clients: Client[] = [];
+  const PORT = 19880;
+
+  afterEach(async () => {
+    for (const c of clients) c.close();
+    clients = [];
+    await wait(50);
+    server?.stop();
+    server = null;
+    await wait(50);
+  });
+
+  /**
+   * Start a server while intercepting `Bun.serve` so we can assert on the
+   * websocket options `listen()` actually hands to Bun.
+   */
+  async function listenCapturingServeOptions(s: RemoteServer): Promise<any> {
+    const originalServe = Bun.serve;
+    let captured: any = null;
+    (Bun as any).serve = (options: any) => {
+      captured = options;
+      return (originalServe as any)(options);
+    };
+    try {
+      await s.listen(PORT);
+    } finally {
+      (Bun as any).serve = originalServe;
+    }
+    return captured;
+  }
+
+  test("enables permessage-deflate by default", async () => {
+    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI);
+
+    const options = await listenCapturingServeOptions(server);
+    expect(options.websocket.perMessageDeflate).toBe(true);
+  });
+
+  test("compression: false disables permessage-deflate", async () => {
+    server = new RemoteServer()
+      .module("Counter", createCounterModule())
+      .ui(UI)
+      .config({ compression: false });
+
+    const options = await listenCapturingServeOptions(server);
+    expect(options.websocket.perMessageDeflate).toBe(false);
+  });
+
+  test("still serves the initial tree with compression enabled", async () => {
+    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI);
+
+    await server.listen(PORT);
+
+    const client = await connectClient(PORT);
+    clients.push(client);
+    const initMsg = await client.waitForMessage((m) => m.type === "initialTree");
+
+    expect(initMsg.state.count).toBe(0);
+    expect(initMsg.patches.length).toBeGreaterThan(0);
+  });
+});

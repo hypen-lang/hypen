@@ -18,6 +18,7 @@
 
 import { BaseEngine } from "@hypen-space/core/engine-base";
 import { frameworkLoggers } from "@hypen-space/core/logger";
+import type { A11yDiagnostic } from "@hypen-space/core";
 import { installPortableFromWasm } from "./install-portable.js";
 
 // Re-export types so consumers of "./engine.js" still work
@@ -95,6 +96,22 @@ export class Engine extends BaseEngine {
       log.error("Failed to initialize WASM engine:", error);
       throw error;
     }
+  }
+
+  /**
+   * Run the engine's dev-mode accessibility conformance pass over a DSL
+   * source and return the findings as `A11yDiagnostic[]`.
+   *
+   * The underlying WASM binding only exists after a WASM rebuild
+   * (`bun run build:wasm`); until then this returns `[]` so hosts can wire
+   * the call without breaking typecheck or runtime. Cast through `any`
+   * because the generated `WasmEngine` types lag the Rust binding.
+   */
+  checkAccessibility(source: string): A11yDiagnostic[] {
+    if (typeof (this.wasmEngine as any)?.checkAccessibility !== "function") {
+      return [];
+    }
+    return (this.wasmEngine as any).checkAccessibility(source) as A11yDiagnostic[];
   }
 
   /**

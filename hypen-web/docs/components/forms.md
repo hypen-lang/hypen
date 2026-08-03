@@ -70,7 +70,7 @@ Button("Hover Me")
   .color("#fff")
   .padding(10, 20)
   .borderRadius(4)
-  .transition("all 0.3s ease")
+  .transition(300, easeOut)
 ```
 
 **Rendered as:** `<button>`
@@ -366,8 +366,20 @@ See [Event Applicators](../applicators/events.md) for more details.
 
 ## Accessibility Tips
 
-1. **Labels:** Always provide labels for inputs (use Text or Heading above inputs)
-2. **Placeholders:** Use placeholders as hints, not labels
+1. **Labels:** Every input needs an accessible label — add `.label("…")`, or place a static `Text` right before the control under a parent with `.id(...)` and the engine auto-associates them (the Text becomes the control's label). `hypen check` flags unlabeled controls (`form-control-missing-label`). `Checkbox`/`Switch` self-label via their visible `label:` argument.
+
+   ```hypen
+   // Explicit label
+   Input(placeholder: "you@example.com").bind(@state.email).label("Email")
+
+   // Auto-association: preceding Text + parent .id()
+   Column {
+       Text("Email")
+       Input(placeholder: "you@example.com").bind(@state.email)
+   }.id("signup-form")
+   ```
+
+2. **Placeholders:** Use placeholders as hints, not labels — a placeholder never counts as a label
 3. **Tab order:** Ensure logical tab navigation through forms
 4. **Required fields:** Clearly mark required fields
 5. **Error messages:** Show clear, specific error messages near problematic fields

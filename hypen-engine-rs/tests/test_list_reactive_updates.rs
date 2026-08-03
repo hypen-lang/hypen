@@ -1175,15 +1175,16 @@ fn test_dsl_list_sparse_update_emits_minimal_delta() {
 
 #[test]
 fn test_dsl_list_length_change_preserves_foreach_children() {
-    // After a length-change rebuild, `ForEach.children` must be correctly
-    // repopulated with the new iteration items (as logical children of the
-    // ForEach, not the grandparent). This is the root cause: the bug left
-    // F.children empty, so subsequent reconciles always took the rebuild
-    // branch and emitted 0 Removes + N Creates indefinitely.
+    // After a length change, `ForEach.children` must be correctly repopulated
+    // with the iteration items (as logical children of the ForEach, not the
+    // grandparent). The original bug left F.children empty, so subsequent
+    // reconciles always saw a length mismatch and emitted 0 Removes + N
+    // Creates indefinitely.
     //
     // We verify indirectly by doing TWO successive length changes and
-    // asserting that the second one emits proper Remove patches. With the
-    // bug, the second rebuild saw F.children empty and emitted 0 removes.
+    // asserting the second one still reconciles against the recorded rows:
+    // exactly the dropped rows are removed and the survivors are reused. With
+    // the bug, F.children was empty and this emitted 0 removes + N creates.
 
     let mut engine = Engine::new();
     let instance = ModuleInstance::new(
@@ -1208,8 +1209,8 @@ fn test_dsl_list_length_change_preserves_foreach_children() {
     let ir = ast_to_ir_node(&doc);
     engine.render_ir_node(&ir);
 
-    // First update: 3 → 4 items. Rebuild branch. After the fix, new items
-    // land under the ForEach logically, so F.children = [4 rows].
+    // First update: 3 → 4 items. New items land under the ForEach logically,
+    // so F.children = [4 rows].
     patches.lock().unwrap().clear();
     engine.update_state(
         None,
@@ -1221,9 +1222,9 @@ fn test_dsl_list_length_change_preserves_foreach_children() {
         ]}),
     );
 
-    // Second update: 4 → 2 items. With F.children correctly populated, the
-    // rebuild emits 4 Removes (one per prior row) and 2 Creates. With the
-    // bug, F.children was empty and this emitted 0 Removes.
+    // Second update: 4 → 2 items. With F.children correctly populated, keyed
+    // reconciliation retires exactly the two dropped rows and reuses A and B.
+    // With the bug, F.children was empty and this emitted 0 Removes.
     patches.lock().unwrap().clear();
     engine.update_state(
         None,
@@ -1237,15 +1238,15 @@ fn test_dsl_list_length_change_preserves_foreach_children() {
     let creates = count_creates(&captured);
     let removes = count_removes(&captured);
 
-    assert!(
-        removes >= 4,
-        "Shrinking 4 → 2 items must emit at least 4 Remove patches for the old rows. \
+    assert_eq!(
+        removes, 2,
+        "Shrinking 4 → 2 items must emit exactly 2 Remove patches (C and D). \
          Got {removes} removes, {creates} creates. Patches: {captured:#?}"
     );
-    assert!(
-        creates >= 2,
-        "Shrinking 4 → 2 items must emit at least 2 Create patches for the new rows. \
-         Got {creates} creates."
+    assert_eq!(
+        creates, 0,
+        "Surviving rows A and B must be reused, not recreated. \
+         Got {creates} creates. Patches: {captured:#?}"
     );
 }
 

@@ -13,7 +13,7 @@ parser/src/
 ├── lib.rs       # Public API exports
 ├── ast.rs       # AST type definitions (ComponentSpecification, Value, etc.)
 ├── parser.rs    # Core parser logic (Chumsky combinators)
-├── tests.rs     # 114 tests covering all syntax features
+├── tests.rs     # 129 tests covering all syntax features
 ├── error.rs     # Error formatting with Ariadne (cli feature)
 ├── wasm.rs      # WASM bindings (wasm feature)
 └── main.rs      # CLI binary entry point
@@ -47,7 +47,7 @@ print_parse_errors(filename, input, errors)
 - `ComponentSpecification` — parsed component with name, arguments, applicators, children
 - `Value` — enum: String, Number, Boolean, List, Map, Reference, DataSourceReference (deprecated alias for Reference)
 - `ArgumentList` / `Argument` — positional and named arguments
-- `ApplicatorSpecification` — dot-notation styling (`.padding(16)`)
+- `ApplicatorSpecification` — dot-notation styling (`.padding(16)`), optionally with a `{ }` children block of full component specifications (`.states(@state.x) { onState(a).size(48) }`)
 - `Document` — top-level structure with imports and components
 - `DeclarationType` — module, component, or regular declaration
 
@@ -57,6 +57,15 @@ The parser uses a three-phase approach:
 1. **Value Parser** — parses literals, references, expressions, lists, maps
 2. **Component Parser** — parses component name, arguments, children (recursive)
 3. **Applicator Folding** — chains `.method()` applicators onto components
+
+**Applicator children blocks**: any applicator may be followed by a `{ }` block
+(`.states(@state.x, transition: spring) { onState(a).size(48) }`), which parses
+into `ApplicatorSpecification.children`. The production is generic (not
+special-cased to `.states`): whitespace/newlines/comments are allowed between
+`)` and `{` exactly as for component blocks, block entries are full recursive
+component specifications with their own applicator chains, the chain may
+continue after a block (`.states(...) { ... }.padding(4)`), and a zero-arg
+applicator with a block (`.modifier { ... }`) also parses.
 
 ## Features
 

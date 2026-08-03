@@ -22,7 +22,7 @@ hypen-renderer-android/
 │       │   ├── Patch.kt              # Patch operations
 │       │   └── RemoteMessage.kt      # WebSocket message types
 │       ├── remote/
-│       │   ├── RemoteEngine.kt       # WebSocket client (OkHttp)
+│       │   ├── RemoteEngine.kt       # WebSocket client (OkHttp, permessage-deflate)
 │       │   ├── RemoteEngineConfig.kt # Connection configuration
 │       │   ├── MessageParser.kt      # JSON message parser
 │       │   └── ConnectionState.kt    # Connection state enum
@@ -136,6 +136,10 @@ ship if/when scroll-position loss becomes a real complaint.
 ## Key Dependencies
 
 - Jetpack Compose (BOM)
-- OkHttp (WebSocket)
+- OkHttp (WebSocket) — 4.12.0; always offers `permessage-deflate`, so patch
+  frames are compressed automatically. The offer cannot be suppressed client-side
+  (OkHttp hardcodes it and rejects a caller-supplied `Sec-WebSocket-Extensions`
+  header), so `RemoteEngineConfig` intentionally has no `compression` flag —
+  disable it server-side instead. See README "Compression".
 - Kotlin serialization (JSON)
 - CameraX + ML Kit (QR scanning in example app)

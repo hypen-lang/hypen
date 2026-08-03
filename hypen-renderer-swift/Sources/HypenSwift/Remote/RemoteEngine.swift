@@ -29,7 +29,26 @@ public struct SessionInfo: Sendable {
     }
 }
 
-/// WebSocket-based remote engine for Hypen
+/// A server message decoded off the main actor. `@unchecked Sendable`
+/// because `[String: Any]` payloads are handed over wholesale from the
+/// decoding task to the main actor and never shared (see CLAUDE.md's
+/// isolation-boundary pattern).
+private enum DecodedRemoteMessage: @unchecked Sendable {
+    case sessionAck([String: Any])
+    case sessionExpired([String: Any])
+    case initialTree(state: [String: Any]?, patches: [Patch]?)
+    case patch([Patch]?)
+    case stateUpdate([String: Any]?)
+    case unknown(type: String)
+    case unparseable(preview: String)
+}
+
+/// WebSocket-based remote engine for Hypen.
+///
+/// Transport is `URLSessionWebSocketTask`. Note that WebSocket compression
+/// (`permessage-deflate`) is offered automatically by URLSession and is not
+/// configurable from this package — see the note in `establishConnection()`
+/// for what that means when talking to the various Hypen server SDKs.
 @MainActor
 public final class RemoteEngine: NSObject, @unchecked Sendable {
     private let url: URL
@@ -49,6 +68,7 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
     // MARK: - Publishers
 
     private let connectionStateSubject = CurrentValueSubject<ConnectionState, Never>(.disconnected)
+    private let treeResetSubject = PassthroughSubject<Void, Never>()
     private let patchesSubject = PassthroughSubject<[Patch], Never>()
     private let stateSubject = CurrentValueSubject<[String: Any], Never>([:])
     private let errorsSubject = PassthroughSubject<Error, Never>()
@@ -61,6 +81,17 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
 
     public var patches: AnyPublisher<[Patch], Never> {
         patchesSubject.eraseToAnyPublisher()
+    }
+
+    /// Fires whenever the server sends a full `initialTree` — including
+    /// replays after a reconnect or revision-gap recovery, where the same
+    /// element ids are re-Created from scratch. Emitted BEFORE the
+    /// accompanying patch batch is delivered on `patches`, so consumers
+    /// must reset any tree state built from previous patches (e.g.
+    /// `HypenRenderer.clear()`) to avoid observing orphaned pre-replay
+    /// element instances.
+    public var treeResets: AnyPublisher<Void, Never> {
+        treeResetSubject.eraseToAnyPublisher()
     }
 
     public var state: AnyPublisher<[String: Any], Never> {
@@ -139,6 +170,43 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
 
         urlSession = URLSession(configuration: sessionConfig, delegate: self, delegateQueue: nil)
         webSocketTask = urlSession?.webSocketTask(with: url)
+        // Compression (RFC 7692 `permessage-deflate`) is not configured here
+        // because Apple gives us no knob to configure. It is handled entirely
+        // inside URLSession, which is why `RemoteEngineConfig` has no
+        // `compression` option where the other Hypen client SDKs do.
+        //
+        // What URLSession actually does: `URLSessionWebSocketTask` offers
+        // `Sec-WebSocket-Extensions: permessage-deflate` in its opening
+        // handshake on its own, and transparently inflates incoming compressed
+        // frames if the server accepts. There is no public API to enable,
+        // disable, or parameterise this — no property on the task, and the
+        // `Sec-*` handshake headers cannot be set on the `URLRequest` (the
+        // Network.framework layer underneath validates the server's response
+        // against what *it* offered and fails the connection on a mismatch).
+        //
+        // Consequences worth knowing:
+        //   * Connecting to a compression-enabled Hypen server (web / Go /
+        //     Kotlin / Rust) means this client gets compressed frames for free,
+        //     with no code change here. Nothing to opt into.
+        //   * Connecting to `hypen-server-swift`, which declines the extension
+        //     (SwiftNIO + WebSocketKit have no RFC 7692 support — see that
+        //     package's README), the connection runs uncompressed. Negotiation
+        //     is per-connection, so this is a clean fallback, not a failure.
+        //   * We cannot opt *out* of compression. If a server misbehaves on
+        //     compressed frames the fix belongs on the server.
+        //
+        // Historical note: on macOS 11 betas this task set the RSV1 frame bit
+        // even when the server declined the extension, which strict servers
+        // rejected as a protocol error (Apple radar 65668399). Fixed in macOS
+        // 11 beta 3, well below this package's iOS 15 / macOS 12 floor.
+        // URLSession caps a single WebSocket message at 1 MiB by default, and
+        // a Hypen `initialTree` routinely exceeds that — any app embedding an
+        // asset in state (a base64 wallpaper, an inlined image) blows past it
+        // on the very first message. The receive then fails, the socket
+        // closes, autoReconnect fires, and the app sits on "Connecting…"
+        // reconnecting every few seconds with no error ever surfaced. Browsers
+        // impose no such limit, so this only ever bit the native clients.
+        webSocketTask?.maximumMessageSize = config.maximumMessageSize
         log.debug("WebSocket task created, resuming...")
         webSocketTask?.resume()
 
@@ -159,21 +227,34 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
     // MARK: - Message Receiving
 
     private func startReceiving() {
-        receiveTask = Task { [weak self] in
-            guard let self = self else { return }
+        receiveTask = Task { @MainActor [weak self] in
             while !Task.isCancelled {
+                guard let self = self else { return }
                 do {
                     guard let message = try await self.webSocketTask?.receive() else {
                         break
                     }
-                    await MainActor.run {
-                        self.handleMessage(message)
+                    // Extract the Sendable payload on the main actor, then
+                    // decode (JSON parse + patch materialization) off-main;
+                    // only the final dispatch touches main-actor state.
+                    let decoded: DecodedRemoteMessage?
+                    switch message {
+                    case .string(let text):
+                        log.debug("Received message (\(text.count) chars)")
+                        decoded = await Self.decodeMessage(text: text, data: nil)
+                    case .data(let data):
+                        log.debug("Received data message (\(data.count) bytes)")
+                        decoded = await Self.decodeMessage(text: nil, data: data)
+                    @unknown default:
+                        log.warn("Unknown message type received")
+                        decoded = nil
+                    }
+                    if let decoded = decoded {
+                        self.handleDecoded(decoded)
                     }
                 } catch {
                     if !Task.isCancelled {
-                        await MainActor.run {
-                            self.handleError(error)
-                        }
+                        self.handleError(error)
                     }
                     break
                 }
@@ -181,44 +262,64 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
         }
     }
 
-    private func handleMessage(_ message: URLSessionWebSocketTask.Message) {
-        switch message {
-        case .string(let text):
-            log.debug("Received message (%d chars)", text.count)
-            parseMessage(text)
-        case .data(let data):
-            if let text = String(data: data, encoding: .utf8) {
-                log.debug("Received data message (%d chars)", text.count)
-                parseMessage(text)
-            }
-        @unknown default:
-            log.warn("Unknown message type received")
-        }
-    }
-
-    private func parseMessage(_ text: String) {
-        guard let data = text.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    /// Decode a raw WebSocket frame into a message. Nonisolated async, so
+    /// it runs on the global executor — large initialTree/patch payloads
+    /// never block the main actor while parsing.
+    nonisolated private static func decodeMessage(text: String?, data: Data?) async -> DecodedRemoteMessage {
+        let payload = data ?? text?.data(using: .utf8)
+        guard let payload = payload,
+              let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
               let type = json["type"] as? String else {
-            log.error("Failed to parse message: %@", String(text.prefix(500)))
-            return
+            let preview = text.map { String($0.prefix(500)) }
+                ?? data.flatMap { String(data: $0.prefix(500), encoding: .utf8) }
+                ?? "<binary>"
+            return .unparseable(preview: preview)
         }
 
-        log.debug("Message type: %@", type)
+        log.debug("Message type: \(type)")
 
         switch type {
         case "sessionAck":
-            handleSessionAck(json)
+            return .sessionAck(json)
         case "sessionExpired":
-            handleSessionExpired(json)
+            return .sessionExpired(json)
         case "initialTree":
-            handleInitialTree(json)
+            let patches = (json["patches"] as? [[String: Any]]).map(Patch.fromArray)
+            return .initialTree(state: json["state"] as? [String: Any], patches: patches)
         case "patch":
-            handlePatch(json)
+            let patches = (json["patches"] as? [[String: Any]]).map(Patch.fromArray)
+            return .patch(patches)
         case "stateUpdate":
-            handleStateUpdate(json)
+            return .stateUpdate(json["state"] as? [String: Any])
         default:
+            return .unknown(type: type)
+        }
+    }
+
+    private func handleDecoded(_ message: DecodedRemoteMessage) {
+        switch message {
+        case .sessionAck(let json):
+            handleSessionAck(json)
+        case .sessionExpired(let json):
+            handleSessionExpired(json)
+        case .initialTree(let state, let patches):
+            handleInitialTree(state: state, patches: patches)
+        case .patch(let patches):
+            if let patches = patches {
+                log.debug("Received patch message with \(patches.count) patches")
+                patchesSubject.send(patches)
+            } else {
+                log.warn("Patch message has no patches array")
+            }
+        case .stateUpdate(let state):
+            if let state = state {
+                log.debug("Received state update")
+                stateSubject.send(state)
+            }
+        case .unknown(let type):
             log.warn("Unknown message type: %@", type)
+        case .unparseable(let preview):
+            log.error("Failed to parse message: %@", preview)
         }
     }
 
@@ -252,41 +353,26 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
         sessionExpiredSubject.send(reason)
     }
 
-    private func handleInitialTree(_ json: [String: Any]) {
+    private func handleInitialTree(state: [String: Any]?, patches: [Patch]?) {
         log.debug("Received initial tree")
 
-        // Extract state
-        if let state = json["state"] as? [String: Any] {
-            log.debug("Initial tree has state with %d keys", state.count)
+        // Signal a full-tree replay before delivering the patches: on
+        // reconnect the server re-sends the whole tree under the same
+        // ids, so consumers must drop stale element instances first.
+        treeResetSubject.send(())
+
+        if let state = state {
+            log.debug("Initial tree has state with \(state.count) keys")
             stateSubject.send(state)
         } else {
             log.debug("Initial tree has no state")
         }
 
-        // Extract and apply patches
-        if let patchesArray = json["patches"] as? [[String: Any]] {
-            let patches = Patch.fromArray(patchesArray)
-            log.debug("Initial tree has %d patches", patches.count)
+        if let patches = patches {
+            log.debug("Initial tree has \(patches.count) patches")
             patchesSubject.send(patches)
         } else {
             log.warn("Initial tree has NO patches array!")
-        }
-    }
-
-    private func handlePatch(_ json: [String: Any]) {
-        if let patchesArray = json["patches"] as? [[String: Any]] {
-            let patches = Patch.fromArray(patchesArray)
-            log.debug("Received patch message with %d patches", patches.count)
-            patchesSubject.send(patches)
-        } else {
-            log.warn("Patch message has no patches array")
-        }
-    }
-
-    private func handleStateUpdate(_ json: [String: Any]) {
-        if let state = json["state"] as? [String: Any] {
-            log.debug("Received state update")
-            stateSubject.send(state)
         }
     }
 

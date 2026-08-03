@@ -1,0 +1,72 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "scrub-lowering",
+  "description": "The .scrub/.settle pair (Option G) lowers to four static wire props on Create — __anim.scrub (source spec with defaults filled), __anim.scrubSettle (settle timing), __anim.scrubBind (dotted state path, .bind semantics) and __anim.scrubPoses (materialized [fromValue, toValue] endpoints per pose-overridden prop key) — alongside the node's untouched .states machinery (pose props, synthesized __anim.transition, __anim.states label). The applicators are stripped: no scrub.*/settle.* junk props ever reach the wire, and a state flip still behaves exactly as plain .states",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "golang: animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Box().translateY(400).scrub(from: closed, to: open, source: gesture, axis: y, over: [0, 400], rubberBand: 0.4).settle(curve: spring, duration: 300, bind: @state.sheetPhase).states(@state.sheetPhase, transition: spring, duration: 300) {\n    onState(closed).translateY(400)\n    onState(open).translateY(0)\n}",
+    "initialState": { "sheetPhase": "closed" },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["sheetPhase"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render carries the four scrub wire props plus the untouched states machinery",
+      "action": "initialRender",
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["create", "insert"],
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Box",
+          "props": {
+            "translateY.0": 400,
+            "__anim.scrub": {
+              "from": "closed",
+              "to": "open",
+              "source": "gesture",
+              "axis": "y",
+              "over": [0, 400],
+              "rubberBand": 0.4
+            },
+            "__anim.scrubSettle": { "curve": "spring", "duration": 300 },
+            "__anim.scrubBind": "sheetPhase",
+            "__anim.scrubPoses": { "translateY.0": [400, 0] },
+            "__anim.states": { "label": "closed" },
+            "__anim.transition": {
+              "curve": "spring",
+              "duration": 300,
+              "props": ["translateY"]
+            }
+          },
+          "absentProps": ["scrub.0", "scrub.from", "settle.0", "settle.bind", "transition.0"]
+        },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "The settle write landing on the bound path flips the pose like any state change",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["sheetPhase"],
+        "newValues": { "sheetPhase": "open" }
+      },
+      "expectedPatches": [
+        { "type": "setProp", "name": "translateY.0", "value": 0 },
+        { "type": "setProp", "name": "__anim.states", "value": { "label": "open" } }
+      ],
+      "forbiddenPatchTypes": ["create", "insert", "remove", "move", "setText", "detach", "attach"]
+    }
+  ]
+}

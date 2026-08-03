@@ -26,6 +26,7 @@ pub struct DesktopApp {
     module: Option<Arc<dyn HypenModule>>,
     shortcuts: Vec<crate::window::ShortcutBinding>,
     unified_titlebar: bool,
+    reduced_motion: Option<bool>,
 }
 
 impl DesktopApp {
@@ -36,7 +37,21 @@ impl DesktopApp {
             module: None,
             shortcuts: Vec::new(),
             unified_titlebar: false,
+            reduced_motion: None,
         }
+    }
+
+    /// Programmatically force reduced motion on or off for this window.
+    /// When unset, the renderer follows the `HYPEN_REDUCED_MOTION`
+    /// environment variable (`1`/`true`/`yes`/`on`), defaulting to
+    /// motion enabled. There is no reliable cross-platform OS
+    /// reduced-motion query in this stack, so configuration is the v1
+    /// gate (a recorded narrowing against the web renderers'
+    /// `prefers-reduced-motion` media query). Per-node
+    /// `.motion(essential)` opt-outs are honored either way.
+    pub fn reduced_motion(mut self, on: bool) -> Self {
+        self.reduced_motion = Some(on);
+        self
     }
 
     /// Register a keyboard shortcut. When the user presses the key
@@ -211,6 +226,9 @@ impl DesktopApp {
         );
         app.set_shortcuts(self.shortcuts.clone());
         app.set_unified_titlebar(self.unified_titlebar);
+        if let Some(on) = self.reduced_motion {
+            app.set_reduced_motion(on);
+        }
         event_loop.run_app(&mut app).expect("event loop run");
     }
 }

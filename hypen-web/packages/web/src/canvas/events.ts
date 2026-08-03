@@ -4,44 +4,38 @@
  * Hit testing and event handling for canvas nodes
  */
 
-import type { VirtualNode, Point } from "./types.js";
+import type { VirtualNode, Point, Rectangle } from "./types.js";
 import { isPointInRoundedRect } from "./utils.js";
-import { getScrollAwareBounds } from "./scroll.js";
-import { resolveEventAction } from "./props.js";
+import { dispatchNodeEvent } from "./dispatch.js";
+import type { FocusManager } from "./focus.js";
 
 // Interface for the engine that CanvasEventManager needs
 interface IEngine {
   dispatchAction(name: string, payload?: any): void;
 }
 
-// Maps a DOM event type to the applicator prop names the engine may have set
-// on a node, in priority order. Multi-word events (`mouseenter`) need their
-// proper camelCase form (`onMouseEnter`) since the engine emits applicator
-// names verbatim. `mouseenter` also accepts `onHover` as an alias.
-const CANVAS_EVENT_PROP_NAMES: Record<string, string[]> = {
-  mouseenter: ["onMouseEnter", "onHover", "onmouseenter", "mouseenter"],
-  mouseleave: ["onMouseLeave", "onmouseleave", "mouseleave"],
-  mousedown: ["onMouseDown", "onmousedown", "mousedown"],
-  mouseup: ["onMouseUp", "onmouseup", "mouseup"],
-  dblclick: ["onDblClick", "onDoubleClick", "ondblclick", "dblclick"],
-  contextmenu: ["onContextMenu", "oncontextmenu", "contextmenu"],
-  keydown: ["onKeyDown", "onkeydown", "keydown"],
-  keyup: ["onKeyUp", "onkeyup", "keyup"],
-};
-
 /**
  * Canvas Event Manager
+ *
+ * Pointer-side interaction: hit testing, hover/pressed state, cursor, and
+ * click dispatch. Focus is NOT owned here — the pointer path funnels into
+ * the {@link FocusManager}, which treats real DOM focus on the
+ * accessibility-mirror (canvas fallback content) as the single source of
+ * truth. Keyboard events likewise arrive via the mirror (a canvas without
+ * tabindex never receives them), so this class attaches no key listeners.
  */
 export class CanvasEventManager {
   private canvas: HTMLCanvasElement;
   private engine: IEngine;
   private rootNode: VirtualNode | null = null;
   private hoveredNode: VirtualNode | null = null;
-  private focusedNode: VirtualNode | null = null;
   private mouseDownNode: VirtualNode | null = null;
-  private focusChangeHandler:
-    | ((next: VirtualNode | null, prev: VirtualNode | null) => void)
-    | null = null;
+  private focusManager: FocusManager | null = null;
+  private editablePointerHandler: ((node: VirtualNode, point: Point) => void) | null = null;
+
+  // Reused for the per-node rounded-rect test so hit testing allocates
+  // nothing per visited node.
+  private scratchBounds: Rectangle = { x: 0, y: 0, width: 0, height: 0 };
 
   // Bound handler references for cleanup
   private boundOnMouseMove!: (e: MouseEvent) => void;
@@ -50,8 +44,6 @@ export class CanvasEventManager {
   private boundOnClick!: (e: MouseEvent) => void;
   private boundOnDoubleClick!: (e: MouseEvent) => void;
   private boundOnContextMenu!: (e: MouseEvent) => void;
-  private boundOnKeyDown!: (e: KeyboardEvent) => void;
-  private boundOnKeyUp!: (e: KeyboardEvent) => void;
 
   constructor(canvas: HTMLCanvasElement, engine: IEngine) {
     this.canvas = canvas;
@@ -67,16 +59,22 @@ export class CanvasEventManager {
   }
 
   /**
-   * Subscribe to focus changes. Used by the renderer to mount the
-   * `InputOverlay` HTML element when an Input/Textarea gains focus and
-   * unmount it when focus moves away. Without this hookup the canvas
-   * Input painted as a pretty pill but a click on it did nothing — the
-   * overlay was constructed but never invoked.
+   * Wire the focus manager the pointer path reports into. Clicking a
+   * focusable node focuses its mirror element; clicking anything else
+   * clears mirror focus.
    */
-  setFocusChangeHandler(
-    fn: ((next: VirtualNode | null, prev: VirtualNode | null) => void) | null,
+  setFocusManager(fm: FocusManager | null): void {
+    this.focusManager = fm;
+  }
+
+  /**
+   * Called with (node, point) when a mousedown lands on a focusable node —
+   * the renderer maps the point to a caret position for editable nodes.
+   */
+  setEditablePointerHandler(
+    fn: ((node: VirtualNode, point: Point) => void) | null,
   ): void {
-    this.focusChangeHandler = fn;
+    this.editablePointerHandler = fn;
   }
 
   /**
@@ -89,8 +87,6 @@ export class CanvasEventManager {
     this.boundOnClick = this.onClick.bind(this);
     this.boundOnDoubleClick = this.onDoubleClick.bind(this);
     this.boundOnContextMenu = this.onContextMenu.bind(this);
-    this.boundOnKeyDown = this.onKeyDown.bind(this);
-    this.boundOnKeyUp = this.onKeyUp.bind(this);
 
     this.canvas.addEventListener("mousemove", this.boundOnMouseMove);
     this.canvas.addEventListener("mousedown", this.boundOnMouseDown);
@@ -98,8 +94,6 @@ export class CanvasEventManager {
     this.canvas.addEventListener("click", this.boundOnClick);
     this.canvas.addEventListener("dblclick", this.boundOnDoubleClick);
     this.canvas.addEventListener("contextmenu", this.boundOnContextMenu);
-    this.canvas.addEventListener("keydown", this.boundOnKeyDown);
-    this.canvas.addEventListener("keyup", this.boundOnKeyUp);
   }
 
   /**
@@ -133,32 +127,66 @@ export class CanvasEventManager {
    * checked first because they paint on top (see `paint.ts` overlay
    * ordering) — without this, a click on the Story's close-button overlay
    * lands on the underlying Image instead.
+   *
+   * `scrollX`/`scrollY` accumulate the ancestors' scroll offsets down the
+   * recursion (the translation paint applies) so no per-node ancestor walk
+   * is needed. Subtrees behind a clipping container are pruned when the
+   * point falls outside the container — nothing inside can be visible there.
    */
-  private hitTestNode(node: VirtualNode, point: Point): VirtualNode | null {
-    if (!node.visible || !node.layout) return null;
+  private hitTestNode(
+    node: VirtualNode,
+    point: Point,
+    scrollX: number = 0,
+    scrollY: number = 0,
+  ): VirtualNode | null {
+    // Exit-animating subtrees are pruned wholesale: the corpse is painted
+    // while its exit plays, but engine-side those ids are already dead.
+    if (!node.visible || !node.layout || node.exiting) return null;
 
-    const bounds = getScrollAwareBounds(node);
-    if (!bounds) return null;
+    const layout = node.layout;
+    const x = layout.x - scrollX;
+    const y = layout.y - scrollY;
+    const inBounds =
+      point.x >= x && point.x <= x + layout.width &&
+      point.y >= y && point.y <= y + layout.height;
+
+    if (!inBounds) {
+      const overflow = node.props.overflow;
+      if (overflow === "hidden" || overflow === "scroll" || overflow === "auto") {
+        return null;
+      }
+    }
+
+    const childScrollX = scrollX + (node.scrollState?.scrollX ?? 0);
+    const childScrollY = scrollY + (node.scrollState?.scrollY ?? 0);
 
     // Front-to-back order: absolute overlays (newest in paint stack)
     // first, then flow children in reverse paint order.
     for (let i = node.children.length - 1; i >= 0; i--) {
       const child = node.children[i];
       if (child.props.position !== "absolute") continue;
-      const hit = this.hitTestNode(child, point);
+      const hit = this.hitTestNode(child, point, childScrollX, childScrollY);
       if (hit) return hit;
     }
     for (let i = node.children.length - 1; i >= 0; i--) {
       const child = node.children[i];
       if (child.props.position === "absolute") continue;
-      const hit = this.hitTestNode(child, point);
+      const hit = this.hitTestNode(child, point, childScrollX, childScrollY);
       if (hit) return hit;
     }
 
     // Test this node
-    const radius = node.layout.border.radius;
-    if (isPointInRoundedRect(point, bounds, radius)) {
-      return node;
+    if (inBounds) {
+      const radius = layout.border.radius;
+      if (radius <= 0) return node;
+      const bounds = this.scratchBounds;
+      bounds.x = x;
+      bounds.y = y;
+      bounds.width = layout.width;
+      bounds.height = layout.height;
+      if (isPointInRoundedRect(point, bounds, radius)) {
+        return node;
+      }
     }
 
     return null;
@@ -217,6 +245,13 @@ export class CanvasEventManager {
    * Handle mouse down
    */
   private onMouseDown(e: MouseEvent): void {
+    // Suppress the browser's default mousedown focus action. The canvas
+    // itself isn't focusable, so the default would move focus to <body>
+    // AFTER this handler — undoing the mirror/proxy focus we set below and
+    // instantly ending any edit session. (Synthetic events have no default
+    // action, so this only bites with real pointers.)
+    e.preventDefault?.();
+
     const point = this.getCanvasCoordinates(e);
     // Same lift-to-clickable as hover so a click on a Button's Icon child
     // dispatches against the Button (where `onClick` actually lives).
@@ -224,6 +259,13 @@ export class CanvasEventManager {
     const node = this.findClickableAncestor(hit) ?? hit;
 
     this.mouseDownNode = node;
+
+    // Track pressed (`:active`) state so paint-time `:active` variants resolve.
+    // Repaint so the active style appears immediately on press.
+    if (node) {
+      node.pressed = true;
+      this.requestRedraw();
+    }
 
     if (node && node.clickable) {
       this.dispatchNodeEvent(node, "mousedown", {
@@ -233,11 +275,16 @@ export class CanvasEventManager {
       });
     }
 
-    // Update focus
+    // Focus routes through the mirror: focusing the node's fallback-content
+    // element makes document.activeElement the truth, and the FocusManager's
+    // focusin/focusout handlers update node state + repaint.
     if (node && node.focusable) {
-      this.setFocus(node);
+      this.focusManager?.requestFocus(node);
+      // After focus (which starts an edit session for Input/Textarea), let
+      // the renderer place the caret at the clicked character.
+      this.editablePointerHandler?.(node, point);
     } else {
-      this.setFocus(null);
+      this.focusManager?.requestFocus(null);
     }
   }
 
@@ -248,6 +295,13 @@ export class CanvasEventManager {
     const point = this.getCanvasCoordinates(e);
     const hit = this.hitTest(point);
     const node = this.findClickableAncestor(hit) ?? hit;
+
+    // Clear the pressed (`:active`) flag from the node that was pressed —
+    // release ends `:active` even if the pointer drifted off the node first.
+    if (this.mouseDownNode && this.mouseDownNode.pressed) {
+      this.mouseDownNode.pressed = false;
+      this.requestRedraw();
+    }
 
     if (node && node.clickable) {
       this.dispatchNodeEvent(node, "mouseup", {
@@ -320,62 +374,6 @@ export class CanvasEventManager {
   }
 
   /**
-   * Handle keyboard events
-   */
-  private onKeyDown(e: KeyboardEvent): void {
-    if (this.focusedNode) {
-      this.dispatchNodeEvent(this.focusedNode, "keydown", {
-        key: e.key,
-        code: e.code,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-      });
-    }
-  }
-
-  private onKeyUp(e: KeyboardEvent): void {
-    if (this.focusedNode) {
-      this.dispatchNodeEvent(this.focusedNode, "keyup", {
-        key: e.key,
-        code: e.code,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-      });
-    }
-  }
-
-  /**
-   * Set focused node
-   */
-  private setFocus(node: VirtualNode | null): void {
-    if (node === this.focusedNode) return;
-
-    const prev = this.focusedNode;
-    if (prev) {
-      prev.focused = false;
-      this.dispatchNodeEvent(prev, "blur", {});
-    }
-
-    this.focusedNode = node;
-
-    if (node) {
-      node.focused = true;
-      this.dispatchNodeEvent(node, "focus", {});
-    }
-
-    if (this.focusChangeHandler) this.focusChangeHandler(node, prev);
-
-    this.requestRedraw();
-  }
-
-  /** Public for the renderer's overlay-blur path. */
-  clearFocus(): void {
-    this.setFocus(null);
-  }
-
-  /**
    * Update cursor based on node
    */
   private updateCursor(node: VirtualNode | null): void {
@@ -395,44 +393,11 @@ export class CanvasEventManager {
   }
 
   /**
-   * Dispatch event to engine
+   * Dispatch event to engine (shared resolver — same payload shape as the
+   * mirror's keyboard/AT path).
    */
   private dispatchNodeEvent(node: VirtualNode, eventType: string, data: any): void {
-    // Engine emits event applicators in camelCase (`onClick`, `onMouseEnter`).
-    // Multi-word DOM events like `mouseenter` must map to `onMouseEnter`, not
-    // the naive `onMouseenter` that `on${capitalize(eventType)}` would produce.
-    // The older flat form `onclick`/`onmouseenter` is still accepted. After
-    // prop normalisation the value is either a string (action name) or an
-    // object carrying an action name at `"0"` plus an auxiliary payload.
-    const propNames = CANVAS_EVENT_PROP_NAMES[eventType] ?? [
-      `on${eventType.charAt(0).toUpperCase()}${eventType.slice(1)}`,
-      `on${eventType}`,
-      eventType,
-    ];
-
-    let spec: unknown;
-    for (const name of propNames) {
-      if (node.props[name] != null) {
-        spec = node.props[name];
-        break;
-      }
-    }
-
-    // Actionable components fall back to the bare `action` prop on click.
-    if (spec == null && eventType === "click") {
-      spec = node.props.action;
-    }
-
-    const resolved = resolveEventAction(spec);
-    if (!resolved) return;
-
-    this.engine.dispatchAction(resolved.actionName, {
-      type: eventType,
-      nodeId: node.id,
-      timestamp: Date.now(),
-      ...resolved.payload,
-      ...data,
-    });
+    dispatchNodeEvent(this.engine, node, eventType, data);
   }
 
   /**
@@ -454,12 +419,11 @@ export class CanvasEventManager {
     this.canvas.removeEventListener("click", this.boundOnClick);
     this.canvas.removeEventListener("dblclick", this.boundOnDoubleClick);
     this.canvas.removeEventListener("contextmenu", this.boundOnContextMenu);
-    this.canvas.removeEventListener("keydown", this.boundOnKeyDown);
-    this.canvas.removeEventListener("keyup", this.boundOnKeyUp);
+    if (this.mouseDownNode) this.mouseDownNode.pressed = false;
     this.rootNode = null;
     this.hoveredNode = null;
-    this.focusedNode = null;
     this.mouseDownNode = null;
+    this.focusManager = null;
   }
 }
 

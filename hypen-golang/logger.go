@@ -24,6 +24,57 @@ const (
 	LogLevelNone
 )
 
+// LogHandler receives log messages that pass the level filter, allowing Hypen
+// logs to be routed into an application's own logging system (slog, zap,
+// logrus, ...) instead of being written to an io.Writer.
+//
+// The message is delivered unformatted — the format string and its arguments
+// are passed through separately so structured handlers can keep the template
+// intact. Handlers that want the rendered line can call
+// fmt.Sprintf(format, args...).
+//
+// Level filtering is applied by the SDK before the handler is called, so
+// handlers never need to re-check the level.
+//
+// Handlers may be invoked concurrently from multiple goroutines and must be
+// safe for concurrent use.
+type LogHandler interface {
+	Debug(tag, format string, args ...any)
+	Info(tag, format string, args ...any)
+	Warn(tag, format string, args ...any)
+	Error(tag, format string, args ...any)
+}
+
+// LogHandlerFunc adapts a single function into a LogHandler, in the style of
+// http.HandlerFunc. The level of the message is passed as the first argument.
+//
+//	core.SetLogHandler(core.LogHandlerFunc(
+//		func(level core.LogLevel, tag, format string, args ...any) {
+//			slog.Info(fmt.Sprintf(format, args...), "tag", tag, "level", level)
+//		},
+//	))
+type LogHandlerFunc func(level LogLevel, tag, format string, args ...any)
+
+// Debug implements LogHandler.
+func (f LogHandlerFunc) Debug(tag, format string, args ...any) {
+	f(LogLevelDebug, tag, format, args...)
+}
+
+// Info implements LogHandler.
+func (f LogHandlerFunc) Info(tag, format string, args ...any) {
+	f(LogLevelInfo, tag, format, args...)
+}
+
+// Warn implements LogHandler.
+func (f LogHandlerFunc) Warn(tag, format string, args ...any) {
+	f(LogLevelWarn, tag, format, args...)
+}
+
+// Error implements LogHandler.
+func (f LogHandlerFunc) Error(tag, format string, args ...any) {
+	f(LogLevelError, tag, format, args...)
+}
+
 // Logger provides tagged logging with configurable levels.
 type Logger struct {
 	tag    string
@@ -34,9 +85,10 @@ type Logger struct {
 
 // Global configuration
 var (
-	globalLevel                = LogLevelError // Default to error-only in production
-	globalOutput    io.Writer = os.Stderr
-	globalMu     sync.RWMutex
+	globalLevel              = LogLevelError // Default to error-only in production
+	globalOutput  io.Writer  = os.Stderr
+	globalHandler LogHandler // nil = write to globalOutput
+	globalMu      sync.RWMutex
 )
 
 // SetDebugMode enables or disables debug logging globally.
@@ -71,6 +123,30 @@ func SetLogOutput(w io.Writer) {
 	globalMu.Lock()
 	defer globalMu.Unlock()
 	globalOutput = w
+}
+
+// SetLogHandler installs a custom log handler. Every message that passes the
+// level filter — global or per-logger — is delivered to the handler instead of
+// being written to an output writer, including messages from loggers with a
+// per-logger SetOutput.
+//
+// Passing nil removes the handler and restores the default writer-based
+// behaviour.
+//
+//	core.SetLogHandler(myHandler)  // route Hypen logs into my logging system
+//	core.SetLogHandler(nil)        // back to writing to the output writer
+func SetLogHandler(h LogHandler) {
+	globalMu.Lock()
+	defer globalMu.Unlock()
+	globalHandler = h
+}
+
+// GetLogHandler returns the currently installed log handler, or nil when logs
+// are written to the output writer.
+func GetLogHandler() LogHandler {
+	globalMu.RLock()
+	defer globalMu.RUnlock()
+	return globalHandler
 }
 
 // IsDebugMode returns true if debug logging is enabled.
@@ -133,6 +209,23 @@ func (l *Logger) getOutput() io.Writer {
 
 func (l *Logger) log(level LogLevel, levelStr string, format string, args ...any) {
 	if !l.shouldLog(level) {
+		return
+	}
+	// A handler, when installed, replaces the writer path entirely. It is
+	// invoked outside the lock so handlers may safely call back into the SDK.
+	if h := GetLogHandler(); h != nil {
+		switch level {
+		case LogLevelDebug:
+			h.Debug(l.tag, format, args...)
+		case LogLevelInfo:
+			h.Info(l.tag, format, args...)
+		case LogLevelWarn:
+			h.Warn(l.tag, format, args...)
+		case LogLevelError:
+			h.Error(l.tag, format, args...)
+		case LogLevelNone:
+			// Never emitted: LogLevelNone is a filter threshold, not a message level.
+		}
 		return
 	}
 	msg := fmt.Sprintf(format, args...)

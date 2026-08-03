@@ -1,0 +1,60 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "states-switch",
+  "description": "Flipping the driving state path of a .states applicator flows as ordinary reconciliation: SetProp for every switched prop and for the __anim.states active label, RemoveProp for a pose-only prop with no case in the new pose and no base default (absent-key semantics). No Create/Insert/Remove or any novel patch type — the pose switch is invisible to the wire protocol",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "golang: animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Box().width(100).cornerRadius(4).states(@state.cardState, transition: spring, duration: 250) {\n    onState(collapsed).cornerRadius(8).width(48).opacity(0.9)\n    onState(expanded).cornerRadius(16).width(240)\n}",
+    "initialState": { "cardState": "collapsed" },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["cardState"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render resolves the collapsed pose",
+      "action": "initialRender",
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["create", "insert"],
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Box",
+          "props": {
+            "cornerRadius.0": 8,
+            "width.0": 48,
+            "opacity.0": 0.9,
+            "__anim.states": { "label": "collapsed" }
+          }
+        },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "State flip to the expanded pose: SetProps for switched props + label, RemoveProp for the pose-only prop",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["cardState"],
+        "newValues": { "cardState": "expanded" }
+      },
+      "expectedPatchCount": 4,
+      "expectedPatches": [
+        { "type": "setProp", "name": "width.0", "value": 240 },
+        { "type": "setProp", "name": "cornerRadius.0", "value": 16 },
+        { "type": "setProp", "name": "__anim.states", "value": { "label": "expanded" } },
+        { "type": "removeProp", "name": "opacity.0" }
+      ],
+      "forbiddenPatchTypes": ["create", "insert", "remove", "move", "setText", "detach", "attach"]
+    }
+  ]
+}

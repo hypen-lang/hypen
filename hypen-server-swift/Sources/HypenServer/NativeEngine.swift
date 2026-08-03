@@ -311,6 +311,31 @@ public final class NativeEngine: @unchecked Sendable {
         if let beforeId = patch.beforeId {
             dict["beforeId"] = beforeId
         }
+        // Accessibility semantics block: present on `create` (nodes with
+        // derivable a11y) and on every `setSemantics` (reactive re-emit).
+        // Same camelCase JSON shape as the web wire format.
+        if let semanticsJson = patch.semanticsJson,
+           let data = semanticsJson.data(using: .utf8),
+           let semantics = try? JSONSerialization.jsonObject(with: data) {
+            dict["semantics"] = semantics
+        }
+        // Deferred-remove flag on `remove`: the removed subtree root carries
+        // an exit animation, so the renderer owns teardown. Emitted only
+        // when true, matching the engine's serde skip-if-false — the wire
+        // stays byte-identical for non-animated removals. Consumer:
+        // `HypenRenderer.applyRemove` on iOS (see
+        // `.notes/ANIMATION_IOS.md`).
+        if patch.transition {
+            dict["transition"] = true
+        }
+        // Transaction-animation prelude (`batchAnimation`, batch index 0
+        // only): the spec rides the wire as a parsed object under `spec`,
+        // the same shape the TS RemoteServer emits.
+        if let specJson = patch.specJson,
+           let data = specJson.data(using: .utf8),
+           let spec = try? JSONSerialization.jsonObject(with: data) {
+            dict["spec"] = spec
+        }
 
         return dict
     }
@@ -331,6 +356,15 @@ public final class NativeEngine: @unchecked Sendable {
         // consumer. Wire name must match the DOM/Compose/iOS strings.
         case .detach: return "detach"
         case .attach: return "attach"
+        // Reactive accessibility re-emit — the node's complete re-resolved
+        // semantics block rides the `semantics` key. Renderers re-apply it
+        // with their create-time translation, clearing dropped fields.
+        case .setSemantics: return "setSemantics"
+        // Transaction-animation prelude — stamps the batch it heads
+        // (index 0 only). The spec rides the `spec` key, attached in
+        // `convertPatch`. Wire name must match the DOM/Compose/iOS
+        // strings.
+        case .batchAnimation: return "batchAnimation"
         }
     }
 }

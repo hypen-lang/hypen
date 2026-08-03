@@ -186,14 +186,44 @@ class RemoteEngine(
      */
     fun getSessionId(): String? = currentSessionId
 
+    /**
+     * Read timeout to actually use, guarding a host that configures one at or
+     * below the ping interval — that races the keepalive and drops healthy
+     * idle sockets. Ping/pong already proves liveness, so we widen rather
+     * than honour a value that can only cause false disconnects.
+     */
+    private fun effectiveReadTimeoutMs(): Long {
+        val configured = config.readTimeoutMs
+        val ping = config.pingIntervalMs
+        if (configured > 0 && ping > 0 && configured <= ping) {
+            log.warn(
+                "readTimeout (${configured}ms) <= pingInterval (${ping}ms) races the keepalive; " +
+                    "disabling the read deadline and letting ping/pong detect a dead peer",
+            )
+            return 0
+        }
+        return configured
+    }
+
     private fun establishConnection() {
+        log.debug { "establishConnection state=${_connectionState.value}" }
         okHttpClient =
             OkHttpClient
                 .Builder()
                 .connectTimeout(config.connectTimeoutMs, TimeUnit.MILLISECONDS)
-                .readTimeout(config.readTimeoutMs, TimeUnit.MILLISECONDS)
+                // A read deadline at or below the ping interval races the
+                // keepalive it depends on and kills healthy idle sockets;
+                // see RemoteEngineConfig.readTimeoutMs.
+                .readTimeout(effectiveReadTimeoutMs(), TimeUnit.MILLISECONDS)
                 .writeTimeout(config.writeTimeoutMs, TimeUnit.MILLISECONDS)
                 .pingInterval(config.pingIntervalMs, TimeUnit.MILLISECONDS)
+                // No compression setup here on purpose. OkHttp always offers
+                // `permessage-deflate` on the upgrade and inflates whatever the
+                // server sends, so the patch stream — the direction that matters —
+                // is compressed with nothing to configure. `minWebSocketMessageToCompress`
+                // is left at its 1024-byte default: it only gates the *outbound*
+                // direction, and our outbound traffic is small hello/action JSON that
+                // deflate would grow rather than shrink. See RemoteEngineConfig.
                 .build()
 
         val request =
@@ -236,10 +266,6 @@ class RemoteEngine(
                 webSocket: WebSocket,
                 text: String,
             ) {
-                // Log message type and size at the WebSocket level
-                val typeMatch = Regex(""""type"\s*:\s*"(\w+)"""").find(text)
-                val revMatch = Regex(""""revision"\s*:\s*(\d+)""").find(text)
-                android.util.Log.d("HypenTree", "<<< WS message: type=${typeMatch?.groupValues?.get(1)}, rev=${revMatch?.groupValues?.get(1)}, size=${text.length}")
                 handleMessage(text)
             }
 
@@ -248,7 +274,7 @@ class RemoteEngine(
                 code: Int,
                 reason: String,
             ) {
-                log.debug("WebSocket closing: $code - $reason")
+                log.debug { "WebSocket closing: $code - $reason" }
             }
 
             override fun onClosed(
@@ -256,7 +282,7 @@ class RemoteEngine(
                 code: Int,
                 reason: String,
             ) {
-                log.debug("WebSocket closed: $code - $reason")
+                log.debug { "WebSocket closed: $code - $reason" }
                 _connectionState.value = ConnectionState.DISCONNECTED
                 maybeScheduleReconnect()
             }
@@ -324,7 +350,7 @@ class RemoteEngine(
     }
 
     private suspend fun handleInitialTree(message: InitialTreeMessage) {
-        android.util.Log.d("HypenTree", ">>> initialTree: rev=${message.revision}, ${message.patches.size} patches")
+        log.debug { "initialTree: rev=${message.revision}, ${message.patches.size} patches" }
         moduleName = message.module
         currentRevision = message.revision
         _state.value = message.state
@@ -335,11 +361,11 @@ class RemoteEngine(
     }
 
     private suspend fun handlePatch(message: PatchMessage) {
-        android.util.Log.d("HypenTree", ">>> patch: rev=${message.revision}, ${message.patches.size} patches (currentRev=$currentRevision)")
+        log.debug { "patch: rev=${message.revision}, ${message.patches.size} patches (currentRev=$currentRevision)" }
 
         // Check revision ordering
         if (message.revision <= currentRevision) {
-            android.util.Log.w("HypenTree", ">>> DROPPED patch rev=${message.revision} (currentRev=$currentRevision)")
+            log.warn { "Dropped patch rev=${message.revision} (currentRev=$currentRevision)" }
             return
         }
 
@@ -367,7 +393,7 @@ class RemoteEngine(
         }
 
         _connectionState.value = ConnectionState.RECONNECTING
-        log.debug("Scheduling reconnect attempt $attempts/${config.maxReconnectAttempts}")
+        log.debug { "Scheduling reconnect attempt $attempts" }
 
         reconnectJob?.cancel()
         reconnectJob =

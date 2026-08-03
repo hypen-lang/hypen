@@ -461,11 +461,16 @@ export class RemoteServer {
 
     const finalPort = port ?? this._config.port ?? 3000;
     const hostname = this._config.hostname ?? "0.0.0.0";
+    // permessage-deflate is on unless explicitly disabled. Bun negotiates it
+    // during the upgrade handshake, so clients that don't offer the extension
+    // just get uncompressed frames.
+    const compression = this._config.compression ?? true;
 
     this.server = Bun.serve({
       port: finalPort,
       hostname,
       websocket: {
+        perMessageDeflate: compression,
         open: (ws) => this.handleOpen(ws),
         message: (ws, message) => this.handleMessage(ws, message),
         close: (ws) => this.handleClose(ws),
@@ -500,6 +505,7 @@ export class RemoteServer {
     });
 
     log.info(`Hypen app streaming on ws://${hostname}:${finalPort}`);
+    log.debug(`permessage-deflate ${compression ? "enabled" : "disabled"}`);
 
     return this;
   }
@@ -685,6 +691,8 @@ export async function serve(options: {
   source?: string;
   port?: number;
   hostname?: string;
+  /** Negotiate permessage-deflate compression (default: true) */
+  compression?: boolean;
   session?: SessionConfig;
   onConnection?: (client: RemoteClient) => void;
   onDisconnection?: (client: RemoteClient) => void;
@@ -700,10 +708,11 @@ export async function serve(options: {
     server.ui(options.ui);
   }
 
-  if (options.port || options.hostname) {
+  if (options.port || options.hostname || options.compression !== undefined) {
     server.config({
       port: options.port,
       hostname: options.hostname,
+      compression: options.compression,
     });
   }
 

@@ -610,9 +610,13 @@ export class RemoteSession {
     await new Promise<void>((resolve) => queueMicrotask(resolve));
 
     // Capture initial render patches (initial tree + any re-render from onCreated state).
+    // `batchAnimation` preludes are dropped: a stamp scopes exactly ONE batch
+    // (first-patch contract), and concatenating accumulated batches into a
+    // single initialTree array would let a stray prelude over-scope onto
+    // patches from other batches — the initial tree never animates anyway.
     const initialPatches: Patch[] = [];
     this.engine.setRenderCallback((patches) => {
-      initialPatches.push(...patches);
+      initialPatches.push(...patches.filter((p) => p.type !== "batchAnimation"));
     });
 
     try {

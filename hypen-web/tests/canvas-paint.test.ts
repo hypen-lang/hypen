@@ -5,7 +5,7 @@
  */
 
 import { test, expect, describe, beforeEach } from "bun:test";
-import { paintNode } from "../packages/web/src/canvas/paint.js";
+import { paintNode, clearCharAdvanceCache } from "../packages/web/src/canvas/paint.js";
 import type { VirtualNode } from "../packages/web/src/canvas/types.js";
 
 // Mock canvas context that records draw calls
@@ -145,8 +145,9 @@ describe("Canvas Paint System", () => {
 
       paintNode(ctx as any, node);
 
-      expect(ctx.wasCalled("save")).toBe(true);
-      expect(ctx.wasCalled("restore")).toBe(true);
+      // Plain containers paint without a scoping save/restore pair (they
+      // only touch state every draw call re-sets); the stack stays balanced.
+      expect(ctx.countCalls("save")).toBe(ctx.countCalls("restore"));
       expect(ctx.wasCalled("fillRect")).toBe(true);
       expect(ctx.fillStyle).toBe("#ff0000");
     });
@@ -534,6 +535,67 @@ describe("Canvas Paint System", () => {
 
       // Should paint both parent and child
       expect(ctx.countCalls("fillRect")).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  describe("Letter-spacing advance cache", () => {
+    function makeTextNode(): VirtualNode {
+      return {
+        id: "txt1",
+        type: "text",
+        props: { text: "ab", letterSpacing: 2 },
+        children: [],
+        parent: null,
+        visible: true,
+        opacity: 1,
+        clickable: false,
+        hoverable: false,
+        focusable: false,
+        focused: false,
+        hovered: false,
+        layout: {
+          x: 0,
+          y: 0,
+          width: 100,
+          height: 20,
+          margin: { top: 0, right: 0, bottom: 0, left: 0 },
+          padding: { top: 0, right: 0, bottom: 0, left: 0 },
+          border: { width: 0, color: "transparent", radius: 0 },
+          contentX: 0,
+          contentY: 0,
+          contentWidth: 100,
+          contentHeight: 20,
+        },
+      };
+    }
+
+    beforeEach(() => {
+      clearCharAdvanceCache();
+    });
+
+    test("clearCharAdvanceCache invalidates glyph advances measured before a font load", () => {
+      // First paint: fallback-font metrics (8px per glyph from the mock).
+      paintNode(ctx as any, makeTextNode());
+      let fills = ctx.calls.filter((c) => c.method === "fillText");
+      expect(fills[0].args).toEqual(["a", 0, 0]);
+      expect(fills[1].args).toEqual(["b", 8 + 2, 0]); // advance + letterSpacing
+
+      // "Web font loads": same CSS font string, different real metrics.
+      const wideCtx = new MockCanvasContext();
+      wideCtx.measureText = (_text: string) => ({ width: 20 });
+
+      // Without invalidation the stale 8px advance is reused.
+      paintNode(wideCtx as any, makeTextNode());
+      fills = wideCtx.calls.filter((c) => c.method === "fillText");
+      expect(fills[1].args).toEqual(["b", 8 + 2, 0]);
+
+      // After clearing (what the renderer's fonts `loadingdone` handler
+      // does), glyphs are re-measured against the loaded font.
+      clearCharAdvanceCache();
+      wideCtx.clearCalls();
+      paintNode(wideCtx as any, makeTextNode());
+      fills = wideCtx.calls.filter((c) => c.method === "fillText");
+      expect(fills[1].args).toEqual(["b", 20 + 2, 0]);
     });
   });
 });

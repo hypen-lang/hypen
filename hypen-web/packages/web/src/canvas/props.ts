@@ -94,11 +94,21 @@ function stripActionPrefixes(raw: string): string {
  * went out verbatim and the engine ignored it because it expects the
  * stripped form (`router.push`).
  *
+ * The `animate:` named argument (transaction-scoped animation, Option D) is
+ * pulled OUT of the payload and returned as the distinct `animate` field —
+ * it stamps the dispatched action and must never reach a module handler's
+ * payload. Both the token form (`animate: spring` → string) and the object
+ * form (`animate: {curve, duration}`) arrive under the `"animate"` key.
+ * ONLY the aggregate's own top-level `animate` key — the applicator's NAMED
+ * `animate:` argument (`onClick.animate`) — is reserved. An `animate` key
+ * inside a positional payload object (`.onClick("@a", {animate: false})` →
+ * nested under `"1"`) is user data and is never extracted.
+ *
  * Returns `null` if no dispatchable action name could be found.
  */
 export function resolveEventAction(
   spec: unknown,
-): { actionName: string; payload: Record<string, any> } | null {
+): { actionName: string; payload: Record<string, any>; animate?: unknown } | null {
   if (typeof spec === "string") {
     if (!spec.startsWith("@")) return null;
     return { actionName: stripActionPrefixes(spec), payload: {} };
@@ -108,10 +118,20 @@ export function resolveEventAction(
     const raw = obj["0"];
     if (typeof raw !== "string" || !raw.startsWith("@")) return null;
     const payload: Record<string, any> = {};
+    let animate: unknown;
+    let hasAnimate = false;
     for (const [k, v] of Object.entries(obj)) {
-      if (k !== "0") payload[k] = v;
+      if (k === "0") continue;
+      if (k === "animate") {
+        animate = v;
+        hasAnimate = true;
+        continue;
+      }
+      payload[k] = v;
     }
-    return { actionName: stripActionPrefixes(raw), payload };
+    return hasAnimate
+      ? { actionName: stripActionPrefixes(raw), payload, animate }
+      : { actionName: stripActionPrefixes(raw), payload };
   }
   return null;
 }

@@ -49,12 +49,14 @@ public final class ComponentRegistry: @unchecked Sendable {
 
     /// Get a handler for a given element type
     public func getHandler(for typeName: String) -> (any ComponentHandler)? {
-        handlers[typeName.lowercased()]
+        // Keys are stored lowercased; try the name as-is first so
+        // already-lowercase lookups skip the `lowercased()` allocation.
+        handlers[typeName] ?? handlers[typeName.lowercased()]
     }
 
     /// Check if a handler exists for a given element type
     public func hasHandler(for typeName: String) -> Bool {
-        handlers[typeName.lowercased()] != nil
+        getHandler(for: typeName) != nil
     }
 
     /// Get all registered type names

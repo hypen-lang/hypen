@@ -22,6 +22,7 @@
 //! ```
 
 pub mod accessibility;
+pub mod anim;
 pub mod app;
 pub(crate) mod damage;
 pub mod gpu;

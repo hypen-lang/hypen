@@ -141,6 +141,82 @@ if manager.connection_count(&session.id) == 0 {
 }
 ```
 
+## Framework Integration
+
+This SDK is **transport-agnostic**. It does not open sockets or bind ports. You
+get a `RemoteSession` (see `hypen_server::remote`) that turns inbound protocol
+frames into outbound ones — both plain `String`s — and you wire it into whatever
+async server you already run (Axum, Actix, Warp, tungstenite, …):
+
+```rust
+use hypen_server::remote::{RemoteSession, SessionConfig};
+
+// Inside your framework's WebSocket handler:
+async fn ws_handler(ws: WebSocket, session: RemoteSession) {
+    let (mut sender, mut receiver) = ws.split();
+
+    for msg in session.handle_hello(None) {
+        sender.send(Message::Text(msg)).await.unwrap();
+    }
+
+    while let Some(Ok(msg)) = receiver.next().await {
+        for resp in session.handle_message(msg.to_text().unwrap()) {
+            sender.send(Message::Text(resp)).await.unwrap();
+        }
+    }
+}
+```
+
+### WebSocket compression (`permessage-deflate`)
+
+Hypen enables `permessage-deflate` by default across its SDKs, and the patch
+stream compresses well. Because this crate owns no socket, **compression is not
+configurable here** — it is negotiated by your transport during the HTTP upgrade.
+
+**Ecosystem status (verified 2026-07): you cannot enable it on an Axum or Actix
+Hypen server today.**
+
+- `tungstenite` / `tokio-tungstenite` publish **no** `deflate` or compression
+  feature in any release up to and including 0.30.0. The `tungstenite` README
+  still reads: *"There is no support for permessage-deflate at the moment, but
+  the PRs are welcome"*. Tracking issue
+  [snapview/tungstenite-rs#2](https://github.com/snapview/tungstenite-rs/issues/2)
+  has been open since 2017; an implementation was merged
+  ([#328](https://github.com/snapview/tungstenite-rs/pull/328)) then reverted,
+  and the re-land ([#426](https://github.com/snapview/tungstenite-rs/pull/426))
+  is still unmerged.
+- **Axum** builds `WebSocketUpgrade` on `tokio-tungstenite`, so it inherits the
+  gap. `WebSocketUpgrade` offers `read_buffer_size`, `write_buffer_size`,
+  `max_write_buffer_size`, `max_message_size`, `max_frame_size`,
+  `accept_unmasked_frames` and subprotocol selection — **there is no compression
+  or extension setting**, at any axum 0.8.x version.
+- **Actix Web** likewise has no WebSocket `permessage-deflate`. (`actix-http`
+  depends on `flate2`, but that serves HTTP body compression, not the WS
+  extension.)
+
+**This is safe, just not optimal.** `permessage-deflate` is negotiated per
+connection and optional per RFC 7692: the client offers it, and a server that
+doesn't support it omits the header from the `101` response, after which both
+peers speak plain frames. Browser and Android/OkHttp clients offer compression,
+have their offer declined, and transparently run uncompressed. The Hypen desktop
+renderer offers no compression at all and interoperates with compression-enabled
+servers unchanged. The cost is bandwidth, not correctness.
+
+If you need compression now:
+
+- Put a **reverse proxy / CDN edge** that terminates `permessage-deflate` in
+  front of the Rust process and forward plain frames upstream. Least invasive.
+- Serve from the **TypeScript/Node or Cloudflare Workers Hypen SDK**, which
+  negotiate `permessage-deflate` natively.
+- Use **[`soketto`](https://crates.io/crates/soketto)** with its `deflate`
+  feature — the one maintained pure-Rust WebSocket crate with a real
+  `permessage-deflate` implementation. `RemoteSession` is transport-agnostic, so
+  driving it from `soketto` needs no changes to your module code.
+
+Re-check when bumping `tokio-tungstenite`: if
+[#426](https://github.com/snapview/tungstenite-rs/pull/426) merges, a `deflate`
+feature becomes available and Axum can plausibly expose it.
+
 ## Nested Modules
 
 Complex screens can compose several independently stateful modules. Each nested module registers under its lowercase name in the shared `GlobalContext`, so `@{feed.items}` / `@actions.feed.refresh` etc. work from the parent template:

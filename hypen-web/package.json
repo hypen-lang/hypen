@@ -1,6 +1,6 @@
 {
   "name": "hypen-web",
-  "version": "0.4.956",
+  "version": "0.4.42",
   "private": true,
   "description": "Hypen Web SDK Monorepo - Declarative UI with stateful modules",
   "type": "module",
@@ -42,6 +42,7 @@
   "devDependencies": {
     "@types/bun": "latest",
     "@types/jsdom": "^27.0.0",
+    "axe-core": "^4.12.1",
     "jsdom": "^27.4.0",
     "typescript": "^5"
   },

@@ -1,0 +1,393 @@
+---
+title: Animation
+description: Declarative animation in Hypen — transitions, enter/exit, layout, presets, states, shared elements, scrubbing, and completion events
+---
+
+# Animation
+
+Hypen animates declaratively: you attach animation applicators to nodes, and the engine ships that *intent* to the renderer, which plays the motion natively — CSS transitions on the web, SwiftUI's implicit animation on iOS, Compose animation on Android, tick-based interpolators on Canvas and desktop. A channel a renderer doesn't play simply snaps to the correct final state, so your UI stays correct on every platform.
+
+The surface is ten applicators plus one event applicator and one event argument:
+
+| Construct | What it animates |
+|-----------|------------------|
+| `.transition()` | Future prop changes on the node |
+| `.enter()` / `.exit()` | The node appearing / being removed |
+| `.layout()` | Keyed list items moving (FLIP) |
+| `.animate()` | Built-in preset timelines (spin, pulse, shimmer, shake) |
+| `.states { }` | Coordinated multi-prop looks driven by one state value |
+| `.sharedElement()` | The same visual element continuing across a navigation |
+| `.scrub()` / `.settle()` | Dragging or scrolling between two `.states` poses |
+| `.motion(essential)` | Opt a node out of reduced-motion snapping |
+| `.onAnimationComplete()` | Dispatches an action when a playback settles |
+| `animate:` (on event applicators) | Everything a single action's state changes touch |
+
+## Quick Start
+
+```hypen
+// Animate future prop changes on this node
+Text("@{state.score}")
+    .fontSize("@{state.emphasized ? 32 : 18}")
+    .transition(200, easeOut)
+
+// Animate appearance and disappearance
+If(condition: @state.showToast) {
+    Row { Text("Saved!") }
+        .enter(slide, fade, from: bottom)
+        .exit(fade, duration: 150)
+}
+
+// Animate list reorders (FLIP)
+ForEach(@state.items) { item ->
+    Row { Text("@{item.title}") }
+        .key("@{item.id}")
+        .layout(spring)
+}
+
+// Ambient motion: looping and one-shot presets
+Spinner {}.animate(spin)
+Badge("LIVE").animate(pulse)
+Row {}.animate(shimmer)                          // skeleton loading sweep
+
+// Named visual states: one state path drives coordinated multi-prop looks
+Image(src: "@{state.cover}")
+    .width(100)
+    .cornerRadius(4)
+    .states(@state.cardState, transition: spring) {
+        onState(collapsed).width(48).cornerRadius(8)
+        onState(expanded).width(240).cornerRadius(16)
+    }
+
+// Shared-element continuity: the same key on two routes = one element across navigation
+Image(src: "@{item.coverUrl}")
+    .sharedElement("cover-@{item.id}")
+
+// React when an animation finishes
+Toast {}
+    .enter(slide, from: bottom)
+    .onAnimationComplete(@actions.toastSettled)  // payload: { animation: "enter" }
+```
+
+**Syntax rule for the whole family:** animation arguments are flat. Presets and curves are bare tokens, options are named arguments — `.enter(slide, fade, from: bottom)` is valid, `slide(from: bottom)` or `spring(bouncy)` is not. Invalid arguments never break the render; they warn and fall back to the channel's defaults. State bindings inside animation arguments are ignored with a warning — with one exception, the `.sharedElement` key, where bindings are the point.
+
+## Animating Prop Changes — `.transition()`
+
+Declare once on a node that property changes should animate. Every later change to an animatable property (a state binding update, a conditional value flip) interpolates instead of snapping. A new value arriving mid-flight retargets from the current visual value.
+
+```hypen
+.transition()                                    // defaults: 200ms, easeOut
+.transition(200, easeOut)                        // positional: number → duration (ms), token → curve
+.transition(duration: 300, curve: spring, delay: 50)
+.transition(props: [opacity, translateY])        // scope to specific props
+```
+
+- A positional number sets the duration in milliseconds; a bare token sets the curve.
+- `props:` limits the transition to the listed properties (entries outside the [animatable whitelist](#animatable-properties) are dropped with a warning). Omit it to animate every animatable property.
+- The initial render never animates — transition styles apply before first paint.
+
+**Platform Support:** Web, Android, iOS, Desktop, Canvas
+
+## Appearance and Removal — `.enter()` / `.exit()`
+
+`.enter()` plays when a node is inserted (an `If` turning true, a `ForEach` item added). `.exit()` plays when it is removed — the renderer defers the actual teardown until the exit settles, so elements fade or slide out instead of vanishing.
+
+```hypen
+.enter(fade)                                     // single preset
+.enter(slide, fade, from: bottom)                // presets compose; direction is a named arg
+.enter(scale, duration: 250, curve: easeOut)
+.exit(fade, duration: 150)
+.exit(slide, to: trailing)
+```
+
+- Presets: `fade`, `slide` (24px offset), `scale` (from 0.95). They compose — `.enter(slide, fade)` slides and fades together. With no preset, `fade` is the default.
+- Direction is a named argument — `from:` on `.enter`, `to:` on `.exit` — with values `top`, `bottom`, `leading`, `trailing` (leading/trailing are RTL-aware).
+- Defaults: enter `{200ms, easeOut}`, exit `{150ms, easeIn}`.
+- Enter plays only for nodes that appear *after* the initial render; the first paint never cascades enter animations, and a route restored from the Router cache reappears instantly.
+- An exit-animating subtree is inert: it ignores pointer events and its actions no longer dispatch. It still occupies layout until the exit settles.
+- Children removed with their parent follow the parent's exit — a child's own `.exit` does not play.
+
+**Rapid toggling caveat:** toggling an `If` off and back on before the exit finishes shows *both* nodes for a moment — the old node plays its exit while the new one plays its enter (the same behavior as Framer Motion's `AnimatePresence`). If that reads wrong for your UI, gate the re-show on the exit's `.onAnimationComplete`, debounce the driving state, or keep one keyed node mounted and flip it with `.states` instead.
+
+**Platform Support:** Web, Android, iOS, Desktop, Canvas
+
+## List Reorders — `.layout()`
+
+When a keyed `ForEach` item moves, `.layout()` animates it from its old position to its new one (a FLIP animation) instead of jumping.
+
+```hypen
+.layout()                                        // defaults: 300ms, spring
+.layout(spring)
+.layout(duration: 400, curve: easeInOut)
+```
+
+If the same update both moves and removes a node, the exit animation wins. On the web, siblings that carry `.layout` also animate the shift when a neighbor is removed.
+
+**Platform Support:** Web, Desktop (Android, iOS, and Canvas snap — moves jump)
+
+## Preset Timelines — `.animate()`
+
+`.animate()` plays a built-in keyframe timeline — ambient, decorative motion that isn't driven by a state change: spinners, live badges, skeleton shimmers, error shakes. The first positional token names the preset; modifiers are named-only.
+
+```hypen
+.animate(spin)                                   // per-preset defaults
+.animate(pulse, duration: 800, repeat: 3, curve: easeInOut)
+.animate(shake, delay: 100)
+```
+
+| Preset | Motion | Duration | Repeat | Curve |
+|--------|--------|----------|--------|-------|
+| `pulse` | opacity breathes 1 → 0.5 → 1 | 1200ms | `loop` | `easeInOut` |
+| `spin` | full 360° rotation | 800ms | `loop` | `linear` |
+| `shimmer` | gradient highlight sweeps across | 1500ms | `loop` | `linear` |
+| `shake` | horizontal wiggle | 400ms | `1` | `easeInOut` |
+
+- `repeat:` is the token `loop` or a positive integer.
+- An unknown preset omits the animation entirely (with a warning) — every other invalid argument falls back to the preset's default.
+- There is no author-defined keyframe DSL and no `when:` trigger — the built-in presets are the entire timeline surface. For "play on becoming true", put the preset on a node inside an `If`; it plays when the node enters:
+
+```hypen
+If(condition: @state.error) {
+    Card { Text("@{state.error}") }.animate(shake)
+}
+```
+
+- On a route restored from the Router cache, looping presets resume but finite-repeat presets do not replay.
+
+**Platform Support:** Web, Android, iOS (`shake` one-sided), Desktop (`shimmer` snaps), Canvas (`shimmer` snaps)
+
+## Named Visual States — `.states { }`
+
+`.states` gives a node named *looks* selected by one state path — the coordinated-transition construct (Compose's `updateTransition`, Framer's `variants`). Instead of scattering ternaries across props, declare each pose once and flip a single state value; every overridden prop travels together, under one shared timing.
+
+```hypen
+Image(src: "@{state.cover}")
+    .width(100)
+    .cornerRadius(4)
+    .states(@state.cardState, transition: spring, duration: 250) {
+        onState(collapsed).width(48).cornerRadius(8).opacity(0.9)
+        onState(expanded).width(240).cornerRadius(16).tw("shadow-lg")
+    }
+```
+
+**The header:**
+
+- The first positional argument must be a state reference (`@state.cardState`) — anything else warns and the applicator is ignored.
+- Named arguments: `transition:` (a curve token — note the name, not `curve:`), `duration:` and `delay:` in milliseconds. Defaults: `easeOut`, 250ms, no delay.
+- One `.states` per node.
+
+**Poses:** the block contains only `onState(<label>)` entries; the pose's props chain as applicators on the head. Pose applicators run through the same machinery as normal chains — `.tw(...)`, directional forms, and breakpoint/interaction variants all work per pose. Three things are excluded inside a pose (warn + drop): animation applicators, `.bind`, and event applicators. Pose values must be static — no `@{state.*}` bindings inside a pose.
+
+**Matching:** the value at the driving path is stringified and matched against the labels (state `2` matches `onState("2")`). A matched pose's props override the node's base chain. No match — unknown label, missing path — falls back to the node's base values; a pose-only prop is removed entirely.
+
+**Timing:** `.states` synthesizes a transition for the node scoped to the overridden animatable props, so pose flips glide with zero extra declarations. An explicit `.transition(...)` on the same node wins over the synthesized one. Overridden props outside the animatable whitelist still switch — they just snap.
+
+Prefer a plain conditional prop (`"@{state.x ? 32 : 18}"`) when exactly one prop changes; reach for `.states` when a *look* is several props that must move as one.
+
+**Platform Support:** All platforms show the correct pose (pose flips are ordinary prop updates). Pose flips glide on Web, Android, iOS, Desktop, and Canvas.
+
+## Cross-Route Continuity — `.sharedElement()`
+
+`.sharedElement(key)` tags a node as *the same visual element* across a navigation — the list-thumbnail-becomes-detail-hero effect. When a route change removes a keyed node and the next screen introduces a node with the same key, the incoming node animates from where the outgoing one sat instead of appearing in place.
+
+```hypen
+// List route
+Image(src: "@{item.coverUrl}")
+    .sharedElement("cover-@{item.id}")
+
+// Detail route
+Image(src: "@{state.restaurant.coverUrl}")
+    .sharedElement("cover-@{state.restaurant.id}", curve: spring, duration: 350)
+```
+
+- The key is the first positional argument and must be a string. It may contain template bindings — this is the one animation argument where bindings are legal, because identity is data.
+- `curve:` and `duration:` are named-only, defaults `{spring, 350ms}`. The **incoming** (destination) node's timing plays.
+- A key with no partner, or an element that can't be measured, degrades silently to a plain navigation — never an error. In dev, a key that matches nothing warns once so typos are catchable.
+- A matched node's own `.enter` is suppressed for that navigation — one motion, not two.
+- Navigating again mid-flight retargets from wherever the element currently is on screen.
+- v1 is transform-only continuity: position and size interpolate; corner radius and opacity don't, and there is no content crossfade. Pairs that mostly match visually look seamless.
+
+**Platform Support:** Web, Desktop (Android, iOS, and Canvas show a plain navigation)
+
+## Gesture and Scroll Bindings — `.scrub()` / `.settle()`
+
+`.scrub()` binds a node's position *between two of its `.states` poses* to a continuous input — a finger dragging a bottom sheet, a scroll offset collapsing a header. The interpolation runs entirely inside the renderer, frame by frame; the engine hears exactly one thing, at the end: `.settle()` writes the winning pose label to a state path as one ordinary state write.
+
+```hypen
+// Upward-opening bottom sheet: 400px of upward finger travel = closed → open
+Sheet { ... }
+    .states(@state.sheetPhase) {
+        onState(closed).translateY(400)
+        onState(open).translateY(0)
+    }
+    .scrub(from: closed, to: open, axis: y, over: [0, -400])
+    .settle(curve: spring, duration: 300, bind: @state.sheetPhase)
+
+// Collapsing header driven by the scroll container's offset
+Header { ... }
+    .states(@state.headerMode) {
+        onState(expanded).height(120)
+        onState(collapsed).height(48)
+    }
+    .scrub(from: expanded, to: collapsed, source: scroll, axis: y, over: [0, 120])
+    .settle(bind: @state.headerMode)
+```
+
+- `.scrub(from:, to:, source:, axis:, over:, rubberBand:, of:)` — `from:`/`to:` (required) are two pose labels from the same node's `.states` block; `source:` is `gesture` (default) or `scroll`; `axis:` is `x` or `y`; `over:` (required) is the *directed* input range `[inputAtProgress0, inputAtProgress1]` in pixels — an upward-opening sheet is `over: [0, -400]`; `rubberBand:` is the resistance factor beyond the range (default 0.4); `of:` names a scroll container by its `id` prop.
+- `.settle(curve:, duration:, bind:)` — the release animation's timing (defaults `{spring, 300ms}`) and the required `bind:` state path that receives the winning label.
+- Taps pass through — a gesture claims the pointer only after ~6px of travel, so a plain tap is a total no-op and clicks on children are unaffected.
+- Drags start from where the element is: a settled-open sheet re-drags from progress 1, a sheet caught mid-settle is grabbed where it is.
+- On release, the velocity-projected progress picks the nearest pose, the settle animation plays, and the label is written to `bind:` — your module sees a normal state change, so a machine that also flips the same path from buttons keeps working unchanged.
+- Scroll sources track continuously and write when progress rests at an endpoint.
+- Requirements: a `.states` block declaring both labels and a `.settle(bind:)` on the same node. Any violation warns once and the node degrades to plain `.states` behavior.
+- Under reduced motion, dragging works unchanged (direct manipulation is the user's own hand); only the release settle snaps.
+
+**Platform Support:** Web, Desktop (Android, iOS, and Canvas ignore scrubbing — the node still flips poses when the bound state changes by other means)
+
+## Completion Events — `.onAnimationComplete()`
+
+`.onAnimationComplete(@actions.name)` dispatches an action when an animation on the node finishes — the piece that lets a module sequence motion without `setTimeout` guesses.
+
+```hypen
+.onAnimationComplete(@actions.animationDone)
+.onAnimationComplete(@actions.animationDone, source: "card")   // extra args merge into the payload
+```
+
+| Playback | Payload |
+|----------|---------|
+| Finite `.animate` preset | `{ animation: "shake" }` (the preset name) |
+| `.enter` | `{ animation: "enter" }` |
+| `.exit` (just before teardown) | `{ animation: "exit" }` |
+| `.states` pose transition | `{ animation: "states", state: "expanded" }` (the matched label) |
+| `.sharedElement` FLIP | `{ animation: "sharedElement" }` |
+
+A completion fires **only when a playback settles naturally**. Interrupted or superseded playbacks, reduced-motion skips, looping presets, and `.states` falling back to the base pose all fire *nothing* — which removes most completion races by construction. Handlers should check the payload and drop completions for phases they've already left.
+
+The intended pattern is a module-resident state machine — the DSL declares the poses, the module owns the transition logic:
+
+```hypen
+Button("@actions.save") {
+    Text("@{state.savePhase == 'done' ? 'Saved!' : 'Save'}")
+}
+.width(160)
+.backgroundColor("#3b82f6")
+.states(@state.savePhase, transition: easeOut, duration: 300) {
+    onState(saving).opacity(0.6)
+    onState(done).backgroundColor("#22c55e").width(48).cornerRadius(24)
+}
+.onAnimationComplete(@actions.animationDone)
+```
+
+```typescript
+export default app
+  .defineState<{ savePhase: string }>({ savePhase: "idle" })
+  .onAction("save", async ({ state }) => {
+    state.savePhase = "saving";
+    await save();
+    state.savePhase = "done";            // pose flip → transition plays → completion fires
+  })
+  .onAction("animationDone", ({ action, state }) => {
+    if (action.payload.animation === "states" && action.payload.state === "done") {
+      state.savePhase = "idle";          // no `idle` pose declared → back to the base look
+    }
+  });
+```
+
+Treat completions as motion choreography, not the only path to a correct end state: on a renderer that snaps a channel, the machine still lands in a sensible pose — it just skips the timed hop.
+
+**Platform Support:** Web and Desktop dispatch all five firing points; Canvas, iOS, and Android dispatch the first four (no `sharedElement`)
+
+## Animating the Cause — `animate:`
+
+Everything above animates the *node*. `animate:` animates the *cause*: the same state change glides when a user tap produced it and snaps when a websocket refresh did — SwiftUI's `withAnimation` idea on Hypen's dispatch pipeline.
+
+```hypen
+Button("@actions.toggleCart") { Text("Cart") }
+    .onClick(@actions.toggleCart, animate: spring)
+
+Row {}.onClick(@actions.expand, animate: {curve: easeOut, duration: 400})
+```
+
+- Any event applicator accepts `animate:` — a bare curve token (means `{curve, 250ms}`) or a spec map (`curve:`, `duration:`, `delay:`, `props:`).
+- The handler's **synchronous** mutations glide with the spec, on every affected node, whether or not the node declares its own `.transition`. Mutations after an `await` are data, and data snaps:
+
+```typescript
+.onAction("toggleCart", async ({ state }) => {
+  state.cartOpen = !state.cartOpen;   // glides with the animate: spec
+  await syncCart();
+  state.lastSynced = Date.now();      // after the await — snaps
+});
+```
+
+- State changes the action didn't cause (websocket pushes, timers) keep snapping — even if they land mid-glide.
+- Precedence: structural playbacks (enter/exit/FLIP/shared-element) > transaction > node `.transition` > snap.
+- Only the event applicator's own named `animate:` argument is reserved — a field named `animate` inside a payload object is ordinary user data.
+- Stamping is currently TypeScript-host-only (browser engine and Node/Bun servers); a TS-hosted stamp reaches every connected renderer, mobile included. On Go and Kotlin hosts the dispatch works normally but the flush snaps.
+
+**Platform Support:** Web, Desktop, Android, iOS renderers honor the stamp (TypeScript hosts only)
+
+## Vocabulary
+
+**Curves:** `linear`, `easeIn`, `easeOut`, `easeInOut`, `spring` — `spring` is a fixed overshoot curve (`cubic-bezier(0.34, 1.56, 0.64, 1)`), identical on every platform.
+
+**Enter/exit presets:** `fade`, `slide`, `scale`. **Directions:** `top`, `bottom`, `leading`, `trailing` (RTL-aware).
+
+**Defaults:**
+
+| Applicator | Duration | Curve | Notes |
+|------------|----------|-------|-------|
+| `.transition()` | 200ms | `easeOut` | all animatable props |
+| `.enter()` | 200ms | `easeOut` | presets default to `fade` |
+| `.exit()` | 150ms | `easeIn` | presets default to `fade` |
+| `.layout()` | 300ms | `spring` | — |
+| `.animate()` | per preset | per preset | see the preset table |
+| `.states()` | 250ms | `easeOut` | curve is named `transition:` |
+| `.sharedElement()` | 350ms | `spring` | key is the first positional; no `delay:` |
+| `.settle()` | 300ms | `spring` | `bind:` required; no `delay:` |
+
+## Animatable Properties
+
+Only whitelisted properties animate — the set every renderer can interpolate consistently. Everything else (`display`, text content, `.tw()` classes) switches instantly.
+
+`opacity` · `translateX` · `translateY` · `scale` · `rotate` · `color` · `backgroundColor` · `borderColor` · `cornerRadius` · `padding` (+ 6 directional forms) · `margin` (+ 6 directional forms) · `width` · `height` · `gap` · `fontSize`
+
+## Reduced Motion
+
+When the platform reports reduced motion (`prefers-reduced-motion` on the web, `accessibilityReduceMotion` on iOS, "Remove animations" on Android), everything snaps with zero author code: transitions neutralize, enters and layout animations skip, exits remove immediately, presets don't play.
+
+The rare animation that *carries meaning* — a progress indicator, a status pulse — can opt out per node:
+
+```hypen
+Spinner {}.animate(spin).motion(essential)
+```
+
+`essential` is the only valid token. A flagged node animates exactly as if the preference were off; everything without the flag keeps snapping. Shared-element FLIPs stay skipped everywhere — cross-route continuity is inherently decorative. Use it sparingly: it exists for meaning-bearing motion, not for overriding a user preference wholesale.
+
+## Platform Support Summary
+
+| Channel | Web (DOM) | Desktop | iOS | Android | Canvas 2D |
+|---------|-----------|---------|-----|---------|-----------|
+| `.transition` | Yes | Yes | Yes | Yes | Yes (`cornerRadius` snaps) |
+| `.enter` / `.exit` | Yes | Yes | Yes | Yes | Yes |
+| `.layout` | Yes | Yes | Snap | Snap | Snap |
+| `.animate` | Yes | Yes (no `shimmer`) | Yes | Yes | Yes (no `shimmer`) |
+| `.states` | Yes | Yes | Yes | Yes | Yes |
+| `.sharedElement` | Yes | Yes | Snap | Snap | Snap |
+| `.scrub` / `.settle` | Yes | Yes | Snap | Snap | Snap |
+| `.onAnimationComplete` | 5 firing points | 5 firing points | 4 | 4 | 4 |
+| `animate:` | Yes | Yes | Yes | Yes | Yes |
+
+"Snap" always means the UI is identical minus the motion — nothing errors, and the correct final state always shows. The full per-renderer capability matrices (including recorded narrowings like iOS's one-sided `shake` or desktop's uniform scale) live in the SDK reference: `hypen-web/docs/animation.md`.
+
+## Legacy: the `.transition("...")` string form
+
+The old web-only form passed a CSS shorthand straight through:
+
+```hypen
+Text("Old style").transition("opacity 0.3s ease")   // deprecated
+```
+
+It still works on the web renderer but logs a deprecation warning and means nothing on any other platform. Prefer the portable form:
+
+```hypen
+Text("New style").transition(duration: 300, curve: easeOut, props: [opacity])
+```

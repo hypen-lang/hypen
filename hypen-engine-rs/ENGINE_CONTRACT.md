@@ -1102,6 +1102,84 @@ means renderers do not see `__ForEach` / `__Conditional` / `__Router`
 element types in the wire format under normal operation. If you ever see
 one, treat it as a plain container element — but you shouldn't.
 
+### 10.5 Responsive / state variant prop keys
+
+Applicators can carry **variant** information — a responsive breakpoint
+and/or an interaction state — encoded directly into the prop key. Both the
+Tailwind path (`.tw("p-4 md:p-8 hover:bg-white")`) and the value-map path
+(`.padding({ default: 8, md: 16, hover: "x" })`) lower to the same key
+shape, so renderers handle a single uniform format.
+
+**Canonical key format:**
+
+```text
+<camelBase><variant?><argSuffix>
+```
+
+* `camelBase` — camelCase applicator name, e.g. `padding`, `backgroundColor`.
+* `variant` (optional) — `@<bp>` and/or `:<state>`, in that order when
+  combined:
+  * `bp` ∈ `{ sm, md, lg, xl, 2xl }` with min-widths `640 / 768 / 1024 /
+    1280 / 1536` px.
+  * `state` ∈ `{ hover, focus, active, disabled, focus-visible,
+    focus-within }`.
+  * Combined example `backgroundColor@md:hover` applies only when BOTH the
+    breakpoint is active (viewport width ≥ its min-width) AND the state is
+    active.
+* `argSuffix` — `.<index>` (almost always `.0`) or `.<name>` for named args.
+
+Examples emitted by the engine: `padding.0`, `padding@md.0`,
+`backgroundColor:hover.0`, `backgroundColor@md:hover.0`, `padding.top`.
+
+> Value-maps express a **single** variant axis per entry — a map key is one
+> token (`default` / a breakpoint / a state). Combined `@bp:state` keys are only
+> producible via the Tailwind path (`.tw("md:hover:bg-white")`); a value-map
+> cannot emit them.
+
+> The variant marker sits **between** the base and the trailing `.arg`
+> suffix. A lookup that forgets the `.arg` suffix (e.g. building `padding@md`
+> and looking it up directly) MISSES the real key `padding@md.0`.
+
+**Resolution precedence** (lowest → highest; later overrides earlier):
+
+```text
+base
+  < breakpoints in ascending min-width order (sm<md<lg<xl<2xl, only those
+    whose min-width <= current viewport width)
+  < disabled < hover < focus < active
+```
+
+This mirrors the iOS reference
+`StateAwareModifier.computeEffectiveModifier` in
+`hypen-renderer-swift/Sources/HypenSwift/Render/VariantSupport.swift`.
+
+**Resolution is renderer-side, not engine-side.** The engine emits all
+variant keys verbatim; each renderer picks the effective value for the
+current viewport width and active interaction states at paint time. The
+shared parser/resolver lives in `crate::portable::variant`
+(`hypen_engine::portable::variant`) — the single source of truth that
+every SDK should call rather than reimplementing the split/precedence:
+
+* `parse_prop_key(key) -> ParsedKey { base, breakpoint, state, arg }`
+* `pick_variant_base(base, candidate_keys, viewport_w, active_states) ->
+  Option<String>` — returns the winning **variant-decorated base WITHOUT
+  the arg suffix** (e.g. `"padding@md"`), so callers append `.0` (or the
+  named arg) with their existing prop getters. This is the mechanism that
+  fixes the `.0` mismatch bug.
+* predicates `is_breakpoint`, `is_state`, `is_variant_token`,
+  `breakpoint_min_width`.
+
+**Reserved value-map key namespace.** The value-map lowering in
+`ir/expand.rs` reinterprets a single positional `Map` argument as variants
+**only when every key is a variant token** — i.e. one of `default`, the
+breakpoints `sm / md / lg / xl / 2xl`, or the states `hover / focus /
+active / disabled / focus-visible / focus-within`. A map keyed *entirely*
+by those names is always treated as a variant map; any other key makes the
+whole map pass through unchanged as a literal `name.0` value. Applicators
+that legitimately take a literal map must therefore avoid map literals whose
+key set is drawn *solely* from this reserved namespace (mix in any other
+key, or pass the map through a non-map argument, to opt out).
+
 ---
 
 ## 11. Bindings and the dependency graph keying convention

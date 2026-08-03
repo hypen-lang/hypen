@@ -27,6 +27,9 @@ pub fn text_element(content: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -60,6 +63,9 @@ pub fn text_element_with_binding(path: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -71,6 +77,9 @@ pub fn column_with_children(children: Vec<Element>) -> Element {
         ir_children: children.into_iter().map(IRNode::Element).collect(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -82,6 +91,9 @@ pub fn row_with_children(children: Vec<Element>) -> Element {
         ir_children: children.into_iter().map(IRNode::Element).collect(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -95,6 +107,9 @@ pub fn image_element(url: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -108,6 +123,9 @@ pub fn button_element(text: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -122,6 +140,9 @@ pub fn button_with_action(text: &str, action: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -135,6 +156,9 @@ pub fn keyed_text_element(content: &str, key: &str) -> Element {
         ir_children: Vec::new(),
         key: Some(key.to_string()),
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -146,6 +170,9 @@ pub fn element_with_props(element_type: &str, props: Props) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 

@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "parse-hyphenated-state", "description": "focus-within is a single state token despite the hyphen.", "function": "parse_prop_key", "input": { "key": "color:focus-within.0" }, "expected": { "base": "color", "breakpoint": null, "state": "focus-within", "arg": "0" } }

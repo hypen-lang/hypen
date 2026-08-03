@@ -1,0 +1,259 @@
+// Accessibility validation demo — one screen that exercises every semantics
+// translation the native renderers implement (see
+// docs/plans/accessibility-native-validation.md for the row-by-row
+// VoiceOver/TalkBack checklist this screen backs).
+ScrollView {
+  Column {
+    Heading("Accessibility demo", level: 1)
+
+    // — Names and labels —
+    Heading("Names and labels", level: 2)
+
+    // Derived name: no .label — screen readers read the visible text.
+    Button {
+      Text("Save").color("#ffffff")
+    }
+    .padding(12)
+    .backgroundColor("#2563eb")
+    .borderRadius(8)
+
+    // Explicit label overrides the visible text.
+    Button {
+      Text("Save").color("#ffffff")
+    }
+    .label("Save document")
+    .padding(12)
+    .backgroundColor("#2563eb")
+    .borderRadius(8)
+
+    // Icon-only button: the glyph is decorative (.hidden — contributes no
+    // accessible text), so unlabeled this fails `hypen check`; .label names
+    // it and .description rides along as the hint.
+    Button {
+      Text("🗑").hidden().fontSize(16)
+    }
+    .label("Delete item")
+    .description("This cannot be undone")
+    .padding(12)
+    .backgroundColor("#dc2626")
+    .borderRadius(8)
+
+    // Decorative: removed from the accessibility tree entirely.
+    Text("· · ·").hidden().color("#9ca3af")
+
+    // — Images —
+    Heading("Images", level: 2)
+
+    // Templated alt: the accessible name resolves at reconcile and re-emits
+    // via setSemantics when the action below changes it — the live-update
+    // proof for native renderers.
+    Image(src: "https://picsum.photos/seed/hypen/320/180", alt: "@{state.photoAlt}")
+      .width(320)
+      .height(180)
+      .borderRadius(8)
+
+    Text("Current alt text: @{state.photoAlt}").fontSize(14).color("#4b5563")
+
+    Button {
+      Text("Change photo description").color("#ffffff")
+    }
+    .onClick(@actions.cyclePhotoAlt)
+    .padding(12)
+    .backgroundColor("#7c3aed")
+    .borderRadius(8)
+
+    // — Disclosure —
+    Heading("Disclosure", level: 2)
+
+    // Bound .expanded resolves at reconcile and live-updates via setSemantics;
+    // .controls is the web-only id reference to the panel below.
+    Button {
+      Text("Show details").color("#ffffff")
+    }
+    .expanded(@state.detailsOpen)
+    .controls("details-panel")
+    .onClick(@actions.toggleDetails)
+    .padding(12)
+    .backgroundColor("#0891b2")
+    .borderRadius(8)
+
+    Column {
+      If(condition: @state.detailsOpen) {
+        Text("These details were revealed by the disclosure button above.")
+          .fontSize(14)
+          .color("#111827")
+      }
+    }
+    .id("details-panel")
+
+    // — Toggles —
+    Heading("Toggles", level: 2)
+
+    // Bound toggles: checked state resolves from the bind target and
+    // live-updates via setSemantics on every change.
+    Checkbox(label: "Enable notifications").bind(@state.notify)
+    Switch(label: "Dark mode").bind(@state.darkMode)
+
+    // Flips the same bound state from the module — proves the announcement
+    // is engine-pushed (setSemantics), not local widget state.
+    Button {
+      Text("Toggle notifications from module").color("#ffffff")
+    }
+    .onClick(@actions.toggleNotify)
+    .padding(12)
+    .backgroundColor("#4b5563")
+    .borderRadius(8)
+
+    // Toggle button: bound .pressed.
+    Button {
+      Text("Mute").color("#ffffff")
+    }
+    .pressed(@state.muted)
+    .onClick(@actions.toggleMute)
+    .padding(12)
+    .backgroundColor("#4b5563")
+    .borderRadius(8)
+
+    // — Navigation and search —
+    Heading("Navigation and search", level: 2)
+
+    Row {
+      Button {
+        Text("Home").color("#111827")
+      }
+      .current("page")
+      .padding(12)
+      .backgroundColor("#e5e7eb")
+      .borderRadius(8)
+
+      Button {
+        Text("Archive").color("#111827")
+      }
+      .padding(12)
+      .backgroundColor("#e5e7eb")
+      .borderRadius(8)
+    }
+    .landmark("navigation")
+    .gap(8)
+
+    Input(placeholder: "Search demos")
+      .role("search")
+      .label("Search demos")
+      .padding(12)
+
+    // — Tabs (auto-wired id graph) —
+    Heading("Tabs", level: 2)
+
+    // The tablist's .id mints prefs-tab-N / prefs-panel-N and wires
+    // tab.controls ↔ panel.labelledby positionally at IR expand.
+    Tabs {
+      Tab {
+        Text("Overview")
+      }
+      .selected(@state.overviewSelected)
+      .onClick(@actions.showOverview)
+      .padding(12)
+
+      Tab {
+        Text("Settings")
+      }
+      .selected(@state.settingsSelected)
+      .onClick(@actions.showSettings)
+      .padding(12)
+
+      TabPanel {
+        If(condition: @state.overviewSelected) {
+          Text("Overview panel content.").fontSize(14)
+        }
+      }
+
+      TabPanel {
+        If(condition: @state.settingsSelected) {
+          Text("Settings panel content.").fontSize(14)
+        }
+      }
+    }
+    .id("prefs")
+    .gap(8)
+
+    // — Combobox options with a roving active descendant —
+    Heading("Combobox", level: 2)
+
+    Text("Active option: @{state.activeFruitName}").fontSize(14).color("#4b5563")
+
+    // Bound .activedescendant re-resolves on every change and rides
+    // setSemantics — move the pointer with the button below.
+    Combobox {
+      Option {
+        Text("Apple")
+      }
+      .id("fruit-0")
+
+      Option {
+        Text("Banana")
+      }
+      .id("fruit-1")
+
+      Option {
+        Text("Cherry")
+      }
+      .id("fruit-2")
+    }
+    .label("Fruits")
+    .activedescendant(@state.activeFruit)
+    .gap(4)
+
+    Button {
+      Text("Next fruit").color("#ffffff")
+    }
+    .onClick(@actions.nextFruit)
+    .padding(12)
+    .backgroundColor("#16a34a")
+    .borderRadius(8)
+
+    // — Dialog —
+    Heading("Dialog", level: 2)
+
+    Button {
+      Text("Delete file").color("#ffffff")
+    }
+    .onClick(@actions.openDialog)
+    .padding(12)
+    .backgroundColor("#dc2626")
+    .borderRadius(8)
+
+    If(condition: @state.dialogOpen) {
+      Column {
+        Heading("Confirm deletion", level: 2)
+        Text("This will permanently delete the file.").fontSize(14)
+
+        Row {
+          Button {
+            Text("Cancel").color("#111827")
+          }
+          .onClick(@actions.closeDialog)
+          .padding(12)
+          .backgroundColor("#e5e7eb")
+          .borderRadius(8)
+
+          Button {
+            Text("Delete").color("#ffffff")
+          }
+          .onClick(@actions.closeDialog)
+          .padding(12)
+          .backgroundColor("#dc2626")
+          .borderRadius(8)
+        }
+        .gap(8)
+      }
+      .role("dialog")
+      .label("Confirm deletion")
+      .padding(16)
+      .backgroundColor("#f9fafb")
+      .borderRadius(12)
+      .gap(8)
+    }
+  }
+  .padding(24)
+  .gap(12)
+}

@@ -18,10 +18,11 @@ export default app
     Row {
       Button {
         Column {
-          Text("🏠")
-            .tw("text-xl md:text-2xl leading-none")
+          Icon(@resources.home)
+            .size(21)
+            .color("@{state.location == '/' ? '#EC4899' : '#9CA3AF'}")
           Text("Home")
-            .tw("text-xs md:text-sm mt-1")
+            .tw("text-[11px] font-medium mt-1")
             .color("@{state.location == '/' ? '#EC4899' : '#9CA3AF'}")
         }
         .tw("items-center")
@@ -31,11 +32,12 @@ export default app
 
       Button {
         Column {
-          Text("📓")
-            .tw("text-xl md:text-2xl leading-none")
+          Icon(@resources.book)
+            .size(21)
+            .color("@{state.location == '/diary' ? '#EC4899' : '#9CA3AF'}")
           Text("Diary")
-            .tw("text-xs md:text-sm mt-1")
-            .color("#9CA3AF")
+            .tw("text-[11px] font-medium mt-1")
+            .color("@{state.location == '/diary' ? '#EC4899' : '#9CA3AF'}")
         }
         .tw("items-center")
       }
@@ -43,18 +45,23 @@ export default app
       .onClick(@router.push, to: "/diary")
 
       Button {
-        Text("+")
-          .tw("text-white text-2xl md:text-3xl font-bold leading-none")
+        Icon(@resources.plus)
+          .size(24)
+          .color("#ffffff")
       }
-      .tw("bg-pink-500 border-0 w-14 h-14 md:w-16 md:h-16 rounded-full shadow-lg items-center justify-center -mt-4")
+      .tw("bg-pink-500 border-0 w-14 h-14 md:w-16 md:h-16 rounded-full items-center justify-center -mt-5")
+      .boxShadow("0 10px 24px rgba(236, 72, 153, 0.35)")
+      .opacity({ default: 1, active: 0.75 })
+      .transition(150, easeOut)
       .onClick(@router.push, to: "/add/breakfast")
 
       Button {
         Column {
-          Text("📊")
-            .tw("text-xl md:text-2xl leading-none")
+          Icon(@resources.chart)
+            .size(21)
+            .color("@{state.location == '/stats' ? '#EC4899' : '#9CA3AF'}")
           Text("Stats")
-            .tw("text-xs md:text-sm mt-1")
+            .tw("text-[11px] font-medium mt-1")
             .color("@{state.location == '/stats' ? '#EC4899' : '#9CA3AF'}")
         }
         .tw("items-center")
@@ -64,10 +71,11 @@ export default app
 
       Button {
         Column {
-          Text("👤")
-            .tw("text-xl md:text-2xl leading-none")
+          Icon(@resources.user)
+            .size(21)
+            .color("@{state.location == '/profile' ? '#EC4899' : '#9CA3AF'}")
           Text("Profile")
-            .tw("text-xs md:text-sm mt-1")
+            .tw("text-[11px] font-medium mt-1")
             .color("@{state.location == '/profile' ? '#EC4899' : '#9CA3AF'}")
         }
         .tw("items-center")
@@ -75,5 +83,5 @@ export default app
       .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
       .onClick(@router.push, to: "/profile")
     }
-    .tw("px-3 pt-1 pb-5 md:pb-6 bg-white border-t border-gray-200 items-center justify-around")
+    .tw("px-3 pt-1.5 pb-5 md:pb-6 bg-white border-t border-gray-100 items-center justify-around")
   `);

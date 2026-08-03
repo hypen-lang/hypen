@@ -1569,7 +1569,7 @@ fn test_conditional_reconciliation_tab_switch_reuses_structure() {
     let remove_patches: Vec<_> = update_patches
         .iter()
         .filter(|p| {
-            if let Patch::Remove { id } = p {
+            if let Patch::Remove { id, .. } = p {
                 *id == column_id_str
             } else {
                 false

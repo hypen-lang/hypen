@@ -23,11 +23,16 @@ import {
   SignatureHelp,
   SignatureHelpParams,
   SignatureInformation,
-  ParameterInformation
+  ParameterInformation,
+  CodeAction,
+  CodeActionKind,
+  CodeActionParams
 } from "vscode-languageserver/node";
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { parseHypenDocument, getContextAtPosition, isInString, initWasmParser, isWasmParserAvailable } from "./parser";
+import { a11yDiagnostics, initWasmEngine } from "./a11y";
+import { computeQuickFix } from "./quickfix";
 
 // Create a connection for the server
 const connection = createConnection(ProposedFeatures.all);
@@ -65,6 +70,7 @@ connection.onInitialize((params: InitializeParams) => {
       hoverProvider: true,
       documentSymbolProvider: true,
       documentFormattingProvider: true,
+      codeActionProvider: true,
       signatureHelpProvider: {
         triggerCharacters: ["(", ","],
         retriggerCharacters: [","]
@@ -97,6 +103,17 @@ connection.onInitialized(async () => {
     connection.console.log("Hypen LSP: WASM parser loaded successfully");
   } else {
     connection.console.log("Hypen LSP: Using regex-based parser (WASM not available)");
+  }
+
+  // Try to load the engine WASM for accessibility conformance squiggles.
+  const engineLoaded = await initWasmEngine();
+  if (engineLoaded) {
+    connection.console.log("Hypen LSP: engine WASM loaded — a11y diagnostics active");
+    // Documents validated before the engine finished loading have no a11y
+    // findings yet — revalidate them now.
+    documents.all().forEach(validateTextDocument);
+  } else {
+    connection.console.log("Hypen LSP: engine WASM not available — a11y diagnostics disabled");
   }
 });
 
@@ -198,6 +215,11 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
       source: "hypen"
     });
   }
+
+  // Accessibility conformance squiggles (source: "hypen-a11y", code: rule).
+  // No-op until the engine WASM has loaded; parse failures return [] so a
+  // syntax error is never double-reported.
+  diagnostics.push(...a11yDiagnostics(text));
 
   // Send the computed diagnostics to VSCode
   connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
@@ -1067,6 +1089,47 @@ connection.onDocumentFormatting((params: DocumentFormattingParams): TextEdit[] =
       newText: formatted
     }
   ];
+});
+
+// Quick fixes for accessibility diagnostics (source "hypen-a11y", code =
+// kebab rule id). Edit computation lives in quickfix.ts; here we only map
+// LSP ranges to string offsets and wrap the result in a WorkspaceEdit.
+connection.onCodeAction((params: CodeActionParams): CodeAction[] => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) {
+    return [];
+  }
+
+  const text = document.getText();
+  const actions: CodeAction[] = [];
+
+  for (const diagnostic of params.context.diagnostics) {
+    if (diagnostic.source !== "hypen-a11y" || typeof diagnostic.code !== "string") {
+      continue;
+    }
+    const fix = computeQuickFix(text, {
+      code: diagnostic.code,
+      startOffset: document.offsetAt(diagnostic.range.start),
+      endOffset: document.offsetAt(diagnostic.range.end)
+    });
+    if (!fix) {
+      continue;
+    }
+    actions.push({
+      title: fix.title,
+      kind: CodeActionKind.QuickFix,
+      diagnostics: [diagnostic],
+      edit: {
+        changes: {
+          [params.textDocument.uri]: [
+            TextEdit.insert(document.positionAt(fix.insertOffset), fix.newText)
+          ]
+        }
+      }
+    });
+  }
+
+  return actions;
 });
 
 function formatHypenDocument(text: string, tabSize: number): string {

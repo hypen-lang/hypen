@@ -1,0 +1,46 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "states-lowering",
+  "description": "The .states(@state.path) { onState(label)... } applicator resolves the matching pose on initial render: pose props override base values as plain JSON, the engine synthesizes __anim.transition from the header timing scoped to the animatable overridden keys (in pose-declaration order), and __anim.states carries the active label. No states.0/onState.0 junk props, no engine-internal StateSwitch novelty on the wire",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "golang: animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Box().width(100).cornerRadius(4).states(@state.cardState, transition: spring, duration: 250) {\n    onState(collapsed).cornerRadius(8).width(48).opacity(0.9)\n    onState(expanded).cornerRadius(16).width(240)\n}",
+    "initialState": { "cardState": "collapsed" },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["cardState"]
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Box",
+        "props": {
+          "cornerRadius.0": 8,
+          "width.0": 48,
+          "opacity.0": 0.9,
+          "__anim.states": { "label": "collapsed" },
+          "__anim.transition": {
+            "curve": "spring",
+            "duration": 250,
+            "props": ["cornerRadius", "width", "opacity"]
+          }
+        },
+        "absentProps": ["states.0", "onState.0", "transition.0"]
+      },
+      { "type": "insert" }
+    ]
+  }
+}

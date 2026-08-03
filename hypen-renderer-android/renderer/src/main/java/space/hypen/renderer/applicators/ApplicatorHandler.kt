@@ -1,6 +1,7 @@
 package space.hypen.renderer.applicators
 
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.DpSize
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.ActionDispatcher
 
@@ -10,6 +11,20 @@ import space.hypen.renderer.render.ActionDispatcher
 data class ApplicatorContext(
     val element: HypenElement,
     val actionDispatcher: ActionDispatcher?,
+    /**
+     * Size of the area the Hypen root was given, for resolving `vw`/`vh`.
+     *
+     * `DpSize.Unspecified` means "not measured" and falls back to the
+     * physical display, which is the right answer for a full-screen host and
+     * the only answer available outside a composition (tests, previews).
+     *
+     * Mirrors `ApplicatorContext.viewportSize` in the Swift renderer:
+     * `100vh` must mean the viewport hosting the app, not the display. A host
+     * that insets us (the Gallery's URL chrome) would otherwise make
+     * `min-h-screen` taller than the area it can occupy and push
+     * bottom-anchored content off screen.
+     */
+    val viewport: DpSize = DpSize.Unspecified,
 )
 
 /**
@@ -34,10 +49,25 @@ enum class ApplicatorPriority(val order: Int) {
      * visible box outward instead of clipping its contents to nothing.
      */
     MARGIN(0),
+    /**
+     * Min/max bounds — must run BEFORE size. In CSS `max-width` always beats
+     * `width`, so `width:100%; max-width:250px` is "fill, but never past
+     * 250". Compose can only express that with the cap OUTSIDE the fill:
+     * `widthIn(max = 250.dp).fillMaxWidth()` proposes 250 inward and the fill
+     * takes it. The reverse order defeats the cap outright — `fillMaxWidth()`
+     * pins min = max = the incoming width, and the inner `widthIn(max)`
+     * cannot shrink below that min, so it is silently coerced back up.
+     *
+     * Both share the SIZE band before this existed, which left their relative
+     * order down to wire prop order, and `width` happened to come first —
+     * that is why the home-screen launcher's icon grid ignored its
+     * `max-w-[250px]` and spanned the full screen.
+     */
+    SIZE_BOUNDS(1),
     /** Size constraints: width, height, size, fillMaxSize, etc. */
-    SIZE(1),
+    SIZE(2),
     /** Layout modifiers: alignment, weight, flex, aspectRatio, offset, gap, zIndex */
-    LAYOUT(2),
+    LAYOUT(3),
     /** Shadow/elevation - typically rendered under content */
     SHADOW(4),
     /** Corner radius for clipping - outermost visual boundary */
@@ -49,16 +79,28 @@ enum class ApplicatorPriority(val order: Int) {
      *   clip shapes the element → border at edge → background fills inside → padding insets content.
      */
     BORDER(6),
-    /** Background colors, gradients, images - fills inside border */
-    BACKGROUND(7),
+    /**
+     * Background COLOR — must run before gradients/images so it paints
+     * underneath them.
+     *
+     * CSS longhands are order-independent: `background-color` is always the
+     * bottom layer, whatever order the declarations appear in. Compose draws
+     * in modifier-chain order, so sharing one band with `backgroundImage`
+     * left the outcome down to wire prop order — and when `backgroundImage`
+     * happened to come first, an opaque `backgroundColor` painted straight
+     * over the gradient or image and erased it.
+     */
+    BACKGROUND_COLOR(7),
+    /** Background gradients and images - fill inside border, over the color */
+    BACKGROUND(8),
     /** Internal spacing - innermost, between background and content */
-    PADDING(8),
+    PADDING(9),
     /** Visual effects: opacity, visibility, blur */
-    VISUAL_EFFECTS(9),
+    VISUAL_EFFECTS(10),
     /** Transforms: rotate, scale, translate */
-    TRANSFORMS(10),
+    TRANSFORMS(11),
     /** Event handlers: onClick, onPress, onLongClick */
-    EVENTS(11),
+    EVENTS(12),
     /** Unknown applicators - applied last */
     UNKNOWN(99)
 }
@@ -71,10 +113,10 @@ object ApplicatorPriorityMap {
         // Size
         "width" to ApplicatorPriority.SIZE,
         "height" to ApplicatorPriority.SIZE,
-        "minwidth" to ApplicatorPriority.SIZE,
-        "maxwidth" to ApplicatorPriority.SIZE,
-        "minheight" to ApplicatorPriority.SIZE,
-        "maxheight" to ApplicatorPriority.SIZE,
+        "minwidth" to ApplicatorPriority.SIZE_BOUNDS,
+        "maxwidth" to ApplicatorPriority.SIZE_BOUNDS,
+        "minheight" to ApplicatorPriority.SIZE_BOUNDS,
+        "maxheight" to ApplicatorPriority.SIZE_BOUNDS,
         "size" to ApplicatorPriority.SIZE,
         "fillmaxsize" to ApplicatorPriority.SIZE,
         "fillmaxwidth" to ApplicatorPriority.SIZE,
@@ -121,7 +163,9 @@ object ApplicatorPriorityMap {
         "borderstyle" to ApplicatorPriority.BORDER,
 
         // Background (fills inside border)
-        "backgroundcolor" to ApplicatorPriority.BACKGROUND,
+        "backgroundcolor" to ApplicatorPriority.BACKGROUND_COLOR,
+        // The `background` shorthand carries its own layer stack (colour
+        // first, then image, then gradients), so it belongs with the layers.
         "background" to ApplicatorPriority.BACKGROUND,
         "lineargradient" to ApplicatorPriority.BACKGROUND,
         "radialgradient" to ApplicatorPriority.BACKGROUND,
@@ -291,11 +335,14 @@ class DefaultApplicatorRegistry : ApplicatorRegistry {
         var baseModifier = modifier
         val responsiveModifiers = mutableMapOf<Breakpoint, Modifier>()
         val stateModifiers = mutableMapOf<StateVariant, Modifier>()
+        val combinedModifiers = mutableMapOf<Pair<Breakpoint, StateVariant>, Modifier>()
 
         // Group applicators, separating variants from base props
         val baseGrouped = mutableMapOf<String, MutableMap<String, Any?>>()
         val responsiveGrouped = mutableMapOf<Breakpoint, MutableMap<String, MutableMap<String, Any?>>>()
         val stateGrouped = mutableMapOf<StateVariant, MutableMap<String, MutableMap<String, Any?>>>()
+        val combinedGrouped =
+            mutableMapOf<Pair<Breakpoint, StateVariant>, MutableMap<String, MutableMap<String, Any?>>>()
 
         for ((name, value) in element.props) {
             val dotIndex = name.indexOf('.')
@@ -309,6 +356,14 @@ class DefaultApplicatorRegistry : ApplicatorRegistry {
             val variantInfo = parseVariantName(propName)
 
             when {
+                variantInfo.breakpoint != null && variantInfo.state != null -> {
+                    // Combined `@bp:state` variant — applies only when both hold,
+                    // so it must NOT fall into the responsive-only bucket.
+                    val key = variantInfo.breakpoint to variantInfo.state
+                    val cGroups = combinedGrouped.getOrPut(key) { mutableMapOf() }
+                    val args = cGroups.getOrPut(variantInfo.baseName) { mutableMapOf() }
+                    args[argKey] = value
+                }
                 variantInfo.breakpoint != null -> {
                     // Responsive variant
                     val bpGroups = responsiveGrouped.getOrPut(variantInfo.breakpoint) { mutableMapOf() }
@@ -385,10 +440,31 @@ class DefaultApplicatorRegistry : ApplicatorRegistry {
             stateModifiers[state] = variantModifier
         }
 
+        // Apply combined `@bp:state` variant applicators (sorted by priority)
+        for ((key, groups) in combinedGrouped) {
+            var variantModifier: Modifier = Modifier
+            val sortedGroups = groups.entries.sortedBy { (baseName, _) ->
+                ApplicatorPriorityMap.getPriority(baseName).order
+            }
+            for ((baseName, args) in sortedGroups) {
+                val handler = getHandler(baseName)
+                if (handler != null) {
+                    val value = when {
+                        args.size == 1 && args.containsKey("__value") -> args["__value"]
+                        args.size == 1 && args.containsKey("0") -> args["0"]
+                        else -> args
+                    }
+                    variantModifier = handler.apply(variantModifier, value, context)
+                }
+            }
+            combinedModifiers[key] = variantModifier
+        }
+
         return ApplicatorResultWithVariants(
             baseModifier = baseModifier,
             responsiveModifiers = responsiveModifiers,
-            stateModifiers = stateModifiers
+            stateModifiers = stateModifiers,
+            combinedModifiers = combinedModifiers
         )
     }
 

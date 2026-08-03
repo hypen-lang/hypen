@@ -1,6 +1,9 @@
 use super::conditionals::{evaluate_value, find_matching_branch, find_matching_route_with_key};
 use super::item_bindings::replace_ir_node_item_bindings;
-use super::keyed::{generate_item_key, reconcile_iterable_children};
+use super::keyed::{
+    generate_item_key, iterable_child_key, reconcile_iterable_children,
+    reconcile_iterable_children_full,
+};
 use super::resolve::{evaluate_binding, resolve_props_full};
 use super::tree::DEFAULT_ROUTER_CACHE_SIZE;
 use super::{ControlFlowKind, InstanceTree, Patch};
@@ -13,6 +16,47 @@ type DataSources = indexmap::IndexMap<String, serde_json::Value>;
 
 /// Module instances map type alias
 type Modules = indexmap::IndexMap<String, crate::lifecycle::ModuleInstance>;
+
+/// Resolve a node's derive-time (base) semantics against resolved props —
+/// templated accessible names and bound self-state/checked fold in exactly
+/// as at the Create sites. The single resolution rule shared by initial
+/// create and the reactive [`Patch::SetSemantics`] delta paths.
+pub(crate) fn resolve_semantics(
+    base: &Option<crate::ir::Semantics>,
+    resolved_props: &IndexMap<String, serde_json::Value>,
+) -> Option<crate::ir::Semantics> {
+    base.clone().map(|s| {
+        s.with_resolved_name(resolved_props)
+            .with_resolved_state(resolved_props)
+    })
+}
+
+/// Compare a node's freshly-resolved semantics against the block last sent
+/// to the renderer and emit a [`Patch::SetSemantics`] when they differ,
+/// recording the new block as last-sent. No-op for nodes whose semantics
+/// never had bindings (resolution is then a fixed point, so the comparison
+/// stays equal and static trees pay nothing beyond the `PartialEq`).
+pub(crate) fn emit_semantics_delta(
+    tree: &mut InstanceTree,
+    node_id: NodeId,
+    patches: &mut Vec<Patch>,
+) {
+    let Some(node) = tree.get(node_id) else {
+        return;
+    };
+    // Fast path: a node that never carried semantics can't gain any —
+    // derivation happens at expand, not reconcile.
+    if node.semantics.is_none() && node.last_semantics.is_none() {
+        return;
+    }
+    let new_semantics = resolve_semantics(&node.semantics, &node.props);
+    if new_semantics != node.last_semantics {
+        patches.push(Patch::set_semantics(node_id, new_semantics.clone()));
+        if let Some(node) = tree.get_mut(node_id) {
+            node.last_semantics = new_semantics;
+        }
+    }
+}
 
 /// Shared mutable context threaded through the recursive tree-building and
 /// reconciliation helpers.  Grouping these fields removes the repetitive
@@ -163,6 +207,16 @@ fn create_element_node(
                         .add_dependency(node_id, binding, module_scope_ref);
                 }
             }
+            Value::StateSwitch { path, .. } => {
+                // `.states` driving path registers exactly like a Binding —
+                // state changes dirty the node and pose flips flow out as
+                // ordinary SetProp/RemoveProp.
+                ctx.dependencies.add_dependency(
+                    node_id,
+                    &state_switch_binding(path),
+                    module_scope_ref,
+                );
+            }
             _ => {}
         }
     }
@@ -194,8 +248,20 @@ fn create_element_node(
             );
         }
     }
-    ctx.patches
-        .push(Patch::create(node_id, element.element_type.clone(), props));
+    // Resolve any deferred (templated) accessible name from the now-resolved
+    // props before emitting the Create patch, and remember the resolved
+    // block so later dirty re-renders can diff against it (SetSemantics).
+    let semantics = resolve_semantics(&element.semantics, &props);
+    if let Some(node) = ctx.tree.get_mut(node_id) {
+        node.last_semantics = semantics.clone();
+    }
+    strip_engine_internal_props(&mut props);
+    ctx.patches.push(Patch::create(
+        node_id,
+        element.element_type.clone(),
+        props,
+        semantics,
+    ));
 
     // Tree-side: hang the node off its logical parent.
     if let Some(parent) = logical_parent {
@@ -275,11 +341,14 @@ fn create_list_tree_impl(
 
     // Generate Create patch for container
     let node = ctx.tree.get(node_id).unwrap();
-    ctx.patches.push(Patch::create(
-        node_id,
-        node.element_type.clone(),
-        node.props.clone(),
-    ));
+    let semantics = resolve_semantics(&node.semantics, &node.props);
+    let (element_type, mut props) = (node.element_type.clone(), node.props.clone());
+    if let Some(node) = ctx.tree.get_mut(node_id) {
+        node.last_semantics = semantics.clone();
+    }
+    strip_engine_internal_props(&mut props);
+    ctx.patches
+        .push(Patch::create(node_id, element_type, props, semantics));
 
     // Insert container
     if let Some(parent) = parent_id {
@@ -388,6 +457,13 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
                         .add_dependency(node_id, binding, module_scope_ref);
                 }
             }
+            Value::StateSwitch { path, .. } => {
+                ctx.dependencies.add_dependency(
+                    node_id,
+                    &state_switch_binding(path),
+                    module_scope_ref,
+                );
+            }
             _ => {}
         }
     }
@@ -401,6 +477,10 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
         node.props = new_props; // move the Arc directly — no extra clone
         node.raw_props = element.props.clone();
     }
+
+    // Re-resolve semantics against the fresh props; emit SetSemantics when
+    // the block a renderer holds went stale (templated name, bound state).
+    emit_semantics_delta(ctx.tree, node_id, ctx.patches);
 
     // Reconcile children (skip when this element is lazy — the renderer
     // hasn't asked for the subtree yet).
@@ -427,11 +507,7 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
 
         if old_children.len() > new_children.len() {
             for old_child_id in old_children.iter().skip(new_children.len()).copied() {
-                let subtree_ids = collect_subtree_ids(ctx.tree, old_child_id);
-                for &id in &subtree_ids {
-                    ctx.patches.push(Patch::remove(id));
-                    ctx.dependencies.remove_node(id);
-                }
+                emit_subtree_removal(ctx.tree, old_child_id, ctx.patches, ctx.dependencies);
                 ctx.tree.remove_child(node_id, old_child_id);
                 ctx.tree.remove(old_child_id);
             }
@@ -456,12 +532,7 @@ fn replace_subtree_impl(
         None
     };
 
-    let ids_to_remove = collect_subtree_ids(ctx.tree, old_node_id);
-
-    for &id in &ids_to_remove {
-        ctx.patches.push(Patch::remove(id));
-        ctx.dependencies.remove_node(id);
-    }
+    emit_subtree_removal(ctx.tree, old_node_id, ctx.patches, ctx.dependencies);
 
     if let Some(pid) = parent_id {
         if let Some(parent) = ctx.tree.get_mut(pid) {
@@ -518,6 +589,31 @@ fn collect_subtree_ids(tree: &InstanceTree, root_id: NodeId) -> Vec<NodeId> {
     result
 }
 
+/// The state `Binding` equivalent of a `Value::StateSwitch` driving path,
+/// so `.states` nodes register in the dependency graph exactly like a
+/// `@{state.<path>}` binding (including module-scope namespacing).
+fn state_switch_binding(path: &str) -> crate::reactive::Binding {
+    crate::reactive::Binding::state(path.split('.').map(str::to_string).collect())
+}
+
+/// Engine-internal carrier props: kept in `InstanceNode` resolved props so
+/// `resolve_semantics` and dependency-driven re-renders can read them, but
+/// never emitted to renderers — their payload already reaches every renderer
+/// as the typed `Semantics` block on `Create`/`SetSemantics`.
+pub(crate) fn is_engine_internal_prop(key: &str) -> bool {
+    key == "__a11yName"
+}
+
+/// Copy-on-write strip of engine-internal props before a `Patch::Create`:
+/// clones the shared map only when such a key is actually present, so the
+/// common no-hoist case stays an `Arc::clone`. Must run *after*
+/// `resolve_semantics`, which reads the carrier props.
+fn strip_engine_internal_props(props: &mut super::tree::ResolvedProps) {
+    if props.keys().any(|k| is_engine_internal_prop(k)) {
+        std::sync::Arc::make_mut(props).retain(|k, _| !is_engine_internal_prop(k));
+    }
+}
+
 /// Diff two sets of props and generate SetProp/RemoveProp patches
 pub fn diff_props(
     node_id: NodeId,
@@ -527,12 +623,18 @@ pub fn diff_props(
     let mut patches = Vec::new();
 
     for (key, new_value) in new_props {
+        if is_engine_internal_prop(key) {
+            continue;
+        }
         if old_props.get(key) != Some(new_value) {
             patches.push(Patch::set_prop(node_id, key.clone(), new_value.clone()));
         }
     }
 
     for key in old_props.keys() {
+        if is_engine_internal_prop(key) {
+            continue;
+        }
         if !new_props.contains_key(key) {
             patches.push(Patch::remove_prop(node_id, key.clone()));
         }
@@ -566,7 +668,7 @@ pub(crate) fn create_ir_node_tree_impl(
 /// is logically owned by the ForEach container, but its `Insert` patch
 /// targets the ForEach's grandparent because the renderer treats the
 /// container as transparent.
-fn create_ir_node_tree_full(
+pub(crate) fn create_ir_node_tree_full(
     ctx: &mut ReconcileCtx,
     node: &IRNode,
     logical_parent: Option<NodeId>,
@@ -682,10 +784,12 @@ fn create_foreach_ir_tree(
     let render_parent = parent_id;
 
     if let serde_json::Value::Array(items) = &array {
+        let multi_template = template.len() > 1;
+
         for (index, item) in items.iter().enumerate() {
             let item_key = generate_item_key(item, key_path, item_name, index);
 
-            for child_template in template {
+            for (template_idx, child_template) in template.iter().enumerate() {
                 let child_with_item = replace_ir_node_item_bindings(
                     child_template,
                     item,
@@ -693,13 +797,22 @@ fn create_foreach_ir_tree(
                     item_name,
                     &item_key,
                 );
-                create_ir_node_tree_full(
+                let child_id = create_ir_node_tree_full(
                     ctx,
                     &child_with_item,
                     Some(node_id),
                     render_parent,
                     is_root && render_parent.is_none(),
                 );
+                // Stamp the same per-child key the keyed reconciler derives so
+                // the FIRST update already matches by identity. Element
+                // templates get `element.key` from replace_ir_node_item_bindings
+                // for free, but control-flow templates (and every template
+                // beyond the first, which needs the `#idx` suffix) do not.
+                if let Some(child_node) = ctx.tree.get_mut(child_id) {
+                    child_node.key =
+                        Some(iterable_child_key(&item_key, template_idx, multi_template));
+                }
             }
         }
     }
@@ -874,6 +987,63 @@ fn create_router_tree(
     node_id
 }
 
+/// Tear down every child of a ForEach container and rebuild the list from
+/// scratch.
+///
+/// This is the historical ForEach update strategy and is now only the
+/// **fallback** for state the keyed reconciler can't match by identity (see
+/// the `children_intact` guard in [`reconcile_ir_node_impl`]). It is correct
+/// but not minimal: O(n) Removes + O(n) Creates for an O(1) change, which
+/// destroys renderer-side state (focus, scroll, input values, media playback)
+/// inside every row and, with animations, plays every row's exit alongside
+/// every row's enter.
+///
+/// Keeps the logical-vs-render parent split: children are created under the
+/// ForEach container (`node_id`) while their Insert patches address
+/// `render_parent`.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_foreach_children(
+    ctx: &mut ReconcileCtx,
+    node_id: NodeId,
+    render_parent: NodeId,
+    old_children: &[NodeId],
+    items: &[serde_json::Value],
+    item_name: &str,
+    key_path: Option<&str>,
+    template: &[IRNode],
+) {
+    for &old_child_id in old_children {
+        let patch = root_remove_patch(ctx.tree, old_child_id);
+        ctx.dependencies.remove_node(old_child_id);
+        ctx.tree.remove(old_child_id);
+        ctx.patches.push(patch);
+    }
+
+    if let Some(node) = ctx.tree.get_mut(node_id) {
+        node.children.clear();
+    }
+
+    let multi_template = template.len() > 1;
+    for (index, item) in items.iter().enumerate() {
+        let item_key = generate_item_key(item, key_path, item_name, index);
+
+        for (template_idx, child_template) in template.iter().enumerate() {
+            let child_with_item =
+                replace_ir_node_item_bindings(child_template, item, index, item_name, &item_key);
+            let child_id = create_ir_node_tree_full(
+                ctx,
+                &child_with_item,
+                Some(node_id),
+                Some(render_parent),
+                false,
+            );
+            if let Some(child_node) = ctx.tree.get_mut(child_id) {
+                child_node.key = Some(iterable_child_key(&item_key, template_idx, multi_template));
+            }
+        }
+    }
+}
+
 /// Reconcile an existing tree against a new IRNode using a `ReconcileCtx`.
 pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, node: &IRNode) {
     let existing_node = ctx.tree.get(node_id).cloned();
@@ -911,71 +1081,47 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 .unwrap_or(serde_json::Value::Array(vec![]));
 
             if let serde_json::Value::Array(items) = &array {
-                let old_children = existing.children.clone();
-                let expected_children_count = items.len() * template.len();
+                let old_children: Vec<NodeId> = existing.children.iter().copied().collect();
+                // The ForEach container is transparent to renderers: items are
+                // LOGICAL children of `node_id` but their Insert/Move patches
+                // must target the ForEach's own parent (the RENDER parent).
+                // Collapsing the two orphans items under the grandparent and
+                // leaves `ForEach.children` empty — every later reconcile then
+                // sees a length mismatch and rebuilds forever. Both branches
+                // below keep the split; `create_foreach_ir_tree` is the
+                // reference for the create side.
                 let render_parent = existing.parent.unwrap_or(node_id);
 
-                if old_children.len() != expected_children_count {
-                    for &old_child_id in &old_children {
-                        ctx.patches.push(Patch::remove(old_child_id));
-                    }
+                // Fallback: keyed reconciliation reasons about the recorded
+                // children by identity, so it needs every one of them to still
+                // resolve in the tree. A dangling id means the container's
+                // bookkeeping is out of sync with the arena (nothing in-tree
+                // produces that today, but a stale `children` entry used to be
+                // possible) — rebuild from scratch instead of matching against
+                // ghosts. Correct but O(n), so it stays the exception.
+                let children_intact = old_children.iter().all(|&id| ctx.tree.get(id).is_some());
 
-                    if let Some(node) = ctx.tree.get_mut(node_id) {
-                        node.children.clear();
-                    }
-
-                    for (index, item) in items.iter().enumerate() {
-                        let item_key =
-                            generate_item_key(item, key_path.as_deref(), item_name, index);
-
-                        for child_template in template {
-                            let child_with_item = replace_ir_node_item_bindings(
-                                child_template,
-                                item,
-                                index,
-                                item_name,
-                                &item_key,
-                            );
-                            // Mirror the initial-create path in
-                            // `create_foreach_ir_tree` (diff.rs ~line 708-714):
-                            // items must be LOGICAL children of the ForEach
-                            // container while their Insert patch targets the
-                            // render parent. Collapsing the two (what
-                            // `create_ir_node_tree_impl` does) orphans items
-                            // under the grandparent and leaves
-                            // `ForEach.children` empty — every subsequent
-                            // reconcile then sees a length mismatch, hits this
-                            // rebuild branch again, and emits 0 Removes + N
-                            // Creates indefinitely.
-                            create_ir_node_tree_full(
-                                ctx,
-                                &child_with_item,
-                                Some(node_id),
-                                Some(render_parent),
-                                false,
-                            );
-                        }
-                    }
+                if children_intact {
+                    reconcile_iterable_children_full(
+                        ctx,
+                        node_id,
+                        render_parent,
+                        items,
+                        item_name,
+                        key_path.as_deref(),
+                        template,
+                    );
                 } else {
-                    let mut child_index = 0;
-                    for (item_index, item) in items.iter().enumerate() {
-                        let item_key =
-                            generate_item_key(item, key_path.as_deref(), item_name, item_index);
-
-                        for child_template in template {
-                            if let Some(&old_child_id) = old_children.get(child_index) {
-                                let child_with_item = replace_ir_node_item_bindings(
-                                    child_template,
-                                    item,
-                                    item_index,
-                                    item_name,
-                                    &item_key,
-                                );
-                                reconcile_ir_node_impl(ctx, old_child_id, &child_with_item);
-                            }
-                            child_index += 1;
-                        }
-                    }
+                    rebuild_foreach_children(
+                        ctx,
+                        node_id,
+                        render_parent,
+                        &old_children,
+                        items,
+                        item_name,
+                        key_path.as_deref(),
+                        template,
+                    );
                 }
             }
         }
@@ -1227,6 +1373,65 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
     }
 }
 
+/// Build the root `Remove` patch for `id`, flagged with `transition: true`
+/// when the node's resolved props carry an `"__anim.exit"` spec. Must be
+/// called BEFORE the node is removed from `tree` — afterwards the props
+/// (and the spec) are gone and the removal silently loses its animation.
+pub(crate) fn root_remove_patch(tree: &InstanceTree, id: NodeId) -> Patch {
+    let exits = tree
+        .get(id)
+        .is_some_and(|node| node.props.contains_key(crate::ir::anim::ANIM_EXIT_PROP));
+    if exits {
+        Patch::remove_with_transition(id)
+    } else {
+        Patch::remove(id)
+    }
+}
+
+/// Emit the Remove patches for the subtree rooted at `root_id` and clear its
+/// dependency registrations, without mutating the tree — callers unlink and
+/// `tree.remove(...)` afterwards (`&InstanceTree` enforces that the removal
+/// root's `"__anim.exit"` spec is read before any mutation).
+///
+/// Ordering (the contract documented on [`Patch::Remove`]):
+/// - root has an exit spec → flagged root Remove FIRST, then descendants as
+///   plain Removes (post-order among themselves). Descendants are plain even
+///   when they carry their own exit specs — parent-remove-wins falls out
+///   structurally because only the removal root is consulted.
+/// - no exit spec → today's post-order exactly (children before parents),
+///   zero ordering churn for non-animated removals.
+fn emit_subtree_removal(
+    tree: &InstanceTree,
+    root_id: NodeId,
+    patches: &mut Vec<Patch>,
+    dependencies: &mut DependencyGraph,
+) {
+    let root_patch = root_remove_patch(tree, root_id);
+    let animated = matches!(
+        root_patch,
+        Patch::Remove {
+            transition: true,
+            ..
+        }
+    );
+    let ids = collect_subtree_ids(tree, root_id);
+    if animated {
+        patches.push(root_patch);
+        for &id in &ids {
+            if id != root_id {
+                patches.push(Patch::remove(id));
+            }
+        }
+    } else {
+        for &id in &ids {
+            patches.push(Patch::remove(id));
+        }
+    }
+    for &id in &ids {
+        dependencies.remove_node(id);
+    }
+}
+
 /// Remove a subtree and generate Remove patches
 fn remove_subtree(
     tree: &mut InstanceTree,
@@ -1234,11 +1439,7 @@ fn remove_subtree(
     patches: &mut Vec<Patch>,
     dependencies: &mut DependencyGraph,
 ) {
-    let ids = collect_subtree_ids(tree, node_id);
-    for &id in &ids {
-        patches.push(Patch::remove(id));
-        dependencies.remove_node(id);
-    }
+    emit_subtree_removal(tree, node_id, patches, dependencies);
     tree.remove(node_id);
 }
 

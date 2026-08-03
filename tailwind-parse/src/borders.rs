@@ -98,26 +98,6 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
             "2" => "2px",
             "4" => "4px",
             "8" => "8px",
-            // Directional borders. Web renders these via the per-side
-            // CSS props directly; native renderers that don't yet
-            // support per-side widths can fall back by checking for
-            // any of the per-side keys and treating them as a uniform
-            // border. Emitting the per-side key is strictly more
-            // information than the previous "border-width: 1px"
-            // collapse, so the desktop / web / mobile renderers all
-            // see what the user actually asked for.
-            "t" => return Some(vec![CssProperty::new("border-top-width", "1px")]),
-            "r" => return Some(vec![CssProperty::new("border-right-width", "1px")]),
-            "b" => return Some(vec![CssProperty::new("border-bottom-width", "1px")]),
-            "l" => return Some(vec![CssProperty::new("border-left-width", "1px")]),
-            "t-0" => return Some(vec![CssProperty::new("border-top-width", "0px")]),
-            "r-0" => return Some(vec![CssProperty::new("border-right-width", "0px")]),
-            "b-0" => return Some(vec![CssProperty::new("border-bottom-width", "0px")]),
-            "l-0" => return Some(vec![CssProperty::new("border-left-width", "0px")]),
-            "t-2" => return Some(vec![CssProperty::new("border-top-width", "2px")]),
-            "r-2" => return Some(vec![CssProperty::new("border-right-width", "2px")]),
-            "b-2" => return Some(vec![CssProperty::new("border-bottom-width", "2px")]),
-            "l-2" => return Some(vec![CssProperty::new("border-left-width", "2px")]),
             // Border style
             "solid" => return Some(vec![CssProperty::new("border-style", "solid")]),
             "dashed" => return Some(vec![CssProperty::new("border-style", "dashed")]),
@@ -125,7 +105,28 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
             "double" => return Some(vec![CssProperty::new("border-style", "double")]),
             "hidden" => return Some(vec![CssProperty::new("border-style", "hidden")]),
             "none" => return Some(vec![CssProperty::new("border-style", "none")]),
-            _ => return None,
+            // Directional borders: border-{t|r|b|l|x|y}[-{0|2|4|8}].
+            // Web renders these via the per-side CSS props directly; native
+            // renderers that don't yet support per-side widths can fall back
+            // by checking for any of the per-side keys and treating them as
+            // a uniform border — strictly more information than collapsing
+            // to "border-width".
+            _ => {
+                let (side, size) = match val.split_once('-') {
+                    Some((side, size)) => (side, size),
+                    None => (val, ""),
+                };
+                let width = match size {
+                    "" => "1px",
+                    "0" => "0px",
+                    "2" => "2px",
+                    "4" => "4px",
+                    "8" => "8px",
+                    _ => return None,
+                };
+                let props = side_width_props(side)?;
+                return Some(props.iter().map(|p| CssProperty::new(p, width)).collect());
+            }
         };
         return Some(vec![CssProperty::new("border-width", value)]);
     }
@@ -254,14 +255,84 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
     None
 }
 
-/// Parse arbitrary border values like `rounded-[12px]`, `border-[3px]`
+/// Per-side border-width property names, shared by named (`border-t-2`)
+/// and arbitrary (`border-t-[3px]`) forms.
+fn side_width_props(side: &str) -> Option<&'static [&'static str]> {
+    match side {
+        "t" => Some(&["border-top-width"]),
+        "r" => Some(&["border-right-width"]),
+        "b" => Some(&["border-bottom-width"]),
+        "l" => Some(&["border-left-width"]),
+        "x" => Some(&["border-left-width", "border-right-width"]),
+        "y" => Some(&["border-top-width", "border-bottom-width"]),
+        _ => None,
+    }
+}
+
+fn side_color_props(side: &str) -> Option<&'static [&'static str]> {
+    match side {
+        "t" => Some(&["border-top-color"]),
+        "r" => Some(&["border-right-color"]),
+        "b" => Some(&["border-bottom-color"]),
+        "l" => Some(&["border-left-color"]),
+        "x" => Some(&["border-left-color", "border-right-color"]),
+        "y" => Some(&["border-top-color", "border-bottom-color"]),
+        _ => None,
+    }
+}
+
+/// Parse arbitrary border values like `rounded-[12px]`, `border-[3px]`,
+/// `border-[#f00]`, `rounded-t-[12px]`, `border-t-[2px]`, `outline-[2px]`,
+/// `ring-[3px]`.
+/// For `border-*` and `outline`, color-like values map to the color
+/// property, others to the width property.
 pub fn parse_arbitrary(prefix: &str, value: &str) -> Option<Vec<CssProperty>> {
-    let property = match prefix {
-        "rounded" => "border-radius",
-        "border" => "border-width",
-        _ => return None,
-    };
-    Some(vec![CssProperty::new(property, value)])
+    if prefix == "rounded" {
+        return Some(vec![CssProperty::new("border-radius", value)]);
+    }
+    if let Some(side) = prefix.strip_prefix("rounded-") {
+        let props = directional_radius_props(side)?;
+        return Some(props.iter().map(|p| CssProperty::new(p, value)).collect());
+    }
+
+    let is_color = crate::colors::is_color_like(value);
+    if prefix == "border" {
+        let property = if is_color {
+            "border-color"
+        } else {
+            "border-width"
+        };
+        return Some(vec![CssProperty::new(property, value)]);
+    }
+    if let Some(side) = prefix.strip_prefix("border-") {
+        let props = if is_color {
+            side_color_props(side)?
+        } else {
+            side_width_props(side)?
+        };
+        return Some(props.iter().map(|p| CssProperty::new(p, value)).collect());
+    }
+
+    if prefix == "outline" {
+        let property = if is_color {
+            "outline-color"
+        } else {
+            "outline-width"
+        };
+        return Some(vec![CssProperty::new(property, value)]);
+    }
+
+    // Ring width: ring-[3px] → box-shadow spread, matching the named ring-N
+    // scale. Ring colors would need CSS-variable composition, so they're
+    // intentionally not handled here.
+    if prefix == "ring" && !is_color {
+        return Some(vec![CssProperty::new(
+            "box-shadow",
+            &format!("0 0 0 {}", value),
+        )]);
+    }
+
+    None
 }
 
 #[cfg(test)]

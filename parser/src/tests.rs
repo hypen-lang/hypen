@@ -517,11 +517,9 @@ fn test_component_name_case_sensitivity() {
     }
 }
 
-// Note: Applicators with children blocks is an advanced feature
-// that may not be supported in the initial implementation
 #[test]
-#[ignore]
 fn test_applicators_with_children() {
+    // Zero-arg applicator with a children block.
     let input = r#"
         Container
             .modifier {
@@ -536,6 +534,169 @@ fn test_applicators_with_children() {
     assert_eq!(component.applicators.len(), 1);
     assert_eq!(component.applicators[0].name, "modifier");
     assert_eq!(component.applicators[0].children.len(), 1);
+    assert_eq!(component.applicators[0].children[0].name, "Text");
+}
+
+#[test]
+fn test_applicator_block_states_shape() {
+    // The Option C .states form: args on the applicator, a block whose
+    // entries are full components carrying their own applicator chains.
+    let input = ".states(@state.cardState, transition: spring) {\n    onState(collapsed).size(48)\n    onState(expanded).size(240)\n}";
+    let input = format!("Box(width: 100){}", input);
+    let component = parse_component(&input).expect("states block should parse");
+
+    assert_eq!(component.name, "Box");
+    assert_eq!(component.applicators.len(), 1);
+
+    let states = &component.applicators[0];
+    assert_eq!(states.name, "states");
+    assert_eq!(states.arguments.arguments.len(), 2);
+    assert_eq!(
+        states.arguments.get_positioned(0),
+        Some(&Value::Reference("state.cardState".to_string()))
+    );
+    assert_eq!(
+        states.arguments.get_named("transition"),
+        Some(&Value::String("spring".to_string()))
+    );
+
+    assert_eq!(states.children.len(), 2);
+    let collapsed = &states.children[0];
+    assert_eq!(collapsed.name, "onState");
+    assert_eq!(
+        collapsed.arguments.get_positioned(0),
+        Some(&Value::String("collapsed".to_string()))
+    );
+    assert_eq!(collapsed.applicators.len(), 1);
+    assert_eq!(collapsed.applicators[0].name, "size");
+    assert_eq!(
+        collapsed.applicators[0].arguments.get_positioned(0),
+        Some(&Value::Number(48.0))
+    );
+
+    let expanded = &states.children[1];
+    assert_eq!(expanded.name, "onState");
+    assert_eq!(
+        expanded.arguments.get_positioned(0),
+        Some(&Value::String("expanded".to_string()))
+    );
+    assert_eq!(expanded.applicators.len(), 1);
+    assert_eq!(expanded.applicators[0].name, "size");
+    assert_eq!(
+        expanded.applicators[0].arguments.get_positioned(0),
+        Some(&Value::Number(240.0))
+    );
+}
+
+#[test]
+fn test_applicator_chain_continues_after_block() {
+    let input = r#"Box().states(@state.mode) { onState(a).opacity(0.5) }.padding(4).color(blue)"#;
+    let component = parse_component(input).expect("chain after block should parse");
+
+    assert_eq!(component.name, "Box");
+    let names: Vec<&str> = component
+        .applicators
+        .iter()
+        .map(|a| a.name.as_str())
+        .collect();
+    assert_eq!(names, vec!["states", "padding", "color"]);
+    assert_eq!(component.applicators[0].children.len(), 1);
+    assert!(component.applicators[1].children.is_empty());
+    assert!(component.applicators[2].children.is_empty());
+}
+
+#[test]
+fn test_applicator_block_newlines_between_args_and_brace() {
+    // Whitespace/newlines (and comments) are allowed between ')' and '{',
+    // exactly as for component children blocks.
+    let input = "Box()\n    .states(@state.mode) // pose switch\n\n    {\n        onState(a).width(10)\n    }";
+    let component = parse_component(input).expect("newline before block should parse");
+
+    assert_eq!(component.applicators.len(), 1);
+    assert_eq!(component.applicators[0].name, "states");
+    assert_eq!(component.applicators[0].children.len(), 1);
+    assert_eq!(component.applicators[0].children[0].name, "onState");
+}
+
+#[test]
+fn test_applicator_block_nested_blocks() {
+    // Block entries are full recursive component specifications: they can
+    // carry their own children blocks — and their own applicator blocks.
+    let input = r#"
+        Container.modifier {
+            Row {
+                Text("nested")
+            }
+            Box().inner(1) {
+                Leaf("deep")
+            }
+        }
+    "#;
+    let component = parse_component(input).expect("nested blocks should parse");
+
+    assert_eq!(component.applicators.len(), 1);
+    let modifier = &component.applicators[0];
+    assert_eq!(modifier.children.len(), 2);
+
+    let row = &modifier.children[0];
+    assert_eq!(row.name, "Row");
+    assert_eq!(row.children.len(), 1);
+    assert_eq!(row.children[0].name, "Text");
+
+    let boxed = &modifier.children[1];
+    assert_eq!(boxed.name, "Box");
+    assert_eq!(boxed.applicators.len(), 1);
+    assert_eq!(boxed.applicators[0].name, "inner");
+    assert_eq!(boxed.applicators[0].children.len(), 1);
+    assert_eq!(boxed.applicators[0].children[0].name, "Leaf");
+}
+
+#[test]
+fn test_applicator_block_empty() {
+    let input = r#"Box().states(@state.mode) { }"#;
+    let component = parse_component(input).expect("empty applicator block should parse");
+    assert_eq!(component.applicators.len(), 1);
+    assert_eq!(component.applicators[0].name, "states");
+    assert!(component.applicators[0].children.is_empty());
+}
+
+#[test]
+fn test_applicator_block_after_component_children() {
+    // The component's own children block binds first (it precedes the
+    // applicator chain in the grammar); a block after an applicator belongs
+    // to that applicator.
+    let input = r#"
+        Column {
+            Text("child")
+        }
+        .states(@state.mode) {
+            onState(a).opacity(0.2)
+        }
+    "#;
+    let component = parse_component(input).expect("both blocks should parse");
+
+    assert_eq!(component.name, "Column");
+    assert_eq!(component.children.len(), 1);
+    assert_eq!(component.children[0].name, "Text");
+    assert_eq!(component.applicators.len(), 1);
+    assert_eq!(component.applicators[0].name, "states");
+    assert_eq!(component.applicators[0].children.len(), 1);
+}
+
+#[test]
+fn test_stray_block_without_applicator_fails() {
+    // A '{' with no owning component or applicator is still an error.
+    assert!(parse_component(r#"{ Text("orphan") }"#).is_err());
+    // A second block after a component that already closed its children
+    // block and has no applicator to own it is an error too.
+    assert!(parse_component("Column { Text(\"a\") } { Text(\"b\") }").is_err());
+    // Stray block between children inside a block is an error.
+    assert!(parse_component("Column { { } }").is_err());
+}
+
+#[test]
+fn test_applicator_block_unclosed_fails() {
+    assert!(parse_component(r#"Box().states(@state.mode) { onState(a).width(10)"#).is_err());
 }
 
 #[test]
@@ -1814,4 +1975,119 @@ fn test_unclosed_single_quote_string() {
         "Error should mention closing quote, got: {}",
         err_str
     );
+}
+
+#[test]
+fn test_name_range_records_the_name_token_span() {
+    // The component name's byte span is recorded in metadata so downstream
+    // diagnostics (a11y conformance, LSP) can point at file:line:col.
+    let input = r#"Column { Button("Save") }"#;
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.name_range.clone();
+    assert_eq!(&input[range], "Column");
+
+    let button = &component.children[0];
+    let range = button.metadata.name_range.clone();
+    assert_eq!(&input[range], "Button");
+}
+
+#[test]
+fn test_name_range_with_module_keyword_and_leading_whitespace() {
+    let input = "  module Search {\n    Text(\"hi\")\n  }";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.name_range.clone();
+    assert_eq!(&input[range], "Search");
+
+    let text = &component.children[0];
+    let range = text.metadata.name_range.clone();
+    assert_eq!(&input[range], "Text");
+}
+
+#[test]
+fn test_expr_range_covers_a_multiline_applicator_chain() {
+    // The full-expression span must end at the LAST applicator's ')' so
+    // downstream tooling (a11y suppression directives) can match a trailing
+    // comment on any line of the chain to this element.
+    let input = "Button {\n    Icon(\"trash\")\n}\n    .padding(16)\n    .color(red)\n    .margin(8)";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.expr_range.clone();
+    assert_eq!(range.start, 0);
+    assert!(
+        input[range.clone()].ends_with(".margin(8)"),
+        "expr_range should end at the last applicator, got: {:?}",
+        &input[range]
+    );
+    assert_eq!(range.end, input.len());
+}
+
+#[test]
+fn test_expr_range_excludes_trailing_whitespace_and_comments() {
+    // Padding consumes trailing whitespace/comments after the last token;
+    // the expression span must not include them (a stray comment between two
+    // elements belongs to neither).
+    let input = "Column {\n    Text(\"a\")\n}\n    .padding(16) // trailing note\n\n";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.expr_range.clone();
+    assert!(
+        input[range].ends_with(".padding(16)"),
+        "expr_range must stop at the applicator's ')'"
+    );
+}
+
+#[test]
+fn test_expr_range_without_applicators_ends_at_the_children_block() {
+    let input = "Column {\n    Text(\"a\")\n}";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.expr_range.clone();
+    assert_eq!(&input[range], input);
+
+    // A child's expression covers exactly its own text.
+    let text = &component.children[0];
+    let range = text.metadata.expr_range.clone();
+    assert_eq!(&input[range], "Text(\"a\")");
+}
+
+#[test]
+fn test_expr_range_starts_at_the_declaration_keyword() {
+    let input = "  module Search {\n    Text(\"hi\")\n  }";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.expr_range.clone();
+    assert_eq!(range.start, input.find("module").unwrap());
+    assert!(input[range].ends_with('}'));
+}
+
+#[test]
+fn test_expr_range_bare_component_covers_name_and_args() {
+    let input = "Text(\"hello\")";
+    let component = parse_component(input).unwrap();
+    assert_eq!(&input[component.metadata.expr_range.clone()], input);
+
+    // No args, no children, no applicators: the name token is the whole
+    // expression.
+    let input = "Divider";
+    let component = parse_component(input).unwrap();
+    assert_eq!(&input[component.metadata.expr_range.clone()], "Divider");
+}
+
+#[test]
+fn test_hypenapp_with_slot_children() {
+    // HypenApp embed with loading/error slot children (customizable slots).
+    let input = r#"HypenApp("ws://x") {
+        Column { Text("Opening") }.slot("loading")
+        Column { Text("Failed") }.slot("error")
+    }.tw("flex-1")"#;
+    let result = parse_component(input);
+    assert!(result.is_ok(), "parse failed: {:?}", result.err());
+
+    let spec = result.unwrap();
+    assert_eq!(spec.name, "HypenApp");
+    assert_eq!(spec.children.len(), 2);
+
+    let slot_count = spec
+        .children
+        .iter()
+        .flat_map(|c| c.applicators.iter())
+        .filter(|a| a.name == "slot")
+        .count();
+    assert_eq!(slot_count, 2, "expected two .slot() applicators on children");
 }

@@ -70,14 +70,11 @@ Stack {
 
 ### Grid
 
-Arranges children in a grid.
+Arranges a bound collection in a grid — data-driven, like `List`.
 
 ```hypen
-Grid {
-    Card { Text("1") }
-    Card { Text("2") }
-    Card { Text("3") }
-    Card { Text("4") }
+Grid(@state.cells, key: "id") {
+    Card { Text("@{item.label}") }
 }
 .gridColumns(2)
 .gap(16)
@@ -85,13 +82,12 @@ Grid {
 
 ### List
 
-Scrollable container for items.
+Scrollable, data-driven list — shorthand for
+`ForEach(items: @state.items, key: "id")`.
 
 ```hypen
-List {
-    Text("Item 1")
-    Text("Item 2")
-    Text("Item 3")
+List(@state.items) {
+    Text("@{item.title}")
 }
 ```
 
@@ -183,7 +179,7 @@ Single-line text input.
 
 ```hypen
 Input(placeholder: "Enter your name")
-    .value(@{state.name})
+    .value(@state.name)
     .onInput(@actions.updateName)
     .padding(12)
     .borderRadius(4)
@@ -205,7 +201,7 @@ Toggle checkbox.
 
 ```hypen
 Checkbox {}
-    .checked(@{state.agreed})
+    .checked(@state.agreed)
     .onChange(@actions.toggleAgreed)
 ```
 
@@ -215,7 +211,7 @@ Toggle switch.
 
 ```hypen
 Switch {}
-    .checked(@{state.darkMode})
+    .checked(@state.darkMode)
     .onChange(@actions.toggleDarkMode)
 ```
 
@@ -225,7 +221,7 @@ Dropdown selection.
 
 ```hypen
 Select {}
-    .value(@{state.country})
+    .value(@state.country)
     .onChange(@actions.updateCountry)
 ```
 
@@ -235,7 +231,7 @@ Range slider.
 
 ```hypen
 Slider {}
-    .value(@{state.volume})
+    .value(@state.volume)
     .onChange(@actions.updateVolume)
 ```
 
@@ -288,7 +284,7 @@ Spinner()
 Progress indicator.
 
 ```hypen
-ProgressBar(value: @{state.progress})
+ProgressBar(value: @state.progress)
     .height(4)
 ```
 
@@ -378,29 +374,32 @@ Link(href: "/about") {
 Declarative routing driven by module state. Routes are matched by the platform renderer based on `state.location`. For a complete routing guide, see **[Routing](/docs/guide/routing)**.
 
 ```hypen
-Router(initialRoute: "/home") {
+Router {
     Route(path: "/home") {
         HomePage()
     }
     Route(path: "/users/:id") {
-        UserProfile(userId: @{state.params.id})
+        UserProfile(userId: @state.params.id)
     }
-    Route(path: "/settings", guard: @actions.requireAuth) {
+    Route(path: "/settings") {
         SettingsPage()
     }
-    Route.fallback {
+    Else {
         NotFoundPage()
     }
 }
 ```
 
 **Router Arguments:**
-- `initialRoute`: Default route on mount
+- `value` (optional): State binding that drives the active route
+  (defaults to `@state.location`). The initial route, path persistence, and
+  module lifecycle are configured on the host SDK's `ManagedRouter`, not in
+  the DSL.
 
 **Route Arguments:**
 - `path`: URL pattern (supports `:param` segments)
-- `guard` (optional): Async action to run before entering the route
-- `exact` (optional): Only match the exact path
+
+An `Else { ... }` child renders when no route matches.
 
 ## Control Flow Components
 
@@ -523,6 +522,7 @@ If(condition: @state.hasNotifications) {
 
 ## Next Steps
 
+- [Child Slots](/docs/guide/slots) — Build reusable components that accept children with `Children()` and named slots
 - [Control Flow](/docs/guide/control-flow) — Deep dive into ForEach, When, If with patterns and performance tips
 - [Routing](/docs/guide/routing) — Navigation, route guards, and nested routing
 - [Layout](/docs/guide/layout) — Layout components and alignment

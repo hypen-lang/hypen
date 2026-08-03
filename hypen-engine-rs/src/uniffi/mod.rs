@@ -216,6 +216,23 @@ pub enum PatchType {
     /// Reattach a previously-detached subtree under the same NodeId.
     /// Emitted by the engine's Router subtree cache on navigation-back.
     Attach,
+    /// Replace a node's accessibility semantics after a reactive change
+    /// (templated accessible name, bound self-state, bound checked). The
+    /// updated block rides `semantics_json`; renderers re-apply it with the
+    /// same translation they run at create, clearing attributes the new
+    /// block no longer sets. `semantics_json == None` clears everything.
+    SetSemantics,
+    /// Batch-scoped animation prelude (transaction-scoped animation).
+    /// Addresses no node — it scopes the *batch*: renderers that
+    /// understand it animate every prop change in the patches that
+    /// follow using the spec carried on `spec_json`. Only ever valid at
+    /// batch index 0; a prelude anywhere else is not a stamp.
+    ///
+    /// **Appended last on purpose.** UniFFI enum discriminants are
+    /// positional (the generated Kotlin does `PatchType.values()[i - 1]`
+    /// and Swift switches on the same ordinal), so new variants must go
+    /// at the end or every existing case shifts.
+    BatchAnimation,
 }
 
 /// A patch represents a single DOM operation
@@ -230,15 +247,72 @@ pub struct Patch {
     pub text: Option<String>,
     pub parent_id: Option<String>,
     pub before_id: Option<String>,
+    /// Serialized `Semantics` block (camelCase JSON, same shape as the web
+    /// wire format). Present on `Create` for nodes with derivable a11y and
+    /// on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+    /// constructors keep compiling.
+    #[uniffi(default = None)]
+    pub semantics_json: Option<String>,
+    /// Roots an animated exit: set on the **root** `Remove` of a subtree
+    /// whose node carried an `"__anim.exit"` spec. The renderer may play
+    /// the exit and finalize teardown itself; the engine-side node is
+    /// dead the moment the patch is emitted (no ack round-trip). `false`
+    /// on every other patch type — which matches the wire default, where
+    /// the field is skip-if-false, so relays that re-serialize this
+    /// record stay byte-identical for unflagged removes.
+    #[uniffi(default = false)]
+    pub transition: bool,
+    /// Animation spec for `PatchType::BatchAnimation`, as a JSON *string*
+    /// (UniFFI has no arbitrary-JSON type, so the engine's `serde_json`
+    /// object is stringified at this boundary and consumers parse it).
+    /// Always a JSON object, e.g. `{"curve":"spring","duration":250}`.
+    /// `None` on every other patch type.
+    ///
+    /// **Both fields are appended last on purpose.** The generated
+    /// Kotlin/Swift record readers are positional, so inserting a field
+    /// anywhere but the tail silently mis-reads every field after it.
+    #[uniffi(default = None)]
+    pub spec_json: Option<String>,
 }
 
-impl From<InternalPatch> for Patch {
-    fn from(p: InternalPatch) -> Self {
+impl Patch {
+    /// Convert an engine patch into the flat FFI record.
+    ///
+    /// **Every** engine patch variant now crosses the uniffi boundary —
+    /// this is total, and deliberately so. It used to return `Option` and
+    /// drop `BatchAnimation`; nothing is dropped any more, so the
+    /// conversion is infallible and call sites use a plain `map`. Keep it
+    /// that way: a silent drop here is invisible to Kotlin/Swift hosts and
+    /// to any browser client they relay to.
+    fn from_internal(p: InternalPatch) -> Self {
         match p {
+            // The batch-animation prelude. UniFFI has no arbitrary-JSON
+            // type, so the spec object is stringified into `spec_json` and
+            // the consumer parses it. It addresses no node, so `id` is
+            // empty — hosts must route on `patch_type`, never on `id`.
+            //
+            // Contract: honored ONLY at batch index 0. Renderers that don't
+            // understand it ignore it and snap; the rest of the batch is
+            // wire-identical to an unstamped one.
+            InternalPatch::BatchAnimation { spec } => Patch {
+                patch_type: PatchType::BatchAnimation,
+                id: String::new(),
+                element_type: None,
+                props_json: None,
+                name: None,
+                value_json: None,
+                text: None,
+                parent_id: None,
+                before_id: None,
+                semantics_json: None,
+                transition: false,
+                spec_json: Some(serde_json::to_string(&spec).unwrap_or_else(|_| "{}".to_string())),
+            },
             InternalPatch::Create {
                 id,
                 element_type,
                 props,
+                semantics,
             } => Patch {
                 patch_type: PatchType::Create,
                 id,
@@ -249,6 +323,27 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: semantics
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok()),
+                transition: false,
+                spec_json: None,
+            },
+            InternalPatch::SetSemantics { id, semantics } => Patch {
+                patch_type: PatchType::SetSemantics,
+                id,
+                element_type: None,
+                props_json: None,
+                name: None,
+                value_json: None,
+                text: None,
+                parent_id: None,
+                before_id: None,
+                semantics_json: semantics
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok()),
+                transition: false,
+                spec_json: None,
             },
             InternalPatch::SetProp { id, name, value } => Patch {
                 patch_type: PatchType::SetProp,
@@ -260,6 +355,9 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
+                transition: false,
+                spec_json: None,
             },
             InternalPatch::RemoveProp { id, name } => Patch {
                 patch_type: PatchType::RemoveProp,
@@ -271,6 +369,9 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
+                transition: false,
+                spec_json: None,
             },
             InternalPatch::SetText { id, text } => Patch {
                 patch_type: PatchType::SetText,
@@ -282,6 +383,9 @@ impl From<InternalPatch> for Patch {
                 text: Some(text),
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
+                transition: false,
+                spec_json: None,
             },
             InternalPatch::Insert {
                 parent_id,
@@ -297,6 +401,9 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: Some(parent_id),
                 before_id,
+                semantics_json: None,
+                transition: false,
+                spec_json: None,
             },
             InternalPatch::Move {
                 parent_id,
@@ -312,8 +419,18 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: Some(parent_id),
                 before_id,
+                semantics_json: None,
+                transition: false,
+                spec_json: None,
             },
-            InternalPatch::Remove { id } => Patch {
+            // The deferred-remove flag now crosses this boundary. A
+            // `transition: true` Remove roots an exiting subtree: it is
+            // emitted FIRST, before its descendants' plain Removes, so a
+            // Kotlin/Swift renderer learns the subtree is exiting before
+            // teardown arrives and can defer the native removal to play the
+            // exit. Hosts relaying to a browser client must re-emit it (as
+            // skip-if-false JSON) or that client snaps.
+            InternalPatch::Remove { id, transition } => Patch {
                 patch_type: PatchType::Remove,
                 id,
                 element_type: None,
@@ -323,6 +440,9 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
+                transition,
+                spec_json: None,
             },
             // Detach/Attach are emitted by the engine's Router
             // subtree cache: Detach unlinks a subtree from its parent
@@ -341,6 +461,9 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
+                transition: false,
+                spec_json: None,
             },
             InternalPatch::Attach {
                 parent_id,
@@ -356,6 +479,9 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: Some(parent_id),
                 before_id,
+                semantics_json: None,
+                transition: false,
+                spec_json: None,
             },
         }
     }
@@ -530,7 +656,7 @@ impl HypenEngine {
         let ir_node = ast_to_ir_node(component);
         let patches = state.core.render_ir_node(&ir_node);
 
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().map(Patch::from_internal).collect())
     }
 
     /// Update engine state with a JSON patch and re-render affected nodes.
@@ -556,12 +682,17 @@ impl HypenEngine {
             .map_err(|e| HypenError::StateError(e.to_string()))?;
 
         let scope = if scope.is_empty() { None } else { Some(scope) };
-        if !state.core.update_state(scope.as_deref(), patch) {
+        // Host-side batch stamping is not exposed over uniffi yet: this
+        // method has no animation argument, so it passes `None`. Preludes
+        // the engine raises on its own DO now relay (`from_internal` maps
+        // `BatchAnimation`); adding an optional animation parameter here is
+        // the remaining piece for Kotlin/Swift-initiated stamps.
+        if !state.core.update_state(scope.as_deref(), patch, None) {
             return Ok(Vec::new());
         }
 
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().map(Patch::from_internal).collect())
     }
 
     /// Apply a sparse state update with explicit dotted path → value pairs.
@@ -595,15 +726,20 @@ impl HypenEngine {
             .map_err(|e| HypenError::StateError(e.to_string()))?;
 
         let scope = if scope.is_empty() { None } else { Some(scope) };
+        // Host-side batch stamping is not exposed over uniffi yet: this
+        // method has no animation argument, so it passes `None`. Preludes
+        // the engine raises on its own DO now relay (`from_internal` maps
+        // `BatchAnimation`); adding an optional animation parameter here is
+        // the remaining piece for Kotlin/Swift-initiated stamps.
         if !state
             .core
-            .update_state_sparse(scope.as_deref(), &paths, &values)
+            .update_state_sparse(scope.as_deref(), &paths, &values, None)
         {
             return Ok(Vec::new());
         }
 
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().map(Patch::from_internal).collect())
     }
 
     /// Set module configuration
@@ -658,7 +794,7 @@ impl HypenEngine {
 
         state.core.set_context(&name, data);
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().map(Patch::from_internal).collect())
     }
 
     /// Remove a data source context and re-render bound nodes.
@@ -673,7 +809,7 @@ impl HypenEngine {
 
         state.core.remove_context(&name);
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from).collect())
+        Ok(patches.into_iter().map(Patch::from_internal).collect())
     }
 
     /// Look up which named module owns an action.
@@ -853,6 +989,143 @@ mod tests {
 
     fn make_engine() -> Arc<HypenEngine> {
         HypenEngine::new().expect("engine")
+    }
+
+    // ── Animation relay across the uniffi boundary ───────────────────────
+    //
+    // These pin the two fields mobile SDKs need to defer removes and honor
+    // transaction stamps. They are the Rust half of a contract whose other
+    // half lives in generated Kotlin/Swift, so they assert on exact values,
+    // not just "something came through".
+
+    #[test]
+    fn test_flagged_remove_carries_transition() {
+        let patch = Patch::from_internal(InternalPatch::Remove {
+            id: "n7".to_string(),
+            transition: true,
+        });
+
+        assert!(matches!(patch.patch_type, PatchType::Remove));
+        assert_eq!(patch.id, "n7");
+        assert!(
+            patch.transition,
+            "an exit-animated removal root must arrive flagged; dropping it is \
+             what forced mobile renderers to snap"
+        );
+        assert_eq!(patch.spec_json, None);
+    }
+
+    #[test]
+    fn test_unflagged_remove_is_unchanged() {
+        let patch = Patch::from_internal(InternalPatch::Remove {
+            id: "n7".to_string(),
+            transition: false,
+        });
+
+        assert!(matches!(patch.patch_type, PatchType::Remove));
+        assert_eq!(patch.id, "n7");
+        assert!(
+            !patch.transition,
+            "plain removals must stay false — matches the wire default, so \
+             relays re-serialize byte-identically to the pre-flag protocol"
+        );
+        // Every other slot stays empty, exactly as before the field existed.
+        assert_eq!(patch.element_type, None);
+        assert_eq!(patch.props_json, None);
+        assert_eq!(patch.name, None);
+        assert_eq!(patch.value_json, None);
+        assert_eq!(patch.text, None);
+        assert_eq!(patch.parent_id, None);
+        assert_eq!(patch.before_id, None);
+        assert_eq!(patch.semantics_json, None);
+        assert_eq!(patch.spec_json, None);
+    }
+
+    #[test]
+    fn test_batch_animation_survives_as_spec_json() {
+        let spec = serde_json::json!({ "curve": "spring", "duration": 250 });
+        let patch = Patch::from_internal(InternalPatch::BatchAnimation { spec: spec.clone() });
+
+        assert!(matches!(patch.patch_type, PatchType::BatchAnimation));
+        // The prelude addresses no node: hosts must route on patch_type.
+        assert_eq!(patch.id, "");
+        assert!(!patch.transition);
+
+        let round_tripped: serde_json::Value =
+            serde_json::from_str(patch.spec_json.as_deref().expect("spec_json present"))
+                .expect("spec_json must be valid JSON for consumers to parse");
+        assert_eq!(
+            round_tripped, spec,
+            "the spec must survive stringification unchanged — unknown fields \
+             included; renderers own interpretation"
+        );
+    }
+
+    #[test]
+    fn test_no_patch_variant_is_dropped_at_the_boundary() {
+        // `from_internal` is total. If a future variant is added and mapped
+        // to a silent drop, this catches it — a dropped patch is invisible
+        // to Kotlin/Swift hosts and to any browser client they relay to.
+        let internal = vec![
+            InternalPatch::BatchAnimation {
+                spec: serde_json::json!({ "curve": "linear", "duration": 100 }),
+            },
+            InternalPatch::Create {
+                id: "n1".to_string(),
+                element_type: "text".to_string(),
+                props: Default::default(),
+                semantics: None,
+            },
+            InternalPatch::SetProp {
+                id: "n1".to_string(),
+                name: "0".to_string(),
+                value: serde_json::json!("hi"),
+            },
+            InternalPatch::RemoveProp {
+                id: "n1".to_string(),
+                name: "0".to_string(),
+            },
+            InternalPatch::SetText {
+                id: "n1".to_string(),
+                text: "hi".to_string(),
+            },
+            InternalPatch::SetSemantics {
+                id: "n1".to_string(),
+                semantics: None,
+            },
+            InternalPatch::Insert {
+                parent_id: "root".to_string(),
+                id: "n1".to_string(),
+                before_id: None,
+            },
+            InternalPatch::Move {
+                parent_id: "root".to_string(),
+                id: "n1".to_string(),
+                before_id: None,
+            },
+            InternalPatch::Remove {
+                id: "n1".to_string(),
+                transition: true,
+            },
+            InternalPatch::Detach {
+                id: "n1".to_string(),
+            },
+            InternalPatch::Attach {
+                parent_id: "root".to_string(),
+                id: "n1".to_string(),
+                before_id: None,
+            },
+        ];
+        let count = internal.len();
+
+        let converted: Vec<Patch> = internal.into_iter().map(Patch::from_internal).collect();
+        assert_eq!(
+            converted.len(),
+            count,
+            "every engine patch variant must cross the uniffi boundary"
+        );
+        // The prelude must stay first — it is only a stamp at batch index 0.
+        assert!(matches!(converted[0].patch_type, PatchType::BatchAnimation));
     }
 
     #[test]

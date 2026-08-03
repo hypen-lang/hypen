@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-hover-active", "description": "hover applies when active.", "function": "resolve_variant", "input": { "base": "backgroundColor", "props": { "backgroundColor.0": "white", "backgroundColor:hover.0": "gray" }, "width": 1000, "activeStates": ["hover"] }, "expected": "gray" }

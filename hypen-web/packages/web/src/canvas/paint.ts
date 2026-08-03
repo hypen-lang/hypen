@@ -4,11 +4,17 @@
  * Drawing virtual nodes to canvas
  */
 
-import type { VirtualNode, PainterFunction } from "./types.js";
-import { renderText } from "./text.js";
+import type { VirtualNode, PainterFunction, Rectangle } from "./types.js";
+import { measureText, renderText } from "./text.js";
 import { ScrollManager, isScrollable } from "./scroll.js";
 import { getVisibleChildren, VIRTUALIZE_THRESHOLD } from "./virtualize.js";
 import type { SelectionManager } from "./selection.js";
+import type { TextEditController } from "./editing.js";
+import {
+  SELECTION_HIGHLIGHT_COLOR,
+  offsetToCaretRect,
+  rangeToRects,
+} from "./text-geometry.js";
 import { cssLengthToPx } from "./utils.js";
 
 /**
@@ -18,6 +24,16 @@ import { cssLengthToPx } from "./utils.js";
 let activeSelectionManager: SelectionManager | null = null;
 export function setSelectionManager(mgr: SelectionManager | null): void {
   activeSelectionManager = mgr;
+}
+
+/**
+ * Module-level reference to the active TextEditController so paintInput can
+ * render the edited value, selection highlight, composition underline, and
+ * blinking caret. Same late-binding pattern as the SelectionManager hook.
+ */
+let activeTextEditor: TextEditController | null = null;
+export function setTextEditor(editor: TextEditController | null): void {
+  activeTextEditor = editor;
 }
 
 /**
@@ -33,23 +49,170 @@ export function registerPainter(type: string, painter: PainterFunction): void {
 }
 
 /**
- * Paint a virtual node and its children
+ * Per-font character advance widths, used by the manual letter-spacing path
+ * so each glyph is shaped once per font instead of once per frame.
  */
-export function paintNode(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
+const charAdvanceCache = new Map<string, Map<string, number>>();
+const MAX_CHAR_ADVANCE_FONTS = 32;
+
+/**
+ * Clear cached per-character advances. Must be called when web fonts finish
+ * loading: the cache is keyed by CSS font string, which is identical before
+ * and after a webfont replaces its fallback, so advances measured against
+ * the fallback font would otherwise poison letter-spaced rendering
+ * permanently.
+ */
+export function clearCharAdvanceCache(): void {
+  charAdvanceCache.clear();
+}
+
+function charAdvance(ctx: CanvasRenderingContext2D, font: string, ch: string): number {
+  let perFont = charAdvanceCache.get(font);
+  if (!perFont) {
+    perFont = new Map();
+    charAdvanceCache.set(font, perFont);
+    evictMap(charAdvanceCache, MAX_CHAR_ADVANCE_FONTS);
+  }
+  let width = perFont.get(ch);
+  if (width === undefined) {
+    width = ctx.measureText(ch).width;
+    perFont.set(ch, width);
+  }
+  return width;
+}
+
+/**
+ * Component types whose painters set sticky canvas state (textAlign,
+ * textBaseline, lineCap, shadows, …) that must not leak to siblings — they
+ * need a scoping save/restore pair. Containers, text, and spacers (and
+ * every unknown type, which routes to paintContainer) only touch state each
+ * draw call re-sets before use, so they paint without one.
+ */
+const STATE_UNSAFE_TYPES = new Set([
+  "button",
+  "input",
+  "textarea",
+  "image",
+  "divider",
+  "separator",
+  "checkbox",
+  "radio",
+  "switch",
+  "toggle",
+  "slider",
+  "progress",
+  "progressbar",
+  "spinner",
+  "loading",
+  "card",
+  "badge",
+  "avatar",
+  "icon",
+  "link",
+]);
+
+/** Whether any transform-related prop is present on the node. */
+function hasTransformProps(props: Record<string, any>): boolean {
+  return (
+    props.transform !== undefined ||
+    props.translateX !== undefined ||
+    props.translateY !== undefined ||
+    props.rotate !== undefined ||
+    props.scale !== undefined ||
+    props.scaleX !== undefined ||
+    props.scaleY !== undefined ||
+    props.skew !== undefined ||
+    props.skewX !== undefined ||
+    props.skewY !== undefined
+  );
+}
+
+/** Extra pixels a node's painting may reach beyond its layout box. */
+const CULL_SLACK = 8;
+
+/** How far a shadow can bleed outside the box it is attached to. */
+function shadowExtent(shadow: any): number {
+  if (typeof shadow === "string") {
+    const parts = shadow.trim().split(/\s+/);
+    const ox = Math.abs(parseFloat(parts[0])) || 0;
+    const oy = Math.abs(parseFloat(parts[1])) || 0;
+    const blur = Math.abs(parseFloat(parts[2])) || 0;
+    return Math.max(ox, oy) + blur;
+  }
+  if (shadow && typeof shadow === "object") {
+    return (
+      Math.max(Math.abs(shadow.offsetX || 0), Math.abs(shadow.offsetY || 0)) +
+      Math.abs(shadow.blur || 0)
+    );
+  }
+  return 0;
+}
+
+/**
+ * Whether the whole subtree rooted at `node` can be skipped when repainting
+ * only `cull`. Conservative: nodes with transforms or custom painters are
+ * never culled (they can draw anywhere), the box is expanded by shadow
+ * bleed + slack, and a node with children is only culled when it clips them.
+ */
+function canCullSubtree(node: VirtualNode, cull: Rectangle): boolean {
+  const layout = node.layout!;
+  if (hasTransformProps(node.props)) return false;
+  if (customPainters.has(node.type.toLowerCase())) return false;
+
+  const shadow = node.props.shadow || node.props.boxShadow || node.props.textShadow;
+  const margin = CULL_SLACK + (shadow ? shadowExtent(shadow) : 0);
+  if (
+    layout.x - margin < cull.x + cull.width &&
+    layout.x + layout.width + margin > cull.x &&
+    layout.y - margin < cull.y + cull.height &&
+    layout.y + layout.height + margin > cull.y
+  ) {
+    return false;
+  }
+
+  if (node.children.length === 0) return true;
+  const overflow = node.props.overflow;
+  return overflow === "hidden" || overflow === "scroll" || overflow === "auto";
+}
+
+/**
+ * Paint a virtual node and its children.
+ *
+ * `cull` (optional) is the dirty region being repainted — subtrees that
+ * provably cannot reach it are skipped entirely.
+ */
+export function paintNode(
+  ctx: CanvasRenderingContext2D,
+  node: VirtualNode,
+  cull?: Rectangle | null,
+): void {
   if (!node.visible || !node.layout) return;
+  if (cull && canCullSubtree(node, cull)) return;
 
-  ctx.save();
+  const type = node.type.toLowerCase();
+  const customPainter = customPainters.get(type);
+  const needsTransform = hasTransformProps(node.props);
+  const needsSave =
+    customPainter !== undefined ||
+    needsTransform ||
+    node.opacity < 1 ||
+    STATE_UNSAFE_TYPES.has(type);
 
-  // Apply transforms
-  applyTransforms(ctx, node);
+  if (needsSave) {
+    ctx.save();
 
-  // Apply opacity
-  if (node.opacity < 1) {
-    ctx.globalAlpha = node.opacity;
+    // Apply transforms
+    if (needsTransform) {
+      applyTransforms(ctx, node);
+    }
+
+    // Apply opacity
+    if (node.opacity < 1) {
+      ctx.globalAlpha = node.opacity;
+    }
   }
 
   // Check for custom painter
-  const customPainter = customPainters.get(node.type.toLowerCase());
   if (customPainter) {
     customPainter(ctx, node);
     ctx.restore();
@@ -57,7 +220,7 @@ export function paintNode(ctx: CanvasRenderingContext2D, node: VirtualNode): voi
   }
 
   // Default painting based on type
-  switch (node.type.toLowerCase()) {
+  switch (type) {
     case "column":
     case "row":
     case "stack":
@@ -70,6 +233,7 @@ export function paintNode(ctx: CanvasRenderingContext2D, node: VirtualNode): voi
       paintButton(ctx, node);
       break;
     case "input":
+    case "textarea":
       paintInput(ctx, node);
       break;
     case "image":
@@ -127,14 +291,26 @@ export function paintNode(ctx: CanvasRenderingContext2D, node: VirtualNode): voi
       paintContainer(ctx, node);
   }
 
-  ctx.restore();
+  if (needsSave) {
+    ctx.restore();
+  }
 
   // Apply scroll translation for scrollable containers
   const ss = node.scrollState;
+  let childCull = cull ?? null;
   if (ss && (ss.scrollX !== 0 || ss.scrollY !== 0)) {
     ctx.save();
     ctx.translate(-ss.scrollX, -ss.scrollY);
     (node as any)._scrollRestore = true;
+    // Children paint in scrolled space — shift the cull region to match.
+    if (childCull) {
+      childCull = {
+        x: childCull.x + ss.scrollX,
+        y: childCull.y + ss.scrollY,
+        width: childCull.width,
+        height: childCull.height,
+      };
+    }
   }
 
   // Paint children -- use windowed rendering for large scrollable lists
@@ -158,14 +334,21 @@ export function paintNode(ctx: CanvasRenderingContext2D, node: VirtualNode): voi
   // tree (Story uses this for its close button) gets covered by the
   // following in-flow Image. Push absolute kids to the end so they land
   // on top — same effect as `z-index: auto` painting absolute after flow.
-  const flowKids: VirtualNode[] = [];
-  const overlayKids: VirtualNode[] = [];
+  let hasOverlays = false;
   for (const child of childrenToPaint) {
-    if (child.props.position === "absolute") overlayKids.push(child);
-    else flowKids.push(child);
+    if (child.props.position === "absolute") {
+      hasOverlays = true;
+      continue;
+    }
+    paintNode(ctx, child, childCull);
   }
-  for (const child of flowKids) paintNode(ctx, child);
-  for (const child of overlayKids) paintNode(ctx, child);
+  if (hasOverlays) {
+    for (const child of childrenToPaint) {
+      if (child.props.position === "absolute") {
+        paintNode(ctx, child, childCull);
+      }
+    }
+  }
 
   // Undo scroll translation before drawing scrollbars
   if ((node as any)._scrollRestore) {
@@ -299,14 +482,15 @@ function paintText(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   if (letterSpacing !== 0) {
     // Manual letter spacing
     ctx.fillStyle = color;
-    ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    const font = `${fontWeight} ${fontSize}px ${fontFamily}`;
+    ctx.font = font;
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
 
     let currentX = x;
     for (let i = 0; i < text.length; i++) {
       ctx.fillText(text[i], currentX, y);
-      currentX += ctx.measureText(text[i]).width;
+      currentX += charAdvance(ctx, font, text[i]);
       // Add letter spacing after each character except the last
       if (i < text.length - 1) {
         currentX += letterSpacing;
@@ -350,11 +534,18 @@ function paintText(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
       textOverflow
     );
 
-    // Text decoration (need to set font again for measurement)
+    // Text decoration — reuse the wrapped metrics renderText just resolved
+    // (cache hit) instead of re-shaping the raw, unwrapped string.
     if (textDecoration !== "none") {
-      ctx.font = `${fontWeight} ${fontSize}px ${fontFamily}`;
-      const textWidth = ctx.measureText(text).width;
-      applyTextDecoration(ctx, textDecoration, color, x, y, textWidth, fontSize);
+      const metrics = measureText(
+        ctx,
+        text,
+        { fontSize, fontWeight, fontFamily, lineHeight },
+        layout.contentWidth,
+        maxLines,
+        textOverflow,
+      );
+      applyTextDecoration(ctx, textDecoration, color, x, y, metrics.width, fontSize);
     }
   }
 
@@ -423,6 +614,18 @@ function paintButton(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     ctx.stroke();
   }
 
+  // Keyboard focus ring. Focus lives on the node's (unrendered) mirror
+  // element in the canvas fallback content, so the UA can't draw a ring at
+  // the painted box — paint one so keyboard users can see where they are.
+  if (node.focused) {
+    ctx.save();
+    ctx.strokeStyle = props.focusRingColor || "#007bff";
+    ctx.lineWidth = 2;
+    drawRoundedRect(ctx, x - 2, y - 2, width + 4, height + 4, radius + 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // Paint children (typically Text)
   for (const child of node.children) {
     paintNode(ctx, child);
@@ -455,24 +658,76 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   drawRoundedRect(ctx, x, y, width, height, radius);
   ctx.stroke();
 
-  // Input value text
-  const value = props.value || "";
+  const isSingleLine = node.type.toLowerCase() === "input";
+
+  // While editing, the mirror element (via TextEditController) is the value
+  // source — paint stays ahead of the engine's SetProp echo.
+  const edit = activeTextEditor?.getStateFor(node) ?? null;
+
+  const value = edit ? edit.value : (props.value || "");
   const placeholder = props.placeholder || "";
   const text = value || placeholder;
   const textColor = value ? (props.color || "#000000") : "#999999";
 
-  if (text) {
-    const fontSize = cssLengthToPx(props.fontSize) ?? 16;
-    const fontWeight = props.fontWeight || "normal";
-    const fontFamily = props.fontFamily || "system-ui, sans-serif";
-    const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
+  const fontSize = cssLengthToPx(props.fontSize) ?? 16;
+  const fontWeight = props.fontWeight || "normal";
+  const fontFamily = props.fontFamily || "system-ui, sans-serif";
+  const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
 
+  if (!edit) {
+    if (text) {
+      renderText(
+        ctx,
+        text,
+        layout.x + layout.contentX,
+        layout.y + layout.contentY,
+        layout.contentWidth,
+        layout.contentHeight,
+        {
+          color: textColor,
+          fontSize,
+          fontWeight,
+          fontFamily,
+          textAlign: "left",
+          verticalAlign: isSingleLine ? "middle" : "top",
+          lineHeight,
+        }
+      );
+    }
+    return;
+  }
+
+  // ---- Editing visuals: clip → selection highlight → text → composition
+  // ---- underline → caret. Geometry comes from the edit controller so
+  // ---- pointer mapping and painting share identical math (incl. scrollX).
+  ctx.save();
+  drawRoundedRect(ctx, x, y, width, height, radius);
+  ctx.clip();
+
+  const g = activeTextEditor!.geometry(
+    layout.x + layout.contentX - edit.scrollX,
+    layout.y + layout.contentY,
+  );
+
+  // Selection highlight behind the text
+  if (edit.selStart !== edit.selEnd) {
+    const from = Math.min(edit.selStart, edit.selEnd);
+    const to = Math.max(edit.selStart, edit.selEnd);
+    ctx.fillStyle = SELECTION_HIGHLIGHT_COLOR;
+    for (const r of rangeToRects(ctx, g, from, to)) {
+      ctx.fillRect(r.x, r.y, r.width, r.height);
+    }
+  }
+
+  if (text) {
     renderText(
       ctx,
-      text,
-      layout.x + layout.contentX,
+      value || placeholder,
+      g.contentX,
       layout.y + layout.contentY,
-      layout.contentWidth,
+      // Single-line inputs never wrap — the clip + scrollX pan handle
+      // overflow. Textareas wrap at content width like static paint.
+      isSingleLine ? Number.POSITIVE_INFINITY : layout.contentWidth,
       layout.contentHeight,
       {
         color: textColor,
@@ -480,11 +735,34 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
         fontWeight,
         fontFamily,
         textAlign: "left",
-        verticalAlign: "middle",
+        verticalAlign: isSingleLine ? "middle" : "top",
         lineHeight,
       }
     );
   }
+
+  // IME composition underline (dashed, under the composing range)
+  if (edit.compStart !== null && edit.compEnd !== null && edit.compEnd > edit.compStart) {
+    ctx.strokeStyle = props.color || "#000000";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    for (const r of rangeToRects(ctx, g, edit.compStart, edit.compEnd)) {
+      ctx.beginPath();
+      ctx.moveTo(r.x, r.y + r.height - 2);
+      ctx.lineTo(r.x + r.width, r.y + r.height - 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  // Caret (hidden while a range is selected, blinks via the edit timer)
+  if (edit.caretVisible && edit.selStart === edit.selEnd) {
+    const caret = offsetToCaretRect(ctx, g, edit.selEnd);
+    ctx.fillStyle = props.color || "#000000";
+    ctx.fillRect(caret.x, caret.y + 1, 1.5, caret.height - 2);
+  }
+
+  ctx.restore();
 }
 
 /**
@@ -648,8 +926,10 @@ function paintImage(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
       imagePending.delete(src);
       imageFailCache.delete(src);
       evictMap(imageCache, MAX_IMAGE_CACHE_SIZE);
-      // Request a repaint so the loaded image is drawn
-      canvas.dispatchEvent(new CustomEvent("hypen:redraw"));
+      // Request a repaint so the loaded image is drawn. `layout: true`
+      // because the decoded intrinsic size can change the image's box
+      // (see getImageNaturalAspect in layout.ts).
+      canvas.dispatchEvent(new CustomEvent("hypen:redraw", { detail: { layout: true } }));
     };
     img.onerror = () => {
       imageInFlight.delete(src);
@@ -793,6 +1073,15 @@ function resolveBackgroundPaint(props: Record<string, any>): string | undefined 
   return undefined;
 }
 
+/**
+ * Parsed gradients keyed by (source string, box geometry). CanvasGradient
+ * objects are not bound to a specific context, so identical fills across
+ * frames — the common case, since layout geometry is stable — skip the
+ * regex parse and createLinearGradient/createRadialGradient entirely.
+ */
+const gradientCache = new Map<string, CanvasGradient | string>();
+const MAX_GRADIENT_CACHE_SIZE = 256;
+
 function resolveCanvasPaint(
   ctx: CanvasRenderingContext2D,
   paint: string,
@@ -801,7 +1090,15 @@ function resolveCanvasPaint(
   width: number,
   height: number,
 ): CanvasGradient | string {
-  return paint.includes("gradient(") ? parseGradient(ctx, paint, x, y, width, height) : paint;
+  if (!paint.includes("gradient(")) return paint;
+  const key = `${paint}|${x}|${y}|${width}|${height}`;
+  let resolved = gradientCache.get(key);
+  if (resolved === undefined) {
+    resolved = parseGradient(ctx, paint, x, y, width, height);
+    gradientCache.set(key, resolved);
+    evictMap(gradientCache, MAX_GRADIENT_CACHE_SIZE);
+  }
+  return resolved;
 }
 
 /**
@@ -1268,7 +1565,7 @@ function paintSlider(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
 
   // Support gradient fills
   if (typeof fillColor === "string" && fillColor.includes("gradient")) {
-    ctx.fillStyle = parseGradient(ctx, fillColor, x, trackY, fillWidth, trackHeight);
+    ctx.fillStyle = resolveCanvasPaint(ctx, fillColor, x, trackY, fillWidth, trackHeight);
   } else {
     ctx.fillStyle = fillColor;
   }
@@ -1323,7 +1620,7 @@ function paintProgress(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     // Support gradient fills
     const fillColor = props.fillColor || props.color || "#007bff";
     if (typeof fillColor === "string" && fillColor.includes("gradient")) {
-      ctx.fillStyle = parseGradient(ctx, fillColor, x, y, fillWidth, height);
+      ctx.fillStyle = resolveCanvasPaint(ctx, fillColor, x, y, fillWidth, height);
     } else {
       ctx.fillStyle = fillColor;
     }

@@ -101,6 +101,22 @@ HypenElementView (recursive)
          SwiftUI View
 ```
 
+### Transport: compression is not ours to control
+
+`RemoteEngine` uses `URLSessionWebSocketTask`. URLSession offers
+`Sec-WebSocket-Extensions: permessage-deflate` in the handshake on its own and
+inflates compressed frames transparently, with **no public API to enable,
+disable, or parameterise it** — no property on the task, and the `Sec-*`
+handshake headers cannot be set on the `URLRequest`.
+
+So `RemoteEngineConfig` intentionally has no `compression` option (the other
+Hypen client SDKs do have one). Do not add one — there is nothing to wire it
+to. Whether a connection is compressed is decided by the server: enabled Hypen
+servers compress automatically, `hypen-server-swift` declines and the
+connection runs uncompressed. Switching to a third-party WebSocket client to
+regain control is out of scope. See the note in
+`RemoteEngine.establishConnection()`.
+
 ### Key Protocols
 
 ```swift

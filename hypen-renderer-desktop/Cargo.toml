@@ -20,9 +20,9 @@ default = []
 mimalloc = ["dep:mimalloc"]
 
 [dependencies]
-hypen-engine = { version = "0.5.0", path = "../hypen-engine-rs" }
-hypen-parser = { version = "0.5.0", path = "../parser" }
-hypen-server = { version = "0.5.0", path = "../hypen-sdk-rs" }
+hypen-engine = { version = "0.6.2", path = "../hypen-engine-rs" }
+hypen-parser = { version = "0.6.2", path = "../parser" }
+hypen-server = { version = "0.6.2", path = "../hypen-sdk-rs" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

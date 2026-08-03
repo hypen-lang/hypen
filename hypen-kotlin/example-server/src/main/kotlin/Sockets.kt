@@ -5,6 +5,7 @@ import io.ktor.server.routing.*
 import io.ktor.server.websocket.*
 import io.ktor.websocket.*
 import kotlinx.serialization.json.*
+import java.util.zip.Deflater
 import kotlin.time.Duration.Companion.seconds
 
 fun Application.configureSockets() {
@@ -13,6 +14,27 @@ fun Application.configureSockets() {
         timeout = 15.seconds
         maxFrameSize = Long.MAX_VALUE
         masking = false
+
+        // Hypen streams JSON patch batches, which deflate very well.
+        // permessage-deflate (RFC 7692) is negotiated per-connection, so
+        // clients that don't advertise the extension keep getting raw
+        // frames — enabling it is safe for every client.
+        //
+        // HypenServer is transport-agnostic and never installs this
+        // plugin itself, so it can't apply its own `compression` setting.
+        // Reading the flag here is what makes `compression = false` in
+        // the HypenServer { ... } block mean anything.
+        if (hypenServer.compression) {
+            extensions {
+                install(WebSocketDeflateExtension) {
+                    compressionLevel = Deflater.DEFAULT_COMPRESSION
+                    // Tiny frames (acks, single setProp patches) cost more
+                    // in deflate overhead than they save, so only compress
+                    // payloads past ~1 KiB.
+                    compressIfBiggerThan(bytes = 1024)
+                }
+            }
+        }
     }
 
     routing {

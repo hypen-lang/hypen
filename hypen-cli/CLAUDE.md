@@ -53,12 +53,33 @@ bun bin/hypen.ts studio           # Test Studio IDE
 | `hypen build` | Production build |
 | `hypen generate` | Generate `.hypen/components.generated.ts` |
 | `hypen studio` | Launch Studio IDE |
+| `hypen test` | Launch Studio directly into Test Mode; boots a RemoteServer for the entry module when run inside a project, opens in connect-only mode otherwise |
 | `hypen run android\|ios` | Run on native device/simulator |
 
 ## Architecture
 
 ### Command Flow
-`bin/hypen.ts` → dispatches to handler → loads config (`hypen.json`) → executes
+`bin/hypen.ts` → (first-run onboarding) → dispatches to handler → loads config (`hypen.json`) → executes
+
+### First-Run Onboarding (`src/onboarding.ts`)
+On the first interactive invocation on a machine, the CLI runs a short paged
+tour (Welcome → `dev` → `studio` → `test` → get started) rendered as branded
+cards, advanced by keypress (`q`/Esc to skip). It runs once: a marker is
+written to `~/.hypen/onboarding.json` afterwards. The tour is skipped for
+non-TTY runs (CI, pipes, teleport web sessions), when `CI` or
+`HYPEN_NO_ONBOARDING` is set, and after it's been seen. Set
+`HYPEN_FORCE_ONBOARDING=1` to replay it.
+
+### Init Generators (`src/init/`)
+`hypen init` asks for a language (`promptLanguage`) and module layout
+(`promptModuleLayout`), then dispatches to `typescript.ts` / `go.ts` /
+`kotlin.ts` to scaffold a Counter starter (Router + Home + Counter). SDK
+versions follow each ecosystem's "latest" so they never go stale: TS pins
+`@hypen-space/*` to `"latest"` and runs `bun install`; Go ships a `go.mod`
+without the hypen require and runs `go mod tidy` to pin the latest
+`github.com/hypen-space/core`; Kotlin uses
+`space.hypen:hypen-kotlin:latest.release`, resolved from Maven Central on
+the first `./gradlew` build.
 
 ### Dev Server
 Two implementations maintain feature parity:
@@ -88,3 +109,18 @@ The CLI reads `hypen.json` (the only supported config format — `.ts` was remov
   "outDir": "dist"
 }
 ```
+
+Server-based projects (modules registered programmatically in the entry
+script, no components directory) use a script path as `entry` — the file
+extension is how `dev`/`test`/Studio detect the layout:
+```json
+{
+  "entry": "./src/app.ts",
+  "port": 3000,
+  "outDir": "dist"
+}
+```
+For these, `hypen dev` runs the entry with `bun --hot` (passing `PORT`),
+`hypen build` bundles it to `<outDir>/main.js` with dependencies external,
+and `hypen test`/Studio open in connect-only mode pointing at the running
+server.

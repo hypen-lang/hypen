@@ -91,6 +91,11 @@ func NewRemoteServer() *RemoteServer {
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins
 			},
+			// permessage-deflate on by default; negotiated per
+			// connection, so non-supporting clients fall back
+			// automatically. Opt out via Config or
+			// DisableCompression().
+			EnableCompression: true,
 		},
 		done: make(chan struct{}),
 	}
@@ -374,6 +379,10 @@ func (s *RemoteServer) Config(config ServerConfig) *RemoteServer {
 	if config.Hostname != "" {
 		s.config.Hostname = config.Hostname
 	}
+	// Unlike Port/Hostname there is no "unset" bool, so this is assigned
+	// unconditionally: the zero value already means "compression on".
+	s.config.DisableCompression = config.DisableCompression
+	s.upgrader.EnableCompression = !config.DisableCompression
 	return s
 }
 
@@ -456,6 +465,42 @@ func (s *RemoteServer) DisableAutoRouter() *RemoteServer {
 	defer s.mu.Unlock()
 	s.autoRouter = false
 	return s
+}
+
+// DisableCompression turns off WebSocket permessage-deflate (RFC 7692),
+// which every upgrade path in this server otherwise offers by default.
+// Equivalent to Config(ServerConfig{DisableCompression: true}); provided
+// as a builder for symmetry with DisableAutoRouter.
+//
+// Reach for this when payloads are already compressed (or tiny enough
+// that per-message deflate costs more CPU than it saves bandwidth).
+func (s *RemoteServer) DisableCompression() *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.config.DisableCompression = true
+	s.upgrader.EnableCompression = false
+	return s
+}
+
+// CompressionEnabled reports whether this server offers permessage-deflate
+// during the WebSocket handshake. True unless compression was explicitly
+// disabled. Note that this is what the server *offers* — the extension is
+// only actually used on connections whose client advertises it too.
+func (s *RemoteServer) CompressionEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return !s.config.DisableCompression
+}
+
+// Upgrader returns a copy of the websocket.Upgrader this server uses for
+// its built-in Listen() path, already carrying the configured
+// compression and origin settings. Hosts wiring Hypen into their own
+// HTTP stack should upgrade with this (rather than a hand-rolled
+// Upgrader) so custom endpoints honour the same configuration.
+func (s *RemoteServer) Upgrader() websocket.Upgrader {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.upgrader
 }
 
 // OnSessionCreate registers a callback that fires the instant a
@@ -585,11 +630,18 @@ func (s *RemoteServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 // request, wraps the connection as a SessionTransport, creates a
 // RemoteSession, and starts the message-pumping goroutine.
 func (s *RemoteServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	conn, err := s.upgrader.Upgrade(w, r, nil)
+	// Snapshot under the lock: Config()/DisableCompression() may mutate
+	// the upgrader while connections are being served.
+	up := s.Upgrader()
+	conn, err := up.Upgrade(w, r, nil)
 	if err != nil {
 		logServer.Error("WebSocket upgrade failed: %v", err)
 		return
 	}
+	logServer.Debug(
+		"WebSocket upgraded (compression offered: %v, client extensions: %q)",
+		up.EnableCompression, r.Header.Get("Sec-WebSocket-Extensions"),
+	)
 	s.handleOpen(conn)
 	go s.readMessages(conn)
 }
@@ -597,6 +649,10 @@ func (s *RemoteServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // handleOpen wraps a freshly-upgraded gorilla connection as a session.
 // Kept unexported; exposed here (same-package) so tests that drive
 // hand-rolled websocket endpoints can continue to use it.
+//
+// Compression is a property of the already-completed handshake, so a
+// caller upgrading on its own endpoint controls it via its own Upgrader
+// — use RemoteServer.Upgrader() to inherit this server's settings.
 func (s *RemoteServer) handleOpen(conn *websocket.Conn) {
 	transport := NewGorillaWebSocketTransport(conn)
 	sess, err := s.CreateSession(transport, WithSocketHandle(conn))
@@ -654,6 +710,8 @@ func corePatchesToRemote(corePatches []core.Patch) []Patch {
 			ParentID:    p.ParentID,
 			BeforeID:    p.BeforeID,
 			EventName:   p.EventName,
+			Transition:  p.Transition,
+			Spec:        p.Spec,
 		}
 	}
 	return out

@@ -1,5 +1,5 @@
 use super::tree::ResolvedProps;
-use crate::ir::NodeId;
+use crate::ir::{NodeId, Semantics};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slotmap::Key;
@@ -26,6 +26,12 @@ mod resolved_props_serde {
         use serde::Deserialize;
         IndexMap::deserialize(deserializer).map(Arc::new)
     }
+}
+
+/// Serde helper: skip a boolean flag when `false` so patches that don't set
+/// it stay byte-identical to the pre-flag wire format.
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Stable, compact serialization for NodeId.
@@ -97,6 +103,30 @@ pub enum Patch {
         /// Initial properties. Key `"0"` is the positional text content.
         #[serde(with = "resolved_props_serde")]
         props: ResolvedProps,
+        /// Accessibility semantics derived for this node, if any. Omitted from
+        /// the wire entirely when `None`, so the format is unchanged for nodes
+        /// with no derivable semantics. Renderers translate it to their native
+        /// accessibility API (ARIA, Compose semantics, SwiftUI traits).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        semantics: Option<Semantics>,
+    },
+
+    /// Replace a node's accessibility semantics after a reactive change.
+    ///
+    /// Emitted by the reconciler when a dirty re-render produces a different
+    /// resolved [`Semantics`] than the node last had — a templated accessible
+    /// name (`Button("@{state.label}")`), bound self-state
+    /// (`.expanded(@state.open)`), or bound `checked` whose source path
+    /// changed. Carries the **complete** block (not a field delta) so the
+    /// renderer re-applies idempotently with the same translation it ran at
+    /// create; a dropped field must clear the corresponding native attribute.
+    /// `semantics: None` means the node lost all derivable a11y → clear
+    /// everything. Static-only trees never produce this patch.
+    #[serde(rename_all = "camelCase")]
+    SetSemantics {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        semantics: Option<Semantics>,
     },
 
     /// Update a single property on an existing node.
@@ -152,8 +182,30 @@ pub enum Patch {
     },
 
     /// Remove a node from the tree and deallocate it.
+    ///
+    /// `transition: true` marks the **root** of a subtree whose node carried
+    /// an `"__anim.exit"` spec in its resolved props: the renderer may play
+    /// the exit animation and finalize the native teardown itself. The
+    /// engine-side node is dead the moment the patch is emitted either way —
+    /// there is no acknowledgement round-trip; the renderer owns the corpse.
+    ///
+    /// # Ordering contract
+    ///
+    /// For an animated subtree the flagged root `Remove` is emitted FIRST,
+    /// followed by its descendants as plain Removes — the renderer must
+    /// learn the subtree is exiting before descendant teardown arrives.
+    /// Descendants are always plain regardless of their own exit specs
+    /// (parent-remove-wins). Non-animated subtrees keep post-order
+    /// (children before parents), byte-identical to the pre-flag protocol.
+    ///
+    /// The field is skipped when `false`, so renderers unaware of the flag
+    /// see an unchanged wire format and snap — graceful degradation.
     #[serde(rename_all = "camelCase")]
-    Remove { id: String },
+    Remove {
+        id: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        transition: bool,
+    },
 
     /// Detach a subtree from its parent without tearing it down.
     ///
@@ -183,17 +235,59 @@ pub enum Patch {
         /// Insert before this sibling, or `null` to append
         before_id: Option<String>,
     },
+
+    /// Batch-scoped animation prelude (Option D cheap subset — transaction-
+    /// scoped animation).
+    ///
+    /// Emitted as the **FIRST** patch of a render cycle whose triggering
+    /// state update carried an animation context (`update_state` /
+    /// `update_state_sparse` with `animation: Some(spec)`). It addresses no
+    /// node — it scopes the *batch*: renderers that understand it animate
+    /// every prop change in the patches that follow using `spec`
+    /// (precedence: batch spec > node `.transition` default > none).
+    ///
+    /// Additive protocol: renderers that don't know the type ignore it and
+    /// snap — the rest of the batch is wire-identical to an unstamped one.
+    /// A cycle that produces no patches emits no prelude either (no stamp
+    /// without patches).
+    ///
+    /// `spec` is always a JSON object by the time it reaches the wire — the
+    /// engine normalizes a bare curve string (`"spring"`) into
+    /// `{"curve": "spring", "duration": 250}` and fills a missing
+    /// `duration` with 250. Unknown fields pass through untouched;
+    /// renderers own interpretation.
+    #[serde(rename_all = "camelCase")]
+    BatchAnimation {
+        /// Animation spec object, e.g. `{"curve": "spring", "duration": 250}`
+        spec: Value,
+    },
 }
 
 impl Patch {
     /// Construct a `Create` patch. `props` must already be an
     /// `Arc`-wrapped resolved-prop map; callers holding a bare
-    /// `IndexMap` wrap it explicitly via `Arc::new(...)`.
-    pub fn create(id: NodeId, element_type: String, props: ResolvedProps) -> Self {
+    /// `IndexMap` wrap it explicitly via `Arc::new(...)`. `semantics` is the
+    /// node's derived accessibility block, or `None` when it has none.
+    pub fn create(
+        id: NodeId,
+        element_type: String,
+        props: ResolvedProps,
+        semantics: Option<Semantics>,
+    ) -> Self {
         Self::Create {
             id: node_id_str(id),
             element_type,
             props,
+            semantics,
+        }
+    }
+
+    /// Construct a `SetSemantics` patch carrying the node's full updated
+    /// (already-resolved) semantics block, or `None` to clear.
+    pub fn set_semantics(id: NodeId, semantics: Option<Semantics>) -> Self {
+        Self::SetSemantics {
+            id: node_id_str(id),
+            semantics,
         }
     }
 
@@ -247,6 +341,16 @@ impl Patch {
     pub fn remove(id: NodeId) -> Self {
         Self::Remove {
             id: node_id_str(id),
+            transition: false,
+        }
+    }
+
+    /// Construct a `Remove` flagged with `transition: true` — the root of an
+    /// exiting subtree. See the ordering contract on [`Patch::Remove`].
+    pub fn remove_with_transition(id: NodeId) -> Self {
+        Self::Remove {
+            id: node_id_str(id),
+            transition: true,
         }
     }
 
@@ -269,6 +373,13 @@ impl Patch {
             id: node_id_str(id),
             before_id: before_id.map(node_id_str),
         }
+    }
+
+    /// Construct the batch-scoped animation prelude carrying an
+    /// already-normalized spec object. See [`Patch::BatchAnimation`] for
+    /// the batch-stamping contract.
+    pub fn batch_animation(spec: Value) -> Self {
+        Self::BatchAnimation { spec }
     }
 
     /// Emit an `Attach` patch targeting the `"root"` container. Used when

@@ -44,6 +44,14 @@ public struct HypenModifier {
 
     public var backgroundGradient: AnyShapeStyle?
 
+    /// Parsed CSS `background` / `background-image` layers.
+    ///
+    /// Kept separate from `backgroundGradient` because a CSS value can stack
+    /// an image UNDER a gradient (the home-screen wallpaper is exactly that:
+    /// a darkening gradient over a photo), which a single shape style can't
+    /// express.
+    public var cssBackground: CssBackground.Layers?
+
     // MARK: - Background Image (for component-level handling)
 
     public var backgroundImageUrl: String?
@@ -173,6 +181,7 @@ public struct HypenModifier {
 
         // Gradient override (Optional)
         if let grad = override.backgroundGradient { result.backgroundGradient = grad }
+        if let css = override.cssBackground { result.cssBackground = css }
 
         // Border overrides
         if override.explicitlySetProperties.contains("borderWidth") { result.borderWidth = override.borderWidth }
@@ -262,7 +271,7 @@ public struct HypenModifier {
     }
 
     public var hasGradientBackground: Bool {
-        backgroundGradient != nil
+        backgroundGradient != nil || !(cssBackground?.gradients.isEmpty ?? true)
     }
 }
 
@@ -440,7 +449,20 @@ extension View {
 
     @ViewBuilder
     func backgroundStyle(_ modifier: HypenModifier) -> some View {
-        if let gradient = modifier.backgroundGradient {
+        if let layers = modifier.cssBackground {
+            // `backgroundColor` is passed as the bottom layer, not dropped:
+            // an element can declare the `background-color` longhand AND a
+            // `background-image`, and CSS composites the colour underneath.
+            // Selecting the CSS layers alone let transparent gradient stops
+            // and image pixels expose the parent instead of that colour.
+            self.background(
+                CssBackgroundView(
+                    layers: layers,
+                    baseColor: modifier.backgroundColor,
+                    cornerRadius: modifier.cornerRadius
+                )
+            )
+        } else if let gradient = modifier.backgroundGradient {
             self.background(
                 RoundedRectangle(cornerRadius: modifier.cornerRadius)
                     .fill(gradient)

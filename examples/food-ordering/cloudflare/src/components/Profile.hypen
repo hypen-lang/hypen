@@ -1,0 +1,126 @@
+Column {
+    Row {
+        Text("Profile")
+            .tw("text-lg font-bold flex-1")
+    }
+    .tw("px-4 py-3.5 bg-white border-b border-gray-100 items-center")
+
+    Column {
+        Row {
+            Image(src: "@{state.currentUser.avatarUrl}")
+                .tw("w-16 h-16 rounded-full")
+
+            Column {
+                Text("@{state.currentUser.name}")
+                    .tw("text-base font-bold")
+                Text("@{state.currentUser.email}")
+                    .tw("text-sm text-gray-500 mt-0.5")
+                Text("@{state.currentUser.phone}")
+                    .tw("text-sm text-gray-500 mt-0.5")
+            }
+            .tw("pl-4 flex-1")
+        }
+        .tw("items-center")
+    }
+    .tw("bg-white px-4 py-4 border-b border-gray-100")
+
+    Column {
+        Row {
+            Column {
+                Text("@{state.totalOrders}")
+                    .tw("text-lg font-bold text-center")
+                Text("Orders")
+                    .tw("text-xs text-gray-500 text-center")
+            }
+            .tw("flex-1 items-center")
+
+            Column {}
+                .tw("w-px h-8 bg-gray-200")
+
+            Column {
+                Text("$@{state.totalSpent}")
+                    .tw("text-lg font-bold text-center")
+                Text("Total spent")
+                    .tw("text-xs text-gray-500 text-center")
+            }
+            .tw("flex-1 items-center")
+
+            Column {}
+                .tw("w-px h-8 bg-gray-200")
+
+            Column {
+                Text("@{state.favoriteCount}")
+                    .tw("text-lg font-bold text-center")
+                Text("Favorites")
+                    .tw("text-xs text-gray-500 text-center")
+            }
+            .tw("flex-1 items-center")
+        }
+        .tw("items-center")
+    }
+    .tw("bg-white px-4 py-5 mt-2 border-b border-gray-100 border-t")
+
+    Column {
+        Button {
+            Row {
+                Icon(@resources.map-pin)
+                    .size(20)
+                    .color("#f97316")
+                Column {
+                    Text("Delivery address")
+                        .tw("text-sm font-semibold text-left")
+                    Text("@{state.currentUser.address}")
+                        .tw("text-xs text-gray-500 mt-0.5 text-left")
+                }
+                .tw("flex-1 pl-3 items-start")
+                Icon(@resources.chevron-right)
+                    .size(18)
+                    .color("#9ca3af")
+            }
+            .tw("items-center")
+        }
+        .tw("bg-white rounded-2xl border border-gray-100 px-4 py-4 mb-2.5 w-full shadow-sm")
+        .opacity({ default: 1, active: 0.75 })
+        .transition(160, easeOut)
+        .onClick(@actions.editAddress)
+
+        Button {
+            Row {
+                Icon(@resources.receipt)
+                    .size(20)
+                    .color("#f97316")
+                Text("Order history")
+                    .tw("text-sm font-semibold flex-1 pl-3 text-left")
+                Icon(@resources.chevron-right)
+                    .size(18)
+                    .color("#9ca3af")
+            }
+            .tw("items-center")
+        }
+        .tw("bg-white rounded-2xl border border-gray-100 px-4 py-4 mb-2.5 w-full shadow-sm")
+        .opacity({ default: 1, active: 0.75 })
+        .transition(160, easeOut)
+        .onClick(@router.push, to: "/orders")
+
+        Button {
+            Row {
+                Icon(@resources.heart)
+                    .size(20)
+                    .color("#f97316")
+                Text("Favorite restaurants")
+                    .tw("text-sm font-semibold flex-1 pl-3 text-left")
+                Icon(@resources.chevron-right)
+                    .size(18)
+                    .color("#9ca3af")
+            }
+            .tw("items-center")
+        }
+        .tw("bg-white rounded-2xl border border-gray-100 px-4 py-4 mb-2.5 w-full shadow-sm")
+        .opacity({ default: 1, active: 0.75 })
+        .transition(160, easeOut)
+        .onClick(@actions.openFavorites)
+    }
+    .tw("px-4 py-4")
+}
+.scrollable(true)
+.tw("flex-1 w-full bg-gray-50")

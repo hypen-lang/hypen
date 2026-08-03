@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "parse-plain", "description": "Plain key: only an arg suffix.", "function": "parse_prop_key", "input": { "key": "padding.0" }, "expected": { "base": "padding", "breakpoint": null, "state": null, "arg": "0" } }

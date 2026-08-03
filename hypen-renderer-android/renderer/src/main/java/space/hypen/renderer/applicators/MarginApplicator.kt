@@ -1,6 +1,5 @@
 package space.hypen.renderer.applicators
 
-import androidx.compose.foundation.layout.padding
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
@@ -18,10 +17,10 @@ class MarginApplicator : ApplicatorHandler {
         context: ApplicatorContext,
     ): Modifier =
         when (value) {
-            is Number -> modifier.padding(value.toFloat().dp)
+            is Number -> modifier.cssMargin(value.toFloat().dp)
             is String -> {
                 val dp = parseCssUnit(value)
-                if (dp != null) modifier.padding(dp) else modifier
+                if (dp != null) modifier.cssMargin(dp) else modifier
             }
             is Map<*, *> -> applyFromMap(modifier, value)
             else -> modifier
@@ -35,7 +34,7 @@ class MarginApplicator : ApplicatorHandler {
         val positional = collectPositional(map)
         if (positional.isNotEmpty()) {
             val edges = edgesFromPositional(positional)
-            return modifier.padding(
+            return modifier.cssMargin(
                 start = edges.start,
                 top = edges.top,
                 end = edges.end,
@@ -60,7 +59,7 @@ class MarginApplicator : ApplicatorHandler {
             parseDp(map["bottom"])
                 ?: parseDp(map["vertical"])
 
-        return modifier.padding(
+        return modifier.cssMargin(
             start = start ?: 0.dp,
             top = top ?: 0.dp,
             end = end ?: 0.dp,
@@ -75,7 +74,7 @@ class MarginTopApplicator : ApplicatorHandler {
     override val name: String = "marginTop"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
-        return modifier.padding(top = dp)
+        return modifier.cssMargin(top = dp)
     }
 }
 
@@ -83,7 +82,7 @@ class MarginBottomApplicator : ApplicatorHandler {
     override val name: String = "marginBottom"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
-        return modifier.padding(bottom = dp)
+        return modifier.cssMargin(bottom = dp)
     }
 }
 
@@ -91,7 +90,7 @@ class MarginLeftApplicator : ApplicatorHandler {
     override val name: String = "marginLeft"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
-        return modifier.padding(start = dp)
+        return modifier.cssMargin(start = dp)
     }
 }
 
@@ -99,7 +98,7 @@ class MarginRightApplicator : ApplicatorHandler {
     override val name: String = "marginRight"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
-        return modifier.padding(end = dp)
+        return modifier.cssMargin(end = dp)
     }
 }
 
@@ -107,7 +106,7 @@ class MarginHorizontalApplicator : ApplicatorHandler {
     override val name: String = "marginHorizontal"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
-        return modifier.padding(start = dp, end = dp)
+        return modifier.cssMargin(start = dp, end = dp)
     }
 }
 
@@ -115,6 +114,6 @@ class MarginVerticalApplicator : ApplicatorHandler {
     override val name: String = "marginVertical"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
-        return modifier.padding(top = dp, bottom = dp)
+        return modifier.cssMargin(top = dp, bottom = dp)
     }
 }

@@ -7,7 +7,10 @@ use crate::{
     ir::{NodeId, Value},
     lifecycle::ModuleInstance,
     reactive::{DependencyGraph, Scheduler},
-    reconcile::{evaluate_binding, reconcile_ir_node_impl, InstanceTree, Patch, ReconcileCtx},
+    reconcile::{
+        diff::is_engine_internal_prop, emit_semantics_delta, evaluate_binding,
+        reconcile_ir_node_impl, InstanceTree, Patch, ReconcileCtx,
+    },
 };
 
 /// Render only dirty nodes (optimized for state changes)
@@ -143,19 +146,36 @@ pub fn render_dirty_nodes_full(
 
             // Compare and generate patches only for changed props. Deref
             // the Arc<IndexMap> explicitly to get a `&IndexMap` iterator.
+            // Engine-internal carriers (hoisted `__a11yName`) never emit —
+            // their change reaches renderers via SetSemantics below.
             if let (Some(old), Some(node)) = (old_props, tree.get(node_id)) {
                 for (key, new_value) in node.props.iter() {
+                    if is_engine_internal_prop(key) {
+                        continue;
+                    }
                     if old.get(key.as_str()) != Some(new_value) {
                         patches.push(Patch::set_prop(node_id, key.clone(), new_value.clone()));
                     }
                 }
                 // Remove props that no longer exist
                 for key in old.keys() {
+                    if is_engine_internal_prop(key) {
+                        continue;
+                    }
                     if !node.props.contains_key(key.as_str()) {
                         patches.push(Patch::remove_prop(node_id, key.clone()));
                     }
                 }
             }
+
+            // A reactive prop change can also change the node's *resolved*
+            // semantics (templated accessible name, bound self-state /
+            // checked). Re-resolve against the fresh props and emit a
+            // SetSemantics when the renderer's block went stale — this is
+            // what keeps Canvas/native accessibility live after first paint
+            // (DOM mostly re-derives from content, but other renderers read
+            // the block verbatim).
+            emit_semantics_delta(tree, node_id, &mut patches);
         }
     }
 
@@ -310,6 +330,65 @@ mod tests {
         assert!(
             set_prop_count > 0,
             "Should have SetProp patches for changed state"
+        );
+    }
+
+    #[test]
+    fn dirty_node_with_templated_name_emits_set_semantics() {
+        use crate::ir::{Semantics, Value};
+        use crate::reconcile::resolve_props;
+
+        let mut scheduler = Scheduler::new();
+        let mut tree = InstanceTree::new();
+
+        let module = Module::new("TestModule");
+        let mut instance = ModuleInstance::new(module, json!({"label": "Save"}));
+
+        // A Button whose accessible name rides the templated `0` prop.
+        let mut element = Element::new("Button");
+        element.props.insert(
+            "0".to_string(),
+            Value::Binding(Binding::state(vec!["label".to_string()])),
+        );
+        element.semantics = Semantics::derive(&element);
+        let node_id = tree.create_node(&element, instance.get_state());
+        // Simulate the create-time emit: resolve + record last_semantics,
+        // exactly as create_element_node does.
+        if let Some(node) = tree.get_mut(node_id) {
+            node.props = resolve_props(&node.raw_props, instance.get_state());
+            node.last_semantics =
+                crate::reconcile::diff::resolve_semantics(&node.semantics, &node.props);
+            assert_eq!(
+                node.last_semantics.as_ref().and_then(|s| s.name.as_deref()),
+                Some("Save")
+            );
+        }
+
+        // The bound path changes → dirty render emits SetSemantics with the
+        // freshly-resolved name.
+        instance.update_state(json!({"label": "Submit"}));
+        scheduler.mark_dirty(node_id);
+        let patches = render_dirty_nodes(&mut scheduler, &mut tree, Some(&instance));
+
+        let blocks: Vec<_> = patches
+            .iter()
+            .filter_map(|p| match p {
+                Patch::SetSemantics { semantics, .. } => Some(semantics.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blocks.len(), 1, "got {patches:?}");
+        assert_eq!(
+            blocks[0].as_ref().and_then(|s| s.name.as_deref()),
+            Some("Submit")
+        );
+
+        // A no-op re-render emits nothing further.
+        scheduler.mark_dirty(node_id);
+        let patches = render_dirty_nodes(&mut scheduler, &mut tree, Some(&instance));
+        assert!(
+            !patches.iter().any(|p| matches!(p, Patch::SetSemantics { .. })),
+            "unchanged semantics must not re-emit, got {patches:?}"
         );
     }
 

@@ -1,6 +1,7 @@
 package space.hypen.renderer
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -10,6 +11,12 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.DpSize
+import space.hypen.renderer.anim.AnimationCoordinator
+import space.hypen.renderer.anim.ClearFocusOnExit
+import space.hypen.renderer.anim.SettingsMotionPreference
+import space.hypen.renderer.anim.rememberHypenAnimation
 import space.hypen.renderer.components.LocalColumnScope
 import space.hypen.renderer.components.LocalParentAllowsHorizontalExpansion
 import space.hypen.renderer.components.LocalRowScope
@@ -23,8 +30,20 @@ import space.hypen.renderer.remote.RemoteEngineConfig
 import space.hypen.renderer.render.ActionDispatcher
 import space.hypen.renderer.render.ComposeRenderer
 import space.hypen.renderer.render.LocalActionDispatcher
+import space.hypen.renderer.render.applyHypenSemantics
 import space.hypen.renderer.render.LocalComposeRenderer
 import kotlinx.coroutines.flow.collectLatest
+
+/**
+ * Size of the area the Hypen root was given, for resolving `vw`/`vh`.
+ *
+ * `DpSize.Unspecified` until the root measures itself; the size appliers fall
+ * back to the physical display until then. Mirrors the Swift renderer's
+ * `viewportHeight` environment value — `100vh` must mean the viewport hosting
+ * the app, not the display, or a host that insets us (the Gallery's URL
+ * chrome) pushes bottom-anchored content off screen.
+ */
+val LocalHypenViewport = compositionLocalOf { DpSize.Unspecified }
 
 /**
  * Main entry point for rendering a Hypen app.
@@ -47,17 +66,23 @@ fun HypenApp(
     loadingContent: @Composable () -> Unit = { DefaultLoadingContent() },
     errorContent: @Composable (String) -> Unit = { DefaultErrorContent(it) },
 ) {
+    // Live reduced-motion preference: Android's "Remove animations" switch
+    // (ANIMATOR_DURATION_SCALE == 0), observed so a mid-session toggle takes
+    // effect without a reconnect.
+    val context = LocalContext.current
+    val motion = remember(context) { SettingsMotionPreference(context) }
+    DisposableEffect(motion) {
+        onDispose { motion.dispose() }
+    }
+
     // Use url as key to recreate engine when URL changes
-    val renderer = remember(url) { ComposeRenderer() }
+    val renderer = remember(url, motion) { ComposeRenderer(animation = AnimationCoordinator(motion)) }
     val remoteEngine = remember(url) { RemoteEngine(url, config) }
 
     HypenLoggers.app.debug("HypenApp composing: renderer=%s, engine=%s", System.identityHashCode(renderer), System.identityHashCode(remoteEngine))
 
     // Connection state
     val connectionState by remoteEngine.connectionState.collectAsState()
-
-    // Tree version for recomposition
-    val treeVersion by renderer.treeVersion.collectAsState()
 
     // Error state
     var lastError by remember { mutableStateOf<Throwable?>(null) }
@@ -89,7 +114,7 @@ fun HypenApp(
         // every patch batch is processed. collectLatest skips intermediate values
         // which causes missing elements when the server sends multiple batches rapidly.
         remoteEngine.patches.collect { patches ->
-            HypenLoggers.app.debug("Received %d patches", patches.size)
+            HypenLoggers.app.debug { "Received ${patches.size} patches" }
             renderer.applyPatches(patches)
         }
     }
@@ -123,7 +148,9 @@ fun HypenApp(
             enabled = connectionState == ConnectionState.CONNECTED,
         )
 
-        Box(modifier = modifier.fillMaxSize()) {
+        BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+            val viewport = DpSize(maxWidth, maxHeight)
+            CompositionLocalProvider(LocalHypenViewport provides viewport) {
             when (connectionState) {
                 ConnectionState.CONNECTING,
                 ConnectionState.RECONNECTING,
@@ -132,30 +159,20 @@ fun HypenApp(
                 }
 
                 ConnectionState.CONNECTED -> {
-                    // Get root element - treeVersion is already collected as State,
-                    // so this whole block will recompose when it changes
+                    // The root id is snapshot-backed, so this block recomposes
+                    // when the root element arrives or is replaced. Per-element
+                    // updates invalidate only the composables that read the
+                    // touched element's snapshot state.
                     val rootId = renderer.getRootId()
                     val rootElement = if (rootId != null) renderer.getElement(rootId) else null
 
-                    HypenLoggers.app.debug("Render check (version=%d): rootId=%s, element=%s", treeVersion, rootId, rootElement?.elementType)
-
                     if (rootElement != null) {
-                        // Key on tree version to force child recomposition
-                        key(treeVersion) {
-                            HypenLoggers.app.debug(
-                                "Rendering element tree (version=%d), type=%s, children=%d",
-                                treeVersion,
-                                rootElement.elementType,
-                                rootElement.children.size,
-                            )
-                            HypenElement(
-                                element = rootElement,
-                                renderer = renderer,
-                            )
-                        }
+                        HypenElement(
+                            element = rootElement,
+                            renderer = renderer,
+                        )
                     } else {
                         // Tree not yet loaded, show loading
-                        HypenLoggers.app.debug("rootElement is null, showing loading (version=%d)", treeVersion)
                         loadingContent()
                     }
                 }
@@ -172,15 +189,20 @@ fun HypenApp(
                     }
                 }
             }
+            }
         }
     }
 }
 
 /**
  * Renders a single Hypen element and its children.
+ *
+ * Internal so component handlers that render host-app subtrees themselves
+ * (e.g. HypenAppComponent's loading/error slots) can reuse the full
+ * rendering pipeline (variants, weights, semantics).
  */
 @Composable
-private fun HypenElement(
+internal fun HypenElement(
     element: HypenElement,
     renderer: ComposeRenderer,
 ) {
@@ -200,26 +222,29 @@ private fun HypenElement(
 
     val handler = componentRegistry.getHandler(element.elementType)
     if (handler == null) {
-        val children = renderer.getChildren(element.id)
         if (isControlFlowElement(element.elementType)) {
-            android.util.Log.d("HypenTree", "CF ${element.elementType}(${element.id}) -> ${children.size} kids: [${children.joinToString { "${it.elementType}(${it.id})" }}]")
             RenderChildren(element, renderer)
         } else {
-            android.util.Log.w("HypenTree", "Unknown ${element.elementType}(${element.id}), ${children.size} kids")
+            HypenLoggers.app.warn { "Unknown ${element.elementType}(${element.id})" }
             Box {
                 RenderChildren(element, renderer)
             }
         }
         return
     }
-    android.util.Log.d("HypenTree", "${element.elementType}(${element.id}) kids=${element.children.size}")
 
-    // Build modifier from applicators with variant support
-    val context = renderer.createApplicatorContext(element)
+    // `vw`/`vh` resolve against the area the Hypen root was given, so the
+    // measured viewport is part of what the modifier depends on — and part of
+    // the `remember` key below, or a rotation would keep the old sizes.
+    val viewport = LocalHypenViewport.current
 
-    // Check if registry supports variants (DefaultApplicatorRegistry)
+    // Build modifier from applicators with variant support, recomputed only
+    // when this element's props change (propsRevision is bumped per touched
+    // element by SET_PROP/REMOVE_PROP) or the viewport changes.
     val modifier = if (applicatorRegistry is space.hypen.renderer.applicators.DefaultApplicatorRegistry) {
-        val result = applicatorRegistry.applyAllWithVariants(Modifier, element, context)
+        val result = remember(element, element.propsRevision, viewport) {
+            applicatorRegistry.applyAllWithVariants(Modifier, element, renderer.createApplicatorContext(element, viewport))
+        }
 
         if (result.hasVariants) {
             // Use responsive modifier based on screen width
@@ -228,7 +253,9 @@ private fun HypenElement(
             result.baseModifier
         }
     } else {
-        applicatorRegistry.applyAll(Modifier, element, context)
+        remember(element, element.propsRevision, viewport) {
+            applicatorRegistry.applyAll(Modifier, element, renderer.createApplicatorContext(element, viewport))
+        }
     }
 
     // Apply weight modifier if in Row/Column scope
@@ -276,6 +303,20 @@ private fun HypenElement(
             }
     }
 
+    // Engine-derived accessibility semantics (label/role/state → TalkBack).
+    // Re-applied on every recomposition, so a SET_SEMANTICS reactive
+    // re-emit lands here too.
+    finalModifier = finalModifier.applyHypenSemantics(element.semantics)
+
+    // Animation channels (`__anim.*`). The playback layer sits OUTSIDE the
+    // base chain so a graphicsLayer pose transforms the whole element — and
+    // with it the hit target, the focus target and the accessibility node
+    // (protocol invariant 5). An exiting subtree's exclusion modifiers land
+    // here too, outermost, so nothing beneath them can be reached.
+    val animation = rememberHypenAnimation(element, renderer.getAnimationCoordinator())
+    ClearFocusOnExit(animation.exiting)
+    finalModifier = animation.modifier.then(finalModifier)
+
     // Render the component
     handler.Render(
         element = element,
@@ -295,9 +336,6 @@ private fun RenderChildren(
     renderer: ComposeRenderer,
 ) {
     val children = renderer.getChildren(element.id)
-    HypenLoggers.app.debug("RenderChildren of %s (id=%s): %d children [%s]",
-        element.elementType, element.id, children.size,
-        children.joinToString(", ") { "${it.elementType}(${it.id})" })
     for (child in children) {
         key(child.id) {
             HypenElement(element = child, renderer = renderer)
@@ -309,7 +347,7 @@ private fun RenderChildren(
  * Default loading content.
  */
 @Composable
-private fun DefaultLoadingContent() {
+internal fun DefaultLoadingContent() {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,
@@ -322,7 +360,7 @@ private fun DefaultLoadingContent() {
  * Default error content.
  */
 @Composable
-private fun DefaultErrorContent(message: String) {
+internal fun DefaultErrorContent(message: String) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,

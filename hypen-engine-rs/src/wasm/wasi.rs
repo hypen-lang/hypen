@@ -405,7 +405,11 @@ pub extern "C" fn hypen_update_state(patch_ptr: *const u8, patch_len: usize) -> 
         };
 
         let scope = engine.active_action_scope.take();
-        if engine.core.update_state(scope.as_deref(), patch) {
+        // The full-patch form has no envelope to carry a batch-animation
+        // context (the payload IS the state patch — adding a reserved key
+        // would collide with real state). Animation stamping is
+        // sparse-update-only on WASI; see `hypen_update_state_sparse`.
+        if engine.core.update_state(scope.as_deref(), patch, None) {
             render_dirty_internal(engine);
         }
         0
@@ -429,7 +433,7 @@ fn update_module_state_internal(
             &format!("update_module_state: module '{}' not found", name),
         );
     }
-    if engine.core.update_state(Some(&canonical), patch) {
+    if engine.core.update_state(Some(&canonical), patch, None) {
         render_dirty_internal(engine);
     }
     0
@@ -481,7 +485,12 @@ pub extern "C" fn hypen_update_module_state(config_ptr: *const u8, config_len: u
 /// Update state with sparse path-value pairs (more efficient for large state)
 ///
 /// # Arguments
-/// * `update_ptr/len` - JSON object with { paths: string[], values: object }
+/// * `update_ptr/len` - JSON object with
+///   { paths: string[], values: object, animation?: object|string }.
+///   `animation` is the optional batch-animation context (Option D cheap
+///   subset): when the update changes state, the resulting patch batch is
+///   prefixed with a `{"type": "batchAnimation", "spec": {...}}` prelude.
+///   Omitting the key keeps the pre-animation wire format.
 ///
 /// # Returns
 /// 0 on success, non-zero on error
@@ -510,10 +519,12 @@ pub extern "C" fn hypen_update_state_sparse(update_ptr: *const u8, update_len: u
         };
 
         let scope = engine.active_action_scope.take();
-        if engine
-            .core
-            .update_state_sparse(scope.as_deref(), &update.paths, &update.values)
-        {
+        if engine.core.update_state_sparse(
+            scope.as_deref(),
+            &update.paths,
+            &update.values,
+            update.animation,
+        ) {
             render_dirty_internal(engine);
         }
         0

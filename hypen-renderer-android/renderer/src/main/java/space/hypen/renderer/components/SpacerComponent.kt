@@ -1,6 +1,5 @@
 package space.hypen.renderer.components
 
-import android.util.Log
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
@@ -39,23 +38,18 @@ class SpacerComponent : ComponentHandler {
         val rowScope = LocalRowScope.current
         val columnScope = LocalColumnScope.current
 
-        Log.d("SpacerComponent", "Rendering Spacer id=${element.id}: rowScope=${rowScope != null}, columnScope=${columnScope != null}, weight=$weight")
-
         if (rowScope != null && weight > 0) {
             // We're inside a Row - apply horizontal weight
-            Log.d("SpacerComponent", "Applying weight $weight in RowScope")
             with(rowScope) {
                 Spacer(modifier = modifier.weight(weight))
             }
         } else if (columnScope != null && weight > 0) {
             // We're inside a Column (but not a Row) - apply vertical weight
-            Log.d("SpacerComponent", "Applying weight $weight in ColumnScope")
             with(columnScope) {
                 Spacer(modifier = modifier.weight(weight))
             }
         } else {
             // No scope available, render plain spacer
-            Log.d("SpacerComponent", "No scope available, using plain Spacer")
             Spacer(modifier = modifier)
         }
     }

@@ -212,14 +212,14 @@ export default app
 ```hypen
 module Items {
     Column {
-        When(@{state.error}) {
+        If(condition: @state.error) {
             Text("@{state.error}")
                 .color("#EF4444")
         }
-        When(@{state.isLoading}) {
+        If(condition: @state.isLoading) {
             Text("Loading...")
         }
-        ForEach(@{state.data}, key: "id") {
+        ForEach(items: @state.data, key: "id") {
             Text("@{item.name}")
         }
     }

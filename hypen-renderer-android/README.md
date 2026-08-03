@@ -55,7 +55,7 @@ dependencies {
 ### renderer
 The core library that can be used in any Android app:
 - **model/**: Data classes for patches and messages
-- **remote/**: WebSocket client using OkHttp
+- **remote/**: WebSocket client using OkHttp (see [Compression](#compression))
 - **render/**: Compose renderer implementation
 - **components/**: Hypen component handlers (Text, Column, Row, etc.)
 - **applicators/**: Style applicators (padding, colors, events, etc.)
@@ -137,6 +137,50 @@ remoteEngine.patches.collect { patches ->
 }
 ```
 
+### Logging
+
+Framework logs go to `android.util.Log` and are **error-only by default**. Raise
+the level with either setter:
+
+```kotlin
+HypenLogger.setDebugMode(true)                  // DEBUG
+HypenLogger.setLogLevel(HypenLogLevel.INFO)     // or a specific level
+```
+
+To send them somewhere else — Timber, Crashlytics, a file, a test recorder —
+install a `HypenLogHandler`. It is a `fun interface`, so a lambda works:
+
+```kotlin
+import android.util.Log
+import space.hypen.renderer.HypenLogLevel
+import space.hypen.renderer.HypenLogger
+import timber.log.Timber
+
+HypenLogger.setLogLevel(HypenLogLevel.DEBUG)
+HypenLogger.setLogHandler { level, tag, message, throwable ->
+    val priority = when (level) {
+        HypenLogLevel.DEBUG -> Log.DEBUG
+        HypenLogLevel.INFO -> Log.INFO
+        HypenLogLevel.WARN -> Log.WARN
+        HypenLogLevel.ERROR -> Log.ERROR
+        HypenLogLevel.NONE -> return@setLogHandler
+    }
+    Timber.tag(tag).log(priority, throwable, message)
+}
+
+// Restore the default android.util.Log output
+HypenLogger.setLogHandler(null)
+```
+
+Notes:
+
+- Messages arrive **already formatted** (varargs applied); `throwable` is
+  non-null only for `error(message, throwable)` calls.
+- **Level filtering stays in the SDK** — the handler is never called for a
+  message below `HypenLogger.level`, and lazy `log.debug { expensive() }`
+  lambdas are still skipped entirely when filtered.
+- The handler is global and `@Volatile`; set it once during app startup.
+
 ## Protocol
 
 The renderer implements the Hypen Remote UI protocol:
@@ -150,6 +194,28 @@ The renderer implements the Hypen Remote UI protocol:
 ### Client → Server Messages
 
 - **dispatchAction**: Sent when user triggers an action
+
+### Compression
+
+WebSocket `permessage-deflate` is **on by default and requires no setup**. OkHttp
+(4.3+, currently 4.12.0) advertises the extension on every upgrade handshake and
+transparently inflates compressed frames, so patch batches — the large, very
+compressible direction — arrive compressed automatically.
+
+Two consequences worth knowing:
+
+- **It cannot be disabled from the Android client.** OkHttp hardcodes the
+  `Sec-WebSocket-Extensions` offer and rejects a caller-supplied one with a
+  `ProtocolException`. `RemoteEngineConfig` therefore has no `compression` flag,
+  since it could not be honoured. Compression is negotiated per connection: turn
+  it off **server-side** (`compression: false` on the TypeScript
+  `RemoteServerConfig`) when you need to read raw frames in a proxy or capture. A
+  server that declines the extension just gets uncompressed frames, and the
+  client falls back transparently.
+- **Outbound messages under 1 KB are not compressed.** That is OkHttp's
+  `minWebSocketMessageToCompress` default, which the engine leaves alone —
+  client→server traffic is small hello/action JSON, where deflate framing costs
+  more than it saves.
 
 ## Supported Components
 

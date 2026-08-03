@@ -178,16 +178,18 @@ export default app
         // ----- Top bar: X | "Add Food · Meal" | ✓ -----
         Row {
           Button {
-            Text("✕")
-              .tw("text-xl md:text-2xl")
-              .color("#374151")
+            Icon(@resources.x)
+              .size(19)
+              .color("#6B7280")
           }
-          .tw("bg-transparent border-0 p-2")
+          .tw("bg-transparent border-0 p-2.5")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(150, easeOut)
           .onClick(@actions.close)
 
           Column {
             Text("Add Food")
-              .tw("text-base md:text-lg font-semibold text-center")
+              .tw("text-[15px] md:text-base font-semibold text-center")
               .color("#111827")
             Text("@{state.mealLabel}")
               .tw("text-xs mt-0.5 text-center")
@@ -196,71 +198,69 @@ export default app
           .tw("flex-1")
 
           Button {
-            Text("✓")
-              .tw("text-xl md:text-2xl font-bold")
+            Icon(@resources.check)
+              .size(19)
               .color("#EC4899")
           }
-          .tw("bg-transparent border-0 p-2")
+          .tw("bg-transparent border-0 p-2.5")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(150, easeOut)
           .onClick(@actions.confirm)
         }
-        .tw("px-2 py-3 items-center border-b border-gray-100")
+        .tw("px-2 py-2.5 items-center border-b border-gray-100")
 
         // ----- Search box -----
         Row {
-          Text("🔍")
-            .tw("text-base mr-2")
+          Icon(@resources.search)
+            .size(16)
             .color("#9CA3AF")
           Input(placeholder: "Search for a food")
             .bind(@state.searchQuery)
             .onInput(@actions.search)
-            .tw("flex-1 bg-transparent border-0 outline-none")
+            .tw("flex-1 bg-transparent border-0 outline-none ml-2.5")
             .fontSize(15)
-          Text("⎙")
-            .tw("text-base ml-2")
-            .color("#9CA3AF")
         }
-        .tw("mx-4 my-3 px-4 py-3 bg-gray-100 rounded-2xl items-center")
+        .tw("mx-4 my-3 px-4 py-3 bg-gray-100 rounded-xl items-center")
 
-        // ----- Category tabs -----
-        List(@state.tabs) {
-          Button {
-            Column {
-              Text("@{item.icon}")
-                .tw("text-base md:text-lg")
-                .color("@{item.active ? '#EC4899' : '#6B7280'}")
+        // ----- Category tabs (segmented control) -----
+        Row {
+          List(@state.tabs) {
+            Button {
               Text("@{item.label}")
-                .tw("text-xs md:text-sm mt-1")
-                .color("@{item.active ? '#EC4899' : '#6B7280'}")
+                .tw("text-[13px] font-semibold")
+                .color("@{item.active ? '#111827' : '#6B7280'}")
             }
-            .tw("items-center")
+            .tw("flex-1 py-2 border-0 rounded-lg items-center justify-center")
+            .backgroundColor("@{item.active ? '#FFFFFF' : 'transparent'}")
+            .transition(200, easeOut, props: [backgroundColor])
+            .boxShadow("@{item.active ? '0 1px 4px rgba(17, 24, 39, 0.10)' : 'none'}")
+            .onClick(@actions.selectCategory, category: "@{item.id}")
           }
-          .tw("flex-1 py-3 mx-1 border-0 rounded-xl items-center justify-center")
-          .backgroundColor("@{item.active ? '#FCE7F3' : '#F9FAFB'}")
-          .onClick(@actions.selectCategory, category: "@{item.id}")
+          .tw("flex flex-row flex-1 items-center")
         }
-        .tw("flex flex-row px-3 items-center")
+        .tw("mx-4 p-1 bg-gray-100 rounded-xl items-center")
 
         // ----- Section header -----
         Row {
           Text("@{state.header}")
-            .tw("flex-1 text-lg md:text-xl font-semibold")
+            .tw("flex-1 text-[15px] md:text-base font-semibold")
             .color("#111827")
-          Text("See all")
-            .tw("text-sm md:text-base font-medium")
-            .color("#EC4899")
         }
-        .tw("px-4 pt-4 pb-2 items-center")
+        .tw("px-4 pt-5 pb-1 items-center")
 
         // ----- Food list -----
         Column {
           List(@state.foods) {
             Row {
-              Text("@{item.icon}")
-                .tw("text-3xl md:text-4xl mr-3")
+              Column {
+                Text("@{item.icon}")
+                  .tw("text-2xl md:text-3xl")
+              }
+              .tw("w-11 h-11 md:w-12 md:h-12 rounded-xl bg-gray-50 items-center justify-center mr-3 shrink-0")
 
               Column {
                 Text("@{item.name}")
-                  .tw("text-base md:text-lg font-semibold")
+                  .tw("text-[15px] md:text-base font-medium")
                   .color("#111827")
                 Text("@{item.subtitle}")
                   .tw("text-xs md:text-sm mt-0.5")
@@ -269,14 +269,26 @@ export default app
               .tw("flex-1")
 
               Button {
-                Text("@{item.added ? '✓' : '+'}")
-                  .tw("text-white text-lg font-bold leading-none")
+                If(condition: "@{item.added}") {
+                  Icon(@resources.check)
+                    .size(15)
+                    .color("#ffffff")
+                }
+                If(condition: "@{!item.added}") {
+                  Icon(@resources.plus)
+                    .size(15)
+                    .color("#ffffff")
+                }
               }
-              .tw("border-0 w-9 h-9 md:w-10 md:h-10 rounded-full items-center justify-center")
+              .tw("border-0 w-9 h-9 rounded-full items-center justify-center")
               .backgroundColor("@{item.added ? '#10B981' : '#EC4899'}")
+              .transition(220, easeOut, props: [backgroundColor])
+              .opacity({ default: 1, active: 0.7 })
+              .transition(150, easeOut)
               .onClick(@actions.addFood, foodId: "@{item.id}")
             }
-            .tw("items-center px-4 py-3 border-b border-gray-100")
+            .tw("items-center px-4 py-2.5 border-b border-gray-50")
+            .enter(fade, duration: 240)
           }
 
           If(condition: @state.isEmpty) {

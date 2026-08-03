@@ -19,6 +19,10 @@ pub struct Node {
     pub id: String,
     pub element_type: String,
     pub props: HashMap<String, Value>,
+    /// Engine-derived accessibility semantics (role, name, hidden, …), carried
+    /// from the Create patch so the AccessKit translation can use the engine's
+    /// accessible name/role instead of layout heuristics.
+    pub semantics: Option<hypen_engine::ir::Semantics>,
 }
 
 impl Node {
@@ -103,17 +107,54 @@ impl Tree {
         self.nodes.get(id)
     }
 
+    /// Iterate every live node (live + detached subtrees alike — the
+    /// `nodes` map holds both). Order is unspecified. Used by the window
+    /// to scan for layout-affecting state variants after a patch flush.
+    pub fn nodes(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.values()
+    }
+
+    /// Write a prop directly, bypassing the patch stream. Used by the
+    /// animation runtime ([`crate::anim::DesktopAnimator`]) to write
+    /// per-tick interpolated values into the REAL props — the same
+    /// entries layout, paint, and hit-testing read (design constraint
+    /// #5: never a paint-only presentation layer).
+    pub(crate) fn set_prop_raw(&mut self, id: &str, name: &str, value: Value) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.props.insert(name.to_string(), value);
+        }
+    }
+
+    /// Remove a prop directly (animator settle restoring an
+    /// originally-absent prop). See [`Tree::set_prop_raw`].
+    pub(crate) fn remove_prop_raw(&mut self, id: &str, name: &str) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.props.remove(name);
+        }
+    }
+
     /// Apply a single patch.
     ///
     /// Patches that reference unknown nodes are logged and skipped rather
     /// than panicking — the renderer should be forgiving of out-of-order
     /// streams from buggy hosts during development.
+    ///
+    /// NOTE on animation: this is the RAW structural application. The
+    /// window routes every batch through
+    /// [`crate::anim::DesktopAnimator::ingest`], which honors the
+    /// `Remove { transition: true }` deferred-exit flag and the
+    /// `BatchAnimation` prelude BEFORE patches reach this method —
+    /// a flagged Remove that defers is withheld from the tree until its
+    /// exit settles, and re-applied here at finalize. Calling `apply`
+    /// directly (tests, headless tools) therefore snaps, which is the
+    /// protocol's sanctioned degradation.
     pub fn apply(&mut self, patch: &Patch) {
         match patch {
             Patch::Create {
                 id,
                 element_type,
                 props,
+                semantics,
             } => {
                 let mut prop_map = HashMap::with_capacity(props.len());
                 for (k, v) in props.iter() {
@@ -125,6 +166,7 @@ impl Tree {
                         id: id.clone(),
                         element_type: element_type.clone(),
                         props: prop_map,
+                        semantics: semantics.clone(),
                     },
                 );
                 self.children.entry(id.clone()).or_default();
@@ -134,6 +176,18 @@ impl Tree {
                     node.props.insert(name.clone(), value.clone());
                 } else {
                     log::warn!("SetProp on unknown node {id}");
+                }
+            }
+            Patch::SetSemantics { id, semantics } => {
+                // Reactive accessibility update: replace the node's whole
+                // block (None clears it). The next `LayoutPass` rebuilds its
+                // node_id→Semantics side-map from `Node.semantics`, so the
+                // AccessKit tree picks the change up on the following push —
+                // no per-field diffing here by design (see the Patch docs).
+                if let Some(node) = self.nodes.get_mut(id) {
+                    node.semantics = semantics.clone();
+                } else {
+                    log::warn!("SetSemantics on unknown node {id}");
                 }
             }
             Patch::RemoveProp { id, name } => {
@@ -183,7 +237,7 @@ impl Tree {
                 self.parent_by_child.insert(id.clone(), parent_id.clone());
                 self.clear_detached(id);
             }
-            Patch::Remove { id } => {
+            Patch::Remove { id, .. } => {
                 // O(1) parent lookup replaces the previous full
                 // children-map scan to find the affected list.
                 if let Some(prev_parent) = self.parent_by_child.remove(id) {
@@ -215,6 +269,12 @@ impl Tree {
                 self.parent_by_child.insert(id.clone(), parent_id.clone());
                 self.clear_detached(id);
             }
+            // Batch-scoped animation prelude: batch metadata, not a node
+            // op — nothing to record in the tree. The animator consumes
+            // it at batch head in `DesktopAnimator::ingest` (transaction-
+            // scoped interpolation, Option D); if one reaches this raw
+            // path (direct `apply` callers) it is structurally inert.
+            Patch::BatchAnimation { .. } => {}
         }
     }
 
@@ -328,6 +388,7 @@ mod tests {
             id: id.to_string(),
             element_type: element_type.to_string(),
             props: props(entries),
+            semantics: None,
         }
     }
 
@@ -444,7 +505,10 @@ mod tests {
         assert_eq!(tree.children_of("a"), &["b".to_string()]);
         assert_eq!(tree.children_of("b"), &["c".to_string()]);
 
-        tree.apply(&Patch::Remove { id: "a".into() });
+        tree.apply(&Patch::Remove {
+            id: "a".into(),
+            transition: false,
+        });
 
         // Nodes are gone.
         assert!(tree.get("a").is_none());
@@ -579,7 +643,10 @@ mod tests {
         assert!(!tree.children_of("col").contains(&"a".to_string()));
 
         // Remove drops the parent_by_child entry.
-        tree.apply(&Patch::Remove { id: "a".into() });
+        tree.apply(&Patch::Remove {
+            id: "a".into(),
+            transition: false,
+        });
         assert_eq!(tree.parent_of("a"), None);
     }
 
@@ -628,7 +695,10 @@ mod tests {
             id: "a".into(),
             before_id: None,
         });
-        tree.apply(&Patch::Remove { id: "b".into() });
+        tree.apply(&Patch::Remove {
+            id: "b".into(),
+            transition: false,
+        });
         assert_eq!(tree.detached_len(), 0);
     }
 

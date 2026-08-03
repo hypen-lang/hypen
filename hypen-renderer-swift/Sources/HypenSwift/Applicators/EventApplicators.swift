@@ -1,5 +1,12 @@
 import SwiftUI
 
+// NOTE: Event closures built here are memoized on the element via
+// `HypenElement.cachedApplicatorResult`. They must capture only the
+// action dispatcher — never the `ApplicatorContext`, which strongly
+// holds the element. Capturing the context would create a retain cycle
+// (element → cached result → closure → context → element) that leaks
+// every interactive element after removal.
+
 // MARK: - OnClick Applicator
 
 public struct OnClickApplicator: ApplicatorHandler {
@@ -9,8 +16,9 @@ public struct OnClickApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         if let action = ActionValue.from(value) {
+            let dispatcher = context.actionDispatcher
             modifier.onTap = {
-                context.actionDispatcher.dispatch(action: action.actionName, payload: action.payload)
+                dispatcher.dispatch(action: action.actionName, payload: action.payload)
             }
         }
     }
@@ -25,8 +33,9 @@ public struct OnPressApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         if let action = ActionValue.from(value) {
+            let dispatcher = context.actionDispatcher
             modifier.onTap = {
-                context.actionDispatcher.dispatch(action: action.actionName, payload: action.payload)
+                dispatcher.dispatch(action: action.actionName, payload: action.payload)
             }
         }
     }
@@ -41,8 +50,9 @@ public struct OnLongPressApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         if let action = ActionValue.from(value) {
+            let dispatcher = context.actionDispatcher
             modifier.onLongPress = {
-                context.actionDispatcher.dispatch(action: action.actionName, payload: action.payload)
+                dispatcher.dispatch(action: action.actionName, payload: action.payload)
             }
         }
     }
@@ -57,8 +67,9 @@ public struct OnLongClickApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         if let action = ActionValue.from(value) {
+            let dispatcher = context.actionDispatcher
             modifier.onLongPress = {
-                context.actionDispatcher.dispatch(action: action.actionName, payload: action.payload)
+                dispatcher.dispatch(action: action.actionName, payload: action.payload)
             }
         }
     }
@@ -73,11 +84,12 @@ public struct OnFocusApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         if let action = ActionValue.from(value) {
+            let dispatcher = context.actionDispatcher
             modifier.onFocus = {
                 var payload = action.payload
                 payload["type"] = "focus"
                 payload["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
-                context.actionDispatcher.dispatch(action: action.actionName, payload: payload)
+                dispatcher.dispatch(action: action.actionName, payload: payload)
             }
         }
     }
@@ -92,11 +104,12 @@ public struct OnBlurApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         if let action = ActionValue.from(value) {
+            let dispatcher = context.actionDispatcher
             modifier.onBlur = {
                 var payload = action.payload
                 payload["type"] = "blur"
                 payload["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
-                context.actionDispatcher.dispatch(action: action.actionName, payload: payload)
+                dispatcher.dispatch(action: action.actionName, payload: payload)
             }
         }
     }

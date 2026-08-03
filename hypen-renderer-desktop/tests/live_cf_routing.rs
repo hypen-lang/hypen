@@ -201,6 +201,8 @@ fn local_vs_deploy_patches_are_structurally_identical() {
                 hypen_engine::Patch::Remove { .. } => "Remove",
                 hypen_engine::Patch::Detach { .. } => "Detach",
                 hypen_engine::Patch::Attach { .. } => "Attach",
+                hypen_engine::Patch::SetSemantics { .. } => "SetSemantics",
+                hypen_engine::Patch::BatchAnimation { .. } => "BatchAnimation",
             };
             *counts.entry(tag).or_insert(0) += 1;
         }

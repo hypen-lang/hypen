@@ -94,8 +94,9 @@ type Skip struct {
 }
 
 // findFixtures recursively finds all JSON files in the fixtures directory.
-// Skips `portable/` — those fixtures use a different schema and have
-// their own runner at portable_test.go.
+// Skips `portable/` and `variant/` — those fixtures use different schemas
+// and have their own runners (portable_test.go here; variant fixtures have
+// runners in the Rust and TypeScript harnesses only).
 func findFixtures(dir string) ([]string, error) {
 	var fixtures []string
 
@@ -103,7 +104,7 @@ func findFixtures(dir string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() && info.Name() == "portable" {
+		if info.IsDir() && (info.Name() == "portable" || info.Name() == "variant") {
 			return filepath.SkipDir
 		}
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".json") {
