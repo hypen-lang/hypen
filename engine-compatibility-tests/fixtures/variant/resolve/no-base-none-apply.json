@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-no-base-none-apply", "description": "Only a variant key, and it does not apply -> no winner (null).", "function": "resolve_variant", "input": { "base": "padding", "props": { "padding@md.0": 16 }, "width": 500, "activeStates": [] }, "expected": null }

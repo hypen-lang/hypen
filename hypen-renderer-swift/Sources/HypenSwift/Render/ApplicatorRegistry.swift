@@ -159,73 +159,73 @@ public final class ApplicatorRegistry: @unchecked Sendable {
             }
         }
 
-        // Group variant props by breakpoint/state and apply to variant modifiers
+        // Group variant props by breakpoint / state / combined, then apply to
+        // variant modifiers. A prop carrying BOTH a breakpoint and a state
+        // (e.g. `padding@md:hover`) goes into the combined bucket so it applies
+        // only when both halves hold — routing it into the responsive bucket
+        // would (incorrectly) apply it at the breakpoint regardless of state.
         var responsiveGroups: [Breakpoint: [String: Any]] = [:]
         var stateGroups: [StateVariant: [String: Any]] = [:]
+        var combinedGroups: [CombinedVariantKey: [String: Any]] = [:]
+
+        // Merge a single (name, value) into a grouping dict, honouring the
+        // `base.0` / `base.namedArg` suffix convention.
+        func insertGrouped(_ group: inout [String: Any], name: String, value: Any) {
+            if let dotIndex = name.lastIndex(of: ".") {
+                let baseName = String(name[..<dotIndex])
+                let suffix = String(name[name.index(after: dotIndex)...])
+                if suffix == "0" {
+                    group[baseName] = value
+                } else {
+                    var existing = group[baseName] as? [String: Any] ?? [:]
+                    existing[suffix] = value
+                    group[baseName] = existing
+                }
+            } else {
+                group[name] = value
+            }
+        }
 
         for (name, breakpoint, state, value) in variantProps {
-            if let bp = breakpoint {
-                if responsiveGroups[bp] == nil {
-                    responsiveGroups[bp] = [:]
-                }
-
-                // Parse the prop name for grouping
-                if let dotIndex = name.lastIndex(of: ".") {
-                    let baseName = String(name[..<dotIndex])
-                    let suffix = String(name[name.index(after: dotIndex)...])
-
-                    if suffix == "0" {
-                        responsiveGroups[bp]![baseName] = value
-                    } else {
-                        var existing = responsiveGroups[bp]![baseName] as? [String: Any] ?? [:]
-                        existing[suffix] = value
-                        responsiveGroups[bp]![baseName] = existing
-                    }
-                } else {
-                    responsiveGroups[bp]![name] = value
-                }
-            } else if let st = state {
-                if stateGroups[st] == nil {
-                    stateGroups[st] = [:]
-                }
-
-                if let dotIndex = name.lastIndex(of: ".") {
-                    let baseName = String(name[..<dotIndex])
-                    let suffix = String(name[name.index(after: dotIndex)...])
-
-                    if suffix == "0" {
-                        stateGroups[st]![baseName] = value
-                    } else {
-                        var existing = stateGroups[st]![baseName] as? [String: Any] ?? [:]
-                        existing[suffix] = value
-                        stateGroups[st]![baseName] = existing
-                    }
-                } else {
-                    stateGroups[st]![name] = value
-                }
+            switch (breakpoint, state) {
+            case let (bp?, st?):
+                let key = CombinedVariantKey(breakpoint: bp, state: st)
+                var group = combinedGroups[key] ?? [:]
+                insertGrouped(&group, name: name, value: value)
+                combinedGroups[key] = group
+            case let (bp?, nil):
+                var group = responsiveGroups[bp] ?? [:]
+                insertGrouped(&group, name: name, value: value)
+                responsiveGroups[bp] = group
+            case let (nil, st?):
+                var group = stateGroups[st] ?? [:]
+                insertGrouped(&group, name: name, value: value)
+                stateGroups[st] = group
+            case (nil, nil):
+                break
             }
         }
 
-        // Apply grouped responsive props to variant modifiers
+        // Build a HypenModifier from a grouping dict by running each base
+        // applicator's handler.
+        func buildModifier(from props: [String: Any]) -> HypenModifier {
+            var variantModifier = HypenModifier()
+            for (name, value) in props {
+                if let handler = getHandler(for: name) {
+                    handler.apply(modifier: &variantModifier, value: value, context: context)
+                }
+            }
+            return variantModifier
+        }
+
         for (breakpoint, props) in responsiveGroups {
-            var variantModifier = HypenModifier()
-            for (name, value) in props {
-                if let handler = getHandler(for: name) {
-                    handler.apply(modifier: &variantModifier, value: value, context: context)
-                }
-            }
-            result.variants.responsive[breakpoint] = variantModifier
+            result.variants.responsive[breakpoint] = buildModifier(from: props)
         }
-
-        // Apply grouped state props to variant modifiers
         for (state, props) in stateGroups {
-            var variantModifier = HypenModifier()
-            for (name, value) in props {
-                if let handler = getHandler(for: name) {
-                    handler.apply(modifier: &variantModifier, value: value, context: context)
-                }
-            }
-            result.variants.states[state] = variantModifier
+            result.variants.states[state] = buildModifier(from: props)
+        }
+        for (key, props) in combinedGroups {
+            result.variants.combined[key] = buildModifier(from: props)
         }
 
         return result

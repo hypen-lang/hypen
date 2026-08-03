@@ -1,0 +1,51 @@
+Row {
+    Image(src: "@{item.imageUrl}")
+        .tw("w-16 h-16 rounded-lg")
+        .objectFit("cover")
+
+    Column {
+        Text("@{item.name}")
+            .tw("text-sm font-semibold")
+
+        Text("$@{item.price}")
+            .tw("text-sm text-gray-500 mt-1")
+
+        Row {
+            Button {
+                Icon(@resources.minus)
+                    .size(14)
+                    .color("#f97316")
+            }
+            .tw("w-7 h-7 rounded-full border border-orange-500 bg-white items-center justify-center")
+            .onClick(@actions.decrementItem, itemId: "@{item.id}")
+
+            Text("@{item.quantity}")
+                .tw("text-sm font-semibold mx-3 min-w-[20px] text-center")
+
+            Button {
+                Icon(@resources.plus)
+                    .size(14)
+                    .color("#ffffff")
+            }
+            .tw("w-7 h-7 rounded-full bg-orange-500 items-center justify-center")
+            .onClick(@actions.incrementItem, itemId: "@{item.id}")
+        }
+        .tw("mt-2 items-center")
+    }
+    .tw("flex-1 pl-3")
+
+    Column {
+        Text("$@{item.lineTotal}")
+            .tw("text-sm font-bold")
+
+        Button {
+            Icon(@resources.trash)
+                .size(16)
+                .color("#ef4444")
+        }
+        .tw("bg-transparent border-0 p-1 mt-2")
+        .onClick(@actions.removeItem, itemId: "@{item.id}")
+    }
+    .tw("items-end shrink-0")
+}
+.tw("py-3 px-4 flex-row items-center border-b border-gray-100")

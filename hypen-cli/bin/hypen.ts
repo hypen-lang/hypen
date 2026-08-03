@@ -20,7 +20,8 @@ import { fileURLToPath } from "url";
 import { pink, yellow, dim, boldPink, boldYellow } from "../src/colors.js";
 import { promptSkillChoice, installSkills, ensureGitignoreSkillEntries } from "../src/skills.js";
 import { renderBanner } from "../src/banner.js";
-import { promptLanguage, promptModuleLayout } from "../src/init/prompts.js";
+import { maybeRunOnboarding } from "../src/onboarding.js";
+import { promptLanguage, promptModuleLayout, type Language } from "../src/init/prompts.js";
 import {
   generateTypescriptProject,
   buildTsPackageJson,
@@ -73,6 +74,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${pink("build")}           Build for production
     ${pink("generate")}        Generate component imports
     ${pink("studio")}          Open Hypen Studio IDE
+    ${pink("test")}            Open Studio Test Mode (live previews + device mirrors)
     ${pink("run")} <platform>  Install and launch on device (android|ios)
 
   ${boldYellow("Options:")}
@@ -85,6 +87,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${dim("$")} hypen dev --port 3000
     ${dim("$")} hypen build --minify
     ${dim("$")} hypen studio --port 5173
+    ${dim("$")} hypen test
     ${dim("$")} hypen run android
     ${dim("$")} hypen run android --url ws://localhost:3000
     ${dim("$")} hypen run ios --studio
@@ -193,7 +196,7 @@ async function initProject(name?: string) {
   // Ask for language + module layout up front, *before* creating any
   // files — otherwise choosing Go/Kotlin mid-scaffold would leave a
   // half-TypeScript directory behind.
-  const language = await promptLanguage();
+  const language: Language = await promptLanguage();
   const layout = await promptModuleLayout();
 
   console.log(`\n  ${dim("Language:")}      ${yellow(language)}`);
@@ -223,10 +226,9 @@ async function initProject(name?: string) {
     installSkills(projectDir, skillChoice);
   }
 
-  // Only the TypeScript scaffold ships a package.json that `bun`/`npm`
-  // can resolve. Go uses `go mod tidy` and Kotlin uses Gradle; we print
-  // the correct next step instead of running an installer we don't own.
+  // Resolve SDK dependencies using each ecosystem's installer.
   if (language === "typescript") {
+    // package.json pins @hypen-space/* to "latest"; bun/npm install resolves it.
     const pm = isBun ? "bun" : "npm";
     console.log(`\n  ${dim("Installing dependencies...")}`);
     try {
@@ -245,7 +247,18 @@ async function initProject(name?: string) {
     } catch {
       console.error(`\n  Failed to install dependencies. Run ${dim(`${pm} install`)} manually.\n`);
     }
+  } else if (language === "go") {
+    // go.mod ships without a hypen require; `go mod tidy` reads the import
+    // in main.go and pins the latest published github.com/hypen-space/core.
+    console.log(`\n  ${dim("Resolving Go modules...")}`);
+    try {
+      execSync("go mod tidy", { cwd: projectDir, stdio: "inherit" });
+    } catch {
+      console.error(`\n  Failed to resolve modules. Run ${dim("go mod tidy")} manually.\n`);
+    }
   }
+  // Kotlin resolves space.hypen:hypen-kotlin (latest.release) from Maven
+  // Central on the first `./gradlew build`/`run`; nothing to install here.
 
   const nextCommand =
     language === "typescript" ? "hypen dev"
@@ -463,6 +476,152 @@ async function startStudio(options: { port?: number; open?: boolean; session?: s
     console.log(`\n  ${pink("Your project is at:")} ${projectDirName}/`);
     console.log(`\n  To continue working:\n    ${dim("$")} cd ${projectDirName}\n    ${dim("$")} hypen dev\n`);
   }
+}
+
+/**
+ * Handle test command: hypen test
+ *
+ * Opens Studio directly into Test Mode (the multi-surface preview window).
+ * If the current directory is a Hypen project, a RemoteServer is started for
+ * the project's entry module and its `ws://` URL is wired through to the
+ * Connect input so the previews come up populated. Otherwise Studio opens in
+ * connect-only mode — the user can type any `ws://hypen-dev-url` and connect.
+ */
+async function testMode(options: { port?: number; open?: boolean }) {
+  const { studio } = await import("../src/studio/server.js");
+
+  const hasConfig = existsSync(resolve("hypen.json"));
+  const hasComponents = existsSync(resolve("src/components"));
+  const isProject = hasConfig || hasComponents;
+
+  let remoteWsUrl = "";
+  let stopRemoteServer: (() => void) | null = null;
+  let stopWatcher: (() => void) | null = null;
+  let components = "./src/components";
+  let entry = "App";
+
+  if (isProject) {
+    const config = await loadConfig();
+    components = config.components;
+    entry = config.entry;
+    const requestedPort = options.port || config.port || 3000;
+
+    // Server-based projects manage their own RemoteServer inside the entry
+    // script — detected by a file-extension entry. Don't try to spin up a
+    // competing one; just open Studio and let the user point Test Mode at
+    // their running `hypen dev`.
+    const isServerBased = /\.(ts|js|mjs)$/.test(config.entry);
+    if (isServerBased) {
+      console.log(
+        `  ${dim("Server-based project — start it separately with")} ${yellow("hypen dev")} ${dim("and reconnect from the toolbar.")}`
+      );
+    } else {
+    try {
+      const { RemoteServer } = await import("@hypen-space/server/remote");
+      const { discoverComponents, loadDiscoveredComponents, watchComponents } = await import(
+        "@hypen-space/server"
+      );
+      const { configureLogger } = await import("@hypen-space/core");
+
+      const componentsDir = resolve(config.components || "./src/components");
+      const discovered = await discoverComponents(componentsDir);
+      const loaded = await loadDiscoveredComponents(discovered);
+      const entryComponent = loaded.get(entry);
+
+      if (!entryComponent?.module) {
+        console.log(
+          `  ${dim("No usable entry module")} ${dim("(\"" + entry + "\" missing or has no module) —")} ${dim("Studio will open in connect-only mode.")}`
+        );
+      } else {
+        // Suppress framework logs while we boot the server — keeps the
+        // banner clean even when the engine is chatty on startup.
+        configureLogger({ level: "error" });
+
+        const remoteServer = new RemoteServer()
+          .module(entry, entryComponent.module)
+          .source(componentsDir)
+          .syncActions();
+
+        let actualPort = requestedPort;
+        const maxRetries = 10;
+        for (let attempt = 0; attempt <= maxRetries; attempt++) {
+          try {
+            await remoteServer.listen(actualPort);
+            break;
+          } catch (err: any) {
+            if (err?.code === "EADDRINUSE" && attempt < maxRetries) {
+              actualPort = requestedPort + attempt + 1;
+              continue;
+            }
+            throw err;
+          }
+        }
+        remoteWsUrl = `ws://localhost:${actualPort}`;
+        console.log(`  ${dim("Module:")}     ${entry}`);
+        console.log(`  ${dim("Server:")}     ${yellow(remoteWsUrl)}`);
+        stopRemoteServer = () => remoteServer.stop();
+
+        // Mirror `hypen dev`: watch the components dir and hot-reload
+        // every connected preview (web cells + native runners) when a
+        // `.hypen` or sibling module file changes.
+        let isInitialScan = true;
+        const watcher = watchComponents(componentsDir, {
+          onChange: async () => {
+            if (isInitialScan) {
+              isInitialScan = false;
+              return;
+            }
+            try {
+              await remoteServer.reload();
+            } catch (e: any) {
+              console.warn(`  ${dim("Hot reload failed:")} ${e?.message ?? e}`);
+            }
+          },
+        });
+        stopWatcher = () => watcher.stop();
+
+        configureLogger({ level: "info" });
+      }
+    } catch (err: any) {
+      console.warn(
+        `  ${dim("Could not start preview server:")} ${err?.message ?? err}`
+      );
+      console.log(`  ${dim("Studio will open in connect-only mode.")}`);
+    }
+    }
+  } else {
+    console.log(
+      `  ${dim("Not inside a Hypen project — opening Studio in connect-only mode.")}`
+    );
+    console.log(
+      `  ${dim("Tip: type a")} ${yellow("ws://...")} ${dim("URL into the Connect input to attach to a remote dev server.")}`
+    );
+  }
+
+  const cleanup = () => {
+    if (stopWatcher) {
+      try { stopWatcher(); } catch { /* already stopped */ }
+      stopWatcher = null;
+    }
+    if (stopRemoteServer) {
+      try { stopRemoteServer(); } catch { /* already stopped */ }
+      stopRemoteServer = null;
+    }
+  };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+  process.on("exit", cleanup);
+
+  await studio({
+    components,
+    entry,
+    port: 5173,
+    open: options.open ?? true,
+    remoteUrl: remoteWsUrl || undefined,
+    testMode: true,
+  });
+
+  cleanup();
 }
 
 /**
@@ -695,6 +854,11 @@ if (values.port) {
 // Execute command
 const command = positionals[0];
 
+// First run on this machine? Walk new users through a short tour before
+// handing off to the command. No-ops for non-interactive runs and after
+// the first time (see src/onboarding.ts).
+await maybeRunOnboarding(VERSION);
+
 switch (command) {
   case "init":
     await initProject(positionals[1]);
@@ -724,6 +888,13 @@ switch (command) {
       port: values.port ? parseInt(values.port) : undefined,
       open: values.open,
       session: values.session,
+    });
+    break;
+
+  case "test":
+    await testMode({
+      port: values.port ? parseInt(values.port) : undefined,
+      open: values.open,
     });
     break;
 

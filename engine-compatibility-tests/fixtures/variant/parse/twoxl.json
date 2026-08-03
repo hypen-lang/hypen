@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "parse-2xl", "description": "2xl breakpoint token.", "function": "parse_prop_key", "input": { "key": "width@2xl.0" }, "expected": { "base": "width", "breakpoint": "2xl", "state": null, "arg": "0" } }

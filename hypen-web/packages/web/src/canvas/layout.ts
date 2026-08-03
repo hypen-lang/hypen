@@ -47,6 +47,19 @@ export async function initTaffyLayout(): Promise<boolean> {
   taffyInitPromise = (async () => {
     try {
       taffy = await import("taffy-layout");
+      // In a server runtime (Bun/Node — including test runs where a JSDOM
+      // `window` may be globally registered by another test file), load the
+      // WASM from node_modules via fs. This path is deterministic; the
+      // fetch-based branch below depends on a reachable origin/CDN and must
+      // never be selected just because a test polyfilled `window`.
+      const isServerRuntime =
+        typeof process !== "undefined" &&
+        !!(process.versions?.bun || process.versions?.node);
+      if (isServerRuntime) {
+        await taffy.loadTaffy();
+        taffyReady = true;
+        return;
+      }
       // Bundlers (esp. Bun's browser bundler) sometimes inline a file:// URL
       // for import.meta.url inside taffy_wasm.js, which the browser blocks
       // ("Not allowed to load local resource"). The package's own `loadTaffy`

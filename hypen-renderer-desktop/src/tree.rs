@@ -103,6 +103,13 @@ impl Tree {
         self.nodes.get(id)
     }
 
+    /// Iterate every live node (live + detached subtrees alike — the
+    /// `nodes` map holds both). Order is unspecified. Used by the window
+    /// to scan for layout-affecting state variants after a patch flush.
+    pub fn nodes(&self) -> impl Iterator<Item = &Node> {
+        self.nodes.values()
+    }
+
     /// Apply a single patch.
     ///
     /// Patches that reference unknown nodes are logged and skipped rather

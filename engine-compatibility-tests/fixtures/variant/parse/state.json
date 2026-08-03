@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "parse-state", "description": "State marker between base and arg suffix.", "function": "parse_prop_key", "input": { "key": "backgroundColor:hover.0" }, "expected": { "base": "backgroundColor", "breakpoint": null, "state": "hover", "arg": "0" } }

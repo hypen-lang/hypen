@@ -79,26 +79,50 @@ public struct VariantInfo {
 ///   "padding@md" -> VariantInfo(baseName: "padding", breakpoint: .md, state: nil)
 ///   "background-color:hover" -> VariantInfo(baseName: "background-color", breakpoint: nil, state: .hover)
 public func parseVariantName(_ name: String) -> VariantInfo {
-    // Check for responsive variant (@)
-    if let atIndex = name.firstIndex(of: "@") {
-        let baseName = String(name[..<atIndex])
-        let breakpointStr = String(name[name.index(after: atIndex)...])
-        let breakpoint = Breakpoint.from(breakpointStr)
-        return VariantInfo(baseName: baseName, breakpoint: breakpoint, state: nil)
+    // Canonical key order is `base@bp:state`; a key may carry the breakpoint
+    // marker, the state marker, BOTH (combined, e.g. "backgroundColor@md:hover"),
+    // or neither. Peel the state marker first, then the breakpoint marker, so a
+    // combined key resolves both halves instead of silently dropping the second.
+    var base = name
+    var breakpoint: Breakpoint? = nil
+    var state: StateVariant? = nil
+
+    // State marker `:state` — only treat it as a variant when the token is a
+    // known state (an unrecognised `:foo` is left as part of the base name, so
+    // it simply never matches a real variant, matching the other renderers).
+    if let colonIndex = base.firstIndex(of: ":") {
+        let stateStr = String(base[base.index(after: colonIndex)...])
+        if let st = StateVariant.from(stateStr) {
+            state = st
+            base = String(base[..<colonIndex])
+        }
     }
 
-    // Check for state variant (:)
-    if let colonIndex = name.firstIndex(of: ":") {
-        let baseName = String(name[..<colonIndex])
-        let stateStr = String(name[name.index(after: colonIndex)...])
-        let state = StateVariant.from(stateStr)
-        return VariantInfo(baseName: baseName, breakpoint: nil, state: state)
+    // Breakpoint marker `@bp`.
+    if let atIndex = base.firstIndex(of: "@") {
+        let bpStr = String(base[base.index(after: atIndex)...])
+        if let bp = Breakpoint.from(bpStr) {
+            breakpoint = bp
+            base = String(base[..<atIndex])
+        }
     }
 
-    return VariantInfo(baseName: name, breakpoint: nil, state: nil)
+    return VariantInfo(baseName: base, breakpoint: breakpoint, state: state)
 }
 
 // MARK: - Responsive Modifier Storage
+
+/// Key for a combined `@bp:state` override (applies only when BOTH the
+/// breakpoint is active at the current width AND the state is active).
+public struct CombinedVariantKey: Hashable {
+    public let breakpoint: Breakpoint
+    public let state: StateVariant
+
+    public init(breakpoint: Breakpoint, state: StateVariant) {
+        self.breakpoint = breakpoint
+        self.state = state
+    }
+}
 
 /// Stores variant-based modifier overrides
 public struct VariantModifiers {
@@ -108,7 +132,13 @@ public struct VariantModifiers {
     /// State-based overrides keyed by state variant
     public var states: [StateVariant: HypenModifier] = [:]
 
+    /// Combined `@bp:state` overrides — applied only when both halves hold.
+    public var combined: [CombinedVariantKey: HypenModifier] = [:]
+
     public init() {}
+
+    /// True when any combined override is present.
+    public var hasCombined: Bool { !combined.isEmpty }
 
     /// Get the appropriate modifier for a given screen width
     public func modifierForWidth(_ width: CGFloat, base: HypenModifier) -> HypenModifier {

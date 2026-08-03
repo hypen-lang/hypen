@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-band-leak-regression", "description": "A high-breakpoint lower state must not outrank a plain higher state.", "function": "resolve_variant", "input": { "base": "c", "props": { "c:hover.0": "h", "c@2xl:disabled.0": "d" }, "width": 1536, "activeStates": ["disabled", "hover"] }, "expected": "h" }

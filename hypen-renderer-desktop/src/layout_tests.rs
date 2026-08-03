@@ -1084,6 +1084,133 @@ fn taffy_state_setprop_recomputes_node_style_only() {
 }
 
 #[test]
+fn padding_hover_state_variant_changes_geometry_when_hovered() {
+    // End-to-end: a Container with `padding:hover` larger than its
+    // base padding produces a larger rect once the interaction
+    // snapshot marks it hovered, and the base geometry when not.
+    let patches = vec![
+        create_patch(
+            "box",
+            "Container",
+            &[("padding.0", json!(8)), ("padding:hover.0", json!(40))],
+        ),
+        insert_patch("root", "box"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+
+    // Base (no hover): ~16-tall minimum from padding(8) top+bottom.
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, 800.0));
+    let mut text = TextEngine::new();
+    let base = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    // The empty Container stretches to full width as a flex child,
+    // so height (padding top+bottom = 16) is the unambiguous signal.
+    let base_rect = base.item_by_id("box").expect("box laid out").rect;
+    assert!(
+        (base_rect.h - 16.0).abs() < 0.5,
+        "base padding(8) → 16-tall rect; got {base_rect:?}",
+    );
+
+    // Hover active on `box`: padding jumps to 40 → 80-tall rect.
+    taffy.set_interaction(crate::layout::LayoutInteraction {
+        hovered: Some("box".into()),
+        ..Default::default()
+    });
+    let hovered = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    let hovered_rect = hovered.item_by_id("box").expect("box laid out").rect;
+    assert!(
+        (hovered_rect.h - 80.0).abs() < 0.5,
+        "padding:hover(40) should produce an 80-tall rect once hovered; got {hovered_rect:?}",
+    );
+
+    // Back to no hover → base geometry restored.
+    taffy.set_interaction(crate::layout::LayoutInteraction::default());
+    let unhovered = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    let unhovered_rect = unhovered.item_by_id("box").expect("box laid out").rect;
+    assert!(
+        (unhovered_rect.h - base_rect.h).abs() < 0.5,
+        "leaving hover should restore base geometry; base={base_rect:?} now={unhovered_rect:?}",
+    );
+}
+
+#[test]
+fn padding_hover_only_applies_to_the_hovered_node() {
+    // Two boxes, both with `padding:hover`. Hovering one must not
+    // inflate the other (per-node active states).
+    let patches = vec![
+        create_patch(
+            "a",
+            "Container",
+            &[("padding.0", json!(8)), ("padding:hover.0", json!(40))],
+        ),
+        insert_patch("root", "a"),
+        create_patch(
+            "b",
+            "Container",
+            &[("padding.0", json!(8)), ("padding:hover.0", json!(40))],
+        ),
+        insert_patch("root", "b"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, 800.0));
+    taffy.set_interaction(crate::layout::LayoutInteraction {
+        hovered: Some("a".into()),
+        ..Default::default()
+    });
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    let a = pass.item_by_id("a").expect("a laid out").rect;
+    let b = pass.item_by_id("b").expect("b laid out").rect;
+    assert!(
+        (a.h - 80.0).abs() < 0.5,
+        "hovered `a` should inflate; got {a:?}"
+    );
+    assert!(
+        (b.h - 16.0).abs() < 0.5,
+        "un-hovered `b` should keep base padding; got {b:?}"
+    );
+}
+
+#[test]
 fn scrollable_true_marks_container_as_scrollable() {
     // `.scrollable(true)` produces a `scrollable: true` prop on
     // the Container. The DSL form is what the social example

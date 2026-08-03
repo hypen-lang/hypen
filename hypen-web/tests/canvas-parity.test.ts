@@ -29,11 +29,13 @@ import type { VirtualNode } from "../packages/web/src/canvas/types.js";
 beforeAll(async () => {
   // The Taffy path is what the production renderer uses; the fallback is
   // covered by canvas-layout.test.ts. We want to assert the production path
-  // matches the engine's expectations.
-  const ready = await initTaffyLayout();
-  if (!ready) {
+  // matches the engine's expectations. Fail loudly if Taffy didn't come up —
+  // otherwise the suite silently runs the JS fallback and produces a wall of
+  // misleading layout mismatches.
+  const ok = await initTaffyLayout();
+  if (!ok) {
     throw new Error(
-      "Taffy failed to initialise — these tests would silently run the JS fallback layout and assert wrong numbers.",
+      "Taffy WASM failed to initialise; canvas parity tests require the production (Taffy) layout path"
     );
   }
 });

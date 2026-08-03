@@ -42,6 +42,7 @@ describe("CLI", () => {
       expect(result.stdout).toContain("dev");
       expect(result.stdout).toContain("build");
       expect(result.stdout).toContain("studio");
+      expect(result.stdout).toContain("test");
       expect(result.exitCode).toBe(0);
     });
 
@@ -197,9 +198,8 @@ describe("CLI", () => {
       expect(componentHypen).toContain("@{state.count}");
       expect(componentHypen).toContain("@actions.increment");
       expect(componentHypen).toContain("@actions.decrement");
-      // Tailwind + normal applicators are both demonstrated.
+      // The Counter scaffold styles entirely with Tailwind utilities.
       expect(componentHypen).toContain(".tw(");
-      expect(componentHypen).toContain(".padding(");
     });
 
     test("Home module exists as a second module with typed action", async () => {
@@ -264,6 +264,43 @@ describe("CLI", () => {
       expect(result.stderr).toContain("Unknown command");
       expect(result.exitCode).toBe(1);
     });
+  });
+
+  describe("test command", () => {
+    test("recognises the command and detects missing project", async () => {
+      // Spawn in an empty temp dir (no hypen.json, no src/components) and
+      // give it a moment to print the connect-only banner, then kill it
+      // before it actually opens a browser tab. We assert on stdout rather
+      // than waiting for clean exit because Studio is designed to run
+      // indefinitely.
+      const proc = spawn({
+        cmd: ["bun", cliPath, "test"],
+        cwd: testDir,
+        stdout: "pipe",
+        stderr: "pipe",
+        env: { ...process.env, HYPEN_NO_OPEN: "1" },
+      });
+
+      let stdoutBuf = "";
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      const deadline = Date.now() + 4000;
+      try {
+        while (Date.now() < deadline) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          stdoutBuf += decoder.decode(value);
+          if (stdoutBuf.includes("Not inside a Hypen project")) break;
+        }
+      } finally {
+        try { proc.kill(); } catch { /* already dead */ }
+        await proc.exited.catch(() => { /* expected */ });
+      }
+
+      expect(stdoutBuf).toContain("Not inside a Hypen project");
+      // Crucially, the test command should NOT be treated as unknown.
+      expect(stdoutBuf).not.toContain("Unknown command");
+    }, 10_000);
   });
 
   describe("command parsing", () => {

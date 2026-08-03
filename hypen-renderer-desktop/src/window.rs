@@ -300,6 +300,13 @@ pub struct App {
     /// Feeds the layout cache key — patches mutate the tree, so any
     /// non-empty patch batch invalidates the cached layout.
     tree_generation: u64,
+    /// `true` when the current renderer tree has at least one node
+    /// carrying a layout-affecting interaction-state variant
+    /// (`padding:hover`, `width:focus`, …). Recomputed after every
+    /// patch flush. When `false` (the overwhelmingly common case),
+    /// hover/press/focus transitions never enter the layout cache key,
+    /// so they stay on the repaint-only fast path with zero relayout.
+    has_layout_state_variants: bool,
     /// Hash of the inputs that fed the most recent successful layout
     /// pass — excluding page `scroll_y`. Page scroll is applied as a
     /// uniform post-pass shift, so a scroll-only frame can re-shift
@@ -416,6 +423,7 @@ impl App {
             ime_active: false,
             damage: Damage::Full,
             tree_generation: 0,
+            has_layout_state_variants: false,
             last_layout_key: None,
             last_scroll_y_in_layout: 0.0,
             last_scroll_y_emitted: 0.0,
@@ -545,6 +553,14 @@ impl App {
                 self.taffy.remove_node(id);
             }
         }
+        // Recompute the layout-state-variant gate for the new tree.
+        // Cheap whole-tree scan, runs only on patch flush (not per
+        // frame). Drives whether interaction transitions participate in
+        // the layout cache key + are threaded into the layout pass.
+        self.has_layout_state_variants = self
+            .tree
+            .nodes()
+            .any(crate::style::node_has_layout_state_variant);
         self.damage.add_full();
         n
     }
@@ -594,6 +610,24 @@ impl App {
                 false
             });
         }
+
+        // Feed the live interaction snapshot into the retained Taffy
+        // state so layout-affecting state variants (`padding:hover`, …)
+        // resolve against the node actually under the pointer / pressed
+        // / focused. Gated on `has_layout_state_variants`: when the tree
+        // has none, pass the default (all-`None`) so the layout pass's
+        // interaction key stays constant and a hover/press/focus
+        // transition never forces a relayout.
+        let layout_interaction = if self.has_layout_state_variants {
+            crate::layout::LayoutInteraction {
+                hovered: self.hovered.clone(),
+                pressed: self.pressed.clone(),
+                focused: self.focused.clone(),
+            }
+        } else {
+            crate::layout::LayoutInteraction::default()
+        };
+        self.taffy.set_interaction(layout_interaction);
 
         // Layout cache. Hover / press / focus / caret-only frames
         // don't change anything that feeds Taffy or cosmic-text, so a
@@ -753,21 +787,17 @@ impl App {
     /// take the fast path in `redraw` and re-shift the cached items
     /// instead of recomputing Taffy + measure.
     fn layout_cache_key(&self, w: u32, h: u32, scale: f32) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h_hasher = std::collections::hash_map::DefaultHasher::new();
-        self.tree_generation.hash(&mut h_hasher);
-        w.hash(&mut h_hasher);
-        h.hash(&mut h_hasher);
-        scale.to_bits().hash(&mut h_hasher);
-        // Sorted iteration so two equivalent maps with different
-        // insertion order produce the same key.
-        let mut sorted: Vec<(&String, &f32)> = self.scrollables.iter().collect();
-        sorted.sort_by(|a, b| a.0.cmp(b.0));
-        for (id, off) in sorted {
-            id.hash(&mut h_hasher);
-            off.to_bits().hash(&mut h_hasher);
-        }
-        h_hasher.finish()
+        layout_cache_key_inner(
+            self.tree_generation,
+            w,
+            h,
+            scale,
+            &self.scrollables,
+            self.has_layout_state_variants,
+            self.hovered.as_deref(),
+            self.pressed.as_deref(),
+            self.focused.as_deref(),
+        )
     }
 
     fn publish_accessibility(&mut self) {
@@ -1399,6 +1429,55 @@ impl ApplicationHandler<AppEvent> for App {
 pub(crate) fn clamp_scroll(y: f32, content_h: f32, viewport_h: f32) -> f32 {
     let max = (content_h - viewport_h).max(0.0);
     y.clamp(0.0, max)
+}
+
+/// Pure layout-cache-key hash. Folds the live interaction state
+/// (hovered / pressed / focused) into the key ONLY when
+/// `has_layout_state_variants` is set — so a tree with no layout-
+/// affecting state variant produces a key independent of hover/press/
+/// focus, keeping interaction transitions on the repaint-only fast path
+/// (no relayout). Extracted as a free function so the guard is unit-
+/// testable without constructing a full `App` (which needs a GPU).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn layout_cache_key_inner(
+    tree_generation: u64,
+    w: u32,
+    h: u32,
+    scale: f32,
+    scrollables: &HashMap<String, f32>,
+    has_layout_state_variants: bool,
+    hovered: Option<&str>,
+    pressed: Option<&str>,
+    focused: Option<&str>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h_hasher = std::collections::hash_map::DefaultHasher::new();
+    tree_generation.hash(&mut h_hasher);
+    w.hash(&mut h_hasher);
+    h.hash(&mut h_hasher);
+    scale.to_bits().hash(&mut h_hasher);
+    // Sorted iteration so two equivalent maps with different insertion
+    // order produce the same key.
+    let mut sorted: Vec<(&String, &f32)> = scrollables.iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    for (id, off) in sorted {
+        id.hash(&mut h_hasher);
+        off.to_bits().hash(&mut h_hasher);
+    }
+    // Interaction state participates ONLY when the tree has a layout-
+    // affecting state variant. In the common case the branch is skipped
+    // entirely, so the key is byte-identical to the pre-feature
+    // behaviour and hover/press/focus transitions never trigger a
+    // relayout. When a layout state variant IS present, a transition on
+    // (or off) the hovered / pressed / focused node bumps the key,
+    // forcing `redraw` to recompute the LayoutPass with the new active
+    // states (Taffy's per-node dirty tracking keeps that incremental).
+    if has_layout_state_variants {
+        hovered.hash(&mut h_hasher);
+        pressed.hash(&mut h_hasher);
+        focused.hash(&mut h_hasher);
+    }
+    h_hasher.finish()
 }
 
 /// Step `cursor` left to the start of the previous UTF-8 codepoint.

@@ -120,7 +120,9 @@ import SwiftUI
 @Test func testParseVariantNameInvalidBreakpoint() {
     let result = parseVariantName("padding@invalid")
 
-    #expect(result.baseName == "padding")
+    // An unrecognised marker is left as part of the base name (so it never
+    // matches a real applicator), matching the engine + web parsers.
+    #expect(result.baseName == "padding@invalid")
     #expect(result.breakpoint == nil) // Invalid breakpoint becomes nil
     #expect(result.state == nil)
 }
@@ -128,7 +130,7 @@ import SwiftUI
 @Test func testParseVariantNameInvalidState() {
     let result = parseVariantName("padding:invalid")
 
-    #expect(result.baseName == "padding")
+    #expect(result.baseName == "padding:invalid")
     #expect(result.breakpoint == nil)
     #expect(result.state == nil) // Invalid state becomes nil
 }
@@ -141,6 +143,21 @@ import SwiftUI
     let result2 = parseVariantName("border-top-width:hover")
     #expect(result2.baseName == "border-top-width")
     #expect(result2.state == .hover)
+}
+
+@Test func testParseVariantNameCombined() {
+    // Combined `@bp:state` must resolve BOTH halves (previously the state was
+    // silently dropped). Mirrors the cross-SDK `parse-combined` fixture.
+    let result = parseVariantName("backgroundColor@md:hover")
+    #expect(result.baseName == "backgroundColor")
+    #expect(result.breakpoint == .md)
+    #expect(result.state == .hover)
+    #expect(result.isVariant)
+
+    let hyphenated = parseVariantName("background-color@2xl:focus-within")
+    #expect(hyphenated.baseName == "background-color")
+    #expect(hyphenated.breakpoint == .xxl)
+    #expect(hyphenated.state == .focusWithin)
 }
 
 // MARK: - VariantModifiers Tests

@@ -1,0 +1,15 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Variant compatibility fixture",
+  "description": "Pins the renderer-side variant parser/resolver across SDKs. parse_prop_key takes a key and yields {base,breakpoint,state,arg}; resolve_variant picks the winning value for a base given props + viewport width + active interaction states.",
+  "type": "object",
+  "required": ["name", "function", "input", "expected"],
+  "properties": {
+    "name": { "type": "string" },
+    "description": { "type": "string" },
+    "function": { "enum": ["parse_prop_key", "resolve_variant"] },
+    "priority": { "type": "string" },
+    "input": { "type": "object" },
+    "expected": {}
+  }
+}

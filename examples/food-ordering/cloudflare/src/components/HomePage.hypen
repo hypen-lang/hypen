@@ -1,0 +1,170 @@
+Column {
+    Column {
+        Row {
+            Column {
+                Text("Crave Cart")
+                    .tw("text-2xl md:text-4xl font-black tracking-tight")
+                    .color("#19130f")
+                Row {
+                    Icon(@resources.map-pin)
+                        .size(14)
+                        .color("#f97316")
+                    Text("@{state.currentUser.address}")
+                        .tw("text-xs md:text-sm font-semibold ml-1 truncate max-w-64 md:max-w-xl")
+                        .color("#6b5d52")
+                }
+                .tw("items-center mt-1")
+            }
+            .tw("flex-1 min-w-0")
+
+            Row {
+                Button {
+                    Row {
+                        Icon(@resources.search)
+                            .size(18)
+                            .color("#f97316")
+                        Text("Search")
+                            .tw("text-sm font-bold ml-2")
+                            .color("#19130f")
+                    }
+                    .tw("items-center")
+                }
+                .tw("hidden md:flex bg-white border border-orange-100 rounded-full px-5 py-3 mr-3 shadow-sm")
+                .onClick(@router.push, to: "/search")
+
+                Button {
+                    Image(src: "@{state.currentUser.avatarUrl}")
+                        .tw("w-10 h-10 md:w-12 md:h-12 rounded-full")
+                }
+                .tw("bg-transparent border-0 p-0 shrink-0")
+                .onClick(@router.push, to: "/profile")
+            }
+            .tw("items-center")
+        }
+        .tw("items-center")
+
+        Button {
+            Row {
+                Icon(@resources.search)
+                    .size(18)
+                    .color("#9ca3af")
+                Text("Search for restaurants or dishes")
+                    .tw("text-sm text-gray-400 ml-2")
+            }
+            .tw("items-center")
+        }
+        .tw("bg-white rounded-2xl border border-orange-100 px-4 py-3.5 mt-4 w-full shadow-sm md:hidden")
+        .onClick(@router.push, to: "/search")
+    }
+    .tw("px-5 md:px-10 pt-5 md:pt-8 pb-4 md:pb-6")
+    .maxWidth(1240)
+    .width("100%")
+    .alignSelf("center")
+
+    Row {
+        Column {
+            Text("Dinner sorted in three taps")
+                .tw("text-4xl md:text-6xl font-black leading-none tracking-tight")
+                .color("#1f140d")
+            Text("Fresh local favorites, quick delivery windows, and a cart that stays put while you keep browsing.")
+                .tw("text-sm md:text-lg mt-4 leading-7")
+                .color("#735f52")
+
+            Row {
+                Column {
+                    Text("18 min")
+                        .tw("text-xl md:text-2xl font-black")
+                        .color("#1f140d")
+                    Text("fastest drop")
+                        .tw("text-xs font-semibold mt-1")
+                        .color("#8b7466")
+                }
+                .tw("bg-white/80 rounded-2xl border border-orange-100 px-4 py-3 mr-3")
+
+                Column {
+                    Text("4.8")
+                        .tw("text-xl md:text-2xl font-black")
+                        .color("#1f140d")
+                    Text("avg rating")
+                        .tw("text-xs font-semibold mt-1")
+                        .color("#8b7466")
+                }
+                .tw("bg-white/80 rounded-2xl border border-orange-100 px-4 py-3")
+            }
+            .tw("mt-6 items-center")
+        }
+        .tw("flex-1 min-w-0 pr-0 md:pr-8")
+
+        Stack {
+            Image(src: "https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=900&h=700&fit=crop")
+                .tw("w-full h-64 lg:h-80 rounded-[28px]")
+                .objectFit("cover")
+            Column {
+                Text("Popular tonight")
+                    .tw("text-xs font-black uppercase tracking-wide")
+                    .color("#9a3412")
+                Text("Napoli Pizzeria")
+                    .tw("text-xl font-black mt-1")
+                    .color("#1f140d")
+            }
+            .tw("absolute left-5 bottom-5 bg-white/90 border border-white rounded-2xl px-4 py-3 shadow-xl")
+        }
+        .tw("hidden md:flex w-[42%] shrink-0")
+    }
+    .tw("mx-5 md:mx-10 mt-2 md:mt-3 p-6 md:p-8 rounded-[32px] items-center")
+    .linearGradient("135deg, #fff7ed 0%, #f8e5cf 54%, #ffd7a8 100%")
+    .maxWidth(1240)
+    .width("100%")
+    .alignSelf("center")
+
+    Column {
+        Row {
+            Text("Categories")
+                .tw("text-base md:text-lg font-black flex-1")
+                .color("#1f140d")
+            Text("@{state.restaurants.length} open now")
+                .tw("hidden md:flex text-sm font-bold")
+                .color("#f97316")
+        }
+        .tw("px-5 md:px-10 pt-6 items-center")
+
+        Row {
+            ForEach(items: @state.categories, key: "id") {
+                CategoryChip()
+            }
+        }
+        .tw("flex-row gap-2 px-5 md:px-10 py-3")
+        .scrollable("horizontal")
+    }
+    .maxWidth(1240)
+    .width("100%")
+    .alignSelf("center")
+
+    Row {
+        Icon(@resources.fire)
+            .size(18)
+            .color("#f97316")
+        Text("Popular near you")
+            .tw("text-lg md:text-2xl font-black ml-2 flex-1")
+            .color("#1f140d")
+    }
+    .tw("px-5 md:px-10 pt-3 pb-4 items-center")
+    .maxWidth(1240)
+    .width("100%")
+    .alignSelf("center")
+
+    Column {
+        ForEach(items: @state.restaurants, key: "id") {
+            RestaurantCard()
+        }
+    }
+    .display("grid")
+    .gridTemplateColumns("repeat(auto-fit, minmax(260px, 1fr))")
+    .gap(18)
+    .tw("px-5 md:px-10 pb-8 md:pb-12 w-full")
+    .maxWidth(1240)
+    .width("100%")
+    .alignSelf("center")
+}
+.scrollable(true)
+.tw("flex-1 w-full bg-[#f7f2ea]")

@@ -475,44 +475,56 @@ impl VelloPainter {
         }
 
         // Background and border resolution mirrors the CPU painter:
-        // Buttons get hover / press tints; other kinds keep their
-        // explicit fills.
+        // explicit paint-time state variants
+        // (`backgroundColor:hover.0`, ...) win first, then the legacy
+        // Button hover / press tint fills in whichever channel a variant
+        // did NOT already override.
+        let hovered = self.interaction.hovered.contains(&item.node_id);
+        let pressed = self.interaction.pressed.contains(&item.node_id);
+        let focused = self.interaction.focused.as_deref() == Some(&item.node_id);
         let mut background = item.background;
         let mut border_color = item.border.color;
-        let pressed = self.interaction.pressed.contains(&item.node_id);
-        let hovered = self.interaction.hovered.contains(&item.node_id);
-
-        // Declarative `hover:` styling (tw `hover:bg-*` / `hover:border-*`,
-        // expanded by the engine into `backgroundColor:hover` /
-        // `borderColor:hover`). Applies to any hovered item — only
-        // actionables ever land in the `hovered` set, so this naturally
-        // covers Buttons / Links / Cards. Wins over the auto-tint below.
-        if hovered && !pressed {
-            if let Some(bg) = item.hover.background {
-                background = Some(bg);
+        let mut bg_from_variant = false;
+        let mut border_from_variant = false;
+        // Resolve background / border / foreground state variants in one pass.
+        // `active_states` is computed once and reused; `fg_override` is the
+        // foreground `color` variant applied to Text / Input / Icon below.
+        let fg_override = if item.state_variants.is_empty() {
+            None
+        } else {
+            let states = item.state_variants.active_states(hovered, pressed, focused);
+            if let Some(c) = item.state_variants.background_color_for(&states) {
+                background = Some(c);
+                bg_from_variant = true;
             }
-            if let Some(bc) = item.hover.border_color {
-                border_color = bc;
+            if let Some(c) = item.state_variants.border_color_for(&states) {
+                border_color = c;
+                border_from_variant = true;
             }
-        }
-
-        // Automatic pseudo-state tint for Buttons that didn't declare
-        // their own `hover:` style. Buttons with an opaque fill get
-        // lightened / darkened; transparent ones (icon buttons like the
-        // browser toolbar's home / reload / pin) get a subtle neutral
-        // overlay — otherwise hover / press read as nothing at all.
+            item.state_variants.color_for(&states)
+        };
+        // Automatic pseudo-state tint for Buttons that didn't declare their own
+        // `hover:`/`active:` state variant. An explicit variant always wins
+        // first (gated by `bg_from_variant`/`border_from_variant`); otherwise
+        // buttons with an opaque fill get lightened/darkened, while transparent
+        // ones (icon buttons like a toolbar's home/reload) get a subtle neutral
+        // overlay so hover/press still read as something (restored from main).
         if matches!(item.kind, ItemKind::Button) {
             const HOVER_FILL: Rgba = Rgba(100, 116, 139, 28);
             const PRESS_FILL: Rgba = Rgba(100, 116, 139, 48);
             let has_fill = background.is_some_and(|b| b.3 > 0);
             if pressed {
-                background = if has_fill {
-                    background.map(|b| darken(b, 0.85))
-                } else {
-                    Some(PRESS_FILL)
-                };
-                border_color = darken(border_color, 0.7);
-            } else if hovered && item.hover.background.is_none() {
+                if !bg_from_variant {
+                    background = if has_fill {
+                        background.map(|b| darken(b, 0.85))
+                    } else {
+                        Some(PRESS_FILL)
+                    };
+                }
+                if !border_from_variant {
+                    border_color = darken(border_color, 0.7);
+                }
+            } else if hovered && !bg_from_variant {
                 background = if has_fill {
                     background.map(|b| lighten(b, 1.05))
                 } else {
@@ -595,7 +607,7 @@ impl VelloPainter {
                     item,
                     content,
                     *font_size * scale_factor,
-                    *color,
+                    fg_override.unwrap_or(*color),
                     *align,
                     item.font_weight,
                     *max_lines,
@@ -617,7 +629,7 @@ impl VelloPainter {
                     value,
                     placeholder.as_deref(),
                     *font_size * scale_factor,
-                    *color,
+                    fg_override.unwrap_or(*color),
                     item.font_weight,
                     scale_factor,
                 );
@@ -630,7 +642,7 @@ impl VelloPainter {
                 view_box,
                 tint,
             } => {
-                draw_icon(&mut self.scene, item.rect, paths, *view_box, *tint);
+                draw_icon(&mut self.scene, item.rect, paths, *view_box, fg_override.or(*tint));
             }
         }
 
@@ -1520,6 +1532,7 @@ mod tests {
             clip_to: None,
             subtree_root: None,
             background_gradient: None,
+            state_variants: crate::style::StateVariants::default(),
         }
     }
 

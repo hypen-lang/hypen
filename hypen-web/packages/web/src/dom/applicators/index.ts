@@ -40,17 +40,16 @@ import { advancedLayoutHandlers } from "./advanced-layout.js";
 import { backgroundHandlers } from "./background.js";
 import { displayHandlers } from "./display.js";
 import { transitionHandlers } from "./transition.js";
+import { BREAKPOINTS as VARIANT_BREAKPOINTS, VALID_STATES } from "../../variants.js";
 
 /**
- * Tailwind breakpoint values for responsive variants
+ * Tailwind breakpoint values for responsive variants.
+ * Derived from the shared `variants.ts` table (single source of truth across
+ * DOM + Canvas renderers) and expressed as CSS `px` strings for media queries.
  */
-const BREAKPOINTS: Record<string, string> = {
-  sm: '640px',
-  md: '768px',
-  lg: '1024px',
-  xl: '1280px',
-  '2xl': '1536px',
-};
+const BREAKPOINTS: Record<string, string> = Object.fromEntries(
+  Object.entries(VARIANT_BREAKPOINTS).map(([name, px]) => [name, `${px}px`]),
+);
 
 /**
  * Singleton stylesheet for variant CSS rules
@@ -327,6 +326,36 @@ export class ApplicatorRegistry {
     const atIndex = name.indexOf('@');
     const colonIndex = name.indexOf(':');
 
+    // Combined responsive + state variant: backgroundColor@md:hover.
+    // Canonical key order is `<prop>@<bp>:<state>`, so the breakpoint sits
+    // between '@' and ':'. Emitted as a pseudo-class rule nested in a media
+    // query so it applies only when BOTH the width matches AND the state holds.
+    if (atIndex !== -1 && colonIndex !== -1 && colonIndex > atIndex) {
+      const prop = name.slice(0, atIndex);
+      const breakpoint = name.slice(atIndex + 1, colonIndex);
+      const state = name.slice(colonIndex + 1);
+      const minWidth = BREAKPOINTS[breakpoint];
+
+      if (minWidth && VALID_STATES.includes(state)) {
+        const cssName = this.toKebabCase(prop);
+        const cssValue = this.formatCssValue(cssName, value);
+        const className = `hypen-${cssName.replace(/[^a-zA-Z0-9-]/g, '')}-${breakpoint}-${state}-${hashValue(value)}`;
+        const ruleKey = `${className}:${cssValue}`;
+
+        if (!insertedRules.has(ruleKey)) {
+          const sheet = getVariantStyleSheet();
+          sheet.insertRule(
+            `@media (min-width: ${minWidth}) { .${className}:${state} { ${cssName}: ${cssValue}; } }`,
+            sheet.cssRules.length
+          );
+          insertedRules.add(ruleKey);
+        }
+
+        element.classList.add(className);
+      }
+      return;
+    }
+
     // Responsive variant: padding@md, width@lg, etc.
     if (atIndex !== -1) {
       const prop = name.slice(0, atIndex);
@@ -359,9 +388,8 @@ export class ApplicatorRegistry {
       const prop = name.slice(0, colonIndex);
       const state = name.slice(colonIndex + 1);
 
-      // Only handle known CSS pseudo-states
-      const validStates = ['hover', 'focus', 'active', 'disabled', 'focus-visible', 'focus-within'];
-      if (validStates.includes(state)) {
+      // Only handle known CSS pseudo-states (shared with the Canvas resolver)
+      if (VALID_STATES.includes(state)) {
         const cssName = this.toKebabCase(prop);
         const cssValue = this.formatCssValue(cssName, value);
         const className = `hypen-${cssName.replace(/[^a-zA-Z0-9-]/g, '')}-${state}-${hashValue(value)}`;

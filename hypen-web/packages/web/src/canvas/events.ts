@@ -225,6 +225,13 @@ export class CanvasEventManager {
 
     this.mouseDownNode = node;
 
+    // Track pressed (`:active`) state so paint-time `:active` variants resolve.
+    // Repaint so the active style appears immediately on press.
+    if (node) {
+      node.pressed = true;
+      this.requestRedraw();
+    }
+
     if (node && node.clickable) {
       this.dispatchNodeEvent(node, "mousedown", {
         button: e.button,
@@ -248,6 +255,13 @@ export class CanvasEventManager {
     const point = this.getCanvasCoordinates(e);
     const hit = this.hitTest(point);
     const node = this.findClickableAncestor(hit) ?? hit;
+
+    // Clear the pressed (`:active`) flag from the node that was pressed —
+    // release ends `:active` even if the pointer drifted off the node first.
+    if (this.mouseDownNode && this.mouseDownNode.pressed) {
+      this.mouseDownNode.pressed = false;
+      this.requestRedraw();
+    }
 
     if (node && node.clickable) {
       this.dispatchNodeEvent(node, "mouseup", {
@@ -456,6 +470,7 @@ export class CanvasEventManager {
     this.canvas.removeEventListener("contextmenu", this.boundOnContextMenu);
     this.canvas.removeEventListener("keydown", this.boundOnKeyDown);
     this.canvas.removeEventListener("keyup", this.boundOnKeyUp);
+    if (this.mouseDownNode) this.mouseDownNode.pressed = false;
     this.rootNode = null;
     this.hoveredNode = null;
     this.focusedNode = null;

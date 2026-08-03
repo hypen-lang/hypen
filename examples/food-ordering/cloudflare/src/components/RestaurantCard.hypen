@@ -1,0 +1,75 @@
+Button {
+    Column {
+        Stack {
+            Image(src: "@{item.imageUrl}")
+                .tw("w-full h-44 md:h-48")
+                .objectFit("cover")
+                .tw("rounded-t-2xl bg-gray-100")
+
+            If(condition: "@{!item.isOpen}") {
+                Column {
+                    Text("Closed")
+                        .tw("text-[10px] font-bold text-white px-1.5 py-0.5 bg-gray-800 rounded")
+                }
+                .tw("absolute top-1 left-1")
+            }
+        }
+
+        Column {
+            Row {
+                Text("@{item.name}")
+                    .tw("text-lg font-black flex-1")
+                    .color("#1f140d")
+
+                Row {
+                    Icon(@resources.star)
+                        .size(14)
+                        .color("#f59e0b")
+                    Text("@{item.rating}")
+                        .tw("text-sm font-semibold ml-1")
+                }
+                .tw("items-center shrink-0")
+            }
+            .tw("items-center")
+
+            Text("@{item.cuisine}")
+                .tw("text-sm font-semibold text-gray-500 mt-1")
+
+            Row {
+                Row {
+                    Icon(@resources.clock)
+                        .size(12)
+                        .color("#6b7280")
+                    Text("@{item.deliveryTimeMin}-@{item.deliveryTimeMax} min")
+                        .tw("text-xs text-gray-600 ml-1")
+                }
+                .tw("items-center")
+
+                Text(" · ")
+                    .tw("text-xs text-gray-400 px-1")
+
+                Row {
+                    Icon(@resources.map-pin)
+                        .size(12)
+                        .color("#6b7280")
+                    Text("@{item.distanceKm} km")
+                        .tw("text-xs text-gray-600 ml-1")
+                }
+                .tw("items-center")
+            }
+            .tw("mt-1 items-center")
+
+            Row {
+                Text("@{item.deliveryFee == 0 ? 'Free delivery' : '$' + item.deliveryFee + ' delivery'}")
+                    .tw("text-xs font-black text-orange-600 bg-orange-50 px-2.5 py-1 rounded-full")
+            }
+            .tw("mt-3")
+        }
+        .tw("p-4 justify-center")
+    }
+    .display("flex")
+    .flexDirection("column")
+    .tw("bg-white rounded-2xl border border-orange-100 items-stretch w-full h-full overflow-hidden shadow-sm")
+}
+.tw("bg-transparent border-0 p-0 w-full")
+.onClick(@router.push, to: "/restaurant/@{item.id}")

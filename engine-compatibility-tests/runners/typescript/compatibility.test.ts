@@ -99,7 +99,7 @@ async function findFixtures(dir: string): Promise<string[]> {
     for (const entry of entries) {
       const fullPath = join(currentDir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === "portable") continue;
+        if (entry.name === "portable" || entry.name === "variant") continue;
         await walk(fullPath);
       } else if (entry.name.endsWith(".json")) {
         fixtures.push(fullPath);

@@ -64,6 +64,13 @@ public struct HypenElementView: View {
 
         let hasResponsiveVariants = !applicatorResult.variants.responsive.isEmpty
         let hasStateVariants = !applicatorResult.variants.states.isEmpty
+        let hasCombinedVariants = !applicatorResult.variants.combined.isEmpty
+        // `disabled` interaction state (mirrors Android's derivation): an explicit
+        // `disabled` prop, or `enabled: false`. Fed to VariantAwareView so
+        // `:disabled` / `@bp:disabled` variants apply on iOS too.
+        let isDisabled =
+            (element.getBoolProp("disabled.0") ?? element.getBoolProp("disabled") ?? false)
+            || !(element.getBoolProp("enabled.0") ?? element.getBoolProp("enabled") ?? true)
 
         // Get component handler or use fallback
         let _ = {
@@ -73,11 +80,12 @@ public struct HypenElementView: View {
             }
         }()
         if let handler = componentRegistry.getHandler(for: element.elementType) {
-            if hasResponsiveVariants || hasStateVariants {
+            if hasResponsiveVariants || hasStateVariants || hasCombinedVariants {
                 // Use variant-aware rendering
                 VariantAwareView(
                     baseModifier: applicatorResult.baseModifier,
                     variants: applicatorResult.variants,
+                    isDisabled: isDisabled,
                     content: {
                         handler.render(
                             context: context,
@@ -102,10 +110,11 @@ public struct HypenElementView: View {
             }
         } else {
             // Fallback: render as a container with top-leading alignment (like Web/Android)
-            if hasResponsiveVariants || hasStateVariants {
+            if hasResponsiveVariants || hasStateVariants || hasCombinedVariants {
                 VariantAwareView(
                     baseModifier: applicatorResult.baseModifier,
                     variants: applicatorResult.variants,
+                    isDisabled: isDisabled,
                     content: {
                         ZStack(alignment: .topLeading) {
                             renderChildren(element)
@@ -151,6 +160,7 @@ public struct HypenElementView: View {
 struct VariantAwareView<Content: View>: View {
     let baseModifier: HypenModifier
     let variants: VariantModifiers
+    var isDisabled: Bool = false
     let content: () -> Content
 
     @State private var isPressed = false
@@ -178,19 +188,57 @@ struct VariantAwareView<Content: View>: View {
         // Compute responsive modifier
         var effectiveModifier = variants.modifierForWidth(screenWidth, base: baseModifier)
 
-        // Apply state-based overrides
+        // Apply combined `@bp:state` overrides for `state` whose breakpoint is
+        // active at the current width, smallest→largest so a higher breakpoint
+        // wins the within-band tiebreak (matches the engine precedence). Layered
+        // right after the plain state override so a combined `@md:hover` beats a
+        // plain `:hover`, while a higher state band still wins overall.
+        func applyCombined(_ state: StateVariant, into mod: HypenModifier) -> HypenModifier {
+            guard variants.hasCombined else { return mod }
+            var out = mod
+            for bp in Breakpoint.allCases.sorted() where screenWidth >= bp.minWidth {
+                if let m = variants.combined[CombinedVariantKey(breakpoint: bp, state: state)] {
+                    out = HypenModifier.mergeOverride(base: out, override: m)
+                }
+            }
+            return out
+        }
+
+        // State-based overrides, lowest→highest precedence: disabled < hover < focus < active.
+        if isDisabled {
+            if let disabledMod = variants.states[.disabled] {
+                effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: disabledMod)
+            }
+            effectiveModifier = applyCombined(.disabled, into: effectiveModifier)
+        }
+
         #if os(macOS) || targetEnvironment(macCatalyst)
-        if isHovered, let hoverMod = variants.states[.hover] {
-            effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: hoverMod)
+        if isHovered {
+            if let hoverMod = variants.states[.hover] {
+                effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: hoverMod)
+            }
+            effectiveModifier = applyCombined(.hover, into: effectiveModifier)
         }
         #endif
 
-        if isFocused, let focusMod = variants.states[.focus] {
-            effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: focusMod)
+        if isFocused {
+            // focus, focus-visible, and focus-within share the focus band (the
+            // native renderer has no keyboard-vs-pointer / descendant-focus
+            // distinction, matching how the engine ranks all three at the focus
+            // slot). Apply each plain state then its combined overrides.
+            for st in [StateVariant.focus, .focusVisible, .focusWithin] {
+                if let mod = variants.states[st] {
+                    effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: mod)
+                }
+                effectiveModifier = applyCombined(st, into: effectiveModifier)
+            }
         }
 
-        if isPressed, let activeMod = variants.states[.active] {
-            effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: activeMod)
+        if isPressed {
+            if let activeMod = variants.states[.active] {
+                effectiveModifier = HypenModifier.mergeOverride(base: effectiveModifier, override: activeMod)
+            }
+            effectiveModifier = applyCombined(.active, into: effectiveModifier)
         }
 
         return effectiveModifier

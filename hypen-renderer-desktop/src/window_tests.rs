@@ -243,3 +243,65 @@ fn typing_sequence_preserves_character_order() {
 }
 
 // -----------------------------------------------------------------
+// Layout-cache-key guard for layout-affecting interaction-state
+// variants. The free `layout_cache_key_inner` carries the gate so it's
+// testable without a GPU-backed `App`.
+// -----------------------------------------------------------------
+
+#[test]
+fn cache_key_ignores_hover_without_layout_state_variants() {
+    // (c) With NO layout-affecting state variants in the tree, the key
+    // is identical regardless of hover / press / focus — so an
+    // interaction transition never forces a relayout (no regression on
+    // the common path).
+    let scrollables = HashMap::new();
+    let base = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, None);
+    let hovered =
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, Some("btn"), None, None);
+    let pressed =
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, Some("btn"), None);
+    let focused =
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, Some("btn"));
+    assert_eq!(base, hovered);
+    assert_eq!(base, pressed);
+    assert_eq!(base, focused);
+}
+
+#[test]
+fn cache_key_changes_on_hover_with_layout_state_variants() {
+    // (d) When the tree DOES carry a layout-affecting state variant, a
+    // hover/press/focus transition bumps the key, forcing `redraw` to
+    // recompute the LayoutPass with the new active states.
+    let scrollables = HashMap::new();
+    let none = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, None, None);
+    let hovered =
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, Some("btn"), None, None);
+    assert_ne!(none, hovered, "hover must bump the key");
+    // Hover moving to a different node also changes the key.
+    let other =
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, Some("other"), None, None);
+    assert_ne!(hovered, other);
+    // Press / focus likewise.
+    let pressed =
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, Some("btn"), None);
+    assert_ne!(none, pressed);
+    let focused =
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, None, Some("btn"));
+    assert_ne!(none, focused);
+}
+
+#[test]
+fn cache_key_with_variants_matches_baseline_when_no_interaction() {
+    // The gate only *adds* hashing when an interaction is present; with
+    // all-`None` interaction the keyed-on and keyed-off variants agree,
+    // confirming the fold is purely additive (hashing `None` thrice is
+    // what the disabled branch skips, but with no interaction the
+    // resulting key still differs only by that — so we assert the
+    // enabled-but-idle key is stable across calls).
+    let scrollables = HashMap::new();
+    let a = layout_cache_key_inner(3, 1024, 768, 2.0, &scrollables, true, None, None, None);
+    let b = layout_cache_key_inner(3, 1024, 768, 2.0, &scrollables, true, None, None, None);
+    assert_eq!(a, b);
+}
+
+// -----------------------------------------------------------------

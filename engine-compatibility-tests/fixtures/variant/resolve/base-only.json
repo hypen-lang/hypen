@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-base-only", "description": "No variants -> base value.", "function": "resolve_variant", "input": { "base": "padding", "props": { "padding.0": 8 }, "width": 1000, "activeStates": [] }, "expected": 8 }

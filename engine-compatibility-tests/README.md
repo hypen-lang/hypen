@@ -138,6 +138,46 @@ For tests that require multiple interactions:
 | `actions` | Action dispatch with payloads | P0 |
 | `control-flow` | ForEach, When conditionals | P1 |
 | `lifecycle` | Module onCreated, onDestroyed | P1 |
+| `portable` | Pure helpers: diff, path, route, session, url | P0 |
+| `variant` | Responsive/state variant key parse + resolve precedence | P0 |
+
+`portable` and `variant` fixtures use a different shape from the DSL→patch
+categories above: each names a pure `function` plus `input`/`expected`. They are
+loaded by dedicated runner files (`runners/rust/tests/{portable,variant}.rs`,
+`runners/typescript/{portable,variant}.test.ts`). Because variant resolution is
+**renderer-side** (each renderer runs its own parser/precedence), the `variant`
+fixtures pin the implementations directly: the Rust runner drives the engine's
+`portable::variant` (used by the desktop renderer) and the TypeScript runner
+drives the web `variants.ts` (used by both DOM and Canvas). The same JSON is the
+contract for the Swift/Android `VariantSupport` parsers once those runners exist.
+
+### Adding the native `variant` runners (TODO)
+
+The `variant` fixtures are language-neutral and already cover the contract; only
+the runner glue is missing for the native renderers. Go is **not applicable** —
+it has no renderer and therefore no variant parser. To wire up the others:
+
+- **Swift** (`hypen-renderer-swift`, run under `swift test`): add a test that
+  loads `engine-compatibility-tests/fixtures/variant/**` and, per fixture,
+  - `parse_prop_key`: call `parseVariantName(input.key)` and assert
+    `{ base, breakpoint, state, arg }`. Note: Swift's parser is fed the key with
+    the arg suffix already stripped by the applicator grouping, so the runner
+    must split the last `.` itself and compare `arg` separately.
+  - `resolve_variant`: build a `VariantModifiers`-equivalent from `input.props`
+    and assert the winner for `input.base` at `input.width` / `input.activeStates`
+    matches `expected` (or null). Easiest is to expose a small pure
+    `pickVariantValue(base, props, width, states)` helper mirroring the engine's
+    `pick_variant_base` and test that directly, rather than going through SwiftUI.
+- **Android** (`hypen-renderer-android`, JVM unit test under
+  `renderer/src/test`): same two functions against `parseVariantName` and a pure
+  resolver helper. Keep it a plain JVM test (no Android SDK / Compose deps) so it
+  runs in CI without an emulator.
+- Both should resolve the repo-root fixtures dir relative to the module and fail
+  on any unknown `function`, so new fixtures are picked up automatically.
+
+Until these exist, the Swift/Android parsers are pinned only by their own
+in-repo unit tests (`VariantSupportTests.swift`, `VariantSupportTest.kt`) plus
+manual review against this fixture set.
 
 ## Adding New Tests
 

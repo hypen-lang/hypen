@@ -71,7 +71,7 @@ pub struct Conversation {
     pub is_unread: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PostThumbnail {
     pub id: String,

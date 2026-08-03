@@ -35,6 +35,7 @@ import {
   refreshApplicator,
   parseApplicatorBase,
 } from "./props.js";
+import { applyVariants, invalidateVariantCache, deriveNodeComputed } from "./variants.js";
 
 const DEFAULT_OPTIONS: CanvasRendererOptions = {
   devicePixelRatio: typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
@@ -294,6 +295,10 @@ export class CanvasRenderer implements Renderer {
 
     node.props[name] = value;
 
+    // A new key may introduce a variant marker (e.g. `padding@md.0`) — drop the
+    // cached variant-base set so the next frame rescans.
+    invalidateVariantCache(node);
+
     // If this is an applicator-namespaced key (e.g. `flex.0`, `onClick.to`),
     // rebuild the derived flat/aggregate entry under the base name so layout,
     // paint, and event dispatch see the updated value.
@@ -341,6 +346,8 @@ export class CanvasRenderer implements Renderer {
     }
 
     delete node.props[name];
+
+    invalidateVariantCache(node);
 
     const base = parseApplicatorBase(name);
     if (base !== null) {
@@ -581,6 +588,20 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * Re-derive cached computed fields that may have been overridden by variant
+   * resolution. `node.opacity` is read straight off `node.props.opacity` in
+   * paint, but it is cached on the node at create/setProp time — after a
+   * variant pass changes `props.opacity` (e.g. `opacity:disabled`), the cache
+   * must be refreshed or the paint would use the stale value.
+   */
+  private refreshComputedProps(node: VirtualNode): void {
+    deriveNodeComputed(node);
+    for (const child of node.children) {
+      this.refreshComputedProps(child);
+    }
+  }
+
+  /**
    * Full canvas repaint (default behavior when dirty rects disabled)
    */
   private renderFull(dpr: number): void {
@@ -595,10 +616,17 @@ export class CanvasRenderer implements Renderer {
 
     // Layout and paint
     if (this.rootNode) {
+      // Resolve responsive + state variants against the current content width
+      // BEFORE layout so spacing/size winners feed the layout engine and
+      // colour/opacity winners feed paint.
+      const contentWidth = this.canvas.width / dpr;
+      applyVariants(this.rootNode, contentWidth);
+      this.refreshComputedProps(this.rootNode);
+
       computeLayout(
         this.ctx,
         this.rootNode,
-        this.canvas.width / dpr,
+        contentWidth,
         this.canvas.height / dpr
       );
 
@@ -618,10 +646,14 @@ export class CanvasRenderer implements Renderer {
   private renderWithDirtyRects(dpr: number): void {
     // Always run layout so nodes have up-to-date bounds
     if (this.rootNode) {
+      const contentWidth = this.canvas.width / dpr;
+      applyVariants(this.rootNode, contentWidth);
+      this.refreshComputedProps(this.rootNode);
+
       computeLayout(
         this.ctx,
         this.rootNode,
-        this.canvas.width / dpr,
+        contentWidth,
         this.canvas.height / dpr
       );
       ScrollManager.updateScrollBounds(this.rootNode);

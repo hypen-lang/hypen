@@ -291,11 +291,14 @@ class DefaultApplicatorRegistry : ApplicatorRegistry {
         var baseModifier = modifier
         val responsiveModifiers = mutableMapOf<Breakpoint, Modifier>()
         val stateModifiers = mutableMapOf<StateVariant, Modifier>()
+        val combinedModifiers = mutableMapOf<Pair<Breakpoint, StateVariant>, Modifier>()
 
         // Group applicators, separating variants from base props
         val baseGrouped = mutableMapOf<String, MutableMap<String, Any?>>()
         val responsiveGrouped = mutableMapOf<Breakpoint, MutableMap<String, MutableMap<String, Any?>>>()
         val stateGrouped = mutableMapOf<StateVariant, MutableMap<String, MutableMap<String, Any?>>>()
+        val combinedGrouped =
+            mutableMapOf<Pair<Breakpoint, StateVariant>, MutableMap<String, MutableMap<String, Any?>>>()
 
         for ((name, value) in element.props) {
             val dotIndex = name.indexOf('.')
@@ -309,6 +312,14 @@ class DefaultApplicatorRegistry : ApplicatorRegistry {
             val variantInfo = parseVariantName(propName)
 
             when {
+                variantInfo.breakpoint != null && variantInfo.state != null -> {
+                    // Combined `@bp:state` variant — applies only when both hold,
+                    // so it must NOT fall into the responsive-only bucket.
+                    val key = variantInfo.breakpoint to variantInfo.state
+                    val cGroups = combinedGrouped.getOrPut(key) { mutableMapOf() }
+                    val args = cGroups.getOrPut(variantInfo.baseName) { mutableMapOf() }
+                    args[argKey] = value
+                }
                 variantInfo.breakpoint != null -> {
                     // Responsive variant
                     val bpGroups = responsiveGrouped.getOrPut(variantInfo.breakpoint) { mutableMapOf() }
@@ -385,10 +396,31 @@ class DefaultApplicatorRegistry : ApplicatorRegistry {
             stateModifiers[state] = variantModifier
         }
 
+        // Apply combined `@bp:state` variant applicators (sorted by priority)
+        for ((key, groups) in combinedGrouped) {
+            var variantModifier: Modifier = Modifier
+            val sortedGroups = groups.entries.sortedBy { (baseName, _) ->
+                ApplicatorPriorityMap.getPriority(baseName).order
+            }
+            for ((baseName, args) in sortedGroups) {
+                val handler = getHandler(baseName)
+                if (handler != null) {
+                    val value = when {
+                        args.size == 1 && args.containsKey("__value") -> args["__value"]
+                        args.size == 1 && args.containsKey("0") -> args["0"]
+                        else -> args
+                    }
+                    variantModifier = handler.apply(variantModifier, value, context)
+                }
+            }
+            combinedModifiers[key] = variantModifier
+        }
+
         return ApplicatorResultWithVariants(
             baseModifier = baseModifier,
             responsiveModifiers = responsiveModifiers,
-            stateModifiers = stateModifiers
+            stateModifiers = stateModifiers,
+            combinedModifiers = combinedModifiers
         )
     }
 

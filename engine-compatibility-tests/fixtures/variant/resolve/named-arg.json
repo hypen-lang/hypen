@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-named-arg", "description": "Resolution works for named-arg keys, not just .0.", "function": "resolve_variant", "input": { "base": "padding", "props": { "padding.top": 4, "padding@md.top": 8 }, "width": 900, "activeStates": [] }, "expected": 8 }

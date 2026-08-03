@@ -130,9 +130,12 @@ fn collect_fixtures(dir: &Path, results: &mut Vec<PathBuf>) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                // Skip `portable/` — different schema, separate runner
-                // (`tests/portable.rs`).
-                if path.file_name().map_or(false, |n| n == "portable") {
+                // Skip `portable/` and `variant/` — different schema, their own
+                // runners (`tests/portable.rs`, `tests/variant.rs`).
+                if path
+                    .file_name()
+                    .map_or(false, |n| n == "portable" || n == "variant")
+                {
                     continue;
                 }
                 collect_fixtures(&path, results);

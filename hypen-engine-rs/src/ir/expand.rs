@@ -211,6 +211,43 @@ fn process_applicators(
             continue;
         }
 
+        // Value-map variant form: .padding({ default: 8, md: 16, hover: "x" })
+        // When the applicator has a SINGLE positional Map argument whose keys
+        // are ALL variant tokens, lower it into suffixed variant props exactly
+        // like the tailwind path:
+        //   "default" -> "<name>.0"
+        //   "md"      -> "<name>@md.0"
+        //   "hover"   -> "<name>:hover.0"
+        // Map values still flow through parser_value_to_ir so @{state.x}
+        // bindings inside continue to work. If not all keys are variant tokens,
+        // fall through to the default applicator handling unchanged.
+        if applicator.arguments.arguments.len() == 1 {
+            if let hypen_parser::Argument::Positioned {
+                value: ParserValue::Map(map),
+                ..
+            } = &applicator.arguments.arguments[0]
+            {
+                if !map.is_empty()
+                    && map
+                        .keys()
+                        .all(|k| crate::portable::variant::is_variant_token(k))
+                {
+                    for (variant, value) in map {
+                        let prop_key = if variant == crate::portable::variant::DEFAULT_KEY {
+                            format!("{}.0", applicator.name)
+                        } else if crate::portable::variant::is_breakpoint(variant) {
+                            format!("{}@{}.0", applicator.name, variant)
+                        } else {
+                            // state token
+                            format!("{}:{}.0", applicator.name, variant)
+                        };
+                        props.insert(prop_key, parser_value_to_ir(value));
+                    }
+                    continue;
+                }
+            }
+        }
+
         // All other applicators become namespaced props
         if applicator.arguments.arguments.is_empty() {
             // Zero-argument applicators default to boolean true
@@ -1169,6 +1206,100 @@ mod tests {
                 other => panic!("Expected static prop {key}, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn test_value_map_variant_breakpoints() {
+        // .padding({ default: 8, md: 16 }) lowers to padding.0 + padding@md.0
+        let input = r#"Text("Hi").padding({default: 8, md: 16})"#;
+        let element = parse_to_element(input);
+
+        assert!(
+            element.props.contains_key("padding.0"),
+            "Should have padding.0 prop"
+        );
+        assert!(
+            element.props.contains_key("padding@md.0"),
+            "Should have padding@md.0 prop"
+        );
+
+        if let Value::Static(val) = element.props.get("padding.0").unwrap() {
+            assert_eq!(val.as_f64().unwrap(), 8.0);
+        } else {
+            panic!("expected static padding.0");
+        }
+        if let Value::Static(val) = element.props.get("padding@md.0").unwrap() {
+            assert_eq!(val.as_f64().unwrap(), 16.0);
+        } else {
+            panic!("expected static padding@md.0");
+        }
+    }
+
+    #[test]
+    fn test_value_map_variant_state() {
+        // .backgroundColor({ default: "red", hover: "blue" })
+        let input = r#"Box {}.backgroundColor({default: "red", hover: "blue"})"#;
+        let element = parse_to_element(input);
+
+        assert!(
+            element.props.contains_key("backgroundColor.0"),
+            "Should have backgroundColor.0 prop"
+        );
+        assert!(
+            element.props.contains_key("backgroundColor:hover.0"),
+            "Should have backgroundColor:hover.0 prop"
+        );
+
+        if let Value::Static(val) = element.props.get("backgroundColor:hover.0").unwrap() {
+            assert_eq!(val.as_str().unwrap(), "blue");
+        } else {
+            panic!("expected static backgroundColor:hover.0");
+        }
+    }
+
+    #[test]
+    fn test_value_map_variant_preserves_binding() {
+        // Bindings inside a variant map value must survive lowering.
+        let input = r#"Text("Hi").padding({default: 8, md: "@{state.gap}"})"#;
+        let element = parse_to_element(input);
+
+        assert!(element.props.contains_key("padding@md.0"));
+        assert!(
+            matches!(
+                element.props.get("padding@md.0").unwrap(),
+                Value::Binding(_)
+            ),
+            "binding inside variant map should be preserved"
+        );
+    }
+
+    #[test]
+    fn test_non_variant_map_is_passthrough() {
+        // A map whose keys are NOT all variant tokens must NOT be hijacked;
+        // it falls through to default applicator handling as a single .0 prop.
+        let input = r#"Box {}.gradient({from: "red", to: "blue"})"#;
+        let element = parse_to_element(input);
+
+        // Default handling: single positional arg -> "gradient.0" holding a map.
+        assert!(
+            element.props.contains_key("gradient.0"),
+            "non-variant map should remain a single gradient.0 prop"
+        );
+        // And it must NOT have produced variant-suffixed keys.
+        assert!(!element.props.contains_key("gradient@from.0"));
+        assert!(!element.props.contains_key("gradient:to.0"));
+    }
+
+    #[test]
+    fn test_named_arg_applicator_unaffected() {
+        // .padding(top: 8) is a Named arg, not a Map; must stay padding.top.
+        let input = r#"Text("Hi").padding(top: 8)"#;
+        let element = parse_to_element(input);
+        assert!(
+            element.props.contains_key("padding.top"),
+            "named-arg applicator must remain padding.top"
+        );
+        assert!(!element.props.contains_key("padding.0"));
     }
 
     #[test]

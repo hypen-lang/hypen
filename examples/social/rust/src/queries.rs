@@ -157,6 +157,7 @@ pub fn get_user_posts(conn: &Connection, user_id: &str) -> Vec<PostThumbnail> {
         Ok(PostThumbnail {
             id: row.get(0)?,
             image_url: row.get(1)?,
+            ..Default::default()
         })
     })
     .unwrap()
@@ -217,6 +218,7 @@ pub fn get_user_post_thumbnails(conn: &Connection, user_id: &str) -> Vec<PostThu
         Ok(PostThumbnail {
             id: row.get(0)?,
             image_url: row.get(1)?,
+            ..Default::default()
         })
     })
     .unwrap()
