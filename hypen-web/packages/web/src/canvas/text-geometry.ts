@@ -202,18 +202,26 @@ export function pointToOffset(
 
   const relX = point.x - alignedLineX(ctx, g, line);
 
-  // Walk characters; snap to whichever side of the glyph is closer. A point
-  // left of the line start clamps to 0 (i has no previous glyph at 0).
+  // Prefix widths are monotonic in prefix length, so bisect for the longest
+  // prefix that fits, then snap to whichever side of the boundary glyph is
+  // closer. A point left of the line start clamps to 0.
   let best = 0;
-  for (let i = 0; i <= line.length; i++) {
-    const w = ctx.measureText(line.slice(0, i)).width;
-    if (w <= relX) {
-      best = i;
-    } else {
-      if (i === 0) break;
-      const prevW = ctx.measureText(line.slice(0, i - 1)).width;
-      best = relX - prevW < w - relX ? i - 1 : i;
-      break;
+  if (relX > 0) {
+    let lo = 0;
+    let hi = line.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (ctx.measureText(line.slice(0, mid)).width <= relX) {
+        lo = mid;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    best = lo;
+    if (lo < line.length) {
+      const w = ctx.measureText(line.slice(0, lo)).width;
+      const nextW = ctx.measureText(line.slice(0, lo + 1)).width;
+      best = relX - w < nextW - relX ? lo : lo + 1;
     }
   }
 

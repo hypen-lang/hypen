@@ -194,10 +194,13 @@ object ColorParser {
         return parseHex(trimmed)
     }
 
+    // Compiled once — these run per color-bearing prop per recomposition
+    private val RGB_PATTERN = Regex("""rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)""")
+    private val HSL_PATTERN = Regex("""hsla?\s*\(\s*(\d+)\s*,\s*(\d+)%?\s*,\s*(\d+)%?\s*(?:,\s*([\d.]+))?\s*\)""")
+
     private fun parseRgb(value: String): Color? {
         // Match rgb(r, g, b) or rgba(r, g, b, a)
-        val pattern = Regex("""rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)""")
-        val match = pattern.find(value) ?: return null
+        val match = RGB_PATTERN.find(value) ?: return null
 
         val r = match.groupValues[1].toIntOrNull() ?: return null
         val g = match.groupValues[2].toIntOrNull() ?: return null
@@ -215,8 +218,7 @@ object ColorParser {
 
     private fun parseHsl(value: String): Color? {
         // Match hsl(h, s%, l%) or hsla(h, s%, l%, a)
-        val pattern = Regex("""hsla?\s*\(\s*(\d+)\s*,\s*(\d+)%?\s*,\s*(\d+)%?\s*(?:,\s*([\d.]+))?\s*\)""")
-        val match = pattern.find(value) ?: return null
+        val match = HSL_PATTERN.find(value) ?: return null
 
         val h = match.groupValues[1].toFloatOrNull() ?: return null
         val s = match.groupValues[2].toFloatOrNull() ?: return null

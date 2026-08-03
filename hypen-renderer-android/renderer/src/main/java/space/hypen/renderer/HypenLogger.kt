@@ -54,11 +54,18 @@ object HypenLogger {
 /**
  * Tagged logger for specific components
  */
-class TaggedLogger(private val tag: String) {
+class TaggedLogger(@PublishedApi internal val tag: String) {
 
     fun debug(message: String, vararg args: Any?) {
         if (HypenLogger.shouldLog(HypenLogLevel.DEBUG)) {
             Log.d(tag, formatMessage(message, args))
+        }
+    }
+
+    /** Lazy variant: the message is only built when debug logging is enabled. */
+    inline fun debug(message: () -> String) {
+        if (HypenLogger.shouldLog(HypenLogLevel.DEBUG)) {
+            Log.d(tag, message())
         }
     }
 
@@ -71,6 +78,13 @@ class TaggedLogger(private val tag: String) {
     fun warn(message: String, vararg args: Any?) {
         if (HypenLogger.shouldLog(HypenLogLevel.WARN)) {
             Log.w(tag, formatMessage(message, args))
+        }
+    }
+
+    /** Lazy variant: the message is only built when warn logging is enabled. */
+    inline fun warn(message: () -> String) {
+        if (HypenLogger.shouldLog(HypenLogLevel.WARN)) {
+            Log.w(tag, message())
         }
     }
 

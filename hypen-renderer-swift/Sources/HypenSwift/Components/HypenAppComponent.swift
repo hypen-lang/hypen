@@ -75,6 +75,9 @@ private struct EmbeddedHypenView: View {
                     renderer: viewModel.renderer,
                     actionDispatcher: viewModel.actionDispatcher
                 )
+                // Rebuild the element view tree when the renderer is reset
+                // (initialTree replay on reconnect) — see HypenView.
+                .id(viewModel.renderer.resetEpoch)
             } else {
                 ProgressView()
                     .progressViewStyle(.circular)
@@ -131,10 +134,33 @@ private final class EmbeddedHypenViewModel: ObservableObject {
     private func setupBindings() {
         guard let engine = engine else { return }
 
-        renderer.objectWillChange
+        // Element views observe their own HypenElement; the embedded root
+        // only needs to re-render when the root element changes.
+        renderer.$rootId
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        // Re-render the embedded root on renderer resets so the element
+        // view tree (keyed by resetEpoch) rebuilds against the fresh
+        // HypenElement instances — see HypenViewModel.
+        renderer.$resetEpoch
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        // Drop the stale tree before an initialTree replay's patches
+        // rebuild it under the same ids (reconnect/session-restore).
+        engine.treeResets
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.renderer.clear()
             }
             .store(in: &cancellables)
 

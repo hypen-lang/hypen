@@ -6,7 +6,6 @@
  */
 
 import type { VirtualNode, Point } from "./types.js";
-import { getScrollAwareBounds } from "./scroll.js";
 import {
   SELECTION_HIGHLIGHT_COLOR,
   nodeTextGeometry,
@@ -244,36 +243,48 @@ export class SelectionManager {
   private hitTestTextNode(
     node: VirtualNode,
     point: Point,
+    scrollX: number = 0,
+    scrollY: number = 0,
   ): TextPosition | null {
     if (!node.visible || !node.layout) return null;
 
+    const layout = node.layout;
+    const x = layout.x - scrollX;
+    const y = layout.y - scrollY;
+    const inBounds =
+      point.x >= x && point.x <= x + layout.width &&
+      point.y >= y && point.y <= y + layout.height;
+
+    // A clipping container confines its subtree to its own box — when the
+    // point is outside, no descendant text can be visible under it.
+    if (!inBounds) {
+      const overflow = node.props.overflow;
+      if (overflow === "hidden" || overflow === "scroll" || overflow === "auto") {
+        return null;
+      }
+    }
+
+    const childScrollX = scrollX + (node.scrollState?.scrollX ?? 0);
+    const childScrollY = scrollY + (node.scrollState?.scrollY ?? 0);
+
     // Check children first (front-to-back)
     for (let i = node.children.length - 1; i >= 0; i--) {
-      const result = this.hitTestTextNode(node.children[i], point);
+      const result = this.hitTestTextNode(node.children[i], point, childScrollX, childScrollY);
       if (result) return result;
     }
 
     // Only text nodes are selectable
     if (node.type !== "text") return null;
-
-    const bounds = getScrollAwareBounds(node);
-    if (!bounds) return null;
-    if (
-      point.x < bounds.x || point.x > bounds.x + bounds.width ||
-      point.y < bounds.y || point.y > bounds.y + bounds.height
-    ) {
-      return null;
-    }
+    if (!inBounds) return null;
 
     // Map point to character offset within this text node
     const ctx = this.canvas.getContext("2d");
     if (!ctx) return null;
-    const layout = node.layout!;
     const geometry = nodeTextGeometry(
       node,
       resolveNodeText(node),
-      bounds.x + layout.contentX,
-      bounds.y + layout.contentY,
+      x + layout.contentX,
+      y + layout.contentY,
     );
     const offset = pointToOffset(ctx, geometry, point);
     return { nodeId: node.id, offset };

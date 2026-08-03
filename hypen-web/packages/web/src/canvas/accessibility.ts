@@ -6,7 +6,6 @@
 
 import type { Semantics } from "@hypen-space/core/types";
 import type { VirtualNode } from "./types.js";
-import { getScrollAwareBounds } from "./scroll.js";
 
 /**
  * Shadow tags that already convey their role natively, so we don't set an
@@ -149,6 +148,18 @@ export class AccessibilityLayer {
   private supported: boolean;
   private canvas: HTMLElement | null;
 
+  /**
+   * Last box written to each mirror element, so the per-frame position sync
+   * only touches elements whose geometry actually changed — style writes on
+   * n absolutely-positioned elements per frame are what they cost.
+   */
+  private lastSyncedBounds = new WeakMap<
+    HTMLElement,
+    { x: number; y: number; width: number; height: number }
+  >();
+  private lastRootRect: { left: number; top: number; width: number; height: number } | null =
+    null;
+
   private boundReposition = () => this.repositionRoot();
 
   constructor(canvas: HTMLElement | null, enabled: boolean = true) {
@@ -229,9 +240,22 @@ export class AccessibilityLayer {
     if (!rect) return;
     const sx = typeof window !== "undefined" ? window.scrollX ?? 0 : 0;
     const sy = typeof window !== "undefined" ? window.scrollY ?? 0 : 0;
+    const left = rect.left + sx;
+    const top = rect.top + sy;
+    const last = this.lastRootRect;
+    if (
+      last &&
+      last.left === left &&
+      last.top === top &&
+      last.width === rect.width &&
+      last.height === rect.height
+    ) {
+      return;
+    }
+    this.lastRootRect = { left, top, width: rect.width, height: rect.height };
     Object.assign(this.mirrorRoot.style, {
-      left: `${rect.left + sx}px`,
-      top: `${rect.top + sy}px`,
+      left: `${left}px`,
+      top: `${top}px`,
       width: `${rect.width}px`,
       height: `${rect.height}px`,
     });
@@ -386,22 +410,46 @@ export class AccessibilityLayer {
     if (!this.enabled) return;
     this.repositionRoot();
     if (root) {
-      this.syncNodePosition(root, 0, 0);
+      this.syncNodePosition(root, 0, 0, 0, 0);
     }
   }
 
-  private syncNodePosition(node: VirtualNode, parentX: number, parentY: number): void {
+  /**
+   * `scrollX`/`scrollY` accumulate the ancestors' scroll offsets down the
+   * recursion (the same subtraction `getScrollAwareBounds` derives by
+   * walking up), keeping the pass O(n) instead of O(n·depth). Writes are
+   * skipped when the element's box is unchanged since the last sync.
+   */
+  private syncNodePosition(
+    node: VirtualNode,
+    parentX: number,
+    parentY: number,
+    scrollX: number,
+    scrollY: number,
+  ): void {
     const element = this.nodeMap.get(node.id);
-    const bounds = getScrollAwareBounds(node);
-    if (!element || !bounds) return;
+    if (!element || !node.layout) return;
 
-    element.style.left = `${bounds.x - parentX}px`;
-    element.style.top = `${bounds.y - parentY}px`;
-    element.style.width = `${bounds.width}px`;
-    element.style.height = `${bounds.height}px`;
+    const x = node.layout.x - scrollX;
+    const y = node.layout.y - scrollY;
+    const width = node.layout.width;
+    const height = node.layout.height;
 
+    const relX = x - parentX;
+    const relY = y - parentY;
+    const last = this.lastSyncedBounds.get(element);
+    if (!last || last.x !== relX || last.y !== relY || last.width !== width || last.height !== height) {
+      element.style.left = `${relX}px`;
+      element.style.top = `${relY}px`;
+      element.style.width = `${width}px`;
+      element.style.height = `${height}px`;
+      this.lastSyncedBounds.set(element, { x: relX, y: relY, width, height });
+    }
+
+    const childScrollX = scrollX + (node.scrollState?.scrollX ?? 0);
+    const childScrollY = scrollY + (node.scrollState?.scrollY ?? 0);
     for (const child of node.children) {
-      this.syncNodePosition(child, bounds.x, bounds.y);
+      this.syncNodePosition(child, x, y, childScrollX, childScrollY);
     }
   }
 

@@ -13,6 +13,7 @@
  */
 
 import { triggerElementAction } from "./applicators/events.js";
+import { getMeta, setMeta } from "./element-data.js";
 import { focusRouteTarget } from "./route-focus.js";
 
 /** Host tags that the browser already makes keyboard-operable. */
@@ -25,6 +26,11 @@ const NATIVE_INTERACTIVE = new Set(["BUTTON", "A"]);
 export function makeKeyboardActivatable(element: HTMLElement, actionValue: unknown): void {
   const tag = element.tagName?.toUpperCase();
   if (tag && NATIVE_INTERACTIVE.has(tag)) return;
+
+  // The keydown listener reads the action from element meta, so a later
+  // re-apply with a different action retargets keyboard activation exactly
+  // as it does the click listener — no stale action, no second listener.
+  setMeta(element, "kbdAction", actionValue);
 
   // Wire the keydown listener only once.
   if (element.dataset?.hypenKbd) return;
@@ -39,7 +45,7 @@ export function makeKeyboardActivatable(element: HTMLElement, actionValue: unkno
     if (key === "Enter" || key === " " || key === "Spacebar") {
       // Space would otherwise scroll the page.
       event.preventDefault?.();
-      triggerElementAction(element, actionValue);
+      triggerElementAction(element, getMeta(element, "kbdAction"));
     }
   });
 }

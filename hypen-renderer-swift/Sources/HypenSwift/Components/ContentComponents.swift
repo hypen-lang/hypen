@@ -288,8 +288,6 @@ public struct ImageComponent: ComponentHandler {
             || modifier.maxHeight != nil
             || modifier.aspectRatio != nil
 
-        print("[HypenImage] src=\(src ?? "nil") hasExplicitSize=\(hasExplicitSize) width=\(String(describing: modifier.width)) height=\(String(describing: modifier.height)) fillMaxWidth=\(modifier.fillMaxWidth) aspectRatio=\(String(describing: modifier.aspectRatio)) contentMode=\(contentMode == .fill ? "fill" : "fit")")
-
         return AnyView(
             Group {
                 if let src = src {

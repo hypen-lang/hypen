@@ -117,9 +117,22 @@ public struct ColumnComponent: ComponentHandler {
         return AnyView(
             Group {
                 if scrollable {
+                    // Lazy rows so a long feed only instantiates what is on
+                    // screen. Control-flow wrappers are flattened (like List
+                    // and Grid) because a wrapper rendered as one item would
+                    // eagerly build its whole subtree.
                     ScrollView(.vertical, showsIndicators: true) {
-                        VStack(alignment: horizontalAlignment, spacing: gap) {
-                            wrappedChildren()
+                        LazyVStack(alignment: horizontalAlignment, spacing: gap) {
+                            ForEach(ControlFlowUtils.flattenControlFlowChildren(childElements, renderer: context.renderer), id: \.id) { childElement in
+                                HypenElementView(
+                                    elementId: childElement.id,
+                                    renderer: context.renderer,
+                                    actionDispatcher: context.actionDispatcher
+                                )
+                                .environment(\.stretchCrossAxis, isStretch ? .horizontal : .none)
+                                .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                                .environment(\.parentExplicitWidth, explicitWidth)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: verticalFrameAlignment(verticalAlignmentStr))
                     }
@@ -369,9 +382,23 @@ public struct RowComponent: ComponentHandler {
         return AnyView(
             Group {
                 if scrollable {
+                    // Lazy items so a long carousel only instantiates what is
+                    // on screen. Control-flow wrappers are flattened (like
+                    // List and Grid) because a wrapper rendered as one item
+                    // would eagerly build its whole subtree.
                     ScrollView(.horizontal, showsIndicators: true) {
-                        HStack(alignment: verticalAlignment, spacing: gap) {
-                            wrappedChildren()
+                        LazyHStack(alignment: verticalAlignment, spacing: gap) {
+                            ForEach(ControlFlowUtils.flattenControlFlowChildren(childElements, renderer: context.renderer), id: \.id) { childElement in
+                                HypenElementView(
+                                    elementId: childElement.id,
+                                    renderer: context.renderer,
+                                    actionDispatcher: context.actionDispatcher
+                                )
+                                .environment(\.stretchCrossAxis, isStretch ? .vertical : .none)
+                                .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                                .environment(\.parentExplicitHeight, explicitHeight)
+                                .environment(\.parentExplicitWidth, explicitWidth)
+                            }
                         }
                         .frame(maxHeight: .infinity, alignment: horizontalFrameAlignment(horizontalAlignmentStr))
                     }
@@ -965,7 +992,7 @@ public struct ListComponent: ComponentHandler {
                     .frame(maxWidth: .infinity)
                 } else {
                     ScrollView(.vertical, showsIndicators: true) {
-                        VStack(alignment: .leading, spacing: gap) {
+                        LazyVStack(alignment: .leading, spacing: gap) {
                             ForEach(childElements, id: \.id) { childElement in
                                 HypenElementView(
                                     elementId: childElement.id,
@@ -1053,10 +1080,6 @@ public struct GridComponent: ComponentHandler {
         // needs to lay out the individual items directly (not a single wrapper as one cell).
         let rawChildren = context.renderer.getChildren(of: context.element.id)
         let childElements = GridComponent.flattenControlFlowChildren(rawChildren, renderer: context.renderer)
-        print("[HypenGrid] columns=\(columns) spacing=\(spacing) scrollable=\(scrollable) raw=\(rawChildren.count) types=\(rawChildren.map { $0.elementType }), flattened=\(childElements.count)")
-        for (i, child) in childElements.enumerated() {
-            print("[HypenGrid]   child[\(i)] id=\(child.id) type=\(child.elementType) props=\(child.props.keys.sorted())")
-        }
 
         // Scrollable grids use ScrollView + LazyVGrid — the canonical SwiftUI pattern.
         // LazyVGrid's "reports one row in sizeThatFits" bug doesn't matter here because the
@@ -1199,7 +1222,6 @@ private struct HypenGridLayout: Layout {
 
         let totalWidth = proposal.width ?? 0
         let colWidth = columnWidth(in: totalWidth)
-        print("[HypenGridLayout] sizeThatFits proposal=\(proposal) totalWidth=\(totalWidth) colWidth=\(colWidth) subviews=\(subviews.count)")
         let grid = computeGrid(subviews: subviews)
 
         // Compute row heights by measuring each child with its column-span width
@@ -1222,7 +1244,6 @@ private struct HypenGridLayout: Layout {
         guard !subviews.isEmpty else { return }
 
         let colWidth = columnWidth(in: bounds.width)
-        print("[HypenGridLayout] placeSubviews bounds=\(bounds) colWidth=\(colWidth)")
         let grid = computeGrid(subviews: subviews)
 
         // Compute row heights (same logic as sizeThatFits)

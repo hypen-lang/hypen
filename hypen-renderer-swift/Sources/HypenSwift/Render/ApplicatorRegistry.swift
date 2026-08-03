@@ -52,12 +52,14 @@ public final class ApplicatorRegistry: @unchecked Sendable {
 
     /// Get a handler for a given applicator name
     public func getHandler(for name: String) -> (any ApplicatorHandler)? {
-        handlers[name.lowercased()]
+        // Keys are stored lowercased; try the name as-is first so
+        // already-lowercase lookups skip the `lowercased()` allocation.
+        handlers[name] ?? handlers[name.lowercased()]
     }
 
     /// Check if a handler exists
     public func hasHandler(for name: String) -> Bool {
-        handlers[name.lowercased()] != nil
+        getHandler(for: name) != nil
     }
 
     /// Apply all applicators from an element's props to a modifier (legacy method)
@@ -70,8 +72,29 @@ public final class ApplicatorRegistry: @unchecked Sendable {
         modifier = result.baseModifier
     }
 
-    /// Apply all applicators with variant support
+    /// Apply all applicators with variant support.
+    ///
+    /// The result depends only on the element's props, so it is memoized
+    /// on the element and recomputed only after a `setProp`/`removeProp`
+    /// invalidates the cache (or when a different registry renders the
+    /// element).
     public func applyAllWithVariants(
+        element: HypenElement,
+        context: ApplicatorContext
+    ) -> ApplicatorResult {
+        let registryID = ObjectIdentifier(self)
+        if element.cachedApplicatorRegistryID == registryID,
+           let cached = element.cachedApplicatorResult {
+            return cached
+        }
+
+        let result = computeApplicatorResult(element: element, context: context)
+        element.cachedApplicatorResult = result
+        element.cachedApplicatorRegistryID = registryID
+        return result
+    }
+
+    private func computeApplicatorResult(
         element: HypenElement,
         context: ApplicatorContext
     ) -> ApplicatorResult {

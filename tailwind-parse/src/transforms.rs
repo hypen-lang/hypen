@@ -281,6 +281,27 @@ fn skew_value(key: &str) -> Option<&'static str> {
     }
 }
 
+/// Parse arbitrary transform values like `rotate-[17deg]`, `scale-[1.15]`,
+/// `translate-x-[13px]`. Negation is handled by the caller (bare prefix +
+/// negated value), matching the named `-rotate-45` forms.
+pub fn parse_arbitrary(prefix: &str, value: &str) -> Option<Vec<CssProperty>> {
+    let function = match prefix {
+        "rotate" => "rotate",
+        "scale" => "scale",
+        "scale-x" => "scaleX",
+        "scale-y" => "scaleY",
+        "translate-x" => "translateX",
+        "translate-y" => "translateY",
+        "skew-x" => "skewX",
+        "skew-y" => "skewY",
+        _ => return None,
+    };
+    Some(vec![CssProperty::new(
+        "transform",
+        &format!("{}({})", function, value),
+    )])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,20 +1,16 @@
 import SwiftUI
 
-/// A SwiftUI view that renders a single Hypen element and its children
+/// A SwiftUI view that renders a single Hypen element and its children.
+///
+/// This is a thin, equatable wrapper: it holds no observed state, so a
+/// parent re-render skips unchanged children. The actual rendering (and
+/// the per-element observation that drives invalidation) lives in
+/// `HypenElementContentView`, which observes only its own `HypenElement`.
 @MainActor
 public struct HypenElementView: View {
     let elementId: String
-    @ObservedObject var renderer: HypenRenderer
+    let renderer: HypenRenderer
     let actionDispatcher: ActionDispatcher
-
-    @Environment(\.componentRegistry) private var componentRegistry
-    @Environment(\.applicatorRegistry) private var applicatorRegistry
-    @Environment(\.stretchCrossAxis) private var stretchCrossAxis
-    @Environment(\.parentAllowsHorizontalExpansion) private var parentAllowsHorizontalExpansion
-    @Environment(\.parentAllowsVerticalExpansion) private var parentAllowsVerticalExpansion
-    @Environment(\.parentExplicitHeight) private var parentExplicitHeight
-    @Environment(\.parentExplicitWidth) private var parentExplicitWidth
-    @Environment(\.proportionalWidth) private var proportionalWidth
 
     public init(
         elementId: String,
@@ -28,8 +24,42 @@ public struct HypenElementView: View {
 
     public var body: some View {
         if let element = renderer.getElement(elementId) {
-            renderElement(element)
+            HypenElementContentView(
+                element: element,
+                renderer: renderer,
+                actionDispatcher: actionDispatcher
+            )
         }
+    }
+}
+
+extension HypenElementView: Equatable {
+    // The dispatcher is fixed per HypenView and flows down uniformly, so
+    // element id plus renderer identity fully determine this wrapper.
+    nonisolated public static func == (lhs: HypenElementView, rhs: HypenElementView) -> Bool {
+        lhs.elementId == rhs.elementId && lhs.renderer === rhs.renderer
+    }
+}
+
+/// Renders one element, observing it directly: a patch that mutates this
+/// element re-evaluates only this view's body, not the whole tree.
+@MainActor
+struct HypenElementContentView: View {
+    @ObservedObject var element: HypenElement
+    let renderer: HypenRenderer
+    let actionDispatcher: ActionDispatcher
+
+    @Environment(\.componentRegistry) private var componentRegistry
+    @Environment(\.applicatorRegistry) private var applicatorRegistry
+    @Environment(\.stretchCrossAxis) private var stretchCrossAxis
+    @Environment(\.parentAllowsHorizontalExpansion) private var parentAllowsHorizontalExpansion
+    @Environment(\.parentAllowsVerticalExpansion) private var parentAllowsVerticalExpansion
+    @Environment(\.parentExplicitHeight) private var parentExplicitHeight
+    @Environment(\.parentExplicitWidth) private var parentExplicitWidth
+    @Environment(\.proportionalWidth) private var proportionalWidth
+
+    var body: some View {
+        renderElement(element)
     }
 
     @ViewBuilder
@@ -77,12 +107,6 @@ public struct HypenElementView: View {
             || !(element.getBoolProp("enabled.0") ?? element.getBoolProp("enabled") ?? true)
 
         // Get component handler or use fallback
-        let _ = {
-            let handler = componentRegistry.getHandler(for: element.elementType)
-            if handler == nil || element.elementType.lowercased() == "grid" || element.elementType.lowercased() == "image" {
-                print("[HypenElementView] type=\(element.elementType) id=\(element.id) handler=\(handler?.typeName ?? "nil") props=\(element.props.keys.sorted()) children=\(element.children)")
-            }
-        }()
         if let handler = componentRegistry.getHandler(for: element.elementType) {
             if hasResponsiveVariants || hasStateVariants || hasCombinedVariants {
                 // Use variant-aware rendering
@@ -306,11 +330,6 @@ extension View {
     /// Proportional widths from flex distribution override other width calculations.
     @ViewBuilder
     func applyWeightExpansion(modifier: HypenModifier, allowsHorizontal: Bool, allowsVertical: Bool, parentHeight: CGFloat? = nil, parentWidth: CGFloat? = nil, proportionalWidth: CGFloat? = nil) -> some View {
-        let _ = {
-            if modifier.fillMaxWidth || modifier.aspectRatio != nil {
-                print("[WeightExpansion] fillMaxWidth=\(modifier.fillMaxWidth) fillMaxWidthFraction=\(modifier.fillMaxWidthFraction) allowsHorizontal=\(allowsHorizontal) parentWidth=\(String(describing: parentWidth)) proportionalWidth=\(String(describing: proportionalWidth)) aspectRatio=\(String(describing: modifier.aspectRatio)) weight=\(String(describing: modifier.weight))")
-            }
-        }()
         // Proportional width from Row's flex distribution takes precedence
         // This handles flex(1), flex(2), etc. proportional distribution
         let effectiveWidth: CGFloat? = proportionalWidth ?? {

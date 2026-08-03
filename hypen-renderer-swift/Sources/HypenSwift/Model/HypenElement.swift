@@ -1,21 +1,51 @@
 import Foundation
+import Combine
 
 /// Represents a single element in the Hypen render tree.
+///
+/// Each element is its own `ObservableObject`: a patch that mutates one
+/// element invalidates only the SwiftUI view rendering that element, not
+/// the whole tree. Structural patches notify through the parent's
+/// `children` array.
 ///
 /// Thread safety is guaranteed by MainActor isolation: `HypenRenderer` is `@MainActor`
 /// and all view code that accesses elements runs on MainActor. The `@unchecked Sendable`
 /// conformance is safe under this guarantee.
-public final class HypenElement: @unchecked Sendable {
+public final class HypenElement: ObservableObject, @unchecked Sendable {
     public let id: String
     public let elementType: String
-    public var props: [String: Any]
-    public var children: [String]
+    public var props: [String: Any] {
+        willSet { objectWillChange.send() }
+        didSet { cachedApplicatorResult = nil }
+    }
+    public var children: [String] {
+        willSet { objectWillChange.send() }
+    }
     public var parentId: String?
-    public var textContent: String?
+    public var textContent: String? {
+        willSet { objectWillChange.send() }
+    }
     /// Engine-derived accessibility semantics: set at `create`, replaced
     /// wholesale by `setSemantics` reactive re-emits (nil clears). Translated
     /// to SwiftUI accessibility modifiers in `applyHypenSemantics`.
-    public var semantics: HypenSemantics?
+    public var semantics: HypenSemantics? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// Applicator pipeline output memoized by `ApplicatorRegistry`.
+    /// Cleared whenever `props` change; the registry identity is kept
+    /// alongside so a subtree rendered with a custom registry never
+    /// reuses a result built by a different one.
+    var cachedApplicatorResult: ApplicatorResult?
+    var cachedApplicatorRegistryID: ObjectIdentifier?
+
+    /// Re-emit this element's change publisher without mutating it.
+    /// Used by `HypenRenderer` when a change to a descendant (e.g. a
+    /// control-flow wrapper's children, or a child prop the parent's
+    /// layout reads) must re-render this element's view.
+    func notifyChanged() {
+        objectWillChange.send()
+    }
 
     public init(
         id: String,
@@ -163,7 +193,9 @@ public final class HypenElement: @unchecked Sendable {
     }
 
     public func removeChild(_ childId: String) {
-        children.removeAll { $0 == childId }
+        if let index = children.firstIndex(of: childId) {
+            children.remove(at: index)
+        }
     }
 }
 

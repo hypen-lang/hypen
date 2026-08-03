@@ -39,9 +39,13 @@ class ComposeRenderer(
     // across the detach → attach cycle.
     private val detachedIds = mutableSetOf<String>()
 
-    private var rootId: String? = null
+    // Snapshot-backed so composables reading [getRootId] recompose when
+    // the root changes; per-element updates flow through each element's
+    // own snapshot state instead of a global version bump.
+    private var rootIdState: String? by mutableStateOf(null)
 
-    // State for Compose recomposition
+    // Bumped once per batch. Kept for external observers and tests;
+    // composition no longer keys on it.
     private val _treeVersion = MutableStateFlow(0)
     val treeVersion: StateFlow<Int> = _treeVersion.asStateFlow()
 
@@ -73,14 +77,7 @@ class ComposeRenderer(
     }
 
     override fun applyPatches(patches: List<Patch>) {
-        android.util.Log.d("HypenTree", "=== applyPatches: ${patches.size} patches ===")
-        // Dump every patch in the batch to trace the exact sequence
-        if (patches.size in 200..500 && patches.any { it.type == PatchType.REMOVE }) {
-            for ((i, p) in patches.withIndex()) {
-                android.util.Log.d("HypenPatch", "[$i] ${p.type} id=${p.id ?: ""} parent=${p.parentId ?: ""} type=${p.elementType ?: ""} name=${p.name ?: ""}")
-            }
-        }
-        log.debug("Applying ${patches.size} patches")
+        log.debug { "Applying ${patches.size} patches" }
 
         // Collect notifications to invoke after releasing the lock,
         // preventing deadlock if listeners call back into renderer APIs.
@@ -97,7 +94,7 @@ class ComposeRenderer(
             val deferredInserts = mutableListOf<Patch>()
 
             for (patch in patches) {
-                log.debug("Patch: type=${patch.type}, id=${patch.id}, name=${patch.name}, value=${patch.value}, text=${patch.text}")
+                log.debug { "Patch: type=${patch.type}, id=${patch.id}, name=${patch.name}, value=${patch.value}, text=${patch.text}" }
                 if (patch.type == PatchType.INSERT || patch.type == PatchType.MOVE) {
                     // Check if both parent and child exist before inserting
                     val parentId = patch.parentId
@@ -114,7 +111,7 @@ class ComposeRenderer(
 
             // Second pass: retry deferred inserts now that all Creates have been processed
             if (deferredInserts.isNotEmpty()) {
-                android.util.Log.d("HypenTree", "Retrying ${deferredInserts.size} deferred inserts")
+                log.debug { "Retrying ${deferredInserts.size} deferred inserts" }
                 for (patch in deferredInserts) {
                     applyPatch(patch, deferredNotifications)
                 }
@@ -128,22 +125,6 @@ class ComposeRenderer(
             notification(listenersSnapshot)
         }
 
-        // Log tree state after patches
-        val rootEl = rootId?.let { elements[it] }
-        android.util.Log.d("HypenTree", "=== After patches: ${elements.size} elements, root=${rootId}(${rootEl?.elementType}), rootKids=${rootEl?.children?.size}")
-        // Log first 3 levels
-        rootEl?.children?.forEach { childId ->
-            val child = elements[childId]
-            if (child != null) {
-                android.util.Log.d("HypenTree", "  ${child.elementType}(${child.id}) kids=${child.children.size}")
-                child.children.take(5).forEach { gcId ->
-                    val gc = elements[gcId]
-                    if (gc != null) android.util.Log.d("HypenTree", "    ${gc.elementType}(${gc.id}) kids=${gc.children.size}")
-                }
-            }
-        }
-
-        // Trigger recomposition
         _treeVersion.value++
 
         // Notify listeners
@@ -169,15 +150,15 @@ class ComposeRenderer(
 
     /**
      * Reactive accessibility re-emit: replace the element's whole semantics
-     * block (null clears). The tree-version bump at the end of the batch
-     * recomposes the element, which re-applies `Modifier.semantics {}` from
-     * the new block — the same translation as at create, so a dropped field
-     * simply stops being applied.
+     * block (null clears). Semantics are snapshot-backed, so the write
+     * recomposes just the element, which re-applies `Modifier.semantics {}`
+     * from the new block — the same translation as at create, so a dropped
+     * field simply stops being applied.
      */
     private fun onSetSemantics(patch: Patch) {
         val id = patch.id ?: return
         val element = elements[id] ?: run {
-            log.debug("SET_SEMANTICS: element not found: $id")
+            log.debug { "SET_SEMANTICS: element not found: $id" }
             return
         }
         element.semantics = patch.semantics
@@ -187,33 +168,41 @@ class ComposeRenderer(
         val id = patch.id ?: return
         val elementType = patch.elementType ?: return
 
-        log.debug("Creating element: $id (type: $elementType), props=${patch.props}")
+        log.debug { "Creating element: $id (type: $elementType), props=${patch.props}" }
 
-        // Log if replacing an existing element (which clears its children)
-        val existing = elements[id]
-        if (existing != null && existing.children.isNotEmpty()) {
-            android.util.Log.w("HypenTree", "CREATE: replacing ${existing.elementType}($id) that had ${existing.children.size} children!")
-        }
-
-        val props = patch.props?.toMutableMap() ?: mutableMapOf()
+        val props = patch.props ?: emptyMap()
 
         // Extract text content from props if present
         val textContent = props["0"]?.toString() ?: props["text"]?.toString()
 
-        val element =
+        val existing = elements[id]
+        val element = if (existing != null) {
+            // Reuse the live instance so composables already holding it
+            // observe the replacement through its snapshot state instead
+            // of rendering a stale node.
+            if (existing.children.isNotEmpty()) {
+                log.warn { "CREATE: replacing ${existing.elementType}($id) that had ${existing.children.size} children!" }
+            }
+            existing.elementType = elementType
+            existing.replaceProps(props)
+            existing.clearChildren()
+            existing.textContent = textContent
+            existing.semantics = patch.semantics
+            existing.bumpPropsRevision()
+            existing
+        } else {
             HypenElement(
                 id = id,
                 elementType = elementType,
                 props = props,
                 textContent = textContent,
                 semantics = patch.semantics,
-            )
-
-        elements[id] = element
+            ).also { elements[id] = it }
+        }
 
         // Set root if this is the first element
-        if (rootId == null) {
-            rootId = id
+        if (rootIdState == null) {
+            rootIdState = id
         }
 
         deferred.add { listeners -> listeners.forEach { it.onElementCreated(element) } }
@@ -224,7 +213,8 @@ class ComposeRenderer(
         val name = patch.name ?: return
 
         val element = elements[id] ?: return
-        element.props[name] = patch.value
+        element.setProp(name, patch.value)
+        element.bumpPropsRevision()
 
         // Handle special props
         if (name == "0" || name == "text") {
@@ -232,7 +222,7 @@ class ComposeRenderer(
             element.textContent = patch.value?.toString()
         }
 
-        log.debug("Set prop: $id.$name = ${patch.value}")
+        log.debug { "Set prop: $id.$name = ${patch.value}" }
     }
 
     private fun onRemoveProp(patch: Patch) {
@@ -240,13 +230,15 @@ class ComposeRenderer(
         val name = patch.name ?: return
 
         val element = elements[id] ?: return
-        element.props.remove(name)
+        if (element.removeProp(name)) {
+            element.bumpPropsRevision()
+        }
 
         if (name == "0" || name == "text") {
             element.textContent = null
         }
 
-        log.debug("Remove prop: $id.$name")
+        log.debug { "Remove prop: $id.$name" }
     }
 
     private fun onSetText(patch: Patch) {
@@ -256,50 +248,37 @@ class ComposeRenderer(
         val element = elements[id] ?: return
         element.textContent = text
 
-        log.debug("Set text: $id = $text")
+        log.debug { "Set text: $id = $text" }
     }
 
     private fun onInsert(patch: Patch) {
         val parentId = patch.parentId ?: run {
-            android.util.Log.w("HypenTree", "INSERT: missing parentId for id=${patch.id}")
+            log.warn { "INSERT: missing parentId for id=${patch.id}" }
             return
         }
         val id = patch.id ?: return
 
         val child = elements[id] ?: run {
-            android.util.Log.w("HypenTree", "INSERT: child $id NOT FOUND in elements (parent=$parentId)")
+            log.warn { "INSERT: child $id NOT FOUND in elements (parent=$parentId)" }
             return
         }
 
         // Handle root insertion
         if (parentId == "root") {
-            rootId = id
-            log.debug("Inserted as root: $id")
+            rootIdState = id
+            log.debug { "Inserted as root: $id" }
             return
         }
 
         val parent = elements[parentId] ?: run {
-            android.util.Log.w("HypenTree", "INSERT: parent $parentId NOT FOUND for child $id")
+            log.warn { "INSERT: parent $parentId NOT FOUND for child $id" }
             return
         }
         child.parentId = parentId
 
-        // Handle beforeId for ordering
-        val beforeId = patch.beforeId
-        if (beforeId != null) {
-            val index = parent.children.indexOf(beforeId)
-            if (index >= 0) {
-                parent.children.add(index, id)
-            } else {
-                parent.children.add(id)
-            }
-        } else {
-            if (!parent.children.contains(id)) {
-                parent.children.add(id)
-            }
-        }
+        parent.addChild(id, patch.beforeId)
 
-        log.debug("Inserted: $id into $parentId")
+        log.debug { "Inserted: $id into $parentId" }
     }
 
     private fun onMove(patch: Patch) {
@@ -311,7 +290,7 @@ class ComposeRenderer(
 
         // Remove from old parent
         child.parentId?.let { oldParentId ->
-            elements[oldParentId]?.children?.remove(id)
+            elements[oldParentId]?.removeChild(id)
         }
 
         // Insert into new parent (same as insert)
@@ -326,17 +305,17 @@ class ComposeRenderer(
 
         // Remove from parent's children
         element.parentId?.let { parentId ->
-            elements[parentId]?.children?.remove(id)
+            elements[parentId]?.removeChild(id)
         }
 
         // Recursively remove all descendants
         removeDescendants(element, deferred)
 
-        if (rootId == id) {
-            rootId = null
+        if (rootIdState == id) {
+            rootIdState = null
         }
 
-        log.debug("Removed: $id")
+        log.debug { "Removed: $id" }
         deferred.add { listeners -> listeners.forEach { it.onElementRemoved(id) } }
     }
 
@@ -366,21 +345,21 @@ class ComposeRenderer(
             return
         }
         val element = elements[id] ?: run {
-            log.debug("DETACH: element not found: $id")
+            log.debug { "DETACH: element not found: $id" }
             return
         }
 
         element.parentId?.let { parentId ->
-            elements[parentId]?.children?.remove(id)
+            elements[parentId]?.removeChild(id)
         }
         element.parentId = null
         detachedIds.add(id)
 
-        if (rootId == id) {
-            rootId = null
+        if (rootIdState == id) {
+            rootIdState = null
         }
 
-        log.debug("Detached: $id")
+        log.debug { "Detached: $id" }
     }
 
     /**
@@ -393,11 +372,11 @@ class ComposeRenderer(
             return
         }
         val parentId = patch.parentId ?: run {
-            log.debug("ATTACH: missing parentId for id=$id")
+            log.debug { "ATTACH: missing parentId for id=$id" }
             return
         }
         val child = elements[id] ?: run {
-            android.util.Log.w("HypenTree", "ATTACH: element $id not found (was it removed?)")
+            log.warn { "ATTACH: element $id not found (was it removed?)" }
             return
         }
 
@@ -407,54 +386,42 @@ class ComposeRenderer(
         // be looked up in `elements`.
         if (parentId == "root" && elements[parentId] == null) {
             child.parentId?.let { oldParentId ->
-                elements[oldParentId]?.children?.remove(id)
+                elements[oldParentId]?.removeChild(id)
             }
             child.parentId = null
-            rootId = id
+            rootIdState = id
             detachedIds.remove(id)
-            log.debug("Attached at root: $id")
+            log.debug { "Attached at root: $id" }
             return
         }
 
         val parent = elements[parentId] ?: run {
-            android.util.Log.w("HypenTree", "ATTACH: parent $parentId not found for id=$id")
+            log.warn { "ATTACH: parent $parentId not found for id=$id" }
             return
         }
 
         // Defensive: if the element somehow still has a stale parent
         // link (engine bug), unlink it first.
         child.parentId?.let { oldParentId ->
-            elements[oldParentId]?.children?.remove(id)
+            elements[oldParentId]?.removeChild(id)
         }
 
         child.parentId = parentId
 
-        val beforeId = patch.beforeId
-        if (beforeId != null) {
-            val index = parent.children.indexOf(beforeId)
-            if (index >= 0) {
-                parent.children.add(index, id)
-            } else {
-                parent.children.add(id)
-            }
-        } else {
-            if (!parent.children.contains(id)) {
-                parent.children.add(id)
-            }
-        }
+        parent.addChild(id, patch.beforeId)
 
         detachedIds.remove(id)
-        log.debug("Attached: $id -> $parentId (before: ${patch.beforeId ?: "end"})")
+        log.debug { "Attached: $id -> $parentId (before: ${patch.beforeId ?: "end"})" }
     }
 
     private fun onAttachEvent(patch: Patch) {
         // Events are handled through props (onClick, etc.)
-        log.debug("Attach event: ${patch.id}.${patch.eventName}")
+        log.debug { "Attach event: ${patch.id}.${patch.eventName}" }
     }
 
     private fun onDetachEvent(patch: Patch) {
         // Events are handled through props
-        log.debug("Detach event: ${patch.id}.${patch.eventName}")
+        log.debug { "Detach event: ${patch.id}.${patch.eventName}" }
     }
 
     override fun getElement(id: String): HypenElement? = synchronized(lock) { elements[id] }
@@ -463,7 +430,7 @@ class ComposeRenderer(
         synchronized(lock) {
             elements.clear()
             detachedIds.clear()
-            rootId = null
+            rootIdState = null
         }
         _treeVersion.value++
     }
@@ -489,12 +456,10 @@ class ComposeRenderer(
     }
 
     /**
-     * Get the root element ID.
+     * Get the root element ID. Snapshot-backed: calling this from
+     * composition subscribes the caller to root changes.
      */
-    fun getRootId(): String? = synchronized(lock) {
-        log.debug("getRootId() called, rootId=$rootId, elements.size=${elements.size}")
-        rootId
-    }
+    fun getRootId(): String? = synchronized(lock) { rootIdState }
 
     /**
      * Get the component registry.

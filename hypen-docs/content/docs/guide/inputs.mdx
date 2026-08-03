@@ -54,8 +54,8 @@ Button {
 ```hypen
 Button { Text("Submit") }
     .onClick(@actions.submit)
-    .disabled(@{state.isSubmitting})
-    .opacity(@{state.isSubmitting} ? 0.5 : 1)
+    .disabled(@state.isSubmitting)
+    .opacity("@{state.isSubmitting ? 0.5 : 1}")
 ```
 
 **Platform Support:** Web, Android, iOS
@@ -177,7 +177,7 @@ Checkbox {}.bind(@state.agreeToTerms)
 
 // With manual event handling
 Checkbox {}
-    .checked(@{state.agreeToTerms})
+    .checked(@state.agreeToTerms)
     .onChange(@actions.toggleTerms)
 ```
 
@@ -204,7 +204,7 @@ Switch {}.bind(@state.darkMode)
 
 // With manual event handling
 Switch {}
-    .checked(@{state.darkMode})
+    .checked(@state.darkMode)
     .onChange(@actions.toggleDarkMode)
 ```
 
@@ -231,7 +231,7 @@ Select {}.bind(@state.country)
 
 // With manual event handling
 Select {}
-    .value(@{state.country})
+    .value(@state.country)
     .onChange(@actions.updateCountry)
 ```
 
@@ -243,7 +243,7 @@ A range slider for numeric input.
 
 ```hypen
 Slider {}
-    .value(@{state.volume})
+    .value(@state.volume)
     .onChange(@actions.updateVolume)
 ```
 
@@ -253,7 +253,7 @@ Slider {}
 Column {
     Text("Volume: @{state.volume}%")
     Slider {}
-        .value(@{state.volume})
+        .value(@state.volume)
         .onChange(@actions.updateVolume)
 }
 .gap(8)

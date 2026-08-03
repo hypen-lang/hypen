@@ -1,23 +1,117 @@
 package space.hypen.renderer.model
 
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
+
+private fun <T> stateListOf(source: List<T>): SnapshotStateList<T> {
+    val list = mutableStateListOf<T>()
+    list.addAll(source)
+    return list
+}
+
 /**
  * Represents a Hypen UI element in the render tree.
  * This is the internal representation used by the renderer.
+ *
+ * Props, children, text content, and semantics are backed by Compose
+ * snapshot state so a patch touching one element invalidates only the
+ * composables that read that element, not the whole tree.
  */
-data class HypenElement(
+class HypenElement(
     val id: String,
-    val elementType: String,
-    val props: MutableMap<String, Any?> = mutableMapOf(),
-    val children: MutableList<String> = mutableListOf(),
-    var parentId: String? = null,
-    var textContent: String? = null,
+    elementType: String,
+    props: Map<String, Any?> = emptyMap(),
+    children: List<String> = emptyList(),
+    parentId: String? = null,
+    textContent: String? = null,
+    semantics: Map<String, Any?>? = null,
+) {
+    var elementType: String by mutableStateOf(elementType)
+        internal set
+
+    // Insertion-ordered immutable map held in a single snapshot state slot and
+    // replaced wholesale on each prop patch. Iteration order must match the
+    // engine-declared prop order (engine IndexMap -> JSON -> parser map): the
+    // ApplicatorPriority sort in DefaultApplicatorRegistry is stable, so
+    // equal-priority applicators (e.g. background vs linearGradient, or
+    // non-commutative transforms) apply in declaration order. A
+    // SnapshotStateMap would break this — its backing persistent hash map
+    // iterates in hash order — while a single mutableStateOf keeps the same
+    // per-element invalidation granularity.
+    private var propsState: Map<String, Any?> by mutableStateOf(LinkedHashMap(props))
+
+    val props: Map<String, Any?> get() = propsState
+
+    internal fun setProp(name: String, value: Any?) {
+        val next = LinkedHashMap(propsState)
+        next[name] = value
+        propsState = next
+    }
+
+    /** Removes a prop. Returns true if the prop existed. */
+    internal fun removeProp(name: String): Boolean {
+        if (!propsState.containsKey(name)) return false
+        val next = LinkedHashMap(propsState)
+        next.remove(name)
+        propsState = next
+        return true
+    }
+
+    internal fun replaceProps(newProps: Map<String, Any?>) {
+        propsState = LinkedHashMap(newProps)
+    }
+
+    val children: SnapshotStateList<String> = stateListOf(children)
+
+    var parentId: String? = parentId
+
+    var textContent: String? by mutableStateOf(textContent)
+
     /**
      * Engine-derived accessibility semantics: set at CREATE, replaced
      * wholesale by SET_SEMANTICS reactive re-emits (null clears). Translated
      * to `Modifier.semantics {}` in [space.hypen.renderer.render.applyHypenSemantics].
      */
-    var semantics: Map<String, Any?>? = null,
-) {
+    var semantics: Map<String, Any?>? by mutableStateOf(semantics)
+
+    // Bumped by the renderer whenever props change so remembered
+    // modifier chains recompute only for touched elements.
+    private val propsRevisionState = mutableIntStateOf(0)
+    val propsRevision: Int get() = propsRevisionState.intValue
+
+    internal fun bumpPropsRevision() {
+        propsRevisionState.intValue++
+    }
+
+    // Mirrors [children] for O(1) membership checks while building
+    // large child lists from INSERT/ATTACH patches.
+    private val childIdSet = HashSet(children)
+
+    internal fun addChild(childId: String, beforeId: String?) {
+        if (beforeId != null) {
+            val index = children.indexOf(beforeId)
+            if (index >= 0) children.add(index, childId) else children.add(childId)
+            childIdSet.add(childId)
+        } else if (childIdSet.add(childId)) {
+            children.add(childId)
+        }
+    }
+
+    internal fun removeChild(childId: String) {
+        if (childIdSet.remove(childId)) {
+            children.remove(childId)
+        }
+    }
+
+    internal fun clearChildren() {
+        childIdSet.clear()
+        children.clear()
+    }
+
     /**
      * Gets a property value with type casting.
      */

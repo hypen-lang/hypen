@@ -21,7 +21,8 @@ import type {
   LayoutFunction,
 } from "./types.js";
 import { computeLayout, initTaffyLayout } from "./layout.js";
-import { paintNode, registerPainter } from "./paint.js";
+import { clearTextCache } from "./text.js";
+import { paintNode, registerPainter, clearCharAdvanceCache } from "./paint.js";
 import { CanvasEventManager } from "./events.js";
 import { AccessibilityLayer } from "./accessibility.js";
 import { FocusManager } from "./focus.js";
@@ -76,8 +77,24 @@ export class CanvasRenderer implements Renderer {
   private rafId: number | null = null;
   private needsRedraw = false;
 
+  // Whether the next frame must re-run layout. Patches, resize, font loads,
+  // and image decodes set it; pure paint frames (scroll, hover, caret blink,
+  // scrollbar fade) leave it clear so the frame skips the Taffy solve.
+  private layoutDirty = true;
+
   private frameCount = 0;
   private lastFrameTime = 0;
+
+  private boundFontsLoaded = () => {
+    // Metrics measured against the fallback font are stale now — both the
+    // wrapped-text metrics and the per-glyph advances used by the manual
+    // letter-spacing path (keyed by CSS font string, which does not change
+    // when the real font replaces the fallback).
+    clearTextCache();
+    clearCharAdvanceCache();
+    this.layoutDirty = true;
+    this.scheduleRedraw();
+  };
 
   constructor(canvas: HTMLCanvasElement, engine: IEngine, options?: Partial<CanvasRendererOptions>) {
     this.canvas = canvas;
@@ -156,15 +173,31 @@ export class CanvasRenderer implements Renderer {
       this.textEditor.placeCaretFromPoint(node, point);
     });
 
-    // Listen for redraw requests from event manager
-    this.canvas.addEventListener("hypen:redraw", () => this.scheduleRedraw());
+    // Listen for redraw requests from event manager (paint-only) and image
+    // loads (which carry `detail.layout` — a decoded intrinsic size can
+    // change the layout, see `getImageNaturalAspect`).
+    this.canvas.addEventListener("hypen:redraw", (e: Event) => {
+      if ((e as CustomEvent).detail?.layout) {
+        this.layoutDirty = true;
+      }
+      this.scheduleRedraw();
+    });
+
+    // A late-loading web font changes every measurement made against the
+    // fallback font — re-run layout once the real metrics are available.
+    if (typeof document !== "undefined") {
+      (document as any).fonts?.addEventListener?.("loadingdone", this.boundFontsLoaded);
+    }
 
     // Eagerly initialise Taffy WASM for layout (non-blocking — fallback used
     // until ready). Repaint once it arrives: the fallback's first frame is
     // approximate, and without this redraw its layout would stick until the
     // next state change.
     initTaffyLayout().then((ready) => {
-      if (ready) this.scheduleRedraw();
+      if (ready) {
+        this.layoutDirty = true;
+        this.scheduleRedraw();
+      }
     });
 
     // Don't schedule initial render - wait for patches
@@ -201,6 +234,7 @@ export class CanvasRenderer implements Renderer {
     this.canvas.width = width;
     this.canvas.height = height;
     this.setupHiDPI();
+    this.layoutDirty = true;
     this.scheduleRedraw();
   }
 
@@ -222,6 +256,9 @@ export class CanvasRenderer implements Renderer {
     // The accessibility mirror is synced incrementally by the per-patch
     // handlers above — no per-batch rebuild, so mirror element identity
     // (and with it AT focus/virtual-cursor position) survives updates.
+
+    // Any patch can affect layout (props, tree shape, text).
+    this.layoutDirty = true;
 
     // Schedule redraw
     this.scheduleRedraw();
@@ -694,6 +731,37 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * Resolve variants and re-run layout when (and only when) something that
+   * affects layout changed since the last frame. Variants are resolved every
+   * frame — hover/focus/pressed winners must reach paint — but the Taffy
+   * solve, computed-prop refresh, and scroll-bounds pass only run when a
+   * patch/resize/font/image marked the layout dirty or a variant winner
+   * actually changed (variants can rewrite spacing/size props).
+   */
+  private runLayoutIfNeeded(dpr: number): void {
+    if (!this.rootNode) return;
+
+    // Resolve responsive + state variants against the current content width
+    // BEFORE layout so spacing/size winners feed the layout engine and
+    // colour/opacity winners feed paint.
+    const contentWidth = this.canvas.width / dpr;
+    const variantsChanged = applyVariants(this.rootNode, contentWidth);
+    if (!variantsChanged && !this.layoutDirty) return;
+
+    this.refreshComputedProps(this.rootNode);
+
+    computeLayout(
+      this.ctx,
+      this.rootNode,
+      contentWidth,
+      this.canvas.height / dpr
+    );
+
+    ScrollManager.updateScrollBounds(this.rootNode);
+    this.layoutDirty = false;
+  }
+
+  /**
    * Full canvas repaint (default behavior when dirty rects disabled)
    */
   private renderFull(dpr: number): void {
@@ -708,21 +776,7 @@ export class CanvasRenderer implements Renderer {
 
     // Layout and paint
     if (this.rootNode) {
-      // Resolve responsive + state variants against the current content width
-      // BEFORE layout so spacing/size winners feed the layout engine and
-      // colour/opacity winners feed paint.
-      const contentWidth = this.canvas.width / dpr;
-      applyVariants(this.rootNode, contentWidth);
-      this.refreshComputedProps(this.rootNode);
-
-      computeLayout(
-        this.ctx,
-        this.rootNode,
-        contentWidth,
-        this.canvas.height / dpr
-      );
-
-      ScrollManager.updateScrollBounds(this.rootNode);
+      this.runLayoutIfNeeded(dpr);
 
       paintNode(this.ctx, this.rootNode);
 
@@ -736,20 +790,7 @@ export class CanvasRenderer implements Renderer {
    * Optimized render that only repaints dirty regions
    */
   private renderWithDirtyRects(dpr: number): void {
-    // Always run layout so nodes have up-to-date bounds
-    if (this.rootNode) {
-      const contentWidth = this.canvas.width / dpr;
-      applyVariants(this.rootNode, contentWidth);
-      this.refreshComputedProps(this.rootNode);
-
-      computeLayout(
-        this.ctx,
-        this.rootNode,
-        contentWidth,
-        this.canvas.height / dpr
-      );
-      ScrollManager.updateScrollBounds(this.rootNode);
-    }
+    this.runLayoutIfNeeded(dpr);
 
     const dirtyRegion = this.dirtyTracker.getDirtyRegion();
     this.dirtyTracker.clear();
@@ -775,9 +816,11 @@ export class CanvasRenderer implements Renderer {
       this.ctx.fillRect(dirtyRegion.x, dirtyRegion.y, dirtyRegion.width, dirtyRegion.height);
     }
 
-    // Repaint the full tree — clip path ensures only dirty pixels are touched
+    // Repaint the tree — the clip path bounds rasterized pixels and the
+    // dirty region is threaded through paintNode so subtrees that cannot
+    // reach it are pruned from the traversal entirely.
     if (this.rootNode) {
-      paintNode(this.ctx, this.rootNode);
+      paintNode(this.ctx, this.rootNode, dirtyRegion);
 
       if (this.options.showLayoutBounds) {
         this.drawLayoutBounds(this.rootNode);
@@ -863,6 +906,9 @@ export class CanvasRenderer implements Renderer {
   destroy(): void {
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
+    }
+    if (typeof document !== "undefined") {
+      (document as any).fonts?.removeEventListener?.("loadingdone", this.boundFontsLoaded);
     }
     this.eventManager.destroy();
     this.scrollManager.destroy();

@@ -67,14 +67,14 @@ Stack {
 
 ## Grid
 
-Grid layout with configurable columns.
+Data-driven grid: pass an array binding and an item template — one child is
+rendered per record, laid out in configurable columns. (A static
+`Grid { ... }` with hand-written children is an error; use nested
+`Row`s/`Column`s for fixed layouts.)
 
 ```hypen
-Grid {
-    Card { Text("1") }
-    Card { Text("2") }
-    Card { Text("3") }
-    Card { Text("4") }
+Grid(@state.products, key: "id") {
+    Card { Text("@{item.name}") }
 }
 .gridColumns(2)
 .gap(16)
@@ -82,13 +82,13 @@ Grid {
 
 ## List
 
-Scrollable container for items.
+Scrollable, data-driven list — shorthand for
+`ForEach(items: @state.items, key: "id")` in a scrollable container. The
+array binding is required.
 
 ```hypen
-List {
-    Text("Item 1")
-    Text("Item 2")
-    Text("Item 3")
+List(@state.items) {
+    Text("@{item.title}")
 }
 .height(400)
 ```

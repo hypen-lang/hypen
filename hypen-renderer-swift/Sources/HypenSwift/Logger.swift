@@ -47,27 +47,31 @@ public struct DebugLogger: Sendable {
         return level >= HypenLogger.shared.level
     }
 
-    public func debug(_ message: String, _ args: CVarArg...) {
+    // Messages are @autoclosure so interpolated strings on hot paths are
+    // never built when the level check filters them out. Prefer the
+    // no-args interpolation form for per-patch/per-render logging; the
+    // CVarArg form still evaluates its arguments eagerly at the call site.
+    public func debug(_ message: @autoclosure () -> String, _ args: CVarArg...) {
         guard shouldLog(.debug) else { return }
-        let formatted = String(format: message, arguments: args)
+        let formatted = args.isEmpty ? message() : String(format: message(), arguments: args)
         NSLog("[%@] DEBUG: %@", tag, formatted)
     }
 
-    public func info(_ message: String, _ args: CVarArg...) {
+    public func info(_ message: @autoclosure () -> String, _ args: CVarArg...) {
         guard shouldLog(.info) else { return }
-        let formatted = String(format: message, arguments: args)
+        let formatted = args.isEmpty ? message() : String(format: message(), arguments: args)
         NSLog("[%@] INFO: %@", tag, formatted)
     }
 
-    public func warn(_ message: String, _ args: CVarArg...) {
+    public func warn(_ message: @autoclosure () -> String, _ args: CVarArg...) {
         guard shouldLog(.warn) else { return }
-        let formatted = String(format: message, arguments: args)
+        let formatted = args.isEmpty ? message() : String(format: message(), arguments: args)
         NSLog("[%@] WARN: %@", tag, formatted)
     }
 
-    public func error(_ message: String, _ args: CVarArg...) {
+    public func error(_ message: @autoclosure () -> String, _ args: CVarArg...) {
         guard shouldLog(.error) else { return }
-        let formatted = String(format: message, arguments: args)
+        let formatted = args.isEmpty ? message() : String(format: message(), arguments: args)
         NSLog("[%@] ERROR: %@", tag, formatted)
     }
 

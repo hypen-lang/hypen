@@ -34,6 +34,12 @@ enum class Breakpoint(val minWidthDp: Int) {
 }
 
 /**
+ * Breakpoints in ascending minWidthDp order, computed once — evaluated on
+ * every variant-modifier resolution.
+ */
+private val ORDERED_BREAKPOINTS: List<Breakpoint> = Breakpoint.entries.sortedBy { it.minWidthDp }
+
+/**
  * CSS-like pseudo-state variants.
  */
 enum class StateVariant {
@@ -133,7 +139,7 @@ data class ApplicatorResultWithVariants(
         var result = baseModifier
 
         // Apply responsive modifiers from smallest to largest breakpoint
-        for (breakpoint in Breakpoint.entries.sortedBy { it.minWidthDp }) {
+        for (breakpoint in ORDERED_BREAKPOINTS) {
             if (screenWidthDp >= breakpoint.minWidthDp) {
                 responsiveModifiers[breakpoint]?.let { variantModifier ->
                     result = result.then(variantModifier)
@@ -189,7 +195,7 @@ fun rememberVariantModifier(
         fun applyCombined(m: Modifier, state: StateVariant): Modifier {
             if (!result.hasCombinedVariants) return m
             var out = m
-            for (bp in Breakpoint.entries.sortedBy { it.minWidthDp }) {
+            for (bp in ORDERED_BREAKPOINTS) {
                 if (screenWidthDp >= bp.minWidthDp) {
                     result.combinedModifiers[bp to state]?.let { out = out.then(it) }
                 }

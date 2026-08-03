@@ -190,8 +190,18 @@ pub fn extract_bindings_from_expression(expr: &str) -> Vec<Binding> {
                     let full_path = format!("{}{}", prefix, path_str);
                     if !seen_paths.contains(&full_path) {
                         seen_paths.insert(full_path);
+                        // `.length` is computed FROM the container, not stored
+                        // in it — state diffs never emit a "...length" path
+                        // (an unshift changes tasks.0, tasks.3, …). Depend on
+                        // the container itself so element-level changes
+                        // invalidate the expression via the graph's
+                        // ancestor/descendant matching.
+                        let dep_path = match path_str.strip_suffix(".length") {
+                            Some(parent) if !parent.is_empty() => parent,
+                            _ => path_str,
+                        };
                         let path: Vec<String> =
-                            path_str.split('.').map(|s| s.to_string()).collect();
+                            dep_path.split('.').map(|s| s.to_string()).collect();
                         bindings.push(Binding::new(source.clone(), path));
                     }
                 }
@@ -350,7 +360,21 @@ pub fn evaluate_template_string(
         // Convert to string
         let replacement = match &value {
             Value::String(s) => s.clone(),
-            Value::Number(n) => n.to_string(),
+            // Match JS number formatting: exprimo does its arithmetic in f64,
+            // so integral results come back as e.g. 3.0 — render them as "3"
+            // (`@{state.tasks.length} tasks` must not say "3.0 tasks").
+            Value::Number(n) => match n.as_f64() {
+                Some(f)
+                    if n.as_i64().is_none()
+                        && n.as_u64().is_none()
+                        && f.is_finite()
+                        && f.fract() == 0.0
+                        && f.abs() < 9_007_199_254_740_992.0 =>
+                {
+                    format!("{}", f as i64)
+                }
+                _ => n.to_string(),
+            },
             Value::Bool(b) => b.to_string(),
             Value::Null => "null".to_string(),
             _ => serde_json::to_string(&value).unwrap_or_default(),
@@ -476,6 +500,48 @@ mod tests {
         let evaluator = build_evaluator(&state, Some(&item), None);
         let result = evaluate_template_string("@{item.name}: $@{item.price}", &evaluator).unwrap();
         assert_eq!(result, "Product: $99");
+    }
+
+    #[test]
+    fn test_length_access_depends_on_container() {
+        // `.length` is computed from the container; diffs never emit a
+        // "...length" path (unshift → tasks.0, tasks.3, …), so the extracted
+        // dependency must be the container path itself.
+        // (Filter to state bindings — the data-source scanner also records a
+        // speculative `tasks.length` provider ref, which the graph validates
+        // separately.)
+        let bindings = extract_bindings_from_expression("state.tasks.length");
+        let state_paths: Vec<String> = bindings
+            .iter()
+            .filter(|b| b.is_state())
+            .map(|b| b.full_path())
+            .collect();
+        assert_eq!(state_paths, vec!["tasks".to_string()]);
+
+        // A literal `length` root key is left alone.
+        let bindings = extract_bindings_from_expression("state.length");
+        let state_paths: Vec<String> = bindings
+            .iter()
+            .filter(|b| b.is_state())
+            .map(|b| b.full_path())
+            .collect();
+        assert_eq!(state_paths, vec!["length".to_string()]);
+    }
+
+    #[test]
+    fn test_template_integral_float_renders_like_js() {
+        // exprimo evaluates in f64, so `.length` member access and template
+        // arithmetic produce e.g. 3.0 — the interpolation must render "3"
+        // (JS-style), not "3.0". Non-integral floats keep their fraction.
+        let state = json!({"tasks": [1, 2, 3], "count": 5, "ratio": 2.5});
+        let evaluator = build_evaluator(&state, None, None);
+        let result =
+            evaluate_template_string("@{state.tasks.length} tasks", &evaluator).unwrap();
+        assert_eq!(result, "3 tasks");
+        let result = evaluate_template_string("next: @{state.count + 1}", &evaluator).unwrap();
+        assert_eq!(result, "next: 6");
+        let result = evaluate_template_string("ratio: @{state.ratio}", &evaluator).unwrap();
+        assert_eq!(result, "ratio: 2.5");
     }
 
     #[test]

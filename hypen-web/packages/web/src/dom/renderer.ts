@@ -8,9 +8,41 @@ import type { Patch } from "@hypen-space/core/types";
 import type { HypenModuleInstance } from "@hypen-space/core/app";
 import type { HypenRouter } from "@hypen-space/core/router";
 import type { HypenGlobalContext } from "@hypen-space/core/context";
-import { frameworkLoggers } from "@hypen-space/core/logger";
+import { frameworkLoggers, isDebugMode } from "@hypen-space/core/logger";
 
 const log = frameworkLoggers.renderer;
+
+/** A compiled piece of a text template: literal text, or an `@{...}` binding. */
+type TemplateSegment = string | { match: string; keys: string[] };
+
+interface TextBinding {
+  element: HTMLElement;
+  template: string;
+  segments: TemplateSegment[];
+}
+
+/**
+ * Split a text template into literal and `@{state.path}` binding segments,
+ * so per-update interpolation walks pre-split paths instead of re-running
+ * the regex over the whole template.
+ */
+function compileTextTemplate(template: string): TemplateSegment[] {
+  const bindingPattern = /@\{([^}]+)\}/g;
+  const segments: TemplateSegment[] = [];
+  let last = 0;
+  let match: RegExpExecArray | null;
+  while ((match = bindingPattern.exec(template)) !== null) {
+    if (match.index > last) {
+      segments.push(template.slice(last, match.index));
+    }
+    segments.push({ match: match[0], keys: match[1]!.split(".") });
+    last = match.index + match[0].length;
+  }
+  if (last < template.length) {
+    segments.push(template.slice(last));
+  }
+  return segments;
+}
 
 /** Element types that treat the "action" prop as an onClick handler */
 const ACTIONABLE_TYPES = new Set(["button", "link", "card"]);
@@ -83,10 +115,21 @@ export class DOMRenderer {
   private componentInstances = new Map<string, HypenModuleInstance>();
   private debugTracker: RerenderTracker;
 
+  /**
+   * Text elements whose template contains an `@{...}` binding, with the
+   * template pre-compiled into segments. Only these nodes are visited on
+   * state changes — static text never re-interpolates.
+   */
+  private textBindings = new Map<string, TextBinding>();
+
   // Canvas subtree routing — Canvas components get their own CanvasRenderer
   // and all descendant patches are forwarded to it instead of the DOM.
   private canvasRenderers = new Map<string, CanvasRenderer>();
   private canvasSubtreeMap = new Map<string, string>(); // nodeId → canvasRootId
+  // Parent/child links within canvas subtrees, so removes can prune the
+  // routing maps without scanning every entry ever recorded.
+  private canvasNodeChildren = new Map<string, Set<string>>();
+  private canvasNodeParent = new Map<string, string>();
   private canvasElements = new Map<string, HTMLCanvasElement>();
   /** Props stashed at create-time so we can forward them to CanvasRenderer */
   private pendingCreateProps = new Map<string, { elementType: string; props: Record<string, any> }>();
@@ -166,35 +209,47 @@ export class DOMRenderer {
    * the DOMRenderer or the owning CanvasRenderer.
    */
   applyPatches(patches: Patch[]): void {
-    // Phase 1: scan inserts to discover new canvas-subtree members
-    for (const patch of patches) {
-      if (patch.type === "insert" || patch.type === "move") {
-        const parentId = patch.parentId;
-        const childId = patch.id;
-        if (!parentId || !childId) continue;
+    // Canvas routing only matters once a canvas root exists; the common
+    // no-canvas case applies the batch directly with no extra passes.
+    let canvasBatches: Map<string, Patch[]> | null = null;
+    let domPatches = patches;
 
-        // Is the parent a canvas root or inside a canvas subtree?
-        const canvasRootId =
-          this.canvasRenderers.has(parentId) ? parentId
-          : this.canvasSubtreeMap.get(parentId);
-        if (canvasRootId) {
-          this.canvasSubtreeMap.set(childId, canvasRootId);
+    if (this.canvasRenderers.size > 0 || this.canvasSubtreeMap.size > 0) {
+      // Phase 1: scan inserts to discover new canvas-subtree members
+      for (const patch of patches) {
+        if (patch.type === "insert" || patch.type === "move") {
+          const parentId = patch.parentId;
+          const childId = patch.id;
+          if (!parentId || !childId) continue;
+
+          // Is the parent a canvas root or inside a canvas subtree?
+          const canvasRootId =
+            this.canvasRenderers.has(parentId) ? parentId
+            : this.canvasSubtreeMap.get(parentId);
+          if (canvasRootId) {
+            this.registerCanvasMember(childId, parentId, canvasRootId);
+          }
         }
       }
-    }
 
-    // Phase 2: route patches
-    const canvasBatches = new Map<string, Patch[]>();
-    const domPatches: Patch[] = [];
+      // Phase 2: route patches
+      canvasBatches = new Map<string, Patch[]>();
+      domPatches = [];
 
-    for (const patch of patches) {
-      const canvasRootId = this.getCanvasRouteTarget(patch);
-      if (canvasRootId) {
-        let batch = canvasBatches.get(canvasRootId);
-        if (!batch) { batch = []; canvasBatches.set(canvasRootId, batch); }
-        batch.push(patch);
-      } else {
-        domPatches.push(patch);
+      for (const patch of patches) {
+        const canvasRootId = this.getCanvasRouteTarget(patch);
+        if (canvasRootId) {
+          let batch = canvasBatches.get(canvasRootId);
+          if (!batch) { batch = []; canvasBatches.set(canvasRootId, batch); }
+          batch.push(patch);
+          if (patch.type === "remove" && patch.id) {
+            // Removed canvas nodes never come back (engine node ids are
+            // never reused), so drop their routing entries now.
+            this.pruneCanvasSubtree(patch.id);
+          }
+        } else {
+          domPatches.push(patch);
+        }
       }
     }
 
@@ -203,11 +258,14 @@ export class DOMRenderer {
     // or a fresh top-level create+insert) is a navigation. Initial renders
     // have no detach, so they never steal focus.
     const isNavigation = domPatches.some((p) => p.type === "detach");
-    const createdInBatch = new Set(
-      domPatches.filter((p) => p.type === "create").map((p) => p.id),
-    );
     const incomingRoots: string[] = [];
     if (isNavigation) {
+      const createdInBatch = new Set<string>();
+      for (const p of domPatches) {
+        if (p.type === "create" && p.id) {
+          createdInBatch.add(p.id);
+        }
+      }
       for (const p of domPatches) {
         if (p.type === "attach" && p.id) {
           incomingRoots.push(p.id);
@@ -230,10 +288,12 @@ export class DOMRenderer {
     }
 
     // Forward canvas-subtree patches to their CanvasRenderer instances
-    for (const [rootId, batch] of canvasBatches) {
-      const renderer = this.canvasRenderers.get(rootId);
-      if (renderer) {
-        renderer.applyPatches(batch);
+    if (canvasBatches) {
+      for (const [rootId, batch] of canvasBatches) {
+        const renderer = this.canvasRenderers.get(rootId);
+        if (renderer) {
+          renderer.applyPatches(batch);
+        }
       }
     }
 
@@ -316,6 +376,46 @@ export class DOMRenderer {
   }
 
   /**
+   * Record a node as a member of a canvas subtree, tracking its parent link
+   * so a later `remove` can prune the whole subtree from the routing maps.
+   */
+  private registerCanvasMember(childId: string, parentId: string, canvasRootId: string): void {
+    this.canvasSubtreeMap.set(childId, canvasRootId);
+    const prevParent = this.canvasNodeParent.get(childId);
+    if (prevParent !== undefined && prevParent !== parentId) {
+      this.canvasNodeChildren.get(prevParent)?.delete(childId);
+    }
+    this.canvasNodeParent.set(childId, parentId);
+    let siblings = this.canvasNodeChildren.get(parentId);
+    if (!siblings) {
+      siblings = new Set();
+      this.canvasNodeChildren.set(parentId, siblings);
+    }
+    siblings.add(childId);
+  }
+
+  /**
+   * Drop a removed canvas node and all of its descendants from the canvas
+   * routing maps. The engine emits `remove` only for the subtree root, so
+   * descendants are walked via the tracked child links.
+   */
+  private pruneCanvasSubtree(id: string): void {
+    const children = this.canvasNodeChildren.get(id);
+    if (children) {
+      this.canvasNodeChildren.delete(id);
+      for (const childId of children) {
+        this.pruneCanvasSubtree(childId);
+      }
+    }
+    this.canvasSubtreeMap.delete(id);
+    const parentId = this.canvasNodeParent.get(id);
+    if (parentId !== undefined) {
+      this.canvasNodeParent.delete(id);
+      this.canvasNodeChildren.get(parentId)?.delete(id);
+    }
+  }
+
+  /**
    * Update state and interpolate text content
    */
   updateState(state: Record<string, any>): void {
@@ -334,42 +434,64 @@ export class DOMRenderer {
   }
 
   /**
-   * Interpolate state values in all text elements
+   * Interpolate state values in all binding-bearing text elements
    */
   private interpolateAllText(): void {
-    for (const [id, element] of this.nodes.entries()) {
-      if (element.dataset.hypenType === "text" && element.dataset.textTemplate) {
-        const template = element.dataset.textTemplate;
-        const interpolated = this.interpolateText(template, this.currentState);
-
-        // Track re-render if text actually changed
-        const currentText = element.textContent;
-        if (currentText !== interpolated) {
-          this.debugTracker.trackRerender(id, element, "interpolate");
-        }
-
+    for (const [id, binding] of this.textBindings) {
+      const interpolated = this.interpolateSegments(binding.segments, this.currentState);
+      const element = binding.element;
+      if (element.textContent !== interpolated) {
+        this.debugTracker.trackRerender(id, element, "interpolate");
         element.textContent = interpolated;
       }
     }
   }
 
   /**
-   * Interpolate state values in text template.
+   * Resolve a compiled template against the current state.
    *
-   * Bindings use the `@{state.path}` syntax (matching the engine's parser).
+   * Bindings use the `@{state.path}` syntax (matching the engine's parser);
+   * unresolvable bindings render as their original `@{...}` text.
    */
-  private interpolateText(template: string, state: Record<string, any>): string {
-    return template.replace(/@\{([^}]+)\}/g, (match, path) => {
-      try {
-        const value = path.split('.').reduce((obj: any, key: string) => {
-          if (key === 'state') return state;
-          return obj?.[key];
-        }, state);
-        return value !== undefined ? String(value) : match;
-      } catch {
-        return match;
+  private interpolateSegments(segments: TemplateSegment[], state: Record<string, any>): string {
+    let result = "";
+    for (const segment of segments) {
+      if (typeof segment === "string") {
+        result += segment;
+        continue;
       }
-    });
+      try {
+        let value: any = state;
+        for (const key of segment.keys) {
+          value = key === "state" ? state : value?.[key];
+        }
+        result += value !== undefined ? String(value) : segment.match;
+      } catch {
+        result += segment.match;
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Keep the binding index in sync with the element's stored template:
+   * register text elements whose template contains an `@{...}` binding,
+   * drop everything else.
+   */
+  private syncTextBinding(id: string, element: HTMLElement): void {
+    const template = element.dataset.textTemplate;
+    if (element.dataset.hypenType === "text" && template && template.includes("@{")) {
+      const existing = this.textBindings.get(id);
+      if (!existing || existing.template !== template || existing.element !== element) {
+        this.textBindings.set(id, {
+          element,
+          template,
+          segments: compileTextTemplate(template),
+        });
+      }
+    } else {
+      this.textBindings.delete(id);
+    }
   }
 
   /**
@@ -499,6 +621,7 @@ export class DOMRenderer {
     }
 
     this.nodes.set(id, element);
+    this.syncTextBinding(id, element);
     this.debugTracker.trackRerender(id, element, `create:${elementType}`);
 
     // Canvas component: create a CanvasRenderer for its subtree
@@ -580,6 +703,7 @@ export class DOMRenderer {
         // If current template isn't a template, keep it in sync.
         element.dataset.textTemplate = nextText;
       }
+      this.syncTextBinding(id, element);
       log.debug(`Updated text content: "${value}"`);
       return;
     }
@@ -645,11 +769,16 @@ export class DOMRenderer {
     const parent = parentId === "root" ? this.container : this.nodes.get(parentId);
     const child = this.nodes.get(id);
 
-    log.debug(`Inserting ${id} into ${parentId}`, {
-      parent: parent ? `${parent.tagName}#${parent.id || 'no-id'}` : 'null',
-      child: child ? `${child.tagName}#${child.id || 'no-id'}` : 'null',
-      childText: child?.textContent?.substring(0, 20)
-    });
+    // Gated up front: building the payload reads `textContent`, which
+    // serializes the whole subtree's text — too costly to pay when debug
+    // logging is off.
+    if (isDebugMode()) {
+      log.debug(`Inserting ${id} into ${parentId}`, {
+        parent: parent ? `${parent.tagName}#${parent.id || 'no-id'}` : 'null',
+        child: child ? `${child.tagName}#${child.id || 'no-id'}` : 'null',
+        childText: child?.textContent?.substring(0, 20)
+      });
+    }
 
     if (!parent || !child) return;
 
@@ -763,8 +892,12 @@ export class DOMRenderer {
       this.canvasRenderers.delete(id);
       this.canvasElements.delete(id);
       // Remove all subtree entries pointing to this canvas root
-      for (const [nodeId, rootId] of this.canvasSubtreeMap) {
-        if (rootId === id) this.canvasSubtreeMap.delete(nodeId);
+      const members = this.canvasNodeChildren.get(id);
+      if (members) {
+        this.canvasNodeChildren.delete(id);
+        for (const childId of members) {
+          this.pruneCanvasSubtree(childId);
+        }
       }
     }
 
@@ -781,6 +914,7 @@ export class DOMRenderer {
     this.restoreDialogsWithin(element);
 
     this.nodes.delete(id);
+    this.textBindings.delete(id);
     this.dialogIds.delete(id);
     // Router LRU eviction: this subtree is gone for good — focus restore
     // must never target it again (route-focus contract).
@@ -809,6 +943,8 @@ export class DOMRenderer {
     this.canvasRenderers.clear();
     this.canvasElements.clear();
     this.canvasSubtreeMap.clear();
+    this.canvasNodeChildren.clear();
+    this.canvasNodeParent.clear();
 
     // Dispose all element resources before clearing
     for (const element of this.nodes.values()) {
@@ -816,6 +952,7 @@ export class DOMRenderer {
     }
     this.container.innerHTML = "";
     this.nodes.clear();
+    this.textBindings.clear();
     this.rootId = null;
     this.dialogIds.clear();
     this.dialogOpeners.clear();

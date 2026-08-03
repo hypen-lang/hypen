@@ -61,7 +61,7 @@ Image("photo.jpg")      // URL as positional
 ```hypen
 Text(text: "Hello")
 Input(placeholder: "Enter name")
-    .value(@{state.name})
+    .value(@state.name)
 ```
 
 ### Argument Types
@@ -204,7 +204,7 @@ Button { Text("Save") }
 
 // Action with additional data
 Button { Text("Delete") }
-    .onClick(@actions.deleteItem, id: @{state.currentId})
+    .onClick(@actions.deleteItem, id: @state.currentId)
 
 // Multiple events
 Input(placeholder: "Type here")
@@ -363,12 +363,12 @@ module UserProfile {
     Column {
         // Header
         Row {
-            Image(@{state.user.avatar})
+            Image(@state.user.avatar)
                 .size(64)
                 .borderRadius(32)
 
             Column {
-                Text(@{state.user.name})
+                Text(@state.user.name)
                     .fontSize(20)
                     .fontWeight("bold")
 
@@ -410,10 +410,10 @@ module UserProfile {
 
         // Actions
         Button {
-            Text(@{state.isFollowing} ? "Unfollow" : "Follow")
+            Text("@{state.isFollowing ? 'Unfollow' : 'Follow'}")
         }
         .onClick(@actions.follow)
-        .backgroundColor(@{state.isFollowing} ? "#E5E7EB" : "#3B82F6")
+        .backgroundColor("@{state.isFollowing ? '#E5E7EB' : '#3B82F6'}")
         .padding(horizontal: 24, vertical: 12)
         .borderRadius(8)
         .fillMaxWidth(true)

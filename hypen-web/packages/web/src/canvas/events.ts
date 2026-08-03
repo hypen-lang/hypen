@@ -4,9 +4,8 @@
  * Hit testing and event handling for canvas nodes
  */
 
-import type { VirtualNode, Point } from "./types.js";
+import type { VirtualNode, Point, Rectangle } from "./types.js";
 import { isPointInRoundedRect } from "./utils.js";
-import { getScrollAwareBounds } from "./scroll.js";
 import { dispatchNodeEvent } from "./dispatch.js";
 import type { FocusManager } from "./focus.js";
 
@@ -33,6 +32,10 @@ export class CanvasEventManager {
   private mouseDownNode: VirtualNode | null = null;
   private focusManager: FocusManager | null = null;
   private editablePointerHandler: ((node: VirtualNode, point: Point) => void) | null = null;
+
+  // Reused for the per-node rounded-rect test so hit testing allocates
+  // nothing per visited node.
+  private scratchBounds: Rectangle = { x: 0, y: 0, width: 0, height: 0 };
 
   // Bound handler references for cleanup
   private boundOnMouseMove!: (e: MouseEvent) => void;
@@ -124,32 +127,64 @@ export class CanvasEventManager {
    * checked first because they paint on top (see `paint.ts` overlay
    * ordering) — without this, a click on the Story's close-button overlay
    * lands on the underlying Image instead.
+   *
+   * `scrollX`/`scrollY` accumulate the ancestors' scroll offsets down the
+   * recursion (the translation paint applies) so no per-node ancestor walk
+   * is needed. Subtrees behind a clipping container are pruned when the
+   * point falls outside the container — nothing inside can be visible there.
    */
-  private hitTestNode(node: VirtualNode, point: Point): VirtualNode | null {
+  private hitTestNode(
+    node: VirtualNode,
+    point: Point,
+    scrollX: number = 0,
+    scrollY: number = 0,
+  ): VirtualNode | null {
     if (!node.visible || !node.layout) return null;
 
-    const bounds = getScrollAwareBounds(node);
-    if (!bounds) return null;
+    const layout = node.layout;
+    const x = layout.x - scrollX;
+    const y = layout.y - scrollY;
+    const inBounds =
+      point.x >= x && point.x <= x + layout.width &&
+      point.y >= y && point.y <= y + layout.height;
+
+    if (!inBounds) {
+      const overflow = node.props.overflow;
+      if (overflow === "hidden" || overflow === "scroll" || overflow === "auto") {
+        return null;
+      }
+    }
+
+    const childScrollX = scrollX + (node.scrollState?.scrollX ?? 0);
+    const childScrollY = scrollY + (node.scrollState?.scrollY ?? 0);
 
     // Front-to-back order: absolute overlays (newest in paint stack)
     // first, then flow children in reverse paint order.
     for (let i = node.children.length - 1; i >= 0; i--) {
       const child = node.children[i];
       if (child.props.position !== "absolute") continue;
-      const hit = this.hitTestNode(child, point);
+      const hit = this.hitTestNode(child, point, childScrollX, childScrollY);
       if (hit) return hit;
     }
     for (let i = node.children.length - 1; i >= 0; i--) {
       const child = node.children[i];
       if (child.props.position === "absolute") continue;
-      const hit = this.hitTestNode(child, point);
+      const hit = this.hitTestNode(child, point, childScrollX, childScrollY);
       if (hit) return hit;
     }
 
     // Test this node
-    const radius = node.layout.border.radius;
-    if (isPointInRoundedRect(point, bounds, radius)) {
-      return node;
+    if (inBounds) {
+      const radius = layout.border.radius;
+      if (radius <= 0) return node;
+      const bounds = this.scratchBounds;
+      bounds.x = x;
+      bounds.y = y;
+      bounds.width = layout.width;
+      bounds.height = layout.height;
+      if (isPointInRoundedRect(point, bounds, radius)) {
+        return node;
+      }
     }
 
     return null;

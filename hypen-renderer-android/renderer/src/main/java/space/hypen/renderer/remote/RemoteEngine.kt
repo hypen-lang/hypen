@@ -236,10 +236,6 @@ class RemoteEngine(
                 webSocket: WebSocket,
                 text: String,
             ) {
-                // Log message type and size at the WebSocket level
-                val typeMatch = Regex(""""type"\s*:\s*"(\w+)"""").find(text)
-                val revMatch = Regex(""""revision"\s*:\s*(\d+)""").find(text)
-                android.util.Log.d("HypenTree", "<<< WS message: type=${typeMatch?.groupValues?.get(1)}, rev=${revMatch?.groupValues?.get(1)}, size=${text.length}")
                 handleMessage(text)
             }
 
@@ -324,7 +320,7 @@ class RemoteEngine(
     }
 
     private suspend fun handleInitialTree(message: InitialTreeMessage) {
-        android.util.Log.d("HypenTree", ">>> initialTree: rev=${message.revision}, ${message.patches.size} patches")
+        log.debug { "initialTree: rev=${message.revision}, ${message.patches.size} patches" }
         moduleName = message.module
         currentRevision = message.revision
         _state.value = message.state
@@ -335,11 +331,11 @@ class RemoteEngine(
     }
 
     private suspend fun handlePatch(message: PatchMessage) {
-        android.util.Log.d("HypenTree", ">>> patch: rev=${message.revision}, ${message.patches.size} patches (currentRev=$currentRevision)")
+        log.debug { "patch: rev=${message.revision}, ${message.patches.size} patches (currentRev=$currentRevision)" }
 
         // Check revision ordering
         if (message.revision <= currentRevision) {
-            android.util.Log.w("HypenTree", ">>> DROPPED patch rev=${message.revision} (currentRev=$currentRevision)")
+            log.warn { "Dropped patch rev=${message.revision} (currentRev=$currentRevision)" }
             return
         }
 

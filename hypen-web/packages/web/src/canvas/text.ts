@@ -36,9 +36,15 @@ function isPretextAvailable(): boolean {
 }
 
 /**
- * Text metrics cache
+ * Text metrics cache — bounded LRU. Every distinct (text, font, width,
+ * clamp) combination measured on the layout/paint hot path lands here, so
+ * without a cap a long-lived session (live feeds, ticking clocks, per-width
+ * generations from resizes) grows it forever. Map iteration order is
+ * insertion order; hits re-insert to keep hot entries at the tail and the
+ * oldest entry is evicted past the cap.
  */
 const textMetricsCache = new Map<string, TextMetrics>();
+const MAX_TEXT_METRICS_CACHE_SIZE = 4096;
 
 /**
  * Get cache key for text metrics
@@ -103,7 +109,12 @@ export function measureText(
 ): TextMetrics {
   const cacheKey = `${getCacheKey(text, fontStyle, maxWidth)}|${maxLines ?? ""}|${textOverflow ?? ""}`;
   const cached = textMetricsCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    // Refresh recency so steady-state entries survive eviction.
+    textMetricsCache.delete(cacheKey);
+    textMetricsCache.set(cacheKey, cached);
+    return cached;
+  }
 
   const font = createFontString(fontStyle.fontSize, fontStyle.fontWeight, fontStyle.fontFamily);
   const lineHeight = fontStyle.lineHeight || fontStyle.fontSize * 1.2;
@@ -189,6 +200,10 @@ export function measureText(
   };
 
   textMetricsCache.set(cacheKey, result);
+  if (textMetricsCache.size > MAX_TEXT_METRICS_CACHE_SIZE) {
+    const oldest = textMetricsCache.keys().next().value;
+    if (oldest !== undefined) textMetricsCache.delete(oldest);
+  }
   return result;
 }
 

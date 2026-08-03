@@ -87,10 +87,20 @@ function activeStatesFor(node: VirtualNode): ActiveStates {
  *
  * No-op for nodes without any variant keys (the common case), so the per-frame
  * cost on a plain tree is one cached set lookup per node.
+ *
+ * Returns true when any base value differs from the previous frame's
+ * effective value — the renderer uses this to decide whether layout must
+ * re-run (variant winners can change spacing/size, not just paint props).
  */
-function applyVariantsToNode(node: VirtualNode, width: number): void {
+function applyVariantsToNode(node: VirtualNode, width: number): boolean {
   const bases = getVariantBases(node);
-  if (bases.size === 0) return;
+  if (bases.size === 0) return false;
+
+  // Snapshot the previous frame's effective values for change detection.
+  const previous: Record<string, unknown> = {};
+  for (const base of bases) {
+    previous[base] = node.props[base];
+  }
 
   // Restore originals from the previous frame so we resolve from a clean base.
   if (node.variantOriginals) {
@@ -123,18 +133,27 @@ function applyVariantsToNode(node: VirtualNode, width: number): void {
       node.props[base] = resolved[base];
     }
   }
+
+  for (const base of bases) {
+    if (node.props[base] !== previous[base]) return true;
+  }
+  return false;
 }
 
 /**
  * Walk the tree from `root` and apply variant overrides to every node using
  * `width` (the canvas/content width) as the viewport for breakpoint matching.
  * Called once per frame before layout.
+ *
+ * Returns true when any node's effective props changed since the previous
+ * frame (breakpoint crossed, hover/focus/active/disabled state flipped).
  */
-export function applyVariants(root: VirtualNode, width: number): void {
-  applyVariantsToNode(root, width);
+export function applyVariants(root: VirtualNode, width: number): boolean {
+  let changed = applyVariantsToNode(root, width);
   for (const child of root.children) {
-    applyVariants(child, width);
+    if (applyVariants(child, width)) changed = true;
   }
+  return changed;
 }
 
 /**

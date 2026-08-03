@@ -21,6 +21,8 @@ import {
   unregisterEvent,
   getKeyTarget,
   setKeyTarget,
+  getMeta,
+  setMeta,
 } from "../element-data.js";
 
 const log = frameworkLoggers.events;
@@ -197,6 +199,7 @@ function createEventHandler(
   eventType: string,
   options: EventHandlerOptions = {}
 ): ApplicatorHandler {
+  const actionMetaKey = `event:${eventType}`;
   return (element: HTMLElement, value: unknown) => {
     const { actionName, payload: customPayload } = extractActionDetails(value);
 
@@ -205,14 +208,18 @@ function createEventHandler(
       return;
     }
 
+    // Store the current action on the element; the persistent listener reads
+    // it per event, so re-applying with a different action (e.g. a keyed-
+    // reused node) replaces the dispatch target instead of stacking listeners.
+    setMeta(element, actionMetaKey, { actionName, customPayload });
+
     const disposables = getElementDisposables(element);
 
     // Track that we've registered this event type
     // The disposable stack handles cleanup automatically
-    const eventKey = `${eventType}:${actionName}`;
+    const eventKey = eventType;
     if (getRegisteredEvents(element).has(eventKey)) {
-      // Already registered - skip to avoid duplicates
-      // This can happen during re-renders
+      // Listener already installed — the meta update above retargets it
       return;
     }
     registerEvent(element, eventKey);
@@ -222,6 +229,12 @@ function createEventHandler(
 
     // Create the event listener
     const listener = (event: Event) => {
+      const current = getMeta<{ actionName: string; customPayload: Record<string, unknown> }>(
+        element,
+        actionMetaKey,
+      );
+      if (!current) return;
+
       // Handle throttling
       if (options.throttleMs && throttleTimer) {
         return;
@@ -240,8 +253,8 @@ function createEventHandler(
 
       // Build payload
       const payload =
-        Object.keys(customPayload).length > 0
-          ? { ...customPayload }
+        Object.keys(current.customPayload).length > 0
+          ? { ...current.customPayload }
           : options.extractPayload
             ? options.extractPayload(event, element)
             : extractEventData(event, element);
@@ -250,9 +263,9 @@ function createEventHandler(
       const engine = getEngine(element);
       if (engine) {
         try {
-          engine.dispatchAction(actionName, payload);
+          engine.dispatchAction(current.actionName, payload);
         } catch (err) {
-          log.error(`Error dispatching action "${actionName}":`, err);
+          log.error(`Error dispatching action "${current.actionName}":`, err);
         }
       }
     };

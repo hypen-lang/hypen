@@ -161,7 +161,7 @@ When you need additional logic (validation, side effects), use manual event hand
 
 ```hypen
 Input(placeholder: "Email")
-    .value(@{state.email})
+    .value(@state.email)
     .onInput(@actions.validateEmail)
 ```
 
@@ -209,7 +209,7 @@ Button { Text("Save") }
 
 // Action with payload
 Button { Text("Delete") }
-    .onClick(@actions.deleteItem, itemId: @{state.selectedId})
+    .onClick(@actions.deleteItem, itemId: @state.selectedId)
 ```
 
 ### Action Payloads
@@ -304,7 +304,21 @@ module TodoList {
         }
         .gap(12)
 
-        List { }
+        List(@state.todos) {
+            Row {
+                Text("@{item.text}")
+                    .textDecoration("@{item.completed ? 'line-through' : 'none'}")
+                    .weight(1)
+
+                Button { Text("✕") }
+                    .onClick(@actions.deleteTodo, id: "@{item.id}")
+                    .backgroundColor("transparent")
+            }
+            .padding(12)
+            .borderRadius(8)
+            .verticalAlignment("center")
+            .onClick(@actions.toggleTodo, id: "@{item.id}")
+        }
         .marginTop(16)
     }
     .padding(24)

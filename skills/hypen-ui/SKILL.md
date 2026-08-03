@@ -149,7 +149,7 @@ import HomePage from "./pages/HomePage"
 | `Box` / `Container` | Generic container with z-stacking | - | Yes |
 | `Center` | Centers children both axes | - | Yes |
 | `Stack` | Z-axis stacking for overlapping | - | Yes |
-| `Grid` | CSS Grid layout | columns | Yes |
+| `Grid` | Data-driven CSS Grid (List with grid layout) | items (binding), key | Yes (item template) |
 | `List` | Scrollable container | items (binding) | Yes |
 | `Spacer` | Flexible empty space | width, height | No |
 | `Divider` | Visual separator line | - | No |
@@ -206,7 +206,7 @@ import HomePage from "./pages/HomePage"
 
 > **List shorthand:** `List(@state.items) { ... }` auto-expands to `ForEach(items: @state.items, key: "id")`. The positional argument is the binding source — there is no separate `items` prop shorthand.
 
-> **Grid:** `Grid { ... }` is a layout container. Apply `.gridColumns(3)` (shorthand for `repeat(3, 1fr)`) or `.gridTemplateColumns("1fr 2fr 1fr")`. Any prop passed is applied as CSS.
+> **Grid:** `Grid` is **data-driven**, exactly like `List` — it expands to a ForEach over an array binding with a grid-layout wrapper. `Grid(@state.buttons, key: "label") { ...item template... }` renders one child per record; apply `.gridColumns(3)` (shorthand for `repeat(3, 1fr)`) or `.gridTemplateColumns("1fr 2fr 1fr")` on the Grid, and `.gridColumn("span 2")` (bindable per item, e.g. `"@{item.span}"`) inside the template. A **static** `Grid { ... }` with no array binding does NOT work — the engine renders an `__Error` node ("Grid requires an array binding"). For a fixed grid of hand-written children, use nested `Row`s/`Column`s instead.
 
 ## Control Flow
 

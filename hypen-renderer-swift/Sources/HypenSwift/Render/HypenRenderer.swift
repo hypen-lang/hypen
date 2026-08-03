@@ -27,10 +27,21 @@ public final class HypenRenderer: ObservableObject {
     /// scroll position across the detach → attach cycle.
     private(set) public var detachedIds: Set<String> = []
 
-    private(set) public var rootId: String?
+    @Published private(set) public var rootId: String?
 
-    // Reactive state
+    // Reactive state. `treeVersion` still counts patch batches for
+    // diagnostics, but views no longer observe the renderer — each
+    // `HypenElement` publishes its own changes, so a patch only
+    // invalidates the views it touches.
     @Published public private(set) var treeVersion: Int = 0
+
+    /// Bumped every time the tree is rebuilt from scratch via `clear()`
+    /// (e.g. a replayed `initialTree` after a WebSocket reconnect).
+    /// Element views observe individual `HypenElement` instances, so a
+    /// rebuild that reuses the same ids would otherwise leave the view
+    /// tree observing orphaned pre-rebuild instances. Hosts key the root
+    /// element view with `.id(resetEpoch)` to force a full rebuild.
+    @Published public private(set) var resetEpoch: Int = 0
     @Published public private(set) var serverState: [String: Any] = [:]
 
     // Error handling
@@ -68,25 +79,25 @@ public final class HypenRenderer: ObservableObject {
 
     public func updateState(_ state: [String: Any]) {
         serverState = state
-        log.debug("State updated: %@", state.keys.joined(separator: ", "))
+        log.debug("State updated: \(state.keys.joined(separator: ", "))")
     }
 
     // MARK: - Patch Application
 
     public func applyPatches(_ patches: [Patch]) {
-        log.debug("Applying %d patches", patches.count)
+        log.debug("Applying \(patches.count) patches")
 
         for patch in patches {
             applyPatch(patch)
         }
 
         treeVersion += 1
-        log.debug("Tree version now: %d, rootId: %@", treeVersion, rootId ?? "nil")
+        log.debug("Tree version now: \(treeVersion), rootId: \(rootId ?? "nil")")
         listener?.onTreeChanged()
     }
 
     private func applyPatch(_ patch: Patch) {
-        log.debug("Applying patch: %@ (id: %@)", patch.type.rawValue, patch.id ?? "nil")
+        log.debug("Applying patch: \(patch.type.rawValue) (id: \(patch.id ?? "nil"))")
 
         switch patch.type {
         case .create:
@@ -129,10 +140,6 @@ public final class HypenRenderer: ObservableObject {
         )
         element.semantics = HypenSemantics.from(dictionary: patch.semantics)
 
-        if elementType.lowercased() == "grid" || elementType.lowercased() == "image" {
-            print("[HypenRenderer] CREATE type=\(elementType) id=\(id) props=\(element.props.keys.sorted())")
-        }
-
         elements[id] = element
 
         // Set as root if this is the first element
@@ -146,8 +153,8 @@ public final class HypenRenderer: ObservableObject {
     }
 
     /// Reactive accessibility re-emit: replace the element's whole semantics
-    /// block (nil clears). The `@Published treeVersion` bump at the end of
-    /// the batch re-renders the element view, which re-applies the SwiftUI
+    /// block (nil clears). Assigning `element.semantics` publishes the
+    /// element's change, re-rendering its view, which re-applies the SwiftUI
     /// accessibility modifiers from the new block — the same translation as
     /// at create, so a dropped field simply stops being applied.
     private func applySetSemantics(_ patch: Patch) {
@@ -182,7 +189,8 @@ public final class HypenRenderer: ObservableObject {
         }
 
         element.setProp(name, value: patch.value)
-        log.debug("Set prop: %@.%@ = %@", id, name, String(describing: patch.value ?? "nil"))
+        notifyHostAncestor(of: element)
+        log.debug("Set prop: \(id).\(name)")
     }
 
     private func applyRemoveProp(_ patch: Patch) {
@@ -197,7 +205,8 @@ public final class HypenRenderer: ObservableObject {
         }
 
         element.setProp(name, value: nil)
-        log.debug("Removed prop: %@.%@", id, name)
+        notifyHostAncestor(of: element)
+        log.debug("Removed prop: \(id).\(name)")
     }
 
     private func applySetText(_ patch: Patch) {
@@ -212,7 +221,8 @@ public final class HypenRenderer: ObservableObject {
         }
 
         element.textContent = patch.text
-        log.debug("Set text: %@ = \"%@\"", id, patch.text ?? "")
+        notifyHostAncestor(of: element)
+        log.debug("Set text: \(id) = \"\(patch.text ?? "")\"")
     }
 
     private func applyInsert(_ patch: Patch) {
@@ -237,27 +247,30 @@ public final class HypenRenderer: ObservableObject {
         if parentId == "root" && elements[parentId] == nil {
             if let oldParentId = element.parentId, let oldParent = elements[oldParentId] {
                 oldParent.removeChild(id)
+                bubbleControlFlowChange(from: oldParent)
             }
             element.parentId = nil
             rootId = id
-            log.debug("Inserted at root: %@", id)
+            log.debug("Inserted at root: \(id)")
             return
         }
 
         guard let parent = elements[parentId] else {
-            log.debug("INSERT: Parent not found: %@", parentId)
+            log.debug("INSERT: Parent not found: \(parentId)")
             return
         }
 
         // Remove from old parent if exists
         if let oldParentId = element.parentId, let oldParent = elements[oldParentId] {
             oldParent.removeChild(id)
+            bubbleControlFlowChange(from: oldParent)
         }
 
         // Add to new parent
         element.parentId = parentId
         parent.addChild(id, beforeId: patch.beforeId)
-        log.debug("Inserted: %@ -> %@", id, parentId)
+        bubbleControlFlowChange(from: parent)
+        log.debug("Inserted: \(id) -> \(parentId)")
     }
 
     private func applyMove(_ patch: Patch) {
@@ -274,27 +287,30 @@ public final class HypenRenderer: ObservableObject {
         if parentId == "root" && elements[parentId] == nil {
             if let oldParentId = element.parentId, let oldParent = elements[oldParentId] {
                 oldParent.removeChild(id)
+                bubbleControlFlowChange(from: oldParent)
             }
             element.parentId = nil
             rootId = id
-            log.debug("Moved to root: %@", id)
+            log.debug("Moved to root: \(id)")
             return
         }
 
         guard let parent = elements[parentId] else {
-            log.debug("MOVE: Parent not found: %@", parentId)
+            log.debug("MOVE: Parent not found: \(parentId)")
             return
         }
 
         // Remove from old parent
         if let oldParentId = element.parentId, let oldParent = elements[oldParentId] {
             oldParent.removeChild(id)
+            bubbleControlFlowChange(from: oldParent)
         }
 
         // Add to new parent
         element.parentId = parentId
         parent.addChild(id, beforeId: patch.beforeId)
-        log.debug("Moved: %@ -> %@", id, parentId)
+        bubbleControlFlowChange(from: parent)
+        log.debug("Moved: \(id) -> \(parentId)")
     }
 
     private func applyRemove(_ patch: Patch) {
@@ -311,11 +327,12 @@ public final class HypenRenderer: ObservableObject {
         // Remove from parent
         if let parentId = element.parentId, let parent = elements[parentId] {
             parent.removeChild(id)
+            bubbleControlFlowChange(from: parent)
         }
 
         // Recursively remove children
         removeElementAndChildren(id)
-        log.debug("Removed: %@", id)
+        log.debug("Removed: \(id)")
     }
 
     private func removeElementAndChildren(_ id: String) {
@@ -362,6 +379,7 @@ public final class HypenRenderer: ObservableObject {
         // while off-screen.
         if let parentId = element.parentId, let parent = elements[parentId] {
             parent.removeChild(id)
+            bubbleControlFlowChange(from: parent)
         }
         element.parentId = nil
         detachedIds.insert(id)
@@ -370,7 +388,7 @@ public final class HypenRenderer: ObservableObject {
             rootId = nil
         }
 
-        log.debug("Detached: %@", id)
+        log.debug("Detached: \(id)")
     }
 
     /// Reattach a previously-detached element to a parent. The element
@@ -390,11 +408,12 @@ public final class HypenRenderer: ObservableObject {
         if parentId == "root" && elements[parentId] == nil {
             if let oldParentId = element.parentId, let oldParent = elements[oldParentId] {
                 oldParent.removeChild(id)
+                bubbleControlFlowChange(from: oldParent)
             }
             element.parentId = nil
             rootId = id
             detachedIds.remove(id)
-            log.debug("Attached at root: %@", id)
+            log.debug("Attached at root: \(id)")
             return
         }
 
@@ -407,18 +426,15 @@ public final class HypenRenderer: ObservableObject {
         // somewhere (engine bug), unlink it first.
         if let oldParentId = element.parentId, let oldParent = elements[oldParentId] {
             oldParent.removeChild(id)
+            bubbleControlFlowChange(from: oldParent)
         }
 
         element.parentId = parentId
         parent.addChild(id, beforeId: patch.beforeId)
+        bubbleControlFlowChange(from: parent)
         detachedIds.remove(id)
 
-        log.debug(
-            "Attached: %@ -> %@ (before: %@)",
-            id,
-            parentId,
-            patch.beforeId ?? "end"
-        )
+        log.debug("Attached: \(id) -> \(parentId) (before: \(patch.beforeId ?? "end"))")
     }
 
     private func applyAttachEvent(_ patch: Patch) {
@@ -441,6 +457,41 @@ public final class HypenRenderer: ObservableObject {
         // Events are handled via props in SwiftUI, this is informational
     }
 
+    // MARK: - Change Notification Bubbling
+
+    /// Container components read their children's elements during body
+    /// evaluation (weight/flex distribution, grid spans, select options),
+    /// so a prop/text change on a child must also re-render the nearest
+    /// non-control-flow ancestor's view.
+    private func notifyHostAncestor(of element: HypenElement) {
+        hostAncestor(startingAt: element.parentId)?.notifyChanged()
+    }
+
+    /// Control-flow wrappers (__ForEach, __Conditional, …) are flattened
+    /// by container components (List, Grid), which read the wrappers'
+    /// children during the host element's body evaluation. When a
+    /// wrapper's children change, re-render the nearest non-control-flow
+    /// ancestor's view; wrappers rendered as their own views already
+    /// publish through their `children` array.
+    private func bubbleControlFlowChange(from parent: HypenElement) {
+        guard ControlFlowUtils.controlFlowTypes.contains(parent.elementType) else { return }
+        hostAncestor(startingAt: parent.parentId)?.notifyChanged()
+    }
+
+    /// Walk up from `startId`, skipping control-flow wrappers, to the
+    /// first element that is rendered as its own view.
+    private func hostAncestor(startingAt startId: String?) -> HypenElement? {
+        var currentId = startId
+        while let id = currentId, let element = elements[id] {
+            if ControlFlowUtils.controlFlowTypes.contains(element.elementType) {
+                currentId = element.parentId
+            } else {
+                return element
+            }
+        }
+        return nil
+    }
+
     // MARK: - Clear
 
     public func clear() {
@@ -448,6 +499,7 @@ public final class HypenRenderer: ObservableObject {
         detachedIds.removeAll()
         rootId = nil
         treeVersion += 1
+        resetEpoch += 1
         log.debug("Cleared renderer")
     }
 }

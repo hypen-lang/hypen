@@ -79,7 +79,15 @@ fn extract_bindings_from_template(s: &str) -> Option<Vec<Binding>> {
             let binding_str = &s[abs_start..=abs_end];
 
             // Try to parse as a simple binding first
-            if let Some(binding) = parse_binding(binding_str) {
+            if let Some(mut binding) = parse_binding(binding_str) {
+                // `.length` is computed FROM the container, not stored in it —
+                // state diffs never emit a "...length" path (an unshift changes
+                // tasks.0, tasks.3, …). Depend on the container itself so
+                // element-level changes invalidate the template. (Same remap
+                // as extract_bindings_from_expression.)
+                if binding.path.len() >= 2 && binding.path.last().is_some_and(|s| s == "length") {
+                    binding.path.pop();
+                }
                 let path = binding.full_path_with_source();
                 if !seen_paths.contains(&path) {
                     seen_paths.insert(path);
