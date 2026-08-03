@@ -138,298 +138,150 @@ export default app
     removeFoodEntry(action.payload.entryId, user.id);
     refresh(state, user, state.date);
   })
-  .ui(`
+  .ui(diaryTemplate());
+
+// One card per meal bucket. The template has one List per meal rather than a
+// nested List(sections) + List(entries) — nested iteration in Hypen only has
+// parse-level coverage right now, so four flat top-level arrays sidestep it.
+// The four blocks are identical except for the state slot, so they're
+// generated here instead of hand-copied.
+function mealBlock(slot: Meal): string {
+  const s = `state.${slot}`;
+  return `
+          Column {
+            Row {
+              Column {
+                Text("@{${s}.icon}")
+                  .tw("text-xl md:text-2xl")
+              }
+              .tw("w-11 h-11 md:w-12 md:h-12 rounded-xl bg-gray-50 items-center justify-center mr-3 shrink-0")
+
+              Column {
+                Text("@{${s}.label}")
+                  .tw("text-[15px] md:text-base font-semibold")
+                  .color("#111827")
+                Text("@{${s}.progressLabel}")
+                  .tw("text-xs mt-0.5")
+                  .color("#9CA3AF")
+              }
+              .tw("flex-1")
+
+              Button {
+                Row {
+                  Icon(@resources.plus)
+                    .size(13)
+                    .color("#EC4899")
+                  Text("Add")
+                    .tw("text-xs font-semibold ml-1")
+                    .color("#EC4899")
+                }
+                .tw("items-center")
+              }
+              .tw("bg-pink-50 border border-pink-100 px-3 py-1.5 rounded-full")
+              .opacity({ default: 1, active: 0.7 })
+              .transition(150, easeOut)
+              .onClick(@router.push, to: "@{${s}.addPath}")
+            }
+            .tw("items-center")
+
+            Row {
+              Box {}
+                .tw("h-1.5 rounded-full bg-pink-500")
+                .width("@{${s}.progressWidth}")
+                .transition(450, easeOut, props: [width])
+            }
+            .tw("mt-3 h-1.5 bg-gray-100 rounded-full w-full")
+
+            If(condition: @${s}.isEmpty) {
+              Text("Nothing logged yet")
+                .tw("text-xs mt-3")
+                .color("#9CA3AF")
+            }
+
+            List(@${s}.entries) {
+              Row {
+                Text("@{item.icon}")
+                  .tw("text-xl md:text-2xl mr-2.5")
+                Column {
+                  Text("@{item.name}")
+                    .tw("text-sm md:text-base font-medium")
+                    .color("#111827")
+                  Text("@{item.subtitle}")
+                    .tw("text-xs mt-0.5")
+                    .color("#9CA3AF")
+                }
+                .tw("flex-1")
+                Button {
+                  Icon(@resources.trash)
+                    .size(15)
+                    .color("#D1D5DB")
+                }
+                .tw("bg-transparent border-0 p-2")
+                .opacity({ default: 1, active: 0.6 })
+                .transition(150, easeOut)
+                .onClick(@actions.removeEntry, entryId: "@{item.id}")
+              }
+              .tw("items-center py-2.5 border-t border-gray-100 mt-2")
+              .enter(fade, duration: 240)
+              .exit(fade, duration: 180)
+            }
+          }
+          .tw("bg-white border border-gray-100 rounded-2xl p-4 md:p-5 mb-3")
+          .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
+          .enter(slide, fade, from: bottom, duration: 280)`;
+}
+
+function diaryTemplate(): string {
+  return `
     module Diary {
       Column {
         Row {
           Button {
-            Text("‹")
-              .tw("text-lg md:text-xl")
-              .color("#374151")
+            Icon(@resources.chevron-left)
+              .size(18)
+              .color("#6B7280")
           }
-          .tw("bg-transparent border-0 px-3 py-2")
+          .tw("bg-white border border-gray-100 w-9 h-9 rounded-full items-center justify-center ml-3")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(150, easeOut)
           .onClick(@actions.shiftDay, direction: "prev")
 
           Column {
             Text("Diary")
-              .tw("text-base md:text-lg font-semibold")
+              .tw("text-[15px] md:text-base font-semibold")
               .color("#111827")
             Text("@{state.dateLabel}")
-              .tw("text-xs md:text-sm mt-0.5")
+              .tw("text-xs mt-0.5")
               .color("#9CA3AF")
           }
           .tw("flex-1 items-center")
 
           Button {
-            Text("›")
-              .tw("text-lg md:text-xl")
-              .color("#374151")
+            Icon(@resources.chevron-right)
+              .size(18)
+              .color("#6B7280")
           }
-          .tw("bg-transparent border-0 px-3 py-2")
+          .tw("bg-white border border-gray-100 w-9 h-9 rounded-full items-center justify-center mr-3")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(150, easeOut)
           .onClick(@actions.shiftDay, direction: "next")
         }
-        .tw("px-2 py-3 items-center border-b border-gray-100")
+        .tw("px-2 py-3 items-center border-b border-gray-100 bg-white")
 
         Text("@{state.totalLabel}")
-          .tw("px-4 pt-3 pb-1 text-xs md:text-sm")
+          .tw("px-4 pt-4 pb-2 text-[11px] font-semibold tracking-widest uppercase")
           .color("#9CA3AF")
 
         Column {
-          // ----- Breakfast block -----
-          Column {
-            Row {
-              Text("@{state.breakfast.icon}")
-                .tw("text-2xl md:text-3xl mr-2")
-              Column {
-                Text("@{state.breakfast.label}")
-                  .tw("text-base md:text-lg font-semibold")
-                  .color("#111827")
-                Text("@{state.breakfast.progressLabel}")
-                  .tw("text-xs md:text-sm mt-0.5")
-                  .color("#9CA3AF")
-              }
-              .tw("flex-1")
-              Button {
-                Text("+ Add")
-                  .tw("text-xs md:text-sm font-semibold")
-                  .color("#EC4899")
-              }
-              .tw("bg-pink-50 border-0 px-3 py-1.5 rounded-full")
-              .onClick(@router.push, to: "@{state.breakfast.addPath}")
-            }
-            .tw("items-center")
-
-            Row {
-              Box {}
-                .tw("h-1.5 rounded-full bg-yellow-400")
-                .width("@{state.breakfast.progressWidth}")
-            }
-            .tw("mt-2 h-1.5 bg-yellow-100 rounded-full w-full")
-
-            If(condition: @state.breakfast.isEmpty) {
-              Text("No items yet")
-                .tw("text-xs md:text-sm mt-3 italic")
-                .color("#9CA3AF")
-            }
-
-            List(@state.breakfast.entries) {
-              Row {
-                Text("@{item.icon}")
-                  .tw("text-xl md:text-2xl mr-2")
-                Column {
-                  Text("@{item.name}")
-                    .tw("text-sm md:text-base font-medium")
-                    .color("#111827")
-                  Text("@{item.subtitle}")
-                    .tw("text-xs md:text-sm mt-0.5")
-                    .color("#9CA3AF")
-                }
-                .tw("flex-1")
-                Button {
-                  Text("🗑")
-                    .tw("text-sm md:text-base")
-                    .color("#9CA3AF")
-                }
-                .tw("bg-transparent border-0 p-2")
-                .onClick(@actions.removeEntry, entryId: "@{item.id}")
-              }
-              .tw("items-center py-2 border-t border-gray-100 mt-2")
-            }
-          }
-          .tw("bg-white border border-gray-100 rounded-2xl p-4 md:p-5 mb-3")
-
-          // ----- Lunch block -----
-          Column {
-            Row {
-              Text("@{state.lunch.icon}")
-                .tw("text-2xl md:text-3xl mr-2")
-              Column {
-                Text("@{state.lunch.label}")
-                  .tw("text-base md:text-lg font-semibold")
-                  .color("#111827")
-                Text("@{state.lunch.progressLabel}")
-                  .tw("text-xs md:text-sm mt-0.5")
-                  .color("#9CA3AF")
-              }
-              .tw("flex-1")
-              Button {
-                Text("+ Add")
-                  .tw("text-xs md:text-sm font-semibold")
-                  .color("#EC4899")
-              }
-              .tw("bg-pink-50 border-0 px-3 py-1.5 rounded-full")
-              .onClick(@router.push, to: "@{state.lunch.addPath}")
-            }
-            .tw("items-center")
-
-            Row {
-              Box {}
-                .tw("h-1.5 rounded-full bg-yellow-400")
-                .width("@{state.lunch.progressWidth}")
-            }
-            .tw("mt-2 h-1.5 bg-yellow-100 rounded-full w-full")
-
-            If(condition: @state.lunch.isEmpty) {
-              Text("No items yet")
-                .tw("text-xs md:text-sm mt-3 italic")
-                .color("#9CA3AF")
-            }
-
-            List(@state.lunch.entries) {
-              Row {
-                Text("@{item.icon}")
-                  .tw("text-xl md:text-2xl mr-2")
-                Column {
-                  Text("@{item.name}")
-                    .tw("text-sm md:text-base font-medium")
-                    .color("#111827")
-                  Text("@{item.subtitle}")
-                    .tw("text-xs md:text-sm mt-0.5")
-                    .color("#9CA3AF")
-                }
-                .tw("flex-1")
-                Button {
-                  Text("🗑")
-                    .tw("text-sm md:text-base")
-                    .color("#9CA3AF")
-                }
-                .tw("bg-transparent border-0 p-2")
-                .onClick(@actions.removeEntry, entryId: "@{item.id}")
-              }
-              .tw("items-center py-2 border-t border-gray-100 mt-2")
-            }
-          }
-          .tw("bg-white border border-gray-100 rounded-2xl p-4 md:p-5 mb-3")
-
-          // ----- Dinner block -----
-          Column {
-            Row {
-              Text("@{state.dinner.icon}")
-                .tw("text-2xl md:text-3xl mr-2")
-              Column {
-                Text("@{state.dinner.label}")
-                  .tw("text-base md:text-lg font-semibold")
-                  .color("#111827")
-                Text("@{state.dinner.progressLabel}")
-                  .tw("text-xs md:text-sm mt-0.5")
-                  .color("#9CA3AF")
-              }
-              .tw("flex-1")
-              Button {
-                Text("+ Add")
-                  .tw("text-xs md:text-sm font-semibold")
-                  .color("#EC4899")
-              }
-              .tw("bg-pink-50 border-0 px-3 py-1.5 rounded-full")
-              .onClick(@router.push, to: "@{state.dinner.addPath}")
-            }
-            .tw("items-center")
-
-            Row {
-              Box {}
-                .tw("h-1.5 rounded-full bg-yellow-400")
-                .width("@{state.dinner.progressWidth}")
-            }
-            .tw("mt-2 h-1.5 bg-yellow-100 rounded-full w-full")
-
-            If(condition: @state.dinner.isEmpty) {
-              Text("No items yet")
-                .tw("text-xs md:text-sm mt-3 italic")
-                .color("#9CA3AF")
-            }
-
-            List(@state.dinner.entries) {
-              Row {
-                Text("@{item.icon}")
-                  .tw("text-xl md:text-2xl mr-2")
-                Column {
-                  Text("@{item.name}")
-                    .tw("text-sm md:text-base font-medium")
-                    .color("#111827")
-                  Text("@{item.subtitle}")
-                    .tw("text-xs md:text-sm mt-0.5")
-                    .color("#9CA3AF")
-                }
-                .tw("flex-1")
-                Button {
-                  Text("🗑")
-                    .tw("text-sm md:text-base")
-                    .color("#9CA3AF")
-                }
-                .tw("bg-transparent border-0 p-2")
-                .onClick(@actions.removeEntry, entryId: "@{item.id}")
-              }
-              .tw("items-center py-2 border-t border-gray-100 mt-2")
-            }
-          }
-          .tw("bg-white border border-gray-100 rounded-2xl p-4 md:p-5 mb-3")
-
-          // ----- Snack block -----
-          Column {
-            Row {
-              Text("@{state.snack.icon}")
-                .tw("text-2xl md:text-3xl mr-2")
-              Column {
-                Text("@{state.snack.label}")
-                  .tw("text-base md:text-lg font-semibold")
-                  .color("#111827")
-                Text("@{state.snack.progressLabel}")
-                  .tw("text-xs md:text-sm mt-0.5")
-                  .color("#9CA3AF")
-              }
-              .tw("flex-1")
-              Button {
-                Text("+ Add")
-                  .tw("text-xs md:text-sm font-semibold")
-                  .color("#EC4899")
-              }
-              .tw("bg-pink-50 border-0 px-3 py-1.5 rounded-full")
-              .onClick(@router.push, to: "@{state.snack.addPath}")
-            }
-            .tw("items-center")
-
-            Row {
-              Box {}
-                .tw("h-1.5 rounded-full bg-yellow-400")
-                .width("@{state.snack.progressWidth}")
-            }
-            .tw("mt-2 h-1.5 bg-yellow-100 rounded-full w-full")
-
-            If(condition: @state.snack.isEmpty) {
-              Text("No items yet")
-                .tw("text-xs md:text-sm mt-3 italic")
-                .color("#9CA3AF")
-            }
-
-            List(@state.snack.entries) {
-              Row {
-                Text("@{item.icon}")
-                  .tw("text-xl md:text-2xl mr-2")
-                Column {
-                  Text("@{item.name}")
-                    .tw("text-sm md:text-base font-medium")
-                    .color("#111827")
-                  Text("@{item.subtitle}")
-                    .tw("text-xs md:text-sm mt-0.5")
-                    .color("#9CA3AF")
-                }
-                .tw("flex-1")
-                Button {
-                  Text("🗑")
-                    .tw("text-sm md:text-base")
-                    .color("#9CA3AF")
-                }
-                .tw("bg-transparent border-0 p-2")
-                .onClick(@actions.removeEntry, entryId: "@{item.id}")
-              }
-              .tw("items-center py-2 border-t border-gray-100 mt-2")
-            }
-          }
-          .tw("bg-white border border-gray-100 rounded-2xl p-4 md:p-5 mb-3")
+${mealBlock("breakfast")}
+${mealBlock("lunch")}
+${mealBlock("dinner")}
+${mealBlock("snack")}
         }
-        .tw("px-4 pt-2 pb-8")
+        .tw("px-4 pt-1 pb-8")
       }
       .scrollable(true)
-      .tw("flex-1 w-full bg-white")
+      .tw("flex-1 w-full bg-[#F8FAFC]")
     }
-  `);
+  `;
+}

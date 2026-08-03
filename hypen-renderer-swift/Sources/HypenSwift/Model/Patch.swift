@@ -31,7 +31,7 @@ public enum PatchType: String, Codable, Sendable {
     /// patch batch it heads with an animation spec (carried in `spec`).
     /// Emitted by the engine at batch index 0 ONLY, and honored only
     /// there — a prelude anywhere else is not a stamp.
-    /// See `hypen-renderer-swift/ANIMATION.md` ("batchAnimation — the
+    /// See `.notes/ANIMATION_IOS.md` ("batchAnimation — the
     /// transaction prelude").
     case batchAnimation = "BatchAnimation"
 }
@@ -57,7 +57,7 @@ public struct Patch: @unchecked Sendable {
     /// (there is no ack round-trip) — the renderer owns the corpse.
     /// `false` for every non-animated removal, keeping the wire identical
     /// to the pre-animation protocol.
-    /// See `hypen-renderer-swift/ANIMATION.md` (".enter / .exit").
+    /// See `.notes/ANIMATION_IOS.md` (".enter / .exit").
     public let transition: Bool
     /// Animation spec carried by a `batchAnimation` prelude (the raw
     /// `{duration, curve, delay, ...}` object). nil on every other type.

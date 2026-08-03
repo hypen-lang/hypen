@@ -6,15 +6,17 @@ Column {
                 .color("#111827")
         }
         .tw("bg-transparent p-2")
+        .opacity({ default: 1, active: 0.6 })
+        .transition(150, easeOut)
         .onClick(@router.push, to: "/orders")
 
         Text("Order Details")
-            .tw("text-base font-semibold flex-1 text-center")
+            .tw("text-[15px] font-semibold flex-1 text-center")
 
         Column {}
             .tw("w-10")
     }
-    .tw("py-2 px-2 items-center bg-white border-b border-gray-200")
+    .tw("py-2.5 px-2 items-center bg-white border-b border-gray-100")
 
     Column {
         Column {
@@ -33,6 +35,7 @@ Column {
             .tw("items-center")
         }
         .tw("bg-white px-4 py-4 border-b border-gray-100")
+        .enter(fade, duration: 280)
 
         Column {
             Text("@{state.order.restaurantName}")

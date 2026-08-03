@@ -822,3 +822,347 @@ func TestServer_ConcurrentAccess(t *testing.T) {
 	wg.Wait()
 	// If we get here without panics, concurrent access is safe
 }
+
+// ============ Compression Tests ============
+
+func TestRemoteServer_CompressionEnabledByDefault(t *testing.T) {
+	server := NewRemoteServer()
+
+	if server.config.DisableCompression {
+		t.Error("expected compression to be enabled by default")
+	}
+	if !server.CompressionEnabled() {
+		t.Error("expected CompressionEnabled() to report true by default")
+	}
+	if !server.Upgrader().EnableCompression {
+		t.Error("expected upgrader to offer permessage-deflate by default")
+	}
+}
+
+func TestRemoteServer_DisableCompression(t *testing.T) {
+	server := NewRemoteServer().DisableCompression()
+
+	if !server.config.DisableCompression {
+		t.Error("expected DisableCompression() to set config.DisableCompression")
+	}
+	if server.CompressionEnabled() {
+		t.Error("expected CompressionEnabled() to report false")
+	}
+	if server.Upgrader().EnableCompression {
+		t.Error("expected upgrader to stop offering permessage-deflate")
+	}
+}
+
+func TestRemoteServer_Config_Compression(t *testing.T) {
+	// A config that says nothing about compression must leave it on —
+	// this is the whole reason the field is phrased negatively.
+	server := NewRemoteServer().
+		Config(ServerConfig{Port: 8080, Hostname: "localhost"})
+
+	if !server.CompressionEnabled() {
+		t.Error("expected zero-value DisableCompression to keep compression on")
+	}
+	if !server.Upgrader().EnableCompression {
+		t.Error("expected upgrader to still offer permessage-deflate")
+	}
+
+	server.Config(ServerConfig{DisableCompression: true})
+	if server.CompressionEnabled() {
+		t.Error("expected Config to be able to turn compression off")
+	}
+	if server.Upgrader().EnableCompression {
+		t.Error("expected upgrader compression to follow the config")
+	}
+
+	// ...and back on again.
+	server.Config(ServerConfig{})
+	if !server.CompressionEnabled() {
+		t.Error("expected Config to be able to turn compression back on")
+	}
+}
+
+func TestEngineOptions_CompressionDefaults(t *testing.T) {
+	if DefaultEngineOptions().DisableCompression {
+		t.Error("expected client compression to be enabled by default")
+	}
+
+	engine := NewRemoteEngine("ws://localhost:3000", nil)
+	if engine.options.DisableCompression {
+		t.Error("expected nil options to keep compression enabled")
+	}
+
+	engine = NewRemoteEngine("ws://localhost:3000", &EngineOptions{AutoReconnect: false})
+	if engine.options.DisableCompression {
+		t.Error("expected zero-value DisableCompression to keep compression enabled")
+	}
+
+	engine = NewRemoteEngine("ws://localhost:3000", &EngineOptions{DisableCompression: true})
+	if !engine.options.DisableCompression {
+		t.Error("expected DisableCompression to be honoured")
+	}
+}
+
+// compressionTestServer stands up a counter app behind the server's own
+// Upgrader (the one Listen() uses), and records the Sec-WebSocket-Extensions
+// header each client offers.
+func compressionTestServer(t *testing.T, configure func(*RemoteServer)) (*RemoteServer, *httptest.Server, func() string) {
+	t.Helper()
+
+	server := NewRemoteServer().
+		WithState("Counter", map[string]any{"count": 0}).
+		OnAction(func(action string, payload any, state map[string]any) map[string]any {
+			if action == "increment" {
+				count, _ := state["count"].(int)
+				state["count"] = count + 1
+			}
+			return state
+		}).
+		UI("Text('Count: @{state.count}')")
+
+	if configure != nil {
+		configure(server)
+	}
+
+	var mu sync.Mutex
+	var offered string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		offered = r.Header.Get("Sec-WebSocket-Extensions")
+		mu.Unlock()
+
+		// Use the server's configured upgrader rather than a hand-rolled
+		// one, so custom endpoints inherit the compression setting.
+		upgrader := server.Upgrader()
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Logf("upgrade error: %v", err)
+			return
+		}
+		server.handleOpen(conn)
+		go server.readMessages(conn)
+	})
+
+	httpServer := httptest.NewServer(mux)
+	return server, httpServer, func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return offered
+	}
+}
+
+// readUntil pumps frames off conn until one of the wanted message types
+// arrives, or the deadline expires.
+func readUntil(t *testing.T, conn *websocket.Conn, want MessageType) map[string]any {
+	t.Helper()
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for i := 0; i < 20; i++ {
+		_, data, err := conn.ReadMessage()
+		if err != nil {
+			t.Fatalf("read %s: %v", want, err)
+		}
+		var msg map[string]any
+		if err := json.Unmarshal(data, &msg); err != nil {
+			t.Fatalf("unmarshal %s: %v (raw=%q)", want, err, data)
+		}
+		if msg["type"] == string(want) {
+			return msg
+		}
+	}
+	t.Fatalf("never received %s", want)
+	return nil
+}
+
+func TestIntegration_CompressedHandshakeAndRoundTrip(t *testing.T) {
+	server, httpServer, _ := compressionTestServer(t, nil)
+	defer httpServer.Close()
+	defer server.Stop()
+
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws"
+
+	dialer := *websocket.DefaultDialer
+	dialer.EnableCompression = true
+
+	conn, resp, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws: %v", err)
+	}
+	defer conn.Close()
+
+	// The server must have echoed the extension back in the 101 response;
+	// gorilla only implements the no-context-takeover modes.
+	negotiated := resp.Header.Get("Sec-WebSocket-Extensions")
+	if !strings.Contains(negotiated, "permessage-deflate") {
+		t.Fatalf("expected permessage-deflate to be negotiated, got %q", negotiated)
+	}
+	if !strings.Contains(negotiated, "no_context_takeover") {
+		t.Errorf("expected a no-context-takeover mode, got %q", negotiated)
+	}
+
+	// The protocol must still work end-to-end over the compressed
+	// connection: hello -> sessionAck -> initialTree -> action -> state.
+	if err := conn.WriteJSON(map[string]any{"type": string(MessageTypeHello)}); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+
+	ack := readUntil(t, conn, MessageTypeSessionAck)
+	if ack["sessionId"] == "" || ack["sessionId"] == nil {
+		t.Error("expected sessionAck to carry a session id")
+	}
+
+	tree := readUntil(t, conn, MessageTypeInitialTree)
+	if tree["module"] != "Counter" {
+		t.Errorf("expected module 'Counter', got %v", tree["module"])
+	}
+	state, ok := tree["state"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected initialTree state map, got %T", tree["state"])
+	}
+	if state["count"] != float64(0) {
+		t.Errorf("expected initial count 0, got %v", state["count"])
+	}
+
+	if err := conn.WriteJSON(map[string]any{
+		"type":   string(MessageTypeDispatchAction),
+		"module": "Counter",
+		"action": "increment",
+	}); err != nil {
+		t.Fatalf("write dispatchAction: %v", err)
+	}
+
+	update := readUntil(t, conn, MessageTypeStateUpdate)
+	newState, ok := update["state"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected stateUpdate state map, got %T", update["state"])
+	}
+	if newState["count"] != float64(1) {
+		t.Errorf("expected count 1 after increment, got %v", newState["count"])
+	}
+}
+
+func TestIntegration_CompressionDisabledSkipsNegotiation(t *testing.T) {
+	server, httpServer, _ := compressionTestServer(t, func(s *RemoteServer) {
+		s.DisableCompression()
+	})
+	defer httpServer.Close()
+	defer server.Stop()
+
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws"
+
+	dialer := *websocket.DefaultDialer
+	dialer.EnableCompression = true
+
+	conn, resp, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws: %v", err)
+	}
+	defer conn.Close()
+
+	if got := resp.Header.Get("Sec-WebSocket-Extensions"); got != "" {
+		t.Errorf("expected no extension when the server opts out, got %q", got)
+	}
+
+	// A compression-less connection must behave identically.
+	if err := conn.WriteJSON(map[string]any{"type": string(MessageTypeHello)}); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	tree := readUntil(t, conn, MessageTypeInitialTree)
+	if tree["module"] != "Counter" {
+		t.Errorf("expected module 'Counter', got %v", tree["module"])
+	}
+}
+
+func TestIntegration_UncompressedClientFallsBack(t *testing.T) {
+	// Server offers permessage-deflate; a client that doesn't ask for it
+	// must still connect and speak the protocol uncompressed.
+	server, httpServer, _ := compressionTestServer(t, nil)
+	defer httpServer.Close()
+	defer server.Stop()
+
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws"
+
+	dialer := *websocket.DefaultDialer
+	dialer.EnableCompression = false
+
+	conn, resp, err := dialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial ws: %v", err)
+	}
+	defer conn.Close()
+
+	if got := resp.Header.Get("Sec-WebSocket-Extensions"); got != "" {
+		t.Errorf("expected no extension for a non-offering client, got %q", got)
+	}
+
+	if err := conn.WriteJSON(map[string]any{"type": string(MessageTypeHello)}); err != nil {
+		t.Fatalf("write hello: %v", err)
+	}
+	tree := readUntil(t, conn, MessageTypeInitialTree)
+	if tree["module"] != "Counter" {
+		t.Errorf("expected module 'Counter', got %v", tree["module"])
+	}
+}
+
+func TestIntegration_RemoteEngineOffersCompression(t *testing.T) {
+	server, httpServer, offered := compressionTestServer(t, nil)
+	defer httpServer.Close()
+	defer server.Stop()
+
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws"
+
+	client := NewRemoteEngine(wsURL, &EngineOptions{AutoReconnect: false})
+	if err := client.Connect(); err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer client.Disconnect()
+
+	if got := offered(); !strings.Contains(got, "permessage-deflate") {
+		t.Errorf("expected RemoteEngine to offer permessage-deflate, got %q", got)
+	}
+}
+
+func TestIntegration_RemoteEngineCompressedRoundTrip(t *testing.T) {
+	server, httpServer, _ := compressionTestServer(t, nil)
+	defer httpServer.Close()
+	defer server.Stop()
+
+	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws"
+
+	var stateUpdates []any
+	var mu sync.Mutex
+
+	client := NewRemoteEngine(wsURL, &EngineOptions{AutoReconnect: false})
+	client.OnStateUpdate(func(state any) {
+		mu.Lock()
+		stateUpdates = append(stateUpdates, state)
+		mu.Unlock()
+	})
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("failed to connect: %v", err)
+	}
+	defer client.Disconnect()
+
+	// The engine client doesn't send hello, so the server falls back to
+	// its 1s legacy grace timer before sending initialTree.
+	time.Sleep(1500 * time.Millisecond)
+
+	if err := client.DispatchAction("increment", nil); err != nil {
+		t.Fatalf("failed to dispatch action: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(stateUpdates) < 2 {
+		t.Fatalf("expected at least 2 state updates over a compressed connection, got %d", len(stateUpdates))
+	}
+	last, ok := stateUpdates[len(stateUpdates)-1].(map[string]any)
+	if !ok {
+		t.Fatalf("expected state map, got %T", stateUpdates[len(stateUpdates)-1])
+	}
+	if last["count"] != float64(1) {
+		t.Errorf("expected count 1 after increment, got %v", last["count"])
+	}
+}

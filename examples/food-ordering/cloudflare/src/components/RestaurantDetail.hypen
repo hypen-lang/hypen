@@ -11,6 +11,8 @@ Column {
                     .color("#111827")
             }
             .tw("absolute top-4 left-4 w-10 h-10 rounded-full bg-white items-center justify-center shadow")
+            .opacity({ default: 1, active: 0.6 })
+            .transition(150, easeOut)
             .onClick(@router.push, to: "/")
 
             Button {
@@ -19,12 +21,14 @@ Column {
                     .color("@{state.isFavorite ? '#ef4444' : '#111827'}")
             }
             .tw("absolute top-4 right-4 w-10 h-10 rounded-full bg-white items-center justify-center shadow")
+            .opacity({ default: 1, active: 0.6 })
+            .transition(150, easeOut)
             .onClick(@actions.toggleFavorite)
         }
 
         Column {
             Text("@{state.restaurant.name}")
-                .tw("text-3xl md:text-5xl font-black")
+                .tw("text-3xl md:text-5xl font-bold")
 
             Text("@{state.restaurant.cuisine} · @{state.restaurant.description}")
                 .tw("text-sm md:text-lg text-gray-600 mt-2 leading-6")
@@ -46,14 +50,15 @@ Column {
                     Text("@{state.restaurant.deliveryTimeMin}-@{state.restaurant.deliveryTimeMax} min")
                         .tw("text-sm text-gray-700 ml-1")
                 }
-                .tw("items-center bg-orange-50 border border-orange-100 rounded-full px-3 py-1 ml-2")
+                .tw("items-center bg-orange-50 border border-gray-100 rounded-full px-3 py-1 ml-2")
 
                 Text("$@{state.restaurant.deliveryFee} fee")
                     .tw("text-sm text-gray-700 bg-stone-100 border border-stone-200 rounded-full px-3 py-1 ml-2")
             }
             .tw("mt-4 items-center flex-wrap")
         }
-        .tw("px-4 md:px-8 py-5 md:py-7 bg-white border-b border-orange-100")
+        .tw("px-4 md:px-8 py-5 md:py-7 bg-white border-b border-gray-100")
+        .enter(fade, duration: 300)
     }
     .maxWidth(1180)
     .width("100%")
@@ -61,7 +66,7 @@ Column {
 
     Column {
         Text("Menu")
-            .tw("text-xl md:text-2xl font-black px-4 md:px-8 pt-5 pb-4")
+            .tw("text-xl md:text-2xl font-bold px-4 md:px-8 pt-5 pb-4")
 
         Column {
             ForEach(items: @state.menuItems, key: "id") {
@@ -94,6 +99,10 @@ Column {
             .tw("items-center")
         }
         .tw("fixed left-4 right-4 bottom-4 md:left-auto md:right-8 md:bottom-8 md:w-96 py-3 px-5 bg-orange-500 rounded-full shadow-xl")
+        .opacity({ default: 1, active: 0.8 })
+        .transition(160, easeOut)
+        .enter(slide, fade, from: bottom, duration: 280)
+        .exit(fade, duration: 160)
         .onClick(@router.push, to: "/cart")
     }
 }

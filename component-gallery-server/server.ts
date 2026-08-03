@@ -281,6 +281,10 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
   },
 
   websocket: {
+    // Negotiated per-connection; clients without the extension fall back to
+    // uncompressed frames.
+    perMessageDeflate: true,
+
     async open(ws) {
       const upgradeData = ws.data as { example: GalleryExample };
       const example = upgradeData.example;

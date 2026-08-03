@@ -6,15 +6,17 @@ Column {
                 .color("#111827")
         }
         .tw("bg-transparent p-2")
+        .opacity({ default: 1, active: 0.6 })
+        .transition(150, easeOut)
         .onClick(@router.push, to: "/")
 
         Text("Your Cart")
-            .tw("text-base font-semibold flex-1 text-center")
+            .tw("text-[15px] font-semibold flex-1 text-center")
 
         Column {}
             .tw("w-10")
     }
-    .tw("py-2 px-2 items-center bg-white border-b border-gray-200")
+    .tw("py-2.5 px-2 items-center bg-white border-b border-gray-100")
 
     If(condition: "@{length(state.cartItems) == 0}") {
         Column {
@@ -31,9 +33,12 @@ Column {
                     .tw("text-sm font-bold text-white")
             }
             .tw("bg-orange-500 rounded-full px-6 py-3 mt-6")
+            .opacity({ default: 1, active: 0.8 })
+            .transition(160, easeOut)
             .onClick(@router.push, to: "/")
         }
         .tw("flex-1 items-center justify-center px-4")
+        .enter(fade, duration: 300)
     }
 
     If(condition: "@{length(state.cartItems) > 0}") {
@@ -110,6 +115,8 @@ Column {
                     .tw("text-base font-bold text-white")
             }
             .tw("mx-4 my-4 py-4 bg-orange-500 rounded-full items-center justify-center")
+            .opacity({ default: 1, active: 0.8 })
+            .transition(160, easeOut)
             .onClick(@actions.placeOrder)
         }
         .scrollable(true)

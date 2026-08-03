@@ -58,19 +58,18 @@ export default app
       Column {
         Row {
           Button {
-            Text("‹")
-              .tw("text-3xl leading-none")
+            Icon(@resources.chevron-left)
+              .size(20)
               .color("#F8FAFC")
           }
-          .tw("w-10 h-10 rounded-full border-0 items-center justify-center")
-          .backgroundColor("rgba(255, 255, 255, 0.12)")
-          .boxShadow("0 16px 32px rgba(2, 6, 23, 0.45)")
+          .tw("w-10 h-10 rounded-full border border-white/10 items-center justify-center")
+          .backgroundColor("rgba(255, 255, 255, 0.07)")
           .opacity({ default: 1, active: 0.6 })
           .transition(160, easeOut)
           .onClick(@router.push, to: "/")
 
           Text("Search")
-            .tw("flex-1 text-2xl md:text-[28px] lg:text-3xl font-black text-center")
+            .tw("flex-1 text-lg md:text-xl font-bold text-center")
             .color("#F8FAFC")
 
           Box {}
@@ -82,19 +81,18 @@ export default app
         .alignSelf("center")
 
         Row {
-          Text("⌕")
-            .tw("text-xl mr-3")
-            .color("#FACC15")
+          Icon(@resources.search)
+            .size(17)
+            .color("#8E8E9A")
           Input(placeholder: "Title, mood, or genre")
             .bind(@state.query)
             .onInput(@actions.search)
-            .tw("flex-1 bg-transparent border-0 outline-none")
-            .color("#FFF7ED")
-            .fontSize(16)
+            .tw("flex-1 bg-transparent border-0 outline-none ml-3")
+            .color("#F8FAFC")
+            .fontSize(15)
         }
-        .tw("mx-5 px-4 py-4 rounded-3xl border-0 items-center")
-        .backgroundColor("rgba(255, 255, 255, 0.10)")
-        .boxShadow("0 18px 38px rgba(2, 6, 23, 0.38)")
+        .tw("mx-5 px-4 py-3.5 rounded-2xl border border-white/10 items-center")
+        .backgroundColor("rgba(255, 255, 255, 0.06)")
         .maxWidth(1120)
         .width("calc(100% - 40px)")
         .alignSelf("center")
@@ -103,26 +101,26 @@ export default app
           ForEach(items: @state.tabs, key: "id") {
             Button {
               Text("@{item.label}")
-                .tw("text-sm md:text-sm lg:text-base font-black")
-                .color("@{item.active ? '#0F172A' : '#CBD5E1'}")
+                .tw("text-[13px] font-semibold")
+                .color("@{item.active ? '#0B0B10' : '#C6C6D0'}")
                 .transition(220, easeOut, props: [color])
             }
-            .tw("mr-2 px-5 py-3 rounded-full border-0 shadow-lg shrink-0")
-            .backgroundColor("@{item.active ? '#FACC15' : 'rgba(236, 72, 153, 0.14)'}")
-            .boxShadow("@{item.active ? '0 16px 32px rgba(250, 204, 21, 0.24)' : '0 10px 24px rgba(236, 72, 153, 0.18)'}")
+            .tw("mr-2 px-4 py-2 rounded-full border shrink-0")
+            .backgroundColor("@{item.active ? '#F5C518' : 'rgba(255, 255, 255, 0.06)'}")
+            .borderColor("@{item.active ? '#F5C518' : 'rgba(255, 255, 255, 0.10)'}")
             .opacity({ default: 1, active: 0.7 })
             .transition(220, easeOut)
             .onClick(@actions.selectGenre, genre: "@{item.id}", animate: spring)
           }
         }
         .scrollable("horizontal")
-        .tw("px-5 md:px-8 pt-7 pb-4 flex-row")
+        .tw("px-5 md:px-8 pt-5 pb-3 flex-row")
         .maxWidth(1180)
         .width("100%")
         .alignSelf("center")
 
         Text("@{state.headline}")
-          .tw("px-5 md:px-8 pt-6 pb-3 text-2xl md:text-[28px] lg:text-3xl font-black")
+          .tw("px-5 md:px-8 pt-4 pb-3 text-lg md:text-xl font-bold")
           .color("#F8FAFC")
           .maxWidth(1180)
           .width("100%")
@@ -133,38 +131,45 @@ export default app
             Column {
               Image(src: "@{item.posterUrl}")
                 .objectFit("cover")
-                .tw("w-full aspect-[2/3] rounded-3xl shadow-xl")
+                .tw("w-full aspect-[2/3] rounded-2xl border border-white/10")
                 .backgroundColor("@{item.posterBg}")
-                .boxShadow("0 18px 34px rgba(0, 0, 0, 0.36)")
+                .boxShadow("0 14px 28px rgba(0, 0, 0, 0.35)")
 
               Text("@{item.title}")
-                .tw("text-base md:text-base lg:text-lg font-black mt-3")
+                .tw("text-[13px] font-semibold mt-2.5")
                 .color("#F8FAFC")
-              Text("★ @{item.ratingLabel} · @{item.year}")
-                .tw("text-xs font-bold mt-1")
-                .color("#FACC15")
-              Text("@{item.genre}")
-                .tw("text-xs mt-1")
-                .color("#FBCFE8")
-              Button {
-                Text("@{item.saved ? '✓ Added to watchlist' : '+ Watchlist'}")
-                  .tw("text-xs font-black")
-                  .color("@{item.saved ? '#052E16' : '#F8FAFC'}")
+              Row {
+                Icon(@resources.star)
+                  .size(11)
+                  .color("#F5C518")
+                Text("@{item.ratingLabel} · @{item.year}")
+                  .tw("text-xs ml-1")
+                  .color("#8E8E9A")
               }
-              .tw("mt-3 py-3 rounded-2xl border-0 shadow-lg items-center justify-center")
-              .backgroundColor("@{item.saved ? '#22C55E' : '#2A0B1B'}")
-              .boxShadow("@{item.saved ? '0 14px 28px rgba(34, 197, 94, 0.24)' : '0 12px 24px rgba(236, 72, 153, 0.20)'}")
-              .opacity({ default: 1, active: 0.75 })
+              .tw("mt-1 items-center")
+
+              Button {
+                Row {
+                  Text("@{item.saved ? 'Saved' : '+ Watchlist'}")
+                    .tw("text-xs font-semibold")
+                    .color("@{item.saved ? '#34D399' : '#E4E4EB'}")
+                }
+                .tw("items-center")
+              }
+              .tw("mt-2.5 py-2.5 rounded-xl border items-center justify-center w-full")
+              .backgroundColor("@{item.saved ? 'rgba(52, 211, 153, 0.10)' : 'rgba(255, 255, 255, 0.07)'}")
+              .borderColor("@{item.saved ? 'rgba(52, 211, 153, 0.35)' : 'rgba(255, 255, 255, 0.12)'}")
+              .opacity({ default: 1, active: 0.7 })
               .transition(260, easeOut)
               .onClick(@actions.saveMovie, movieId: "@{item.id}")
             }
-            .tw("p-0 border-0")
+            .tw("p-0 border-0 items-start")
             .enter(fade, duration: 260)
             .exit(fade, duration: 140)
             .layout(spring)
           }
           .gridColumns({default: 2, md: 3, lg: 4})
-          .gap(12)
+          .gap(14)
           .tw("px-5 md:px-8")
           .maxWidth(1180)
           .width("100%")
@@ -173,15 +178,14 @@ export default app
           If(condition: @state.empty) {
             Column {
               Text("No movies found")
-                .tw("text-lg font-bold")
+                .tw("text-[15px] font-semibold")
                 .color("#F8FAFC")
               Text("Try another mood, genre, or title.")
-                .tw("text-sm mt-2")
-                .color("#FBCFE8")
+                .tw("text-[13px] mt-1.5")
+                .color("#8E8E9A")
             }
-            .tw("mx-5 mt-6 p-6 rounded-3xl border-0 items-center")
-            .backgroundColor("rgba(255, 255, 255, 0.10)")
-            .boxShadow("0 18px 42px rgba(2, 6, 23, 0.35)")
+            .tw("mx-5 mt-6 p-6 rounded-2xl border border-white/10 items-center")
+            .backgroundColor("rgba(255, 255, 255, 0.04)")
             .enter(slide, fade, from: bottom, duration: 280)
             .exit(fade, duration: 140)
           }
@@ -193,6 +197,6 @@ export default app
       }
       .scrollable(true)
       .tw("flex-1")
-      .linearGradient("180deg, #050505 0%, #190812 54%, #050505 100%")
+      .backgroundColor("#0B0B10")
     }
   `);

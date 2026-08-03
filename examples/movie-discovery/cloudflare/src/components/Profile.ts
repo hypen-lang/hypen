@@ -26,9 +26,9 @@ async function refresh(state: ProfileState) {
   const stats = await profileStats(user.id);
   state.user = user;
   state.stats = [
-    { id: "saved", label: "Saved", value: String(stats.saved), tint: "#FACC15" },
-    { id: "genre", label: "Top genre", value: stats.topGenre, tint: "#EC4899" },
-    { id: "hours", label: "Queued", value: `${stats.hoursQueued}h`, tint: "#F9A8D4" },
+    { id: "saved", label: "Saved", value: String(stats.saved), tint: "#F5C518" },
+    { id: "genre", label: "Top genre", value: stats.topGenre, tint: "#F8FAFC" },
+    { id: "hours", label: "Queued", value: `${stats.hoursQueued}h`, tint: "#F8FAFC" },
   ];
 }
 
@@ -43,50 +43,47 @@ export default app
     module Profile {
       Column {
         Text("Profile")
-          .tw("px-5 pt-6 text-3xl md:text-4xl font-black")
+          .tw("px-5 pt-6 text-2xl md:text-3xl font-bold tracking-tight")
           .color("#F8FAFC")
 
         Column {
           Column {
             Text("@{state.user.avatar}")
-              .tw("text-3xl font-black")
-              .color("#0F172A")
+              .tw("text-2xl font-bold")
+              .color("#0B0B10")
           }
-          .tw("w-24 h-24 rounded-full items-center justify-center")
-          .linearGradient("135deg, #EC4899 0%, #F472B6 100%")
-          .boxShadow("0 18px 42px rgba(236, 72, 153, 0.34)")
+          .tw("w-20 h-20 rounded-full items-center justify-center")
+          .linearGradient("135deg, #F5C518 0%, #E8A317 100%")
 
           Text("@{state.user.name}")
-            .tw("text-2xl md:text-3xl font-black mt-4")
+            .tw("text-xl md:text-2xl font-bold mt-4")
             .color("#F8FAFC")
           Text("@{state.user.handle}")
-            .tw("text-sm mt-1")
-            .color("#FBCFE8")
-          Text("Favorite genre: @{state.user.favoriteGenre}")
-            .tw("text-sm font-bold mt-4 px-4 py-2 rounded-full")
-            .backgroundColor("rgba(255, 255, 255, 0.12)")
-            .color("#FFEDD5")
+            .tw("text-[13px] mt-0.5")
+            .color("#8E8E9A")
+          Text("Favorite genre · @{state.user.favoriteGenre}")
+            .tw("text-xs font-medium mt-4 px-3.5 py-1.5 rounded-full border border-white/10")
+            .backgroundColor("rgba(255, 255, 255, 0.06)")
+            .color("#C6C6D0")
         }
-        .tw("mx-5 mt-5 p-7 rounded-3xl border-0 items-center")
-        .linearGradient("135deg, rgba(236, 72, 153, 0.40) 0%, rgba(10, 10, 12, 0.96) 50%, rgba(244, 114, 182, 0.18) 100%")
-        .boxShadow("0 24px 60px rgba(236, 72, 153, 0.20)")
+        .tw("mx-5 mt-5 p-7 rounded-3xl border border-white/10 items-center")
+        .backgroundColor("rgba(255, 255, 255, 0.04)")
 
         Text("Library pulse")
-          .tw("px-5 pt-7 pb-3 text-2xl md:text-3xl font-black")
+          .tw("px-5 pt-7 pb-3 text-lg md:text-xl font-bold")
           .color("#F8FAFC")
 
         Grid(@state.stats, key: "id") {
           Column {
             Text("@{item.value}")
-              .tw("text-3xl md:text-4xl font-black text-center")
+              .tw("text-2xl md:text-3xl font-bold text-center")
               .color("@{item.tint}")
             Text("@{item.label}")
-              .tw("text-xs md:text-sm mt-2 text-center font-bold")
-              .color("#FBCFE8")
+              .tw("text-xs mt-1.5 text-center font-medium")
+              .color("#8E8E9A")
           }
-          .tw("p-5 rounded-3xl border-0 items-center")
-          .linearGradient("180deg, rgba(255, 255, 255, 0.13) 0%, rgba(255, 255, 255, 0.055) 100%")
-          .boxShadow("0 18px 42px rgba(2, 6, 23, 0.35)")
+          .tw("p-5 rounded-2xl border border-white/10 items-center justify-center")
+          .backgroundColor("rgba(255, 255, 255, 0.04)")
           .enter(slide, fade, from: bottom, duration: 320)
         }
         .gridColumns(3)
@@ -95,18 +92,17 @@ export default app
 
         Column {
           Text("Demo notes")
-            .tw("text-lg font-bold")
+            .tw("text-[15px] font-semibold")
             .color("#F8FAFC")
           Text("This example focuses on rich catalog browsing, detail routes, search filters, and persistent watchlist state.")
-            .tw("text-sm mt-2 leading-6")
-            .color("#FBCFE8")
+            .tw("text-[13px] mt-2 leading-6")
+            .color("#8E8E9A")
         }
-        .tw("mx-5 mt-6 p-5 rounded-3xl border-0")
-        .backgroundColor("rgba(255, 255, 255, 0.10)")
-        .boxShadow("0 18px 42px rgba(2, 6, 23, 0.35)")
+        .tw("mx-5 mt-6 p-5 rounded-2xl border border-white/10")
+        .backgroundColor("rgba(255, 255, 255, 0.04)")
       }
       .scrollable(true)
       .tw("flex-1")
-      .linearGradient("180deg, #050505 0%, #190812 54%, #050505 100%")
+      .backgroundColor("#0B0B10")
     }
   `);

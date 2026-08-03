@@ -43,7 +43,12 @@ private enum DecodedRemoteMessage: @unchecked Sendable {
     case unparseable(preview: String)
 }
 
-/// WebSocket-based remote engine for Hypen
+/// WebSocket-based remote engine for Hypen.
+///
+/// Transport is `URLSessionWebSocketTask`. Note that WebSocket compression
+/// (`permessage-deflate`) is offered automatically by URLSession and is not
+/// configurable from this package — see the note in `establishConnection()`
+/// for what that means when talking to the various Hypen server SDKs.
 @MainActor
 public final class RemoteEngine: NSObject, @unchecked Sendable {
     private let url: URL
@@ -165,6 +170,35 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
 
         urlSession = URLSession(configuration: sessionConfig, delegate: self, delegateQueue: nil)
         webSocketTask = urlSession?.webSocketTask(with: url)
+        // Compression (RFC 7692 `permessage-deflate`) is not configured here
+        // because Apple gives us no knob to configure. It is handled entirely
+        // inside URLSession, which is why `RemoteEngineConfig` has no
+        // `compression` option where the other Hypen client SDKs do.
+        //
+        // What URLSession actually does: `URLSessionWebSocketTask` offers
+        // `Sec-WebSocket-Extensions: permessage-deflate` in its opening
+        // handshake on its own, and transparently inflates incoming compressed
+        // frames if the server accepts. There is no public API to enable,
+        // disable, or parameterise this — no property on the task, and the
+        // `Sec-*` handshake headers cannot be set on the `URLRequest` (the
+        // Network.framework layer underneath validates the server's response
+        // against what *it* offered and fails the connection on a mismatch).
+        //
+        // Consequences worth knowing:
+        //   * Connecting to a compression-enabled Hypen server (web / Go /
+        //     Kotlin / Rust) means this client gets compressed frames for free,
+        //     with no code change here. Nothing to opt into.
+        //   * Connecting to `hypen-server-swift`, which declines the extension
+        //     (SwiftNIO + WebSocketKit have no RFC 7692 support — see that
+        //     package's README), the connection runs uncompressed. Negotiation
+        //     is per-connection, so this is a clean fallback, not a failure.
+        //   * We cannot opt *out* of compression. If a server misbehaves on
+        //     compressed frames the fix belongs on the server.
+        //
+        // Historical note: on macOS 11 betas this task set the RSV1 frame bit
+        // even when the server declined the extension, which strict servers
+        // rejected as a protocol error (Apple radar 65668399). Fixed in macOS
+        // 11 beta 3, well below this package's iOS 15 / macOS 12 floor.
         // URLSession caps a single WebSocket message at 1 MiB by default, and
         // a Hypen `initialTree` routinely exceeds that — any app embedding an
         // asset in state (a base64 wallpaper, an inlined image) blows past it

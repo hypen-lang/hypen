@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/web",
-  "version": "0.6.0",
+  "version": "0.6.2",
   "description": "Hypen web renderers - DOM and Canvas rendering for browsers",
   "type": "module",
   "main": "./dist/index.js",
@@ -43,7 +43,7 @@
   },
   "dependencies": {
     "@chenglou/pretext": "^0.0.3",
-    "@hypen-space/core": "^0.6.0",
+    "@hypen-space/core": "^0.6.2",
     "taffy-layout": "^2.0.3"
   },
   "devDependencies": {

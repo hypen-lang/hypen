@@ -5,7 +5,7 @@
 Row {
     Button {
         Icon(@resources.home)
-            .size(26)
+            .size({default: 22, md: 28})
             .color("@{state.location == '/' ? '#262626' : '#8e8e8e'}")
     }
     .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
@@ -16,7 +16,7 @@ Row {
 
     Button {
         Icon(@resources.search)
-            .size(26)
+            .size({default: 22, md: 28})
             .color("@{state.location == '/search' ? '#262626' : '#8e8e8e'}")
     }
     .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
@@ -27,7 +27,7 @@ Row {
 
     Button {
         Icon(@resources.plus-square)
-            .size(26)
+            .size({default: 22, md: 28})
             .color("#8e8e8e")
     }
     .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
@@ -38,7 +38,7 @@ Row {
 
     Button {
         Icon(@resources.heart)
-            .size(26)
+            .size({default: 22, md: 28})
             .color("@{state.location == '/notifications' ? '#262626' : '#8e8e8e'}")
     }
     .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
@@ -50,6 +50,8 @@ Row {
     Button {
         Image(src: "@{state.currentUser.avatarUrl}")
             .tw("w-7 h-7 rounded-full")
+            .width({default: 24, md: 30})
+            .height({default: 24, md: 30})
     }
     .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
     .opacity({default: 1, active: 0.45})

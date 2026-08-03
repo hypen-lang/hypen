@@ -144,7 +144,7 @@ function fallbackMovie(
     mood,
     posterEmoji: "★",
     posterUrl: posterFallbackSvg(title),
-    posterBg: "#111827",
+    posterBg: "#15151C",
     accent: accentForGenre(genre),
     tagline: synopsis,
     synopsis,
@@ -179,7 +179,43 @@ async function omdb(params: Record<string, string>): Promise<any | null> {
 
 function posterFallbackSvg(title: string): string {
   const escaped = title.replace(/[<&>"]/g, (ch) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[ch] ?? ch));
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="480" viewBox="0 0 320 480"><rect width="320" height="480" fill="#111827"/><rect x="18" y="18" width="284" height="444" rx="28" fill="#1E293B" stroke="#334155"/><text x="160" y="214" font-family="Arial" font-size="32" font-weight="700" fill="#FACC15" text-anchor="middle">Cinebox</text><text x="160" y="262" font-family="Arial" font-size="24" fill="#F8FAFC" text-anchor="middle">${escaped}</text></svg>`;
+  // Wrap long titles over up to three centred lines so the placeholder reads
+  // like a deliberate typographic poster instead of one clipped string.
+  const words = title.split(/\s+/);
+  const lines: string[] = [];
+  let line = "";
+  for (const word of words) {
+    const next = line ? `${line} ${word}` : word;
+    if (next.length > 16 && line) {
+      lines.push(line);
+      line = word;
+    } else {
+      line = next;
+    }
+  }
+  if (line) lines.push(line);
+  const shown = lines.slice(0, 3);
+  const lineHeight = 34;
+  const startY = 258 - ((shown.length - 1) * lineHeight) / 2;
+  const titleText = shown
+    .map((l, i) => {
+      const esc = l.replace(/[<&>"]/g, (ch) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[ch] ?? ch));
+      return `<text x="160" y="${startY + i * lineHeight}" font-family="Georgia, 'Times New Roman', serif" font-size="27" font-weight="700" fill="#F8FAFC" text-anchor="middle">${esc}</text>`;
+    })
+    .join("");
+  const monogram = (escaped[0] ?? "?").toUpperCase();
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="320" height="480" viewBox="0 0 320 480">` +
+    `<defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">` +
+    `<stop offset="0" stop-color="#1C1C26"/><stop offset="0.55" stop-color="#101016"/><stop offset="1" stop-color="#0B0B10"/>` +
+    `</linearGradient></defs>` +
+    `<rect width="320" height="480" fill="url(#bg)"/>` +
+    `<rect x="14" y="14" width="292" height="452" rx="18" fill="none" stroke="rgba(255,255,255,0.10)"/>` +
+    `<circle cx="160" cy="150" r="44" fill="none" stroke="#F5C518" stroke-opacity="0.55" stroke-width="1.5"/>` +
+    `<text x="160" y="167" font-family="Georgia, 'Times New Roman', serif" font-size="46" font-weight="700" fill="#F5C518" text-anchor="middle">${monogram}</text>` +
+    titleText +
+    `<text x="160" y="428" font-family="Arial, sans-serif" font-size="12" letter-spacing="4" fill="#8E8E9A" text-anchor="middle">C I N E B O X</text>` +
+    `</svg>`;
   return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
 }
 
@@ -232,7 +268,7 @@ function movieFromOmdb(detail: OmdbDetail, rank = 0, isFeatured = false, isTrend
     mood: moodForGenre(genre),
     posterEmoji: "★",
     posterUrl,
-    posterBg: "#111827",
+    posterBg: "#15151C",
     accent: accentForGenre(genre),
     tagline: synopsis,
     synopsis,

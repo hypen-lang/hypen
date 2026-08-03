@@ -69,6 +69,11 @@ typealias ConnectionCallback = (RemoteClient) -> Unit
  * Each WebSocket client gets its own `NativeEngine` + `ModuleInstance`.
  * Sessions are managed with TTL-based expiry and reconnection support.
  *
+ * This class is transport-agnostic: it owns sessions, engines and module
+ * lifecycles, but never the socket. Your application installs Ktor's
+ * `WebSockets` plugin and pumps frames through [handleConnect],
+ * [handleMessage] and [handleDisconnect].
+ *
  * ```kotlin
  * val server = HypenServer {
  *     module("Counter", counterModule)
@@ -80,7 +85,27 @@ typealias ConnectionCallback = (RemoteClient) -> Unit
  *
  * // In Ktor:
  * fun Application.module() {
- *     server.install(this)
+ *     install(WebSockets) {
+ *         // permessage-deflate is on by default — see [compression]
+ *         if (server.compression) {
+ *             extensions { install(WebSocketDeflateExtension) }
+ *         }
+ *     }
+ *     routing {
+ *         webSocket("/ws") {
+ *             val send: suspend (String) -> Unit = { send(Frame.Text(it)) }
+ *             send(server.handleConnect(connectionKey = this, sendMessage = send))
+ *             try {
+ *                 for (frame in incoming) {
+ *                     if (frame is Frame.Text) {
+ *                         server.handleMessage(this, frame.readText(), send)
+ *                     }
+ *                 }
+ *             } finally {
+ *                 server.handleDisconnect(this)
+ *             }
+ *         }
+ *     }
  * }
  * ```
  */
@@ -112,6 +137,29 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
      */
     private val managedRouters = ConcurrentHashMap<Any, ManagedRouter>()
 
+    /**
+     * Whether this server wants WebSocket permessage-deflate (RFC 7692)
+     * compression on its transport. On by default; opt out with
+     * `compression = false` in the [HypenServerBuilder] block.
+     *
+     * **Advisory, not enforced.** [HypenServer] is transport-agnostic — it
+     * only exposes [handleConnect] / [handleMessage] / [handleDisconnect]
+     * and never installs Ktor's `WebSockets` plugin itself. Your Ktor
+     * application owns that install, so it must read this flag when
+     * wiring the socket up:
+     *
+     * ```kotlin
+     * install(WebSockets) {
+     *     if (hypenServer.compression) {
+     *         extensions { install(WebSocketDeflateExtension) }
+     *     }
+     * }
+     * ```
+     *
+     * See `example-server/src/main/kotlin/Sockets.kt` for the full wiring.
+     */
+    val compression: Boolean
+
     /** Default primitives are registered on every engine via engine.registerDefaultPrimitives(). */
 
     init {
@@ -123,6 +171,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         onDisconnectionCallback = builder.onDisconnectionCallback
         resourceJsonList.addAll(builder.resourceJsonList)
         autoRouterEnabled = builder.autoRouterEnabled
+        compression = builder.compression
 
         // Register modules in HypenApp
         modules.forEach { (name, def) ->
@@ -147,6 +196,11 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         }
 
         log.info("HypenServer initialized with ${modules.size} modules, ${routeDefinitions.size} routes")
+        log.debug(
+            "WebSocket permessage-deflate compression " +
+                if (compression) "enabled (advisory — host must install WebSocketDeflateExtension)"
+                else "disabled"
+        )
     }
 
     /**
@@ -915,6 +969,33 @@ class HypenServerBuilder {
     internal var watchConfig: ComponentWatchConfig? = null
     internal val resourceJsonList = mutableListOf<String>()
     internal var autoRouterEnabled: Boolean = true
+
+    /**
+     * Enable WebSocket permessage-deflate (RFC 7692) compression on the
+     * transport. **On by default** — patch streams are JSON and compress
+     * extremely well, and compression is negotiated per-connection, so
+     * clients that don't advertise the extension fall back to raw frames
+     * automatically. The name matches `compression` on the TypeScript SDK
+     * (Go spells it `DisableCompression` only because a struct zero value
+     * cannot express "default true").
+     *
+     * Set to `false` to force raw, uncompressed frames — useful when
+     * debugging the wire protocol, since a deflated payload is opaque to
+     * `tcpdump` and to most WebSocket frame inspectors.
+     *
+     * ```kotlin
+     * val server = HypenServer {
+     *     module("Counter", counterModule)
+     *     compression = false  // raw-wire debugging
+     * }
+     * ```
+     *
+     * Note that [HypenServer] cannot apply this itself: it is transport
+     * agnostic and never installs Ktor's `WebSockets` plugin — your Ktor
+     * application does. Read [HypenServer.compression] where you install
+     * the plugin so this flag actually takes effect.
+     */
+    var compression: Boolean = true
 
     /**
      * Opt out of the per-session auto-wired [ManagedRouter]. After this

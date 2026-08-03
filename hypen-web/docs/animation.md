@@ -1,6 +1,6 @@
 # Animation
 
-Hypen animates through ten applicators — `.transition()`, `.enter()`, `.exit()`, `.layout()`, `.animate()`, `.states { }`, `.sharedElement()`, the `.scrub()`/`.settle()` pair, and the `.motion(essential)` reduced-motion opt-out — plus one completion event, `.onAnimationComplete()`, and one event argument, `animate:` (transaction-scoped animation — see its section below). Each declares *intent* on a node; the engine ships that intent to the renderer, which executes the motion natively (CSS transitions and keyframes on the DOM renderer; a per-frame numeric ticker on the Canvas renderer). Renderers without animation support simply snap — your UI stays correct on every platform.
+Hypen animates through ten applicators — `.transition()`, `.enter()`, `.exit()`, `.layout()`, `.animate()`, `.states { }`, `.sharedElement()`, the `.scrub()`/`.settle()` pair, and the `.motion(essential)` reduced-motion opt-out — plus one completion event, `.onAnimationComplete()`, and one event argument, `animate:` (transaction-scoped animation — see its section below). Each declares *intent* on a node; the engine ships that intent to the renderer, which executes the motion natively (CSS transitions and keyframes on the DOM renderer; a per-frame numeric ticker on the Canvas renderer; a tick animator on desktop; SwiftUI's implicit animation on iOS; Compose animation on Android). A channel a renderer doesn't play simply snaps — your UI stays correct on every platform.
 
 ## Quick Start
 
@@ -207,7 +207,7 @@ A pose flip reaches renderers as ordinary `SetProp`/`RemoveProp` patches under t
 - **Canvas 2D** — the numeric ticker interpolates them; the `.transition` capability matrix applies unchanged (colors interpolate in RGBA, `cornerRadius` snaps, etc.).
 - **Desktop (Vello)** — the tick interpolator glides pose flips per the `.transition` matrix above (numeric + color; `cornerRadius` interpolates; uniform scale).
 - **iOS (SwiftUI)** — pose flips glide through the same per-element implicit animation the `.transition` channel uses, so the engine-synthesized spec drives them for free.
-- **Android** — poses switch instantly (snap). The UI is always in the correct pose on every platform; only the motion differs.
+- **Android (Compose)** — pose flips glide for free through the same animated prop resolution the `.transition` channel uses; the engine-synthesized spec drives them. The UI is always in the correct pose on every platform; only the motion differs.
 
 The engine also ships the active label as the reserved `__anim.states` prop (`{"label": "expanded"}`, or `null` in the fallback-to-base pose) — animation-aware renderers use it to time the settle and stamp `.onAnimationComplete` payloads; renderers that ignore it lose nothing.
 
@@ -409,7 +409,7 @@ export default app
 
 ### Per-renderer behavior
 
-The DOM renderer implements all five firing points; the native desktop (Vello) renderer likewise dispatches all five (`sharedElement` included). The Canvas and iOS renderers implement the first four with identical payloads (`sharedElement` never fires on either — neither plays shared-element FLIPs). Renderers that don't animate (Android today) never dispatch completions — nothing played. Treat completions as motion choreography, not as the only path to a correct end state: a machine like the one above still lands in a sensible pose everywhere, it just skips the timed hop on snapping renderers.
+The DOM renderer implements all five firing points; the native desktop (Vello) renderer likewise dispatches all five (`sharedElement` included). The Canvas, iOS, and Android renderers implement the first four with identical payloads (`sharedElement` never fires on any of them — none plays shared-element FLIPs). Interrupted, superseded, and reduced-motion-skipped playbacks fire nothing everywhere. Treat completions as motion choreography, not as the only path to a correct end state: a machine like the one above still lands in a sensible pose everywhere — a channel a renderer snaps (e.g. `.layout` on mobile) just skips its timed hop.
 
 ## `animate:` — Transaction-Scoped Dispatch Animation
 
@@ -463,9 +463,9 @@ Transaction glides fire no `.onAnimationComplete` — completions belong to node
 
 ### Renderer and host support
 
-Both web renderers honor the stamp: the DOM renderer via scoped CSS transitions, the Canvas renderer by using the spec as its tick-interpolation spec (its usual capability matrix applies — e.g. `cornerRadius` still snaps there). The native desktop (Vello) renderer also honors it — it consumes the engine's `batchAnimation` patch directly (not via UniFFI) and applies the spec through its tick animator. Renderers that don't animate ignore the stamp; the batch is wire-identical to an unstamped one otherwise.
+Every animating renderer honors the stamp: the DOM renderer via scoped CSS transitions, the Canvas renderer by using the spec as its tick-interpolation spec (its usual capability matrix applies — e.g. `cornerRadius` still snaps there), the native desktop (Vello) renderer through its tick animator (it consumes the engine's `batchAnimation` patch directly, not via UniFFI), and the iOS (SwiftUI) and Android (Compose) renderers as a per-batch spec consulted by their animated prop resolution — honored at batch index 0 only, under the same precedence chain. Renderers that don't recognize the prelude ignore it; the batch is wire-identical to an unstamped one otherwise.
 
-`animate:` is **TypeScript-host-only** for now: it stamps on the browser engine and on Node/Bun remote servers. On Go and Kotlin hosts the dispatch works and handlers run normally — the reserved key that carries the stamp is stripped before handlers see the payload, so it never leaks into user code — but nothing stamps and the resulting flush snaps. (Go's state-sync path notifies synchronously per mutation and has no animation envelope; honest stamping there is tracked separately — see `hypen-golang/CHANGELOG.md`.) Mobile renderers behind UniFFI never receive the stamp at all.
+`animate:` **stamping is TypeScript-host-only** for now: it stamps on the browser engine and on Node/Bun remote servers, and a TS-hosted stamp reaches every remote client — including the mobile renderers. On Go and Kotlin hosts the dispatch works and handlers run normally — the reserved key that carries the stamp is stripped before handlers see the payload, so it never leaks into user code — but nothing stamps and the resulting flush snaps. (Go's state-sync path notifies synchronously per mutation and has no animation envelope; honest stamping there is tracked separately — see `hypen-golang/CHANGELOG.md`.) The UniFFI boundary carries the prelude (`spec_json` on the flat `Patch` record) and the `Remove.transition` flag, and the Kotlin and Swift hosts relay both — but `update_state` has no animation parameter over FFI, so mobile hosts can relay engine-raised preludes, not originate one.
 
 ### Reduced motion
 
@@ -569,7 +569,7 @@ Animation degrades gracefully by design: the animation channel rides along as re
 | Canvas 2D | Yes — numeric ticker (`cornerRadius` snaps) | Yes — removal deferred until exit settles | Snap (moves jump) | `pulse` / `spin` / `shake` (`shimmer` is static) | Yes — per the `.transition` matrix | Ignores the props (plain navigation) | Ignores the props (poses still flip via state) | Yes — four firing points (no `sharedElement`) | Near-full support — see the matrix below |
 | Desktop (Vello) | Yes — tick interpolator (transforms + hit-testing follow) | Yes — removal deferred until exit settles | Yes — FLIP (same-redraw removal-sibling shift snaps) | `pulse` / `spin` / `shake` (`shimmer` snaps) | Yes — pose flips glide | Yes — cross-route FLIP (transform-only, uniform scale, reduced-motion skip) | Yes — drag/scroll scrubbing + settle write (single OS cursor) | Yes — all five firing points | Full parity — see the desktop matrix below |
 | iOS (SwiftUI) | Yes — per-element implicit animation (pinned curves) | Yes — removal deferred until exit settles | Snap (moves jump) | `pulse` / `spin` / `shimmer` / `shake` (one-sided shake) | Yes — pose flips glide | Ignores the props (plain navigation) | Ignores the props | Yes — four firing points (no `sharedElement`) | Daily-driver channels supported — see the iOS matrix below |
-| Android (Compose) | Snap | Snap (instant removal) | Snap | Static | Instant pose switch | Ignores the props (plain navigation) | Ignores the props | Never dispatches | Ignores animation props |
+| Android (Compose) | Yes — animated prop resolution (sRGB color lerp) | Yes — removal deferred until exit settles | Snap (moves jump) | `pulse` / `spin` / `shimmer` / `shake` | Yes — pose flips glide | Ignores the props (plain navigation) | Ignores the props | Yes — four firing points (no `sharedElement`) | Daily-driver channels supported — see the Android matrix below |
 
 "Snap" means the UI is identical, minus the motion — nothing errors, nothing leaks. `.states` needs no renderer support at all (pose flips are ordinary prop patches), which is why even snapping renderers always show the correct pose.
 
@@ -620,6 +620,21 @@ The iOS renderer plays the daily-driver channels natively: SwiftUI's own animati
 | `.sharedElement`, `.scrub` / `.settle` | Ignored — plain navigation, no gesture scrubbing. Not implemented in v1. |
 | `.onAnimationComplete` | Four firing points (`enter`, `exit`, `states`, finite `<preset>`) with DOM payload parity. Settles are timer-derived rather than callback-derived, so an interrupted playback is superseded by cancelling its timer. |
 | Reduced motion | `accessibilityReduceMotion` (the SwiftUI environment in views, `UIAccessibility`/`NSWorkspace` at patch-apply time). Everything snaps and flagged removes finalize synchronously; the per-node `.motion(essential)` opt-out works as elsewhere. |
+
+### Android (Compose) capability matrix
+
+The Android renderer plays the daily-driver channels natively (the capability matrix in `.notes/ANIMATION_ANDROID.md` is the source of truth). Interpolated values are written back onto the element as animation overrides, so every whitelisted prop animates through its existing applicator/component — and because motion stays in Compose modifiers, hit targets, focus, and TalkBack follow the pixels for free. Curves are the pinned CSS beziers built as explicit `CubicBezierEasing` instances — `spring` is the fixed overshoot bezier `cubic-bezier(0.34, 1.56, 0.64, 1)`, **not** Compose's physics `spring()`. The recorded v1 narrowings:
+
+| Channel | Android behavior |
+|---------|------------------|
+| `.transition` | All whitelisted props glide. Colors interpolate in straight sRGB (matching DOM/Canvas — **not** Compose's Oklab `Color.lerp`); unparseable endpoints or a unit change (`50%` → `200px`) snap. |
+| `.enter` / `.exit` | Played as a `graphicsLayer` pose (alpha + translation + scale), deliberately **not** `AnimatedVisibility` — the exiting node keeps occupying layout until finalize, per the shipped contract. Full deferred-remove protocol: root-first ordering, descendant deferral, finalize on natural settle or the `duration + delay + 80ms` backbone. An exiting subtree is excluded on four planes immediately: pointer events, action dispatch, TalkBack semantics, and focus (the soft keyboard dismisses). |
+| `.layout` | Parsed, snapped — moves jump (sanctioned; `Modifier.animateItem` only works in Lazy containers, `LookaheadScope` is roadmap). |
+| `.animate` | All four presets play, `shimmer` included (gradient overlay). Looping presets never complete; a cached Router attach never replays a finite repeat; presets yield to an in-flight enter/exit on the same node. |
+| `animate:` (transaction) | Honored at batch index 0 only, as a per-batch spec (Compose has no ambient transaction). Precedence `structural > transaction > node .transition > snap`; same-batch-created, exiting, and mid-playback nodes are excluded. |
+| `.sharedElement`, `.scrub` / `.settle` | Ignored — plain navigation, no gesture scrubbing. Not implemented in v1 (stage 2: `SharedTransitionLayout` across the Detach/Attach seam). |
+| `.onAnimationComplete` | Four firing points (`enter`, `exit`, `states`, finite `<preset>`) with DOM payload parity, natural settle only; completion fields are written last so custom args can't shadow them. |
+| Reduced motion | `Settings.Global.ANIMATOR_DURATION_SCALE == 0` ("Remove animations") with a live `ContentObserver` — a mid-session toggle takes effect without reconnect. Developer duration scales (0.5×/5×) are deliberately not applied — playbacks and the finalize backbone time off the same unscaled numbers. The per-node `.motion(essential)` opt-out works as elsewhere. |
 
 ## Legacy: `.transition("...")` String Form (Deprecated)
 

@@ -10,7 +10,7 @@ Column {
         }
         .tw("flex-1 bg-stone-100 rounded-2xl px-4 py-3.5 items-center")
     }
-    .tw("px-4 md:px-8 py-4 bg-white border-b border-orange-100")
+    .tw("px-4 md:px-8 py-4 bg-white border-b border-gray-100")
     .maxWidth(1180)
     .width("100%")
     .alignSelf("center")
@@ -27,7 +27,7 @@ Column {
                             .size(16)
                             .color("#9ca3af")
                         Text("@{item.name}")
-                            .tw("text-sm ml-3 flex-1")
+                            .tw("text-sm ml-3 flex-1 text-left")
                         Icon(@resources.chevron-right)
                             .size(16)
                             .color("#9ca3af")
@@ -35,6 +35,8 @@ Column {
                     .tw("items-center")
                 }
                 .tw("bg-white px-4 py-3 border-b border-gray-100 w-full")
+                .opacity({ default: 1, active: 0.6 })
+                .transition(150, easeOut)
                 .onClick(@actions.applySuggestion, query: "@{item.name}")
             }
         }
@@ -53,7 +55,7 @@ Column {
                 Text("@{state.searchQuery}")
                     .tw("text-xs font-semibold")
             }
-            .tw("px-4 md:px-8 py-2 bg-stone-100 border-b border-orange-100")
+            .tw("px-4 md:px-8 py-2 bg-stone-100 border-b border-gray-100")
 
             If(condition: "@{length(state.searchResults) == 0}") {
                 Column {

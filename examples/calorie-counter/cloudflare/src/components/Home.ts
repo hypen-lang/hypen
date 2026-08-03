@@ -129,24 +129,24 @@ export default app
         // ----- Top bar -----
         Row {
           Button {
-            Text("⚙")
-              .tw("text-xl md:text-2xl")
-              .color("#374151")
+            Icon(@resources.settings)
+              .size(20)
+              .color("#6B7280")
           }
           .tw("bg-transparent border-0 p-2")
           .onClick(@router.push, to: "/profile")
 
           Column {
             Text("@{state.dateLabel}")
-              .tw("text-base md:text-lg font-semibold")
+              .tw("text-[15px] md:text-base font-semibold")
               .color("#111827")
           }
           .tw("flex-1 items-center")
 
           Button {
-            Text("🔔")
-              .tw("text-xl md:text-2xl")
-              .color("#374151")
+            Icon(@resources.bell)
+              .size(20)
+              .color("#6B7280")
           }
           .tw("bg-transparent border-0 p-2")
         }
@@ -155,8 +155,8 @@ export default app
         // ----- Hero: Eaten | kcal left | Burned -----
         Row {
           Column {
-            Text("😊 Eaten")
-              .tw("text-xs md:text-sm")
+            Text("Eaten")
+              .tw("text-xs font-medium")
               .color("#9CA3AF")
             Text("@{state.summary.caloriesEaten}")
               .tw("text-2xl md:text-3xl font-bold mt-1")
@@ -167,21 +167,22 @@ export default app
           }
           .tw("flex-1 items-center")
 
-          // Big center "ring" — heavy pink border stands in for the
+          // Big center "ring" — the layered pink border stands in for the
           // real ring chart in the design.
           Column {
             Text("@{state.kcalLeft}")
-              .tw("text-3xl md:text-4xl font-bold")
+              .tw("text-3xl md:text-4xl font-bold tracking-tight")
               .color("#111827")
             Text("kcal left")
               .tw("text-xs md:text-sm mt-1")
               .color("#9CA3AF")
           }
-          .tw("w-32 h-32 md:w-40 md:h-40 lg:w-44 lg:h-44 rounded-full border-8 border-pink-200 items-center justify-center bg-white")
+          .tw("w-32 h-32 md:w-40 md:h-40 lg:w-44 lg:h-44 rounded-full border-8 border-pink-100 items-center justify-center bg-white")
+          .boxShadow("0 10px 30px rgba(236, 72, 153, 0.14)")
 
           Column {
-            Text("🔥 Burned")
-              .tw("text-xs md:text-sm")
+            Text("Burned")
+              .tw("text-xs font-medium")
               .color("#9CA3AF")
             Text("@{state.summary.caloriesBurned}")
               .tw("text-2xl md:text-3xl font-bold mt-1")
@@ -192,148 +193,177 @@ export default app
           }
           .tw("flex-1 items-center")
         }
-        .tw("px-4 py-3 items-center")
+        .tw("px-4 py-4 items-center")
 
-        // ----- Eaten / Macros -----
-        Text("Eaten")
-          .tw("px-4 pt-2 pb-2 text-sm md:text-base font-medium")
-          .color("#374151")
+        // ----- Macros -----
+        Text("MACROS")
+          .tw("px-4 pt-2 pb-2 text-[11px] font-semibold tracking-widest")
+          .color("#9CA3AF")
 
         Row {
           Column {
-            Text("@{state.summary.carbsG}")
-              .tw("text-lg md:text-xl font-bold")
-              .color("#111827")
-            Text("@{state.carbsLabel}")
-              .tw("text-xs mt-0.5")
-              .color("#9CA3AF")
-            Row {
-              Box {}
-                .tw("h-2 rounded-full bg-pink-500")
-                .width("@{state.carbsWidth}")
-            }
-            .tw("mt-2 h-2 bg-pink-100 rounded-full w-full")
             Text("Carbs")
-              .tw("text-xs mt-2 font-medium")
+              .tw("text-xs font-medium")
               .color("#6B7280")
-          }
-          .tw("flex-1 bg-white rounded-2xl p-3 md:p-4 border border-gray-100 items-center")
-
-          Column {
-            Text("@{state.summary.proteinG}")
-              .tw("text-lg md:text-xl font-bold")
+            Text("@{state.summary.carbsG} g")
+              .tw("text-lg md:text-xl font-bold mt-1")
               .color("#111827")
-            Text("@{state.proteinLabel}")
-              .tw("text-xs mt-0.5")
-              .color("#9CA3AF")
             Row {
               Box {}
-                .tw("h-2 rounded-full bg-yellow-400")
-                .width("@{state.proteinWidth}")
+                .tw("h-1.5 rounded-full bg-pink-500")
+                .width("@{state.carbsWidth}")
+                .transition(450, easeOut, props: [width])
             }
-            .tw("mt-2 h-2 bg-yellow-100 rounded-full w-full")
+            .tw("mt-2.5 h-1.5 bg-gray-100 rounded-full w-full")
+            Text("@{state.carbsLabel}")
+              .tw("text-[11px] mt-2")
+              .color("#9CA3AF")
+          }
+          .tw("flex-1 bg-white rounded-2xl p-3.5 md:p-4 border border-gray-100 items-start")
+          .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
+
+          Column {
             Text("Protein")
-              .tw("text-xs mt-2 font-medium")
+              .tw("text-xs font-medium")
               .color("#6B7280")
-          }
-          .tw("flex-1 bg-white rounded-2xl p-3 md:p-4 border border-gray-100 items-center ml-2")
-
-          Column {
-            Text("@{state.summary.fatG}")
-              .tw("text-lg md:text-xl font-bold")
+            Text("@{state.summary.proteinG} g")
+              .tw("text-lg md:text-xl font-bold mt-1")
               .color("#111827")
-            Text("@{state.fatLabel}")
-              .tw("text-xs mt-0.5")
-              .color("#9CA3AF")
             Row {
               Box {}
-                .tw("h-2 rounded-full bg-pink-300")
-                .width("@{state.fatWidth}")
+                .tw("h-1.5 rounded-full bg-amber-400")
+                .width("@{state.proteinWidth}")
+                .transition(450, easeOut, props: [width])
             }
-            .tw("mt-2 h-2 bg-pink-100 rounded-full w-full")
-            Text("Fat")
-              .tw("text-xs mt-2 font-medium")
-              .color("#6B7280")
+            .tw("mt-2.5 h-1.5 bg-gray-100 rounded-full w-full")
+            Text("@{state.proteinLabel}")
+              .tw("text-[11px] mt-2")
+              .color("#9CA3AF")
           }
-          .tw("flex-1 bg-white rounded-2xl p-3 md:p-4 border border-gray-100 items-center ml-2")
+          .tw("flex-1 bg-white rounded-2xl p-3.5 md:p-4 border border-gray-100 items-start ml-2.5")
+          .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
+
+          Column {
+            Text("Fat")
+              .tw("text-xs font-medium")
+              .color("#6B7280")
+            Text("@{state.summary.fatG} g")
+              .tw("text-lg md:text-xl font-bold mt-1")
+              .color("#111827")
+            Row {
+              Box {}
+                .tw("h-1.5 rounded-full bg-violet-400")
+                .width("@{state.fatWidth}")
+                .transition(450, easeOut, props: [width])
+            }
+            .tw("mt-2.5 h-1.5 bg-gray-100 rounded-full w-full")
+            Text("@{state.fatLabel}")
+              .tw("text-[11px] mt-2")
+              .color("#9CA3AF")
+          }
+          .tw("flex-1 bg-white rounded-2xl p-3.5 md:p-4 border border-gray-100 items-start ml-2.5")
+          .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
         }
         .tw("px-4")
 
-        // ----- Burned / Activities -----
-        Text("Burned")
-          .tw("px-4 pt-4 pb-2 text-sm md:text-base font-medium")
-          .color("#374151")
+        // ----- Activity -----
+        Text("ACTIVITY")
+          .tw("px-4 pt-5 pb-2 text-[11px] font-semibold tracking-widest")
+          .color("#9CA3AF")
 
         Row {
           List(@state.activities) {
             Column {
-              Text("@{item.label}")
-                .tw("text-xs")
-                .color("#9CA3AF")
-              Text("@{item.calories}")
-                .tw("text-xl md:text-2xl font-bold mt-1")
+              Row {
+                Icon(@resources.flame)
+                  .size(13)
+                  .color("#F59E0B")
+                Text("@{item.label}")
+                  .tw("text-xs font-medium ml-1")
+                  .color("#6B7280")
+              }
+              .tw("items-center")
+              Text("@{item.calories} kcal")
+                .tw("text-lg md:text-xl font-bold mt-1.5")
                 .color("#111827")
-              Text("kcal")
-                .tw("text-xs")
-                .color("#9CA3AF")
             }
-            .tw("flex-1 bg-white rounded-2xl p-3 md:p-4 border border-gray-100 items-center mr-2")
+            .tw("flex-1 bg-white rounded-2xl p-3.5 md:p-4 border border-gray-100 items-start mr-2.5")
+            .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
           }
           .tw("flex flex-row flex-1")
 
           Button {
-            Text("+")
-              .tw("text-white text-2xl font-bold leading-none")
+            Icon(@resources.plus)
+              .size(18)
+              .color("#EC4899")
           }
-          .tw("bg-yellow-400 border-0 w-12 h-12 md:w-14 md:h-14 rounded-full items-center justify-center")
+          .tw("bg-pink-50 border border-pink-100 w-12 h-12 md:w-14 md:h-14 rounded-2xl items-center justify-center shrink-0")
+          .enter(fade, duration: 300)
+          .opacity({ default: 1, active: 0.7 })
+          .transition(150, easeOut)
           .onClick(@actions.logWalkingStep)
         }
         .tw("px-4 items-center")
 
         // ----- Meals list -----
+        Text("MEALS")
+          .tw("px-4 pt-5 pb-2 text-[11px] font-semibold tracking-widest")
+          .color("#9CA3AF")
+
         List(@state.mealCards) {
           Button {
             Row {
-              Text("@{item.icon}")
-                .tw("text-3xl md:text-4xl mr-3")
+              Column {
+                Text("@{item.icon}")
+                  .tw("text-2xl md:text-3xl")
+              }
+              .tw("w-12 h-12 md:w-14 md:h-14 rounded-xl bg-gray-50 items-center justify-center mr-3 shrink-0")
 
               Column {
                 Row {
                   Text("@{item.label}")
-                    .tw("text-base md:text-lg font-semibold")
+                    .tw("text-[15px] md:text-base font-semibold")
                     .color("#111827")
-                  Text("@{item.hasLogged ? ' ✓' : ''}")
-                    .tw("text-base ml-1")
-                    .color("#EC4899")
+                  If(condition: "@{item.hasLogged}") {
+                    Icon(@resources.check)
+                      .size(14)
+                      .color("#EC4899")
+                  }
                 }
+                .tw("items-center gap-1.5")
 
                 Row {
                   Box {}
-                    .tw("h-1.5 rounded-full bg-yellow-400")
+                    .tw("h-1.5 rounded-full bg-pink-500")
                     .width("@{item.progressWidth}")
+                    .transition(450, easeOut, props: [width])
                 }
-                .tw("mt-2 h-1.5 bg-yellow-100 rounded-full w-full")
+                .tw("mt-2 h-1.5 bg-gray-100 rounded-full w-full")
 
                 Text("@{item.progressLabel}")
-                  .tw("text-xs mt-1")
+                  .tw("text-xs mt-1.5")
                   .color("#9CA3AF")
               }
               .tw("flex-1")
 
-              Text("›")
-                .tw("text-2xl ml-2")
-                .color("#9CA3AF")
+              Icon(@resources.chevron-right)
+                .size(18)
+                .color("#D1D5DB")
             }
             .tw("items-center")
           }
-          .tw("bg-white border border-gray-100 rounded-2xl p-3 md:p-4 mb-2 w-full")
+          .tw("bg-white border border-gray-100 rounded-2xl p-3.5 md:p-4 mb-2.5 w-full")
+          .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
+          .opacity({ default: 1, active: 0.75 })
+          .transition(160, easeOut)
+          .enter(slide, fade, from: bottom, duration: 280)
           // Tap a meal → jump to /add/:meal. AddFood reads the meal
           // off its route match, so no shared App state is needed.
           .onClick(@router.push, to: "/add/@{item.meal}")
         }
-        .tw("px-4 pt-4 pb-4")
+        .tw("px-4 pt-1 pb-5")
       }
       .scrollable(true)
-      .tw("flex-1 w-full bg-white")
+      .tw("flex-1 w-full bg-[#F8FAFC]")
     }
   `);

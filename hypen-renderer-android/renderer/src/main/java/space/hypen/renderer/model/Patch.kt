@@ -72,7 +72,7 @@ enum class PatchType {
      * "first-patch-only preludes") — a prelude anywhere else, or inside a
      * replayed initialTree, is not a stamp. Consumed by
      * `AnimationCoordinator.beginBatch`; see
-     * `hypen-renderer-android/ANIMATION.md` ("`batchAnimation` — the
+     * `.notes/ANIMATION_ANDROID.md` ("`batchAnimation` — the
      * transaction prelude").
      */
     @Json(name = "batchAnimation")
@@ -109,7 +109,7 @@ data class Patch(
      *
      * The wire omits the key entirely when false (`serde` skip-if-false),
      * hence the `false` default. Honoured by `ComposeRenderer.onRemove` —
-     * see `hypen-renderer-android/ANIMATION.md`.
+     * see `.notes/ANIMATION_ANDROID.md`.
      */
     val transition: Boolean = false,
     /**

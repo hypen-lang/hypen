@@ -1,9 +1,9 @@
 Column {
     Row {
         Text("Profile")
-            .tw("text-xl font-bold flex-1")
+            .tw("text-lg font-bold flex-1")
     }
-    .tw("px-4 py-4 bg-white border-b border-gray-100 items-center")
+    .tw("px-4 py-3.5 bg-white border-b border-gray-100 items-center")
 
     Column {
         Row {
@@ -68,18 +68,20 @@ Column {
                     .color("#f97316")
                 Column {
                     Text("Delivery address")
-                        .tw("text-sm font-semibold")
+                        .tw("text-sm font-semibold text-left")
                     Text("@{state.currentUser.address}")
-                        .tw("text-xs text-gray-500 mt-0.5")
+                        .tw("text-xs text-gray-500 mt-0.5 text-left")
                 }
-                .tw("flex-1 pl-3")
+                .tw("flex-1 pl-3 items-start")
                 Icon(@resources.chevron-right)
                     .size(18)
                     .color("#9ca3af")
             }
             .tw("items-center")
         }
-        .tw("bg-white rounded-xl px-4 py-4 mb-2 w-full")
+        .tw("bg-white rounded-2xl border border-gray-100 px-4 py-4 mb-2.5 w-full shadow-sm")
+        .opacity({ default: 1, active: 0.75 })
+        .transition(160, easeOut)
         .onClick(@actions.editAddress)
 
         Button {
@@ -88,14 +90,16 @@ Column {
                     .size(20)
                     .color("#f97316")
                 Text("Order history")
-                    .tw("text-sm font-semibold flex-1 pl-3")
+                    .tw("text-sm font-semibold flex-1 pl-3 text-left")
                 Icon(@resources.chevron-right)
                     .size(18)
                     .color("#9ca3af")
             }
             .tw("items-center")
         }
-        .tw("bg-white rounded-xl px-4 py-4 mb-2 w-full")
+        .tw("bg-white rounded-2xl border border-gray-100 px-4 py-4 mb-2.5 w-full shadow-sm")
+        .opacity({ default: 1, active: 0.75 })
+        .transition(160, easeOut)
         .onClick(@router.push, to: "/orders")
 
         Button {
@@ -104,14 +108,16 @@ Column {
                     .size(20)
                     .color("#f97316")
                 Text("Favorite restaurants")
-                    .tw("text-sm font-semibold flex-1 pl-3")
+                    .tw("text-sm font-semibold flex-1 pl-3 text-left")
                 Icon(@resources.chevron-right)
                     .size(18)
                     .color("#9ca3af")
             }
             .tw("items-center")
         }
-        .tw("bg-white rounded-xl px-4 py-4 mb-2 w-full")
+        .tw("bg-white rounded-2xl border border-gray-100 px-4 py-4 mb-2.5 w-full shadow-sm")
+        .opacity({ default: 1, active: 0.75 })
+        .transition(160, easeOut)
         .onClick(@actions.openFavorites)
     }
     .tw("px-4 py-4")

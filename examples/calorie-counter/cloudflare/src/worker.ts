@@ -22,6 +22,7 @@ import * as wasm from "hypen-engine";
 import genericClientJs from "../node_modules/@hypen-space/cf/dist/client/generic.js";
 
 import { bindSql } from "./db";
+import { resources } from "./icons";
 import { initSchema } from "./seed";
 
 // Side-effect imports — each registers itself on the shared `app` registry.
@@ -59,6 +60,7 @@ const worker = defineHypenWorker({
   componentTemplates: {
     BottomNav: (bottomNavModule as { template?: string }).template ?? "",
   },
+  resources,
   wasm: wasm as never,
   wasmModule: wasmModule as WebAssembly.Module,
   doClassName: "CalorieCounterDO",

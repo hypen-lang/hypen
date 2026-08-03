@@ -1,6 +1,6 @@
 ---
 name: hypen-ui
-description: Build cross-platform UI with the Hypen declarative language. Covers all components, applicators, modules, state, typed actions, control flow, and styling across TypeScript, Kotlin, Go, Swift, and Rust SDKs.
+description: Build cross-platform UI with the Hypen declarative language. Covers all components, applicators, modules, state, typed actions, control flow, styling, and animation across TypeScript, Kotlin, Go, Swift, and Rust SDKs.
 ---
 
 # Building UI with Hypen
@@ -408,9 +408,86 @@ Applicators are chained with dot notation after components. Any unrecognized app
 .filter("brightness(1.2)")
 .backdropFilter("blur(10px)")
 .transform("rotate(45deg)")
-.transition(200, easeOut)                          // portable form: duration (ms), curve token
 .cursor("pointer")
 ```
+
+### Animation
+
+Ten portable applicators; each declares intent that renderers play natively (web, iOS, Android, desktop) or snap gracefully (correct final state, no motion). **Flat syntax only**: presets and curves are bare tokens, options are named args — `.enter(slide, from: bottom)` is valid, `slide(from: bottom)` is not. Invalid args warn and fall back to defaults, never error. State bindings inside animation args are ignored — except the `.sharedElement` key.
+
+```hypen
+// .transition — animate this node's future prop changes (200ms easeOut default)
+Text("@{state.score}")
+    .fontSize("@{state.big ? 32 : 18}")
+    .transition(200, easeOut)                        // positional: number → ms, token → curve
+    // .transition(duration: 300, curve: spring, delay: 50, props: [opacity, translateY])
+
+// .enter / .exit — appearance and removal (presets: fade|slide|scale, compose freely;
+// directions: top|bottom|leading|trailing; enter {200ms easeOut}, exit {150ms easeIn})
+If(condition: @state.showToast) {
+    Row { Text("Saved!") }
+        .enter(slide, fade, from: bottom)
+        .exit(fade, duration: 150)
+}
+
+// .layout — FLIP animation when keyed ForEach items reorder ({300ms spring})
+ForEach(@state.items) { item ->
+    Row { Text("@{item.title}") }.key("@{item.id}").layout(spring)
+}
+
+// .animate — built-in preset timelines: pulse|spin|shimmer|shake (no custom keyframes)
+Spinner {}.animate(spin)
+Row {}.animate(shimmer)                              // skeleton loading sweep
+Card {}.animate(shake, duration: 400)                // one-shot; repeat: loop or a count
+
+// .states — named multi-prop poses driven by ONE state path; flips glide automatically
+Image(src: "@{state.cover}")
+    .width(100)
+    .cornerRadius(4)
+    .states(@state.cardState, transition: spring, duration: 250) {
+        onState(collapsed).width(48).cornerRadius(8)
+        onState(expanded).width(240).cornerRadius(16).tw("shadow-lg")
+    }
+
+// .sharedElement — same key on two routes = one element continues across navigation
+Image(src: "@{item.coverUrl}").sharedElement("cover-@{item.id}")
+
+// .scrub/.settle — drag or scroll between two .states poses; release writes the label
+Sheet { ... }
+    .states(@state.sheetPhase) {
+        onState(closed).translateY(400)
+        onState(open).translateY(0)
+    }
+    .scrub(from: closed, to: open, axis: y, over: [0, -400])   // over: directed [at0, at1] px
+    .settle(curve: spring, duration: 300, bind: @state.sheetPhase)
+
+// .onAnimationComplete — action on NATURAL settle only (interrupted/reduced-motion fire nothing)
+Toast {}
+    .enter(slide, from: bottom)
+    .onAnimationComplete(@actions.toastSettled)
+    // payloads: {animation: "enter"|"exit"|"sharedElement"|"<presetName>"}
+    //           {animation: "states", state: "<matched label>"}
+
+// animate: on any event applicator — THAT action's synchronous state changes glide,
+// everything else (websocket pushes, post-await mutations) still snaps. TS hosts only.
+Button("@actions.toggleCart") { Text("Cart") }.onClick(@actions.toggleCart, animate: spring)
+
+// .motion(essential) — exempt meaning-bearing motion from reduced-motion snapping
+Spinner {}.animate(spin).motion(essential)
+```
+
+**Vocabulary.** Curves: `linear|easeIn|easeOut|easeInOut|spring` (`spring` = fixed overshoot bezier, same feel everywhere). Enter/exit presets: `fade|slide|scale`. Directions: `top|bottom|leading|trailing` (RTL-aware). Timing args are `duration:`/`delay:` in ms plus a curve — named `curve:` everywhere except `.states`, which names it `transition:`.
+
+**Animatable whitelist** (everything else snaps): `opacity`, `translateX/Y`, `scale`, `rotate`, `color`, `backgroundColor`, `borderColor`, `cornerRadius`, `padding`/`margin` (+ directional forms), `width`, `height`, `gap`, `fontSize`.
+
+**Key rules:**
+- The initial render never animates — `.enter` plays only for nodes appearing after first paint; routes restored from the Router cache reappear instantly (no enter replay, finite presets don't replay).
+- `.states`: first positional MUST be a state reference; poses contain only `onState(label)` entries with static values — no bindings, no event/animation applicators, no `.bind` inside a pose. Unmatched label falls back to the node's base chain. An explicit `.transition` on the node overrides the synthesized pose timing.
+- `.scrub` requires, on the same node: a `.states` block declaring both `from:`/`to:` labels AND `.settle(bind: @state.path)`. `over:` is directed — an upward-opening sheet is `over: [0, -400]`. Taps pass through (~6px slop); release writes the winning label as an ordinary state write your module handles like any other.
+- `.onAnimationComplete` drives module state machines: flip a `.states` pose in a handler, advance on the matching completion payload (check `animation`/`state` fields and drop stale ones — latest wins).
+- An exit-animating subtree is inert (no events) but still occupies layout until it settles; toggling an `If` off/on quickly shows exit + enter simultaneously (deliberate — debounce or use `.states` on one keyed node if it reads wrong).
+- Renderer support: web + desktop play everything; iOS, Android, and Canvas play the daily-driver channels (`.transition`, `.enter`/`.exit`, `.states`, `.animate`, `animate:`, completions) and snap `.layout`/`.sharedElement`/`.scrub` (Canvas also snaps `shimmer` and `cornerRadius` transitions). Never depend on a completion event for correctness — snapping renderers land the right pose but skip the timed hop.
+- Deprecated: the CSS string form `.transition("opacity 0.3s ease")` (web-only, warns). Use the portable form.
 
 ### Events
 

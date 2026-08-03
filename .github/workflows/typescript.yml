@@ -126,6 +126,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # hypen-lsp/wasm-engine is a symlink to ../hypen-engine-rs/pkg/nodejs;
+      # without the engine WASM artifact, `tsc -b` fails resolving
+      # src/a11y.ts's import of ../wasm-engine/hypen_engine.js.
+      - uses: actions/download-artifact@v4
+        with:
+          name: wasm-nodejs
+          path: hypen-engine-rs/pkg/nodejs
+
       # hypen-lsp is a bun package (bun.lock, no package-lock.json), so use
       # bun for installs; `npm ci` fails without an npm lockfile.
       - uses: oven-sh/setup-bun@v2

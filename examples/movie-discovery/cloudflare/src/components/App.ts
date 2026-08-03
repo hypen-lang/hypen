@@ -20,27 +20,27 @@ export default app
           Router {
             Route(path: "/") {
               Home()
-                .tw("flex-1 h-full min-h-0 overflow-hidden bg-slate-950")
+                .tw("flex-1 h-full min-h-0 overflow-hidden bg-[#0B0B10]")
             }
 
             Route(path: "/search") {
               Search()
-                .tw("flex-1 h-full min-h-0 overflow-hidden bg-slate-950")
+                .tw("flex-1 h-full min-h-0 overflow-hidden bg-[#0B0B10]")
             }
 
             Route(path: "/watchlist") {
               Watchlist()
-                .tw("flex-1 h-full min-h-0 overflow-hidden bg-slate-950")
+                .tw("flex-1 h-full min-h-0 overflow-hidden bg-[#0B0B10]")
             }
 
             Route(path: "/profile") {
               Profile()
-                .tw("flex-1 h-full min-h-0 overflow-hidden bg-slate-950")
+                .tw("flex-1 h-full min-h-0 overflow-hidden bg-[#0B0B10]")
             }
 
             Route(path: "/movie/:id") {
               MovieDetail()
-                .tw("flex-1 h-full min-h-0 overflow-hidden bg-slate-950")
+                .tw("flex-1 h-full min-h-0 overflow-hidden bg-[#0B0B10]")
             }
           }
         }
@@ -58,6 +58,6 @@ export default app
             .exit(fade, duration: 140)
         }
       }
-      .tw("flex-1 w-full h-screen min-h-0 overflow-hidden bg-slate-950")
+      .tw("flex-1 w-full h-screen min-h-0 overflow-hidden bg-[#0B0B10]")
     }
   `);

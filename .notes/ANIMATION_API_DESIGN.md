@@ -8,16 +8,21 @@ Option D** transaction scope (`animate:` on event applicators, stamped onto
 the patch batch via a `batchAnimation` prelude), and **Option G scrub
 bindings** (`.scrub`/`.settle` between `.states` poses, renderer-resident)
 are shipped (engine + DOM renderer + Canvas 2D renderer for A/B/C/D/E/F,
-and the native **desktop (Vello) renderer now with FULL parity across
+the native **desktop (Vello) renderer with FULL parity across
 A–H + G**, its recorded narrowings pulled from the `anim.rs` capability
-matrix — see the desktop parity note and the renderer table in §3). H and
-G otherwise remain DOM-and-desktop only — Canvas and iOS/Android snap by
-ignoring the new props/flag/prelude, which for H means a plain navigation
-and for G a node that flips poses only when its bound state changes by
-other means; iOS and Android additionally never dispatch completions
-(desktop and both web renderers do); D's stamping is additionally
-**TS-host-only** — Go and Kotlin hosts strip the dispatch stamp, see the
-host matrix in §3).
+matrix — see the desktop parity note and the renderer table in §3, and
+the native **mobile renderers now playing the daily-driver channels**:
+iOS/SwiftUI (stage 1, #158) and Android/Jetpack Compose (stage 1, #159)
+each implement A/B/C, the E presets, the D prelude, `.motion(essential)`,
+reduced motion, and four completion firing points, with recorded
+narrowings in their capability matrices in `hypen-web/docs/animation.md`).
+H and G remain DOM-and-desktop only — Canvas and iOS/Android snap by
+ignoring those props, which for H means a plain navigation and for G a
+node that flips poses only when its bound state changes by other means;
+`.layout` FLIP also stays snapped on Canvas and mobile. D's stamping is
+additionally **TS-host-only** — Go and Kotlin hosts strip the dispatch
+stamp, though the UniFFI boundary now carries engine-raised preludes and
+the `Remove.transition` flag to mobile (see the host matrix in §3).
 The normative as-shipped surface is the *Shipped v1* section in §3 —
 including the Canvas parity note recording what still snaps there (`.layout`
 FLIP, `cornerRadius`, `shimmer`), the as-shipped H contract recording its
@@ -303,11 +308,19 @@ the Canvas 2D renderer (`packages/web/src/canvas/anim.ts` — see the
 Canvas parity note below; Canvas does not play H or G), and the native
 **desktop (Vello) renderer** (`hypen-renderer-desktop/src/anim.rs` — a
 tick-based twin of the Canvas animator carrying FULL A–H + G parity; see
-the desktop parity note below for its recorded narrowings). iOS and Android
-degrade to snap by ignoring the `__anim.*` props and the
-`transition` flag — the spec-sanctioned behavior, no changes required there
-(they also never dispatch completion events: nothing plays, nothing
-completes; for H, ignoring the props means a plain navigation).
+the desktop parity note below for its recorded narrowings). The native
+mobile renderers play the daily-driver channels: **iOS/SwiftUI**
+(`hypen-renderer-swift`, stage 1 #158) and **Android/Jetpack Compose**
+(`hypen-renderer-android`, stage 1 #159) each implement `.transition`,
+`.enter`/`.exit` with the full deferred-remove contract, `.states` glides,
+the `.animate` presets, the `batchAnimation` prelude, `.motion(essential)`,
+reduced motion, and the four node-level `.onAnimationComplete` firing
+points — recorded narrowings live in their capability matrices in
+`hypen-web/docs/animation.md` (headline items: `.layout` FLIP snaps on
+both; iOS `shake` is one-sided; Android interpolates colors in straight
+sRGB, not Compose's Oklab). H and G stay snapped on mobile (stage 2) —
+for H that means a plain navigation, and neither dispatches the
+`sharedElement` completion.
 Where this section deviates from the sketches above, this section wins.
 
 **Flat syntax only.** Nested calls do not parse — `slide(from: bottom)` and
@@ -859,9 +872,9 @@ completions belong to node-level playbacks.
 | DOM renderer | Honors the prelude (scoped CSS transitions, restore-on-settle) |
 | Canvas 2D renderer | Honors the prelude (tick interpolation spec; canvas snap matrix still applies) |
 | Native desktop (Vello) renderer | **Honors** the prelude — it consumes the engine's `BatchAnimation` patch directly (not through UniFFI) and applies the transaction spec through `DesktopAnimator`, same precedence as the web renderers |
-| uniffi (iOS/Android) | **Drops** the prelude (`InternalPatch::BatchAnimation → None`) — mobile snaps, matching the Remove-flag policy; carrying it needs a `spec_json` field on the flat FFI record and both binding sets regenerated, deferred with the rest of the non-web animation work |
+| uniffi (iOS/Android) | **Carries** the prelude: the flat FFI `Patch` record gained `spec_json: Option<String>` plus `PatchType::BatchAnimation` (and `transition: bool` for the Remove flag), strictly appended so every existing positional read stays at its old offset; both binding sets regenerated, and `from_internal` is now total so a variant can never again be silently dropped at this boundary. The Kotlin and Swift hosts relay both fields (omit-when-absent preserves the serde skip-if-false wire), and both mobile renderers honor the stamp at batch head. Host-initiated stamping stays unexposed — `update_state` has no animation parameter over FFI, so mobile hosts relay engine-raised preludes but cannot originate one |
 | Go SDK | **Relays but never generates**: `Patch.Spec` (`json:"spec,omitempty"`) exists so engine-emitted preludes survive transit, but dispatch-side stamping was evaluated and **declined** with recorded reasons — the Go observable notifies synchronously per mutation (no batch boundary to hang "first flush" on) and the Go host syncs state over the envelope-less full-patch WASI path (`NotifyStateChange` → `hypen_update_state`); the remote host strips the reserved `__hypenAnimate` dispatch key before handlers run. TS-host-only status documented in `hypen-golang/CHANGELOG.md` |
-| Kotlin host | Strips the reserved dispatch key before handlers run; no stamping |
+| Kotlin host | Strips the reserved dispatch key before handlers run; no stamping. Relays `transition` and the `batchAnimation` spec through the Remote-UI wire with default-omission encoding (the serde skip-if-false contract survives the relay) |
 
 **Review hardening (adversarial pass, 22 regression tests).** Renderer:
 structural playbacks now outrank transactions (a stamped batch can no

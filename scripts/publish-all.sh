@@ -13,9 +13,9 @@ set -e
 #   1. Bump versions (Rust + npm)
 #   2. Run tests (parser, engine, web SDK, CLI)
 #   3. Build WASM (+ auto-copy to SDK locations)
-#   4. Build npm packages (core, web, server, web-engine, lsp, cli) with type declarations
+#   4. Build npm packages (core, web, server, web-engine, cf, lsp, cli) with type declarations
 #   5. Publish Rust crates (parser -> tailwind-parse -> engine)
-#   6. Publish npm packages (core -> web -> server -> web-engine -> lsp -> cli)
+#   6. Publish npm packages (hypen-engine -> core -> web -> server -> web-engine -> cf -> lsp -> cli)
 #
 # Flags:
 #   --skip-tests     Skip test step
@@ -222,6 +222,10 @@ echo -e "  Building @hypen-space/web-engine..."
 cd "$ROOT_DIR/hypen-web/packages/web-engine" && bun run build
 echo -e "  ${GREEN}✓ @hypen-space/web-engine built${NC}"
 
+echo -e "  Building @hypen-space/cf..."
+cd "$ROOT_DIR/hypen-web/packages/cf" && bun run build
+echo -e "  ${GREEN}✓ @hypen-space/cf built${NC}"
+
 echo -e "  Building @hypen-space/lsp..."
 cd "$ROOT_DIR/hypen-lsp" && bun run compile
 echo -e "  ${GREEN}✓ @hypen-space/lsp built${NC}"
@@ -247,6 +251,10 @@ if [ ! -f "$ROOT_DIR/hypen-web/packages/web-engine/dist/index.d.ts" ]; then
   echo -e "${RED}✗ Missing web-engine type declarations (dist/index.d.ts)${NC}"
   exit 1
 fi
+if [ ! -f "$ROOT_DIR/hypen-web/packages/cf/dist/index.d.ts" ]; then
+  echo -e "${RED}✗ Missing cf type declarations (dist/index.d.ts)${NC}"
+  exit 1
+fi
 echo -e "${GREEN}✓ All packages built with type declarations${NC}"
 echo ""
 
@@ -265,13 +273,19 @@ fi
 echo ""
 
 # ============================================================================
-# Step 6: Publish npm packages (order: core -> web -> server -> web-engine -> lsp -> cli)
+# Step 6: Publish npm packages (order: hypen-engine -> core -> web -> server -> web-engine -> cf -> lsp -> cli)
 # ============================================================================
 
 if [ "$SKIP_NPM" = true ]; then
   echo -e "${YELLOW}[Step 6/7] Skipping npm publishing (--skip-npm)${NC}"
 else
   echo -e "${YELLOW}[Step 6/7] Publishing npm packages...${NC}"
+
+  # hypen-engine = the browser WASM build (wasm-browser). The node WASM build
+  # is NOT published standalone — it ships inside @hypen-space/server.
+  echo -e "  Publishing hypen-engine (wasm-browser)..."
+  cd "$ROOT_DIR/hypen-web/packages/web-engine/wasm-browser" && npm publish --access public
+  echo -e "  ${GREEN}✓ hypen-engine published${NC}"
 
   echo -e "  Publishing @hypen-space/core..."
   cd "$ROOT_DIR/hypen-web/packages/core" && npm publish --access public
@@ -288,6 +302,10 @@ else
   echo -e "  Publishing @hypen-space/web-engine..."
   cd "$ROOT_DIR/hypen-web/packages/web-engine" && npm publish --access public
   echo -e "  ${GREEN}✓ @hypen-space/web-engine published${NC}"
+
+  echo -e "  Publishing @hypen-space/cf..."
+  cd "$ROOT_DIR/hypen-web/packages/cf" && npm publish --access public
+  echo -e "  ${GREEN}✓ @hypen-space/cf published${NC}"
 
   echo -e "  Publishing @hypen-space/lsp..."
   cd "$ROOT_DIR/hypen-lsp" && npm publish --access public
@@ -357,10 +375,12 @@ echo "    - hypen-engine@${NEW_VERSION}"
 echo "    - hypen-server@${NEW_VERSION}"
 if [ "$SKIP_NPM" = false ]; then
   echo "  npm packages:"
+  echo "    - hypen-engine@${NEW_VERSION}"
   echo "    - @hypen-space/core@${NEW_VERSION}"
   echo "    - @hypen-space/web@${NEW_VERSION}"
   echo "    - @hypen-space/server@${NEW_VERSION}"
   echo "    - @hypen-space/web-engine@${NEW_VERSION}"
+  echo "    - @hypen-space/cf@${NEW_VERSION}"
   echo "    - @hypen-space/lsp@${NEW_LSP_VERSION}"
   echo "    - @hypen-space/cli@${NEW_VERSION}"
 fi
@@ -372,10 +392,12 @@ fi
 echo ""
 echo "Verify:"
 if [ "$SKIP_NPM" = false ]; then
+  echo "  https://www.npmjs.com/package/hypen-engine"
   echo "  https://www.npmjs.com/package/@hypen-space/core"
   echo "  https://www.npmjs.com/package/@hypen-space/web"
   echo "  https://www.npmjs.com/package/@hypen-space/server"
   echo "  https://www.npmjs.com/package/@hypen-space/web-engine"
+  echo "  https://www.npmjs.com/package/@hypen-space/cf"
   echo "  https://www.npmjs.com/package/@hypen-space/lsp"
 fi
 if [ "$SKIP_CRATES" = false ]; then

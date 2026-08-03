@@ -13,7 +13,7 @@ A Kotlin implementation of the Hypen SDK for building stateful UI modules. This 
 - **Nested Modules** — compose a parent module from independently stateful child modules
 - **Router** — built-in routing with pattern matching
 - **Global Context** — cross-module communication and events
-- **HypenServer** — WebSocket server for streaming UI to iOS / Android / Web clients
+- **HypenServer** — WebSocket server for streaming UI to iOS / Android / Web clients, with permessage-deflate compression on by default
 
 ## Installation
 
@@ -73,14 +73,15 @@ val counterDef = hypen(CounterState(count = 0)) {
 }
 
 // Serve with the HypenServer DSL — register every module on the server, add
-// routes if you have multiple, then install on your Ktor application.
+// routes if you have multiple, then wire it into your Ktor application.
 val server = HypenServer {
     module("Counter", counterDef)
     // module("Feed", feedDef)
     // route("/counter", "Counter")
 }
-// server.install(ktorApplication)
 ```
+
+See [WebSocket transport](#websocket-transport) for the Ktor wiring.
 
 Modules built with `name("…")` also auto-register on the global `HypenApp` singleton, so `ManagedRouter` and `ComponentResolver` find them without extra wiring. For a one-off unit test you can still create a standalone instance with `counterDef.createInstance(engine)`.
 
@@ -259,6 +260,66 @@ context.on("custom:event") { payload ->
 }
 context.emit("custom:event", mapOf("data" to "value"))
 ```
+
+## WebSocket transport
+
+`HypenServer` is transport-agnostic: it exposes `handleConnect` / `handleMessage` /
+`handleDisconnect` and leaves the socket itself to your application. On Ktor that
+means **your app installs the `WebSockets` plugin**, not the SDK.
+
+### Compression
+
+Hypen streams JSON patch batches, which deflate very well, so
+permessage-deflate (RFC 7692) is **recommended and on by default** — the
+`compression` flag on the `HypenServer { … }` block defaults to `true`.
+Compression is negotiated per connection, so clients that don't advertise the
+extension keep receiving raw frames and nothing breaks.
+
+Because the SDK never installs the plugin, read the flag where you do:
+
+```kotlin
+import io.ktor.server.websocket.*
+import io.ktor.websocket.*
+import java.util.zip.Deflater
+import kotlin.time.Duration.Companion.seconds
+
+fun Application.configureSockets() {
+    install(WebSockets) {
+        pingPeriod = 15.seconds
+        timeout = 15.seconds
+
+        if (hypenServer.compression) {
+            extensions {
+                install(WebSocketDeflateExtension) {
+                    compressionLevel = Deflater.DEFAULT_COMPRESSION
+                    compressIfBiggerThan(bytes = 1024)
+                }
+            }
+        }
+    }
+
+    routing {
+        webSocket("/ws") { /* handleConnect / handleMessage / handleDisconnect */ }
+    }
+}
+```
+
+`WebSocketDeflateExtension` ships with `io.ktor:ktor-server-websockets` — no extra
+dependency needed. `compressIfBiggerThan` skips tiny frames (session acks, single
+`setProp` patches) where deflate framing overhead outweighs the saving.
+
+Opt out for raw-wire debugging — a deflated payload is opaque to `tcpdump` and to
+most WebSocket frame inspectors:
+
+```kotlin
+val server = HypenServer {
+    module("Counter", counterDef)
+    compression = false
+}
+```
+
+A complete, runnable wiring lives in
+[`example-server/src/main/kotlin/Sockets.kt`](example-server/src/main/kotlin/Sockets.kt).
 
 ## Compatibility Tests
 

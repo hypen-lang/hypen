@@ -324,7 +324,7 @@ public final class NativeEngine: @unchecked Sendable {
         // when true, matching the engine's serde skip-if-false — the wire
         // stays byte-identical for non-animated removals. Consumer:
         // `HypenRenderer.applyRemove` on iOS (see
-        // `hypen-renderer-swift/ANIMATION.md`).
+        // `.notes/ANIMATION_IOS.md`).
         if patch.transition {
             dict["transition"] = true
         }

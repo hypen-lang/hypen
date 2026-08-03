@@ -104,6 +104,38 @@ without touching the rest of the crate.
   connects to `ws://localhost:3000` (module `App`); pass `URL MODULE`
   on the command line to override.
 
+### WebSocket compression (`permessage-deflate`)
+
+**The desktop client does not offer compression.** Hypen turns
+`permessage-deflate` on by default in its other SDKs, but this renderer's
+WebSocket client (`tokio-tungstenite`, pinned at 0.24) cannot negotiate it —
+so we send no `Sec-WebSocket-Extensions` offer and the patch stream travels
+uncompressed.
+
+This is a hard ecosystem limitation, not a configuration we skipped. No
+published `tungstenite` / `tokio-tungstenite` release up to and including
+0.30.0 exposes a `deflate` (or any compression) feature, and none depends on a
+compression crate; the `tungstenite` README still says *"There is no support
+for permessage-deflate at the moment"*. Upstream issue
+[snapview/tungstenite-rs#2](https://github.com/snapview/tungstenite-rs/issues/2)
+has been open since 2017 — an implementation merged as
+[#328](https://github.com/snapview/tungstenite-rs/pull/328) and was reverted,
+and the re-land ([#426](https://github.com/snapview/tungstenite-rs/pull/426))
+is still unmerged. There is therefore no version bump that would enable it, and
+the dependency is deliberately left untouched.
+
+**It interoperates fine either way.** `permessage-deflate` is negotiated per
+connection and optional under RFC 7692: this client makes no offer, so a
+compression-enabled Hypen server has nothing to accept and both peers speak
+plain frames. Pointing the desktop renderer at a server that happily compresses
+for browser or Android/OkHttp clients works unchanged — the desktop connection
+simply pays full bandwidth. The cost is bytes, not correctness.
+
+Re-check this on any `tokio-tungstenite` bump: if
+[#426](https://github.com/snapview/tungstenite-rs/pull/426) lands, enable the
+`deflate` feature and offer the extension at the `connect_async` call in
+`src/remote.rs`.
+
 ## What works (additions in Phase 10)
 
 - **IME composition** wired through `winit`'s `Ime` event:

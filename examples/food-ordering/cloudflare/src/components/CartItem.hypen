@@ -17,6 +17,8 @@ Row {
                     .color("#f97316")
             }
             .tw("w-7 h-7 rounded-full border border-orange-500 bg-white items-center justify-center")
+            .opacity({ default: 1, active: 0.6 })
+            .transition(150, easeOut)
             .onClick(@actions.decrementItem, itemId: "@{item.id}")
 
             Text("@{item.quantity}")
@@ -28,6 +30,8 @@ Row {
                     .color("#ffffff")
             }
             .tw("w-7 h-7 rounded-full bg-orange-500 items-center justify-center")
+            .opacity({ default: 1, active: 0.6 })
+            .transition(150, easeOut)
             .onClick(@actions.incrementItem, itemId: "@{item.id}")
         }
         .tw("mt-2 items-center")
@@ -44,8 +48,13 @@ Row {
                 .color("#ef4444")
         }
         .tw("bg-transparent border-0 p-1 mt-2")
+        .opacity({ default: 1, active: 0.5 })
+        .transition(150, easeOut)
         .onClick(@actions.removeItem, itemId: "@{item.id}")
     }
     .tw("items-end shrink-0")
 }
 .tw("py-3 px-4 flex-row items-center border-b border-gray-100")
+.enter(slide, fade, from: bottom, duration: 260)
+.exit(fade, duration: 180)
+.layout(spring)

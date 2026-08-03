@@ -431,7 +431,7 @@ private fun NativePatch.toPatch(): Patch {
             // `Patch::BatchAnimation` (`reconcile/patch.rs`). The spec
             // rides `specJson` → `Patch.spec`; renderers honor it at
             // batch index 0 only (protocol invariant 3, see
-            // `hypen-renderer-android/ANIMATION.md`).
+            // `.notes/ANIMATION_ANDROID.md`).
             NativePatchType.BATCH_ANIMATION -> PatchType.BATCH_ANIMATION
         },
         id = id,

@@ -62,6 +62,7 @@ func NewRemoteEngine(wsURL string, options *EngineOptions) *RemoteEngine {
 			opts.MaxReconnectAttempts = options.MaxReconnectAttempts
 		}
 		opts.AutoReconnect = options.AutoReconnect
+		opts.DisableCompression = options.DisableCompression
 	}
 
 	return &RemoteEngine{
@@ -94,7 +95,17 @@ func (e *RemoteEngine) Connect() error {
 		return fmt.Errorf("invalid URL: %w", err)
 	}
 
-	conn, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
+	// Copy DefaultDialer so we keep its proxy/handshake-timeout defaults
+	// without mutating the package-level global, then offer
+	// permessage-deflate (RFC 7692) unless the caller opted out. The
+	// server answers with the extension or without it; either way the
+	// connection works, and gorilla transparently (de)compresses when it
+	// was negotiated. Only "no context takeover" mode is supported, so
+	// each message is deflated in isolation.
+	dialer := *websocket.DefaultDialer
+	dialer.EnableCompression = !e.options.DisableCompression
+
+	conn, _, err := dialer.Dial(u.String(), nil)
 	if err != nil {
 		e.setState(StateError)
 		e.notifyError(err)

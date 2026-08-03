@@ -35,7 +35,7 @@ hypen-server-swift/
 │       ├── ComponentLoader.swift           # Component registry + filesystem loading
 │       ├── ComponentDiscovery.swift        # Filesystem scanning + file watcher
 │       ├── ComponentResolver.swift         # Import resolution (local + URL)
-│       ├── Logger.swift                    # Structured logging
+│       ├── Logger.swift                    # Structured logging + pluggable HypenLogHandler
 │       └── Remote/
 │           ├── RemoteServer.swift          # WebSocket server (NIO + WebSocketKit)
 │           └── RemoteEngine.swift          # WebSocket client with auto-reconnect
@@ -108,6 +108,24 @@ To regenerate bindings after engine changes:
 ```bash
 ./scripts/generate-bindings.sh
 ```
+
+## Transport: no WebSocket compression
+
+`RemoteServer` does **not** negotiate RFC 7692 `permessage-deflate`, unlike the
+other Hypen server SDKs, and `ServerConfig` has no `compression` option as a
+result. `NIOWebSocketServerUpgrader` never reads or echoes
+`Sec-WebSocket-Extensions`, and WebSocketKit has no compression support
+(vapor/websocket-kit#55, open since 2020). The maintained Swift RFC 7692
+implementation (`WSCompression` in hummingbird-project/swift-websocket) is
+bound to that package's own `WSCore` upgrade stack and cannot be spliced into
+this pipeline.
+
+This is protocol-safe: clients offering the extension get a 101 that does not
+accept it and fall back to uncompressed frames. **Do not make `shouldUpgrade`
+echo the extension header without also installing a compressor/decompressor** —
+accepting an unimplemented extension breaks clients hard. See the comment block
+at the upgrader site in `Sources/HypenServer/Remote/RemoteServer.swift` and the
+Compression section in `README.md`.
 
 ## Key Dependencies
 

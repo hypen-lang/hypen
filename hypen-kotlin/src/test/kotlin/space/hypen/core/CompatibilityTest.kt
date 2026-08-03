@@ -147,7 +147,7 @@ class CompatibilityTest {
                         // (NativeEngine over uniffi render_source/update_state),
                         // so this category is not blocked on the same thing as
                         // the render categories above. What remains, in order
-                        // (graduation checklist: hypen-renderer-android/ANIMATION.md,
+                        // (graduation checklist: .notes/ANIMATION_ANDROID.md,
                         // "Conformance graduation (the Kotlin runner)"):
                         //
                         //  1. The uniffi FFI change must land — a hard gate.
@@ -176,7 +176,7 @@ class CompatibilityTest {
                         // fixtures pin engine-side lowering only. The Android
                         // renderer's own animation support is verified visually
                         // against the DOM renderer, and it still snaps.
-                        println("Skipped: Test category 'animation' pending the uniffi transition/BatchAnimation FFI change and a Kotlin render-category runner (see hypen-renderer-android/ANIMATION.md)")
+                        println("Skipped: Test category 'animation' pending the uniffi transition/BatchAnimation FFI change and a Kotlin render-category runner (see .notes/ANIMATION_ANDROID.md)")
                     }
                     else -> {
                         println("Skipped: Unknown test category: ${testCase.category}")

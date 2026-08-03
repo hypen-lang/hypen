@@ -6,7 +6,7 @@
  * {@link dispatchAnimationComplete} when a playback settles NATURALLY.
  * Interrupted, superseded, and reduced-motion-skipped playbacks fire nothing
  * — that contract removes most completion races by construction. Firing
- * points and payloads (normative, ANIMATION_API_DESIGN.md §3 Option F):
+ * points and payloads (normative, .notes/ANIMATION_API_DESIGN.md §3 Option F):
  *
  *   - finite `.animate` preset completes → `{ animation: "<presetName>" }`
  *   - `.enter` settles                   → `{ animation: "enter" }`

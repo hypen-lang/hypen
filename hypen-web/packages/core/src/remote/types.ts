@@ -138,4 +138,16 @@ export interface RemoteClient {
 export interface RemoteServerConfig {
   port?: number;
   hostname?: string;
+  /**
+   * Negotiate WebSocket `permessage-deflate` compression (default: `true`).
+   *
+   * Patch streams are JSON and compress well, so this is on by default.
+   * Compression is negotiated per-connection during the upgrade handshake:
+   * clients that don't offer the extension (e.g. the desktop renderer's
+   * tokio-tungstenite client) transparently fall back to uncompressed frames.
+   *
+   * Set to `false` to opt out — useful when inspecting the raw wire in a proxy
+   * or packet capture.
+   */
+  compression?: boolean;
 }

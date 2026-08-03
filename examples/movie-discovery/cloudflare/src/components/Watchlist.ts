@@ -53,20 +53,21 @@ export default app
         Row {
           Column {
             Text("Watchlist")
-              .tw("text-3xl md:text-4xl font-black")
+              .tw("text-2xl md:text-3xl font-bold tracking-tight")
               .color("#F8FAFC")
             Text("@{state.countLabel}")
-              .tw("text-sm mt-1")
-              .color("#94A3B8")
+              .tw("text-[13px] mt-0.5")
+              .color("#8E8E9A")
           }
           .tw("flex-1")
 
           Button {
-            Text("＋")
-              .tw("text-2xl")
-              .color("#0F172A")
+            Icon(@resources.plus)
+              .size(18)
+              .color("#F8FAFC")
           }
-          .tw("w-12 h-12 rounded-full bg-yellow-300 border-0 items-center justify-center")
+          .tw("w-10 h-10 rounded-full border border-white/10 items-center justify-center")
+          .backgroundColor("rgba(255, 255, 255, 0.07)")
           .opacity({ default: 1, active: 0.6 })
           .transition(160, easeOut)
           .onClick(@router.push, to: "/search")
@@ -79,41 +80,49 @@ export default app
               Button {
                 Row {
                   Image(src: "@{item.posterUrl}")
-                    .tw("w-20 h-28 rounded-2xl mr-4")
+                    .tw("w-16 h-24 rounded-xl mr-3.5 border border-white/10")
                     .backgroundColor("@{item.posterBg}")
                     .sharedElement("@{item.id == state.openingId ? 'movie-hero' : ''}", curve: spring, duration: 340)
 
                   Column {
                     Text("@{item.title}")
-                      .tw("text-lg md:text-xl font-black")
+                      .tw("text-[15px] font-semibold")
                       .color("#F8FAFC")
-                    Text("@{item.tagline}")
-                      .tw("text-xs md:text-sm mt-1")
-                      .color("#CBD5E1")
-                    Text("★ @{item.ratingLabel} · @{item.genre} · @{item.runtimeMin} min")
-                      .tw("text-xs mt-2")
-                      .color("#94A3B8")
+                    Row {
+                      Icon(@resources.star)
+                        .size(11)
+                        .color("#F5C518")
+                      Text("@{item.ratingLabel} · @{item.genre}")
+                        .tw("text-xs ml-1 truncate")
+                        .color("#8E8E9A")
+                    }
+                    .tw("mt-1.5 items-center w-full")
+                    Text("@{item.runtimeMin} min")
+                      .tw("text-xs mt-1")
+                      .color("#8E8E9A")
                   }
-                  .tw("flex-1")
+                  .tw("flex-1 items-start min-w-0")
                 }
                 .tw("flex-1 items-center")
               }
-              .tw("flex-1 bg-transparent border-0 p-0")
+              .tw("flex-1 min-w-0 bg-transparent border-0 p-0")
               .opacity({ default: 1, active: 0.7 })
               .transition(160, easeOut)
               .onClick(@actions.openMovie, movieId: "@{item.id}")
 
               Button {
-                Text("−")
-                  .tw("text-2xl font-black")
-                  .color("#F8FAFC")
+                Icon(@resources.x)
+                  .size(15)
+                  .color("#8E8E9A")
               }
-              .tw("w-10 h-10 rounded-full bg-slate-800 border border-slate-700 items-center justify-center")
+              .tw("w-9 h-9 rounded-full border border-white/10 items-center justify-center shrink-0 ml-2")
+              .backgroundColor("rgba(255, 255, 255, 0.05)")
               .opacity({ default: 1, active: 0.55 })
               .transition(160, easeOut)
               .onClick(@actions.remove, movieId: "@{item.id}")
             }
-            .tw("mx-5 mb-3 p-3 rounded-2xl bg-slate-900 border border-slate-800 items-center")
+            .tw("mb-3 p-3 rounded-2xl border border-white/10 items-center")
+            .backgroundColor("rgba(255, 255, 255, 0.04)")
             .enter(slide, fade, from: bottom, duration: 300)
             .exit(fade, duration: 220)
             .layout(spring)
@@ -122,29 +131,31 @@ export default app
           If(condition: @state.empty) {
             Column {
               Text("Your watchlist is empty")
-                .tw("text-xl font-black")
+                .tw("text-[15px] font-semibold")
                 .color("#F8FAFC")
               Text("Save a few movies from Search or Home.")
-                .tw("text-sm mt-2 text-center")
-                .color("#94A3B8")
+                .tw("text-[13px] mt-1.5 text-center")
+                .color("#8E8E9A")
               Button {
                 Text("Browse movies")
-                  .tw("text-base font-black")
-                  .color("#0F172A")
+                  .tw("text-sm font-semibold")
+                  .color("#0B0B10")
               }
-              .tw("mt-5 px-5 py-3 rounded-2xl bg-yellow-300 border-0")
+              .tw("mt-5 px-5 py-2.5 rounded-xl border-0")
+              .backgroundColor("#F5C518")
               .opacity({ default: 1, active: 0.7 })
               .transition(160, easeOut)
               .onClick(@router.push, to: "/search")
             }
-            .tw("mx-5 mt-10 p-8 rounded-3xl bg-slate-900 border border-slate-800 items-center")
+            .tw("mt-10 p-8 rounded-2xl border border-white/10 items-center")
+            .backgroundColor("rgba(255, 255, 255, 0.04)")
             .enter(fade, duration: 320)
             .exit(fade, duration: 140)
           }
         }
-        .tw("pb-8")
+        .tw("px-5 pb-8")
       }
       .scrollable(true)
-      .tw("flex-1 bg-slate-950")
+      .tw("flex-1 bg-[#0B0B10]")
     }
   `);

@@ -1,6 +1,14 @@
 import Foundation
 
-/// Configuration options for the RemoteEngine
+/// Configuration options for the RemoteEngine.
+///
+/// **No `compression` option.** Other Hypen client SDKs expose one to opt out
+/// of RFC 7692 `permessage-deflate`; this one deliberately does not, because
+/// Apple exposes no API to control it. `URLSessionWebSocketTask` offers the
+/// extension in its handshake automatically and inflates compressed frames
+/// transparently — it cannot be turned on, off, or tuned from here. Whether a
+/// given connection ends up compressed is decided entirely by the server.
+/// See `RemoteEngine.establishConnection()` for the details.
 public struct RemoteEngineConfig: Sendable {
     /// Whether to automatically reconnect on disconnect
     public let autoReconnect: Bool

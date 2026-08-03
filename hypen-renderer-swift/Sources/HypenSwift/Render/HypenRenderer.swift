@@ -39,7 +39,7 @@ public final class HypenRenderer: ObservableObject {
 
     /// The `__anim.*` runtime: enter/exit playbacks, the deferred-remove
     /// contract, glide-animation resolution, and `.onAnimationComplete`
-    /// dispatch. See `hypen-renderer-swift/ANIMATION.md`.
+    /// dispatch. See `.notes/ANIMATION_IOS.md`.
     public private(set) lazy var animator = HypenAnimator(renderer: self)
 
     @Published private(set) public var rootId: String?
@@ -378,7 +378,7 @@ public final class HypenRenderer: ObservableObject {
         // the `duration + delay + 80ms` backbone. It also swallows plain
         // Removes for ids INSIDE an exiting subtree, which defer to the
         // root's finalize rather than tearing children out from under a
-        // playing exit. See `hypen-renderer-swift/ANIMATION.md`,
+        // playing exit. See `.notes/ANIMATION_IOS.md`,
         // ".enter / .exit — the deferred-remove contract".
         if animator.noteRemove(patch: patch, element: element) {
             return

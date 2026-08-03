@@ -26,6 +26,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **BREAKING:** Removed `IconPack`, the internal `svg.go` parser, and the `.Icons()` / `.IconsFromDir()` / `.IconFromFile()` builder methods. Use `Resources(map)` / `ResourcesDir(dir)` / `ResourcesFile(path)` instead — they forward raw SVG strings to the Rust engine, which now owns all SVG parsing. The `Icon("name")` / `Icon(@resources.name)` DSL syntax is unchanged.
 
 ### Added
+- `core.LogHandler` — a pluggable log handler for routing Hypen logs into an
+  application's own logging system (`slog`, `zap`, `logrus`, ...), reaching
+  parity with the TypeScript and Kotlin SDKs. Install one with
+  `core.SetLogHandler(h)`; `core.SetLogHandler(nil)` restores the default
+  writer-based behaviour, and `core.GetLogHandler()` reports the current one.
+  Handlers receive `(tag, format string, args ...any)` — the raw format string
+  and its arguments, not a rendered line — so structured loggers can keep the
+  template intact. Level filtering stays in the SDK, so handlers never re-check
+  it. `core.LogHandlerFunc` adapts a single `func(level, tag, format, args...)`
+  into a handler. Logs from the `remote` package route to the same handler
+  (filtered by `remote.SetLogLevel`), so one handler covers the whole SDK. The
+  existing `io.Writer` path (`SetLogOutput`, per-logger `SetOutput`) is
+  unchanged and remains the default when no handler is installed.
+- WebSocket **permessage-deflate compression (RFC 7692), enabled by
+  default** on every upgrade and dial path in `remote`. Negotiated per
+  connection, so peers that don't advertise the extension fall back to
+  uncompressed frames automatically. Opt out via
+  `ServerConfig.DisableCompression` / `RemoteServer.DisableCompression()`
+  on the server and `EngineOptions.DisableCompression` on the client.
+  New `RemoteServer.Upgrader()` returns the configured
+  `websocket.Upgrader` so custom HTTP endpoints inherit the setting, and
+  `RemoteServer.CompressionEnabled()` reports it. Note that
+  `gorilla/websocket` supports no-context-takeover mode only.
 - `core.NewApp[T]` — generic, strongly-typed module builder backed by a
   user-defined struct. Action and lifecycle handlers receive a
   `TypedActionContext[T]` / `*T` whose fields can be mutated directly; a

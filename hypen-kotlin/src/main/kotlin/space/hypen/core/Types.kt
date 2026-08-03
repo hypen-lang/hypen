@@ -69,7 +69,7 @@ object PatchType {
      * Honored by renderers at batch index 0 ONLY (protocol invariant 3,
      * "first-patch-only preludes") — a prelude anywhere else, or inside a
      * replayed initialTree, is not a stamp. See
-     * `hypen-renderer-android/ANIMATION.md`.
+     * `.notes/ANIMATION_ANDROID.md`.
      */
     const val BATCH_ANIMATION = "batchAnimation"
 }

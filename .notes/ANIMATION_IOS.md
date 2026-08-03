@@ -56,7 +56,7 @@ Who feeds it matters:
 
 ## Protocol invariants (non-negotiable)
 
-Identical section in `hypen-renderer-android/ANIMATION.md`. These are the
+Identical section in `.notes/ANIMATION_ANDROID.md`. These are the
 rules every renderer implementation has re-derived the hard way; do not
 relitigate them.
 

@@ -134,6 +134,12 @@ export abstract class HypenDurableObject {
     }
 
     // Create a WebSocketPair — client goes to the caller, server stays here.
+    //
+    // Compression: there is no per-socket knob here. workerd handles
+    // permessage-deflate transparently when the Worker sets the
+    // `web_socket_compression` compatibility flag in wrangler.jsonc; without
+    // it, frames are always sent uncompressed. It is negotiated per-connection,
+    // so clients that don't offer the extension are unaffected.
     const pair = new (getWebSocketPair())();
     const client = pair[0];
     const server = pair[1];

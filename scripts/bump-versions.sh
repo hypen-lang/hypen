@@ -14,11 +14,11 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Current versions (edit these as the source of truth)
-CURRENT_RUST_VERSION="0.6.0"
-CURRENT_NPM_VERSION="0.6.0"
-CURRENT_LSP_VERSION="0.6.0"
-CURRENT_GRADLE_VERSION="0.6.0"
-CURRENT_SWIFT_SERVER_VERSION="0.6.0"
+CURRENT_RUST_VERSION="0.6.2"
+CURRENT_NPM_VERSION="0.6.2"
+CURRENT_LSP_VERSION="0.6.2"
+CURRENT_GRADLE_VERSION="0.6.2"
+CURRENT_SWIFT_SERVER_VERSION="0.6.2"
 # @hypen-space/ios-streamer is versioned independently (macOS-only, optional
 # CLI dep). Bump it via --ios-streamer <version>; otherwise it's left alone.
 CURRENT_IOS_STREAMER_VERSION="0.1.0"
@@ -109,7 +109,7 @@ else
     echo ""
     echo "Current versions:"
     echo "  Rust (parser, tailwind-parse, engine, server): $CURRENT_RUST_VERSION"
-    echo "  NPM (core, web, server, web-engine, cli): $CURRENT_NPM_VERSION"
+    echo "  NPM (core, web, server, web-engine, cf, cli, hypen-engine): $CURRENT_NPM_VERSION"
     echo "  NPM (lsp): $CURRENT_LSP_VERSION"
     echo "  Gradle (android, kotlin): $CURRENT_GRADLE_VERSION"
     echo "  Swift (hypen-server-swift): $CURRENT_SWIFT_SERVER_VERSION"
@@ -186,6 +186,12 @@ update_dep "$ROOT_DIR/hypen-web/packages/web-engine/package.json" "@hypen-space\
 update_dep "$ROOT_DIR/hypen-web/packages/web-engine/package.json" "@hypen-space\/web" "$OLD" "$NEW"
 echo "  ✓ hypen-web/packages/web-engine/package.json"
 
+# @hypen-space/cf (depends on core, web)
+update_version "$ROOT_DIR/hypen-web/packages/cf/package.json" "$OLD" "$NEW"
+update_dep "$ROOT_DIR/hypen-web/packages/cf/package.json" "@hypen-space\/core" "$OLD" "$NEW"
+update_dep "$ROOT_DIR/hypen-web/packages/cf/package.json" "@hypen-space\/web" "$OLD" "$NEW"
+echo "  ✓ hypen-web/packages/cf/package.json"
+
 # @hypen-space/lsp
 update_version "$ROOT_DIR/hypen-lsp/package.json" "$OLD_LSP" "$NEW_LSP"
 echo "  ✓ hypen-lsp/package.json"
@@ -236,6 +242,15 @@ for pkg in core server web web-engine; do
     update_dep_exact "$ROOT_DIR/hypen-cli/studio-ui/package.json" "@hypen-space\/$pkg" "$OLD" "$NEW"
 done
 echo "  ✓ hypen-cli/studio-ui/package.json"
+
+# Cloudflare examples (exact versions, no caret: core, cf, hypen-engine)
+for dir in "$ROOT_DIR"/examples/*/cloudflare "$ROOT_DIR/examples/simple/cf"; do
+    [ -f "$dir/package.json" ] || continue
+    update_dep_exact "$dir/package.json" "@hypen-space\/core" "$OLD" "$NEW"
+    update_dep_exact "$dir/package.json" "@hypen-space\/cf" "$OLD" "$NEW"
+    update_dep_exact "$dir/package.json" "hypen-engine" "$OLD" "$NEW"
+    echo "  ✓ ${dir#$ROOT_DIR/}/package.json"
+done
 
 # ── @hypen-space/ios-streamer (independent track, optional) ─────────────
 

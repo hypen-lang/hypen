@@ -785,7 +785,8 @@ server := remote.NewRemoteServer().
 | `.WithState(name, state)` | Quick setup with just name and state |
 | `.OnAction(handler)` | Set action handler (simple mode) |
 | `.UI(dsl)` | Set the Hypen DSL template |
-| `.Config(config)` | Server configuration (port, hostname) |
+| `.Config(config)` | Server configuration (port, hostname, compression) |
+| `.DisableCompression()` | Opt out of WebSocket permessage-deflate (on by default) |
 | `.OnConnection(callback)` | Called when a client connects |
 | `.OnDisconnection(callback)` | Called when a client disconnects |
 | `.Listen(port?)` | Start the WebSocket server |
@@ -794,8 +795,10 @@ server := remote.NewRemoteServer().
 ### Server Methods
 
 ```go
-server.GetURL()         // WebSocket URL string
-server.GetClientCount() // number of active connections
+server.GetURL()             // WebSocket URL string
+server.GetClientCount()     // number of active connections
+server.CompressionEnabled() // whether permessage-deflate is offered
+server.Upgrader()           // configured websocket.Upgrader for custom endpoints
 
 // Send to specific client
 server.SendPatches(conn, patches)
@@ -813,8 +816,53 @@ server.BroadcastState(state)
 remote.ServerConfig{
     Port:     3000,        // default: 3000
     Hostname: "0.0.0.0",   // default: "0.0.0.0"
+
+    // WebSocket permessage-deflate (RFC 7692) is ON by default.
+    // The field is phrased negatively because a zero-valued Go bool
+    // has to mean "keep the default".
+    DisableCompression: false, // default: false (compression enabled)
 }
 ```
+
+### Compression
+
+Every WebSocket connection negotiates `permessage-deflate` compression by
+default. It is negotiated per connection during the handshake, so clients
+that don't advertise the extension fall back to uncompressed frames
+automatically — no configuration needed on either side.
+
+Turn it off with either form:
+
+```go
+server.DisableCompression()
+// or
+server.Config(remote.ServerConfig{DisableCompression: true})
+
+server.CompressionEnabled() // false
+```
+
+Worth disabling when payloads are already compressed, or small enough that
+per-message deflate costs more CPU than it saves bandwidth.
+
+If you upgrade connections on your own HTTP endpoint rather than using
+`.Listen()`, use `server.Upgrader()` so the endpoint inherits the
+configured compression and origin settings:
+
+```go
+mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+    upgrader := server.Upgrader()
+    conn, err := upgrader.Upgrade(w, r, nil)
+    if err != nil {
+        return
+    }
+    // hand `conn` to your session wiring
+})
+```
+
+One caveat: `gorilla/websocket` implements RFC 7692 in **no-context-takeover**
+mode only. Each message is compressed in isolation, without a sliding window
+shared across messages. Ratios are therefore lower than a context-takeover
+implementation, but per-connection memory use stays flat.
 
 ## RemoteEngine (Client)
 
@@ -825,6 +873,8 @@ client := remote.NewRemoteEngine("ws://localhost:3000/ws", &remote.EngineOptions
     AutoReconnect:        true,
     ReconnectInterval:    3 * time.Second,
     MaxReconnectAttempts: 10,
+    // Offers permessage-deflate on dial; set to true to opt out.
+    DisableCompression: false, // default: false (compression enabled)
 }).
     OnPatches(func(patches []remote.Patch) {
         for _, p := range patches {
@@ -1080,6 +1130,49 @@ core.LogState.SetLevel(core.LogLevelWarn)
 childLog := core.LogEngine.Child("WASM")
 childLog.Debug("Initializing WASM runtime")
 ```
+
+### Custom log handler
+
+To route Hypen logs into your own logging system (`slog`, `zap`, `logrus`, ...),
+install a `LogHandler`. It receives every message that passes the level filter —
+the SDK does the filtering, so handlers never need to re-check the level — and
+replaces the output writer entirely. Messages arrive unformatted (format string
+plus arguments) so structured loggers can keep the template intact:
+
+```go
+type slogHandler struct{ log *slog.Logger }
+
+func (h slogHandler) Debug(tag, format string, args ...any) {
+    h.log.Debug(fmt.Sprintf(format, args...), "tag", tag)
+}
+func (h slogHandler) Info(tag, format string, args ...any) {
+    h.log.Info(fmt.Sprintf(format, args...), "tag", tag)
+}
+func (h slogHandler) Warn(tag, format string, args ...any) {
+    h.log.Warn(fmt.Sprintf(format, args...), "tag", tag)
+}
+func (h slogHandler) Error(tag, format string, args ...any) {
+    h.log.Error(fmt.Sprintf(format, args...), "tag", tag)
+}
+
+core.SetLogHandler(slogHandler{log: slog.Default()})
+core.SetLogLevel(core.LogLevelInfo)  // filtering still happens in the SDK
+
+core.SetLogHandler(nil)  // remove the handler, back to the output writer
+```
+
+For a one-liner, use the `LogHandlerFunc` adapter — the level is passed as the
+first argument:
+
+```go
+core.SetLogHandler(core.LogHandlerFunc(
+    func(level core.LogLevel, tag, format string, args ...any) {
+        slog.Info(fmt.Sprintf(format, args...), "tag", tag, "level", level)
+    },
+))
+```
+
+> **Note:** A handler takes precedence over `SetLogOutput` **and** any per-logger `SetOutput`. Logs from the `remote` package are routed to the same handler, so a single handler covers the whole SDK (the `remote` package keeps its own `remote.SetLogLevel` filter). Handlers may be called from multiple goroutines and must be safe for concurrent use.
 
 ## Deployment
 

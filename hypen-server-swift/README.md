@@ -386,6 +386,96 @@ Same message protocol as all Hypen SDKs (Go, Kotlin, TypeScript, Rust):
 { "type": "dispatchAction", "module": "Counter", "action": "increment", "payload": null }
 ```
 
+### Compression (`permessage-deflate`)
+
+**Not supported by the Swift server.** Other Hypen SDKs negotiate RFC 7692
+`permessage-deflate` by default (with a `compression` opt-out); the Swift
+server does not, and there is no `compression` option on `ServerConfig`
+because there is nothing to turn off.
+
+Why: `RemoteServer` upgrades connections with SwiftNIO's
+`NIOWebSocketServerUpgrader` and runs frames through WebSocketKit. Neither
+implements RFC 7692 — NIO's upgrader never reads or echoes
+`Sec-WebSocket-Extensions`, and [vapor/websocket-kit#55][wsk55] has been open
+since 2020. The maintained Swift implementation, `WSCompression` in
+[hummingbird-project/swift-websocket][swift-websocket], is tied to that
+package's own `WSCore` handler and upgrade path and cannot be dropped into a
+WebSocketKit pipeline, so adopting it would mean replacing this transport
+outright.
+
+**This is safe, not broken.** Compression is negotiated per-connection. A
+client that offers `permessage-deflate` receives a 101 response that does not
+accept it and, per RFC 7692 §5.1, falls back to uncompressed frames. So:
+
+- Hypen web/Go/Kotlin/Rust **clients** talk to this server fine — uncompressed.
+- The iOS renderer (`hypen-renderer-swift`) *does* offer the extension —
+  `URLSessionWebSocketTask` does so automatically and with no opt-out — and
+  falls back cleanly when this server declines. That client gets real
+  compression against the other Hypen server SDKs.
+
+One rule if you ever change the handshake: **never accept the extension
+without implementing it.** Apple's client validates the 101 response against
+what it offered and hard-fails the connection on an extension it did not
+negotiate, and NIO's frame decoder likewise rejects RSV1-flagged frames when no
+extension is in play.
+
+Practical impact: Hypen's wire traffic is JSON patches, which deflate well
+(often 5-10x on large `initialTree` messages). If bandwidth matters for your
+deployment, terminate WebSockets behind a proxy that handles compression, or
+use one of the other server SDKs.
+
+[wsk55]: https://github.com/vapor/websocket-kit/issues/55
+[swift-websocket]: https://github.com/hummingbird-project/swift-websocket
+
+## Logging
+
+Hypen logs to `print` by default: debug lines only in DEBUG builds,
+info/warn/error always. Change that with the global log level:
+
+```swift
+setLogLevel(.warn)    // or setDebugMode(true) / setLogLevel(.none)
+```
+
+### Routing logs into your own logger
+
+Install a handler to send the same messages anywhere — `os.Logger`,
+swift-log, a structured JSON sink, an aggregator. The SDK still does the
+level filtering and formatting; the handler just receives the final tag
+and message:
+
+```swift
+import Logging   // swift-log
+
+let appLogger = Logger(label: "com.example.app.hypen")
+
+setLogHandler { level, tag, message in
+    switch level {
+    case .debug: appLogger.debug("[\(tag)] \(message)")
+    case .info:  appLogger.info("[\(tag)] \(message)")
+    case .warn:  appLogger.warning("[\(tag)] \(message)")
+    default:     appLogger.error("[\(tag)] \(message)")
+    }
+}
+```
+
+Or conform a type to `HypenLogHandler` for full control:
+
+```swift
+struct MyLogHandler: HypenLogHandler {
+    func debug(tag: String, message: String) { /* ... */ }
+    func info(tag: String, message: String)  { /* ... */ }
+    func warn(tag: String, message: String)  { /* ... */ }
+    func error(tag: String, message: String) { /* ... */ }
+}
+
+setLogHandler(MyLogHandler())
+setLogHandler(nil)   // back to print
+```
+
+Set the handler (and the level) **once at startup**, before `listen()` —
+`HypenLoggerConfig.shared` is unsynchronised global configuration, so
+mutating it while the server is serving is a data race.
+
 ## Requirements
 
 - Swift 6.0+

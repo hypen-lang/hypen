@@ -407,8 +407,50 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
             .serverChannelOption(.backlog, value: 256)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
+                // Compression (RFC 7692 `permessage-deflate`) is deliberately
+                // NOT negotiated by this server. Other Hypen SDKs enable it by
+                // default; Swift is the exception, and it is the exception on
+                // purpose:
+                //
+                //   * SwiftNIO's `NIOWebSocketServerUpgrader` implements RFC
+                //     6455 only. It parses `Sec-WebSocket-Key` / `-Version`
+                //     and never reads or echoes `Sec-WebSocket-Extensions`;
+                //     extension negotiation is left entirely to the
+                //     `shouldUpgrade` callback below.
+                //   * WebSocketKit (the frame handler we install in
+                //     `upgradePipelineHandler`) has no compression support
+                //     either — vapor/websocket-kit#55 has been open since 2020.
+                //   * The maintained RFC 7692 implementation in the ecosystem
+                //     (`WSCompression` in hummingbird-project/swift-websocket,
+                //     built on compress-nio) is bound to that package's own
+                //     `WSCore` handler + upgrade stack; it negotiates via
+                //     `WebSocketServerConfiguration.extensions` and cannot be
+                //     spliced into a WebSocketKit pipeline. Adopting it means
+                //     replacing this transport wholesale. Kitura-WebSocket-
+                //     Compression does expose standalone NIO handlers, but
+                //     Kitura has been unmaintained since 2020.
+                //
+                // Hand-rolling RFC 7692 (per-connection sliding-window zlib
+                // contexts, `client_no_context_takeover` /
+                // `server_max_window_bits` parameter negotiation, RSV1
+                // framing) is not worth the risk for this change.
+                //
+                // The behaviour below is protocol-correct regardless: a client
+                // offering `Sec-WebSocket-Extensions: permessage-deflate` gets
+                // a 101 response that does NOT accept the extension (the empty
+                // `HTTPHeaders()` returned here are the ONLY headers added on
+                // top of Upgrade/Connection/Sec-WebSocket-Accept), so per RFC
+                // 7692 §5.1 the client must fall back to uncompressed frames.
+                // Compression is per-connection, so a compression-capable
+                // client interoperates with this server unchanged — the
+                // connection simply runs uncompressed. Never echo the
+                // extension header from `shouldUpgrade` without also
+                // installing the corresponding compressor/decompressor: an
+                // accepted-but-unimplemented extension breaks every client.
                 let upgrader = NIOWebSocketServerUpgrader(
                     shouldUpgrade: { channel, head in
+                        // Empty headers => no extensions accepted. See the
+                        // compression note above before changing this.
                         channel.eventLoop.makeSucceededFuture(HTTPHeaders())
                     },
                     upgradePipelineHandler: { channel, req in

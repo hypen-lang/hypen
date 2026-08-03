@@ -41,7 +41,7 @@ data class PendingGlide(val spec: TransitionSpec, val from: Any?)
  * (`HypenAnimation.kt`) is a thin consumer that plays what this decides — so
  * the protocol is exercised by plain JVM unit tests.
  *
- * Protocol invariants honoured here (see `hypen-renderer-android/ANIMATION.md`):
+ * Protocol invariants honoured here (see `.notes/ANIMATION_ANDROID.md`):
  *
  * - **2, renderers own corpses.** A `Remove{transition:true}` on a node with
  *   an `__anim.exit` spec does not evict: the id is marked exiting, the

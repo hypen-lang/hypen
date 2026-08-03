@@ -63,7 +63,7 @@ private val log = HypenLoggers.renderer.child("Anim")
  * layout node, which would break the Row/Column scope chain the renderer
  * relies on for `.weight()`, and it shrinks the exiting slot — whereas the
  * shipped web/canvas contract is that an exiting node keeps occupying layout
- * until finalize (ANIMATION_API_DESIGN.md's recorded v1 limit). A
+ * until finalize (.notes/ANIMATION_API_DESIGN.md's recorded v1 limit). A
  * `graphicsLayer` pose keeps layout identical, keeps hit targets glued to
  * the pixels (protocol invariant 5, which Compose pays for us as long as
  * motion stays in modifiers), and gives an exact settle signal.

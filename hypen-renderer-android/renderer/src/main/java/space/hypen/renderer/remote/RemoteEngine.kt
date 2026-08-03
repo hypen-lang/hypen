@@ -206,7 +206,7 @@ class RemoteEngine(
     }
 
     private fun establishConnection() {
-        log.error("HYPENDBG establishConnection state=${_connectionState.value}", Throwable("caller"))
+        log.debug { "establishConnection state=${_connectionState.value}" }
         okHttpClient =
             OkHttpClient
                 .Builder()
@@ -217,6 +217,13 @@ class RemoteEngine(
                 .readTimeout(effectiveReadTimeoutMs(), TimeUnit.MILLISECONDS)
                 .writeTimeout(config.writeTimeoutMs, TimeUnit.MILLISECONDS)
                 .pingInterval(config.pingIntervalMs, TimeUnit.MILLISECONDS)
+                // No compression setup here on purpose. OkHttp always offers
+                // `permessage-deflate` on the upgrade and inflates whatever the
+                // server sends, so the patch stream — the direction that matters —
+                // is compressed with nothing to configure. `minWebSocketMessageToCompress`
+                // is left at its 1024-byte default: it only gates the *outbound*
+                // direction, and our outbound traffic is small hello/action JSON that
+                // deflate would grow rather than shrink. See RemoteEngineConfig.
                 .build()
 
         val request =
@@ -267,7 +274,7 @@ class RemoteEngine(
                 code: Int,
                 reason: String,
             ) {
-                log.error("HYPENDBG onClosing $code - $reason")
+                log.debug { "WebSocket closing: $code - $reason" }
             }
 
             override fun onClosed(
@@ -275,7 +282,7 @@ class RemoteEngine(
                 code: Int,
                 reason: String,
             ) {
-                log.error("HYPENDBG onClosed $code - $reason")
+                log.debug { "WebSocket closed: $code - $reason" }
                 _connectionState.value = ConnectionState.DISCONNECTED
                 maybeScheduleReconnect()
             }
@@ -386,7 +393,7 @@ class RemoteEngine(
         }
 
         _connectionState.value = ConnectionState.RECONNECTING
-        log.error("HYPENDBG scheduling reconnect $attempts", Throwable("scheduler"))
+        log.debug { "Scheduling reconnect attempt $attempts" }
 
         reconnectJob?.cancel()
         reconnectJob =

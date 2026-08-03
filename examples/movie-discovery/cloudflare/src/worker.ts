@@ -16,6 +16,7 @@ import * as wasm from "hypen-engine";
 import genericClientJs from "../node_modules/@hypen-space/cf/dist/client/generic.js";
 
 import appModule from "./components/App";
+import { resources } from "./icons";
 import homeModule from "./components/Home";
 import searchModule from "./components/Search";
 import detailModule from "./components/MovieDetail";
@@ -37,6 +38,7 @@ const worker = defineHypenWorker({
   componentTemplates: {
     BottomNav: (bottomNavModule as { template?: string }).template ?? "",
   },
+  resources,
   wasm: wasm as never,
   wasmModule: wasmModule as WebAssembly.Module,
   doClassName: "MovieDiscoveryDO",

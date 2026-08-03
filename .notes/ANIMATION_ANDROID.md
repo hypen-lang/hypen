@@ -108,7 +108,7 @@ Who feeds it matters:
 
 ## Protocol invariants (non-negotiable)
 
-Identical section in `hypen-renderer-swift/ANIMATION.md`. These are the
+Identical section in `.notes/ANIMATION_IOS.md`. These are the
 rules every renderer implementation has re-derived the hard way; do not
 relitigate them.
 
@@ -572,5 +572,6 @@ Graduation steps:
    double motion on matched enters, taps never stolen by scrub surfaces.
 5. Update the host-matrix rows for uniffi/Android in
    `ANIMATION_API_DESIGN.md` §3 and `hypen-web/docs/animation.md` as each
-   channel ships — both currently record Android as snap-everything, and
-   that documentation is load-bearing.
+   channel ships — done for stage 1 (both now record the daily-driver
+   channels and the Android capability matrix); keep them current as
+   stage 2 lands. That documentation is load-bearing.
