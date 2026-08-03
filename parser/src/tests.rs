@@ -1907,3 +1907,26 @@ fn test_expr_range_bare_component_covers_name_and_args() {
     let component = parse_component(input).unwrap();
     assert_eq!(&input[component.metadata.expr_range.clone()], "Divider");
 }
+
+#[test]
+fn test_hypenapp_with_slot_children() {
+    // HypenApp embed with loading/error slot children (customizable slots).
+    let input = r#"HypenApp("ws://x") {
+        Column { Text("Opening") }.slot("loading")
+        Column { Text("Failed") }.slot("error")
+    }.tw("flex-1")"#;
+    let result = parse_component(input);
+    assert!(result.is_ok(), "parse failed: {:?}", result.err());
+
+    let spec = result.unwrap();
+    assert_eq!(spec.name, "HypenApp");
+    assert_eq!(spec.children.len(), 2);
+
+    let slot_count = spec
+        .children
+        .iter()
+        .flat_map(|c| c.applicators.iter())
+        .filter(|a| a.name == "slot")
+        .count();
+    assert_eq!(slot_count, 2, "expected two .slot() applicators on children");
+}

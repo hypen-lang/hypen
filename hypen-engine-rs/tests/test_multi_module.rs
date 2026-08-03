@@ -953,7 +953,7 @@ fn test_no_create_then_remove_for_module_grid() {
                     println!("  CREATE Image id={}", id);
                 }
             }
-            Patch::Remove { id } => {
+            Patch::Remove { id, .. } => {
                 removed_ids.push(id.clone());
             }
             _ => {}
@@ -1120,7 +1120,7 @@ fn test_preregistered_component_module_grid() {
     let removed_ids: Vec<&str> = patches
         .iter()
         .filter_map(|p| {
-            if let Patch::Remove { id } = p {
+            if let Patch::Remove { id, .. } = p {
                 Some(id.as_str())
             } else {
                 None
@@ -1252,7 +1252,7 @@ fn test_double_render_via_notify_state_change() {
     let removes_of_created: Vec<&str> = patches
         .iter()
         .filter_map(|p| {
-            if let Patch::Remove { id } = p {
+            if let Patch::Remove { id, .. } = p {
                 Some(id.as_str())
             } else {
                 None

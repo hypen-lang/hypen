@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/core",
-  "version": "0.5.2",
+  "version": "0.5.4",
   "description": "Hypen core - Platform-agnostic reactive UI runtime (types, state, router, events)",
   "type": "module",
   "main": "./dist/index.js",
@@ -93,6 +93,12 @@
       "bun": "./src/types.ts",
       "import": "./dist/types.js",
       "default": "./dist/types.js"
+    },
+    "./animation": {
+      "types": "./dist/animation.d.ts",
+      "bun": "./src/animation.ts",
+      "import": "./dist/animation.js",
+      "default": "./dist/animation.js"
     },
     "./result": {
       "types": "./dist/result.d.ts",

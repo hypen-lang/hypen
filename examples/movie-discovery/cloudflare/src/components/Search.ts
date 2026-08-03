@@ -68,7 +68,7 @@ export default app
           .onClick(@router.push, to: "/")
 
           Text("Search")
-            .tw("flex-1 text-2xl md:text-3xl font-black text-center")
+            .tw("flex-1 text-2xl md:text-[28px] lg:text-3xl font-black text-center")
             .color("#F8FAFC")
 
           Box {}
@@ -101,7 +101,7 @@ export default app
           ForEach(items: @state.tabs, key: "id") {
             Button {
               Text("@{item.label}")
-                .tw("text-sm md:text-base font-black")
+                .tw("text-sm md:text-sm lg:text-base font-black")
                 .color("@{item.active ? '#0F172A' : '#CBD5E1'}")
             }
             .tw("mr-2 px-5 py-3 rounded-full border-0 shadow-lg shrink-0")
@@ -117,7 +117,7 @@ export default app
         .alignSelf("center")
 
         Text("@{state.headline}")
-          .tw("px-5 md:px-8 pt-6 pb-3 text-2xl md:text-3xl font-black")
+          .tw("px-5 md:px-8 pt-6 pb-3 text-2xl md:text-[28px] lg:text-3xl font-black")
           .color("#F8FAFC")
           .maxWidth(1180)
           .width("100%")
@@ -133,7 +133,7 @@ export default app
                 .boxShadow("0 18px 34px rgba(0, 0, 0, 0.36)")
 
               Text("@{item.title}")
-                .tw("text-base md:text-lg font-black mt-3")
+                .tw("text-base md:text-base lg:text-lg font-black mt-3")
                 .color("#F8FAFC")
               Text("★ @{item.ratingLabel} · @{item.year}")
                 .tw("text-xs font-bold mt-1")

@@ -63,10 +63,15 @@ const COMPONENT_HTML_ATTRS: Record<string, Set<string>> = {
   checkbox: new Set(["checked", "disabled", "name"]),
   radio: new Set(["checked", "disabled", "name", "value"]),
   link: new Set(["href", "target", "rel"]),
+  // Route URL changes to the handler so it reconnects the embedded app
+  // instead of the generic text branch overwriting the subtree.
+  hypenapp: new Set(["0", "url"]),
 };
 
 import { ComponentRegistry } from "./components/index.js";
 import { ApplicatorRegistry } from "./applicators/index.js";
+import { DomAnimator } from "./anim.js";
+import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
 import { applySemantics } from "./semantics.js";
 import {
   makeKeyboardActivatable,
@@ -84,6 +89,7 @@ import { CanvasRenderer } from "../canvas/renderer.js";
 import { RerenderTracker, type DebugConfig, defaultDebugConfig } from "./debug.js";
 import { setEngine, disposeHypenElement } from "./element-data.js";
 import { ensureA11yStyles } from "./a11y-styles.js";
+import { ensureAnimStyles } from "./anim-styles.js";
 
 // Interface for the engine that renderer needs
 interface IEngine {
@@ -162,6 +168,12 @@ export class DOMRenderer {
    */
   private pendingDialogMounts: string[] = [];
 
+  /**
+   * `__anim.*` runtime: transition styles, enter/FLIP playback queues, and
+   * deferred-remove (exit) lifecycles. See `anim.ts`.
+   */
+  private animator = new DomAnimator();
+
   constructor(
     container: HTMLElement,
     engine: IEngine,
@@ -177,6 +189,8 @@ export class DOMRenderer {
 
     // Inject the global reduced-motion + focus-visible stylesheet once.
     ensureA11yStyles();
+    // Inject the `.animate` preset keyframes/classes stylesheet once.
+    ensureAnimStyles();
 
     // Match the canvas/iOS/Android renderers: text without an explicit
     // `.color()` defaults to black. Without this, DOM text would inherit
@@ -282,6 +296,10 @@ export class DOMRenderer {
       }
     }
 
+    // FLIP pre-pass: record First rects for `.layout`-animated moves before
+    // the batch mutates the DOM (Last is measured in `animator.flush()`).
+    this.animator.prepareMoves(domPatches, (nodeId) => this.nodes.get(nodeId));
+
     // Apply DOM patches normally
     for (const patch of domPatches) {
       this.applyPatch(patch);
@@ -304,6 +322,10 @@ export class DOMRenderer {
     // Dialog mount focus runs last: a dialog opened by this batch takes
     // focus even when the batch was also a navigation (modal wins).
     this.flushDialogMounts();
+
+    // Animation post-batch hook: play queued enters and FLIP moves now that
+    // the whole batch (including late-arriving descendants) is in the DOM.
+    this.animator.flush();
   }
 
   /**
@@ -523,13 +545,13 @@ export class DOMRenderer {
         this.onMove(parentId!, id!, beforeId);
         break;
       case "remove":
-        this.onRemove(id!);
+        this.onRemove(id!, patch.transition === true);
         break;
       case "detach":
         this.onDetach(id!);
         break;
       case "attach":
-        this.onInsert(parentId!, id!, beforeId);
+        this.onAttach(parentId!, id!, beforeId);
         break;
       case "setSemantics":
         this.onSetSemantics(id!, patch.semantics);
@@ -558,7 +580,27 @@ export class DOMRenderer {
    * Create a new element
    */
   private onCreate(id: string, elementType: string, props: Record<string, any> | Map<string, any>, semantics?: Semantics): void {
-    const propsObj = props instanceof Map ? Object.fromEntries(props) : props;
+    // Defensive: a create for an id still exit-animating finalizes the old
+    // subtree first, so the corpse can't shadow the new element in `nodes`.
+    this.animator.finalizeNow(id);
+
+    let propsObj = props instanceof Map ? Object.fromEntries(props) : props;
+
+    // Split off `__anim.*` channel props: they configure the animator, and
+    // must never reach the applicators (or their CSS fallback).
+    let animProps: Record<string, any> | null = null;
+    for (const key of Object.keys(propsObj)) {
+      if (key.startsWith(ANIM_PROP_PREFIX)) {
+        (animProps ??= {})[key] = propsObj[key];
+      }
+    }
+    if (animProps) {
+      const rest: Record<string, any> = {};
+      for (const [key, value] of Object.entries(propsObj)) {
+        if (!key.startsWith(ANIM_PROP_PREFIX)) rest[key] = value;
+      }
+      propsObj = rest;
+    }
 
     let element = this.components.createElement(elementType, propsObj);
 
@@ -576,6 +618,15 @@ export class DOMRenderer {
     element.dataset.hypenType = elementType.toLowerCase();
     element.dataset.hypenId = id;
     setEngine(element, this.engine);
+
+    // Slot marker: `.slot("name")` lowers to the `slot.0` prop. The engine
+    // resolves slots during component expansion, but container components
+    // that own their children natively (HypenApp's loading/error slots)
+    // need to identify slotted children at the DOM level.
+    const slotName = propsObj["slot.0"] ?? propsObj.slot;
+    if (typeof slotName === "string" && slotName) {
+      element.dataset.hypenSlot = slotName;
+    }
 
     // Apply engine-derived accessibility semantics (role, …) before styling
     // props, so a redundant-role check sees the final host tag.
@@ -609,6 +660,10 @@ export class DOMRenderer {
     // browser owns the keyboard behaviour).
     if (semantics?.role === "listbox") {
       makeRovingListbox(element);
+    }
+
+    if (animProps) {
+      this.animator.registerCreate(id, element, animProps);
     }
 
     this.applicators.applyAll(element, propsObj);
@@ -658,7 +713,23 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (!element) return;
 
+    // `__anim.*` channel props route to the animator, never to applicators.
+    if (name.startsWith(ANIM_PROP_PREFIX)) {
+      this.animator.setAnimProp(id, element, name, value);
+      return;
+    }
+
     this.debugTracker.trackRerender(id, element, `setProp:${name}`);
+
+    if (name === "slot.0" || name === "slot") {
+      if (typeof value === "string" && value) {
+        element.dataset.hypenSlot = value;
+      } else {
+        delete element.dataset.hypenSlot;
+      }
+      this.notifyParentChildrenChanged(element);
+      return;
+    }
 
     if (name === "0" || name === "text") {
       const elementType = element.dataset.hypenType;
@@ -747,7 +818,19 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (!element) return;
 
+    if (name.startsWith(ANIM_PROP_PREFIX)) {
+      this.animator.removeAnimProp(id, element, name);
+      return;
+    }
+
     this.debugTracker.trackRerender(id, element, `removeProp:${name}`);
+
+    if (name === "slot.0" || name === "slot") {
+      delete element.dataset.hypenSlot;
+      this.notifyParentChildrenChanged(element);
+      return;
+    }
+
     this.applicators.apply(element, name, undefined);
   }
 
@@ -768,6 +851,7 @@ export class DOMRenderer {
   private onInsert(parentId: string, id: string, beforeId?: string): void {
     const parent = parentId === "root" ? this.container : this.nodes.get(parentId);
     const child = this.nodes.get(id);
+    const previousParent = child?.parentNode;
 
     // Gated up front: building the payload reads `textContent`, which
     // serializes the whole subtree's text — too costly to pay when debug
@@ -799,12 +883,24 @@ export class DOMRenderer {
       }
     }
 
+    if (previousParent instanceof HTMLElement && previousParent !== parent) {
+      this.components.notifyChildrenChanged(previousParent);
+    }
+    if (parent instanceof HTMLElement) {
+      this.components.notifyChildrenChanged(parent);
+    }
+
     // Dialog entering the document (insert or cached re-attach): queue mount
     // focus for the end of the batch (flushDialogMounts). Already-open
     // dialogs are filtered there, so moves never re-focus.
     if (this.dialogIds.has(id)) {
       this.pendingDialogMounts.push(id);
     }
+
+    // Enter animation queue: only nodes created in this same batch qualify
+    // (the animator checks), so a cached `attach` — routed through here —
+    // never enter-animates.
+    this.animator.noteInsert(id, child);
   }
 
   /**
@@ -812,6 +908,21 @@ export class DOMRenderer {
    */
   private onMove(parentId: string, id: string, beforeId?: string): void {
     this.onInsert(parentId, id, beforeId);
+  }
+
+  /**
+   * Reinsert a cached (Router) subtree. Same DOM mechanics as insert, plus
+   * the animator's attach hook: re-entering the document restarts every CSS
+   * animation in the subtree, and finite-repeat `.animate` presets must not
+   * replay on a cached re-attach (the `.animate` counterpart of the
+   * "a cached attach never enter-animates" contract; looping presets resume).
+   */
+  private onAttach(parentId: string, id: string, beforeId?: string): void {
+    this.onInsert(parentId, id, beforeId);
+    const element = this.nodes.get(id);
+    if (element) {
+      this.animator.noteAttach(element);
+    }
   }
 
   /**
@@ -834,6 +945,7 @@ export class DOMRenderer {
   private onDetach(id: string): void {
     const element = this.nodes.get(id);
     if (!element) return;
+    const previousParent = element.parentNode;
 
     // Remember where focus was inside the leaving route, so a cached
     // re-`attach` of this subtree can restore it (route-focus contract).
@@ -845,6 +957,9 @@ export class DOMRenderer {
 
     if (element.parentNode) {
       element.parentNode.removeChild(element);
+    }
+    if (previousParent instanceof HTMLElement) {
+      this.components.notifyChildrenChanged(previousParent);
     }
 
     // Any open dialog inside the detached subtree just left the document:
@@ -880,12 +995,39 @@ export class DOMRenderer {
   }
 
   /**
-   * Remove an element from the tree
+   * Remove an element from the tree.
+   *
+   * A `remove` flagged with `transition: true` whose root carries an
+   * `__anim.exit` spec defers teardown: the animator plays the exit and runs
+   * `finalizeRemove` when it settles. The engine emits the flagged root
+   * BEFORE its descendants' plain removes, so descendant removes arriving
+   * while an ancestor exits queue their finalize on that root — the subtree
+   * stays intact until the exit finishes. Everything else (no flag, no spec,
+   * unaware paths) tears down immediately.
    */
-  private onRemove(id: string): void {
+  private onRemove(id: string, transition = false): void {
     const element = this.nodes.get(id);
     if (!element) return;
 
+    if (
+      transition &&
+      this.animator.beginExit(id, element, () => this.finalizeRemove(id, element))
+    ) {
+      return;
+    }
+
+    if (this.animator.deferToExitingAncestor(element, () => this.finalizeRemove(id, element))) {
+      return;
+    }
+
+    this.finalizeRemove(id, element);
+  }
+
+  /**
+   * Tear an element down for real: shared by the instant path and the
+   * deferred (exit-animated) path.
+   */
+  private finalizeRemove(id: string, element: HTMLElement): void {
     // Clean up canvas renderer if this is a canvas root
     if (this.canvasRenderers.has(id)) {
       this.canvasRenderers.get(id)!.destroy();
@@ -904,8 +1046,14 @@ export class DOMRenderer {
     // Dispose event listeners and other resources before removing from DOM
     disposeHypenElement(element);
 
+    // Read the parent before the unlink: on the deferred (exit-animated)
+    // path the element is still attached until this runs.
+    const previousParent = element.parentNode;
     if (element.parentNode) {
       element.parentNode.removeChild(element);
+    }
+    if (previousParent instanceof HTMLElement) {
+      this.components.notifyChildrenChanged(previousParent);
     }
 
     // Restore-to-trigger for any open dialog in the removed subtree, before
@@ -916,12 +1064,57 @@ export class DOMRenderer {
     this.nodes.delete(id);
     this.textBindings.delete(id);
     this.dialogIds.delete(id);
+    this.animator.forget(id);
     // Router LRU eviction: this subtree is gone for good — focus restore
     // must never target it again (route-focus contract).
     this.routeFocusMemory.delete(id);
 
+    // The engine emits ONE Remove for a removed subtree's root on the keyed
+    // and ForEach-rebuild paths (descendants get no Removes of their own),
+    // so descendant bookkeeping must be swept here or it leaks for the life
+    // of the renderer.
+    this.sweepDetachedDescendants(element);
+
     if (this.rootId === id) {
       this.rootId = null;
+    }
+  }
+
+  /**
+   * Drop bookkeeping for every tracked node that lives inside a subtree
+   * just torn out of the document. `root` is already detached, but its
+   * internal `parentNode` links survive removal — descendants are found by
+   * walking up to `root` (fake-dom has no `closest`/`contains`).
+   */
+  private sweepDetachedDescendants(root: HTMLElement): void {
+    // Leaf roots have nothing to sweep (`children`, not `firstChild` —
+    // fake-dom only models element children).
+    if (!root.children?.length) return;
+    for (const [descId, desc] of this.nodes) {
+      if (desc === root) continue;
+      let node: unknown = (desc as { parentNode?: unknown }).parentNode ?? null;
+      while (node && node !== root) {
+        node = (node as { parentNode?: unknown }).parentNode ?? null;
+      }
+      if (node !== root) continue;
+      disposeHypenElement(desc);
+      this.nodes.delete(descId);
+      this.textBindings.delete(descId);
+      this.dialogIds.delete(descId);
+      this.animator.forget(descId);
+      this.routeFocusMemory.delete(descId);
+    }
+  }
+
+  /**
+   * Slot identity belongs to the child, but its meaning belongs to the
+   * native parent component (currently HypenApp). Keep that parent in sync
+   * when a reactive SetProp/RemoveProp changes the assignment.
+   */
+  private notifyParentChildrenChanged(element: HTMLElement): void {
+    const parent = element.parentNode;
+    if (parent instanceof HTMLElement) {
+      this.components.notifyChildrenChanged(parent);
     }
   }
 
@@ -953,6 +1146,7 @@ export class DOMRenderer {
     this.container.innerHTML = "";
     this.nodes.clear();
     this.textBindings.clear();
+    this.animator.reset();
     this.rootId = null;
     this.dialogIds.clear();
     this.dialogOpeners.clear();

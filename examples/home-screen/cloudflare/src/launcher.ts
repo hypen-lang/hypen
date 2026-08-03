@@ -1,5 +1,6 @@
 import { app } from "@hypen-space/core";
-import { durableObjectStore, global } from "@hypen-space/cf";
+import { durableObjectStore, withKey } from "@hypen-space/cf";
+import homeWallpaper from "./assets/home-wallpaper";
 
 // Hypen Home — a phone-style home screen that launches OTHER Hypen apps.
 //
@@ -9,7 +10,7 @@ import { durableObjectStore, global } from "@hypen-space/cf";
 // this repo deploys as a Cloudflare Worker, "installing an app" here is
 // literally just a URL.
 //
-// The ⚙ Settings icon opens a route of the launcher itself (no embed):
+// The Settings icon opens a route of the launcher itself (no embed):
 // wallpaper presets and an accent color, both plain state. The wallpaper is
 // an applicator binding — `.background("@{state.wallpaper}")` — and the
 // accent tints the app-frame chrome, so picking a swatch restyles the whole
@@ -24,76 +25,113 @@ export interface LauncherApp {
   slug: string;
   /** Label under the icon. */
   name: string;
-  /** Emoji used as the icon glyph. */
-  icon: string;
+  /** SVG resource key used as the icon glyph. */
+  resource: string;
+  /** Glyph color. */
+  iconColor: string;
   /** Tailwind classes for the icon tile background. */
   tile: string;
   /**
-   * WebSocket endpoint of the deployed example. Defaults assume each sibling
-   * example is running locally on its own port (see README). After deploying
-   * the siblings, swap these for their wss://...workers.dev/ws URLs.
+   * WebSocket endpoint of the deployed example.
    */
   url: string;
 }
 
 export const APPS: LauncherApp[] = [
   {
-    slug: "counter",
-    name: "Counter",
-    icon: "🔢",
-    tile: "bg-gradient-to-br from-sky-400 to-blue-600",
-    url: "ws://localhost:8788/ws",
-  },
-  {
     slug: "todo",
     name: "Todo",
-    icon: "✅",
+    resource: "check-square",
+    iconColor: "#ffffff",
     tile: "bg-gradient-to-br from-indigo-400 to-violet-600",
-    url: "ws://localhost:8789/ws",
+    url: "wss://hypen-todo.ian-dae.workers.dev/ws",
   },
   {
     slug: "calculator",
     name: "Calculator",
-    icon: "🧮",
+    resource: "calculator",
+    iconColor: "#ffffff",
     tile: "bg-gradient-to-br from-slate-500 to-slate-800",
-    url: "ws://localhost:8794/ws",
+    url: "wss://hypen-calculator.ian-dae.workers.dev/ws",
   },
   {
     slug: "calories",
     name: "Calories",
-    icon: "🥗",
+    resource: "activity",
+    iconColor: "#ffffff",
     tile: "bg-gradient-to-br from-pink-400 to-rose-600",
-    url: "ws://localhost:8790/ws",
+    url: "wss://hypen-calorie-counter.ian-dae.workers.dev/ws",
   },
   {
     slug: "movies",
     name: "Movies",
-    icon: "🎬",
+    resource: "film",
+    iconColor: "#ffffff",
     tile: "bg-gradient-to-br from-amber-400 to-orange-600",
-    url: "ws://localhost:8791/ws",
+    url: "wss://hypen-movie-discovery.ian-dae.workers.dev/ws",
   },
   {
     slug: "food",
     name: "Food",
-    icon: "🍔",
+    resource: "utensils",
+    iconColor: "#ffffff",
     tile: "bg-gradient-to-br from-emerald-400 to-green-600",
-    url: "ws://localhost:8792/ws",
+    url: "wss://hypen-food-ordering.ian-dae.workers.dev/ws",
   },
   {
     slug: "social",
     name: "Social",
-    icon: "💬",
+    resource: "message-circle",
+    iconColor: "#ffffff",
     tile: "bg-gradient-to-br from-fuchsia-400 to-purple-600",
-    url: "ws://localhost:8793/ws",
+    url: "wss://hypen-social.ian-dae.workers.dev/ws",
   },
 ];
+
+const iconSvg = (paths: string) =>
+  `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none">${paths}</svg>`;
+
+const stroke = (d: string) =>
+  `<path d="${d}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+
+export const resources: Record<string, string> = {
+  "activity": iconSvg(stroke("M22 12h-4l-3 9L9 3l-3 9H2")),
+  "calculator": iconSvg(
+    stroke("M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2") +
+      stroke("M8 6h8") +
+      stroke("M8 10h.01") +
+      stroke("M12 10h.01") +
+      stroke("M16 10h.01") +
+      stroke("M8 14h.01") +
+      stroke("M12 14h.01") +
+      stroke("M16 14h.01") +
+      stroke("M8 18h.01") +
+      stroke("M12 18h.01") +
+      stroke("M16 18h.01"),
+  ),
+  "check-square": iconSvg(stroke("M9 11l3 3L22 4") + stroke("M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")),
+  "chevron-right": iconSvg(stroke("M9 18l6-6-6-6")),
+  "film": iconSvg(
+    stroke("M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2") +
+      stroke("M8 3v18") +
+      stroke("M16 3v18") +
+      stroke("M2 9h20") +
+      stroke("M2 15h20"),
+  ),
+  "image": iconSvg(stroke("M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5") + stroke("M8 11l3 3 2-2 5 5") + stroke("M8.5 8.5h.01")),
+  "message-circle": iconSvg(stroke("M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5")),
+  "palette": iconSvg(stroke("M12 3a9 9 0 0 0 0 18h1.5a1.5 1.5 0 0 0 0-3H12a1.5 1.5 0 0 1 0-3h1a8 8 0 0 0 8-8.2C21 4.7 17 3 12 3") + stroke("M7.5 10.5h.01") + stroke("M10 7.5h.01") + stroke("M14 7.5h.01") + stroke("M16.5 10.5h.01")),
+  "settings": iconSvg(stroke("M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5") + stroke("M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.33 1.82V22a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.6 20a1.65 1.65 0 0 0-1.82-.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1 1.65 1.65 0 0 0-1.82-.33H2a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4 8.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.6 4.6a1.65 1.65 0 0 0 1-.6 1.65 1.65 0 0 0 .33-1.82V2a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 8.6a1.65 1.65 0 0 0 .6 1 1.65 1.65 0 0 0 1.82.33H22a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.82.33 1.65 1.65 0 0 0-.69.74")),
+  "utensils": iconSvg(stroke("M4 3v8") + stroke("M8 3v8") + stroke("M4 7h4") + stroke("M6 11v10") + stroke("M16 3c2 1.5 3 4 3 7s-1 5.5-3 7V3") + stroke("M16 17v4")),
+};
 
 // The Settings "app" lives on the grid like any other icon but routes into
 // the launcher's own /settings screen instead of embedding a remote app.
 const SETTINGS_ICON = {
   slug: "settings",
   name: "Settings",
-  icon: "⚙️",
+  resource: "settings",
+  iconColor: "#ffffff",
   tile: "bg-gradient-to-br from-gray-400 to-gray-600",
   route: "/settings",
 };
@@ -112,8 +150,12 @@ interface Accent {
   selected: boolean;
 }
 
+const PHOTO_WALLPAPER = `linear-gradient(180deg, rgba(3, 7, 18, 0.08), rgba(3, 7, 18, 0.6)), url('${homeWallpaper}') center / cover no-repeat`;
+const HOME_STATE_KEY = "home-screen:v3";
+
 const WALLPAPERS: Wallpaper[] = [
-  { id: "indigo", name: "Indigo Night", css: "linear-gradient(180deg, #312e81, #0f172a)", selected: true },
+  { id: "torres", name: "Torres Night", css: PHOTO_WALLPAPER, selected: true },
+  { id: "indigo", name: "Indigo Night", css: "linear-gradient(180deg, #312e81, #0f172a)", selected: false },
   { id: "sunset", name: "Sunset", css: "linear-gradient(180deg, #7c2d12, #831843)", selected: false },
   { id: "emerald", name: "Deep Emerald", css: "linear-gradient(180deg, #064e3b, #022c22)", selected: false },
   { id: "graphite", name: "Graphite", css: "linear-gradient(180deg, #334155, #0f172a)", selected: false },
@@ -129,8 +171,12 @@ const ACCENTS: Accent[] = [
 
 export interface LauncherState {
   location: string;
+  /** Selected wallpaper preset id. */
+  wallpaperId: string;
   /** Current wallpaper CSS — bound by `.background(...)` on every screen. */
   wallpaper: string;
+  /** Selected accent preset id. */
+  accentId: string;
   /** Current accent color — tints back buttons, titles, and checkmarks. */
   accent: string;
   wallpapers: Wallpaper[];
@@ -139,7 +185,7 @@ export interface LauncherState {
 
 /** One tappable icon (tile + label) for the home grid or the dock. */
 function appIcon(
-  a: { name: string; icon: string; tile: string },
+  a: { name: string; resource: string; iconColor: string; tile: string },
   to: string,
   { label = true } = {},
 ): string {
@@ -147,10 +193,11 @@ function appIcon(
           Button {
             Column {
               Column {
-                Text("${a.icon}")
-                  .tw("text-3xl")
+                Icon(@resources.${a.resource})
+                  .size(28)
+                  .color("${a.iconColor}")
               }
-              .tw("w-16 h-16 rounded-2xl ${a.tile} items-center justify-center shadow-lg")
+              .tw("w-14 h-14 rounded-2xl ${a.tile} items-center justify-center shadow-lg")
               ${
                 label
                   ? `Text("${a.name}")
@@ -179,9 +226,15 @@ function appRoute(a: LauncherApp): string {
               .onClick(@router.push, to: "/")
               .tw("bg-transparent border-0 px-2 py-1")
 
-              Text("${a.icon} ${a.name}")
-                .tw("text-sm font-semibold")
-                .color("#F9FAFB")
+              Row {
+                Icon(@resources.${a.resource})
+                  .size(18)
+                  .color("${a.iconColor}")
+                Text("${a.name}")
+                  .tw("text-sm font-semibold ml-2")
+                  .color("#F9FAFB")
+              }
+              .tw("items-center")
 
               // Spacer to balance the back button so the title centers.
               Column {}
@@ -190,90 +243,200 @@ function appRoute(a: LauncherApp): string {
             .tw("items-center justify-between px-3 py-3 bg-gray-900")
 
             Column {
-              HypenApp("${a.url}")
+              HypenApp("${a.url}") {
+                Column {
+                  Column {
+                    Icon(@resources.${a.resource})
+                      .size(34)
+                      .color("${a.iconColor}")
+                  }
+                  .tw("w-20 h-20 rounded-[24px] ${a.tile} items-center justify-center shadow-xl")
+
+                  Text("${a.name}")
+                    .tw("mt-5 text-lg font-semibold")
+                    .color("#F9FAFB")
+
+                  Text("Opening app...")
+                    .tw("mt-1 text-xs")
+                    .color("#9CA3AF")
+                }
+                .slot("loading")
+                .tw("flex-1 w-full h-full min-h-0 items-center justify-center bg-gray-950")
+
+                Column {
+                  Text("Couldn't open ${a.name}")
+                    .tw("text-base font-semibold")
+                    .color("#F9FAFB")
+
+                  Text("Check the worker connection and try again.")
+                    .tw("mt-2 text-xs text-center")
+                    .color("#9CA3AF")
+                }
+                .slot("error")
+                .tw("flex-1 w-full h-full min-h-0 items-center justify-center bg-gray-950 px-8")
+              }
+              .tw("flex-1 w-full min-h-0")
             }
-            .tw("flex-1 bg-white overflow-auto")
+            .tw("flex-1 w-full min-h-0 bg-white overflow-hidden")
           }
-          .tw("flex-1 min-h-screen")
+          .tw("flex-1 min-h-screen w-full overflow-hidden")
         }`;
 }
 
 /** The launcher's own Settings screen — wallpaper + accent pickers. */
 function settingsRoute(): string {
-  return `
-        Route(path: "/settings") {
-          Column {
-            Row {
-              Button {
-                Text("‹ Home")
-                  .tw("text-sm font-semibold")
-                  .color("@{state.accent}")
-              }
-              .onClick(@router.push, to: "/")
-              .tw("bg-transparent border-0 px-2 py-1")
-
-              Text("⚙️ Settings")
-                .tw("text-sm font-semibold")
-                .color("#F9FAFB")
-
-              Column {}
-                .tw("w-16")
-            }
-            .tw("items-center justify-between px-3 py-3 w-full")
-
-            Column {
-              Text("WALLPAPER")
-                .tw("text-xs font-semibold tracking-wide mt-2 mb-2")
-                .color("#9CA3AF")
-
-              List(@state.wallpapers) {
+  const wallpaperRows = WALLPAPERS.map(
+    (wallpaper) => `
                 Button {
                   Row {
                     Box {}
-                      .background("@{item.css}")
-                      .tw("w-12 h-12 rounded-xl border border-white/20")
+                      .background("${wallpaper.css}")
+                      .tw("w-9 h-9 rounded-lg border border-white/20")
 
-                    Text("@{item.name}")
-                      .tw("text-sm font-medium ml-3 flex-1 text-left")
-                      .color("#F9FAFB")
+                    Column {
+                      Text("${wallpaper.name}")
+                        .tw("text-[15px] font-medium")
+                        .color("#F9FAFB")
+                      Text("@{state.wallpaperId == '${wallpaper.id}' ? 'Selected' : 'Wallpaper'}")
+                        .tw("text-xs mt-0.5")
+                        .color("#9CA3AF")
+                    }
+                    .tw("ml-3 flex-1")
 
-                    Text("@{item.selected ? '✓' : ''}")
-                      .tw("text-base font-bold")
-                      .color("@{state.accent}")
+                    Row {
+                      Text("@{state.wallpaperId == '${wallpaper.id}' ? '✓' : ''}")
+                        .tw("text-[15px] font-semibold mr-2")
+                        .color("@{state.accent}")
+                      Icon(@resources.chevron-right)
+                        .size(18)
+                        .color("#6B7280")
+                    }
+                    .tw("items-center")
                   }
                   .tw("items-center w-full")
                 }
-                .onClick(@actions.setWallpaper, id: "@{item.id}")
-                .tw("bg-white/10 border-0 rounded-2xl p-3 mb-2 w-full")
-              }
-              .tw("w-full")
+                .onClick(@actions.setWallpaper, id: "${wallpaper.id}")
+                .tw("bg-transparent border-0 p-3 w-full")`,
+  ).join("\n");
+  const accentRows = ACCENTS.map(
+    (accent) => `
+                Button {
+                  Row {
+                    Box {}
+                      .background("${accent.color}")
+                      .tw("w-9 h-9 rounded-lg border border-white/20")
 
-              Text("ACCENT")
-                .tw("text-xs font-semibold tracking-wide mt-4 mb-2")
-                .color("#9CA3AF")
-
-              Row {
-                List(@state.accents) {
-                  Button {
                     Column {
-                      Text("@{item.selected ? '✓' : ''}")
-                        .tw("text-base font-bold")
-                        .color("#111827")
+                      Text("${accent.id[0]!.toUpperCase()}${accent.id.slice(1)}")
+                        .tw("text-[15px] font-medium")
+                        .color("#F9FAFB")
+                      Text("@{state.accentId == '${accent.id}' ? 'Selected' : 'Accent color'}")
+                        .tw("text-xs mt-0.5")
+                        .color("#9CA3AF")
                     }
-                    .background("@{item.color}")
-                    .tw("w-11 h-11 rounded-full items-center justify-center border-2 border-white/30")
+                    .tw("ml-3 flex-1")
+
+                    Row {
+                      Text("@{state.accentId == '${accent.id}' ? '✓' : ''}")
+                        .tw("text-[15px] font-semibold mr-2")
+                        .color("@{state.accent}")
+                      Icon(@resources.chevron-right)
+                        .size(18)
+                        .color("#6B7280")
+                    }
+                    .tw("items-center")
                   }
-                  .onClick(@actions.setAccent, id: "@{item.id}")
-                  .tw("bg-transparent border-0 p-1")
+                  .tw("items-center w-full")
                 }
-                .tw("flex flex-row")
+                .onClick(@actions.setAccent, id: "${accent.id}")
+                .tw("bg-transparent border-0 p-3 w-full")`,
+  ).join("\n");
+
+  return `
+        Route(path: "/settings") {
+          Column {
+            Column {
+              Row {
+                Button {
+                  Text("‹ Home")
+                    .tw("text-[17px] font-medium")
+                    .color("@{state.accent}")
+                }
+                .onClick(@router.push, to: "/")
+                .tw("bg-transparent border-0 px-0 py-2")
+
+                Column {}
+                  .tw("flex-1")
               }
-              .tw("w-full")
+              .tw("items-center w-full")
+
+              Text("Settings")
+                .tw("text-[34px] font-bold mt-1")
+                .color("#F9FAFB")
             }
-            .tw("px-5 w-full max-w-sm")
+            .tw("px-5 pt-3 pb-2 w-full items-start")
+
+            Column {
+              Column {
+                Row {
+                  Column {
+                    Icon(@resources.image)
+                      .size(20)
+                      .color("#ffffff")
+                  }
+                  .tw("w-8 h-8 rounded-lg bg-sky-500 items-center justify-center")
+                  Text("Wallpaper")
+                    .tw("text-[15px] font-medium ml-3 flex-1")
+                    .color("#F9FAFB")
+                }
+                .tw("items-center px-3 pt-3 pb-1")
+${wallpaperRows}
+              }
+              .tw("w-full rounded-2xl bg-black/30 border border-white/10 overflow-hidden")
+
+              Column {
+                Row {
+                  Column {
+                    Icon(@resources.palette)
+                      .size(20)
+                      .color("#ffffff")
+                  }
+                  .tw("w-8 h-8 rounded-lg bg-pink-500 items-center justify-center")
+                  Text("Appearance")
+                    .tw("text-[15px] font-medium ml-3 flex-1")
+                    .color("#F9FAFB")
+                }
+                .tw("items-center px-3 pt-3 pb-1")
+${accentRows}
+              }
+              .tw("w-full rounded-2xl bg-black/30 border border-white/10 overflow-hidden mt-5")
+
+              Column {
+                Row {
+                  Column {
+                    Icon(@resources.settings)
+                      .size(20)
+                      .color("#ffffff")
+                  }
+                  .tw("w-8 h-8 rounded-lg bg-gray-500 items-center justify-center")
+                  Column {
+                    Text("Hypen Home")
+                      .tw("text-[15px] font-medium")
+                      .color("#F9FAFB")
+                    Text("Cloudflare Worker")
+                      .tw("text-xs mt-0.5")
+                      .color("#9CA3AF")
+                  }
+                  .tw("ml-3 flex-1")
+                }
+                .tw("items-center p-3")
+              }
+              .tw("w-full rounded-2xl bg-black/30 border border-white/10 overflow-hidden mt-5")
+            }
+            .tw("px-5 pt-2 w-full")
           }
           .background("@{state.wallpaper}")
-          .tw("flex-1 min-h-screen items-center")
+          .tw("flex-1 min-h-screen w-full items-center overflow-auto pb-8")
         }`;
 }
 
@@ -282,7 +445,7 @@ export function buildLauncherTemplate(apps: LauncherApp[] = APPS): string {
   // The icon grid is rows of three. (The engine's Grid component is
   // data-driven — it wants an array binding — so a static launcher grid is
   // plain Rows.)
-  const gridItems: Array<{ item: { name: string; icon: string; tile: string }; to: string }> = [
+  const gridItems: Array<{ item: { name: string; resource: string; iconColor: string; tile: string }; to: string }> = [
     ...apps.map((a) => ({ item: a, to: `/app/${a.slug}` })),
     { item: SETTINGS_ICON, to: SETTINGS_ICON.route },
   ];
@@ -296,7 +459,7 @@ export function buildLauncherTemplate(apps: LauncherApp[] = APPS): string {
             Row {
 ${row.map(({ item, to }) => appIcon(item, to)).join("\n")}
             }
-            .tw("items-start justify-around w-full")`,
+            .tw("items-start justify-between w-full")`,
     )
     .join("\n");
   const dock = apps
@@ -326,19 +489,22 @@ ${row.map(({ item, to }) => appIcon(item, to)).join("\n")}
             Column {
 ${homeGrid}
             }
-            .tw("gap-6 px-6 w-full max-w-sm")
+            .tw("gap-4 px-3 w-full max-w-[250px] md:max-w-[270px] lg:max-w-[290px]")
 
             Column {}
               .tw("flex-1")
 
             // ----- Dock -----
-            Row {
+            Column {
+              Row {
 ${dock}
+              }
+              .tw("items-center justify-between bg-black/25 border border-white/15 rounded-3xl px-3 py-2 w-full")
             }
-            .tw("items-center justify-around bg-white/10 rounded-3xl mx-4 mb-4 px-4 py-3 w-full max-w-sm")
+            .tw("px-1 mb-4 w-full max-w-[260px] md:max-w-[280px] lg:max-w-[300px]")
           }
           .background("@{state.wallpaper}")
-          .tw("flex-1 min-h-screen items-center")
+          .tw("flex-1 min-h-screen w-full items-center")
         }
 ${settingsRoute()}
 ${appRoutes}
@@ -356,16 +522,19 @@ ${appRoutes}
 export default app
   .defineState<LauncherState>({
     location: "/",
-    wallpaper: WALLPAPERS[0]!.css,
+    wallpaperId: "torres",
+    wallpaper: PHOTO_WALLPAPER,
+    accentId: "blue",
     accent: ACCENTS[0]!.color,
     wallpapers: WALLPAPERS,
     accents: ACCENTS,
   })
-  .persist(durableObjectStore<LauncherState>(global<LauncherState>()))
+  .persist(durableObjectStore<LauncherState>(withKey<LauncherState>(() => HOME_STATE_KEY)))
   .onAction<{ id: string }>("setWallpaper", ({ action, state }) => {
     const id = action.payload?.id;
     const wp = state.wallpapers.find((w) => w.id === id);
     if (!wp) return;
+    state.wallpaperId = wp.id;
     state.wallpaper = wp.css;
     state.wallpapers = state.wallpapers.map((w) => ({ ...w, selected: w.id === id }));
   })
@@ -373,6 +542,7 @@ export default app
     const id = action.payload?.id;
     const accent = state.accents.find((a) => a.id === id);
     if (!accent) return;
+    state.accentId = accent.id;
     state.accent = accent.color;
     state.accents = state.accents.map((a) => ({ ...a, selected: a.id === id }));
   })

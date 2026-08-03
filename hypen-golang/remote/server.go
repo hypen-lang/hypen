@@ -654,6 +654,7 @@ func corePatchesToRemote(corePatches []core.Patch) []Patch {
 			ParentID:    p.ParentID,
 			BeforeID:    p.BeforeID,
 			EventName:   p.EventName,
+			Transition:  p.Transition,
 		}
 	}
 	return out

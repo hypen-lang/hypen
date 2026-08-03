@@ -34,7 +34,7 @@ export class FakeStyle {
   constructor() {
     return new Proxy(this, {
       get: (target, prop, receiver) => {
-        if (prop === "setProperty" || prop === "getProperty") {
+        if (prop === "setProperty" || prop === "getProperty" || prop === "removeProperty") {
           return (target as any)[prop].bind(target);
         }
         if (typeof prop === "string") {
@@ -68,6 +68,10 @@ export class FakeStyle {
 
   getProperty(name: string): string | undefined {
     return this.store[name];
+  }
+
+  removeProperty(name: string): void {
+    delete this.store[name];
   }
 }
 
@@ -108,6 +112,21 @@ export class FakeElement {
   public ownerDocument: FakeDocument | null = null;
   public id = "";
   public sheet: FakeCSSStyleSheet | null = null;
+
+  /**
+   * Settable measurement hook for FLIP tests: a plain property, so a test
+   * can overwrite it per-element (`el.getBoundingClientRect = () => rect`)
+   * or even swap it between the renderer's First and Last reads. Defaults
+   * to the all-zero rect a detached real element would report.
+   */
+  public getBoundingClientRect: () => {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+    width: number;
+    height: number;
+  } = () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 });
 
   private listeners: Map<string, Set<Listener>> = new Map();
 

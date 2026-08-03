@@ -17,6 +17,9 @@ type Patch struct {
 	ParentID    string         `json:"parentId,omitempty"`
 	BeforeID    string         `json:"beforeId,omitempty"`
 	EventName   string         `json:"eventName,omitempty"`
+	// Transition relays the engine's exit-animation flag on "remove"
+	// patches to animation-capable remote clients (see core.Patch).
+	Transition bool `json:"transition,omitempty"`
 }
 
 // MessageType represents the type of remote message

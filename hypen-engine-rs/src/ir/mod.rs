@@ -1,3 +1,4 @@
+pub mod anim;
 pub mod component;
 pub mod conformance;
 pub mod discover;

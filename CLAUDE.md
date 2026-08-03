@@ -157,13 +157,17 @@ enum Patch {
     SetText { id, text },                             // reserved; reconciler emits SetProp for text
     Insert { parent_id, id, before_id },
     Move { parent_id, id, before_id },
-    Remove { id },
+    Remove { id, transition },                        // transition: true (serde skip-if-false) roots an animated exit
     Detach { id },                                    // unlink but keep alive (Router cache)
     Attach { parent_id, id, before_id },              // reinsert a previously-detached subtree
 }
 // Note: Event handling is done at the renderer level, not via patches.
 // Detach/Attach back the Router subtree cache — navigating back to a visited route
 // reuses the same NodeId subtree instead of rebuilding it.
+// Remove.transition flags the root of a subtree whose node carried an "__anim.exit"
+// prop (from the .exit() applicator): the flagged root Remove is emitted FIRST,
+// then its descendants as plain Removes, and the renderer may defer teardown to
+// play the exit. Absent flag = wire-identical to the old protocol (renderers snap).
 ```
 
 ## Hypen DSL Syntax

@@ -5,6 +5,7 @@
  */
 
 export { CanvasRenderer } from "./renderer.js";
+export { CanvasAnimator, EXIT_SETTLE_GRACE_MS } from "./anim.js";
 export { registerPainter } from "./paint.js";
 export { CanvasEventManager } from "./events.js";
 export { AccessibilityLayer } from "./accessibility.js";

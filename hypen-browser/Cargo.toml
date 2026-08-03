@@ -8,10 +8,10 @@ authors.workspace = true
 description = "Hypen Browser — a native desktop browser for Hypen apps, built on the Hypen engine + desktop renderer"
 
 [dependencies]
-hypen-engine = { version = "0.5.2", path = "../hypen-engine-rs" }
-hypen-parser = { version = "0.5.2", path = "../parser" }
-hypen-server = { version = "0.5.2", path = "../hypen-sdk-rs" }
-hypen-renderer-desktop = { version = "0.5.2", path = "../hypen-renderer-desktop" }
+hypen-engine = { version = "0.5.4", path = "../hypen-engine-rs" }
+hypen-parser = { version = "0.5.4", path = "../parser" }
+hypen-server = { version = "0.5.4", path = "../hypen-sdk-rs" }
+hypen-renderer-desktop = { version = "0.5.4", path = "../hypen-renderer-desktop" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -7,6 +7,12 @@
 export interface ComponentHandler {
   create(): HTMLElement;
   applyProps?(element: HTMLElement, props: Record<string, any>): void;
+  /**
+   * Called after the renderer changes this component's direct children.
+   * Native container components can use this instead of depending on an
+   * asynchronous MutationObserver to keep renderer-owned child state live.
+   */
+  onChildrenChanged?(element: HTMLElement): void;
 }
 
 export class ComponentRegistry {
@@ -44,6 +50,16 @@ export class ComponentRegistry {
       handler.applyProps(element, props);
     }
     return element;
+  }
+
+  /**
+   * Notify a native component that its direct child list or a child's slot
+   * assignment changed.
+   */
+  notifyChildrenChanged(element: HTMLElement): void {
+    const type = element.dataset.hypenType;
+    if (!type) return;
+    this.get(type)?.onChildrenChanged?.(element);
   }
 
   /**

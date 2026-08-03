@@ -359,4 +359,237 @@ describe("DOMRenderer patch field name robustness", () => {
 
     expect(container.children.length).toBe(1);
   });
+
+  test("slot.0 prop is exposed as data-hypen-slot for slot-owning components", () => {
+    const { renderer } = makeRenderer();
+
+    renderer.applyPatches([
+      {
+        type: "create",
+        id: "loader",
+        elementType: "Column",
+        props: { "slot.0": "loading" },
+      } as Patch,
+    ]);
+
+    const node = renderer.getNode("loader") as FakeElement;
+    expect(node.dataset.hypenSlot).toBe("loading");
+  });
+
+  test("elements without a slot applicator have no data-hypen-slot", () => {
+    const { renderer } = makeRenderer();
+
+    renderer.applyPatches([
+      { type: "create", id: "plain", elementType: "Column", props: {} } as Patch,
+    ]);
+
+    const node = renderer.getNode("plain") as FakeElement;
+    expect(node.dataset.hypenSlot).toBeUndefined();
+  });
+
+  test("HypenApp applies loading/error slots when MutationObserver is unavailable", () => {
+    const previousMutationObserver = (globalThis as any).MutationObserver;
+    delete (globalThis as any).MutationObserver;
+
+    try {
+      const { renderer } = makeRenderer();
+
+      renderer.applyPatches([
+        { type: "create", id: "app", elementType: "HypenApp", props: {} } as Patch,
+        { type: "insert", parentId: "root", id: "app" } as Patch,
+        {
+          type: "create",
+          id: "error",
+          elementType: "Column",
+          props: { "slot.0": "error" },
+        } as Patch,
+        { type: "insert", parentId: "app", id: "error" } as Patch,
+        {
+          type: "create",
+          id: "loading",
+          elementType: "Column",
+          props: { "slot.0": "loading" },
+        } as Patch,
+        { type: "insert", parentId: "app", id: "loading" } as Patch,
+      ]);
+
+      const app = renderer.getNode("app") as FakeElement;
+      const error = renderer.getNode("error") as FakeElement;
+      const loading = renderer.getNode("loading") as FakeElement;
+
+      expect(app.dataset.hypenAppStatus).toBe("error");
+      expect(error.style.display).toBe("flex");
+      expect(loading.style.display).toBe("none");
+      expect(
+        app.children.some((child) => (child as any).className === "hypen-app-error"),
+      ).toBe(false);
+    } finally {
+      (globalThis as any).MutationObserver = previousMutationObserver;
+    }
+  });
+
+  test("HypenApp reacts when a child's slot prop is changed or removed", () => {
+    const previousMutationObserver = (globalThis as any).MutationObserver;
+    delete (globalThis as any).MutationObserver;
+
+    try {
+      const { renderer } = makeRenderer();
+
+      renderer.applyPatches([
+        { type: "create", id: "app", elementType: "HypenApp", props: {} } as Patch,
+        { type: "insert", parentId: "root", id: "app" } as Patch,
+        {
+          type: "create",
+          id: "status",
+          elementType: "Column",
+          props: { "slot.0": "loading" },
+        } as Patch,
+        { type: "insert", parentId: "app", id: "status" } as Patch,
+      ]);
+
+      const app = renderer.getNode("app") as FakeElement;
+      const status = renderer.getNode("status") as FakeElement;
+
+      expect(status.dataset.hypenSlot).toBe("loading");
+      expect(status.style.display).toBe("none");
+
+      renderer.applyPatches([
+        { type: "setProp", id: "status", name: "slot.0", value: "error" } as Patch,
+      ]);
+
+      expect(status.dataset.hypenSlot).toBe("error");
+      expect(status.style.display).toBe("flex");
+      expect(
+        app.children.some((child) => (child as any).className === "hypen-app-error"),
+      ).toBe(false);
+
+      renderer.applyPatches([
+        { type: "removeProp", id: "status", name: "slot.0" } as Patch,
+      ]);
+
+      expect(status.dataset.hypenSlot).toBeUndefined();
+      expect(
+        app.children.some((child) => (child as any).className === "hypen-app-error"),
+      ).toBe(true);
+    } finally {
+      (globalThis as any).MutationObserver = previousMutationObserver;
+    }
+  });
+
+  test("HypenApp swaps its loading slot for remote content after the first tree", async () => {
+    class StubWebSocket {
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSING = 2;
+      static CLOSED = 3;
+      static instances: StubWebSocket[] = [];
+
+      readyState = StubWebSocket.CONNECTING;
+      onopen: (() => void) | null = null;
+      private listeners = new Map<string, Set<(event: any) => void>>();
+
+      constructor(public url: string) {
+        StubWebSocket.instances.push(this);
+      }
+
+      addEventListener(type: string, listener: (event: any) => void): void {
+        let listeners = this.listeners.get(type);
+        if (!listeners) {
+          listeners = new Set();
+          this.listeners.set(type, listeners);
+        }
+        listeners.add(listener);
+      }
+
+      removeEventListener(type: string, listener: (event: any) => void): void {
+        this.listeners.get(type)?.delete(listener);
+      }
+
+      send(): void {}
+
+      close(): void {
+        this.readyState = StubWebSocket.CLOSED;
+      }
+
+      open(): void {
+        this.readyState = StubWebSocket.OPEN;
+        this.onopen?.();
+      }
+
+      message(data: unknown): void {
+        for (const listener of this.listeners.get("message") ?? []) {
+          listener({ data: JSON.stringify(data) });
+        }
+      }
+    }
+
+    const previousMutationObserver = (globalThis as any).MutationObserver;
+    const previousWebSocket = (globalThis as any).WebSocket;
+    delete (globalThis as any).MutationObserver;
+    (globalThis as any).WebSocket = StubWebSocket;
+
+    try {
+      const { renderer } = makeRenderer();
+      renderer.applyPatches([
+        {
+          type: "create",
+          id: "app",
+          elementType: "HypenApp",
+          props: { "0": "ws://example.test", autoReconnect: false },
+        } as Patch,
+        { type: "insert", parentId: "root", id: "app" } as Patch,
+        {
+          type: "create",
+          id: "loading",
+          elementType: "Column",
+          props: { "slot.0": "loading" },
+        } as Patch,
+        { type: "insert", parentId: "app", id: "loading" } as Patch,
+        {
+          type: "create",
+          id: "error",
+          elementType: "Column",
+          props: { "slot.0": "error" },
+        } as Patch,
+        { type: "insert", parentId: "app", id: "error" } as Patch,
+      ]);
+
+      const app = renderer.getNode("app") as FakeElement;
+      const loading = renderer.getNode("loading") as FakeElement;
+      const error = renderer.getNode("error") as FakeElement;
+      const content = app.children.find(
+        (child) => (child as any).className === "hypen-app-content",
+      )!;
+
+      expect(app.dataset.hypenAppStatus).toBe("loading");
+      expect(loading.style.display).toBe("flex");
+      expect(error.style.display).toBe("none");
+      expect(content.style.display).toBe("none");
+
+      const socket = StubWebSocket.instances[0]!;
+      socket.open();
+      socket.message({
+        type: "initialTree",
+        module: "Remote",
+        state: {},
+        revision: 1,
+        patches: [
+          { type: "create", id: "remote-root", elementType: "Text", props: { "0": "Ready" } },
+          { type: "insert", parentId: "root", id: "remote-root" },
+        ],
+      });
+      await Promise.resolve();
+
+      expect(app.dataset.hypenAppStatus).toBe("connected");
+      expect(loading.style.display).toBe("none");
+      expect(error.style.display).toBe("none");
+      expect(content.style.display).toBe("contents");
+
+      renderer.clear();
+      expect(socket.readyState).toBe(StubWebSocket.CLOSED);
+    } finally {
+      (globalThis as any).MutationObserver = previousMutationObserver;
+      (globalThis as any).WebSocket = previousWebSocket;
+    }
+  });
 });

@@ -39,6 +39,8 @@ import {
   parseApplicatorBase,
 } from "./props.js";
 import { applyVariants, invalidateVariantCache, deriveNodeComputed } from "./variants.js";
+import { CanvasAnimator } from "./anim.js";
+import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
 
 const DEFAULT_OPTIONS: CanvasRendererOptions = {
   devicePixelRatio: typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
@@ -73,6 +75,13 @@ export class CanvasRenderer implements Renderer {
   private textEditor: TextEditController;
   
   private dirtyTracker: DirtyRectTracker;
+
+  /**
+   * `__anim.*` runtime: per-frame numeric ticker that writes interpolated
+   * values into the real VirtualNode props (see `anim.ts`). Exposed to tests
+   * via `getAnimator()` for deterministic clock control.
+   */
+  private animator: CanvasAnimator;
 
   private rafId: number | null = null;
   private needsRedraw = false;
@@ -115,6 +124,35 @@ export class CanvasRenderer implements Renderer {
     const dpr = this.options.devicePixelRatio || 1;
     const rect = canvas.getBoundingClientRect();
     this.dirtyTracker = new DirtyRectTracker(rect.width, rect.height);
+
+    // Animation ticker: mutates real node props each frame; the renderer
+    // supplies dirty accounting, layout invalidation, and real teardown.
+    this.animator = new CanvasAnimator({
+      markNodeDirty: (node) => {
+        if (this.options.enableDirtyRects) {
+          this.dirtyTracker.markNodeDirty(node);
+        }
+      },
+      markLayoutDirty: () => {
+        this.layoutDirty = true;
+        // Animated layout moves geometry Taffy has not solved yet: per-node
+        // pre-layout rects under-mark (reflowed siblings, a growing node's
+        // new extent). Promote the frame to a full-canvas dirty region —
+        // correct pixels over clipped repaints while the animation runs.
+        if (this.options.enableDirtyRects) {
+          this.dirtyTracker.markFullDirty();
+        }
+      },
+      scheduleRedraw: () => this.scheduleRedraw(),
+      removeNode: (id) => this.onRemove(id),
+      getNode: (id) => this.nodes.get(id),
+      isNodeAttached: (node) => {
+        if (this.rootNode === null) return false;
+        let current: VirtualNode = node;
+        while (current.parent) current = current.parent;
+        return current === this.rootNode;
+      },
+    });
 
     // Initialize subsystems
     this.eventManager = new CanvasEventManager(canvas, engine);
@@ -257,6 +295,10 @@ export class CanvasRenderer implements Renderer {
     // handlers above — no per-batch rebuild, so mirror element identity
     // (and with it AT focus/virtual-cursor position) survives updates.
 
+    // Post-batch animation hook: play queued enters (first batch suppressed,
+    // cached attaches excluded) and reset the animator's per-batch state.
+    this.animator.flush();
+
     // Any patch can affect layout (props, tree shape, text).
     this.layoutDirty = true;
 
@@ -294,7 +336,7 @@ export class CanvasRenderer implements Renderer {
         break;
 
       case "remove":
-        this.onRemove(patch.id!);
+        this.onRemoveMaybeDeferred(patch.id!, patch.transition === true);
         break;
 
       case "detach":
@@ -336,6 +378,11 @@ export class CanvasRenderer implements Renderer {
     props: Record<string, any>,
     semantics?: import("@hypen-space/core/types").Semantics,
   ): void {
+    // Defensive: if this id is still exit-animating (ids never recycle, but
+    // the corpse must not shadow a new node), finalize the old subtree now —
+    // before the map entry below replaces it.
+    this.animator.finalizeNow(id);
+
     // Engine may send a Map (from WASM) or a plain object. Copy either way so
     // we own the prop bag and can mutate it during applicator normalisation.
     const rawProps: Record<string, any> =
@@ -370,6 +417,10 @@ export class CanvasRenderer implements Renderer {
 
     this.nodes.set(id, node);
 
+    // Cache the node's `__anim.*` channel specs and start any ambient
+    // `.animate` preset (enter eligibility is marked here too).
+    this.animator.registerCreate(node);
+
     // Mirror the create (element stays detached until its insert patch).
     this.accessibilityLayer.createNode(node);
   }
@@ -380,6 +431,21 @@ export class CanvasRenderer implements Renderer {
   private onSetProp(id: string, name: string, value: any): void {
     const node = this.nodes.get(id);
     if (!node) return;
+
+    // `__anim.*` channel props configure the animator, never layout/paint —
+    // route them there and skip the applicator/variant machinery (which
+    // would otherwise synthesize a junk `__anim` aggregate).
+    if (name.startsWith(ANIM_PROP_PREFIX)) {
+      node.props[name] = value;
+      this.animator.setAnimProp(node, name, value);
+      return;
+    }
+
+    // Applicator base (e.g. `flex.0` → `flex`) — computed up front so the
+    // transition channel can capture the previous FLAT value (which, for a
+    // mid-flight retarget, is the animator's last interpolated write).
+    const base = parseApplicatorBase(name);
+    const previousFlat = node.props[base ?? name];
 
     // Mark dirty before prop change (old bounds)
     if (this.options.enableDirtyRects) {
@@ -395,7 +461,6 @@ export class CanvasRenderer implements Renderer {
     // If this is an applicator-namespaced key (e.g. `flex.0`, `onClick.to`),
     // rebuild the derived flat/aggregate entry under the base name so layout,
     // paint, and event dispatch see the updated value.
-    const base = parseApplicatorBase(name);
     if (base !== null) {
       refreshApplicator(node.props, base);
     }
@@ -426,6 +491,11 @@ export class CanvasRenderer implements Renderer {
     // Update accessibility
     this.accessibilityLayer.updateNode(node);
 
+    // Transition channel: if the node carries `__anim.transition` and the
+    // flat prop is whitelisted + interpolable, the animator rewinds the prop
+    // to `previousFlat` and interpolates toward the value just written.
+    this.animator.notePropSet(node, base ?? name, previousFlat);
+
     // Engine value echo for an actively edited input: same value → no-op
     // (the caret must not move); a rewritten value re-seeds the element.
     if (name === "value") {
@@ -440,6 +510,16 @@ export class CanvasRenderer implements Renderer {
     const node = this.nodes.get(id);
     if (!node) return;
 
+    // `__anim.*` channel props route to the animator (clearing `.animate`
+    // stops playback and restores the touched props).
+    if (name.startsWith(ANIM_PROP_PREFIX)) {
+      delete node.props[name];
+      this.animator.removeAnimProp(node, name);
+      return;
+    }
+
+    const base = parseApplicatorBase(name);
+
     if (this.options.enableDirtyRects) {
       this.dirtyTracker.markNodeDirty(node);
     }
@@ -448,7 +528,6 @@ export class CanvasRenderer implements Renderer {
 
     invalidateVariantCache(node);
 
-    const base = parseApplicatorBase(name);
     if (base !== null) {
       refreshApplicator(node.props, base);
     }
@@ -474,6 +553,9 @@ export class CanvasRenderer implements Renderer {
     }
 
     this.accessibilityLayer.updateNode(node);
+
+    // A removed animatable prop snaps any in-flight transition on it.
+    this.animator.notePropRemoved(node, base ?? name);
   }
 
   /**
@@ -503,6 +585,11 @@ export class CanvasRenderer implements Renderer {
   private onInsert(parentId: string, id: string, beforeId?: string): void {
     const child = this.nodes.get(id);
     if (!child) return;
+
+    // Queue an enter playback for the post-batch flush. The animator only
+    // accepts nodes created in this same batch, so a cached Router `attach`
+    // (routed through this method) never enter-animates.
+    this.animator.noteInsert(child);
 
     // Mirror the insert/attach/move — insertNode resolves root addressing
     // and unknown-beforeId fallback with the same rules as the code below.
@@ -625,11 +712,45 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * Handle a `remove` patch, deferring teardown when the exit protocol asks:
+   * a flagged root carrying an `__anim.exit` spec starts an exit playback
+   * (subtree stays painted, excluded from hit-testing, finalized on settle
+   * or the timeout backbone); a plain remove under an exiting root defers
+   * with that root (root-first wire ordering). Everything else — including
+   * flagged removes without a spec, and all removes under reduced motion —
+   * tears down immediately: the sanctioned snap.
+   */
+  private onRemoveMaybeDeferred(id: string, transition: boolean): void {
+    const node = this.nodes.get(id);
+    if (!node) return;
+    if (transition && this.animator.beginExit(node, () => this.onRemove(id))) {
+      // The subtree is a corpse: engine-side these ids are already dead, so
+      // keyboard/AT interaction must die NOW, not at finalize (DOM parity:
+      // beginExit sets `inert` + the exiting attr on the root immediately).
+      // End any edit session inside it (flushing composition state), evict
+      // focus, and make the accessibility-mirror subtree inert so Tab and
+      // AT activation can no longer reach it during the exit window.
+      this.textEditor.endIfWithin(node);
+      this.focusManager.clearIfWithin(node);
+      this.accessibilityLayer.markExiting(id);
+      return;
+    }
+    if (this.animator.deferToExitingAncestor(node, () => this.onRemove(id))) {
+      return;
+    }
+    this.onRemove(id);
+  }
+
+  /**
    * Remove node from tree
    */
   private onRemove(id: string): void {
     const node = this.nodes.get(id);
     if (!node) return;
+
+    // Drop all animator state for the id (specs, in-flight animations,
+    // ambient playback, any exit bookkeeping).
+    this.animator.forget(id);
 
     // End any edit session inside the removed subtree; focus state follows.
     this.textEditor.endIfWithin(node);
@@ -672,8 +793,11 @@ export class CanvasRenderer implements Renderer {
     // Use requestAnimationFrame if available (browser), otherwise render immediately (tests)
     if (typeof requestAnimationFrame !== "undefined") {
       this.rafId = requestAnimationFrame(() => {
-        this.render();
+        // Null BEFORE rendering so the end-of-render animation re-arm (and
+        // any redraw requested during paint) can schedule the next frame
+        // instead of being swallowed by the coalescing guard above.
         this.rafId = null;
+        this.render();
       });
     } else {
       // In non-browser environments (tests), render immediately
@@ -687,6 +811,12 @@ export class CanvasRenderer implements Renderer {
   private render(): void {
     const startTime = performance.now();
     const dpr = this.options.devicePixelRatio || 1;
+
+    // Advance animations FIRST: interpolated values land in the real node
+    // props before layout runs and before the dirty region is read, so this
+    // frame's layout, paint, and hit-testing all see the animated state
+    // (layout-affecting animations mark layoutDirty via the host hook).
+    this.animator.tick();
 
     if (this.options.enableDirtyRects) {
       this.renderWithDirtyRects(dpr);
@@ -703,6 +833,26 @@ export class CanvasRenderer implements Renderer {
     // Keep the semantics overlay's element boxes on the painted bounds so
     // screen-reader browse modes (geometry-driven) track layout changes.
     this.accessibilityLayer.syncPositions(this.rootNode);
+
+    // Ticker: while animations are in flight, keep the coalescing scheduler
+    // re-armed; when the last one settles this stops firing — no runaway
+    // rAF. Guarded to the rAF path only: the synchronous fallback would
+    // recurse.
+    if (this.animator.hasActive()) {
+      if (typeof requestAnimationFrame !== "undefined") {
+        this.scheduleRedraw();
+      } else if (!this.animator.manualFrameDriver) {
+        // No frame clock at all (headless/server hosts): nothing will ever
+        // advance these animations, so an entering node would freeze at its
+        // hidden pose — content vanishing is NOT the sanctioned degradation,
+        // snapping to final values is. Tests that drive frames manually opt
+        // out via `manualFrameDriver`. The follow-up synchronous render
+        // paints the settled state; `hasActive()` is false afterwards, so
+        // it cannot recurse further.
+        this.animator.snapAll();
+        this.scheduleRedraw();
+      }
+    }
 
     // Performance logging
     if (this.options.logPerformance) {
@@ -866,9 +1016,18 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * The `__anim.*` animation runtime. Exposed for tests (deterministic clock
+   * via `animator.now`, reduced-motion override) and diagnostics.
+   */
+  getAnimator(): CanvasAnimator {
+    return this.animator;
+  }
+
+  /**
    * Clear renderer
    */
   clear(): void {
+    this.animator.reset();
     this.textEditor.endEditing();
     this.rootNode = null;
     this.nodes.clear();
@@ -904,6 +1063,7 @@ export class CanvasRenderer implements Renderer {
    * Destroy renderer
    */
   destroy(): void {
+    this.animator.destroy();
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
     }

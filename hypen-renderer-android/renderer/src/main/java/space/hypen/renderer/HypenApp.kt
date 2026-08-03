@@ -166,9 +166,13 @@ fun HypenApp(
 
 /**
  * Renders a single Hypen element and its children.
+ *
+ * Internal so component handlers that render host-app subtrees themselves
+ * (e.g. HypenAppComponent's loading/error slots) can reuse the full
+ * rendering pipeline (variants, weights, semantics).
  */
 @Composable
-private fun HypenElement(
+internal fun HypenElement(
     element: HypenElement,
     renderer: ComposeRenderer,
 ) {
@@ -299,7 +303,7 @@ private fun RenderChildren(
  * Default loading content.
  */
 @Composable
-private fun DefaultLoadingContent() {
+internal fun DefaultLoadingContent() {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,
@@ -312,7 +316,7 @@ private fun DefaultLoadingContent() {
  * Default error content.
  */
 @Composable
-private fun DefaultErrorContent(message: String) {
+internal fun DefaultErrorContent(message: String) {
     Box(
         modifier = Modifier.fillMaxSize(),
         contentAlignment = Alignment.Center,

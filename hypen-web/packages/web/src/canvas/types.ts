@@ -27,6 +27,12 @@ export interface VirtualNode {
   visible: boolean;
   opacity: number;
 
+  // Exit-animating subtree root (set by CanvasAnimator on a transition-
+  // flagged remove). The node stays in the tree — still painted — until the
+  // exit finalizes, but the whole subtree is excluded from hit-testing and
+  // scroll targeting immediately: engine-side the id is already dead.
+  exiting?: boolean;
+
   // Interaction state
   clickable: boolean;
   hoverable: boolean;

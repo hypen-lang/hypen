@@ -68,7 +68,7 @@ export default app
         Row {
           Column {
             Text("Cinebox")
-              .tw("text-3xl md:text-5xl font-black")
+              .tw("text-3xl md:text-4xl lg:text-5xl font-black")
               .color("#F8FAFC")
             Text("@{state.greeting}")
               .tw("text-sm md:text-base mt-1")
@@ -98,10 +98,10 @@ export default app
                 .tw("text-xs font-black tracking-wide text-left")
                 .color("#FDE68A")
               Text("@{state.featured.title}")
-                .tw("text-4xl md:text-6xl font-black mt-2 text-left")
+                .tw("text-4xl md:text-5xl lg:text-6xl font-black mt-2 text-left")
                 .color("#F8FAFC")
               Text("@{state.featured.tagline}")
-                .tw("text-sm md:text-lg mt-3 leading-6 text-left")
+                .tw("text-sm md:text-base lg:text-lg mt-3 leading-6 text-left")
                 .color("#FFF7ED")
               Row {
                 Text("★ @{state.featured.ratingLabel}")
@@ -121,7 +121,7 @@ export default app
 
             Image(src: "@{state.featured.posterUrl}")
               .objectFit("cover")
-              .tw("w-28 h-40 md:w-48 md:h-72 rounded-3xl shadow-2xl shrink-0")
+              .tw("w-28 h-40 md:w-40 md:h-60 lg:w-48 lg:h-72 rounded-3xl shadow-2xl shrink-0")
               .backgroundColor("@{state.featured.posterBg}")
               .boxShadow("0 24px 48px rgba(0, 0, 0, 0.45)")
           }
@@ -137,7 +137,7 @@ export default app
 
         Row {
           Text("Trending now")
-            .tw("flex-1 text-2xl md:text-3xl font-black")
+            .tw("flex-1 text-2xl md:text-[28px] lg:text-3xl font-black")
             .color("#F8FAFC")
           Text("Top 8")
             .tw("text-sm md:text-base font-bold")
@@ -154,18 +154,18 @@ export default app
               Column {
                 Image(src: "@{item.posterUrl}")
                   .objectFit("cover")
-                  .tw("w-36 h-52 md:w-44 md:h-64 rounded-3xl shadow-2xl")
+                  .tw("w-36 h-52 md:w-40 md:h-60 lg:w-44 lg:h-64 rounded-3xl shadow-2xl")
                   .backgroundColor("@{item.posterBg}")
                   .boxShadow("0 22px 44px rgba(0, 0, 0, 0.42)")
 
                 Text("@{item.title}")
-                  .tw("w-36 md:w-44 text-base md:text-lg font-black mt-3 text-center")
+                  .tw("w-36 md:w-40 lg:w-44 text-base md:text-base lg:text-lg font-black mt-3 text-center")
                   .color("#F8FAFC")
                 Text("★ @{item.ratingLabel}")
-                  .tw("w-36 md:w-44 text-sm font-bold mt-1 text-center")
+                  .tw("w-36 md:w-40 lg:w-44 text-sm font-bold mt-1 text-center")
                   .color("#FACC15")
                 Text("@{item.genre}")
-                  .tw("w-36 md:w-44 text-xs mt-1 text-center")
+                  .tw("w-36 md:w-40 lg:w-44 text-xs mt-1 text-center")
                   .color("#FBCFE8")
               }
               .tw("items-center")
@@ -182,7 +182,7 @@ export default app
 
         Row {
           Text("Because you like smart stories")
-            .tw("flex-1 text-2xl md:text-3xl font-black")
+            .tw("flex-1 text-2xl md:text-[28px] lg:text-3xl font-black")
             .color("#F8FAFC")
         }
         .tw("px-5 md:px-8 pt-8 pb-4")
@@ -199,7 +199,7 @@ export default app
               .boxShadow("0 18px 34px rgba(0, 0, 0, 0.36)")
 
             Text("@{item.title}")
-              .tw("text-base md:text-lg font-black mt-3")
+              .tw("text-base md:text-base lg:text-lg font-black mt-3")
               .color("#F8FAFC")
             Text("★ @{item.ratingLabel} · @{item.year}")
               .tw("text-xs font-bold mt-1")

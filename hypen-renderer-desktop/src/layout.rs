@@ -612,7 +612,7 @@ impl TaffyState {
                 self.set_parent_children(parent_id, id, before_id.as_deref(), tree);
                 true
             }
-            Patch::Remove { id } => {
+            Patch::Remove { id, .. } => {
                 if let Some(tid) = self.node_map.remove(id) {
                     if let Some(parent) = self.tree.parent(tid) {
                         let mut children: Vec<NodeId> =

@@ -1,0 +1,61 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "exit-deferred-remove",
+  "description": "Removing a subtree whose root carries __anim.exit emits the root Remove FIRST, flagged with transition:true, and no per-descendant Removes — the renderer owns the exiting subtree's teardown",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented (golang); ForEach source rendering not supported in the typescript runner",
+    "sdks": ["golang", "typescript"]
+  },
+
+  "input": {
+    "source": "Column { ForEach(items: \"@{state.cards}\") { Column(key: \"@{item.id}\") { Text(\"@{item.title}\") Text(\"@{item.body}\") }.exit(fade, duration: 150) } }",
+    "initialState": {
+      "cards": [{ "id": "c1", "title": "Card", "body": "Body" }]
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["cards"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render creates the card subtree with __anim.exit on its root",
+      "action": "initialRender",
+      "expectedPatchCount": 8,
+      "expectedPatchTypes": ["create", "insert", "create", "insert", "create", "insert", "create", "insert"],
+      "expectedPatches": [
+        { "type": "create", "elementType": "Column", "props": {} },
+        {
+          "type": "create",
+          "elementType": "Column",
+          "props": {
+            "__anim.exit": { "curve": "easeIn", "duration": 150, "presets": ["fade"] },
+            "key": "c1"
+          }
+        },
+        { "type": "create", "elementType": "Text", "props": { "0": "Card" } },
+        { "type": "create", "elementType": "Text", "props": { "0": "Body" } },
+        { "type": "insert" },
+        { "type": "insert" },
+        { "type": "insert" },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Clearing the list removes the animated subtree: exactly one root Remove flagged transition:true, descendants get no Removes of their own",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["cards"],
+        "newValues": { "cards": [] }
+      },
+      "expectedPatchCount": 1,
+      "expectedPatchTypes": ["remove"],
+      "expectedPatches": [{ "type": "remove", "transition": true }]
+    }
+  ]
+}

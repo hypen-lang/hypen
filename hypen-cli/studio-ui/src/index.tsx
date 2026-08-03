@@ -37,25 +37,52 @@ const isHostedByCli = Boolean(process.env.HYPEN_PROJECT_DIR);
 let serveIndex: any;
 let buildAssetsDir: string | null = null;
 
+// Prebuilt bundle shipped inside the published @hypen-space/cli package
+// (built by hypen-cli/build.ts at publish time, into the CLI's dist/ so the
+// tarball's `dist/` gitignore rule can't strip it). Preferring it over a
+// runtime build matters beyond startup speed: published installs live
+// under bun's global dir (`~/.bun/install/global/node_modules/...`), and
+// Tailwind's source scanner silently skips everything under a hidden
+// (dot-)directory — a runtime build there emits CSS with ZERO utility
+// classes and Studio renders completely unstyled.
+const prebuiltAssetsDir = join(import.meta.dir, "..", "..", "dist", "studio-ui");
+
 if (isHostedByCli) {
-  const tailwindPlugin = (await import("bun-plugin-tailwind")).default;
-  buildAssetsDir = join(tmpdir(), `hypen-studio-${process.pid}`);
+  if (existsSync(join(prebuiltAssetsDir, "index.html"))) {
+    buildAssetsDir = prebuiltAssetsDir;
+  } else {
+    // Monorepo / teleport dev: no prebuilt bundle, build on the fly.
+    const tailwindPlugin = (await import("bun-plugin-tailwind")).default;
+    buildAssetsDir = join(tmpdir(), `hypen-studio-${process.pid}`);
 
-  const result = await Bun.build({
-    entrypoints: [join(import.meta.dir, "index.html")],
-    outdir: buildAssetsDir,
-    plugins: [tailwindPlugin],
-    target: "browser",
-  });
+    const result = await Bun.build({
+      entrypoints: [join(import.meta.dir, "index.html")],
+      outdir: buildAssetsDir,
+      plugins: [tailwindPlugin],
+      target: "browser",
+    });
 
-  if (!result.success) {
-    console.error("Studio UI build failed:", result.logs);
-    process.exit(1);
+    if (!result.success) {
+      console.error("Studio UI build failed:", result.logs);
+      process.exit(1);
+    }
+
+    // Surface the hidden-directory Tailwind failure mode instead of
+    // serving a silently unstyled Studio.
+    const cssArtifact = result.outputs.find((o) => o.path.endsWith(".css"));
+    if (cssArtifact && !/\.flex\b/.test(await Bun.file(cssArtifact.path).text())) {
+      console.warn(
+        "[studio] Tailwind emitted no utility classes — studio-ui is likely under a " +
+          "hidden directory (e.g. ~/.bun), which Tailwind's scanner skips. " +
+          "Studio will render unstyled. Upgrade @hypen-space/cli (newer builds ship a " +
+          "prebuilt Studio UI) or run from a path with no dot-directories."
+      );
+    }
+
+    // Clean up temp build on exit
+    const dir = buildAssetsDir;
+    process.on("exit", () => { try { rmSync(dir, { recursive: true }); } catch {} });
   }
-
-  // Clean up temp build on exit
-  const dir = buildAssetsDir;
-  process.on("exit", () => { try { rmSync(dir, { recursive: true }); } catch {} });
 } else {
   // Dev mode: use Bun's HTML import for HMR support
   serveIndex = (await import("./index.html")).default;

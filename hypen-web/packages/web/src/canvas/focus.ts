@@ -22,6 +22,22 @@ import type { VirtualNode } from "./types.js";
 import type { AccessibilityLayer } from "./accessibility.js";
 import { dispatchNodeEvent, type DispatchEngine } from "./dispatch.js";
 
+/**
+ * Is this node inside an exit-animating subtree? Engine-side those ids are
+ * already dead: pointer hit-testing prunes them via `node.exiting`, and the
+ * mirror root is made `inert` — this walk covers the keyboard/AT paths in
+ * environments where `inert` is unsupported (or focus predates the exit),
+ * so a corpse can never dispatch actions or receive focus mid-exit.
+ */
+function inExitingSubtree(node: VirtualNode): boolean {
+  let current: VirtualNode | null = node;
+  while (current) {
+    if (current.exiting) return true;
+    current = current.parent;
+  }
+  return false;
+}
+
 export interface FocusManagerHooks {
   getNode(id: string): VirtualNode | undefined;
   /** Fired after node.focused flags are updated. Renderer repaints and
@@ -81,7 +97,10 @@ export class FocusManager {
   }
 
   private onFocusIn(e: FocusEvent): void {
-    this.syncFocus(this.resolveNode(e.target));
+    const node = this.resolveNode(e.target);
+    // Focus landing inside an exiting corpse (mirror not yet inert, or inert
+    // unsupported) must not register as canvas focus.
+    this.syncFocus(node && inExitingSubtree(node) ? null : node);
   }
 
   private onFocusOut(e: FocusEvent): void {
@@ -187,12 +206,16 @@ export class FocusManager {
     const node = this.resolveNode(e.target);
     if (!node) return;
     if (!node.clickable) return;
+    // Exiting subtrees are engine-dead: activation must not dispatch (the
+    // pointer path is already pruned by hit-testing; this is the AT twin).
+    if (inExitingSubtree(node)) return;
     dispatchNodeEvent(this.engine, node, "click", {});
   }
 
   private onMirrorKey(type: "keydown" | "keyup", e: KeyboardEvent): void {
     const node = this.resolveNode(e.target);
     if (!node) return;
+    if (inExitingSubtree(node)) return;
     dispatchNodeEvent(this.engine, node, type, {
       key: e.key,
       code: e.code,

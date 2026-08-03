@@ -805,3 +805,37 @@ fn test_set_context_invalidates_deep_data_source_bindings() {
         *captured
     );
 }
+
+// ========== Animation prop channel ==========
+
+#[test]
+fn test_render_carries_anim_transition_prop_on_create() {
+    // GIVEN: Engine and a parsed element with .transition(200, easeOut)
+    let mut engine = Engine::new();
+    let (patches, callback) = patch_capture();
+    engine.set_render_callback(callback);
+
+    let source = r#"Text("Score").transition(200, easeOut).fontSize(18)"#;
+    let component = hypen_parser::parse_component(source).expect("parse");
+    let ir_node = hypen_engine::ir::ast_to_ir_node(&component);
+
+    // WHEN: Render through the full pipeline
+    engine.render_ir_node(&ir_node);
+
+    // THEN: The Create patch carries the lowered "__anim.transition" object
+    //       (renderer-facing — must NOT be stripped as engine-internal) and
+    //       no legacy "transition.0" leftover.
+    let captured = patches.lock().unwrap();
+    let create = captured
+        .iter()
+        .find_map(|p| match p {
+            hypen_engine::reconcile::Patch::Create { props, .. } => Some(props),
+            _ => None,
+        })
+        .expect("Expected a Create patch");
+    assert_eq!(
+        create.get("__anim.transition"),
+        Some(&json!({"duration": 200, "curve": "easeOut"}))
+    );
+    assert!(create.get("transition.0").is_none());
+}

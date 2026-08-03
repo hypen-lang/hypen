@@ -352,9 +352,66 @@ async function ensureProjectDeps() {
   console.log("");
 }
 
+/**
+ * Server-based projects configure `entry` as a script path (e.g.
+ * `./src/app.ts`) rather than a component name — the script boots its own
+ * `RemoteServer`, so there is no components directory to discover or watch.
+ */
+function isScriptEntry(entry: string): boolean {
+  return /\.(ts|js|mjs)$/.test(entry);
+}
+
+/**
+ * `hypen dev` for a server-based project: run the entry script with hot
+ * reload and hand it the configured port. The script owns the server —
+ * discovery, generation, and the component watcher would all crash on the
+ * (intentionally absent) components directory.
+ */
+async function runServerEntry(config: Config, options: { port?: number }) {
+  const entryPath = resolve(config.entry);
+  if (!existsSync(entryPath)) {
+    console.error(`\n  Entry script not found: ${config.entry}\n`);
+    process.exit(1);
+  }
+  if (!isBun) {
+    console.error(
+      "\n  `hypen dev` for server-based projects requires the Bun runtime. Install from https://bun.sh\n"
+    );
+    process.exit(1);
+  }
+
+  const port = options.port || config.port || 3000;
+  console.log(`\n  ${boldPink("Hypen Dev Server")} ${dim("(server-based)")}\n`);
+  console.log(`  ${dim("Entry:")} ${yellow(config.entry)}`);
+  console.log(`  ${dim("Port:")}  ${yellow(String(port))}\n`);
+
+  const proc = Bun.spawn({
+    cmd: ["bun", "--hot", entryPath],
+    env: { ...process.env, PORT: String(port) },
+    stdout: "inherit",
+    stderr: "inherit",
+    stdin: "inherit",
+  });
+
+  const stop = () => {
+    try { proc.kill(); } catch { /* already dead */ }
+  };
+  process.on("SIGINT", stop);
+  process.on("SIGTERM", stop);
+
+  const code = await proc.exited;
+  process.exit(code ?? 0);
+}
+
 async function devServer(options: { port?: number; debug?: boolean; a11y?: boolean }) {
   await ensureProjectDeps();
   const config = await loadConfig();
+
+  if (isScriptEntry(config.entry)) {
+    await runServerEntry(config, options);
+    return;
+  }
+
   const { dev, isDevA11yEnabled } = await import("../src/dev.js");
 
   await dev({
@@ -380,6 +437,50 @@ async function buildProject(options: {
   sourcemap?: boolean;
 }) {
   const config = await loadConfig();
+
+  // Server-based projects: bundle the entry script (deps stay external so
+  // the output runs against the project's node_modules) instead of the
+  // component-discovery browser build.
+  if (isScriptEntry(config.entry)) {
+    if (!isBun) {
+      console.error(
+        "\n  `hypen build` for server-based projects requires the Bun runtime. Install from https://bun.sh\n"
+      );
+      process.exit(1);
+    }
+    const entryPath = resolve(config.entry);
+    if (!existsSync(entryPath)) {
+      console.error(`\n  Entry script not found: ${config.entry}\n`);
+      process.exit(1);
+    }
+    const outDir = resolve(options.outDir || config.outDir || "dist");
+    console.log(`\n  ${boldPink("Hypen Build")} ${dim("(server-based)")}\n`);
+    console.log(`  ${dim("Entry:")}  ${config.entry}`);
+    console.log(`  ${dim("Output:")} ${outDir}\n`);
+
+    const result = await Bun.build({
+      entrypoints: [entryPath],
+      outdir: outDir,
+      target: "node",
+      format: "esm",
+      packages: "external",
+      naming: "main.[ext]",
+      minify: options.minify ?? true,
+      sourcemap: options.sourcemap ? "external" : "none",
+    });
+    if (!result.success) {
+      console.error("Build failed:");
+      for (const log of result.logs) console.error(log);
+      process.exit(1);
+    }
+    console.log(`  ${pink("Build complete!")}\n`);
+    for (const output of result.outputs) {
+      console.log(`    ${yellow(output.path)}`);
+    }
+    console.log();
+    return;
+  }
+
   const { build } = await import("../src/dev.js");
 
   await build({
@@ -595,7 +696,7 @@ async function testMode(options: { port?: number; open?: boolean }) {
     // script — detected by a file-extension entry. Don't try to spin up a
     // competing one; just open Studio and let the user point Test Mode at
     // their running `hypen dev`.
-    const isServerBased = /\.(ts|js|mjs)$/.test(config.entry);
+    const isServerBased = isScriptEntry(config.entry);
     if (isServerBased) {
       console.log(
         `  ${dim("Server-based project — start it separately with")} ${yellow("hypen dev")} ${dim("and reconnect from the toolbar.")}`

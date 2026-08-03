@@ -1975,3 +1975,336 @@ fn test_create_tree_with_duplicate_keys() {
         "Both should have duplicate key"
     );
 }
+
+// ============================================================================
+// H. Deferred remove protocol (`transition` flag on Remove)
+// ============================================================================
+
+use hypen_engine::reconcile::node_id_str;
+
+/// A Row carrying an `.exit(...)` spec, as the Phase-1 lowering emits it.
+fn exiting_row(children: Vec<Element>) -> Element {
+    let mut row = Element::new("Row").with_prop(
+        "__anim.exit",
+        Value::Static(json!({"presets": ["fade"], "duration": 150, "curve": "easeIn"})),
+    );
+    for child in children {
+        row = row.with_child(child);
+    }
+    row
+}
+
+fn expect_remove(patch: &Patch) -> (&str, bool) {
+    match patch {
+        Patch::Remove { id, transition } => (id.as_str(), *transition),
+        other => panic!("Expected Remove patch, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_remove_exit_root_flagged_and_emitted_first() {
+    // GIVEN: Column { Text("keep"), Row.exit { Text("inner") } } rendered
+    let mut tree = InstanceTree::new();
+    let mut dependencies = DependencyGraph::new();
+    let state = json!({});
+    let initial = column_with_children(vec![
+        text_element("keep"),
+        exiting_row(vec![text_element("inner")]),
+    ]);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(initial),
+        None,
+        &state,
+        &mut dependencies,
+    );
+
+    let root = tree.root().expect("root");
+    let row_id = *tree.get(root).unwrap().children.get(1).expect("row child");
+    let inner_id = *tree
+        .get(row_id)
+        .unwrap()
+        .children
+        .get(0)
+        .expect("inner text");
+
+    // WHEN: The Row subtree leaves (excess-children removal)
+    let updated = column_with_children(vec![text_element("keep")]);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(updated),
+        None,
+        &state,
+        &mut dependencies,
+    );
+
+    // THEN: Flagged root Remove FIRST, then the descendant as a plain Remove
+    assert_eq!(patches.len(), 2, "got {:?}", patches);
+    assert_eq!(
+        expect_remove(&patches[0]),
+        (node_id_str(row_id).as_str(), true)
+    );
+    assert_eq!(
+        expect_remove(&patches[1]),
+        (node_id_str(inner_id).as_str(), false)
+    );
+}
+
+#[test]
+fn test_remove_parent_without_exit_wins_over_exiting_child() {
+    // GIVEN: Column { Text("keep"), Row { Text.exit } } — only the CHILD
+    // carries an exit spec; the removal root (Row) does not.
+    let mut tree = InstanceTree::new();
+    let mut dependencies = DependencyGraph::new();
+    let state = json!({});
+    let exiting_text = Element::new("Text")
+        .with_prop("text", Value::Static(json!("inner")))
+        .with_prop(
+            "__anim.exit",
+            Value::Static(json!({"presets": ["fade"], "duration": 150, "curve": "easeIn"})),
+        );
+    let initial = column_with_children(vec![
+        text_element("keep"),
+        Element::new("Row").with_child(exiting_text),
+    ]);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(initial),
+        None,
+        &state,
+        &mut dependencies,
+    );
+
+    let root = tree.root().expect("root");
+    let row_id = *tree.get(root).unwrap().children.get(1).expect("row child");
+    let inner_id = *tree
+        .get(row_id)
+        .unwrap()
+        .children
+        .get(0)
+        .expect("inner text");
+
+    // WHEN: The Row subtree leaves
+    let updated = column_with_children(vec![text_element("keep")]);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(updated),
+        None,
+        &state,
+        &mut dependencies,
+    );
+
+    // THEN: Parent-remove-wins — post-order, every Remove plain (the child's
+    // exit spec is never consulted because it isn't the removal root).
+    assert_eq!(patches.len(), 2, "got {:?}", patches);
+    assert_eq!(
+        expect_remove(&patches[0]),
+        (node_id_str(inner_id).as_str(), false)
+    );
+    assert_eq!(
+        expect_remove(&patches[1]),
+        (node_id_str(row_id).as_str(), false)
+    );
+}
+
+#[test]
+fn test_remove_non_animated_ordering_and_wire_format_unchanged() {
+    // GIVEN: Column { Text("keep"), Row { Text("a"), Text("b") } } — no
+    // animation props anywhere.
+    let mut tree = InstanceTree::new();
+    let mut dependencies = DependencyGraph::new();
+    let state = json!({});
+    let initial = column_with_children(vec![
+        text_element("keep"),
+        row_with_children(vec![text_element("a"), text_element("b")]),
+    ]);
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(initial),
+        None,
+        &state,
+        &mut dependencies,
+    );
+
+    let root = tree.root().expect("root");
+    let row_id = *tree.get(root).unwrap().children.get(1).expect("row child");
+    let a_id = *tree.get(row_id).unwrap().children.get(0).expect("text a");
+    let b_id = *tree.get(row_id).unwrap().children.get(1).expect("text b");
+
+    // WHEN: The Row subtree leaves
+    let updated = column_with_children(vec![text_element("keep")]);
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(updated),
+        None,
+        &state,
+        &mut dependencies,
+    );
+
+    // THEN: Exactly today's post-order (children before parent), and the
+    // serialized wire format carries no `transition` field at all.
+    assert_eq!(patches.len(), 3, "got {:?}", patches);
+    assert_eq!(
+        expect_remove(&patches[0]),
+        (node_id_str(a_id).as_str(), false)
+    );
+    assert_eq!(
+        expect_remove(&patches[1]),
+        (node_id_str(b_id).as_str(), false)
+    );
+    assert_eq!(
+        expect_remove(&patches[2]),
+        (node_id_str(row_id).as_str(), false)
+    );
+    let wire = serde_json::to_string(&patches).unwrap();
+    assert!(
+        !wire.contains("transition"),
+        "non-animated removals must be wire-identical to the pre-flag protocol: {wire}"
+    );
+}
+
+#[test]
+fn test_replace_subtree_flags_exiting_root() {
+    // GIVEN: a rendered Row.exit { Text("inner") }
+    let mut tree = InstanceTree::new();
+    let mut dependencies = DependencyGraph::new();
+    let state = json!({});
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(exiting_row(vec![text_element("inner")])),
+        None,
+        &state,
+        &mut dependencies,
+    );
+    let row_id = tree.root().expect("root");
+    let inner_id = *tree
+        .get(row_id)
+        .unwrap()
+        .children
+        .get(0)
+        .expect("inner text");
+
+    // WHEN: The element type changes, replacing the whole subtree
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(column_with_children(vec![])),
+        None,
+        &state,
+        &mut dependencies,
+    );
+
+    // THEN: The old subtree's removal leads with the flagged root
+    assert_eq!(
+        expect_remove(&patches[0]),
+        (node_id_str(row_id).as_str(), true)
+    );
+    assert_eq!(
+        expect_remove(&patches[1]),
+        (node_id_str(inner_id).as_str(), false)
+    );
+    assert!(count_creates(&patches) >= 1, "replacement Column created");
+}
+
+#[test]
+fn test_foreach_rebuild_flags_exiting_item_roots() {
+    // GIVEN: ForEach over @{state.items} whose item template carries an
+    // exit spec on its root.
+    let mut tree = InstanceTree::new();
+    let mut dependencies = DependencyGraph::new();
+    let template_root = Element::new("Row")
+        .with_prop(
+            "__anim.exit",
+            Value::Static(json!({"presets": ["fade"], "duration": 150, "curve": "easeIn"})),
+        )
+        .with_prop("text", Value::Binding(Binding::item(vec![])));
+    let ir_node = IRNode::ForEach {
+        source: Binding::state(vec!["items".to_string()]),
+        item_name: "item".to_string(),
+        key_path: None,
+        template: vec![IRNode::Element(template_root)],
+        props: hypen_engine::ir::Props::new(),
+        module_scope: None,
+    };
+    let state = json!({"items": ["a", "b"]});
+    reconcile_ir(&mut tree, &ir_node, None, &state, &mut dependencies);
+
+    // WHEN: The item count changes, triggering the ForEach rebuild path
+    let state = json!({"items": ["a"]});
+    let patches = reconcile_ir(&mut tree, &ir_node, None, &state, &mut dependencies);
+
+    // THEN: The rebuild's root-only Removes carry the exit flag
+    let removes: Vec<(&str, bool)> = patches
+        .iter()
+        .filter_map(|p| match p {
+            Patch::Remove { id, transition } => Some((id.as_str(), *transition)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removes.len(), 2, "got {:?}", patches);
+    assert!(
+        removes.iter().all(|(_, transition)| *transition),
+        "every removed item root must be flagged: {:?}",
+        removes
+    );
+}
+
+#[test]
+fn test_keyed_removal_flags_exiting_item_root() {
+    // GIVEN: an iterable (List) whose keyed item template carries an exit
+    // spec — exercises the keyed reconciliation removal path.
+    let mut tree = InstanceTree::new();
+    let mut dependencies = DependencyGraph::new();
+    let template_root = Element::new("Row")
+        .with_prop(
+            "__anim.exit",
+            Value::Static(json!({"presets": ["fade"], "duration": 150, "curve": "easeIn"})),
+        )
+        .with_prop(
+            "text",
+            Value::Binding(Binding::item(vec!["label".to_string()])),
+        );
+    let list = Element {
+        element_type: "List".to_string(),
+        props: hypen_engine::ir::Props::from_map(indexmap::indexmap! {
+            "0".to_string() => Value::Binding(Binding::state(vec!["items".to_string()])),
+        }),
+        ir_children: vec![IRNode::Element(template_root)],
+        key: None,
+        module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
+    };
+    let state = json!({"items": [
+        {"id": 1, "label": "one"},
+        {"id": 2, "label": "two"},
+    ]});
+    reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list.clone()),
+        None,
+        &state,
+        &mut dependencies,
+    );
+
+    // WHEN: Item 2 leaves the list
+    let state = json!({"items": [{"id": 1, "label": "one"}]});
+    let patches = reconcile_ir(
+        &mut tree,
+        &IRNode::Element(list),
+        None,
+        &state,
+        &mut dependencies,
+    );
+
+    // THEN: The keyed root-only Remove is flagged
+    let removes: Vec<(&str, bool)> = patches
+        .iter()
+        .filter_map(|p| match p {
+            Patch::Remove { id, transition } => Some((id.as_str(), *transition)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(removes.len(), 1, "got {:?}", patches);
+    assert!(removes[0].1, "keyed item-root Remove must carry the flag");
+}

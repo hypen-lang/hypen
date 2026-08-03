@@ -4,7 +4,7 @@
     "Hypen Contributors"
   ],
   "description": "A Rust implementation of the Hypen engine",
-  "version": "0.5.2",
+  "version": "0.5.4",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -23,5 +23,7 @@
     "engine",
     "wasm",
     "hypen"
-  ]
+  ],
+  "type": "commonjs",
+  "sideEffects": false
 }

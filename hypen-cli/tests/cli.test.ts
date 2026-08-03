@@ -1,7 +1,8 @@
 import { describe, expect, test, beforeEach, afterEach } from "bun:test";
-import { existsSync, mkdirSync, rmSync, readFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "fs";
 import { join } from "path";
 import { spawn } from "bun";
+import { generateTypescriptProject } from "../src/init/typescript";
 
 describe("CLI", () => {
   const testDir = `/tmp/hypen-cli-test-${Date.now()}`;
@@ -129,6 +130,29 @@ describe("CLI", () => {
       expect(config.components).toBe("./src/components");
       expect(config.entry).toBe("App");
       expect(config.port).toBe(3000);
+    });
+
+    test("server-based scaffold writes a script entry and no components dir pointer", () => {
+      const projectDir = join(testDir, "server-app");
+      mkdirSync(projectDir, { recursive: true });
+      generateTypescriptProject({
+        projectDir,
+        projectName: "server-app",
+        layout: "server-based",
+      });
+
+      const config = JSON.parse(
+        readFileSync(join(projectDir, "hypen.json"), "utf-8")
+      );
+
+      // Server-based projects register modules inside the entry script;
+      // pointing `components` at a directory the scaffold never creates
+      // made `hypen dev` crash on fs.watch (ENOENT). The file-extension
+      // entry is what dev/test use to detect the layout.
+      expect(config.entry).toBe("./src/app.ts");
+      expect(config.components).toBeUndefined();
+      expect(existsSync(join(projectDir, "src/app.ts"))).toBe(true);
+      expect(existsSync(join(projectDir, "src/modules/App.ts"))).toBe(true);
     });
 
     test("creates .gitignore with env and npmrc entries", async () => {
@@ -301,6 +325,56 @@ describe("CLI", () => {
       // Crucially, the test command should NOT be treated as unknown.
       expect(stdoutBuf).not.toContain("Unknown command");
     }, 10_000);
+  });
+
+  describe("dev command (server-based)", () => {
+    test("runs the entry script instead of component discovery", async () => {
+      // A server-based project: hypen.json entry is a script path, no
+      // components directory exists. `hypen dev` must run the script (with
+      // the configured port in $PORT) rather than crash trying to watch
+      // ./src/components.
+      const projectDir = join(testDir, "server-dev");
+      mkdirSync(join(projectDir, "src"), { recursive: true });
+      writeFileSync(
+        join(projectDir, "package.json"),
+        JSON.stringify({ name: "server-dev", type: "module" })
+      );
+      writeFileSync(
+        join(projectDir, "hypen.json"),
+        JSON.stringify({ entry: "./src/app.ts", port: 3123 })
+      );
+      writeFileSync(
+        join(projectDir, "src/app.ts"),
+        'console.log("SERVER_ENTRY_BOOTED on " + process.env.PORT);'
+      );
+
+      const proc = spawn({
+        cmd: ["bun", cliPath, "dev"],
+        cwd: projectDir,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+
+      let stdoutBuf = "";
+      const reader = proc.stdout.getReader();
+      const decoder = new TextDecoder();
+      const deadline = Date.now() + 8000;
+      try {
+        while (Date.now() < deadline) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          stdoutBuf += decoder.decode(value);
+          if (stdoutBuf.includes("SERVER_ENTRY_BOOTED")) break;
+        }
+      } finally {
+        try { proc.kill(); } catch { /* already dead */ }
+        await proc.exited.catch(() => { /* expected */ });
+      }
+
+      expect(stdoutBuf).toContain("(server-based)");
+      expect(stdoutBuf).toContain("SERVER_ENTRY_BOOTED on 3123");
+      expect(stdoutBuf).not.toContain("ENOENT");
+    }, 15_000);
   });
 
   describe("command parsing", () => {

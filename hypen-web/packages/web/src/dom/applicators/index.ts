@@ -324,6 +324,11 @@ export class ApplicatorRegistry {
    * Set a CSS property with automatic unit handling and variant support
    */
   private setStyleProperty(element: HTMLElement, name: string, value: any): void {
+    // Reserved double-underscore props (the `__anim.*` channels and any
+    // future engine protocol props) are consumed by dedicated subsystems —
+    // belt-and-braces: never leak them into inline CSS.
+    if (name.startsWith("__")) return;
+
     const atIndex = name.indexOf('@');
     const colonIndex = name.indexOf(':');
 

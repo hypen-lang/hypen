@@ -28,6 +28,12 @@ mod resolved_props_serde {
     }
 }
 
+/// Serde helper: skip a boolean flag when `false` so patches that don't set
+/// it stay byte-identical to the pre-flag wire format.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 /// Stable, compact serialization for NodeId.
 ///
 /// Returns a decimal string derived directly from the slotmap key's FFI
@@ -176,8 +182,30 @@ pub enum Patch {
     },
 
     /// Remove a node from the tree and deallocate it.
+    ///
+    /// `transition: true` marks the **root** of a subtree whose node carried
+    /// an `"__anim.exit"` spec in its resolved props: the renderer may play
+    /// the exit animation and finalize the native teardown itself. The
+    /// engine-side node is dead the moment the patch is emitted either way —
+    /// there is no acknowledgement round-trip; the renderer owns the corpse.
+    ///
+    /// # Ordering contract
+    ///
+    /// For an animated subtree the flagged root `Remove` is emitted FIRST,
+    /// followed by its descendants as plain Removes — the renderer must
+    /// learn the subtree is exiting before descendant teardown arrives.
+    /// Descendants are always plain regardless of their own exit specs
+    /// (parent-remove-wins). Non-animated subtrees keep post-order
+    /// (children before parents), byte-identical to the pre-flag protocol.
+    ///
+    /// The field is skipped when `false`, so renderers unaware of the flag
+    /// see an unchanged wire format and snap — graceful degradation.
     #[serde(rename_all = "camelCase")]
-    Remove { id: String },
+    Remove {
+        id: String,
+        #[serde(default, skip_serializing_if = "is_false")]
+        transition: bool,
+    },
 
     /// Detach a subtree from its parent without tearing it down.
     ///
@@ -287,6 +315,16 @@ impl Patch {
     pub fn remove(id: NodeId) -> Self {
         Self::Remove {
             id: node_id_str(id),
+            transition: false,
+        }
+    }
+
+    /// Construct a `Remove` flagged with `transition: true` — the root of an
+    /// exiting subtree. See the ordering contract on [`Patch::Remove`].
+    pub fn remove_with_transition(id: NodeId) -> Self {
+        Self::Remove {
+            id: node_id_str(id),
+            transition: true,
         }
     }
 

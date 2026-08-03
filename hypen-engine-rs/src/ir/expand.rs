@@ -219,6 +219,32 @@ fn process_applicators(
             continue;
         }
 
+        // .transition/.enter/.exit/.layout/.animate → lower into the
+        // reserved "__anim.*" prop channel (one JSON object per channel;
+        // renderers that don't understand it ignore the prop and snap). The
+        // original applicator never becomes a `<name>.<idx>` prop — an
+        // `.animate` with an unknown preset lowers to nothing at all. Must
+        // run BEFORE the variant-map branch below so an animation map
+        // argument isn't misread as variant props. The legacy web-only
+        // string form `.transition("opacity 0.3s ease")` (single positional
+        // string with whitespace) falls through to the generic path
+        // (→ "transition.0") for back-compat, with a deprecation warning.
+        if crate::ir::anim::is_anim_applicator(&applicator.name) {
+            if crate::ir::anim::is_legacy_transition_string(applicator) {
+                crate::log_warn!(
+                    crate::logger::LogScope::Engine,
+                    ".transition(\"<css shorthand>\") is deprecated and web-only; \
+                     use .transition(duration, curve) instead"
+                );
+                // fall through to the generic applicator handling below
+            } else {
+                if let Some((key, spec)) = crate::ir::anim::lower_anim_applicator(applicator) {
+                    props.insert(key, Value::Static(spec));
+                }
+                continue;
+            }
+        }
+
         // Value-map variant form: .padding({ default: 8, md: 16, hover: "x" })
         // When the applicator has a SINGLE positional Map argument whose keys
         // are ALL variant tokens, lower it into suffixed variant props exactly

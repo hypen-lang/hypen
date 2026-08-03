@@ -168,7 +168,10 @@ mod tests {
                 semantics: None,
             },
             // Non-Create patches must be ignored.
-            Patch::Remove { id: str_a.clone() },
+            Patch::Remove {
+                id: str_a.clone(),
+                transition: false,
+            },
         ];
         index.index_creates(&patches, &core);
 

@@ -16,6 +16,11 @@
           "additionalProperties": true,
           "description": "Initial properties for the element"
         },
+        "absentProps": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Fixture-assertion-only field (never on the wire): prop keys that must NOT be present on the matched patch's props. Pins omission contracts, e.g. an invalid .animate preset lowering to no __anim.animate prop and no raw animate.0 passthrough."
+        },
         "semantics": {
           "type": "object",
           "additionalProperties": true,
@@ -86,7 +91,11 @@
       "type": "object",
       "properties": {
         "type": { "const": "remove" },
-        "id": { "type": "string", "description": "Element ID to remove" }
+        "id": { "type": "string", "description": "Element ID to remove" },
+        "transition": {
+          "type": "boolean",
+          "description": "When true, the removed subtree has an exit animation (`__anim.exit` on this root): the renderer may defer teardown until the animation settles. Emitted FIRST, before any descendant removes. Omitted entirely when false — the wire format is unchanged for non-animated removals."
+        }
       },
       "required": ["type", "id"],
       "additionalProperties": false

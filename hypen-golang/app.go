@@ -28,6 +28,12 @@ type Patch struct {
 	ParentID    string         `json:"parentId,omitempty"`
 	BeforeID    string         `json:"beforeId,omitempty"`
 	EventName   string         `json:"eventName,omitempty"`
+	// Transition marks a "remove" whose root carries an exit animation:
+	// animation-capable renderers (e.g. a browser client behind the remote
+	// relay) defer the teardown and play the exit; everyone else snaps.
+	// Carried even though Go renders nothing itself — dropping it here
+	// would silently strip exit animations from every Go-hosted app.
+	Transition bool `json:"transition,omitempty"`
 }
 
 // Patch type constants

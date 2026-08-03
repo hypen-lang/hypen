@@ -1,0 +1,48 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "enter-exit-lowering",
+  "description": "The .enter and .exit applicators lower into __anim.enter / __anim.exit prop objects — presets compose positionally, from:/to: set the direction, and .exit defaults to {150, easeIn} with a fade preset",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Text(\"Toast\").enter(slide, fade, from: bottom, duration: 250).exit(fade)",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "Toast",
+          "__anim.enter": {
+            "curve": "easeOut",
+            "duration": 250,
+            "from": "bottom",
+            "presets": ["slide", "fade"]
+          },
+          "__anim.exit": {
+            "curve": "easeIn",
+            "duration": 150,
+            "presets": ["fade"]
+          }
+        }
+      },
+      { "type": "insert" }
+    ]
+  }
+}

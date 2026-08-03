@@ -7,6 +7,7 @@
       "dependencies": {
         "@hypen-space/cf": "file:../../../hypen-web/packages/cf",
         "@hypen-space/core": "file:../../../hypen-web/packages/core",
+        "@hypen-space/web": "file:../../../hypen-web/packages/web",
         "hypen-engine": "file:../../../hypen-engine-rs/pkg/web",
       },
       "devDependencies": {
@@ -18,6 +19,7 @@
   },
   "overrides": {
     "@hypen-space/core": "file:../../../hypen-web/packages/core",
+    "@hypen-space/web": "file:../../../hypen-web/packages/web",
   },
   "packages": {
     "@chenglou/pretext": ["@chenglou/pretext@0.0.3", "", {}, "sha512-RQmqMqUAPRCyv4R3LlRi/ao6KbNWYclqLA+V1HS7sWgyUUbjn3JmmlfXZSY/BjM4rbmIaMSyIVisYocYGYftiQ=="],
@@ -98,7 +100,7 @@
 
     "@hypen-space/core": ["@hypen-space/core@file:../../../hypen-web/packages/core", { "devDependencies": { "@types/bun": "latest", "typescript": "^5" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }],
 
-    "@hypen-space/web": ["@hypen-space/web@0.5.2", "", { "dependencies": { "@chenglou/pretext": "^0.0.3", "@hypen-space/core": "^0.5.2", "taffy-layout": "^2.0.3" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-xGU0vfwZx4BfXHs7SfR5kSaFQew97cKj7BVV5US1e9tKHvxlMwKvkaqULJqI8Ato4rD1Lr5ar9BufbQHopNALg=="],
+    "@hypen-space/web": ["@hypen-space/web@file:../../../hypen-web/packages/web", { "dependencies": { "@chenglou/pretext": "^0.0.3", "@hypen-space/core": "^0.5.3", "taffy-layout": "^2.0.3" }, "devDependencies": { "@types/bun": "latest", "typescript": "^5" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }],
 
     "@img/colour": ["@img/colour@1.1.0", "", {}, "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ=="],
 
@@ -222,8 +224,14 @@
 
     "youch-core": ["youch-core@0.3.3", "", { "dependencies": { "@poppinss/exception": "^1.2.2", "error-stack-parser-es": "^1.0.5" } }, "sha512-ho7XuGjLaJ2hWHoK8yFnsUGy2Y5uDpqSTq1FkHLK4/oqKtyUU1AFbOOxY4IpC9f0fTLjwYbslUz0Po5BpD1wrA=="],
 
-    "@hypen-space/cf/@hypen-space/core": ["@hypen-space/core@file:../../../hypen-web/packages/core", {}],
+    "@hypen-space/cf/@hypen-space/core": ["@hypen-space/core@file:../../../hypen-web/packages/core", { "devDependencies": { "@types/bun": "latest", "typescript": "^5" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }],
 
-    "@hypen-space/web/@hypen-space/core": ["@hypen-space/core@file:../../../hypen-web/packages/core", {}],
+    "@hypen-space/cf/@hypen-space/web": ["@hypen-space/web@file:../../../hypen-web/packages/web", { "dependencies": { "@chenglou/pretext": "^0.0.3", "@hypen-space/core": "^0.5.3", "taffy-layout": "^2.0.3" }, "devDependencies": { "@types/bun": "latest", "typescript": "^5" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }],
+
+    "@hypen-space/cf/hypen-engine": ["hypen-engine@file:../../../hypen-engine-rs/pkg/web", {}],
+
+    "@hypen-space/web/@hypen-space/core": ["@hypen-space/core@file:../../../hypen-web/packages/core", { "devDependencies": { "@types/bun": "latest", "typescript": "^5" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }],
+
+    "@hypen-space/cf/@hypen-space/web/@hypen-space/core": ["@hypen-space/core@file:../../../hypen-web/packages/core", { "devDependencies": { "@types/bun": "latest", "typescript": "^5" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }],
   }
 }

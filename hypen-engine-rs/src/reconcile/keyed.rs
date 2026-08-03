@@ -4,7 +4,9 @@
 //! DOM moves by computing the Longest Increasing Subsequence (LIS) of
 //! old-to-new position mappings.
 
-use super::diff::{create_ir_node_tree_impl, reconcile_ir_node_impl, ReconcileCtx};
+use super::diff::{
+    create_ir_node_tree_impl, reconcile_ir_node_impl, root_remove_patch, ReconcileCtx,
+};
 use super::item_bindings::replace_ir_node_item_bindings;
 use super::Patch;
 use crate::ir::{IRNode, NodeId};
@@ -187,16 +189,19 @@ pub(crate) fn reconcile_iterable_children(
         }
     }
 
-    // Remove old children that weren't reused.
+    // Remove old children that weren't reused. The exit spec must be read
+    // (root_remove_patch) before `ctx.tree.remove` drops the node's props.
     for &old_id in old_keyed.values() {
+        let patch = root_remove_patch(ctx.tree, old_id);
         ctx.dependencies.remove_node(old_id);
         ctx.tree.remove(old_id);
-        ctx.patches.push(Patch::remove(old_id));
+        ctx.patches.push(patch);
     }
     for &old_id in &old_unkeyed[unkeyed_idx..] {
+        let patch = root_remove_patch(ctx.tree, old_id);
         ctx.dependencies.remove_node(old_id);
         ctx.tree.remove(old_id);
-        ctx.patches.push(Patch::remove(old_id));
+        ctx.patches.push(patch);
     }
 }
 

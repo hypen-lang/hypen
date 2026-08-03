@@ -1,0 +1,59 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "animate-repeat-forms",
+  "description": "The .animate repeat: modifier lowers both wire forms: a positive integer becomes a JSON number (pulse, repeat: 3) and the bare loop token becomes the string \"loop\" (shake, repeat: loop) — each overriding the preset's own repeat default",
+  "category": "animation",
+  "priority": "P1",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Column { Text(\"Counted\").animate(pulse, repeat: 3) Text(\"Looped\").animate(shake, repeat: loop) }",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 6,
+    "patchTypes": ["create", "insert", "create", "insert", "create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Column" },
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "Counted",
+          "__anim.animate": {
+            "preset": "pulse",
+            "duration": 1200,
+            "repeat": 3,
+            "curve": "easeInOut"
+          }
+        }
+      },
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "Looped",
+          "__anim.animate": {
+            "preset": "shake",
+            "duration": 400,
+            "repeat": "loop",
+            "curve": "easeInOut"
+          }
+        }
+      },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

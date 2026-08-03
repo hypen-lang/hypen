@@ -50,6 +50,16 @@ export type Patch = {
   parentId?: string;
   beforeId?: string;
   eventName?: string;
+  /**
+   * On `remove`: `true` when the removed subtree's root carries an
+   * `__anim.exit` spec and the renderer should play the exit animation
+   * before tearing the element down. Engine-side the id is already dead —
+   * the renderer owns deferred finalization (no ack round-trip). A flagged
+   * root is emitted BEFORE its descendants' plain removes so the renderer
+   * learns the subtree is exiting first. Absent/false — and in renderers
+   * that don't understand the flag — removal is immediate (sanctioned snap).
+   */
+  transition?: boolean;
 };
 
 /**

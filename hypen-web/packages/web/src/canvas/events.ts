@@ -139,7 +139,9 @@ export class CanvasEventManager {
     scrollX: number = 0,
     scrollY: number = 0,
   ): VirtualNode | null {
-    if (!node.visible || !node.layout) return null;
+    // Exit-animating subtrees are pruned wholesale: the corpse is painted
+    // while its exit plays, but engine-side those ids are already dead.
+    if (!node.visible || !node.layout || node.exiting) return null;
 
     const layout = node.layout;
     const x = layout.x - scrollX;

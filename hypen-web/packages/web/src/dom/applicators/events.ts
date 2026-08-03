@@ -24,6 +24,7 @@ import {
   getMeta,
   setMeta,
 } from "../element-data.js";
+import { isInExitingSubtree } from "../anim.js";
 
 const log = frameworkLoggers.events;
 
@@ -234,6 +235,10 @@ function createEventHandler(
         actionMetaKey,
       );
       if (!current) return;
+
+      // Exit-animating subtrees are visually leaving and their engine-side
+      // ids are already dead — drop dispatches instead of firing ghosts.
+      if (isInExitingSubtree(element)) return;
 
       // Handle throttling
       if (options.throttleMs && throttleTimer) {

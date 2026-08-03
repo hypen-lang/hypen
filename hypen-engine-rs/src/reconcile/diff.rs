@@ -487,11 +487,7 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
 
         if old_children.len() > new_children.len() {
             for old_child_id in old_children.iter().skip(new_children.len()).copied() {
-                let subtree_ids = collect_subtree_ids(ctx.tree, old_child_id);
-                for &id in &subtree_ids {
-                    ctx.patches.push(Patch::remove(id));
-                    ctx.dependencies.remove_node(id);
-                }
+                emit_subtree_removal(ctx.tree, old_child_id, ctx.patches, ctx.dependencies);
                 ctx.tree.remove_child(node_id, old_child_id);
                 ctx.tree.remove(old_child_id);
             }
@@ -516,12 +512,7 @@ fn replace_subtree_impl(
         None
     };
 
-    let ids_to_remove = collect_subtree_ids(ctx.tree, old_node_id);
-
-    for &id in &ids_to_remove {
-        ctx.patches.push(Patch::remove(id));
-        ctx.dependencies.remove_node(id);
-    }
+    emit_subtree_removal(ctx.tree, old_node_id, ctx.patches, ctx.dependencies);
 
     if let Some(pid) = parent_id {
         if let Some(parent) = ctx.tree.get_mut(pid) {
@@ -1001,7 +992,8 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
 
                 if old_children.len() != expected_children_count {
                     for &old_child_id in &old_children {
-                        ctx.patches.push(Patch::remove(old_child_id));
+                        let patch = root_remove_patch(ctx.tree, old_child_id);
+                        ctx.patches.push(patch);
                     }
 
                     if let Some(node) = ctx.tree.get_mut(node_id) {
@@ -1311,6 +1303,65 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
     }
 }
 
+/// Build the root `Remove` patch for `id`, flagged with `transition: true`
+/// when the node's resolved props carry an `"__anim.exit"` spec. Must be
+/// called BEFORE the node is removed from `tree` — afterwards the props
+/// (and the spec) are gone and the removal silently loses its animation.
+pub(crate) fn root_remove_patch(tree: &InstanceTree, id: NodeId) -> Patch {
+    let exits = tree
+        .get(id)
+        .is_some_and(|node| node.props.contains_key(crate::ir::anim::ANIM_EXIT_PROP));
+    if exits {
+        Patch::remove_with_transition(id)
+    } else {
+        Patch::remove(id)
+    }
+}
+
+/// Emit the Remove patches for the subtree rooted at `root_id` and clear its
+/// dependency registrations, without mutating the tree — callers unlink and
+/// `tree.remove(...)` afterwards (`&InstanceTree` enforces that the removal
+/// root's `"__anim.exit"` spec is read before any mutation).
+///
+/// Ordering (the contract documented on [`Patch::Remove`]):
+/// - root has an exit spec → flagged root Remove FIRST, then descendants as
+///   plain Removes (post-order among themselves). Descendants are plain even
+///   when they carry their own exit specs — parent-remove-wins falls out
+///   structurally because only the removal root is consulted.
+/// - no exit spec → today's post-order exactly (children before parents),
+///   zero ordering churn for non-animated removals.
+fn emit_subtree_removal(
+    tree: &InstanceTree,
+    root_id: NodeId,
+    patches: &mut Vec<Patch>,
+    dependencies: &mut DependencyGraph,
+) {
+    let root_patch = root_remove_patch(tree, root_id);
+    let animated = matches!(
+        root_patch,
+        Patch::Remove {
+            transition: true,
+            ..
+        }
+    );
+    let ids = collect_subtree_ids(tree, root_id);
+    if animated {
+        patches.push(root_patch);
+        for &id in &ids {
+            if id != root_id {
+                patches.push(Patch::remove(id));
+            }
+        }
+    } else {
+        for &id in &ids {
+            patches.push(Patch::remove(id));
+        }
+    }
+    for &id in &ids {
+        dependencies.remove_node(id);
+    }
+}
+
 /// Remove a subtree and generate Remove patches
 fn remove_subtree(
     tree: &mut InstanceTree,
@@ -1318,11 +1369,7 @@ fn remove_subtree(
     patches: &mut Vec<Patch>,
     dependencies: &mut DependencyGraph,
 ) {
-    let ids = collect_subtree_ids(tree, node_id);
-    for &id in &ids {
-        patches.push(Patch::remove(id));
-        dependencies.remove_node(id);
-    }
+    emit_subtree_removal(tree, node_id, patches, dependencies);
     tree.remove(node_id);
 }
 

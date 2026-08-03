@@ -348,7 +348,17 @@ impl From<InternalPatch> for Patch {
                 before_id,
                 semantics_json: None,
             },
-            InternalPatch::Remove { id } => Patch {
+            // KNOWN v1 LIMITATION: the deferred-remove `transition` flag is
+            // dropped at this boundary. Mobile renderers snapping on removal
+            // is spec-sanctioned degradation, but this struct also feeds the
+            // Kotlin/Swift Remote UI relays — a browser client served by a
+            // Kotlin- or Swift-hosted app will NOT receive the flag and
+            // snaps on exit even though its DOM renderer supports exit
+            // animations. Fixing that means adding a defaulted `transition`
+            // field here, regenerating both binding sets, and threading it
+            // through each SDK's core Patch type + relay serialization —
+            // deferred with the rest of the non-web animation work.
+            InternalPatch::Remove { id, .. } => Patch {
                 patch_type: PatchType::Remove,
                 id,
                 element_type: None,

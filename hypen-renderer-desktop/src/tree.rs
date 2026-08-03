@@ -208,7 +208,7 @@ impl Tree {
                 self.parent_by_child.insert(id.clone(), parent_id.clone());
                 self.clear_detached(id);
             }
-            Patch::Remove { id } => {
+            Patch::Remove { id, .. } => {
                 // O(1) parent lookup replaces the previous full
                 // children-map scan to find the affected list.
                 if let Some(prev_parent) = self.parent_by_child.remove(id) {
@@ -470,7 +470,10 @@ mod tests {
         assert_eq!(tree.children_of("a"), &["b".to_string()]);
         assert_eq!(tree.children_of("b"), &["c".to_string()]);
 
-        tree.apply(&Patch::Remove { id: "a".into() });
+        tree.apply(&Patch::Remove {
+            id: "a".into(),
+            transition: false,
+        });
 
         // Nodes are gone.
         assert!(tree.get("a").is_none());
@@ -605,7 +608,10 @@ mod tests {
         assert!(!tree.children_of("col").contains(&"a".to_string()));
 
         // Remove drops the parent_by_child entry.
-        tree.apply(&Patch::Remove { id: "a".into() });
+        tree.apply(&Patch::Remove {
+            id: "a".into(),
+            transition: false,
+        });
         assert_eq!(tree.parent_of("a"), None);
     }
 
@@ -654,7 +660,10 @@ mod tests {
             id: "a".into(),
             before_id: None,
         });
-        tree.apply(&Patch::Remove { id: "b".into() });
+        tree.apply(&Patch::Remove {
+            id: "b".into(),
+            transition: false,
+        });
         assert_eq!(tree.detached_len(), 0);
     }
 

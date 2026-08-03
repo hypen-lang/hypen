@@ -367,6 +367,23 @@ export class AccessibilityLayer {
   }
 
   /**
+   * An exit playback started on this subtree root: the engine already
+   * considers the ids dead, so the mirror must stop being interactive NOW —
+   * `inert` blocks focus and activation for the whole subtree (and evicts
+   * any focus the browser holds inside it), `aria-hidden` drops it from the
+   * AT tree while the pixels fade. The element is removed outright when the
+   * exit finalizes (`removeNode`). DOM-renderer parity: its `beginExit`
+   * sets `inert` + the exiting attribute on the root immediately.
+   */
+  markExiting(id: string): void {
+    if (!this.enabled) return;
+    const element = this.nodeMap.get(id);
+    if (!element) return;
+    element.setAttribute("inert", "");
+    element.setAttribute("aria-hidden", "true");
+  }
+
+  /**
    * Full rebuild from a virtual tree. Only used when re-enabling the mirror
    * (`setEnabled(true)`) and by `clear()` — steady-state sync is incremental.
    */

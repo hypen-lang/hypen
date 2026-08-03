@@ -192,10 +192,11 @@ fn test_remove_patch() {
     // WHEN: Create Remove patch
     let patch = Patch::remove(node_id);
 
-    // THEN: Remove patch with correct structure
+    // THEN: Remove patch with correct structure, unflagged by default
     match patch {
-        Patch::Remove { id } => {
+        Patch::Remove { id, transition } => {
             assert!(!id.is_empty());
+            assert!(!transition);
         }
         _ => panic!("Expected Remove patch"),
     }
@@ -313,10 +314,11 @@ fn test_deserialize_patch() {
     // WHEN: Deserialize from JSON
     let patch: Patch = serde_json::from_value(json).unwrap();
 
-    // THEN: Correct patch variant
+    // THEN: Correct patch variant; absent `transition` defaults to false
     match patch {
-        Patch::Remove { id } => {
+        Patch::Remove { id, transition } => {
             assert_eq!(id, "42");
+            assert!(!transition);
         }
         _ => panic!("Expected Remove patch"),
     }
@@ -512,4 +514,82 @@ fn test_node_id_str_stable_and_unique() {
         ids.len(),
         "different NodeIds collided to the same string"
     );
+}
+
+// ============================================================================
+// Deferred remove protocol (`transition` flag)
+// ============================================================================
+
+#[test]
+fn test_remove_with_transition_constructor() {
+    // GIVEN: Node ID of an exiting subtree root
+    let node_id = test_node_id();
+
+    // WHEN: Create flagged Remove patch
+    let patch = Patch::remove_with_transition(node_id);
+
+    // THEN: Remove patch with the transition flag set
+    match patch {
+        Patch::Remove { id, transition } => {
+            assert!(!id.is_empty());
+            assert!(transition);
+        }
+        _ => panic!("Expected Remove patch"),
+    }
+}
+
+#[test]
+fn test_serialize_unflagged_remove_omits_transition() {
+    // GIVEN: Plain Remove patch
+    let patch = Patch::remove(test_node_id());
+
+    // WHEN: Serialize to JSON
+    let json = serde_json::to_value(&patch).unwrap();
+
+    // THEN: Wire format is byte-identical to the pre-flag protocol —
+    // exactly {"type":"remove","id":"..."} with no `transition` key.
+    assert_eq!(json["type"], "remove");
+    assert!(json.get("transition").is_none());
+    assert_eq!(json.as_object().unwrap().len(), 2);
+}
+
+#[test]
+fn test_serialize_flagged_remove_carries_transition() {
+    // GIVEN: Flagged Remove patch
+    let patch = Patch::remove_with_transition(test_node_id());
+
+    // WHEN: Serialize to JSON
+    let json = serde_json::to_value(&patch).unwrap();
+
+    // THEN: {"type":"remove","id":"...","transition":true}
+    assert_eq!(json["type"], "remove");
+    assert_eq!(json["transition"], true);
+}
+
+#[test]
+fn test_remove_transition_serde_roundtrip() {
+    // GIVEN: One flagged and one plain Remove
+    let flagged = Patch::remove_with_transition(test_node_id());
+    let plain = Patch::remove(test_node_id());
+
+    // WHEN: Round-trip both through JSON
+    let flagged_back: Patch =
+        serde_json::from_str(&serde_json::to_string(&flagged).unwrap()).unwrap();
+    let plain_back: Patch = serde_json::from_str(&serde_json::to_string(&plain).unwrap()).unwrap();
+
+    // THEN: The flag survives, and its absence deserializes to false
+    assert!(matches!(
+        flagged_back,
+        Patch::Remove {
+            transition: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        plain_back,
+        Patch::Remove {
+            transition: false,
+            ..
+        }
+    ));
 }

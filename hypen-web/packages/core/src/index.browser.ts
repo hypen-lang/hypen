@@ -139,3 +139,47 @@ export {
   isDebugMode,
 } from "./logger.js";
 export type { LogLevel, LoggerConfig, LogHandler } from "./logger.js";
+
+// ============================================================================
+// ANIMATION (__anim.* prop channel — shared renderer vocabulary)
+// ============================================================================
+
+export {
+  ANIM_PROP_PREFIX,
+  ANIM_TRANSITION_PROP,
+  ANIM_ENTER_PROP,
+  ANIM_EXIT_PROP,
+  ANIM_LAYOUT_PROP,
+  ANIM_PROP_ANIMATE,
+  ANIM_CURVES,
+  ANIM_PRESETS,
+  ANIM_DIRECTIONS,
+  ANIMATE_PRESETS,
+  CURVE_TO_CSS,
+  ANIMATABLE_PROPS,
+  ENTER_EXIT_PRESETS,
+  SLIDE_OFFSET_PX,
+  SCALE_HIDDEN_FACTOR,
+  CURVE_BEZIER_POINTS,
+  cssPropertiesFor,
+  presetHiddenStyles,
+  parseAnimProps,
+  cubicBezier,
+  curveFunction,
+} from "./animation.js";
+export type {
+  AnimCurve,
+  EasingFunction,
+  AnimPreset,
+  AnimDirection,
+  AnimRepeat,
+  AnimatePreset,
+  AnimatePresetDefaults,
+  TransitionSpec,
+  EnterSpec,
+  ExitSpec,
+  LayoutSpec,
+  AnimateSpec,
+  NodeAnimSpecs,
+  PresetHiddenStyle,
+} from "./animation.js";

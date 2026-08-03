@@ -345,6 +345,7 @@ fn test_patch_serialization_all_types() {
         },
         Patch::Remove {
             id: "node1".to_string(),
+            transition: false,
         },
     ];
 

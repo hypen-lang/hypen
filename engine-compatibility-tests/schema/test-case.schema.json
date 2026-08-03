@@ -15,7 +15,7 @@
     },
     "category": {
       "type": "string",
-      "enum": ["rendering", "state", "reconciliation", "actions", "control-flow", "lifecycle"],
+      "enum": ["rendering", "state", "reconciliation", "actions", "control-flow", "lifecycle", "animation"],
       "description": "Test category for organization"
     },
     "priority": {
@@ -73,6 +73,16 @@
           "type": "integer",
           "minimum": 0,
           "description": "Expected number of patches (alternative to exact match)"
+        },
+        "patchTypes": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Expected patch types in exact emission order"
+        },
+        "strictPatchOrder": {
+          "type": "boolean",
+          "default": false,
+          "description": "When true, `patches` must match the emitted patches index-by-index (exact emission order) instead of structurally. Use for fixtures whose contract IS the ordering, e.g. the flagged-root-first deferred-remove protocol"
         }
       },
       "additionalProperties": false
@@ -88,8 +98,12 @@
           },
           "action": {
             "type": "string",
-            "enum": ["initialRender", "updateState", "dispatchAction"],
+            "enum": ["initialRender", "updateState", "dispatchAction", "renderSource"],
             "description": "Type of action to perform"
+          },
+          "source": {
+            "type": "string",
+            "description": "Replacement Hypen DSL source (for renderSource action) — reconciled against the existing tree, so subtree replacement/teardown paths can be exercised"
           },
           "stateChange": {
             "$ref": "state-change.schema.json",
@@ -108,6 +122,16 @@
             "type": "integer",
             "minimum": 0,
             "description": "Expected number of patches (alternative to exact match)"
+          },
+          "expectedPatchTypes": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Expected patch types in exact emission order"
+          },
+          "strictPatchOrder": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, `expectedPatches` must match the emitted patches index-by-index (exact emission order) instead of structurally. Use for steps whose contract IS the ordering, e.g. the flagged-root-first deferred-remove protocol"
           },
           "forbiddenPatches": {
             "type": "array",

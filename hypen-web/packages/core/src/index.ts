@@ -336,3 +336,47 @@ export type { PatchValidationResult } from "./validate.js";
 // `checkAccessibility(source)` findings in a host dev console.
 export { logA11yDiagnostics, checkRuleDrift, EXPECTED_A11Y_RULES } from "./a11y.js";
 export type { A11yDiagnostic, A11ySourceSpan, A11yRuleDrift } from "./a11y.js";
+
+// ============================================================================
+// ANIMATION (__anim.* prop channel — shared renderer vocabulary)
+// ============================================================================
+
+export {
+  ANIM_PROP_PREFIX,
+  ANIM_TRANSITION_PROP,
+  ANIM_ENTER_PROP,
+  ANIM_EXIT_PROP,
+  ANIM_LAYOUT_PROP,
+  ANIM_PROP_ANIMATE,
+  ANIM_CURVES,
+  ANIM_PRESETS,
+  ANIM_DIRECTIONS,
+  ANIMATE_PRESETS,
+  CURVE_TO_CSS,
+  ANIMATABLE_PROPS,
+  ENTER_EXIT_PRESETS,
+  SLIDE_OFFSET_PX,
+  SCALE_HIDDEN_FACTOR,
+  CURVE_BEZIER_POINTS,
+  cssPropertiesFor,
+  presetHiddenStyles,
+  parseAnimProps,
+  cubicBezier,
+  curveFunction,
+} from "./animation.js";
+export type {
+  AnimCurve,
+  EasingFunction,
+  AnimPreset,
+  AnimDirection,
+  AnimRepeat,
+  AnimatePreset,
+  AnimatePresetDefaults,
+  TransitionSpec,
+  EnterSpec,
+  ExitSpec,
+  LayoutSpec,
+  AnimateSpec,
+  NodeAnimSpecs,
+  PresetHiddenStyle,
+} from "./animation.js";

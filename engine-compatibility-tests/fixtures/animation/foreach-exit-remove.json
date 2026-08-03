@@ -1,0 +1,86 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "foreach-exit-remove",
+  "description": "Shrinking a keyed ForEach list flags every removed item root that carries __anim.exit with transition:true, and all Removes are emitted before the rebuild's Create/Insert patches",
+  "category": "animation",
+  "priority": "P1",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented (golang); ForEach source rendering not supported in the typescript runner",
+    "sdks": ["golang", "typescript"]
+  },
+
+  "input": {
+    "source": "Column { ForEach(items: \"@{state.items}\") { Text(\"@{item.name}\", key: \"@{item.id}\").exit(fade) } }",
+    "initialState": {
+      "items": [
+        { "id": "a", "name": "Alice" },
+        { "id": "b", "name": "Bob" }
+      ]
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["items"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render creates both items with __anim.exit",
+      "action": "initialRender",
+      "expectedPatchCount": 6,
+      "expectedPatchTypes": ["create", "insert", "create", "insert", "create", "insert"],
+      "expectedPatches": [
+        { "type": "create", "elementType": "Column", "props": {} },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "Alice",
+            "__anim.exit": { "curve": "easeIn", "duration": 150, "presets": ["fade"] },
+            "key": "a"
+          }
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "Bob",
+            "__anim.exit": { "curve": "easeIn", "duration": 150, "presets": ["fade"] },
+            "key": "b"
+          }
+        },
+        { "type": "insert" },
+        { "type": "insert" },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Dropping Bob rebuilds the list: flagged Removes for the old item roots first, then Alice is recreated",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["items"],
+        "newValues": {
+          "items": [{ "id": "a", "name": "Alice" }]
+        }
+      },
+      "expectedPatchCount": 4,
+      "expectedPatchTypes": ["remove", "remove", "create", "insert"],
+      "expectedPatches": [
+        { "type": "remove", "transition": true },
+        { "type": "remove", "transition": true },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "Alice",
+            "__anim.exit": { "curve": "easeIn", "duration": 150, "presets": ["fade"] },
+            "key": "a"
+          }
+        },
+        { "type": "insert" }
+      ]
+    }
+  ]
+}

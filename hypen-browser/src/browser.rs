@@ -477,7 +477,10 @@ impl BrowserModule {
         let removes: Vec<Patch> = tab
             .app_root_ids
             .iter()
-            .map(|id| Patch::Remove { id: id.clone() })
+            .map(|id| Patch::Remove {
+                id: id.clone(),
+                transition: false,
+            })
             .collect();
         if !removes.is_empty() {
             forward(&self.inner, &removes);
@@ -858,7 +861,7 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
                                     // Filter out roots that were
                                     // Removed in the same drain.
                                     for p in &rewritten {
-                                        if let Patch::Remove { id } = p {
+                                        if let Patch::Remove { id, .. } = p {
                                             t.app_root_ids.retain(|tr| tr != id);
                                         }
                                     }
@@ -919,7 +922,7 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
         // Filter out any roots that were just removed by the same
         // batch.
         for p in &rewritten {
-            if let Patch::Remove { id } = p {
+            if let Patch::Remove { id, .. } = p {
                 tab.app_root_ids.retain(|tracked| tracked != id);
                 // Also drop the matching pending new_root if the
                 // worker emitted Create + Insert + Remove all in the
@@ -1013,8 +1016,9 @@ fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec
                 before_id: before_id.map(|b| prefix_id(prefix, &b)),
             }
         }
-        Patch::Remove { id } => Patch::Remove {
+        Patch::Remove { id, transition } => Patch::Remove {
             id: prefix_id(prefix, &id),
+            transition,
         },
         Patch::Detach { id } => Patch::Detach {
             id: prefix_id(prefix, &id),
@@ -1291,7 +1295,7 @@ mod tests {
         let removes: Vec<&str> = after[before..]
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id } => Some(id.as_str()),
+                Patch::Remove { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
@@ -1340,7 +1344,7 @@ mod tests {
         let removes: Vec<&str> = after[before..]
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id } => Some(id.as_str()),
+                Patch::Remove { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();
@@ -1467,7 +1471,7 @@ mod tests {
         let app_removes: Vec<&str> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id } if id.starts_with("a1:") || id.starts_with("a2:") => {
+                Patch::Remove { id, .. } if id.starts_with("a1:") || id.starts_with("a2:") => {
                     Some(id.as_str())
                 }
                 _ => None,
@@ -1517,7 +1521,7 @@ mod tests {
                     Patch::Attach { id, .. } if id.starts_with("a1:")
                 ) || matches!(
                     p,
-                    Patch::Remove { id } if id.starts_with("a1:")
+                    Patch::Remove { id, .. } if id.starts_with("a1:")
                 )
             })
             .count();
@@ -1623,7 +1627,7 @@ mod tests {
         let removed: Vec<&str> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id } => Some(id.as_str()),
+                Patch::Remove { id, .. } => Some(id.as_str()),
                 _ => None,
             })
             .collect();

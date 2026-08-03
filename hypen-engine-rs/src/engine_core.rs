@@ -408,7 +408,7 @@ impl EngineCore {
             .collect();
         if !created_ids.is_empty() {
             patches.retain(|p| {
-                if let Patch::Remove { id } = p {
+                if let Patch::Remove { id, .. } = p {
                     !created_ids.contains(id)
                 } else {
                     true
@@ -492,5 +492,43 @@ fn collect_module_scopes_ir(node: &IRNode, scopes: &mut HashSet<String>) {
 impl Default for EngineCore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    #[test]
+    fn filter_spurious_removes_drops_flagged_remove_for_created_id() {
+        let mut patches = vec![
+            Patch::Create {
+                id: "7".to_string(),
+                element_type: "Row".to_string(),
+                props: Arc::new(IndexMap::new()),
+                semantics: None,
+            },
+            Patch::Remove {
+                id: "7".to_string(),
+                transition: true,
+            },
+            Patch::Remove {
+                id: "9".to_string(),
+                transition: true,
+            },
+        ];
+
+        EngineCore::filter_spurious_removes(&mut patches);
+
+        // The created-in-batch Remove is dropped — its exit flag goes with
+        // the pair. The unrelated flagged Remove survives intact.
+        assert_eq!(patches.len(), 2);
+        assert!(matches!(&patches[0], Patch::Create { id, .. } if id == "7"));
+        assert!(
+            matches!(&patches[1], Patch::Remove { id, transition: true } if id == "9"),
+            "unrelated flagged Remove must keep its transition flag: {:?}",
+            patches[1]
+        );
     }
 }

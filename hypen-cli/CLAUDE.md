@@ -109,3 +109,18 @@ The CLI reads `hypen.json` (the only supported config format — `.ts` was remov
   "outDir": "dist"
 }
 ```
+
+Server-based projects (modules registered programmatically in the entry
+script, no components directory) use a script path as `entry` — the file
+extension is how `dev`/`test`/Studio detect the layout:
+```json
+{
+  "entry": "./src/app.ts",
+  "port": 3000,
+  "outDir": "dist"
+}
+```
+For these, `hypen dev` runs the entry with `bun --hot` (passing `PORT`),
+`hypen build` bundles it to `<outDir>/main.js` with dependencies external,
+and `hypen test`/Studio open in connect-only mode pointing at the running
+server.

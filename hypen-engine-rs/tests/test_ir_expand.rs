@@ -310,3 +310,313 @@ fn test_empty_component() {
     assert_eq!(element.ir_children.len(), 0);
     assert_eq!(element.key, None);
 }
+
+// ============================================================================
+// Animation Applicator Lowering (.transition/.enter/.exit/.layout → __anim.*)
+// ============================================================================
+
+/// Helper: fetch a lowered "__anim.<channel>" spec as JSON.
+fn anim_spec(element: &hypen_engine::Element, channel: &str) -> serde_json::Value {
+    match element.props.get(&format!("__anim.{channel}")).unwrap() {
+        Value::Static(v) => v.clone(),
+        other => panic!("Expected Static __anim.{channel}, got {:?}", other),
+    }
+}
+
+#[test]
+fn test_transition_positional_lowering() {
+    // GIVEN: .transition(200, easeOut) — number→duration(ms), token→curve
+    let element = parse_to_element(r#"Text("Hi").transition(200, easeOut)"#);
+
+    // THEN: One "__anim.transition" prop, no "transition.0" leftover
+    assert_eq!(
+        anim_spec(&element, "transition"),
+        json!({"duration": 200, "curve": "easeOut"})
+    );
+    assert!(!element.props.contains_key("transition.0"));
+}
+
+#[test]
+fn test_transition_named_lowering_with_scoped_props() {
+    let element = parse_to_element(
+        r#"Text("Hi").transition(duration: 300, curve: spring, delay: 50, props: [opacity, translateY])"#,
+    );
+
+    assert_eq!(
+        anim_spec(&element, "transition"),
+        json!({
+            "duration": 300,
+            "curve": "spring",
+            "delay": 50,
+            "props": ["opacity", "translateY"]
+        })
+    );
+}
+
+#[test]
+fn test_transition_props_whitelist_filtering() {
+    // GIVEN: props list mixing animatable and non-animatable names
+    let element =
+        parse_to_element(r#"Text("Hi").transition(props: [opacity, tw, display, fontSize])"#);
+
+    // THEN: Non-animatable entries dropped
+    assert_eq!(
+        anim_spec(&element, "transition")["props"],
+        json!(["opacity", "fontSize"])
+    );
+}
+
+#[test]
+fn test_transition_unknown_token_falls_back_to_defaults() {
+    let element = parse_to_element(r#"Text("Hi").transition(wobble)"#);
+
+    assert_eq!(
+        anim_spec(&element, "transition"),
+        json!({"duration": 200, "curve": "easeOut"})
+    );
+}
+
+#[test]
+fn test_transition_binding_args_rejected() {
+    // GIVEN: bindings in animation arguments — warn + ignore, keep defaults
+    let element = parse_to_element(r#"Text("Hi").transition(@state.speed, curve: @state.curve)"#);
+
+    assert_eq!(
+        anim_spec(&element, "transition"),
+        json!({"duration": 200, "curve": "easeOut"})
+    );
+}
+
+#[test]
+fn test_transition_legacy_string_passthrough() {
+    // GIVEN: legacy web-only CSS shorthand (single positional string with
+    // whitespace) — falls through to the generic path unchanged
+    let element = parse_to_element(r#"Text("Hi").transition("opacity 0.3s ease")"#);
+
+    assert!(!element.props.contains_key("__anim.transition"));
+    match element.props.get("transition.0").unwrap() {
+        Value::Static(v) => assert_eq!(v, &json!("opacity 0.3s ease")),
+        _ => panic!("Expected Static value"),
+    }
+}
+
+#[test]
+fn test_transition_single_curve_token_is_new_path() {
+    // Pins the legacy discriminator: .transition(easeOut) has no whitespace
+    // → new path, not legacy passthrough
+    let element = parse_to_element(r#"Text("Hi").transition(easeOut)"#);
+
+    assert!(!element.props.contains_key("transition.0"));
+    assert_eq!(
+        anim_spec(&element, "transition"),
+        json!({"duration": 200, "curve": "easeOut"})
+    );
+}
+
+#[test]
+fn test_enter_presets_compose() {
+    let element = parse_to_element(
+        r#"Row { Text("Saved!") }.enter(slide, fade, from: bottom, duration: 200, curve: easeOut)"#,
+    );
+
+    assert_eq!(
+        anim_spec(&element, "enter"),
+        json!({
+            "presets": ["slide", "fade"],
+            "from": "bottom",
+            "duration": 200,
+            "curve": "easeOut"
+        })
+    );
+    assert!(!element.props.contains_key("enter.0"));
+}
+
+#[test]
+fn test_exit_defaults() {
+    let element = parse_to_element(r#"Row { Text("Bye") }.exit(fade, duration: 150)"#);
+
+    assert_eq!(
+        anim_spec(&element, "exit"),
+        json!({"presets": ["fade"], "duration": 150, "curve": "easeIn"})
+    );
+}
+
+#[test]
+fn test_exit_slide_direction() {
+    let element = parse_to_element(r#"Row { Text("Bye") }.exit(slide, to: trailing)"#);
+
+    assert_eq!(
+        anim_spec(&element, "exit"),
+        json!({"presets": ["slide"], "to": "trailing", "duration": 150, "curve": "easeIn"})
+    );
+}
+
+#[test]
+fn test_layout_lowering() {
+    // .layout(spring) and bare .layout() both hit the {300, spring} defaults
+    let element = parse_to_element(r#"Row { Text("A") }.layout(spring)"#);
+    assert_eq!(
+        anim_spec(&element, "layout"),
+        json!({"duration": 300, "curve": "spring"})
+    );
+
+    let element = parse_to_element(r#"Row { Text("A") }.layout()"#);
+    assert_eq!(
+        anim_spec(&element, "layout"),
+        json!({"duration": 300, "curve": "spring"})
+    );
+    assert!(!element.props.contains_key("layout.0"));
+}
+
+#[test]
+fn test_anim_applicators_stack_per_channel() {
+    let element = parse_to_element(
+        r#"Row { Text("T") }.enter(fade).exit(fade).layout(spring).transition(200).animate(pulse)"#,
+    );
+
+    assert!(element.props.contains_key("__anim.enter"));
+    assert!(element.props.contains_key("__anim.exit"));
+    assert!(element.props.contains_key("__anim.layout"));
+    assert!(element.props.contains_key("__anim.transition"));
+    assert!(element.props.contains_key("__anim.animate"));
+}
+
+#[test]
+fn test_animate_preset_defaults() {
+    // GIVEN: .animate(spin) — bare preset, everything else defaulted
+    let element = parse_to_element(r#"Icon("loader").animate(spin)"#);
+
+    // THEN: One "__anim.animate" prop with spin's defaults, no "animate.0"
+    assert_eq!(
+        anim_spec(&element, "animate"),
+        json!({"preset": "spin", "duration": 800, "repeat": "loop", "curve": "linear"})
+    );
+    assert!(!element.props.contains_key("animate.0"));
+
+    let element = parse_to_element(r#"Text("Hi").animate(pulse)"#);
+    assert_eq!(
+        anim_spec(&element, "animate"),
+        json!({"preset": "pulse", "duration": 1200, "repeat": "loop", "curve": "easeInOut"})
+    );
+
+    let element = parse_to_element(r#"Row { Text("...") }.animate(shimmer)"#);
+    assert_eq!(
+        anim_spec(&element, "animate"),
+        json!({"preset": "shimmer", "duration": 1500, "repeat": "loop", "curve": "linear"})
+    );
+
+    let element = parse_to_element(r#"Row { Text("!") }.animate(shake)"#);
+    assert_eq!(
+        anim_spec(&element, "animate"),
+        json!({"preset": "shake", "duration": 400, "repeat": 1, "curve": "easeInOut"})
+    );
+}
+
+#[test]
+fn test_animate_named_overrides() {
+    let element = parse_to_element(
+        r#"Text("Hi").animate(pulse, duration: 800, repeat: 3, curve: easeInOut, delay: 100)"#,
+    );
+
+    assert_eq!(
+        anim_spec(&element, "animate"),
+        json!({
+            "preset": "pulse",
+            "duration": 800,
+            "repeat": 3,
+            "curve": "easeInOut",
+            "delay": 100
+        })
+    );
+}
+
+#[test]
+fn test_animate_repeat_loop_token() {
+    // shake defaults to repeat: 1; the loop token overrides it
+    let element = parse_to_element(r#"Text("Hi").animate(shake, repeat: loop)"#);
+
+    assert_eq!(
+        anim_spec(&element, "animate"),
+        json!({"preset": "shake", "duration": 400, "repeat": "loop", "curve": "easeInOut"})
+    );
+}
+
+#[test]
+fn test_animate_unknown_preset_omits_channel() {
+    // GIVEN: an unknown preset — warn + omit the channel ENTIRELY; the
+    // interception still consumes the applicator (no "animate.0" leftover)
+    let element = parse_to_element(r#"Text("Hi").animate(wobble)"#);
+
+    assert!(!element.props.contains_key("__anim.animate"));
+    assert!(!element.props.contains_key("animate.0"));
+}
+
+#[test]
+fn test_animate_binding_args_rejected() {
+    // Binding as preset — channel omitted entirely
+    let element = parse_to_element(r#"Text("Hi").animate(@state.preset)"#);
+    assert!(!element.props.contains_key("__anim.animate"));
+    assert!(!element.props.contains_key("animate.0"));
+
+    // Bindings in modifiers — warn + ignore, keep preset defaults
+    let element =
+        parse_to_element(r#"Text("Hi").animate(spin, duration: @state.speed, repeat: @state.n)"#);
+    assert_eq!(
+        anim_spec(&element, "animate"),
+        json!({"preset": "spin", "duration": 800, "repeat": "loop", "curve": "linear"})
+    );
+}
+
+#[test]
+fn test_animate_delay_only_when_given() {
+    let element = parse_to_element(r#"Text("Hi").animate(spin)"#);
+    assert!(anim_spec(&element, "animate").get("delay").is_none());
+
+    let element = parse_to_element(r#"Text("Hi").animate(shake, delay: 100)"#);
+    assert_eq!(anim_spec(&element, "animate")["delay"], json!(100));
+}
+
+#[test]
+fn test_variant_map_non_collision_with_anim() {
+    // GIVEN: a variant-map applicator alongside an animation applicator
+    let element =
+        parse_to_element(r#"Text("Hi").padding({ default: 8, md: 16 }).transition(200, easeOut)"#);
+
+    // THEN: variant-map lowering still applies to .padding, and the anim
+    // interception (which runs first) did not swallow it
+    match element.props.get("padding.0").unwrap() {
+        Value::Static(v) => assert_eq!(v, &json!(8.0)),
+        _ => panic!("Expected Static value"),
+    }
+    match element.props.get("padding@md.0").unwrap() {
+        Value::Static(v) => assert_eq!(v, &json!(16.0)),
+        _ => panic!("Expected Static value"),
+    }
+    assert!(element.props.contains_key("__anim.transition"));
+}
+
+#[test]
+fn test_anim_lowering_inside_foreach_template() {
+    // .enter/.exit on a ForEach item template lowers on the template element
+    let component = parse_component(
+        r#"
+        ForEach(items: @state.items) {
+            Row { Text("@{item.title}") }
+                .enter(fade)
+                .exit(slide, to: trailing)
+        }
+    "#,
+    )
+    .unwrap();
+
+    match hypen_engine::ast_to_ir_node(&component) {
+        IRNode::ForEach { template, .. } => match &template[0] {
+            IRNode::Element(row) => {
+                assert!(row.props.contains_key("__anim.enter"));
+                assert!(row.props.contains_key("__anim.exit"));
+            }
+            other => panic!("Expected Element template, got {:?}", other),
+        },
+        other => panic!("Expected ForEach, got {:?}", other),
+    }
+}

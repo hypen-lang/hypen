@@ -1,0 +1,62 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "exit-nested-descendant-removes",
+  "description": "Tearing down an animated subtree that DOES emit per-descendant Removes (subtree replacement) puts the flagged root Remove FIRST on the wire, followed by the descendants' plain Removes — pinned in strict emission order, since renderers must learn the subtree is exiting before any descendant teardown arrives",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Column { Column { Text(\"A\") Text(\"B\") }.exit(fade, duration: 150) }",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render creates the animated subtree with __anim.exit on its root",
+      "action": "initialRender",
+      "expectedPatchCount": 8,
+      "expectedPatchTypes": ["create", "insert", "create", "insert", "create", "insert", "create", "insert"],
+      "expectedPatches": [
+        { "type": "create", "elementType": "Column", "props": {} },
+        {
+          "type": "create",
+          "elementType": "Column",
+          "props": {
+            "__anim.exit": { "curve": "easeIn", "duration": 150, "presets": ["fade"] }
+          }
+        },
+        { "type": "create", "elementType": "Text", "props": { "0": "A" } },
+        { "type": "create", "elementType": "Text", "props": { "0": "B" } },
+        { "type": "insert" },
+        { "type": "insert" },
+        { "type": "insert" },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Replacing the animated subtree tears it down: flagged root Remove first, then the descendants' plain Removes, then the replacement",
+      "action": "renderSource",
+      "source": "Column { Text(\"gone\") }",
+      "expectedPatchCount": 5,
+      "expectedPatchTypes": ["remove", "remove", "remove", "create", "insert"],
+      "strictPatchOrder": true,
+      "expectedPatches": [
+        { "type": "remove", "transition": true },
+        { "type": "remove", "transition": false },
+        { "type": "remove", "transition": false },
+        { "type": "create", "elementType": "Text", "props": { "0": "gone" } },
+        { "type": "insert" }
+      ]
+    }
+  ]
+}

@@ -17,7 +17,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, watch } from "fs";
-import { join, basename, resolve, relative } from "path";
+import { join, basename, dirname, resolve, relative } from "path";
 import type { HypenModuleDefinition } from "@hypen-space/core/app";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 
@@ -438,25 +438,76 @@ export function watchComponents(
     }, 100);
   };
 
-  // Start watching
-  const watcher = watch(
-    resolvedDir,
-    { recursive: true },
-    (event, filename) => {
-      if (!filename) return;
-      if (filename.endsWith(".hypen") || filename.endsWith(".ts")) {
-        log("File changed:", filename);
-        rescan();
+  // Start watching. A missing directory must not throw: server-based
+  // projects have no components directory at all, and file-based projects
+  // can have theirs deleted mid-session. In both cases we watch the
+  // nearest existing ancestor and attach the real recursive watcher once
+  // the directory appears.
+  let watcher: ReturnType<typeof watch> | null = null;
+  let stopped = false;
+
+  const attachWatcher = () => {
+    if (stopped) return;
+    watcher = watch(
+      resolvedDir,
+      { recursive: true },
+      (event, filename) => {
+        if (!filename) return;
+        if (filename.endsWith(".hypen") || filename.endsWith(".ts")) {
+          log("File changed:", filename);
+          rescan();
+        }
       }
+    );
+  };
+
+  let creationPoll: ReturnType<typeof setInterval> | null = null;
+
+  const watchForCreation = () => {
+    if (stopped) return;
+    const onCreated = () => {
+      if (stopped || !existsSync(resolvedDir)) return;
+      watcher?.close();
+      watcher = null;
+      if (creationPoll) {
+        clearInterval(creationPoll);
+        creationPoll = null;
+      }
+      attachWatcher();
+      rescan();
+    };
+    let ancestor = dirname(resolvedDir);
+    while (!existsSync(ancestor)) {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) break; // filesystem root
+      ancestor = parent;
     }
-  );
+    watcher = watch(ancestor, { recursive: true }, onCreated);
+    // Recursive watchers can miss events inside directories created after
+    // the watch started (the OS-level watch on a new subtree attaches
+    // asynchronously), so back the event path with a cheap existence poll.
+    creationPoll = setInterval(onCreated, 500);
+  };
+
+  if (existsSync(resolvedDir)) {
+    attachWatcher();
+  } else {
+    frameworkLoggers.discovery.warn(
+      `Components directory does not exist: ${resolvedDir} — watching for it to be created.`
+    );
+    watchForCreation();
+  }
 
   // Initial scan
   initialScan();
 
   return {
     stop: () => {
-      watcher.close();
+      stopped = true;
+      watcher?.close();
+      if (creationPoll) {
+        clearInterval(creationPoll);
+      }
       if (debounceTimer) {
         clearTimeout(debounceTimer);
       }

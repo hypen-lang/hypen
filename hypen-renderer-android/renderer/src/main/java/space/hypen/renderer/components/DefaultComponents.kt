@@ -51,6 +51,9 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     // Icon component (renders server-resolved SVG path data)
     register(IconComponent())
 
+    // Embedded remote app (HypenApp("ws://...")) with loading/error slots
+    register(HypenAppComponent())
+
     return this
 }
 

@@ -10,10 +10,12 @@
   "dependencies": {
     "@hypen-space/core": "file:../../../hypen-web/packages/core",
     "@hypen-space/cf": "file:../../../hypen-web/packages/cf",
+    "@hypen-space/web": "file:../../../hypen-web/packages/web",
     "hypen-engine": "file:../../../hypen-engine-rs/pkg/web"
   },
   "overrides": {
-    "@hypen-space/core": "file:../../../hypen-web/packages/core"
+    "@hypen-space/core": "file:../../../hypen-web/packages/core",
+    "@hypen-space/web": "file:../../../hypen-web/packages/web"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250101.0",

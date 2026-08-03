@@ -1308,7 +1308,10 @@ fn taffy_state_remove_drops_node_from_tree_and_map() {
     let mut taffy = TaffyState::new();
     assert!(taffy.apply_patches(&patches, &tree, 1.0, 800.0));
 
-    let remove = vec![hypen_engine::Patch::Remove { id: "a".into() }];
+    let remove = vec![hypen_engine::Patch::Remove {
+        id: "a".into(),
+        transition: false,
+    }];
     tree.apply_batch(&remove);
     assert!(taffy.apply_patches(&remove, &tree, 1.0, 800.0));
 
