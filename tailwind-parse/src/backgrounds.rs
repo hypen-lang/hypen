@@ -177,6 +177,50 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
     None
 }
 
+/// Parse arbitrary background values like `bg-[#FCFCFC]`, `bg-[rgb(252,252,252)]`,
+/// `bg-[url(...)]`. Image-like values map to background-image, everything else
+/// to background-color.
+pub fn parse_arbitrary(prefix: &str, value: &str) -> Option<Vec<CssProperty>> {
+    match prefix {
+        "bg" => {
+            let property = if value.starts_with("url(")
+                || value.starts_with("linear-gradient(")
+                || value.starts_with("radial-gradient(")
+                || value.starts_with("conic-gradient(")
+            {
+                "background-image"
+            } else {
+                "background-color"
+            };
+            Some(vec![CssProperty::new(property, value)])
+        }
+        "from" => {
+            let transparent = make_transparent(value);
+            Some(vec![
+                CssProperty::new("--tw-gradient-from", value),
+                CssProperty::new("--tw-gradient-to", &transparent),
+                CssProperty::new(
+                    "--tw-gradient-stops",
+                    "var(--tw-gradient-from), var(--tw-gradient-to)",
+                ),
+            ])
+        }
+        "via" => {
+            let transparent = make_transparent(value);
+            Some(vec![
+                CssProperty::new("--tw-gradient-via", value),
+                CssProperty::new("--tw-gradient-to", &transparent),
+                CssProperty::new(
+                    "--tw-gradient-stops",
+                    &format!("var(--tw-gradient-from), {}, var(--tw-gradient-to)", value),
+                ),
+            ])
+        }
+        "to" => Some(vec![CssProperty::new("--tw-gradient-to", value)]),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -235,5 +279,38 @@ mod tests {
         let props = parse("to-red-500").unwrap();
         assert_eq!(props[0].property, "--tw-gradient-to");
         assert_eq!(props[0].value, "#ef4444");
+    }
+
+    #[test]
+    fn test_arbitrary_bg_hex() {
+        let props = parse_arbitrary("bg", "#FCFCFC").unwrap();
+        assert_eq!(props[0].property, "background-color");
+        assert_eq!(props[0].value, "#FCFCFC");
+    }
+
+    #[test]
+    fn test_arbitrary_bg_rgb() {
+        let props = parse_arbitrary("bg", "rgb(252,252,252)").unwrap();
+        assert_eq!(props[0].property, "background-color");
+        assert_eq!(props[0].value, "rgb(252,252,252)");
+    }
+
+    #[test]
+    fn test_arbitrary_bg_url_is_image() {
+        let props = parse_arbitrary("bg", "url(/img/hero.png)").unwrap();
+        assert_eq!(props[0].property, "background-image");
+        assert_eq!(props[0].value, "url(/img/hero.png)");
+    }
+
+    #[test]
+    fn test_arbitrary_gradient_stops() {
+        let props = parse_arbitrary("from", "#112233").unwrap();
+        assert_eq!(props[0].property, "--tw-gradient-from");
+        assert_eq!(props[0].value, "#112233");
+        assert_eq!(props[1].value, "#11223300");
+
+        let props = parse_arbitrary("to", "#445566").unwrap();
+        assert_eq!(props[0].property, "--tw-gradient-to");
+        assert_eq!(props[0].value, "#445566");
     }
 }

@@ -495,6 +495,37 @@ Any applicator accepts a map for responsive breakpoints or interaction states:
 .borderColor({default: "#D1D5DB", focus: "#3B82F6"})
 ```
 
+## Accessibility
+
+The engine derives semantics automatically; `hypen check` flags what it can't derive. Follow these rules and generated code passes the checker.
+
+**Free (no annotation needed):** `Button("Save")`, `Link("Docs")`, `Paragraph`, `Heading(..., level: N)`, `Image(alt: "…")`, `Checkbox(label: "…")`/`Switch(label: "…")` (the visible label IS the accessible name), `Tabs`/`Tab`/`TabPanel`, `Spinner`. Names derived from text content update reactively, including `@{state.x}` templates.
+
+**Add `.label("…")` when there is no visible text:**
+
+```hypen
+Button { Icon("trash") }.label("Delete")     // icon-only button
+Icon("checkmark").hidden()                    // decorative → hide instead
+```
+
+**Form controls** (`Input`, `TextArea`, `Select`, `Slider`) need a label — a placeholder is not one. Either:
+
+```hypen
+Input(placeholder: "you@example.com").bind(@state.email).label("Email")
+
+// Or auto-association: static Text right before the control, parent has .id()
+Column {
+    Text("Email")
+    Input(placeholder: "you@example.com").bind(@state.email)
+}.id("signup-form")
+```
+
+**Rules that will flag your code:** `Heading` without `level:`; `Image` without `alt:`; button/link nested inside another button/link; typo'd `.role(...)`/`.landmark(...)`/`.dir(...)` tokens; `.controls`/`.describedby`/`.labelledby`/`.owns` referencing an id no element declares via `.id(...)`; two elements declaring the same static `.id(...)`; a `Tabs` with unequal tab/panel counts; `.aria(...)` (informational — web-only, prefer portable applicators). A `.labelledby(...)` that resolves to a declared id counts as a label. Announce reactive text changes with `.liveRegion("polite")` (or `"assertive"`) — spell the token exactly, typos are silently ignored.
+
+**Tabs:** give the `Tabs` block an `.id(...)` and the engine auto-wires the tab↔panel id graph (equal tab/panel counts, direct children). Keep selection author-driven via `.selected(@state.x)`.
+
+**Always run `hypen check` after writing templates** — it prints findings as `<file>:<line>:<col>: a11y[<rule>] …` and exits `0` clean, `1` with issues, `2` if the check could not run.
+
 ## Module System
 
 Modules manage state and handle actions. They pair with `.hypen` template files OR inline their UI via `.ui(\`...\`)`. Every SDK follows the same pattern: define state, register action handlers, add lifecycle hooks.

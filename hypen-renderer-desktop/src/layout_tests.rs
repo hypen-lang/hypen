@@ -21,6 +21,7 @@ fn create_patch(id: &str, element_type: &str, props: &[(&str, Value)]) -> Patch 
         id: id.into(),
         element_type: element_type.into(),
         props: Arc::new(map),
+        semantics: None,
     }
 }
 

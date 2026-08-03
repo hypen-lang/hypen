@@ -111,6 +111,8 @@ public final class HypenRenderer: ObservableObject {
             applyDetach(patch)
         case .attach:
             applyAttach(patch)
+        case .setSemantics:
+            applySetSemantics(patch)
         }
     }
 
@@ -125,6 +127,7 @@ public final class HypenRenderer: ObservableObject {
             elementType: elementType,
             props: patch.props ?? [:]
         )
+        element.semantics = HypenSemantics.from(dictionary: patch.semantics)
 
         if elementType.lowercased() == "grid" || elementType.lowercased() == "image" {
             print("[HypenRenderer] CREATE type=\(elementType) id=\(id) props=\(element.props.keys.sorted())")
@@ -140,6 +143,23 @@ public final class HypenRenderer: ObservableObject {
 
         listener?.onElementCreated(element)
         log.debug("Created element: %@ (%@)", id, elementType)
+    }
+
+    /// Reactive accessibility re-emit: replace the element's whole semantics
+    /// block (nil clears). The `@Published treeVersion` bump at the end of
+    /// the batch re-renders the element view, which re-applies the SwiftUI
+    /// accessibility modifiers from the new block — the same translation as
+    /// at create, so a dropped field simply stops being applied.
+    private func applySetSemantics(_ patch: Patch) {
+        guard let id = patch.id else {
+            log.debug("SET_SEMANTICS: Missing id")
+            return
+        }
+        guard let element = elements[id] else {
+            log.debug("SET_SEMANTICS: Element not found: %@", id)
+            return
+        }
+        element.semantics = HypenSemantics.from(dictionary: patch.semantics)
     }
 
     private func applySetProp(_ patch: Patch) {

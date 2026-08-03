@@ -1,5 +1,5 @@
 use super::resolve::{resolve_props, resolve_props_full};
-use crate::ir::{Element, IRNode, NodeId, Props};
+use crate::ir::{Element, IRNode, NodeId, Props, Semantics};
 use indexmap::IndexMap;
 use slotmap::SlotMap;
 use std::sync::Arc;
@@ -104,6 +104,23 @@ pub struct InstanceNode {
     /// Used during dirty re-rendering to resolve `@{state.xxx}` against
     /// the correct named module's state.
     pub module_scope: Option<String>,
+
+    /// Derived accessibility semantics for this node, carried from the IR
+    /// `Element` so any path that re-emits a `Create` patch (e.g. List
+    /// re-render) keeps the node's semantics. `None` for control-flow
+    /// containers and elements with nothing derivable.
+    ///
+    /// This is the *base* (derive-time) block — templated names and bound
+    /// state unresolved. The resolved block last sent to the renderer lives
+    /// in [`last_semantics`](Self::last_semantics).
+    pub semantics: Option<Semantics>,
+
+    /// The fully-resolved semantics block last emitted to the renderer
+    /// (with `Create` or a later `SetSemantics`). Dirty re-renders resolve
+    /// [`semantics`](Self::semantics) against the fresh props and compare
+    /// against this to decide whether a [`Patch::SetSemantics`] is due —
+    /// static blocks never compare unequal, so static trees emit nothing.
+    pub last_semantics: Option<Semantics>,
 }
 
 impl InstanceNode {
@@ -131,6 +148,8 @@ impl InstanceNode {
             parent: None,
             children: im::Vector::new(),
             module_scope: element.module_scope.clone(),
+            semantics: element.semantics.clone(),
+            last_semantics: None,
         }
     }
 
@@ -155,6 +174,8 @@ impl InstanceNode {
             parent: None,
             children: im::Vector::new(),
             module_scope: None,
+            semantics: None,
+            last_semantics: None,
         }
     }
 

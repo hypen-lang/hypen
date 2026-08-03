@@ -9,6 +9,12 @@ import { renderText } from "./text.js";
 import { ScrollManager, isScrollable } from "./scroll.js";
 import { getVisibleChildren, VIRTUALIZE_THRESHOLD } from "./virtualize.js";
 import type { SelectionManager } from "./selection.js";
+import type { TextEditController } from "./editing.js";
+import {
+  SELECTION_HIGHLIGHT_COLOR,
+  offsetToCaretRect,
+  rangeToRects,
+} from "./text-geometry.js";
 import { cssLengthToPx } from "./utils.js";
 
 /**
@@ -18,6 +24,16 @@ import { cssLengthToPx } from "./utils.js";
 let activeSelectionManager: SelectionManager | null = null;
 export function setSelectionManager(mgr: SelectionManager | null): void {
   activeSelectionManager = mgr;
+}
+
+/**
+ * Module-level reference to the active TextEditController so paintInput can
+ * render the edited value, selection highlight, composition underline, and
+ * blinking caret. Same late-binding pattern as the SelectionManager hook.
+ */
+let activeTextEditor: TextEditController | null = null;
+export function setTextEditor(editor: TextEditController | null): void {
+  activeTextEditor = editor;
 }
 
 /**
@@ -70,6 +86,7 @@ export function paintNode(ctx: CanvasRenderingContext2D, node: VirtualNode): voi
       paintButton(ctx, node);
       break;
     case "input":
+    case "textarea":
       paintInput(ctx, node);
       break;
     case "image":
@@ -423,6 +440,18 @@ function paintButton(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     ctx.stroke();
   }
 
+  // Keyboard focus ring. Focus lives on the node's (unrendered) mirror
+  // element in the canvas fallback content, so the UA can't draw a ring at
+  // the painted box — paint one so keyboard users can see where they are.
+  if (node.focused) {
+    ctx.save();
+    ctx.strokeStyle = props.focusRingColor || "#007bff";
+    ctx.lineWidth = 2;
+    drawRoundedRect(ctx, x - 2, y - 2, width + 4, height + 4, radius + 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+
   // Paint children (typically Text)
   for (const child of node.children) {
     paintNode(ctx, child);
@@ -455,24 +484,76 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   drawRoundedRect(ctx, x, y, width, height, radius);
   ctx.stroke();
 
-  // Input value text
-  const value = props.value || "";
+  const isSingleLine = node.type.toLowerCase() === "input";
+
+  // While editing, the mirror element (via TextEditController) is the value
+  // source — paint stays ahead of the engine's SetProp echo.
+  const edit = activeTextEditor?.getStateFor(node) ?? null;
+
+  const value = edit ? edit.value : (props.value || "");
   const placeholder = props.placeholder || "";
   const text = value || placeholder;
   const textColor = value ? (props.color || "#000000") : "#999999";
 
-  if (text) {
-    const fontSize = cssLengthToPx(props.fontSize) ?? 16;
-    const fontWeight = props.fontWeight || "normal";
-    const fontFamily = props.fontFamily || "system-ui, sans-serif";
-    const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
+  const fontSize = cssLengthToPx(props.fontSize) ?? 16;
+  const fontWeight = props.fontWeight || "normal";
+  const fontFamily = props.fontFamily || "system-ui, sans-serif";
+  const lineHeight = cssLengthToPx(props.lineHeight) ?? fontSize * 1.2;
 
+  if (!edit) {
+    if (text) {
+      renderText(
+        ctx,
+        text,
+        layout.x + layout.contentX,
+        layout.y + layout.contentY,
+        layout.contentWidth,
+        layout.contentHeight,
+        {
+          color: textColor,
+          fontSize,
+          fontWeight,
+          fontFamily,
+          textAlign: "left",
+          verticalAlign: isSingleLine ? "middle" : "top",
+          lineHeight,
+        }
+      );
+    }
+    return;
+  }
+
+  // ---- Editing visuals: clip → selection highlight → text → composition
+  // ---- underline → caret. Geometry comes from the edit controller so
+  // ---- pointer mapping and painting share identical math (incl. scrollX).
+  ctx.save();
+  drawRoundedRect(ctx, x, y, width, height, radius);
+  ctx.clip();
+
+  const g = activeTextEditor!.geometry(
+    layout.x + layout.contentX - edit.scrollX,
+    layout.y + layout.contentY,
+  );
+
+  // Selection highlight behind the text
+  if (edit.selStart !== edit.selEnd) {
+    const from = Math.min(edit.selStart, edit.selEnd);
+    const to = Math.max(edit.selStart, edit.selEnd);
+    ctx.fillStyle = SELECTION_HIGHLIGHT_COLOR;
+    for (const r of rangeToRects(ctx, g, from, to)) {
+      ctx.fillRect(r.x, r.y, r.width, r.height);
+    }
+  }
+
+  if (text) {
     renderText(
       ctx,
-      text,
-      layout.x + layout.contentX,
+      value || placeholder,
+      g.contentX,
       layout.y + layout.contentY,
-      layout.contentWidth,
+      // Single-line inputs never wrap — the clip + scrollX pan handle
+      // overflow. Textareas wrap at content width like static paint.
+      isSingleLine ? Number.POSITIVE_INFINITY : layout.contentWidth,
       layout.contentHeight,
       {
         color: textColor,
@@ -480,11 +561,34 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
         fontWeight,
         fontFamily,
         textAlign: "left",
-        verticalAlign: "middle",
+        verticalAlign: isSingleLine ? "middle" : "top",
         lineHeight,
       }
     );
   }
+
+  // IME composition underline (dashed, under the composing range)
+  if (edit.compStart !== null && edit.compEnd !== null && edit.compEnd > edit.compStart) {
+    ctx.strokeStyle = props.color || "#000000";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([2, 2]);
+    for (const r of rangeToRects(ctx, g, edit.compStart, edit.compEnd)) {
+      ctx.beginPath();
+      ctx.moveTo(r.x, r.y + r.height - 2);
+      ctx.lineTo(r.x + r.width, r.y + r.height - 2);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+  }
+
+  // Caret (hidden while a range is selected, blinks via the edit timer)
+  if (edit.caretVisible && edit.selStart === edit.selEnd) {
+    const caret = offsetToCaretRect(ctx, g, edit.selEnd);
+    ctx.fillStyle = props.color || "#000000";
+    ctx.fillRect(caret.x, caret.y + 1, 1.5, caret.height - 2);
+  }
+
+  ctx.restore();
 }
 
 /**

@@ -1,5 +1,5 @@
 use super::tree::ResolvedProps;
-use crate::ir::NodeId;
+use crate::ir::{NodeId, Semantics};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slotmap::Key;
@@ -97,6 +97,30 @@ pub enum Patch {
         /// Initial properties. Key `"0"` is the positional text content.
         #[serde(with = "resolved_props_serde")]
         props: ResolvedProps,
+        /// Accessibility semantics derived for this node, if any. Omitted from
+        /// the wire entirely when `None`, so the format is unchanged for nodes
+        /// with no derivable semantics. Renderers translate it to their native
+        /// accessibility API (ARIA, Compose semantics, SwiftUI traits).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        semantics: Option<Semantics>,
+    },
+
+    /// Replace a node's accessibility semantics after a reactive change.
+    ///
+    /// Emitted by the reconciler when a dirty re-render produces a different
+    /// resolved [`Semantics`] than the node last had — a templated accessible
+    /// name (`Button("@{state.label}")`), bound self-state
+    /// (`.expanded(@state.open)`), or bound `checked` whose source path
+    /// changed. Carries the **complete** block (not a field delta) so the
+    /// renderer re-applies idempotently with the same translation it ran at
+    /// create; a dropped field must clear the corresponding native attribute.
+    /// `semantics: None` means the node lost all derivable a11y → clear
+    /// everything. Static-only trees never produce this patch.
+    #[serde(rename_all = "camelCase")]
+    SetSemantics {
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        semantics: Option<Semantics>,
     },
 
     /// Update a single property on an existing node.
@@ -188,12 +212,28 @@ pub enum Patch {
 impl Patch {
     /// Construct a `Create` patch. `props` must already be an
     /// `Arc`-wrapped resolved-prop map; callers holding a bare
-    /// `IndexMap` wrap it explicitly via `Arc::new(...)`.
-    pub fn create(id: NodeId, element_type: String, props: ResolvedProps) -> Self {
+    /// `IndexMap` wrap it explicitly via `Arc::new(...)`. `semantics` is the
+    /// node's derived accessibility block, or `None` when it has none.
+    pub fn create(
+        id: NodeId,
+        element_type: String,
+        props: ResolvedProps,
+        semantics: Option<Semantics>,
+    ) -> Self {
         Self::Create {
             id: node_id_str(id),
             element_type,
             props,
+            semantics,
+        }
+    }
+
+    /// Construct a `SetSemantics` patch carrying the node's full updated
+    /// (already-resolved) semantics block, or `None` to clear.
+    pub fn set_semantics(id: NodeId, semantics: Option<Semantics>) -> Self {
+        Self::SetSemantics {
+            id: node_id_str(id),
+            semantics,
         }
     }
 

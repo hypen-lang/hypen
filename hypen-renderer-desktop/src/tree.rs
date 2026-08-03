@@ -19,6 +19,10 @@ pub struct Node {
     pub id: String,
     pub element_type: String,
     pub props: HashMap<String, Value>,
+    /// Engine-derived accessibility semantics (role, name, hidden, …), carried
+    /// from the Create patch so the AccessKit translation can use the engine's
+    /// accessible name/role instead of layout heuristics.
+    pub semantics: Option<hypen_engine::ir::Semantics>,
 }
 
 impl Node {
@@ -121,6 +125,7 @@ impl Tree {
                 id,
                 element_type,
                 props,
+                semantics,
             } => {
                 let mut prop_map = HashMap::with_capacity(props.len());
                 for (k, v) in props.iter() {
@@ -132,6 +137,7 @@ impl Tree {
                         id: id.clone(),
                         element_type: element_type.clone(),
                         props: prop_map,
+                        semantics: semantics.clone(),
                     },
                 );
                 self.children.entry(id.clone()).or_default();
@@ -141,6 +147,18 @@ impl Tree {
                     node.props.insert(name.clone(), value.clone());
                 } else {
                     log::warn!("SetProp on unknown node {id}");
+                }
+            }
+            Patch::SetSemantics { id, semantics } => {
+                // Reactive accessibility update: replace the node's whole
+                // block (None clears it). The next `LayoutPass` rebuilds its
+                // node_id→Semantics side-map from `Node.semantics`, so the
+                // AccessKit tree picks the change up on the following push —
+                // no per-field diffing here by design (see the Patch docs).
+                if let Some(node) = self.nodes.get_mut(id) {
+                    node.semantics = semantics.clone();
+                } else {
+                    log::warn!("SetSemantics on unknown node {id}");
                 }
             }
             Patch::RemoveProp { id, name } => {
@@ -335,6 +353,7 @@ mod tests {
             id: id.to_string(),
             element_type: element_type.to_string(),
             props: props(entries),
+            semantics: None,
         }
     }
 

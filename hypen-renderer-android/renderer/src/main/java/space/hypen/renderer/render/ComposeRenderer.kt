@@ -163,7 +163,24 @@ class ComposeRenderer(
             PatchType.DETACH_EVENT -> onDetachEvent(patch)
             PatchType.DETACH -> onDetach(patch)
             PatchType.ATTACH -> onAttach(patch)
+            PatchType.SET_SEMANTICS -> onSetSemantics(patch)
         }
+    }
+
+    /**
+     * Reactive accessibility re-emit: replace the element's whole semantics
+     * block (null clears). The tree-version bump at the end of the batch
+     * recomposes the element, which re-applies `Modifier.semantics {}` from
+     * the new block — the same translation as at create, so a dropped field
+     * simply stops being applied.
+     */
+    private fun onSetSemantics(patch: Patch) {
+        val id = patch.id ?: return
+        val element = elements[id] ?: run {
+            log.debug("SET_SEMANTICS: element not found: $id")
+            return
+        }
+        element.semantics = patch.semantics
     }
 
     private fun onCreate(patch: Patch, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
@@ -189,6 +206,7 @@ class ComposeRenderer(
                 elementType = elementType,
                 props = props,
                 textContent = textContent,
+                semantics = patch.semantics,
             )
 
         elements[id] = element

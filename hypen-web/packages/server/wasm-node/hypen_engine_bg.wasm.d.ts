@@ -16,6 +16,8 @@ export const pathGet: (a: number, b: number, c: number, d: number) => [number, n
 export const pathHas: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const pathSet: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
 export const sessionStep: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+export const wasmengine_a11yRules: (a: number) => [number, number];
+export const wasmengine_checkAccessibility: (a: number, b: number, c: number) => [number, number, number];
 export const wasmengine_clearResolvedComponents: (a: number) => void;
 export const wasmengine_clearTree: (a: number) => void;
 export const wasmengine_currentState: (a: number) => any;
@@ -50,4 +52,5 @@ export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __externref_table_dealloc: (a: number) => void;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __externref_drop_slice: (a: number, b: number) => void;
 export const __wbindgen_start: () => void;

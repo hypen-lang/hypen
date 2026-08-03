@@ -5,10 +5,15 @@
  * triple-click-line, and Ctrl/Cmd+C copy for canvas-rendered text.
  */
 
-import type { VirtualNode, Point, FontStyle, TextMetrics } from "./types.js";
+import type { VirtualNode, Point } from "./types.js";
 import { getScrollAwareBounds } from "./scroll.js";
-import { measureText } from "./text.js";
-import { createFontString } from "./utils.js";
+import {
+  SELECTION_HIGHLIGHT_COLOR,
+  nodeTextGeometry,
+  pointToOffset,
+  rangeToRects,
+  resolveNodeText,
+} from "./text-geometry.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -35,12 +40,6 @@ export interface SelectionRect {
   width: number;
   height: number;
 }
-
-// ---------------------------------------------------------------------------
-// Selection state
-// ---------------------------------------------------------------------------
-
-const HIGHLIGHT_COLOR = "rgba(59, 130, 246, 0.35)";
 
 // ---------------------------------------------------------------------------
 // SelectionManager
@@ -202,7 +201,7 @@ export class SelectionManager {
   private selectWord(pos: TextPosition): void {
     const node = this.findNodeById(pos.nodeId);
     if (!node) return;
-    const text = resolveText(node);
+    const text = resolveNodeText(node);
     const start = wordBoundaryBefore(text, pos.offset);
     const end = wordBoundaryAfter(text, pos.offset);
     this.selection = {
@@ -214,7 +213,7 @@ export class SelectionManager {
   private selectAll(nodeId: string): void {
     const node = this.findNodeById(nodeId);
     if (!node) return;
-    const text = resolveText(node);
+    const text = resolveNodeText(node);
     this.selection = {
       anchor: { nodeId, offset: 0 },
       focus: { nodeId, offset: text.length },
@@ -225,7 +224,7 @@ export class SelectionManager {
     if (!this.selection) return null;
     const node = this.findNodeById(this.selection.anchor.nodeId);
     if (!node) return null;
-    const text = resolveText(node);
+    const text = resolveNodeText(node);
     const [start, end] = normalizeRange(this.selection);
     return text.slice(start, end);
   }
@@ -267,7 +266,16 @@ export class SelectionManager {
     }
 
     // Map point to character offset within this text node
-    const offset = pointToOffset(this.canvas, node, bounds, point);
+    const ctx = this.canvas.getContext("2d");
+    if (!ctx) return null;
+    const layout = node.layout!;
+    const geometry = nodeTextGeometry(
+      node,
+      resolveNodeText(node),
+      bounds.x + layout.contentX,
+      bounds.y + layout.contentY,
+    );
+    const offset = pointToOffset(ctx, geometry, point);
     return { nodeId: node.id, offset };
   }
 
@@ -285,10 +293,17 @@ export class SelectionManager {
     const [start, end] = normalizeRange(this.selection);
     if (start === end) return; // caret only, no highlight
 
-    const rects = getSelectionRects(ctx, node, start, end);
+    const layout = node.layout!;
+    const geometry = nodeTextGeometry(
+      node,
+      resolveNodeText(node),
+      layout.x + layout.contentX,
+      layout.y + layout.contentY,
+    );
+    const rects = rangeToRects(ctx, geometry, start, end);
 
     ctx.save();
-    ctx.fillStyle = HIGHLIGHT_COLOR;
+    ctx.fillStyle = SELECTION_HIGHLIGHT_COLOR;
     for (const r of rects) {
       ctx.fillRect(r.x, r.y, r.width, r.height);
     }
@@ -321,16 +336,6 @@ export class SelectionManager {
 // Pure helpers
 // ---------------------------------------------------------------------------
 
-function resolveText(node: VirtualNode): string {
-  const raw = node.props[0] || node.props.text || "";
-  let text = String(raw);
-  const tt = node.props.textTransform || "none";
-  if (tt === "uppercase") text = text.toUpperCase();
-  else if (tt === "lowercase") text = text.toLowerCase();
-  else if (tt === "capitalize") text = text.replace(/\b\w/g, (c) => c.toUpperCase());
-  return text;
-}
-
 function normalizeRange(sel: TextSelection): [number, number] {
   const a = sel.anchor.offset;
   const b = sel.focus.offset;
@@ -362,180 +367,6 @@ function findById(node: VirtualNode, id: string): VirtualNode | null {
     if (found) return found;
   }
   return null;
-}
-
-// ---------------------------------------------------------------------------
-// Geometry: map a canvas point to a character offset
-// ---------------------------------------------------------------------------
-
-/**
- * Given a point inside a text node's bounds, return the character index
- * that the point falls on.
- */
-function pointToOffset(
-  canvas: HTMLCanvasElement,
-  node: VirtualNode,
-  bounds: { x: number; y: number; width: number; height: number },
-  point: Point,
-): number {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return 0;
-
-  const props = node.props;
-  const text = resolveText(node);
-  const layout = node.layout!;
-  const fontSize = parseFloat(props.fontSize) || 16;
-  const fontWeight = props.fontWeight || "normal";
-  const fontFamily = props.fontFamily || "system-ui, sans-serif";
-  const lineHeight = parseFloat(props.lineHeight) || fontSize * 1.2;
-  const textAlign = props.textAlign || "left";
-
-  const fontStyle: FontStyle = { fontSize, fontWeight, fontFamily, lineHeight };
-  const font = createFontString(fontSize, fontWeight, fontFamily);
-
-  ctx.save();
-  ctx.font = font;
-
-  const metrics = measureText(ctx, text, fontStyle, layout.contentWidth);
-  const contentX = bounds.x + layout.contentX;
-  const contentY = bounds.y + layout.contentY;
-
-  // Find which line the point falls on
-  const relY = point.y - contentY;
-  let lineIndex = Math.floor(relY / metrics.lineHeight);
-  lineIndex = Math.max(0, Math.min(lineIndex, metrics.lines.length - 1));
-
-  // Calculate character offset before this line
-  let charsBefore = 0;
-  for (let i = 0; i < lineIndex; i++) {
-    charsBefore += metrics.lines[i].length;
-    // Account for space/newline between lines (word wrap eats the space)
-    if (i < metrics.lines.length - 1) {
-      const nextLineStart = text.indexOf(metrics.lines[i + 1], charsBefore);
-      if (nextLineStart > charsBefore) charsBefore = nextLineStart;
-    }
-  }
-
-  const line = metrics.lines[lineIndex];
-
-  // Calculate line X offset (for text-align)
-  let lineX = contentX;
-  if (textAlign === "center") {
-    const lw = ctx.measureText(line).width;
-    lineX = contentX + (layout.contentWidth - lw) / 2;
-  } else if (textAlign === "right") {
-    const lw = ctx.measureText(line).width;
-    lineX = contentX + layout.contentWidth - lw;
-  }
-
-  // Binary search for the character at point.x
-  const relX = point.x - lineX;
-  let best = 0;
-  for (let i = 0; i <= line.length; i++) {
-    const w = ctx.measureText(line.slice(0, i)).width;
-    if (w <= relX) {
-      best = i;
-    } else {
-      // Check if we're closer to this char or the previous
-      const prevW = ctx.measureText(line.slice(0, i - 1)).width;
-      if (relX - prevW < w - relX) {
-        best = i - 1;
-      } else {
-        best = i;
-      }
-      break;
-    }
-  }
-
-  ctx.restore();
-  return charsBefore + best;
-}
-
-// ---------------------------------------------------------------------------
-// Geometry: compute highlight rectangles for a selection range
-// ---------------------------------------------------------------------------
-
-/**
- * Return a list of rectangles to paint as the selection highlight for
- * characters [start, end) within a text node.
- */
-function getSelectionRects(
-  ctx: CanvasRenderingContext2D,
-  node: VirtualNode,
-  start: number,
-  end: number,
-): SelectionRect[] {
-  const props = node.props;
-  const layout = node.layout!;
-  const text = resolveText(node);
-  const fontSize = parseFloat(props.fontSize) || 16;
-  const fontWeight = props.fontWeight || "normal";
-  const fontFamily = props.fontFamily || "system-ui, sans-serif";
-  const lineHeight = parseFloat(props.lineHeight) || fontSize * 1.2;
-  const textAlign = props.textAlign || "left";
-
-  const fontStyle: FontStyle = { fontSize, fontWeight, fontFamily, lineHeight };
-  const font = createFontString(fontSize, fontWeight, fontFamily);
-
-  ctx.save();
-  ctx.font = font;
-
-  const metrics = measureText(ctx, text, fontStyle, layout.contentWidth);
-  const x = layout.x + layout.contentX;
-  const y = layout.y + layout.contentY;
-
-  const rects: SelectionRect[] = [];
-
-  // Map lines to character ranges
-  let charOffset = 0;
-  for (let i = 0; i < metrics.lines.length; i++) {
-    const line = metrics.lines[i];
-    const lineStart = charOffset;
-    const lineEnd = charOffset + line.length;
-
-    // Find actual position in original text for this line
-    if (i > 0) {
-      const idx = text.indexOf(line, charOffset);
-      if (idx > charOffset) charOffset = idx;
-    }
-    const actualLineStart = charOffset;
-    const actualLineEnd = charOffset + line.length;
-
-    // Does this line overlap with the selection?
-    if (actualLineEnd <= start || actualLineStart >= end) {
-      charOffset = actualLineEnd;
-      continue;
-    }
-
-    // Clamp selection to this line
-    const selStart = Math.max(0, start - actualLineStart);
-    const selEnd = Math.min(line.length, end - actualLineStart);
-
-    // Calculate line X offset (text-align)
-    let lineX = x;
-    const lineWidth = ctx.measureText(line).width;
-    if (textAlign === "center") {
-      lineX = x + (layout.contentWidth - lineWidth) / 2;
-    } else if (textAlign === "right") {
-      lineX = x + layout.contentWidth - lineWidth;
-    }
-
-    // Measure selection bounds within this line
-    const startX = ctx.measureText(line.slice(0, selStart)).width;
-    const endX = ctx.measureText(line.slice(0, selEnd)).width;
-
-    rects.push({
-      x: lineX + startX,
-      y: y + i * metrics.lineHeight,
-      width: endX - startX,
-      height: metrics.lineHeight,
-    });
-
-    charOffset = actualLineEnd;
-  }
-
-  ctx.restore();
-  return rects;
 }
 
 // ---------------------------------------------------------------------------

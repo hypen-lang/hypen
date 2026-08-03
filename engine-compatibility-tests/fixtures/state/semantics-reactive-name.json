@@ -1,0 +1,54 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "semantics-reactive-name",
+  "description": "A templated accessible name (Button(\"@{state.label}\")) resolves into the create semantics block, and a state change re-emits the complete block via setSemantics",
+  "category": "state",
+  "priority": "P0",
+
+  "input": {
+    "source": "Button(\"@{state.label}\")",
+    "initialState": {
+      "label": "Save"
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["label"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render resolves the templated name into the create semantics block",
+      "action": "initialRender",
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["create", "insert"],
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Button",
+          "props": { "0": "Save" },
+          "semantics": { "role": "button", "name": "Save" }
+        },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Updating the bound label re-resolves and re-emits the complete semantics block",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["label"],
+        "newValues": {
+          "label": "Saving..."
+        }
+      },
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["setProp", "setSemantics"],
+      "expectedPatches": [
+        { "type": "setProp", "name": "0", "value": "Saving..." },
+        { "type": "setSemantics", "semantics": { "role": "button", "name": "Saving..." } }
+      ],
+      "forbiddenPatchTypes": ["create", "remove", "insert"]
+    }
+  ]
+}

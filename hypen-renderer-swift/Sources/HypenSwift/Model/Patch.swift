@@ -21,6 +21,12 @@ public enum PatchType: String, Codable, Sendable {
     /// Reattach a previously-detached subtree to a parent. The `id`
     /// must reference an element still in the renderer's node map.
     case attach = "Attach"
+    /// Replace a node's accessibility semantics after a reactive change
+    /// (templated accessible name, bound self-state, bound checked, reactive
+    /// activedescendant). Carries the node's complete re-resolved block in
+    /// `semantics`; the renderer re-applies it with the same translation it
+    /// runs at create. A nil block clears the node's semantics.
+    case setSemantics = "SetSemantics"
 }
 
 /// Represents a single patch operation on the render tree
@@ -35,6 +41,10 @@ public struct Patch: @unchecked Sendable {
     public let parentId: String?
     public let beforeId: String?
     public let eventName: String?
+    /// Engine-derived accessibility semantics block (camelCase JSON object).
+    /// Present on `create` for nodes with derivable a11y and on every
+    /// `setSemantics`; nil otherwise.
+    public let semantics: [String: Any]?
 
     public init(
         type: PatchType,
@@ -46,7 +56,8 @@ public struct Patch: @unchecked Sendable {
         text: String? = nil,
         parentId: String? = nil,
         beforeId: String? = nil,
-        eventName: String? = nil
+        eventName: String? = nil,
+        semantics: [String: Any]? = nil
     ) {
         self.type = type
         self.id = id
@@ -58,6 +69,7 @@ public struct Patch: @unchecked Sendable {
         self.parentId = parentId
         self.beforeId = beforeId
         self.eventName = eventName
+        self.semantics = semantics
     }
 }
 
@@ -82,6 +94,7 @@ extension Patch {
         case "detachevent": type = .detachEvent
         case "detach": type = .detach
         case "attach": type = .attach
+        case "setsemantics": type = .setSemantics
         default:
             log.warn("Unknown patch type: %@", typeString)
             return nil
@@ -97,7 +110,8 @@ extension Patch {
             text: dictionary["text"] as? String,
             parentId: dictionary["parentId"] as? String,
             beforeId: dictionary["beforeId"] as? String,
-            eventName: dictionary["eventName"] as? String
+            eventName: dictionary["eventName"] as? String,
+            semantics: dictionary["semantics"] as? [String: Any]
         )
     }
 
@@ -132,6 +146,8 @@ extension Patch: CustomDebugStringConvertible {
             return "DETACH(\(id ?? "?"))"
         case .attach:
             return "ATTACH(\(id ?? "?") -> \(parentId ?? "?"), before: \(beforeId ?? "nil"))"
+        case .setSemantics:
+            return "SET_SEMANTICS(\(id ?? "?"), \(semantics == nil ? "clear" : "block"))"
         }
     }
 }

@@ -97,6 +97,10 @@ struct ExpectedPatch {
     value: Option<Value>,
     #[allow(dead_code)]
     text: Option<String>,
+    /// Accessibility semantics block on `create`/`setSemantics` patches.
+    /// Matched as a complete object (not partial) — the fixture pins the
+    /// exact wire format, so an extra or missing field is a mismatch.
+    semantics: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -263,6 +267,15 @@ fn matches_expected_patch(actual: &Value, expected: &ExpectedPatch) -> bool {
     if let Some(ref value) = expected.value {
         match actual.get("value") {
             Some(av) if json_values_equal(av, value) => {}
+            _ => return false,
+        }
+    }
+
+    if let Some(ref semantics) = expected.semantics {
+        // Exact object equality (json_values_equal requires equal key sets)
+        // pins the complete semantics wire block, not a subset of it.
+        match actual.get("semantics") {
+            Some(av) if json_values_equal(av, semantics) => {}
             _ => return false,
         }
     }

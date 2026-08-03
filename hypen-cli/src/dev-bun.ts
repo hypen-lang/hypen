@@ -21,6 +21,7 @@ import {
   type DiscoveredComponent,
 } from "@hypen-space/server";
 import { pink, yellow, dim, boldPink, boldYellow } from "./colors.js";
+import { createDevA11yChecker, type DevA11yOptions } from "./dev.js";
 
 export interface DevOptions {
   /**
@@ -71,6 +72,12 @@ export interface DevOptions {
    * Callback when components change
    */
   onComponentsChange?: (components: DiscoveredComponent[]) => void;
+
+  /**
+   * Opt-in accessibility findings on the dev loop (initial build + every
+   * rebuild, `hypen check` format). Never fails the server. Default: off.
+   */
+  a11y?: DevA11yOptions;
 }
 
 export interface BuildOptions {
@@ -175,6 +182,7 @@ export async function dev(options: DevOptions): Promise<{
     outDir = ".hypen",
     onStart,
     onComponentsChange,
+    a11y,
   } = options;
 
   const log = debug
@@ -211,6 +219,16 @@ export async function dev(options: DevOptions): Promise<{
     log("Generated:", mainPath);
     return mainPath;
   };
+
+  // Opt-in accessibility pass over the .hypen sources; runs after the
+  // initial generation and after every rebuild. Never throws.
+  const runA11y = a11y
+    ? createDevA11yChecker({
+        componentsDir: resolvedComponentsDir,
+        projectRoot: resolve("."),
+        ignoreRules: a11y.ignoreRules,
+      })
+    : null;
 
   // Initial generation
   const componentsPath = await generateComponents();
@@ -258,6 +276,7 @@ export async function dev(options: DevOptions): Promise<{
         await generateComponents();
         generateMain(componentsPath);
         await buildBundle();
+        await runA11y?.();
         onComponentsChange?.(components);
       },
     });
@@ -377,6 +396,10 @@ export async function dev(options: DevOptions): Promise<{
   console.log(`  ${dim("Components:")} ${resolvedComponentsDir}\n`);
 
   onStart?.(serverUrl);
+
+  // Initial-build findings print under the banner; fire-and-forget so the
+  // WASM engine boot never delays the server coming up.
+  void runA11y?.();
 
   return {
     url: serverUrl,

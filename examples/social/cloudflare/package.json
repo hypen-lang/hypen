@@ -8,12 +8,18 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@hypen-space/core": "file:../../../hypen-web/packages/core",
-    "@hypen-space/cf": "file:../../../hypen-web/packages/cf",
+    "@hypen-space/core": "^0.5.2",
+    "@hypen-space/cf": "^0.5.2",
+    "@hypen-space/web": "^0.5.2",
     "hypen-engine": "file:../../../hypen-engine-rs/pkg/web"
   },
   "overrides": {
-    "@hypen-space/core": "file:../../../hypen-web/packages/core"
+    "@hypen-space/core": "^0.5.2",
+    "@hypen-space/web": "^0.5.2"
+  },
+  "resolutions": {
+    "@hypen-space/core": "^0.5.2",
+    "@hypen-space/web": "^0.5.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250101.0",

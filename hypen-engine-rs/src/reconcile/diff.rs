@@ -14,6 +14,47 @@ type DataSources = indexmap::IndexMap<String, serde_json::Value>;
 /// Module instances map type alias
 type Modules = indexmap::IndexMap<String, crate::lifecycle::ModuleInstance>;
 
+/// Resolve a node's derive-time (base) semantics against resolved props —
+/// templated accessible names and bound self-state/checked fold in exactly
+/// as at the Create sites. The single resolution rule shared by initial
+/// create and the reactive [`Patch::SetSemantics`] delta paths.
+pub(crate) fn resolve_semantics(
+    base: &Option<crate::ir::Semantics>,
+    resolved_props: &IndexMap<String, serde_json::Value>,
+) -> Option<crate::ir::Semantics> {
+    base.clone().map(|s| {
+        s.with_resolved_name(resolved_props)
+            .with_resolved_state(resolved_props)
+    })
+}
+
+/// Compare a node's freshly-resolved semantics against the block last sent
+/// to the renderer and emit a [`Patch::SetSemantics`] when they differ,
+/// recording the new block as last-sent. No-op for nodes whose semantics
+/// never had bindings (resolution is then a fixed point, so the comparison
+/// stays equal and static trees pay nothing beyond the `PartialEq`).
+pub(crate) fn emit_semantics_delta(
+    tree: &mut InstanceTree,
+    node_id: NodeId,
+    patches: &mut Vec<Patch>,
+) {
+    let Some(node) = tree.get(node_id) else {
+        return;
+    };
+    // Fast path: a node that never carried semantics can't gain any —
+    // derivation happens at expand, not reconcile.
+    if node.semantics.is_none() && node.last_semantics.is_none() {
+        return;
+    }
+    let new_semantics = resolve_semantics(&node.semantics, &node.props);
+    if new_semantics != node.last_semantics {
+        patches.push(Patch::set_semantics(node_id, new_semantics.clone()));
+        if let Some(node) = tree.get_mut(node_id) {
+            node.last_semantics = new_semantics;
+        }
+    }
+}
+
 /// Shared mutable context threaded through the recursive tree-building and
 /// reconciliation helpers.  Grouping these fields removes the repetitive
 /// parameter tuple that was being copy-pasted across every internal function.
@@ -194,8 +235,20 @@ fn create_element_node(
             );
         }
     }
-    ctx.patches
-        .push(Patch::create(node_id, element.element_type.clone(), props));
+    // Resolve any deferred (templated) accessible name from the now-resolved
+    // props before emitting the Create patch, and remember the resolved
+    // block so later dirty re-renders can diff against it (SetSemantics).
+    let semantics = resolve_semantics(&element.semantics, &props);
+    if let Some(node) = ctx.tree.get_mut(node_id) {
+        node.last_semantics = semantics.clone();
+    }
+    strip_engine_internal_props(&mut props);
+    ctx.patches.push(Patch::create(
+        node_id,
+        element.element_type.clone(),
+        props,
+        semantics,
+    ));
 
     // Tree-side: hang the node off its logical parent.
     if let Some(parent) = logical_parent {
@@ -275,11 +328,14 @@ fn create_list_tree_impl(
 
     // Generate Create patch for container
     let node = ctx.tree.get(node_id).unwrap();
-    ctx.patches.push(Patch::create(
-        node_id,
-        node.element_type.clone(),
-        node.props.clone(),
-    ));
+    let semantics = resolve_semantics(&node.semantics, &node.props);
+    let (element_type, mut props) = (node.element_type.clone(), node.props.clone());
+    if let Some(node) = ctx.tree.get_mut(node_id) {
+        node.last_semantics = semantics.clone();
+    }
+    strip_engine_internal_props(&mut props);
+    ctx.patches
+        .push(Patch::create(node_id, element_type, props, semantics));
 
     // Insert container
     if let Some(parent) = parent_id {
@@ -402,6 +458,10 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
         node.raw_props = element.props.clone();
     }
 
+    // Re-resolve semantics against the fresh props; emit SetSemantics when
+    // the block a renderer holds went stale (templated name, bound state).
+    emit_semantics_delta(ctx.tree, node_id, ctx.patches);
+
     // Reconcile children (skip when this element is lazy — the renderer
     // hasn't asked for the subtree yet).
     let is_lazy = element
@@ -518,6 +578,24 @@ fn collect_subtree_ids(tree: &InstanceTree, root_id: NodeId) -> Vec<NodeId> {
     result
 }
 
+/// Engine-internal carrier props: kept in `InstanceNode` resolved props so
+/// `resolve_semantics` and dependency-driven re-renders can read them, but
+/// never emitted to renderers — their payload already reaches every renderer
+/// as the typed `Semantics` block on `Create`/`SetSemantics`.
+pub(crate) fn is_engine_internal_prop(key: &str) -> bool {
+    key == "__a11yName"
+}
+
+/// Copy-on-write strip of engine-internal props before a `Patch::Create`:
+/// clones the shared map only when such a key is actually present, so the
+/// common no-hoist case stays an `Arc::clone`. Must run *after*
+/// `resolve_semantics`, which reads the carrier props.
+fn strip_engine_internal_props(props: &mut super::tree::ResolvedProps) {
+    if props.keys().any(|k| is_engine_internal_prop(k)) {
+        std::sync::Arc::make_mut(props).retain(|k, _| !is_engine_internal_prop(k));
+    }
+}
+
 /// Diff two sets of props and generate SetProp/RemoveProp patches
 pub fn diff_props(
     node_id: NodeId,
@@ -527,12 +605,18 @@ pub fn diff_props(
     let mut patches = Vec::new();
 
     for (key, new_value) in new_props {
+        if is_engine_internal_prop(key) {
+            continue;
+        }
         if old_props.get(key) != Some(new_value) {
             patches.push(Patch::set_prop(node_id, key.clone(), new_value.clone()));
         }
     }
 
     for key in old_props.keys() {
+        if is_engine_internal_prop(key) {
+            continue;
+        }
         if !new_props.contains_key(key) {
             patches.push(Patch::remove_prop(node_id, key.clone()));
         }

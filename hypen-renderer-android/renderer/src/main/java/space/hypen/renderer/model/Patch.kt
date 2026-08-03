@@ -52,6 +52,16 @@ enum class PatchType {
      */
     @Json(name = "attach")
     ATTACH,
+
+    /**
+     * Replace an element's accessibility semantics after a reactive change
+     * (templated accessible name, bound self-state, bound checked, reactive
+     * activedescendant). Carries the complete re-resolved block in
+     * [Patch.semantics]; the renderer re-applies it with the same
+     * translation it runs at create. A null block clears the semantics.
+     */
+    @Json(name = "setSemantics")
+    SET_SEMANTICS,
 }
 
 /**
@@ -70,6 +80,12 @@ data class Patch(
     val parentId: String? = null,
     val beforeId: String? = null,
     val eventName: String? = null,
+    /**
+     * Engine-derived accessibility semantics block (camelCase JSON object —
+     * role/name/state/hidden/…, same shape as the web wire format). Present
+     * on CREATE for elements with derivable a11y and on every SET_SEMANTICS.
+     */
+    val semantics: Map<String, Any?>? = null,
 ) {
     companion object {
         /**
@@ -183,6 +199,18 @@ data class Patch(
             type = PatchType.DETACH_EVENT,
             id = id,
             eventName = eventName,
+        )
+
+        /**
+         * Create a SET_SEMANTICS patch replacing an element's semantics.
+         */
+        fun setSemantics(
+            id: String,
+            semantics: Map<String, Any?>?,
+        ) = Patch(
+            type = PatchType.SET_SEMANTICS,
+            id = id,
+            semantics = semantics,
         )
 
         /**

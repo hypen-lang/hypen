@@ -35,6 +35,9 @@ fn list_with_complex_template(array_path: &str, template_children: Vec<Element>)
         ir_children: template_children.into_iter().map(IRNode::Element).collect(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -65,6 +68,9 @@ fn product_card_template() -> Element {
                 ir_children: Vec::new(),
                 key: None,
                 module_scope: None,
+                semantics: None,
+                span: None,
+                expr_span: None,
             }),
             // Product description
             IRNode::Element(Element {
@@ -76,6 +82,9 @@ fn product_card_template() -> Element {
                 ir_children: Vec::new(),
                 key: None,
                 module_scope: None,
+                semantics: None,
+                span: None,
+                expr_span: None,
             }),
             // Price with conditional styling
             IRNode::Element(Element {
@@ -93,6 +102,9 @@ fn product_card_template() -> Element {
                 ir_children: Vec::new(),
                 key: None,
                 module_scope: None,
+                semantics: None,
+                span: None,
+                expr_span: None,
             }),
             // Stock status
             IRNode::Element(Element {
@@ -106,10 +118,16 @@ fn product_card_template() -> Element {
                 ir_children: Vec::new(),
                 key: None,
                 module_scope: None,
+                semantics: None,
+                span: None,
+                expr_span: None,
             }),
         ],
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -266,6 +284,9 @@ fn golden_list_partial_update_changes_one_item() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let initial_state = json!({
@@ -362,6 +383,9 @@ fn golden_list_add_one_item_to_end() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let initial_state = json!({
@@ -450,6 +474,9 @@ fn golden_list_reorder_items() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None, // Note: key would come from item.id in optimized version
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let initial_state = json!({
@@ -541,6 +568,9 @@ fn golden_list_reverse_order() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let initial_state = json!({
@@ -698,6 +728,9 @@ fn golden_dependency_graph_cleared_on_render() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     };
 
     let initial_state = json!({"counter": 0});
@@ -767,6 +800,9 @@ fn golden_dependency_multi_binding_tracking() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     };
 
     let state = json!({"firstName": "John", "lastName": "Doe"});
@@ -830,6 +866,9 @@ fn golden_correctness_item_binding_substitution() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let state = json!({
@@ -909,6 +948,9 @@ fn golden_correctness_ternary_evaluation() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let state = json!({
@@ -981,6 +1023,9 @@ fn golden_correctness_nested_path_resolution() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let state = json!({

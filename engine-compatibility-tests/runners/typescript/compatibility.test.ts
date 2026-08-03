@@ -22,6 +22,7 @@ interface EnginePatch {
   parentId?: string;
   beforeId?: string | null;
   eventName?: string;
+  semantics?: Record<string, any>;
 }
 
 // Test case types
@@ -37,6 +38,7 @@ interface ExpectedPatch {
   name?: string;
   value?: any;
   text?: string;
+  semantics?: Record<string, any>;
 }
 
 interface TestStep {
@@ -181,7 +183,29 @@ function patchMatches(actual: EnginePatch, expected: ExpectedPatch): boolean {
   if (expected.name !== undefined && actual.name !== expected.name) return false;
   if (expected.value !== undefined && actual.value !== expected.value) return false;
 
+  // Check the semantics block on create/setSemantics patches. Exact match
+  // (not partial) — the fixture pins the complete wire block, so an extra
+  // or missing field is a mismatch.
+  if (expected.semantics !== undefined) {
+    if (JSON.stringify(sortKeys(actual.semantics)) !== JSON.stringify(sortKeys(expected.semantics))) {
+      return false;
+    }
+  }
+
   return true;
+}
+
+// Key-order-insensitive canonicalization for exact object comparison
+function sortKeys(value: any): any {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, any> = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = sortKeys(value[key]);
+    }
+    return sorted;
+  }
+  return value;
 }
 
 // Main test runner

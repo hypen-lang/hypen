@@ -952,6 +952,7 @@ mod paint_variant_tests {
                 ("backgroundColor:hover.0", json!("#0000ff")), // hover: blue
                 ("backgroundColor@md.0", json!("#00ff00")), // md: green
             ]),
+            semantics: None,
         });
         tree.apply(&Patch::Insert {
             parent_id: ROOT_ID.to_string(),

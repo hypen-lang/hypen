@@ -1,16 +1,22 @@
 /**
  * Hypen Social on Cloudflare — the whole worker in one file.
  *
- * `@hypen-space/cf/worker` provides the engine + WASM + Durable Object + WS
- * routing + the browser clients (`serveClient`); this file declares the app:
+ * `@hypen-space/cf` provides the Durable Object + WS routing. This file wires in
+ * the app, WASM engine, and shared browser clients explicitly:
  * the App module, the full `templates` map (App's route components live in
  * external `.hypen` files, so their registry `.template` is empty and the
  * runtime fills it from here), the SVG `resources` bundle, and an `onStorage`
  * hook that binds the DO's SQL into the `bun:sqlite` shim + seeds the schema.
  */
 
-import { defineHypenWorker } from "@hypen-space/cf/worker";
+import { defineHypenWorker } from "@hypen-space/cf";
 import { app } from "@hypen-space/core";
+// @ts-ignore - Wrangler's CompiledWasm rule turns this into a WebAssembly.Module.
+import wasmModule from "hypen-engine/hypen_engine_bg.wasm";
+// @ts-ignore - The web-target glue exports initSync(module) and WasmEngine.
+import * as wasm from "hypen-engine";
+// @ts-ignore - Wrangler's Text rule imports the prebuilt generic client as a string.
+import genericClientJs from "../../../../hypen-web/packages/cf/dist/client/generic.js";
 
 import { bindSql } from "./db";
 import { initSchema } from "./seed";
@@ -51,11 +57,20 @@ const worker = defineHypenWorker({
   app,
   componentTemplates: templates,
   resources,
+  wasm: wasm as never,
+  wasmModule: wasmModule as WebAssembly.Module,
   doClassName: "SocialDO",
   binding: "SOCIAL_DO",
-  // Browser clients from the prebuilt generic client: DOM at `/`, Canvas at
-  // `/canvas`. (Pass `clients: {...}` with your own bundles to customise.)
-  serveClient: { dom: "/", canvas: "/canvas" },
+  clients: {
+    "/": {
+      js: genericClientJs as string,
+      renderer: "dom",
+    },
+    "/canvas": {
+      js: genericClientJs as string,
+      renderer: "canvas",
+    },
+  },
   onStorage: (storage) => {
     bindSql(storage as never);
     if (!schemaReady) {

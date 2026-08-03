@@ -1,0 +1,427 @@
+---
+title: Accessibility
+description: What Hypen derives for free, the accessibility applicators, cross-node relationships, and how to check your app with hypen check
+---
+
+# Accessibility
+
+Hypen derives accessibility semantics in the engine — role, accessible name,
+state, and relationships are computed once from your template and carried on
+every patch as a single typed block. Each renderer translates that block to
+its native accessibility API: ARIA attributes on DOM, a shadow tree on Canvas,
+`accessibilityLabel`/traits on iOS, Compose semantics on Android, and AccessKit
+on desktop. You describe *intent* (`.label`, `.hidden`, `.role`) — never
+platform tokens like `aria-*`.
+
+Whatever the engine cannot derive is flagged loudly at dev time: `hypen check`
+prints findings with `file:line:col`, and the LSP shows the same findings as
+editor squiggles with quick fixes.
+
+## What you get for free
+
+Roles and names are derived automatically where they are structurally certain
+from the component type — no annotation needed:
+
+| Component | Derived role | Derived name |
+|-----------|-------------|--------------|
+| `Button("Save")` | `button` | `"Save"` from text content |
+| `Link("Docs")` | `link` | `"Docs"` from text content |
+| `Paragraph` | `paragraph` | — |
+| `Heading("Title", level: 2)` | `heading` + level | visible text |
+| `Image(src: "…", alt: "…")` | `img` | the `alt` text |
+| `Input` / `TextArea` | `textbox` | needs a label (see below) |
+| `Checkbox(label: "Accept terms")` | `checkbox` | the visible label |
+| `Switch(label: "Dark mode")` | `switch` | the visible label |
+| `Select` | `listbox` | needs a label |
+| `Slider` | `slider` | needs a label |
+| `ProgressBar` | `progressbar` | — |
+| `Spinner` | `status` + busy | — |
+| `Tabs` / `Tab` / `TabPanel` | `tablist` / `tab` / `tabpanel` | `Tab` names from content |
+| `Option` | `option` | from content |
+| `Combobox` | `combobox` | needs a label |
+
+Names derived from nested text content work too — `Button { Text("Save") }`
+gets the name `"Save"`. Templated content (`Button("@{state.action}")`)
+resolves reactively: the name updates whenever the bound state changes.
+
+Containers (`Column`, `Row`, `Card`, …), `List`, and `Icon` deliberately derive
+*nothing*: the engine cannot tell a decorative icon from a meaningful one, or a
+`List` used as a semantic list from one used as a toolbar. A wrong role is
+worse than none — you opt in with `.role(...)` when you mean it. When you do
+opt a container into `.role("list")`, its direct role-less children are
+automatically given `listitem`, so the list reads as a real list to assistive
+tech without per-child annotation.
+
+## The accessibility applicators
+
+| Applicator | Meaning | Notes |
+|------------|---------|-------|
+| `.label("…")` | Explicit accessible name | Overrides any derived name; accepts `@{state.x}` templates (reactive) |
+| `.description("…")` | Supplementary description | `aria-description` / `accessibilityHint` / `stateDescription` |
+| `.hidden()` | Decorative — remove from the accessibility tree | Clears all other semantics |
+| `.role("…")` / `.landmark("…")` | Opt-in role for containers | Known tokens: `button`, `link`, `list`, `navigation`/`nav`, `main`, `region`, `search`, `banner`/`header`, `contentinfo`/`footer`, `complementary`/`aside`, `dialog`, `tablist`, `tab`, `tabpanel`, `option`, `combobox`, `listbox`. Typos are flagged, not silently ignored |
+| `level: N` (or `.level(N)`) | Heading level 1–6 | Required on `Heading` — the checker flags a missing level |
+| `.expanded(bool)` | Disclosure state | Static or bound (`.expanded(@state.open)`) — bound values update live |
+| `.pressed(bool)` | Toggle-button state | Static or bound |
+| `.selected(bool)` | Selection state (tabs, options) | Static or bound |
+| `.current("page")` | Current item in a set | Tokens like `"page"`, `"step"`, `"true"` |
+| `.invalid(bool)` | Form-control validity | Static or bound (`.invalid(@state.hasError)`) → `aria-invalid` |
+| `.dir("rtl")` | Base text direction | `"ltr"`, `"rtl"`, or `"auto"` — static only; unknown tokens flagged |
+| `.liveRegion("polite")` | Announce content changes | `"polite"` or `"assertive"` → `aria-live`; put it on the element whose *text* changes reactively. Unknown tokens are currently ignored silently — spell them exactly |
+| `.bind(@state.x)` | Two-way binding | On `Checkbox`/`Switch` also emits reactive checked state for free |
+
+Two more building blocks:
+
+- **`VisuallyHidden { Text("…") }`** — content invisible on screen but read by
+  screen readers (the standard "sr-only" pattern).
+- **`.aria(key, value)`** — a raw, DOM-only escape hatch
+  (`.aria("haspopup", "menu")` → `aria-haspopup="menu"`). It bypasses the
+  portable semantics block and never reaches Canvas, iOS, or Android. Prefer
+  the intent applicators whenever one exists.
+
+```hypen
+// Icon-only button: the derived name is missing, so label it.
+Button { Icon("trash") }.label("Delete")
+
+// Decorative image next to text that already says it all.
+Icon("checkmark").hidden()
+
+// Navigation landmark on a plain container.
+Column { … }.landmark("navigation")
+
+// Reactive disclosure state.
+Button("Menu").expanded(@state.menuOpen).controls("menu-panel")
+Column { … }.id("menu-panel")
+```
+
+## Labelling form controls
+
+Form controls (`Input`, `TextArea`, `Select`, `Slider`, `Combobox`) get their
+accessible name from a *label*, not their content — a placeholder is a hint,
+not a label. Hypen gives you three ways, and the checker flags any control
+that has none of them:
+
+**1. An explicit `.label(...)`:**
+
+```hypen
+Input(placeholder: "you@example.com").bind(@state.email).label("Email")
+```
+
+**2. A `.labelledby(...)` reference.** Naming by reference to a visible
+element counts as a label — the checker accepts it whenever the referenced
+id resolves (a dangling reference is flagged separately by
+`dangling-reference`):
+
+```hypen
+Text("Search settings").id("search-label")
+Input(placeholder: "Search").labelledby("search-label")
+```
+
+**3. Auto-association with a preceding `Text`.** The ubiquitous
+label-then-field layout is wired for you: when a static `Text` immediately
+precedes an unlabeled control under a parent with an explicit `.id(...)`, the
+engine mints the id/`labelledby` pair automatically, and the Text's content
+becomes the control's name on every platform:
+
+```hypen
+Column {
+    Text("Email")
+    Input(placeholder: "you@example.com").bind(@state.email)
+
+    Text("Bio")
+    TextArea { }.bind(@state.bio)
+}.id("profile-form")
+```
+
+Auto-association is deliberately conservative — it only fires for the
+*immediately preceding* sibling, only when that `Text` is static and carries no
+other semantic job, and only inside a stable id namespace (the parent's
+`.id(...)`, or the Text's own `.id(...)`). An explicit `.label(...)` or
+`.labelledby(...)` on the control always wins.
+
+The text must also *look like a label*: at most 40 characters, at most 5
+words, and no trailing sentence punctuation (`.`, `!`, `?` — a trailing `:`
+is label-like and still wires). Instructional prose that happens to precede a
+control ("All fields are required.") fails the shape test, so it is never
+taken as the control's accessible name; the control simply stays unlabeled
+and `form-control-missing-label` fires, pointing you at an explicit
+`.label(...)`. Declining to wire is always the safe direction — a prose text
+that genuinely is your label just needs `.label` (or a shorter label), while
+hint text belongs elsewhere (or wired with `.describedby`).
+
+`Checkbox` and `Switch` self-label: their visible `label:` argument *is* their
+accessible name, so `Checkbox(label: "Accept terms").bind(@state.ok)` needs
+nothing more.
+
+## Cross-node relationships
+
+Some semantics describe a relationship between two nodes — a button and the
+panel it controls, an input and its hint text. These are expressed by
+reference to a stable id:
+
+| Applicator | Meaning |
+|------------|---------|
+| `.id("panel-1")` | Declares this node's stable id — the anchor references resolve against |
+| `.controls("panel-1")` | This node controls that node (disclosure, tab → panel) |
+| `.describedby("hint-1")` | That node describes this one (input → hint/error text) |
+| `.labelledby("tab-1")` | That node labels this one (panel → tab) |
+| `.owns("popup-1")` | That node is logically my child even though it renders elsewhere (portaled popups) |
+| `.activedescendant(@state.focusedId)` | The currently-active descendant — usually *bound*, updating live as the user arrows through options |
+
+All of these accept bound or templated values. Inside a `ForEach`, mint
+per-item ids from your own item data — the same data your module state uses:
+
+```hypen
+Column {
+    ForEach(items: @state.options) {
+        Text("@{item.label}").role("option").id("opt-@{item.id}")
+    }
+}.role("listbox").activedescendant(@state.focusedId)
+```
+
+Arrowing through options in your module (`state.focusedId = "opt-3"`) moves
+the accessibility pointer with no further wiring.
+
+References are validated: a static `.controls("missing-panel")` whose target
+no element declares is flagged by the `dangling-reference` rule (only when the
+document declares at least one `.id(...)` — ids living outside Hypen are left
+alone).
+
+**Platform reach:** id relationships apply as `aria-*` on DOM and as real
+AccessKit relationships on desktop. iOS and Android have no id-reference
+accessibility API, so these are dropped there — where the relationship carries
+the *name* (e.g. `labelledby`), pair it with content the platform can speak,
+or use `.label(...)`.
+
+## Tabs: an auto-wired composite
+
+A `Tabs` block with an explicit id gets its full reference graph minted at
+compile time — `tab.id`, `tab.controls → panel.id`, `panel.labelledby →
+tab.id`, positionally paired:
+
+```hypen
+Tabs {
+    Tab("Overview").selected(@state.overviewSelected).onClick(@actions.showOverview)
+    Tab("Settings").selected(@state.settingsSelected).onClick(@actions.showSettings)
+    TabPanel { … }
+    TabPanel { … }
+}.id("settings")
+```
+
+This mints `settings-tab-0` ↔ `settings-panel-0` and so on.
+
+When tabs and panels are mixed under one container (as above), ARIA forbids
+the container itself from being the tablist (`role="tablist"` may only own
+tabs). The engine restructures the shape for you: the outer container becomes
+a plain group (it keeps your `.id(...)`, styling, and everything else), and a
+synthetic inner element carrying `role="tablist"` is inserted holding only
+the tab children, positioned where the first tab was. Panels stay direct
+children of the outer container. Layout follows the restructure: the outer
+container defaults to column so the tab strip sits above the panels (a
+`flexDirection` you set yourself always wins), and a `.gap(...)` on the
+container is mirrored onto the tab strip — tabs stay spaced exactly as you
+wrote them, and the same gap separates the strip from the panels. When the
+children are all tabs (panels rendered elsewhere), no restructuring happens —
+the container itself is the tablist, and its layout is untouched.
+
+The contract:
+
+- The tablist **must have an `.id(...)`** — it is the namespace ids are minted
+  from. No id, no wiring.
+- Direct children with tab/tabpanel roles are paired **positionally**, and the
+  counts must match. A nonzero mismatch disables wiring rather than
+  manufacturing dangling references, and the checker explains the skip with
+  `tablist-wiring-skipped` — balance the pairs, or move every panel outside
+  and hand-wire with `.controls`/`.labelledby`.
+- Any value you set yourself (`.id`, `.controls`, `.labelledby`) wins over the
+  minted one. `.role("tab")` opt-ins on other element types participate.
+- Tabs generated by a `ForEach` are not auto-wired (the pairs aren't statically
+  visible) — mint ids from item data as shown above.
+- Selection stays yours, via `.selected`.
+
+## Keyboard behaviour you get on the web
+
+The DOM renderer implements operability client-side, keyed off the semantic
+role — no configuration:
+
+- **Activation** — actionable non-native elements (e.g. a clickable `Card`)
+  become focusable and activate on Enter/Space, announced as buttons. Native
+  `Button`/`Link` hosts already work.
+- **Dialogs** — `.role("dialog")` gets the full modal contract: focus moves
+  into the dialog when it appears (first focusable element, else the dialog
+  itself), Tab and Shift+Tab cycle within it and wrap at the ends, Escape
+  dispatches the dialog's `onClose` action when one is declared (no
+  `onClose`, no Escape behaviour — closing stays your module's decision),
+  and focus returns to the triggering element when the dialog is removed.
+- **Tablists** — the WAI-ARIA roving-tabindex contract: Arrow keys move
+  between tabs with wrap-around, Home/End jump to first/last, and the whole
+  tablist is a single Tab stop.
+- **Listboxes** — non-native listboxes (`.role("listbox")` with `option`
+  children) get the same roving behaviour plus first-character typeahead.
+- **Route navigation** — when the router swaps routes, focus moves to the new
+  route's first heading, else its `main` landmark, else the subtree root — so
+  screen readers announce the new page. Returning to a cached route restores
+  the focus you left there. Apps with their own focus management can opt out
+  with `new DOMRenderer(root, { routeFocus: "off" })`.
+
+## Checking your app: `hypen check`
+
+```bash
+hypen check                              # whole project
+hypen check src/components/profile.hypen # one file
+hypen check src/components src/shared    # specific directories
+```
+
+Runs the engine's accessibility conformance pass. With no arguments it scans
+every `.hypen` file in your project (the configured `components` directory
+from `hypen.json`); with positional arguments it checks exactly those files
+and directories. Findings print with exact source locations:
+
+```
+src/components/profile.hypen:14:5: a11y[missing-accessible-name] Button — interactive Button has no accessible name — add visible text or a label
+Found 1 accessibility issue across 1 file.
+```
+
+Exit codes (CI-safe — "couldn't check" is never reported as clean):
+
+| Code | Meaning |
+|------|---------|
+| `0` | Ran, no issues found |
+| `1` | Ran, found issues |
+| `2` | Could not (fully) check: engine binding unavailable, a file failed to read or parse, or a given path does not exist |
+
+If the engine WASM predates this checker, missing rules are reported as a
+prominent drift warning (the check still runs with the rules the binding
+does implement) — rebuild with `bun run build:wasm`.
+
+The rules — each fires only on a gap the engine *cannot* derive its way out
+of, so a clean template stays silent:
+
+| Rule | Fires when | Fix |
+|------|-----------|-----|
+| `missing-accessible-name` | An interactive control (button/link) has no derivable name — e.g. icon-only | Add visible text or `.label("…")` |
+| `image-missing-alt` | An `Image` has no `alt` | Add `alt: "…"` (or `.hidden()` if decorative) |
+| `form-control-missing-label` | A form control has no label | Add `.label("…")`, a resolving `.labelledby(...)`, or use the auto-association pattern |
+| `heading-missing-level` | A `Heading` has no level | Add `level: N` (1–6) |
+| `nested-interactive` | A button/link is nested inside another | Restructure — one interactive control per node |
+| `unknown-role-token` | `.role(...)`/`.landmark(...)` used an unrecognised token (typo) | Check the spelling |
+| `unknown-dir-token` | `.dir(...)` was not `ltr`/`rtl`/`auto` | Use a valid token |
+| `unknown-live-token` | `.liveRegion(...)` was not `polite`/`assertive` | Use a valid token |
+| `dangling-reference` | `.controls`/`.describedby`/`.labelledby`/`.owns`/static `.activedescendant` targets an id no element declares | Add `.id("…")` to the target |
+| `duplicate-id` | Two elements statically declare the same `.id(...)` in one document (mutually-exclusive `When`/`Router` branches are exempt) | Rename one id |
+| `tablist-wiring-skipped` | A `Tabs` with an `.id(...)` has a nonzero, unequal number of tab and panel children, so auto-wiring was skipped | Balance the pairs, or portal every panel out and hand-wire |
+| `non-portable-aria` | `.aria(...)` was used — it only reaches the DOM renderer (informational) | Prefer a portable applicator when one exists |
+| `unknown-ignore-rule` | A `// hypen-a11y-ignore` directive names a rule id that doesn't exist, so that entry suppresses nothing | Check the spelling against this table |
+
+Notes on the reference rules: ids minted from item data inside a `ForEach`
+(`.id("opt-@{item.id}")`) exist only at runtime, so a document containing any
+dynamic id cannot have its references statically validated —
+`dangling-reference` goes silent for that whole document rather than flag
+correct code. Likewise a document declaring no `.id(...)` at all is assumed
+to reference ids living outside Hypen.
+
+### Suppressing findings
+
+Both mechanisms keep suppression visible: suppressed findings never fail the
+check, but the report always ends with `N finding(s) suppressed.`
+
+**Inline, per element** — a `// hypen-a11y-ignore` comment, either trailing
+any line of the element's expression or alone on the line directly above it
+(no blank line in between). Bare, it suppresses every rule on that element;
+with a comma-separated rule list, only those rules:
+
+```hypen
+// hypen-a11y-ignore missing-accessible-name
+Button { Icon("logo") }
+
+Input(placeholder: "q") // hypen-a11y-ignore form-control-missing-label
+```
+
+An element's expression runs from its name through the end of its applicator
+chain, so for a multiline element the natural spot — trailing the last
+applicator — works:
+
+```hypen
+Button {
+    Icon("trash")
+}
+    .padding(16) // hypen-a11y-ignore missing-accessible-name
+```
+
+The directive never reaches past the expression: a comment on the line
+*after* the last applicator applies to nothing, and the comment-above form
+breaks on a blank line, so a directive orphaned by later edits can't silently
+latch onto whatever element drifts beneath it. A rule id the engine doesn't
+implement is itself flagged (`unknown-ignore-rule`) rather than silently
+matching nothing — a typo'd directive tells you it's broken.
+
+**Project-wide, per rule** — `hypen.json`:
+
+```json
+{ "a11y": { "ignoreRules": ["non-portable-aria"] } }
+```
+
+### During development
+
+`hypen dev --a11y` runs the same conformance pass over your `.hypen` sources
+on the initial build and on every rebuild, printing findings to the dev
+server console in the same `<file>:<line>:<col>: a11y[rule]` format. To make
+it the project default (no flag needed), set it in `hypen.json`:
+
+```json
+{ "a11y": { "dev": true } }
+```
+
+It is off by default and purely informational: findings never stop or fail
+the dev server, both suppression mechanisms above apply exactly as in
+`hypen check`, and a clean pass prints nothing.
+
+## In the editor
+
+The Hypen LSP runs the same conformance pass on every edit and publishes
+findings as inline squiggles (source `hypen-a11y`, the rule id as the
+diagnostic code). Severity is conservative: `nested-interactive` is an error,
+missing names/labels/alt and unknown tokens are warnings, a missing heading
+level is informational.
+
+Quick fixes are available from the lightbulb menu:
+
+- `missing-accessible-name` / `form-control-missing-label` → appends
+  `.label("")` after the element's expression
+- `image-missing-alt` → inserts `alt: ""` into the argument list
+- `heading-missing-level` → inserts `level: 1`
+
+## Platform support
+
+One semantics block travels to every renderer, but each platform's
+accessibility API can express different parts of it. What each renderer
+consumes — and what it deliberately drops:
+
+| Semantics | DOM | Canvas (shadow tree) | iOS (SwiftUI) | Android (Compose) | Desktop (AccessKit) |
+|---|---|---|---|---|---|
+| Role | `role` attribute (overrides native tags when intentional) | `role` on generic hosts | traits (button/link/header/image/search, dialog→modal) | `Role.*` (Button/Tab/Checkbox/Switch/Image/DropdownList) | full role map incl. composites |
+| Derived name (visible text) | left to the browser | applied as `aria-label` (pixels are invisible to AT) | left to visible text | left to visible text | AccessKit label |
+| Explicit `.label` / image alt | `aria-label` | `aria-label` | `accessibilityLabel` | `contentDescription` | label |
+| `.description` | `aria-description` | `aria-description` | `accessibilityHint` | folded into `stateDescription` | description |
+| `.hidden` | `aria-hidden` | omitted from the shadow tree | `.accessibilityHidden` | `clearAndSetSemantics {}` | — |
+| Heading level | `<hN>` / `aria-level` | shadow `<hN>` | `.accessibilityHeading(.h1–.h6)` | `heading()` (no level) | Heading role (no level) |
+| Self-state (`expanded`/`pressed`/`selected`/`current`) | `aria-*` | `aria-*` | `accessibilityValue` | `stateDescription` | — |
+| `checked` (from `.bind`) | `aria-checked` | `aria-checked` | `accessibilityValue` | `stateDescription` | — |
+| `.invalid` | `aria-invalid` | — | — | — | — |
+| `.liveRegion` | `aria-live` | `aria-live` | — | — | — |
+| `.dir` | `dir` attribute | — | — | — | — |
+| Id references (`.id`/`.controls`/`.describedby`/`.labelledby`/`.owns`/`.activedescendant`) | ARIA id references | — | dropped (string-hint API only) | dropped | real AccessKit `NodeId` relations |
+| Keyboard (activation, dialog trap, roving tabindex, typeahead, route focus) | ✓ | — | native platform behaviour | native platform behaviour | AccessKit actions (Click) |
+
+Reactive updates (`setSemantics` re-emits for bound names and state) reach
+**all five** renderers — a dash above means the *field* has no faithful
+target on that platform, never that updates go stale. Derived names staying
+with visible text is deliberate and uniform: an explicit `.label` overrides,
+visible content speaks for itself.
+
+## See also
+
+- [Inputs & Forms](/docs/guide/inputs) — form components and two-way binding
+- [Styling](/docs/guide/styling) — the general applicator model
+- [CLI](/docs/tooling/cli) — all `hypen` commands
+- [LSP](/docs/tooling/lsp) — editor setup

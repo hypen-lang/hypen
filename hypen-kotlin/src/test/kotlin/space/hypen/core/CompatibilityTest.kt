@@ -113,8 +113,12 @@ class CompatibilityTest {
 
         val fixtures = fixturesDir.walkTopDown()
             // Skip `portable/` — different schema, separate runner
-            // (PortableCompatibilityTest.kt).
-            .onEnter { dir -> dir.name != "portable" }
+            // (PortableCompatibilityTest.kt). Skip `variant/` for the same
+            // reason — its cases have no `input.source` (they exercise the
+            // variant parse/resolve helpers, not the DSL pipeline), so they
+            // fail TestCase deserialization at discovery time. Mirrors the
+            // fixtures/variant/ skip the other DSL runners already have.
+            .onEnter { dir -> dir.name != "portable" && dir.name != "variant" }
             .filter { it.isFile && it.extension == "json" }
             .toList()
 

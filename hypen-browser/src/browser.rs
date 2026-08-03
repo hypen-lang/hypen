@@ -728,6 +728,7 @@ fn summarize_patches(patches: &[Patch]) -> String {
             Patch::Remove { .. } => "Remove",
             Patch::Detach { .. } => "Detach",
             Patch::Attach { .. } => "Attach",
+            Patch::SetSemantics { .. } => "SetSemantics",
         };
         *counts.entry(kind).or_default() += 1;
     }
@@ -960,10 +961,12 @@ fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec
             id,
             element_type,
             props,
+            semantics,
         } => Patch::Create {
             id: prefix_id(prefix, &id),
             element_type,
             props,
+            semantics,
         },
         Patch::SetProp { id, name, value } => Patch::SetProp {
             id: prefix_id(prefix, &id),
@@ -977,6 +980,10 @@ fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec
         Patch::SetText { id, text } => Patch::SetText {
             id: prefix_id(prefix, &id),
             text,
+        },
+        Patch::SetSemantics { id, semantics } => Patch::SetSemantics {
+            id: prefix_id(prefix, &id),
+            semantics,
         },
         Patch::Insert {
             parent_id,
@@ -1125,6 +1132,7 @@ mod tests {
                 id: "col".into(),
                 element_type: "Column".into(),
                 props: props(&[]),
+                semantics: None,
             },
             Patch::Insert {
                 parent_id: "root".into(),
@@ -1135,6 +1143,7 @@ mod tests {
                 id: "t".into(),
                 element_type: "Text".into(),
                 props: props(&[("0", json!("Hello"))]),
+                semantics: None,
             },
             Patch::Insert {
                 parent_id: "col".into(),
@@ -1530,6 +1539,7 @@ mod tests {
                 id: "1".into(),
                 element_type: "Column".into(),
                 props: Arc::new(IndexMap::new()),
+                semantics: None,
             },
             Patch::Insert {
                 parent_id: "root".into(),
@@ -1578,6 +1588,7 @@ mod tests {
                 id: "1".into(),
                 element_type: "Text".into(),
                 props: Arc::new(IndexMap::new()),
+                semantics: None,
             },
             Patch::Insert {
                 parent_id: "root".into(),

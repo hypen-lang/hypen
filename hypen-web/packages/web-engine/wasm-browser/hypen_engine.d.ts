@@ -60,6 +60,34 @@ export class WasmEngine {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Kebab-case ids of every accessibility rule this engine build's
+     * conformance pass checks (from `ir::conformance::ALL_RULES`, so the
+     * list cannot drift from the `A11yRule` enum). Hosts compare it against
+     * the rule set they were built to expect: a prebuilt WASM that predates
+     * a rule still exposes `checkAccessibility` and looks current while
+     * silently never firing the newer rule.
+     */
+    a11yRules(): string[];
+    /**
+     * Run the dev-mode accessibility conformance pass over a DSL source and
+     * return any findings as
+     * `[{ rule, elementType, message, span?, line?, col?, suppressed? }]`.
+     * Hosts wire this into a dev console / editor diagnostics; an empty
+     * array means nothing actionable was found. Flags only un-derivable
+     * gaps (icon-only controls, missing alt, unleveled headings, nested
+     * interactives). `suppressed: true` marks findings matched by an inline
+     * `// hypen-a11y-ignore` directive (resolved by `locate_diagnostics`) —
+     * hosts count and report them but must not fail on or squiggle them.
+     *
+     * `span` is the offending element name token's byte range in `source`;
+     * `line`/`col` are its resolved position (1-based; `col` counts Unicode
+     * codepoints — the human/CLI convention). Resolution happens here, at
+     * the binding, so every host shares one byte→column rule. LSP-style
+     * consumers needing 0-based UTF-16 positions should resolve `span`
+     * themselves.
+     */
+    checkAccessibility(source: string): any;
+    /**
      * Clear resolved components and caches, preserving primitives and resolver.
      */
     clearResolvedComponents(): void;
@@ -296,6 +324,8 @@ export interface InitOutput {
     readonly pathHas: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pathSet: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly sessionStep: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly wasmengine_a11yRules: (a: number) => [number, number];
+    readonly wasmengine_checkAccessibility: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmengine_clearResolvedComponents: (a: number) => void;
     readonly wasmengine_clearTree: (a: number) => void;
     readonly wasmengine_currentState: (a: number) => any;
@@ -330,6 +360,7 @@ export interface InitOutput {
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __externref_drop_slice: (a: number, b: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

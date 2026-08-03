@@ -213,6 +213,59 @@ impl WasmEngine {
             .map_err(|e| structured_error("serializeError", &format!("{}", e)))
     }
 
+    /// Run the dev-mode accessibility conformance pass over a DSL source and
+    /// return any findings as
+    /// `[{ rule, elementType, message, span?, line?, col?, suppressed? }]`.
+    /// Hosts wire this into a dev console / editor diagnostics; an empty
+    /// array means nothing actionable was found. Flags only un-derivable
+    /// gaps (icon-only controls, missing alt, unleveled headings, nested
+    /// interactives). `suppressed: true` marks findings matched by an inline
+    /// `// hypen-a11y-ignore` directive (resolved by `locate_diagnostics`) —
+    /// hosts count and report them but must not fail on or squiggle them.
+    ///
+    /// `span` is the offending element name token's byte range in `source`;
+    /// `line`/`col` are its resolved position (1-based; `col` counts Unicode
+    /// codepoints — the human/CLI convention). Resolution happens here, at
+    /// the binding, so every host shares one byte→column rule. LSP-style
+    /// consumers needing 0-based UTF-16 positions should resolve `span`
+    /// themselves.
+    #[wasm_bindgen(js_name = checkAccessibility)]
+    pub fn check_accessibility(&self, source: &str) -> Result<JsValue, JsValue> {
+        let doc = hypen_parser::parse_document(source)
+            .map_err(|e| structured_error("parseError", &format_parse_errors(&e)))?;
+        // All components of the document share one id scope: `.controls("x")`
+        // in one component may target `.id("x")` in a sibling, so the trees
+        // are checked together (check_accessibility_trees), not one-by-one.
+        let trees: Vec<crate::ir::IRNode> = doc
+            .components
+            .iter()
+            .map(crate::ir::ast_to_ir_node)
+            .collect();
+        let diagnostics = crate::ir::check_accessibility_trees(&trees);
+        // Spans are document-relative (parse_document parsed the full
+        // source), so one locate pass covers every component's findings.
+        let located = crate::ir::conformance::locate_diagnostics(diagnostics, source);
+        // json_compatible: LocatedDiagnostic uses #[serde(flatten)], which
+        // serde_wasm_bindgen would otherwise emit as a JS `Map` (opaque to
+        // JSON.stringify and property access). This serializer produces
+        // plain objects.
+        use serde::Serialize;
+        located
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|e| structured_error("serializeError", &format!("{}", e)))
+    }
+
+    /// Kebab-case ids of every accessibility rule this engine build's
+    /// conformance pass checks (from `ir::conformance::ALL_RULES`, so the
+    /// list cannot drift from the `A11yRule` enum). Hosts compare it against
+    /// the rule set they were built to expect: a prebuilt WASM that predates
+    /// a rule still exposes `checkAccessibility` and looks current while
+    /// silently never firing the newer rule.
+    #[wasm_bindgen(js_name = a11yRules)]
+    pub fn a11y_rules(&self) -> Vec<String> {
+        crate::ir::conformance::all_rule_ids()
+    }
+
     /// Register resources from a JavaScript object (name -> SVG string map).
     #[wasm_bindgen(js_name = registerResources)]
     pub fn register_resources(&mut self, resources_js: JsValue) -> Result<(), JsValue> {

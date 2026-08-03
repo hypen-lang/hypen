@@ -53,6 +53,7 @@ fn test_string_buffer_pattern() {
             id: "root".to_string(),
             element_type: "Column".to_string(),
             props: std::sync::Arc::new(indexmap::IndexMap::new()),
+            semantics: None,
         },
         Patch::Create {
             id: "text1".to_string(),
@@ -62,6 +63,7 @@ fn test_string_buffer_pattern() {
                 map.insert("0".to_string(), json!("Hello"));
                 map
             }),
+            semantics: None,
         },
         Patch::Insert {
             parent_id: "root".to_string(),
@@ -320,6 +322,7 @@ fn test_patch_serialization_all_types() {
                 map.insert("0".to_string(), json!("Hello"));
                 map
             }),
+            semantics: None,
         },
         Patch::SetProp {
             id: "node1".to_string(),

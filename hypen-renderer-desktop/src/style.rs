@@ -1597,6 +1597,7 @@ mod tests {
             id: "test".into(),
             element_type: "Container".into(),
             props: map,
+            semantics: None,
         }
     }
 

@@ -13,6 +13,7 @@ import {
   type DiscoveredComponent,
 } from "@hypen-space/server";
 import { pink, yellow, dim, boldPink, boldYellow } from "./colors.js";
+import { createDevA11yChecker, type DevA11yOptions } from "./dev.js";
 
 // Lazy load esbuild to avoid issues if not installed
 let esbuild: typeof import("esbuild") | null = null;
@@ -40,6 +41,11 @@ export interface DevOptions {
   outDir?: string;
   onStart?: (url: string) => void;
   onComponentsChange?: (components: DiscoveredComponent[]) => void;
+  /**
+   * Opt-in accessibility findings on the dev loop (initial build + every
+   * rebuild, `hypen check` format). Never fails the server. Default: off.
+   */
+  a11y?: DevA11yOptions;
 }
 
 export interface BuildOptions {
@@ -152,6 +158,7 @@ export async function dev(options: DevOptions): Promise<{
     outDir = ".hypen",
     onStart,
     onComponentsChange,
+    a11y,
   } = options;
 
   // Verify esbuild is available
@@ -192,6 +199,16 @@ export async function dev(options: DevOptions): Promise<{
     return mainPath;
   };
 
+  // Opt-in accessibility pass over the .hypen sources; runs after the
+  // initial generation and after every rebuild. Never throws.
+  const runA11y = a11y
+    ? createDevA11yChecker({
+        componentsDir: resolvedComponentsDir,
+        projectRoot: resolve("."),
+        ignoreRules: a11y.ignoreRules,
+      })
+    : null;
+
   // Initial generation
   const componentsPath = await generateComponents();
   generateMain(componentsPath);
@@ -210,6 +227,7 @@ export async function dev(options: DevOptions): Promise<{
         ) {
           log("File changed:", filename);
           await generateComponents();
+          await runA11y?.();
           const components = await discoverComponents(resolvedComponentsDir);
           onComponentsChange?.(components);
         }
@@ -333,6 +351,10 @@ export async function dev(options: DevOptions): Promise<{
   console.log(`  ${dim("Components:")} ${resolvedComponentsDir}\n`);
 
   onStart?.(serverUrl);
+
+  // Initial-build findings print under the banner; fire-and-forget so the
+  // WASM engine boot never delays the server coming up.
+  void runA11y?.();
 
   return {
     url: serverUrl,

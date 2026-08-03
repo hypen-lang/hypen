@@ -73,6 +73,12 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${pink("dev")}             Start development server
     ${pink("build")}           Build for production
     ${pink("generate")}        Generate component imports
+    ${pink("check")} [path...] Run accessibility conformance over .hypen files
+                    (paths may be files or directories; default: project components)
+                    Suppress findings with a trailing ${dim("// hypen-a11y-ignore [rule-id, ...]")}
+                    comment (or on the line above), or project-wide via hypen.json:
+                    ${dim('"a11y": { "ignoreRules": ["rule-id", ...] }')} — suppressed
+                    findings are counted in the report, never in the exit code
     ${pink("studio")}          Open Hypen Studio IDE
     ${pink("test")}            Open Studio Test Mode (live previews + device mirrors)
     ${pink("run")} <platform>  Install and launch on device (android|ios)
@@ -80,12 +86,18 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
   ${boldYellow("Options:")}
     -h, --help      Show this help message
     -v, --version   Show version number
+    --a11y          With dev: print accessibility findings on the initial
+                    build and every rebuild (never fails the server; also
+                    enabled via hypen.json ${dim('"a11y": { "dev": true }')})
     --studio        Open Studio alongside device runner (with run command)
 
   ${boldYellow("Examples:")}
     ${dim("$")} hypen init my-app
     ${dim("$")} hypen dev --port 3000
+    ${dim("$")} hypen dev --a11y
     ${dim("$")} hypen build --minify
+    ${dim("$")} hypen check
+    ${dim("$")} hypen check src/components/App.hypen
     ${dim("$")} hypen studio --port 5173
     ${dim("$")} hypen test
     ${dim("$")} hypen run android
@@ -98,6 +110,12 @@ interface Config {
   entry: string;
   port?: number;
   outDir?: string;
+  /**
+   * Accessibility options: `ignoreRules` suppresses those rule ids
+   * project-wide (check + dev loop); `dev: true` enables findings on
+   * `hypen dev` rebuilds without the `--a11y` flag.
+   */
+  a11y?: { ignoreRules?: string[]; dev?: boolean };
 }
 
 async function loadConfig(): Promise<Config> {
@@ -113,6 +131,21 @@ async function loadConfig(): Promise<Config> {
         entry: config.entry || "App",
         port: config.port,
         outDir: config.outDir || config.build?.outDir,
+        a11y:
+          config.a11y && typeof config.a11y === "object"
+            ? {
+                // Non-string entries are dropped rather than silently
+                // matching nothing at check time.
+                ignoreRules: Array.isArray(config.a11y.ignoreRules)
+                  ? config.a11y.ignoreRules.filter(
+                      (rule: unknown): rule is string => typeof rule === "string",
+                    )
+                  : undefined,
+                // Anything but literal `true` stays off — dev-loop findings
+                // are strictly opt-in.
+                dev: config.a11y.dev === true,
+              }
+            : undefined,
       };
       // Validate port from config file
       if (parsedConfig.port !== undefined) {
@@ -319,10 +352,10 @@ async function ensureProjectDeps() {
   console.log("");
 }
 
-async function devServer(options: { port?: number; debug?: boolean }) {
+async function devServer(options: { port?: number; debug?: boolean; a11y?: boolean }) {
   await ensureProjectDeps();
   const config = await loadConfig();
-  const { dev } = await import("../src/dev.js");
+  const { dev, isDevA11yEnabled } = await import("../src/dev.js");
 
   await dev({
     components: config.components,
@@ -330,6 +363,11 @@ async function devServer(options: { port?: number; debug?: boolean }) {
     port: options.port || config.port || 3000,
     debug: options.debug || false,
     hot: true,
+    // `--a11y` OR hypen.json `"a11y": { "dev": true }` enables findings on
+    // rebuilds; default is fully silent.
+    a11y: isDevA11yEnabled(options.a11y, config.a11y)
+      ? { ignoreRules: config.a11y?.ignoreRules }
+      : undefined,
   });
 }
 
@@ -372,6 +410,53 @@ async function generateComponents() {
 
   writeFileSync(outputPath, code);
   console.log(`\n  ${pink("Generated:")} ${outputPath}\n`);
+}
+
+/**
+ * Run the accessibility conformance check: `hypen check [path...]`.
+ *
+ * With positional paths, checks exactly those targets (a file is checked
+ * as-is, a directory is scanned for `.hypen` sources), resolved against the
+ * CWD. With no paths, globs `.hypen` sources under the configured components
+ * directory. Findings print per-file; the exit code distinguishes clean (0),
+ * found issues (1), and couldn't-check (2 — missing binding, unparseable
+ * file, or a named path that doesn't exist).
+ *
+ * Suppression: an inline `// hypen-a11y-ignore [rule-id, …]` comment
+ * (trailing on the flagged line, or alone on the line above) silences
+ * matching findings, and hypen.json's `"a11y": { "ignoreRules": [...] }`
+ * silences rules project-wide. Suppressed findings are reported as a count,
+ * never counted toward the exit code.
+ */
+async function checkAccessibility(paths: string[]) {
+  const { runCheck, resolveCheckTargets, COULD_NOT_CHECK } = await import(
+    "../src/check.js"
+  );
+
+  const projectRoot = resolve(".");
+  const config = await loadConfig();
+  const ignoreRules = config.a11y?.ignoreRules;
+  let count: number;
+  let missingPaths: string[] = [];
+  if (paths.length > 0) {
+    const { files, missing } = resolveCheckTargets(paths, projectRoot);
+    missingPaths = missing;
+    for (const path of missing) {
+      console.error(`  ${path}: no such file or directory`);
+    }
+    count = await runCheck({ files, projectRoot, ignoreRules });
+  } else {
+    const componentsDir = resolve(config.components || "./src/components");
+    count = await runCheck({ componentsDir, projectRoot, ignoreRules });
+  }
+
+  // Exit codes: 0 = ran & clean, 1 = ran & found issues, 2 = could not
+  // check everything asked for (engine binding missing, file failed to
+  // read/parse, or a named path doesn't exist) — distinct so CI doesn't
+  // read "couldn't check" as a clean pass. Findings win over exit 2.
+  if (count > 0) process.exit(1);
+  if (count === COULD_NOT_CHECK || missingPaths.length > 0) process.exit(2);
+  process.exit(0);
 }
 
 /**
@@ -826,6 +911,7 @@ const { values, positionals } = parseArgs({
     url: { type: "string" },
     studio: { type: "boolean" },
     clean: { type: "boolean" },
+    a11y: { type: "boolean" },
   },
   allowPositionals: true,
 });
@@ -868,6 +954,7 @@ switch (command) {
     await devServer({
       port: values.port ? parseInt(values.port) : undefined,
       debug: values.debug,
+      a11y: values.a11y,
     });
     break;
 
@@ -881,6 +968,11 @@ switch (command) {
 
   case "generate":
     await generateComponents();
+    break;
+
+  case "check":
+  case "a11y":
+    await checkAccessibility(positionals.slice(1));
     break;
 
   case "studio":

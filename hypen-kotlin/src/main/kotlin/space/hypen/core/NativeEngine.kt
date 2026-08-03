@@ -423,6 +423,10 @@ private fun NativePatch.toPatch(): Patch {
             // (`ComposeRenderer.onDetach` / `onAttach`).
             NativePatchType.DETACH -> PatchType.DETACH
             NativePatchType.ATTACH -> PatchType.ATTACH
+            // Reactive accessibility re-emit — see the Rust engine's
+            // `Patch::SetSemantics` (`reconcile/patch.rs`). The updated
+            // block rides `semanticsJson` → `Patch.semantics`.
+            NativePatchType.SET_SEMANTICS -> PatchType.SET_SEMANTICS
         },
         id = id,
         elementType = elementType,
@@ -443,6 +447,13 @@ private fun NativePatch.toPatch(): Patch {
         },
         text = text,
         parentId = parentId,
-        beforeId = beforeId
+        beforeId = beforeId,
+        semantics = semanticsJson?.let {
+            try {
+                Json.decodeFromString<JsonElement>(it)
+            } catch (e: Exception) {
+                null
+            }
+        }
     )
 }

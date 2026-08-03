@@ -50,6 +50,16 @@ object PatchType {
      * Emitted by the engine's Router subtree cache on nav-back.
      */
     const val ATTACH = "attach"
+
+    /**
+     * Replace a node's accessibility semantics after a reactive change
+     * (templated accessible name, bound self-state, bound checked). Carries
+     * the node's complete re-resolved semantics block in [Patch.semantics];
+     * renderers re-apply it with the same translation they run at create,
+     * clearing anything the new block no longer sets. A null block means
+     * the node lost all derivable semantics.
+     */
+    const val SET_SEMANTICS = "setSemantics"
 }
 
 /**
@@ -70,7 +80,14 @@ data class Patch(
     @SerialName("beforeId")
     val beforeId: String? = null,
     @SerialName("eventName")
-    val eventName: String? = null
+    val eventName: String? = null,
+    /**
+     * Engine-derived accessibility semantics block (camelCase JSON object —
+     * role/name/state/hidden/…, same shape as the web wire format). Present
+     * on `create` for nodes with derivable a11y and on every
+     * `setSemantics`; null otherwise.
+     */
+    val semantics: JsonElement? = null
 )
 
 /**

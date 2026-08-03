@@ -55,6 +55,13 @@ function wrapTextFallback(ctx: CanvasRenderingContext2D, text: string, maxWidth:
   const paragraphs = text.split("\n");
 
   for (const paragraph of paragraphs) {
+    // An empty paragraph is a blank line — dropping it would collapse
+    // consecutive newlines (and a trailing Enter in a Textarea).
+    if (paragraph === "") {
+      lines.push("");
+      continue;
+    }
+
     const words = paragraph.split(" ");
     let currentLine = "";
 
@@ -70,9 +77,7 @@ function wrapTextFallback(ctx: CanvasRenderingContext2D, text: string, maxWidth:
       }
     }
 
-    if (currentLine) {
-      lines.push(currentLine);
-    }
+    lines.push(currentLine);
   }
 
   return lines.length > 0 ? lines : [""];
@@ -107,11 +112,25 @@ export function measureText(
   let width: number;
 
   if (isPretextAvailable()) {
-    const prepared = prepareWithSegments(text, font);
     const effectiveMaxWidth = maxWidth || Infinity;
-    const linesResult = layoutWithLines(prepared, effectiveMaxWidth, lineHeight);
-    lines = linesResult.lines.map((l) => l.text);
-    width = lines.length > 0 ? Math.max(...linesResult.lines.map((l) => l.width)) : 0;
+    // Hard line breaks: pretext treats "\n" as ordinary whitespace, so
+    // paragraphs are laid out separately (matching the fallback path and
+    // what Textarea editing needs). Empty paragraphs stay as blank lines.
+    lines = [];
+    width = 0;
+    for (const paragraph of text.split("\n")) {
+      if (paragraph === "") {
+        lines.push("");
+        continue;
+      }
+      const prepared = prepareWithSegments(paragraph, font);
+      const linesResult = layoutWithLines(prepared, effectiveMaxWidth, lineHeight);
+      const paragraphLines = linesResult.lines.map((l) => l.text);
+      lines.push(...(paragraphLines.length > 0 ? paragraphLines : [""]));
+      for (const l of linesResult.lines) {
+        width = Math.max(width, l.width);
+      }
+    }
     if (lines.length === 0) lines = [""];
   } else {
     ctx.save();

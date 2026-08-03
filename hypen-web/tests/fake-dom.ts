@@ -98,6 +98,13 @@ export class FakeElement {
   public value = "";
   public placeholder = "";
   public type = "";
+  public selectionStart: number | null = null;
+  public selectionEnd: number | null = null;
+
+  setSelectionRange(start: number, end: number, _direction?: string): void {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  }
   public ownerDocument: FakeDocument | null = null;
   public id = "";
   public sheet: FakeCSSStyleSheet | null = null;
@@ -186,6 +193,51 @@ export class FakeElement {
     this.attributes[name] = value;
   }
 
+  removeAttribute(name: string): void {
+    delete this.attributes[name];
+  }
+
+  /**
+   * Minimal focus support: records this element as document.activeElement
+   * and fires bubbling focusout (on the previous holder) / focusin — enough
+   * for delegated focus handlers (e.g. the canvas mirror's FocusManager).
+   */
+  focus(_options?: unknown): void {
+    const doc = (globalThis as any).document;
+    if (!doc) return;
+    const prev = doc.activeElement ?? null;
+    if (prev === this) return;
+    doc.activeElement = this;
+    if (prev instanceof FakeElement) {
+      prev.dispatchEvent("blur", { target: prev, relatedTarget: this });
+      prev.bubbleEvent("focusout", { target: prev, relatedTarget: this });
+    }
+    this.bubbleEvent("focusin", { target: this, relatedTarget: prev });
+  }
+
+  blur(): void {
+    const doc = (globalThis as any).document;
+    if (!doc || doc.activeElement !== this) return;
+    doc.activeElement = null;
+    this.dispatchEvent("blur", { target: this, relatedTarget: null });
+    this.bubbleEvent("focusout", { target: this, relatedTarget: null });
+  }
+
+  /** Dispatch an event on this element and every FakeElement ancestor. */
+  bubbleEvent(type: string, event: any = {}): void {
+    if (!("target" in event)) event.target = this;
+    if (!("type" in event)) event.type = type;
+    let el: FakeElement | FakeDocument | null = this;
+    while (el instanceof FakeElement) {
+      el.dispatchEvent(type, event);
+      el = el.parentNode;
+    }
+  }
+
+  getAttribute(name: string): string | null {
+    return name in this.attributes ? this.attributes[name] : null;
+  }
+
   get firstElementChild(): FakeElement | null {
     return this.children[0] ?? null;
   }
@@ -203,6 +255,8 @@ export class FakeDocument {
   private nodes: FakeElement[] = [];
   public head: FakeElement;
   public body: FakeElement;
+  /** Set by FakeElement.focus(); null until anything is focused. */
+  public activeElement: FakeElement | null = null;
 
   constructor() {
     this.head = new FakeElement("HEAD");
@@ -223,6 +277,14 @@ export class FakeDocument {
     if (index >= 0) {
       this.nodes.splice(index, 1);
     }
+  }
+
+  getElementById(id: string): FakeElement | null {
+    return (
+      [this.head, this.body, ...this.head.children, ...this.body.children, ...this.nodes].find(
+        (node) => node.id === id
+      ) ?? null
+    );
   }
 
   querySelectorAll(selector: string): FakeElement[] {

@@ -216,6 +216,12 @@ pub enum PatchType {
     /// Reattach a previously-detached subtree under the same NodeId.
     /// Emitted by the engine's Router subtree cache on navigation-back.
     Attach,
+    /// Replace a node's accessibility semantics after a reactive change
+    /// (templated accessible name, bound self-state, bound checked). The
+    /// updated block rides `semantics_json`; renderers re-apply it with the
+    /// same translation they run at create, clearing attributes the new
+    /// block no longer sets. `semantics_json == None` clears everything.
+    SetSemantics,
 }
 
 /// A patch represents a single DOM operation
@@ -230,6 +236,12 @@ pub struct Patch {
     pub text: Option<String>,
     pub parent_id: Option<String>,
     pub before_id: Option<String>,
+    /// Serialized `Semantics` block (camelCase JSON, same shape as the web
+    /// wire format). Present on `Create` for nodes with derivable a11y and
+    /// on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+    /// constructors keep compiling.
+    #[uniffi(default = None)]
+    pub semantics_json: Option<String>,
 }
 
 impl From<InternalPatch> for Patch {
@@ -239,6 +251,7 @@ impl From<InternalPatch> for Patch {
                 id,
                 element_type,
                 props,
+                semantics,
             } => Patch {
                 patch_type: PatchType::Create,
                 id,
@@ -249,6 +262,23 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: semantics
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok()),
+            },
+            InternalPatch::SetSemantics { id, semantics } => Patch {
+                patch_type: PatchType::SetSemantics,
+                id,
+                element_type: None,
+                props_json: None,
+                name: None,
+                value_json: None,
+                text: None,
+                parent_id: None,
+                before_id: None,
+                semantics_json: semantics
+                    .as_ref()
+                    .and_then(|s| serde_json::to_string(s).ok()),
             },
             InternalPatch::SetProp { id, name, value } => Patch {
                 patch_type: PatchType::SetProp,
@@ -260,6 +290,7 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
             },
             InternalPatch::RemoveProp { id, name } => Patch {
                 patch_type: PatchType::RemoveProp,
@@ -271,6 +302,7 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
             },
             InternalPatch::SetText { id, text } => Patch {
                 patch_type: PatchType::SetText,
@@ -282,6 +314,7 @@ impl From<InternalPatch> for Patch {
                 text: Some(text),
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
             },
             InternalPatch::Insert {
                 parent_id,
@@ -297,6 +330,7 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: Some(parent_id),
                 before_id,
+                semantics_json: None,
             },
             InternalPatch::Move {
                 parent_id,
@@ -312,6 +346,7 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: Some(parent_id),
                 before_id,
+                semantics_json: None,
             },
             InternalPatch::Remove { id } => Patch {
                 patch_type: PatchType::Remove,
@@ -323,6 +358,7 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
             },
             // Detach/Attach are emitted by the engine's Router
             // subtree cache: Detach unlinks a subtree from its parent
@@ -341,6 +377,7 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: None,
                 before_id: None,
+                semantics_json: None,
             },
             InternalPatch::Attach {
                 parent_id,
@@ -356,6 +393,7 @@ impl From<InternalPatch> for Patch {
                 text: None,
                 parent_id: Some(parent_id),
                 before_id,
+                semantics_json: None,
             },
         }
     }

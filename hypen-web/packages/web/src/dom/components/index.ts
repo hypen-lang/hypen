@@ -84,8 +84,11 @@ export class ComponentRegistry {
     const { hypenAppHandler } = require("./hypenapp.js");
     const { appHandler } = require("./app.js");
     const { iconHandler } = require("./icon.js");
+    const { visuallyHiddenHandler } = require("./visuallyhidden.js");
+    const { tabsHandler, tabHandler, tabPanelHandler, optionHandler } = require("./tabs.js");
 
     this.register("app", appHandler);
+    this.register("visuallyhidden", visuallyHiddenHandler);
     this.register("icon", iconHandler);
     this.register("column", columnHandler);
     this.register("row", rowHandler);
@@ -116,6 +119,10 @@ export class ComponentRegistry {
     this.register("video", videoHandler);
     this.register("audio", audioHandler);
     this.register("paragraph", paragraphHandler);
+    this.register("tabs", tabsHandler);
+    this.register("tab", tabHandler);
+    this.register("tabpanel", tabPanelHandler);
+    this.register("option", optionHandler);
     this.register("router", routerHandler);
     this.register("route", routeHandler);
     this.register("hypenapp", hypenAppHandler);

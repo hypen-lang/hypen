@@ -362,6 +362,13 @@ fn parse_arbitrary(utility: &str) -> Option<Vec<CssProperty>> {
             }
         })
         .or_else(|| effects::parse_arbitrary(bare_prefix, neg_val))
+        .or_else(|| {
+            if is_negative {
+                None
+            } else {
+                backgrounds::parse_arbitrary(prefix, value)
+            }
+        })
 }
 
 #[cfg(test)]
@@ -403,6 +410,32 @@ mod tests {
         let props = output.to_props();
         assert_eq!(props.get("padding"), Some(&"1rem".to_string()));
         assert_eq!(props.get("padding@md"), Some(&"2rem".to_string()));
+    }
+
+    #[test]
+    fn test_arbitrary_bg_color() {
+        let output = parse_classes("bg-[#FCFCFC]");
+        assert_eq!(output.base.len(), 1);
+        assert_eq!(output.base[0].property, "background-color");
+        assert_eq!(output.base[0].value, "#FCFCFC");
+    }
+
+    #[test]
+    fn test_arbitrary_bg_color_with_variant() {
+        let output = parse_classes("hover:bg-[#FCFCFC]");
+        let props = output.variants.get(":hover").unwrap();
+        assert_eq!(props[0].property, "background-color");
+        assert_eq!(props[0].value, "#FCFCFC");
+    }
+
+    #[test]
+    fn test_arbitrary_gradient_stops_resolve() {
+        let output = parse_classes("bg-gradient-to-r from-[#112233] to-[#445566]");
+        let props = output.to_props();
+        assert_eq!(
+            props.get("background-image"),
+            Some(&"linear-gradient(to right, #112233, #445566)".to_string())
+        );
     }
 
     #[test]

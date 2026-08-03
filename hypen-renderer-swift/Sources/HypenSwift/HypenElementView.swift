@@ -39,7 +39,11 @@ public struct HypenElementView: View {
         if !isVisible {
             EmptyView()
         } else {
+            // Engine-derived accessibility semantics wrap the whole rendered
+            // element (label/traits/state → VoiceOver). Re-applied on every
+            // re-render, so a `setSemantics` reactive re-emit lands here too.
             renderVisibleElement(element)
+                .applyHypenSemantics(element.semantics)
         }
     }
 

@@ -1558,6 +1558,7 @@ mod tests {
             focusable_ids: vec![],
             scrollable_ids: vec![],
             hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
         };
         // Build is the side effect we're testing — just verify it
         // doesn't panic and produces a non-empty scene for visible
@@ -1591,6 +1592,7 @@ mod tests {
             focusable_ids: vec![],
             scrollable_ids: vec![],
             hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
         }
     }
 
@@ -1667,6 +1669,7 @@ mod tests {
             focusable_ids: vec![],
             scrollable_ids: vec![],
             hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(scene.encoding().path_tags.len(), 0);
@@ -1706,6 +1709,7 @@ mod tests {
             focusable_ids: vec![],
             scrollable_ids: vec![],
             hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 200.0);
         // At least one path encoded (the on-screen item) — and the

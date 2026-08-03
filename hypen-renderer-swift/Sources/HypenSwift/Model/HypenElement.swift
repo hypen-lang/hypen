@@ -12,6 +12,10 @@ public final class HypenElement: @unchecked Sendable {
     public var children: [String]
     public var parentId: String?
     public var textContent: String?
+    /// Engine-derived accessibility semantics: set at `create`, replaced
+    /// wholesale by `setSemantics` reactive re-emits (nil clears). Translated
+    /// to SwiftUI accessibility modifiers in `applyHypenSemantics`.
+    public var semantics: HypenSemantics?
 
     public init(
         id: String,

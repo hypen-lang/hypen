@@ -110,6 +110,7 @@ fn test_patch_matchers() {
         id: "node-1".to_string(),
         element_type: "Text".to_string(),
         props: std::sync::Arc::new(indexmap::indexmap! {}),
+        semantics: None,
     };
 
     let set_prop_patch = Patch::SetProp {

@@ -1,3 +1,5 @@
+use crate::ir::semantics::Semantics;
+use crate::ir::span::SourceSpan;
 use crate::reactive::Binding;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
@@ -321,6 +323,31 @@ pub struct Element {
     /// Set during component expansion when the source is `module X { ... }`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module_scope: Option<String>,
+
+    /// Accessibility semantics derived from the element type during IR
+    /// expansion (see [`Semantics::derive`]). `None` when nothing is
+    /// derivable. Carried into `Patch::Create` so every renderer can apply
+    /// the correct native accessibility metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantics: Option<Semantics>,
+
+    /// Byte span of this element's name token in the original source, from
+    /// the parser's `MetaData::name_range`. Set only by [`ast_to_ir_node`]
+    /// (`crate::ir::ast_to_ir_node`); `None` for synthesized elements and
+    /// hand-built test trees. Consumed by the conformance checker to point
+    /// diagnostics at `file:line:col` — never carried on `Patch`, so there is
+    /// no wire-format or renderer impact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<SourceSpan>,
+
+    /// Byte span of this element's full source expression (declaration
+    /// keyword through the last applicator), from the parser's
+    /// `MetaData::expr_range`. Same provenance rules as [`span`](Self::span).
+    /// Consumed by the conformance checker so a suppression directive
+    /// trailing any line of a multiline applicator chain matches the element
+    /// it annotates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expr_span: Option<SourceSpan>,
 }
 
 impl Element {
@@ -331,6 +358,9 @@ impl Element {
             ir_children: Vec::new(),
             key: None,
             module_scope: None,
+            semantics: None,
+            span: None,
+            expr_span: None,
         }
     }
 

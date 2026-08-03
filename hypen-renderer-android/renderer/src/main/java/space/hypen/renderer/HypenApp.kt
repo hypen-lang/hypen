@@ -23,6 +23,7 @@ import space.hypen.renderer.remote.RemoteEngineConfig
 import space.hypen.renderer.render.ActionDispatcher
 import space.hypen.renderer.render.ComposeRenderer
 import space.hypen.renderer.render.LocalActionDispatcher
+import space.hypen.renderer.render.applyHypenSemantics
 import space.hypen.renderer.render.LocalComposeRenderer
 import kotlinx.coroutines.flow.collectLatest
 
@@ -275,6 +276,11 @@ private fun HypenElement(
                 else -> finalModifier
             }
     }
+
+    // Engine-derived accessibility semantics (label/role/state → TalkBack).
+    // Re-applied on every recomposition, so a SET_SEMANTICS reactive
+    // re-emit lands here too.
+    finalModifier = finalModifier.applyHypenSemantics(element.semantics)
 
     // Render the component
     handler.Render(

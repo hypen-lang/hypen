@@ -1,0 +1,23 @@
+{
+  "name": "a11y-demo",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "hypen dev",
+    "build": "hypen build",
+    "check": "hypen check",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@hypen-space/core": "latest",
+    "@hypen-space/server": "latest",
+    "@hypen-space/web": "latest",
+    "@hypen-space/web-engine": "latest"
+  },
+  "devDependencies": {
+    "@hypen-space/cli": "latest",
+    "@types/bun": "latest",
+    "esbuild": "^0.20.0",
+    "typescript": "^5.0.0"
+  }
+}

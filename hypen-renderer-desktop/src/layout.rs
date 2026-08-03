@@ -306,6 +306,10 @@ pub struct LayoutPass {
     /// routing iterates these (in reverse for topmost-first) instead
     /// of the full items vec.
     pub(crate) scrollable_ids: Vec<usize>,
+    /// Engine-derived accessibility semantics by `node_id`. The AccessKit
+    /// translation reads this for the accessible name/role/hidden of each
+    /// item, falling back to layout heuristics when absent.
+    pub(crate) a11y: std::collections::HashMap<String, hypen_engine::ir::Semantics>,
     /// Indexes of items whose `hover_action` is `Some(_)`. Hover
     /// hit-testing (`hit_hoverable`) iterates this list in reverse —
     /// just like `actionable_ids` — to find the topmost subject under
@@ -551,6 +555,15 @@ impl TaffyState {
                         }
                     }
                 }
+                true
+            }
+            Patch::SetSemantics { .. } => {
+                // Accessibility-only: no Taffy geometry impact. The
+                // renderer Tree already updated its `Node.semantics`; the
+                // next LayoutPass rebuild re-collects the a11y side-map.
+                // (A SetSemantics always accompanies the SetProp for the
+                // prop that fed it, so the repaint/AccessKit push it needs
+                // is already scheduled.)
                 true
             }
             Patch::SetText { id, .. } => {
@@ -1198,6 +1211,17 @@ impl LayoutPass {
             }
         }
 
+        // Collect engine-derived semantics for the items that have any, so the
+        // AccessKit translation can use them.
+        let mut a11y = HashMap::new();
+        for it in &items {
+            if let Some(node) = tree.get(&it.node_id) {
+                if let Some(sem) = node.semantics.as_ref() {
+                    a11y.insert(it.node_id.clone(), sem.clone());
+                }
+            }
+        }
+
         Self {
             items,
             content_size,
@@ -1206,6 +1230,7 @@ impl LayoutPass {
             focusable_ids,
             scrollable_ids,
             hoverable_ids,
+            a11y,
         }
     }
 

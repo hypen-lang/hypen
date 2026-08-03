@@ -305,6 +305,17 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
             // Regular element - convert children to IRNodes recursively
             let mut element = Element::new(&component.name);
 
+            // Carry the parser's name-token byte span so diagnostics
+            // (conformance checker, LSP) can point at file:line:col, and the
+            // full-expression span so suppression directives can trail any
+            // line of a multiline applicator chain.
+            element.span = Some(crate::ir::SourceSpan::from_range(
+                &component.metadata.name_range,
+            ));
+            element.expr_span = Some(crate::ir::SourceSpan::from_range(
+                &component.metadata.expr_range,
+            ));
+
             // Convert arguments to props
             for (i, arg) in component.arguments.arguments.iter().enumerate() {
                 let (key, value) = match arg {
@@ -369,9 +380,406 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
             // Convert children recursively as IRNodes to preserve ForEach/When/If
             element.ir_children = component.children.iter().map(ast_to_ir_node).collect();
 
+            // Derive accessibility semantics once, here in the engine, and
+            // carry them to every renderer via the Create patch. Runs after
+            // props AND children are populated so prop-dependent semantics
+            // (heading level) and content-dependent semantics (accessible
+            // name) are both available.
+            element.semantics = crate::ir::Semantics::derive(&element);
+
+            // Tabs auto-wiring: a tablist with an explicit `.id(...)` gets
+            // its tab↔panel id graph minted for it, so authors don't
+            // hand-assemble `.id`/`.controls`/`.labelledby` per pair.
+            if element.semantics.as_ref().and_then(|s| s.role)
+                == Some(crate::ir::semantics::Role::Tablist)
+            {
+                wire_tablist(&mut element);
+            }
+
+            // Listitem derivation: `.role("list")` is an author's statement
+            // that this container really is a semantic list, which is only
+            // true to assistive tech when its children are listitems. Wire
+            // the direct, role-less element children.
+            if element.semantics.as_ref().and_then(|s| s.role)
+                == Some(crate::ir::semantics::Role::List)
+            {
+                wire_list_items(&mut element);
+            }
+
+            // Form-control ↔ label auto-association: an unlabeled form
+            // control whose immediately-preceding sibling is a static Text
+            // gets that Text wired as its label, so authors don't need an
+            // explicit `.label(...)` for the ubiquitous label-then-field
+            // layout. See `wire_form_labels` for the (deliberately narrow)
+            // conditions.
+            wire_form_labels(&mut element);
+
+            // A content-named element whose nameable text is dynamic and
+            // spans children (`Button { Text("@{state.x}") }`) cannot resolve
+            // its name from its own props at reconcile. Hoist the recovered
+            // template onto the parent as the synthetic `__a11yName` prop:
+            // its bindings register as parent dependencies (a child text
+            // change re-emits SetSemantics) and `with_resolved_name` reads
+            // the resolved value. Renderers drop the unknown prop.
+            if let Some(hoisted) = crate::ir::semantics::hoisted_name_template(&element) {
+                element.props.insert("__a11yName".to_string(), hoisted);
+            }
+
+            // Intent applicators (.label/.hidden/.role/.landmark) are consumed
+            // into the semantics block above; strip them so they don't travel
+            // on as junk props (which would otherwise be silently dropped by
+            // the renderer's CSS fallback).
+            element.props.remove("label.0");
+            element.props.remove("hidden.0");
+            element.props.remove("description.0");
+            // NOTE: .role/.landmark (role.0/landmark.0) and .dir (dir.0) are
+            // intentionally NOT stripped — the conformance checker reads them
+            // to flag an unrecognised token (a typo like `.role("buton")` or
+            // `.dir("rlt")`) rather than
+            // silently ignoring it. Likewise .expanded/.pressed/.selected/
+            // .current/.invalid AND the id-reference applicators (.id/.controls/
+            // .describedby/.labelledby/.owns/.activedescendant) must survive
+            // so a bound or templated value (`.expanded(@state.open)`,
+            // `.id("opt-@{item.id}")` inside a ForEach) resolves at
+            // reconcile. The leftover props are harmless (dropped by the
+            // renderer's CSS fallback).
+
             IRNode::Element(element)
         }
     }
+}
+
+/// Auto-wire the id graph of a tablist's tab/panel pairs, and restructure
+/// mixed children so the tablist role never owns a tabpanel.
+///
+/// A hand-assembled accessible Tabs needs four references per pair —
+/// `tab.id`, `tab.controls → panel.id`, `panel.id`, `panel.labelledby →
+/// tab.id`. When the tablist declares an explicit `.id("settings")` (the
+/// deterministic namespace) and its direct children contain an equal,
+/// non-zero number of tab-role and tabpanel-role elements, the pairs are
+/// wired positionally with minted ids `<tablistId>-tab-<i>` /
+/// `<tablistId>-panel-<i>`. Author-supplied values always win (`??=`
+/// semantics), and selection state stays author-driven via `.selected`.
+///
+/// ARIA constrains the shape: `role="tablist"` may own only `role="tab"`
+/// children, and `role="tab"` requires a tablist parent. So when tabs and
+/// panels are mixed under one container, the container CANNOT be the
+/// tablist — it becomes a plain group (role cleared, id and everything
+/// else kept), a synthetic inner `Tabs` element (same DOM flex-row host)
+/// carries `role="tablist"` and ONLY the tab children in their original
+/// relative order, positioned where the first tab was, and the panels stay
+/// direct children of the outer container. The restructured outer defaults
+/// to column layout (strip above panels; an author `flexDirection` wins)
+/// and an author `gap` is mirrored onto the strip, so the widget lays out
+/// as the author wrote it. The minted id namespace is the outer container's
+/// author id either way, so the wired graph is identical in both shapes. When children are ALL tabs (panels portaled elsewhere),
+/// the container itself stays the tablist. The restructured shape is pinned
+/// against axe-core in `hypen-web/tests/a11y.axe.test.ts` and mirrored by
+/// `tabs_mixed_children_restructure_into_tab_only_tablist` in
+/// `tests/test_a11y_conformance.rs`.
+///
+/// Deliberately conservative: count mismatch → no wiring and no
+/// restructuring (panels may be portaled elsewhere and hand-wired — minting
+/// `controls` references to panels that don't exist here would manufacture
+/// dangling references, and the conformance pass explains the skip via
+/// `TablistWiringSkipped` against the unrestructured shape); no tablist id
+/// → no wiring (no deterministic namespace to mint from), but a mixed
+/// matched shape is still restructured so the ARIA ownership rule holds.
+fn wire_tablist(element: &mut Element) {
+    use crate::ir::semantics::{Role, Semantics};
+
+    let role_of = |node: &IRNode| -> Option<Role> {
+        node.as_element()
+            .and_then(|e| e.semantics.as_ref())
+            .and_then(|s| s.role)
+    };
+
+    let tab_indices: Vec<usize> = element
+        .ir_children
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| role_of(c) == Some(Role::Tab))
+        .map(|(i, _)| i)
+        .collect();
+    let panel_indices: Vec<usize> = element
+        .ir_children
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| role_of(c) == Some(Role::Tabpanel))
+        .map(|(i, _)| i)
+        .collect();
+
+    // All-tabs (panels portaled elsewhere): the container IS the tablist.
+    // Mismatch: no wiring and no restructuring — TablistWiringSkipped reads
+    // the unrestructured shape to explain why.
+    if tab_indices.is_empty()
+        || panel_indices.is_empty()
+        || tab_indices.len() != panel_indices.len()
+    {
+        return;
+    }
+
+    if let Some(tablist_id) = element.semantics.as_ref().and_then(|s| s.id.clone()) {
+        for (pair, (&tab_idx, &panel_idx)) in tab_indices.iter().zip(&panel_indices).enumerate() {
+            let tab_id = format!("{tablist_id}-tab-{pair}");
+            let panel_id = format!("{tablist_id}-panel-{pair}");
+
+            if let Some(IRNode::Element(tab)) = element.ir_children.get_mut(tab_idx) {
+                if let Some(sem) = tab.semantics.as_mut() {
+                    sem.id.get_or_insert_with(|| tab_id.clone());
+                    sem.controls.get_or_insert_with(|| panel_id.clone());
+                }
+            }
+            if let Some(IRNode::Element(panel)) = element.ir_children.get_mut(panel_idx) {
+                if let Some(sem) = panel.semantics.as_mut() {
+                    sem.id.get_or_insert_with(|| panel_id.clone());
+                    sem.labelledby.get_or_insert_with(|| tab_id.clone());
+                }
+            }
+        }
+    }
+
+    // Restructure: tabs move into a synthetic inner tablist at the first
+    // tab's position; everything else (panels included) keeps its relative
+    // order under the outer container. The inner element carries no id of
+    // its own — the outer keeps the author id (a copy would be a DuplicateId)
+    // and the minted references never target the tablist element itself.
+    let mut tablist = Element::new("Tabs");
+    tablist.semantics = Some(Semantics {
+        role: Some(Role::Tablist),
+        ..Semantics::default()
+    });
+
+    // Restructuring must not change how the widget lays out: both hosts
+    // default to flex-row on DOM, so untouched the panels would sit BESIDE
+    // the tab strip and the author's `.gap` would stop spacing tab from tab.
+    // The outer defaults to column (strip above panels — what every tabs UI
+    // does) unless the author set a direction, and the author's gap is
+    // copied (not moved) onto the strip: tabs keep their pre-restructure
+    // spacing, and the outer gap separates strip from panels.
+    if !element.props.contains_key("flexDirection.0")
+        && !element.props.contains_key("flexDirection")
+    {
+        element.props.insert(
+            "flexDirection.0".to_string(),
+            Value::Static(serde_json::json!("column")),
+        );
+    }
+    if let Some(gap) = element.props.get("gap.0").cloned() {
+        if !tablist.props.contains_key("gap.0") {
+            tablist.props.insert("gap.0".to_string(), gap);
+        }
+    }
+
+    let mut new_children = Vec::with_capacity(element.ir_children.len() + 1 - tab_indices.len());
+    let mut insert_at = None;
+    for child in std::mem::take(&mut element.ir_children) {
+        if role_of(&child) == Some(Role::Tab) {
+            insert_at.get_or_insert(new_children.len());
+            tablist.ir_children.push(child);
+        } else {
+            new_children.push(child);
+        }
+    }
+    new_children.insert(
+        insert_at.expect("tab_indices is non-empty"),
+        IRNode::Element(tablist),
+    );
+    element.ir_children = new_children;
+
+    if let Some(sem) = element.semantics.as_mut() {
+        sem.role = None;
+        if *sem == Semantics::default() {
+            element.semantics = None;
+        }
+    }
+}
+
+/// Derive `listitem` for the direct children of an explicit list.
+///
+/// Deliberately conservative, mirroring [`wire_tablist`]: only *direct*
+/// `Element` children, and only those that derive no role of their own — an
+/// element with any role (structural or opted-in) has a different job, and
+/// content behind control flow (`ForEach`/`When`) is left untouched rather
+/// than guessed. Hidden children stay decorative.
+fn wire_list_items(element: &mut Element) {
+    use crate::ir::semantics::{Role, Semantics};
+
+    for child in &mut element.ir_children {
+        let IRNode::Element(item) = child else { continue };
+        if item
+            .semantics
+            .as_ref()
+            .is_some_and(|s| s.role.is_some() || s.hidden == Some(true))
+        {
+            continue;
+        }
+        item.semantics.get_or_insert_with(Semantics::default).role = Some(Role::Listitem);
+    }
+}
+
+/// Auto-associate unlabeled form controls with an immediately-preceding
+/// static Text sibling.
+///
+/// The ubiquitous form layout — `Text("Name")` directly followed by an
+/// `Input` — is, in the unambiguous case, a label/field pair. Wiring it
+/// mints what an author would hand-assemble: the Text gets an `id`, the
+/// control gets `labelledby` → that id, **and** the Text's static content
+/// becomes the control's `name` (non-explicit), so renderers without an
+/// id-reference vocabulary (iOS/Android) still speak the label.
+///
+/// Deliberately conservative — a wrong auto-label is worse than none:
+/// - Only roles that *need* an external label are wired
+///   ([`Role::needs_external_label`]); Checkbox/Switch self-label and are
+///   never touched.
+/// - Only the control's *immediately preceding* element sibling counts, and
+///   only when it is a bare `Text` with fully-static content and no other
+///   semantic job (a role/label/hidden Text is presumed to have one). A
+///   templated Text resolves at reconcile — its value is unknown here, and a
+///   stale name is worse than none.
+/// - Ids are minted only inside a deterministic namespace: the parent's
+///   explicit `.id("signup")` yields `signup-label-<i>`; a Text carrying its
+///   own author `.id(...)` is referenced as-is. No parent id and no Text id
+///   → no wiring (ids invented without a namespace would not be stable
+///   across rebuilds, which is worse than no association).
+/// - An author `.label(...)` / `.labelledby(...)` on the control — static
+///   or bound — always wins.
+/// - The Text's content must pass [`looks_like_label`]: instructional prose
+///   ("All fields are required.") meets every structural guard above, and
+///   wiring it would both mis-name the control *and* silence
+///   `FormControlMissingLabel`. Declining to wire only re-fires that rule,
+///   which points the author at an explicit `.label` — false-negative-safe.
+fn wire_form_labels(element: &mut Element) {
+    use crate::ir::semantics::Semantics;
+
+    if element.ir_children.len() < 2 {
+        return;
+    }
+
+    let parent_id = element.semantics.as_ref().and_then(|s| s.id.clone());
+    let mut minted = 0usize;
+
+    for i in 1..element.ir_children.len() {
+        let (left, right) = element.ir_children.split_at_mut(i);
+        let Some(IRNode::Element(control)) = right.first_mut() else {
+            continue;
+        };
+
+        let wirable = control
+            .semantics
+            .as_ref()
+            .and_then(|s| s.role)
+            .is_some_and(|r| r.needs_external_label());
+        let unlabeled = control
+            .semantics
+            .as_ref()
+            .is_some_and(|s| s.name.is_none() && s.labelledby.is_none());
+        // A bound/templated `.label(...)` or `.labelledby(...)` contributes
+        // nothing at derive but is author intent resolving at reconcile —
+        // never wire over it.
+        if !wirable
+            || !unlabeled
+            || control.props.contains_key("label.0")
+            || control.props.contains_key("labelledby.0")
+        {
+            continue;
+        }
+
+        let Some(IRNode::Element(text)) = left.last_mut() else {
+            continue;
+        };
+        if text.element_type != "Text" || !text.ir_children.is_empty() {
+            continue;
+        }
+        // The Text must carry no semantics of its own beyond (possibly) an
+        // author `.id(...)` — anything else means it has another job.
+        let text_is_plain = match text.semantics.as_ref() {
+            None => true,
+            Some(s) => {
+                *s == Semantics {
+                    id: s.id.clone(),
+                    ..Semantics::default()
+                }
+            }
+        };
+        // A bound/templated `.id(...)` re-resolves at reconcile and would
+        // clobber a minted id, leaving the labelledby reference dangling.
+        let text_id_deferred = matches!(
+            text.props.get("id.0"),
+            Some(Value::Binding(_)) | Some(Value::TemplateString { .. })
+        );
+        if !text_is_plain || text_id_deferred {
+            continue;
+        }
+        let Some(label_text) = static_text(&text.props) else {
+            continue;
+        };
+        // Prose preceding a control satisfies every structural guard above;
+        // only its shape gives it away. Declining to wire is always safe —
+        // the control stays unlabeled and `FormControlMissingLabel` fires.
+        if !looks_like_label(&label_text) {
+            continue;
+        }
+
+        let text_id = match text.semantics.as_ref().and_then(|s| s.id.clone()) {
+            Some(author_id) => author_id,
+            None => match &parent_id {
+                Some(parent) => {
+                    let id = format!("{parent}-label-{minted}");
+                    minted += 1;
+                    id
+                }
+                None => continue,
+            },
+        };
+
+        text.semantics
+            .get_or_insert_with(Semantics::default)
+            .id
+            .get_or_insert_with(|| text_id.clone());
+        if let Some(sem) = control.semantics.as_mut() {
+            sem.labelledby = Some(text_id);
+            // name_explicit stays unset: DOM keeps relying on the labelledby
+            // reference (no aria-label), while name-only renderers get the
+            // spoken label.
+            sem.name = Some(label_text);
+        }
+    }
+}
+
+/// Shape test for auto-association: does this (trimmed) Text content look
+/// like a form label rather than prose?
+///
+/// Labels are short noun phrases ("Email", "Full name:"); prose that happens
+/// to precede a control ("All fields are required.") is long, many-worded,
+/// or sentence-punctuated. Rejects when the text
+/// - exceeds 40 characters, or
+/// - has more than 5 whitespace-separated words, or
+/// - ends with sentence punctuation (`.`, `!`, `?`) — a trailing `:` is
+///   label-like and stays wireable.
+///
+/// Every rejection is false-negative-safe: an unwired control falls back to
+/// `FormControlMissingLabel`, guiding the author to an explicit `.label`.
+fn looks_like_label(text: &str) -> bool {
+    text.chars().count() <= 40
+        && text.split_whitespace().count() <= 5
+        && !text.ends_with(['.', '!', '?'])
+}
+
+/// A Text element's own fully-static content (`0`/`text` prop), trimmed.
+/// `None` for templated, empty, or non-string content.
+fn static_text(props: &Props) -> Option<String> {
+    for key in ["0", "text"] {
+        if let Some(value) = props.get(key) {
+            return match value {
+                Value::Static(serde_json::Value::String(s)) if !s.trim().is_empty() => {
+                    Some(s.trim().to_string())
+                }
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +932,12 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
     // Applicator props (flex, backgroundColor, etc.) go on the wrapper element
     // so the renderer can style the container.
     let mut list_element = Element::new(element_type);
+    list_element.span = Some(crate::ir::SourceSpan::from_range(
+        &component.metadata.name_range,
+    ));
+    list_element.expr_span = Some(crate::ir::SourceSpan::from_range(
+        &component.metadata.expr_range,
+    ));
     // Copy applicator props onto the wrapper (e.g. flex.0, backgroundColor.0)
     for (key, value) in &foreach_props {
         list_element.props.insert(key.clone(), value.clone());
@@ -877,6 +1291,23 @@ mod tests {
             IRNode::Element(e) => e,
             other => panic!("Expected Element, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn looks_like_label_thresholds() {
+        // Label-shaped: short, few words, no sentence punctuation.
+        assert!(looks_like_label("Email"));
+        assert!(looks_like_label("Email:"));
+        assert!(looks_like_label("Full legal name"));
+        assert!(looks_like_label("One two three four five")); // 5 words: boundary in
+        assert!(looks_like_label(&"x".repeat(40))); // 40 chars: boundary in
+
+        // Prose-shaped: any single threshold rejects.
+        assert!(!looks_like_label("All fields are required."));
+        assert!(!looks_like_label("Required!"));
+        assert!(!looks_like_label("What is your name?"));
+        assert!(!looks_like_label("One two three four five six")); // 6 words
+        assert!(!looks_like_label(&"x".repeat(41))); // 41 chars
     }
 
     #[test]

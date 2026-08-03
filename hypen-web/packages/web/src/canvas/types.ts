@@ -4,12 +4,21 @@
  * Shared type definitions for the canvas renderer
  */
 
+import type { Semantics } from "@hypen-space/core/types";
+
 export interface VirtualNode {
   id: string;
   type: string;
   props: Record<string, any>;
   children: VirtualNode[];
   parent: VirtualNode | null;
+
+  /**
+   * Engine-derived accessibility semantics (role, name, hidden, …) carried
+   * from the Create patch. Drives the transparent accessibility overlay,
+   * since the canvas bitmap itself exposes nothing to assistive technology.
+   */
+  semantics?: Semantics;
 
   // Computed layout
   layout?: Layout;
@@ -112,9 +121,13 @@ export interface CanvasRendererOptions {
   backgroundColor?: string;
 
   // Features
+  //
+  // enableAccessibility also gates text-input editing and keyboard focus:
+  // the accessibility mirror (a transparent positioned overlay above the
+  // canvas) is the renderer's focus system, and Input/Textarea edit
+  // sessions start from mirror focus.
   enableAccessibility?: boolean;
   enableHitTesting?: boolean;
-  enableInputOverlay?: boolean;
 
   // Performance
   enableDirtyRects?: boolean;

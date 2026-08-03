@@ -27,7 +27,7 @@ fn test_create_patch_basic() {
     };
 
     // WHEN: Create patch
-    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props.clone()));
+    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props.clone()), None);
 
     // THEN: Create patch with correct structure
     match patch {
@@ -35,6 +35,7 @@ fn test_create_patch_basic() {
             id,
             element_type,
             props: patch_props,
+            ..
         } => {
             assert!(!id.is_empty());
             assert_eq!(element_type, "Text");
@@ -225,7 +226,7 @@ fn test_create_patch_with_empty_props() {
     let props = indexmap! {};
 
     // WHEN: Create patch
-    let patch = Patch::create(node_id, "EmptyElement".to_string(), Arc::new(props));
+    let patch = Patch::create(node_id, "EmptyElement".to_string(), Arc::new(props), None);
 
     // THEN: Handles empty props
     match patch {
@@ -252,7 +253,7 @@ fn test_serialize_create_patch() {
     let props = indexmap! {
         "text".to_string() => json!("Hello"),
     };
-    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props));
+    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props), None);
 
     // WHEN: Serialize to JSON
     let json = serde_json::to_value(&patch).unwrap();
@@ -391,7 +392,7 @@ fn test_create_patch_wire_format_unchanged_by_arc_wrap() {
         "text".to_string() => json!("Hello"),
         "color".to_string() => json!("red"),
     };
-    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props));
+    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props), None);
 
     let json_str = serde_json::to_string(&patch).unwrap();
     let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -424,7 +425,7 @@ fn test_create_patch_serde_roundtrip() {
         "flag".to_string() => json!(true),
         "nested".to_string() => json!({"inner": [1, 2, 3]}),
     };
-    let original = Patch::create(node_id, "Text".to_string(), Arc::new(props));
+    let original = Patch::create(node_id, "Text".to_string(), Arc::new(props), None);
 
     let json_str = serde_json::to_string(&original).unwrap();
     let restored: Patch = serde_json::from_str(&json_str).unwrap();
@@ -464,7 +465,7 @@ fn test_create_patch_exact_json_bytes() {
     let props = indexmap! {
         "text".to_string() => json!("Hi"),
     };
-    let patch = Patch::create(id, "Text".to_string(), Arc::new(props));
+    let patch = Patch::create(id, "Text".to_string(), Arc::new(props), None);
 
     // Build the expected shape manually from primitives so the assertion
     // doesn't lean on Patch's own serialization.

@@ -30,6 +30,9 @@ fn scoped_text_binding(path: &str, scope: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: Some(scope.to_string()),
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -41,6 +44,9 @@ fn scoped_column(children: Vec<Element>, scope: Option<&str>) -> Element {
         ir_children: children.into_iter().map(IRNode::Element).collect(),
         key: None,
         module_scope: scope.map(|s| s.to_string()),
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -536,6 +542,9 @@ fn test_conditional_branch_activates_module_scope() {
         ir_children: Vec::new(),
         key: None,
         module_scope: Some("search".to_string()),
+        semantics: None,
+        span: None,
+        expr_span: None,
     };
 
     let conditional = IRNode::Conditional {
@@ -557,6 +566,9 @@ fn test_conditional_branch_activates_module_scope() {
         ir_children: vec![conditional],
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     };
 
     let ir_root = IRNode::Element(root_column);

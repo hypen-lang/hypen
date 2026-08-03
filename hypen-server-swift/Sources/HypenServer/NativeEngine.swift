@@ -311,6 +311,14 @@ public final class NativeEngine: @unchecked Sendable {
         if let beforeId = patch.beforeId {
             dict["beforeId"] = beforeId
         }
+        // Accessibility semantics block: present on `create` (nodes with
+        // derivable a11y) and on every `setSemantics` (reactive re-emit).
+        // Same camelCase JSON shape as the web wire format.
+        if let semanticsJson = patch.semanticsJson,
+           let data = semanticsJson.data(using: .utf8),
+           let semantics = try? JSONSerialization.jsonObject(with: data) {
+            dict["semantics"] = semantics
+        }
 
         return dict
     }
@@ -331,6 +339,10 @@ public final class NativeEngine: @unchecked Sendable {
         // consumer. Wire name must match the DOM/Compose/iOS strings.
         case .detach: return "detach"
         case .attach: return "attach"
+        // Reactive accessibility re-emit — the node's complete re-resolved
+        // semantics block rides the `semantics` key. Renderers re-apply it
+        // with their create-time translation, clearing dropped fields.
+        case .setSemantics: return "setSemantics"
         }
     }
 }

@@ -44,6 +44,27 @@ const view =
       })
     : new DOMRenderer(mount as HTMLElement, engine);
 
-engine.onPatches((patches) => view.applyPatches(patches));
+let hasRenderedRoot = false;
+
+engine.onPatches((patches) => {
+  const createdIds = new Set(
+    patches
+      .filter((patch) => patch.type === "create")
+      .map((patch) => patch.id),
+  );
+  const hasReplacementRoot = patches.some(
+    (patch) =>
+      patch.type === "insert" &&
+      patch.parentId === "root" &&
+      createdIds.has(patch.id),
+  );
+
+  if (hasReplacementRoot && hasRenderedRoot) {
+    view.clear();
+  }
+
+  view.applyPatches(patches);
+  hasRenderedRoot = hasRenderedRoot || hasReplacementRoot;
+});
 
 engine.connect();

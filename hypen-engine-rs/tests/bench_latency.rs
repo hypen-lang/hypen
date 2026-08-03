@@ -25,6 +25,9 @@ fn text_with_binding(path: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -38,6 +41,9 @@ fn column_with_children(children: Vec<Element>) -> Element {
             .collect(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 

@@ -23,8 +23,10 @@ import type {
 import { computeLayout, initTaffyLayout } from "./layout.js";
 import { paintNode, registerPainter } from "./paint.js";
 import { CanvasEventManager } from "./events.js";
-import { InputOverlay } from "./input.js";
 import { AccessibilityLayer } from "./accessibility.js";
+import { FocusManager } from "./focus.js";
+import { TextEditController, isEditableNode } from "./editing.js";
+import { setTextEditor } from "./paint.js";
 import { findNodeById } from "./utils.js";
 import { ScrollManager } from "./scroll.js";
 import { SelectionManager } from "./selection.js";
@@ -42,7 +44,6 @@ const DEFAULT_OPTIONS: CanvasRendererOptions = {
   backgroundColor: "#ffffff",
   enableAccessibility: true,
   enableHitTesting: true,
-  enableInputOverlay: true,
   enableDirtyRects: false,
   enableLayerCaching: false,
   maxLayerCacheSize: 10,
@@ -66,8 +67,9 @@ export class CanvasRenderer implements Renderer {
   private eventManager: CanvasEventManager;
   private scrollManager: ScrollManager;
   private selectionManager: SelectionManager;
-  private inputOverlay: InputOverlay;
   private accessibilityLayer: AccessibilityLayer;
+  private focusManager: FocusManager;
+  private textEditor: TextEditController;
   
   private dirtyTracker: DirtyRectTracker;
 
@@ -102,42 +104,68 @@ export class CanvasRenderer implements Renderer {
     this.scrollManager = new ScrollManager(canvas, () => this.scheduleRedraw());
     this.selectionManager = new SelectionManager(canvas, () => this.scheduleRedraw());
     setSelectionManager(this.selectionManager);
-    this.inputOverlay = new InputOverlay(
-      (canvas as any).parentElement || (typeof document !== "undefined" ? document.body : null)
-    );
+    // The mirror is a transparent positioned overlay above the canvas: its
+    // elements are exposed to AT with REAL geometry (screen-reader browse
+    // modes are geometry-driven) and join the native tab order, while the
+    // canvas paints all pixels and keeps all pointer events.
     this.accessibilityLayer = new AccessibilityLayer(
-      (canvas as any).parentElement || (typeof document !== "undefined" ? document.body : null),
+      canvas as unknown as HTMLElement,
       this.options.enableAccessibility || false
     );
 
-    // Bridge focus changes from the hit-tester to the HTML input overlay.
-    // Without this, `Input`/`Textarea` painted on the canvas but clicking
-    // one did nothing — the overlay never got mounted.
-    this.eventManager.setFocusChangeHandler((next) => {
-      const t = next ? next.type.toLowerCase() : null;
-      if (next && (t === "input" || t === "textarea")) {
-        const rect = this.canvas.getBoundingClientRect();
-        this.inputOverlay.showInput(
-          next,
-          rect,
-          (value) => {
-            // Local mirror so the next paint sees the typed text even
-            // before the engine echoes it back via SetProp.
-            next.props.value = value;
-            this.scheduleRedraw();
-          },
-          this.engine,
-        );
-      } else {
-        this.inputOverlay.hideInput();
-      }
+    // Text editing happens IN the focused mirror element (the browser owns
+    // value/caret/selection/IME there); the controller reads that state and
+    // the canvas paints text, selection, and caret natively.
+    this.textEditor = new TextEditController(canvas, engine, {
+      scheduleRedraw: () => this.scheduleRedraw(),
+      markDirty: (node) => {
+        if (this.options.enableDirtyRects) {
+          this.dirtyTracker.markNodeDirty(node);
+        }
+      },
+      // Proxy blurred to somewhere outside the canvas: node.focused follows.
+      onEditBlur: () => this.focusManager.clearFocus(),
+    });
+    setTextEditor(this.textEditor);
+
+    // DOM focus on mirror elements (canvas fallback content) is the single
+    // source of truth for focus: Tab/Shift+Tab traverse the mirror natively,
+    // and the pointer path (hit-test in CanvasEventManager) funnels into the
+    // same place by focusing the node's mirror element.
+    this.focusManager = new FocusManager(this.accessibilityLayer, engine, {
+      getNode: (id) => this.nodes.get(id),
+      isAuxFocusTarget: (el) => this.textEditor.isProxyElement(el),
+      onFocusChange: (next) => {
+        if (next && isEditableNode(next)) {
+          const el = this.accessibilityLayer.getElement(next.id);
+          if (el) {
+            this.textEditor.beginEditing(
+              next,
+              el as HTMLInputElement | HTMLTextAreaElement,
+            );
+          }
+        } else {
+          this.textEditor.endEditing();
+        }
+        // Repaint so focus styling (input border, button ring) updates.
+        this.scheduleRedraw();
+      },
+    });
+    this.eventManager.setFocusManager(this.focusManager);
+    this.eventManager.setEditablePointerHandler((node, point) => {
+      this.textEditor.placeCaretFromPoint(node, point);
     });
 
     // Listen for redraw requests from event manager
     this.canvas.addEventListener("hypen:redraw", () => this.scheduleRedraw());
 
-    // Eagerly initialise Taffy WASM for layout (non-blocking — fallback used until ready)
-    initTaffyLayout();
+    // Eagerly initialise Taffy WASM for layout (non-blocking — fallback used
+    // until ready). Repaint once it arrives: the fallback's first frame is
+    // approximate, and without this redraw its layout would stick until the
+    // next state change.
+    initTaffyLayout().then((ready) => {
+      if (ready) this.scheduleRedraw();
+    });
 
     // Don't schedule initial render - wait for patches
   }
@@ -191,10 +219,9 @@ export class CanvasRenderer implements Renderer {
       this.dirtyTracker.markFullDirty();
     }
 
-    // Update accessibility layer
-    if (this.rootNode) {
-      this.accessibilityLayer.syncTree(this.rootNode);
-    }
+    // The accessibility mirror is synced incrementally by the per-patch
+    // handlers above — no per-batch rebuild, so mirror element identity
+    // (and with it AT focus/virtual-cursor position) survives updates.
 
     // Schedule redraw
     this.scheduleRedraw();
@@ -206,7 +233,7 @@ export class CanvasRenderer implements Renderer {
   private applyPatch(patch: Patch): void {
     switch (patch.type) {
       case "create":
-        this.onCreate(patch.id!, patch.elementType!, patch.props || {});
+        this.onCreate(patch.id!, patch.elementType!, patch.props || {}, patch.semantics);
         break;
 
       case "setProp":
@@ -240,13 +267,38 @@ export class CanvasRenderer implements Renderer {
       case "attach":
         this.onInsert(patch.parentId!, patch.id!, patch.beforeId);
         break;
+
+      case "setSemantics":
+        this.onSetSemantics(patch.id!, patch.semantics);
+        break;
     }
+  }
+
+  /**
+   * Reactive accessibility update: swap in the node's complete re-resolved
+   * semantics block and re-apply it to the shadow element. This is the only
+   * channel that keeps the canvas shadow tree's accessible name/state live —
+   * painted text is invisible to AT, so prop deltas alone can't do it.
+   */
+  private onSetSemantics(
+    id: string,
+    semantics?: import("@hypen-space/core/types").Semantics,
+  ): void {
+    const node = this.nodes.get(id);
+    if (!node) return;
+    node.semantics = semantics;
+    this.accessibilityLayer.updateNode(node);
   }
 
   /**
    * Create new virtual node
    */
-  private onCreate(id: string, elementType: string, props: Record<string, any>): void {
+  private onCreate(
+    id: string,
+    elementType: string,
+    props: Record<string, any>,
+    semantics?: import("@hypen-space/core/types").Semantics,
+  ): void {
     // Engine may send a Map (from WASM) or a plain object. Copy either way so
     // we own the prop bag and can mutate it during applicator normalisation.
     const rawProps: Record<string, any> =
@@ -263,6 +315,7 @@ export class CanvasRenderer implements Renderer {
       id,
       type: elementType,
       props: rawProps,
+      semantics,
       children: [],
       parent: null,
       visible: true,
@@ -279,6 +332,9 @@ export class CanvasRenderer implements Renderer {
     };
 
     this.nodes.set(id, node);
+
+    // Mirror the create (element stays detached until its insert patch).
+    this.accessibilityLayer.createNode(node);
   }
 
   /**
@@ -332,6 +388,12 @@ export class CanvasRenderer implements Renderer {
 
     // Update accessibility
     this.accessibilityLayer.updateNode(node);
+
+    // Engine value echo for an actively edited input: same value → no-op
+    // (the caret must not move); a rewritten value re-seeds the element.
+    if (name === "value") {
+      this.textEditor.onEngineValueEcho(node);
+    }
   }
 
   /**
@@ -404,6 +466,10 @@ export class CanvasRenderer implements Renderer {
   private onInsert(parentId: string, id: string, beforeId?: string): void {
     const child = this.nodes.get(id);
     if (!child) return;
+
+    // Mirror the insert/attach/move — insertNode resolves root addressing
+    // and unknown-beforeId fallback with the same rules as the code below.
+    this.accessibilityLayer.insertNode(parentId, id, beforeId);
 
     // Check if this is setting the root node (parent_id === id === "root" or similar)
     if (parentId === "root" && id === "root") {
@@ -488,6 +554,15 @@ export class CanvasRenderer implements Renderer {
     const node = this.nodes.get(id);
     if (!node) return;
 
+    // An edit session inside the detached subtree ends (flushing any
+    // pending composition value) before the subtree leaves the tree, and
+    // focus state follows.
+    this.textEditor.endIfWithin(node);
+    this.focusManager.clearIfWithin(node);
+
+    // Mirror keeps the element (and subtree ids) alive for re-attach.
+    this.accessibilityLayer.detachNode(id);
+
     // Mark dirty so the next paint doesn't leave stale pixels behind.
     if (this.options.enableDirtyRects) {
       this.dirtyTracker.markNodeDirty(node);
@@ -518,6 +593,13 @@ export class CanvasRenderer implements Renderer {
   private onRemove(id: string): void {
     const node = this.nodes.get(id);
     if (!node) return;
+
+    // End any edit session inside the removed subtree; focus state follows.
+    this.textEditor.endIfWithin(node);
+    this.focusManager.clearIfWithin(node);
+
+    // Drop the mirror element and its subtree's id mappings.
+    this.accessibilityLayer.removeNode(node);
 
     // Mark dirty before removal
     if (this.options.enableDirtyRects) {
@@ -574,6 +656,16 @@ export class CanvasRenderer implements Renderer {
     } else {
       this.renderFull(dpr);
     }
+
+    // Layout may have moved the edited input — keep the IME proxy (and with
+    // it the IME candidate window) pinned to the painted caret.
+    if (this.textEditor.isActive()) {
+      this.textEditor.syncProxyPosition();
+    }
+
+    // Keep the semantics overlay's element boxes on the painted bounds so
+    // screen-reader browse modes (geometry-driven) track layout changes.
+    this.accessibilityLayer.syncPositions(this.rootNode);
 
     // Performance logging
     if (this.options.logPerformance) {
@@ -734,11 +826,13 @@ export class CanvasRenderer implements Renderer {
    * Clear renderer
    */
   clear(): void {
+    this.textEditor.endEditing();
     this.rootNode = null;
     this.nodes.clear();
     this.eventManager.setRootNode(null);
     this.scrollManager.setRootNode(null);
     this.selectionManager.setRootNode(null);
+    this.accessibilityLayer.rebuild(null);
     this.dirtyTracker.clear();
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
@@ -755,7 +849,12 @@ export class CanvasRenderer implements Renderer {
    */
   setOptions(options: Partial<CanvasRendererOptions>): void {
     this.options = { ...this.options, ...options };
-    this.accessibilityLayer.setEnabled(this.options.enableAccessibility || false);
+    // Re-enabling rebuilds the mirror from the current tree — incremental
+    // sync has no history to replay for the disabled period.
+    this.accessibilityLayer.setEnabled(
+      this.options.enableAccessibility || false,
+      this.rootNode,
+    );
   }
 
   /**
@@ -769,6 +868,9 @@ export class CanvasRenderer implements Renderer {
     this.scrollManager.destroy();
     this.selectionManager.destroy();
     setSelectionManager(null);
+    this.textEditor.destroy();
+    setTextEditor(null);
+    this.focusManager.destroy();
     this.accessibilityLayer.destroy();
   }
 }

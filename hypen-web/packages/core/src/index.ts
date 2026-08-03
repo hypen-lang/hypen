@@ -331,3 +331,8 @@ export type { LogLevel, LoggerConfig, LogHandler } from "./logger.js";
 // elementTypes) in CI / smoke tests off the wire.
 export { validatePatches } from "./validate.js";
 export type { PatchValidationResult } from "./validate.js";
+
+// Accessibility conformance diagnostics — surface the engine's dev-mode
+// `checkAccessibility(source)` findings in a host dev console.
+export { logA11yDiagnostics, checkRuleDrift, EXPECTED_A11Y_RULES } from "./a11y.js";
+export type { A11yDiagnostic, A11ySourceSpan, A11yRuleDrift } from "./a11y.js";

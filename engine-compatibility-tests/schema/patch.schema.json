@@ -15,9 +15,28 @@
           "type": "object",
           "additionalProperties": true,
           "description": "Initial properties for the element"
+        },
+        "semantics": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Accessibility semantics derived for this node (role, name, states, relationships). Omitted entirely when the node has no derivable semantics."
         }
       },
       "required": ["type", "id", "elementType"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "setSemantics" },
+        "id": { "type": "string", "description": "Element ID to update" },
+        "semantics": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "The complete re-resolved semantics block (not a field delta). Omitted when the node lost all derivable semantics — renderers must then clear everything."
+        }
+      },
+      "required": ["type", "id"],
       "additionalProperties": false
     },
     {

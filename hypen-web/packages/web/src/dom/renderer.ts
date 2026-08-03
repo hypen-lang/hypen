@@ -35,14 +35,39 @@ const COMPONENT_HTML_ATTRS: Record<string, Set<string>> = {
 
 import { ComponentRegistry } from "./components/index.js";
 import { ApplicatorRegistry } from "./applicators/index.js";
+import { applySemantics } from "./semantics.js";
+import {
+  makeKeyboardActivatable,
+  makeFocusTrap,
+  makeRovingTablist,
+  makeRovingListbox,
+  focusDialogOnOpen,
+  restoreDialogFocus,
+  installDialogEscape,
+} from "./operability.js";
+import { findRouteFocusTarget, focusRouteTarget } from "./route-focus.js";
+import type { Semantics } from "@hypen-space/core/types";
 import { canvasHandler, canvasApplicators } from "./canvas/index.js";
 import { CanvasRenderer } from "../canvas/renderer.js";
 import { RerenderTracker, type DebugConfig, defaultDebugConfig } from "./debug.js";
 import { setEngine, disposeHypenElement } from "./element-data.js";
+import { ensureA11yStyles } from "./a11y-styles.js";
 
 // Interface for the engine that renderer needs
 interface IEngine {
   dispatchAction(name: string, payload?: any): void;
+}
+
+export interface DOMRendererOptions {
+  /**
+   * Route-change focus contract (route-focus.ts). `"auto"` (default) moves
+   * focus to the incoming route's first heading / `main` landmark / subtree
+   * root on every navigation. `"off"` skips `focusIncomingRoute` entirely —
+   * the escape hatch for authors who own focus management themselves (custom
+   * transition choreography, embedded shells) and would otherwise fight the
+   * renderer for focus on every navigation.
+   */
+  routeFocus?: "auto" | "off";
 }
 
 export class DOMRenderer {
@@ -66,12 +91,49 @@ export class DOMRenderer {
   /** Props stashed at create-time so we can forward them to CanvasRenderer */
   private pendingCreateProps = new Map<string, { elementType: string; props: Record<string, any> }>();
 
-  constructor(container: HTMLElement, engine: IEngine, debugConfig?: Partial<DebugConfig>) {
+  /**
+   * Focus-restore memory for the Router subtree cache, keyed by detached
+   * subtree root id: the element that held focus when the route was
+   * detached, restored on cached re-`attach`. Entries are dropped on
+   * `remove` (Router LRU eviction) so focus restore can never target an
+   * evicted NodeId — the route-focus contract (see route-focus.ts).
+   */
+  private routeFocusMemory = new Map<string, HTMLElement>();
+
+  /** See `DOMRendererOptions.routeFocus` — `"off"` disables `focusIncomingRoute`. */
+  private routeFocus: "auto" | "off";
+
+  /** Ids created with `semantics.role === "dialog"`, so insert/remove hooks can act. */
+  private dialogIds = new Set<string>();
+  /**
+   * Open dialog id → the element that held focus before the dialog took it
+   * (the trigger), restored on dialog remove/detach when still connected.
+   * Presence of an entry means "already focused" — re-inserts (moves) of an
+   * open dialog never re-run the mount focus.
+   */
+  private dialogOpeners = new Map<string, HTMLElement | null>();
+  /**
+   * Dialog ids inserted during the current batch. Mount focus runs after the
+   * whole batch, because a dialog's focusable children may be inserted after
+   * the dialog's own insert patch.
+   */
+  private pendingDialogMounts: string[] = [];
+
+  constructor(
+    container: HTMLElement,
+    engine: IEngine,
+    debugConfig?: Partial<DebugConfig>,
+    options?: DOMRendererOptions,
+  ) {
     this.container = container;
     this.engine = engine;
     this.components = new ComponentRegistry();
     this.applicators = new ApplicatorRegistry();
     this.debugTracker = new RerenderTracker({ ...defaultDebugConfig, ...debugConfig });
+    this.routeFocus = options?.routeFocus ?? "auto";
+
+    // Inject the global reduced-motion + focus-visible stylesheet once.
+    ensureA11yStyles();
 
     // Match the canvas/iOS/Android renderers: text without an explicit
     // `.color()` defaults to black. Without this, DOM text would inherit
@@ -136,6 +198,32 @@ export class DOMRenderer {
       }
     }
 
+    // Route-change detection for the focus contract: a batch with a detach
+    // (route leaving) plus incoming subtree roots (attach of a cached route,
+    // or a fresh top-level create+insert) is a navigation. Initial renders
+    // have no detach, so they never steal focus.
+    const isNavigation = domPatches.some((p) => p.type === "detach");
+    const createdInBatch = new Set(
+      domPatches.filter((p) => p.type === "create").map((p) => p.id),
+    );
+    const incomingRoots: string[] = [];
+    if (isNavigation) {
+      for (const p of domPatches) {
+        if (p.type === "attach" && p.id) {
+          incomingRoots.push(p.id);
+        } else if (
+          p.type === "insert" &&
+          p.id &&
+          createdInBatch.has(p.id) &&
+          (!p.parentId || !createdInBatch.has(p.parentId))
+        ) {
+          // A freshly-built subtree root: created in this batch, inserted
+          // under a parent that predates the batch (the router's slot).
+          incomingRoots.push(p.id);
+        }
+      }
+    }
+
     // Apply DOM patches normally
     for (const patch of domPatches) {
       this.applyPatch(patch);
@@ -148,6 +236,51 @@ export class DOMRenderer {
         renderer.applyPatches(batch);
       }
     }
+
+    if (isNavigation && incomingRoots.length > 0 && this.routeFocus !== "off") {
+      this.focusIncomingRoute(incomingRoots[0]!);
+    }
+
+    // Dialog mount focus runs last: a dialog opened by this batch takes
+    // focus even when the batch was also a navigation (modal wins).
+    this.flushDialogMounts();
+  }
+
+  /**
+   * Apply the dialog focus contract to dialogs inserted by the finished
+   * batch: focus the first focusable descendant, else the dialog itself, and
+   * remember the previously-focused element (the trigger) for restore on
+   * close. Deferred to batch end so descendants inserted after the dialog's
+   * own insert patch are visible to the focus search.
+   */
+  private flushDialogMounts(): void {
+    if (this.pendingDialogMounts.length === 0) return;
+    const pending = this.pendingDialogMounts;
+    this.pendingDialogMounts = [];
+    for (const id of pending) {
+      if (this.dialogOpeners.has(id)) continue; // already open — a move, not a mount
+      const dialog = this.nodes.get(id);
+      if (!dialog) continue;
+      this.dialogOpeners.set(id, focusDialogOnOpen(dialog));
+    }
+  }
+
+  /**
+   * Apply the route-focus contract to a freshly-shown route subtree: restore
+   * the remembered focus of a cached route when it is still inside the
+   * subtree, otherwise land on the first heading / main landmark / the
+   * subtree root (see route-focus.ts for the full contract).
+   */
+  private focusIncomingRoute(rootId: string): void {
+    const root = this.nodes.get(rootId);
+    if (!root) return;
+
+    const remembered = this.routeFocusMemory.get(rootId);
+    const target =
+      remembered && (root === remembered || root.contains?.(remembered))
+        ? remembered
+        : findRouteFocusTarget(root);
+    focusRouteTarget(target);
   }
 
   /**
@@ -250,7 +383,7 @@ export class DOMRenderer {
 
     switch (patch.type) {
       case "create":
-        this.onCreate(id!, elementType ?? "container", patch.props || {});
+        this.onCreate(id!, elementType ?? "container", patch.props || {}, patch.semantics);
         break;
       case "setProp":
         this.onSetProp(id!, patch.name!, patch.value);
@@ -276,13 +409,33 @@ export class DOMRenderer {
       case "attach":
         this.onInsert(parentId!, id!, beforeId);
         break;
+      case "setSemantics":
+        this.onSetSemantics(id!, patch.semantics);
+        break;
     }
+  }
+
+  /**
+   * Reactive accessibility update: re-run the create-time semantics
+   * translation on the live element with the node's complete re-resolved
+   * block. `applySemantics` is idempotent and clears attributes it set on a
+   * previous pass that the new block no longer produces. This is the sole
+   * ARIA writer for bound self-state — the SetProp that accompanies a bound
+   * `.expanded(@state.open)` change does not touch ARIA attributes.
+   */
+  private onSetSemantics(id: string, semantics?: Semantics): void {
+    const element = this.nodes.get(id);
+    if (!element) {
+      log.warn(`setSemantics: element ${id} not found`);
+      return;
+    }
+    applySemantics(element, semantics);
   }
 
   /**
    * Create a new element
    */
-  private onCreate(id: string, elementType: string, props: Record<string, any> | Map<string, any>): void {
+  private onCreate(id: string, elementType: string, props: Record<string, any> | Map<string, any>, semantics?: Semantics): void {
     const propsObj = props instanceof Map ? Object.fromEntries(props) : props;
 
     let element = this.components.createElement(elementType, propsObj);
@@ -302,11 +455,47 @@ export class DOMRenderer {
     element.dataset.hypenId = id;
     setEngine(element, this.engine);
 
+    // Apply engine-derived accessibility semantics (role, …) before styling
+    // props, so a redundant-role check sees the final host tag.
+    applySemantics(element, semantics);
+
+    // Dialog-like containers trap keyboard focus so Tab cycles within the
+    // dialog rather than escaping to the page behind it. Mount focus and
+    // restore-to-trigger run on insert/remove (tracked via dialogIds) — the
+    // element isn't in the document yet at create time. Escape closes only
+    // when the author declared an onClose action; without one, closing is
+    // app state and Escape does nothing.
+    if (semantics?.role === "dialog") {
+      makeFocusTrap(element);
+      this.dialogIds.add(id);
+      const onClose = propsObj.onClose ?? propsObj["onClose.0"];
+      if (onClose) {
+        installDialogEscape(element, onClose);
+      }
+    }
+
+    // Tablists get the WAI-ARIA roving-tabindex keyboard contract: arrows
+    // move focus among the role="tab" children, Home/End jump to the ends,
+    // only the focused tab stays in the page Tab order, and printable
+    // characters typeahead to the next matching tab.
+    if (semantics?.role === "tablist") {
+      makeRovingTablist(element);
+    }
+
+    // Listboxes get the same roving + typeahead contract over their
+    // role="option" children (no-op on a native <select> host, where the
+    // browser owns the keyboard behaviour).
+    if (semantics?.role === "listbox") {
+      makeRovingListbox(element);
+    }
+
     this.applicators.applyAll(element, propsObj);
 
-    // Actionable components: wire "action" prop as onClick
+    // Actionable components: wire "action" prop as onClick, and make
+    // non-native hosts (e.g. an actionable Card div) keyboard-operable.
     if (propsObj.action && ACTIONABLE_TYPES.has(elementType.toLowerCase())) {
       this.applicators.apply(element, "onClick", propsObj.action);
+      makeKeyboardActivatable(element, propsObj.action);
     }
 
     this.nodes.set(id, element);
@@ -398,6 +587,7 @@ export class DOMRenderer {
     // Actionable components: wire "action" prop as onClick
     if (name === "action" && ACTIONABLE_TYPES.has(element.dataset.hypenType || "")) {
       this.applicators.apply(element, "onClick", value);
+      makeKeyboardActivatable(element, value);
       return;
     }
 
@@ -479,6 +669,13 @@ export class DOMRenderer {
         parent.appendChild(child);
       }
     }
+
+    // Dialog entering the document (insert or cached re-attach): queue mount
+    // focus for the end of the batch (flushDialogMounts). Already-open
+    // dialogs are filtered there, so moves never re-focus.
+    if (this.dialogIds.has(id)) {
+      this.pendingDialogMounts.push(id);
+    }
   }
 
   /**
@@ -509,14 +706,47 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (!element) return;
 
+    // Remember where focus was inside the leaving route, so a cached
+    // re-`attach` of this subtree can restore it (route-focus contract).
+    const active = (element.ownerDocument?.activeElement ??
+      (typeof document !== "undefined" ? document.activeElement : null)) as HTMLElement | null;
+    if (active && (element === active || element.contains?.(active))) {
+      this.routeFocusMemory.set(id, active);
+    }
+
     if (element.parentNode) {
       element.parentNode.removeChild(element);
     }
+
+    // Any open dialog inside the detached subtree just left the document:
+    // restore its trigger (a trigger detached along with it fails the
+    // connectivity check and is skipped — the route-focus contract owns
+    // focus for the incoming route). Runs after the DOM unlink so the
+    // connectivity check reflects the detach. dialogIds keeps the id — a
+    // cached re-attach re-runs mount focus.
+    this.restoreDialogsWithin(element);
 
     // If the root gets detached (unlikely but defensible), clear
     // rootId so a later attach can re-root cleanly.
     if (this.rootId === id) {
       this.rootId = null;
+    }
+  }
+
+  /**
+   * Close-side of the dialog focus contract: every open dialog at-or-under
+   * `subtree` has left the document — restore focus to its remembered
+   * trigger (when still connected) and drop the open entry so a later
+   * insert/attach counts as a fresh mount.
+   */
+  private restoreDialogsWithin(subtree: HTMLElement): void {
+    if (this.dialogOpeners.size === 0) return;
+    for (const [dialogId, opener] of this.dialogOpeners) {
+      const dialog = this.nodes.get(dialogId);
+      if (!dialog || subtree === dialog || subtree.contains?.(dialog)) {
+        this.dialogOpeners.delete(dialogId);
+        if (dialog) restoreDialogFocus(dialog, opener);
+      }
     }
   }
 
@@ -545,7 +775,16 @@ export class DOMRenderer {
       element.parentNode.removeChild(element);
     }
 
+    // Restore-to-trigger for any open dialog in the removed subtree, before
+    // the node map forgets it. The removed subtree is gone for good, so the
+    // dialog id is dropped too.
+    this.restoreDialogsWithin(element);
+
     this.nodes.delete(id);
+    this.dialogIds.delete(id);
+    // Router LRU eviction: this subtree is gone for good — focus restore
+    // must never target it again (route-focus contract).
+    this.routeFocusMemory.delete(id);
 
     if (this.rootId === id) {
       this.rootId = null;
@@ -578,6 +817,10 @@ export class DOMRenderer {
     this.container.innerHTML = "";
     this.nodes.clear();
     this.rootId = null;
+    this.dialogIds.clear();
+    this.dialogOpeners.clear();
+    this.pendingDialogMounts = [];
+    this.routeFocusMemory.clear();
   }
 
   /**

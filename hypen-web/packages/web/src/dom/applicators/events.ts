@@ -275,6 +275,24 @@ function createEventHandler(
 }
 
 /**
+ * Dispatch the action encoded in an applicator value (e.g. `"@actions.save"`)
+ * to the element's engine. Shared by click wiring and keyboard activation so
+ * both routes dispatch identically. No-op if the value carries no action or
+ * the element has no engine.
+ */
+export function triggerElementAction(element: HTMLElement, value: unknown): void {
+  const { actionName, payload } = extractActionDetails(value);
+  if (!actionName) return;
+  const engine = getEngine(element);
+  if (!engine) return;
+  try {
+    engine.dispatchAction(actionName, payload);
+  } catch (err) {
+    log.error(`Error dispatching action "${actionName}":`, err);
+  }
+}
+
+/**
  * Create a keyboard event handler that filters by key
  */
 function createKeyHandler(defaultKey: string = "Enter"): ApplicatorHandler {

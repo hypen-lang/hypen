@@ -2587,6 +2587,13 @@ data class Patch(
   var `text`: kotlin.String?,
   var `parentId`: kotlin.String?,
   var `beforeId`: kotlin.String?,
+  /**
+   * Serialized `Semantics` block (camelCase JSON, same shape as the web
+   * wire format). Present on `Create` for nodes with derivable a11y and
+   * on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+   * constructors keep compiling.
+   */
+  var `semanticsJson`: kotlin.String? = null,
 ) {
   companion object
 }
@@ -2606,6 +2613,7 @@ public object FfiConverterTypePatch : FfiConverterRustBuffer<Patch> {
       FfiConverterOptionalString.read(buf),
       FfiConverterOptionalString.read(buf),
       FfiConverterOptionalString.read(buf),
+      FfiConverterOptionalString.read(buf),
     )
 
   override fun allocationSize(value: Patch) =
@@ -2618,7 +2626,8 @@ public object FfiConverterTypePatch : FfiConverterRustBuffer<Patch> {
         FfiConverterOptionalString.allocationSize(value.`valueJson`) +
         FfiConverterOptionalString.allocationSize(value.`text`) +
         FfiConverterOptionalString.allocationSize(value.`parentId`) +
-        FfiConverterOptionalString.allocationSize(value.`beforeId`)
+        FfiConverterOptionalString.allocationSize(value.`beforeId`) +
+        FfiConverterOptionalString.allocationSize(value.`semanticsJson`)
     )
 
   override fun write(
@@ -2634,6 +2643,7 @@ public object FfiConverterTypePatch : FfiConverterRustBuffer<Patch> {
     FfiConverterOptionalString.write(value.`text`, buf)
     FfiConverterOptionalString.write(value.`parentId`, buf)
     FfiConverterOptionalString.write(value.`beforeId`, buf)
+    FfiConverterOptionalString.write(value.`semanticsJson`, buf)
   }
 }
 
@@ -2843,6 +2853,15 @@ enum class PatchType {
    * Emitted by the engine's Router subtree cache on navigation-back.
    */
   ATTACH,
+
+  /**
+   * Replace a node's accessibility semantics after a reactive change
+   * (templated accessible name, bound self-state, bound checked). The
+   * updated block rides `semantics_json`; renderers re-apply it with the
+   * same translation they run at create, clearing attributes the new
+   * block no longer sets. `semantics_json == None` clears everything.
+   */
+  SET_SEMANTICS,
 
   ;
 

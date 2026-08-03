@@ -70,6 +70,12 @@ pub struct MetaData {
     pub internal_id: String,
     pub name_range: Range<usize>,
     pub block_range: Option<Range<usize>>,
+    /// Byte range of the component's full source expression: declaration
+    /// keyword (when present) through name, arguments, children block and the
+    /// last applicator. Unlike the raw parser span, it excludes trailing
+    /// whitespace/comments consumed by padding, so its end is the last real
+    /// token of the expression.
+    pub expr_range: Range<usize>,
 }
 
 /// An applicator specification (style/modifier applied to a component)

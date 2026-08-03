@@ -1320,10 +1320,23 @@ public struct Patch: Equatable, Hashable {
     public var text: String?
     public var parentId: String?
     public var beforeId: String?
+    /**
+     * Serialized `Semantics` block (camelCase JSON, same shape as the web
+     * wire format). Present on `Create` for nodes with derivable a11y and
+     * on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+     * constructors keep compiling.
+     */
+    public var semanticsJson: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(patchType: PatchType, id: String, elementType: String?, propsJson: String?, name: String?, valueJson: String?, text: String?, parentId: String?, beforeId: String?) {
+    public init(patchType: PatchType, id: String, elementType: String?, propsJson: String?, name: String?, valueJson: String?, text: String?, parentId: String?, beforeId: String?, 
+        /**
+         * Serialized `Semantics` block (camelCase JSON, same shape as the web
+         * wire format). Present on `Create` for nodes with derivable a11y and
+         * on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+         * constructors keep compiling.
+         */semanticsJson: String? = nil) {
         self.patchType = patchType
         self.id = id
         self.elementType = elementType
@@ -1333,6 +1346,7 @@ public struct Patch: Equatable, Hashable {
         self.text = text
         self.parentId = parentId
         self.beforeId = beforeId
+        self.semanticsJson = semanticsJson
     }
 
     
@@ -1359,7 +1373,8 @@ public struct FfiConverterTypePatch: FfiConverterRustBuffer {
                 valueJson: FfiConverterOptionString.read(from: &buf), 
                 text: FfiConverterOptionString.read(from: &buf), 
                 parentId: FfiConverterOptionString.read(from: &buf), 
-                beforeId: FfiConverterOptionString.read(from: &buf)
+                beforeId: FfiConverterOptionString.read(from: &buf), 
+                semanticsJson: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1373,6 +1388,7 @@ public struct FfiConverterTypePatch: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.text, into: &buf)
         FfiConverterOptionString.write(value.parentId, into: &buf)
         FfiConverterOptionString.write(value.beforeId, into: &buf)
+        FfiConverterOptionString.write(value.semanticsJson, into: &buf)
     }
 }
 
@@ -1544,6 +1560,14 @@ public enum PatchType: Equatable, Hashable {
      * Emitted by the engine's Router subtree cache on navigation-back.
      */
     case attach
+    /**
+     * Replace a node's accessibility semantics after a reactive change
+     * (templated accessible name, bound self-state, bound checked). The
+     * updated block rides `semantics_json`; renderers re-apply it with the
+     * same translation they run at create, clearing attributes the new
+     * block no longer sets. `semantics_json == None` clears everything.
+     */
+    case setSemantics
 
 
 
@@ -1582,6 +1606,8 @@ public struct FfiConverterTypePatchType: FfiConverterRustBuffer {
         case 8: return .detach
         
         case 9: return .attach
+        
+        case 10: return .setSemantics
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -1625,6 +1651,10 @@ public struct FfiConverterTypePatchType: FfiConverterRustBuffer {
         
         case .attach:
             writeInt(&buf, Int32(9))
+        
+        
+        case .setSemantics:
+            writeInt(&buf, Int32(10))
         
         }
     }

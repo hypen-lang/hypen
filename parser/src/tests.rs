@@ -1815,3 +1815,95 @@ fn test_unclosed_single_quote_string() {
         err_str
     );
 }
+
+#[test]
+fn test_name_range_records_the_name_token_span() {
+    // The component name's byte span is recorded in metadata so downstream
+    // diagnostics (a11y conformance, LSP) can point at file:line:col.
+    let input = r#"Column { Button("Save") }"#;
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.name_range.clone();
+    assert_eq!(&input[range], "Column");
+
+    let button = &component.children[0];
+    let range = button.metadata.name_range.clone();
+    assert_eq!(&input[range], "Button");
+}
+
+#[test]
+fn test_name_range_with_module_keyword_and_leading_whitespace() {
+    let input = "  module Search {\n    Text(\"hi\")\n  }";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.name_range.clone();
+    assert_eq!(&input[range], "Search");
+
+    let text = &component.children[0];
+    let range = text.metadata.name_range.clone();
+    assert_eq!(&input[range], "Text");
+}
+
+#[test]
+fn test_expr_range_covers_a_multiline_applicator_chain() {
+    // The full-expression span must end at the LAST applicator's ')' so
+    // downstream tooling (a11y suppression directives) can match a trailing
+    // comment on any line of the chain to this element.
+    let input = "Button {\n    Icon(\"trash\")\n}\n    .padding(16)\n    .color(red)\n    .margin(8)";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.expr_range.clone();
+    assert_eq!(range.start, 0);
+    assert!(
+        input[range.clone()].ends_with(".margin(8)"),
+        "expr_range should end at the last applicator, got: {:?}",
+        &input[range]
+    );
+    assert_eq!(range.end, input.len());
+}
+
+#[test]
+fn test_expr_range_excludes_trailing_whitespace_and_comments() {
+    // Padding consumes trailing whitespace/comments after the last token;
+    // the expression span must not include them (a stray comment between two
+    // elements belongs to neither).
+    let input = "Column {\n    Text(\"a\")\n}\n    .padding(16) // trailing note\n\n";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.expr_range.clone();
+    assert!(
+        input[range].ends_with(".padding(16)"),
+        "expr_range must stop at the applicator's ')'"
+    );
+}
+
+#[test]
+fn test_expr_range_without_applicators_ends_at_the_children_block() {
+    let input = "Column {\n    Text(\"a\")\n}";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.expr_range.clone();
+    assert_eq!(&input[range], input);
+
+    // A child's expression covers exactly its own text.
+    let text = &component.children[0];
+    let range = text.metadata.expr_range.clone();
+    assert_eq!(&input[range], "Text(\"a\")");
+}
+
+#[test]
+fn test_expr_range_starts_at_the_declaration_keyword() {
+    let input = "  module Search {\n    Text(\"hi\")\n  }";
+    let component = parse_component(input).unwrap();
+    let range = component.metadata.expr_range.clone();
+    assert_eq!(range.start, input.find("module").unwrap());
+    assert!(input[range].ends_with('}'));
+}
+
+#[test]
+fn test_expr_range_bare_component_covers_name_and_args() {
+    let input = "Text(\"hello\")";
+    let component = parse_component(input).unwrap();
+    assert_eq!(&input[component.metadata.expr_range.clone()], input);
+
+    // No args, no children, no applicators: the name token is the whole
+    // expression.
+    let input = "Divider";
+    let component = parse_component(input).unwrap();
+    assert_eq!(&input[component.metadata.expr_range.clone()], "Divider");
+}

@@ -41,6 +41,7 @@ import { backgroundHandlers } from "./background.js";
 import { displayHandlers } from "./display.js";
 import { transitionHandlers } from "./transition.js";
 import { BREAKPOINTS as VARIANT_BREAKPOINTS, VALID_STATES } from "../../variants.js";
+import { ariaHandlers } from "./aria.js";
 
 /**
  * Tailwind breakpoint values for responsive variants.
@@ -518,6 +519,10 @@ export class ApplicatorRegistry {
     }
 
     for (const [name, handler] of Object.entries(transitionHandlers)) {
+      this.register(name, handler as ApplicatorHandler);
+    }
+
+    for (const [name, handler] of Object.entries(ariaHandlers)) {
       this.register(name, handler as ApplicatorHandler);
     }
   }

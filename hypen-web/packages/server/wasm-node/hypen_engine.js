@@ -67,6 +67,50 @@ class WasmEngine {
         wasm.__wbg_wasmengine_free(ptr, 0);
     }
     /**
+     * Kebab-case ids of every accessibility rule this engine build's
+     * conformance pass checks (from `ir::conformance::ALL_RULES`, so the
+     * list cannot drift from the `A11yRule` enum). Hosts compare it against
+     * the rule set they were built to expect: a prebuilt WASM that predates
+     * a rule still exposes `checkAccessibility` and looks current while
+     * silently never firing the newer rule.
+     * @returns {string[]}
+     */
+    a11yRules() {
+        const ret = wasm.wasmengine_a11yRules(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * Run the dev-mode accessibility conformance pass over a DSL source and
+     * return any findings as
+     * `[{ rule, elementType, message, span?, line?, col?, suppressed? }]`.
+     * Hosts wire this into a dev console / editor diagnostics; an empty
+     * array means nothing actionable was found. Flags only un-derivable
+     * gaps (icon-only controls, missing alt, unleveled headings, nested
+     * interactives). `suppressed: true` marks findings matched by an inline
+     * `// hypen-a11y-ignore` directive (resolved by `locate_diagnostics`) —
+     * hosts count and report them but must not fail on or squiggle them.
+     *
+     * `span` is the offending element name token's byte range in `source`;
+     * `line`/`col` are its resolved position (1-based; `col` counts Unicode
+     * codepoints — the human/CLI convention). Resolution happens here, at
+     * the binding, so every host shares one byte→column rule. LSP-style
+     * consumers needing 0-based UTF-16 positions should resolve `span`
+     * themselves.
+     * @param {string} source
+     * @returns {any}
+     */
+    checkAccessibility(source) {
+        const ptr0 = passStringToWasm0(source, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_checkAccessibility(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * Clear resolved components and caches, preserving primitives and resolver.
      */
     clearResolvedComponents() {
@@ -1107,6 +1151,17 @@ function debugString(val) {
     }
     // TODO we could test for more things here, like `Set`s and `Map`s.
     return className;
+}
+
+function getArrayJsValueFromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    const mem = getDataViewMemory0();
+    const result = [];
+    for (let i = ptr; i < ptr + 4 * len; i += 4) {
+        result.push(wasm.__wbindgen_externrefs.get(mem.getUint32(i, true)));
+    }
+    wasm.__externref_drop_slice(ptr, len);
+    return result;
 }
 
 function getArrayU8FromWasm0(ptr, len) {

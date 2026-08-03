@@ -425,6 +425,7 @@ mod tests {
             id: id.into(),
             element_type: kind.into(),
             props: Arc::new(IndexMap::new()),
+            semantics: None,
         }
     }
 

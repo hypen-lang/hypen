@@ -1,20 +1,25 @@
 /**
  * Hypen Calorie Counter on Cloudflare — the whole worker in one file.
  *
- * `@hypen-space/cf/worker` provides the engine + WASM + Durable Object + WS
- * routing + the browser clients (`serveClient`); this file just declares the
- * app:
+ * `@hypen-space/cf` provides the Durable Object + WS routing. This file wires in
+ * the app, WASM engine, and shared browser clients:
  *
  *   - the component modules (imported for their side-effect registration on
  *     the shared `app` registry — Home/Diary/AddFood/Stats/Profile);
  *   - the App module, the registry, and the BottomNav anonymous fallback;
- *   - `serveClient`, serving the prebuilt DOM/Canvas clients;
+ *   - `clients`, serving the prebuilt DOM/Canvas clients;
  *   - `onStorage`, which binds the DO's `state.storage.sql` into the
  *     `bun:sqlite` shim and seeds the schema (runs on connect + every wake).
  */
 
-import { defineHypenWorker } from "@hypen-space/cf/worker";
+import { defineHypenWorker } from "@hypen-space/cf";
 import { app } from "@hypen-space/core";
+// @ts-ignore - Wrangler's CompiledWasm rule turns this into a WebAssembly.Module.
+import wasmModule from "hypen-engine/hypen_engine_bg.wasm";
+// @ts-ignore - The web-target glue exports initSync(module) and WasmEngine.
+import * as wasm from "hypen-engine";
+// @ts-ignore - Wrangler's Text rule imports the prebuilt generic client as a string.
+import genericClientJs from "../node_modules/@hypen-space/cf/dist/client/generic.js";
 
 import { bindSql } from "./db";
 import { initSchema } from "./seed";
@@ -47,11 +52,20 @@ const worker = defineHypenWorker({
   componentTemplates: {
     BottomNav: (bottomNavModule as { template?: string }).template ?? "",
   },
+  wasm: wasm as never,
+  wasmModule: wasmModule as WebAssembly.Module,
   doClassName: "CalorieCounterDO",
   binding: "CALORIE_DO",
-  // Browser clients from the prebuilt generic client: DOM at `/`, Canvas at
-  // `/canvas`. (Pass `clients: {...}` with your own bundles to customise.)
-  serveClient: { dom: "/", canvas: "/canvas" },
+  clients: {
+    "/": {
+      js: genericClientJs as string,
+      renderer: "dom",
+    },
+    "/canvas": {
+      js: genericClientJs as string,
+      renderer: "canvas",
+    },
+  },
   // Bind the DO's synchronous SQL into the bun:sqlite shim + seed the schema
   // before any module handler (which calls into queries.ts) runs. Re-runs on
   // every message so it survives hibernation.

@@ -11,6 +11,12 @@ data class HypenElement(
     val children: MutableList<String> = mutableListOf(),
     var parentId: String? = null,
     var textContent: String? = null,
+    /**
+     * Engine-derived accessibility semantics: set at CREATE, replaced
+     * wholesale by SET_SEMANTICS reactive re-emits (null clears). Translated
+     * to `Modifier.semantics {}` in [space.hypen.renderer.render.applyHypenSemantics].
+     */
+    var semantics: Map<String, Any?>? = null,
 ) {
     /**
      * Gets a property value with type casting.

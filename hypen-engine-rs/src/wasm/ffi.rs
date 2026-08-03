@@ -733,6 +733,7 @@ mod tests {
                 id: "node1".to_string(),
                 element_type: "Text".to_string(),
                 props: std::sync::Arc::new(indexmap::IndexMap::new()),
+                semantics: None,
             },
             Patch::SetText {
                 id: "node1".to_string(),
@@ -760,6 +761,7 @@ mod tests {
             id: "n1".to_string(),
             element_type: "Column".to_string(),
             props: std::sync::Arc::new(indexmap::IndexMap::new()),
+            semantics: None,
         };
         let json = serde_json::to_string(&create).unwrap();
         assert!(
