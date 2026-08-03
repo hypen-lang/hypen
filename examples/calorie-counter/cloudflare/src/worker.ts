@@ -39,7 +39,14 @@ void diaryModule;
 void statsModule;
 void profileModule;
 
-let schemaReady = false;
+// Per-storage, not per-module: `onStorage` fires once per Durable Object
+// instance, but a module-level boolean is shared across every DO in the
+// isolate. The first session seeded its own storage and set the flag, so
+// every later session bound a fresh, empty storage and skipped
+// `initSchema()` entirely — leaving a DO with no tables at all and a UI
+// with no data. A WeakSet keyed on the storage object scopes readiness to
+// the thing actually being initialised, and lets the DO be collected.
+const seededStorages = new WeakSet<object>();
 
 const worker = defineHypenWorker({
   module: appModule,
@@ -71,9 +78,9 @@ const worker = defineHypenWorker({
   // every message so it survives hibernation.
   onStorage: (storage) => {
     bindSql(storage as never);
-    if (!schemaReady) {
+    if (!seededStorages.has(storage as object)) {
       initSchema();
-      schemaReady = true;
+      seededStorages.add(storage as object);
     }
   },
 });

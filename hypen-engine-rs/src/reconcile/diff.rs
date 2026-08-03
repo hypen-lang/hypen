@@ -1,6 +1,9 @@
 use super::conditionals::{evaluate_value, find_matching_branch, find_matching_route_with_key};
 use super::item_bindings::replace_ir_node_item_bindings;
-use super::keyed::{generate_item_key, reconcile_iterable_children};
+use super::keyed::{
+    generate_item_key, iterable_child_key, reconcile_iterable_children,
+    reconcile_iterable_children_full,
+};
 use super::resolve::{evaluate_binding, resolve_props_full};
 use super::tree::DEFAULT_ROUTER_CACHE_SIZE;
 use super::{ControlFlowKind, InstanceTree, Patch};
@@ -665,7 +668,7 @@ pub(crate) fn create_ir_node_tree_impl(
 /// is logically owned by the ForEach container, but its `Insert` patch
 /// targets the ForEach's grandparent because the renderer treats the
 /// container as transparent.
-fn create_ir_node_tree_full(
+pub(crate) fn create_ir_node_tree_full(
     ctx: &mut ReconcileCtx,
     node: &IRNode,
     logical_parent: Option<NodeId>,
@@ -781,10 +784,12 @@ fn create_foreach_ir_tree(
     let render_parent = parent_id;
 
     if let serde_json::Value::Array(items) = &array {
+        let multi_template = template.len() > 1;
+
         for (index, item) in items.iter().enumerate() {
             let item_key = generate_item_key(item, key_path, item_name, index);
 
-            for child_template in template {
+            for (template_idx, child_template) in template.iter().enumerate() {
                 let child_with_item = replace_ir_node_item_bindings(
                     child_template,
                     item,
@@ -792,13 +797,22 @@ fn create_foreach_ir_tree(
                     item_name,
                     &item_key,
                 );
-                create_ir_node_tree_full(
+                let child_id = create_ir_node_tree_full(
                     ctx,
                     &child_with_item,
                     Some(node_id),
                     render_parent,
                     is_root && render_parent.is_none(),
                 );
+                // Stamp the same per-child key the keyed reconciler derives so
+                // the FIRST update already matches by identity. Element
+                // templates get `element.key` from replace_ir_node_item_bindings
+                // for free, but control-flow templates (and every template
+                // beyond the first, which needs the `#idx` suffix) do not.
+                if let Some(child_node) = ctx.tree.get_mut(child_id) {
+                    child_node.key =
+                        Some(iterable_child_key(&item_key, template_idx, multi_template));
+                }
             }
         }
     }
@@ -973,6 +987,63 @@ fn create_router_tree(
     node_id
 }
 
+/// Tear down every child of a ForEach container and rebuild the list from
+/// scratch.
+///
+/// This is the historical ForEach update strategy and is now only the
+/// **fallback** for state the keyed reconciler can't match by identity (see
+/// the `children_intact` guard in [`reconcile_ir_node_impl`]). It is correct
+/// but not minimal: O(n) Removes + O(n) Creates for an O(1) change, which
+/// destroys renderer-side state (focus, scroll, input values, media playback)
+/// inside every row and, with animations, plays every row's exit alongside
+/// every row's enter.
+///
+/// Keeps the logical-vs-render parent split: children are created under the
+/// ForEach container (`node_id`) while their Insert patches address
+/// `render_parent`.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_foreach_children(
+    ctx: &mut ReconcileCtx,
+    node_id: NodeId,
+    render_parent: NodeId,
+    old_children: &[NodeId],
+    items: &[serde_json::Value],
+    item_name: &str,
+    key_path: Option<&str>,
+    template: &[IRNode],
+) {
+    for &old_child_id in old_children {
+        let patch = root_remove_patch(ctx.tree, old_child_id);
+        ctx.dependencies.remove_node(old_child_id);
+        ctx.tree.remove(old_child_id);
+        ctx.patches.push(patch);
+    }
+
+    if let Some(node) = ctx.tree.get_mut(node_id) {
+        node.children.clear();
+    }
+
+    let multi_template = template.len() > 1;
+    for (index, item) in items.iter().enumerate() {
+        let item_key = generate_item_key(item, key_path, item_name, index);
+
+        for (template_idx, child_template) in template.iter().enumerate() {
+            let child_with_item =
+                replace_ir_node_item_bindings(child_template, item, index, item_name, &item_key);
+            let child_id = create_ir_node_tree_full(
+                ctx,
+                &child_with_item,
+                Some(node_id),
+                Some(render_parent),
+                false,
+            );
+            if let Some(child_node) = ctx.tree.get_mut(child_id) {
+                child_node.key = Some(iterable_child_key(&item_key, template_idx, multi_template));
+            }
+        }
+    }
+}
+
 /// Reconcile an existing tree against a new IRNode using a `ReconcileCtx`.
 pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, node: &IRNode) {
     let existing_node = ctx.tree.get(node_id).cloned();
@@ -1010,72 +1081,47 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 .unwrap_or(serde_json::Value::Array(vec![]));
 
             if let serde_json::Value::Array(items) = &array {
-                let old_children = existing.children.clone();
-                let expected_children_count = items.len() * template.len();
+                let old_children: Vec<NodeId> = existing.children.iter().copied().collect();
+                // The ForEach container is transparent to renderers: items are
+                // LOGICAL children of `node_id` but their Insert/Move patches
+                // must target the ForEach's own parent (the RENDER parent).
+                // Collapsing the two orphans items under the grandparent and
+                // leaves `ForEach.children` empty — every later reconcile then
+                // sees a length mismatch and rebuilds forever. Both branches
+                // below keep the split; `create_foreach_ir_tree` is the
+                // reference for the create side.
                 let render_parent = existing.parent.unwrap_or(node_id);
 
-                if old_children.len() != expected_children_count {
-                    for &old_child_id in &old_children {
-                        let patch = root_remove_patch(ctx.tree, old_child_id);
-                        ctx.patches.push(patch);
-                    }
+                // Fallback: keyed reconciliation reasons about the recorded
+                // children by identity, so it needs every one of them to still
+                // resolve in the tree. A dangling id means the container's
+                // bookkeeping is out of sync with the arena (nothing in-tree
+                // produces that today, but a stale `children` entry used to be
+                // possible) — rebuild from scratch instead of matching against
+                // ghosts. Correct but O(n), so it stays the exception.
+                let children_intact = old_children.iter().all(|&id| ctx.tree.get(id).is_some());
 
-                    if let Some(node) = ctx.tree.get_mut(node_id) {
-                        node.children.clear();
-                    }
-
-                    for (index, item) in items.iter().enumerate() {
-                        let item_key =
-                            generate_item_key(item, key_path.as_deref(), item_name, index);
-
-                        for child_template in template {
-                            let child_with_item = replace_ir_node_item_bindings(
-                                child_template,
-                                item,
-                                index,
-                                item_name,
-                                &item_key,
-                            );
-                            // Mirror the initial-create path in
-                            // `create_foreach_ir_tree` (diff.rs ~line 708-714):
-                            // items must be LOGICAL children of the ForEach
-                            // container while their Insert patch targets the
-                            // render parent. Collapsing the two (what
-                            // `create_ir_node_tree_impl` does) orphans items
-                            // under the grandparent and leaves
-                            // `ForEach.children` empty — every subsequent
-                            // reconcile then sees a length mismatch, hits this
-                            // rebuild branch again, and emits 0 Removes + N
-                            // Creates indefinitely.
-                            create_ir_node_tree_full(
-                                ctx,
-                                &child_with_item,
-                                Some(node_id),
-                                Some(render_parent),
-                                false,
-                            );
-                        }
-                    }
+                if children_intact {
+                    reconcile_iterable_children_full(
+                        ctx,
+                        node_id,
+                        render_parent,
+                        items,
+                        item_name,
+                        key_path.as_deref(),
+                        template,
+                    );
                 } else {
-                    let mut child_index = 0;
-                    for (item_index, item) in items.iter().enumerate() {
-                        let item_key =
-                            generate_item_key(item, key_path.as_deref(), item_name, item_index);
-
-                        for child_template in template {
-                            if let Some(&old_child_id) = old_children.get(child_index) {
-                                let child_with_item = replace_ir_node_item_bindings(
-                                    child_template,
-                                    item,
-                                    item_index,
-                                    item_name,
-                                    &item_key,
-                                );
-                                reconcile_ir_node_impl(ctx, old_child_id, &child_with_item);
-                            }
-                            child_index += 1;
-                        }
-                    }
+                    rebuild_foreach_children(
+                        ctx,
+                        node_id,
+                        render_parent,
+                        &old_children,
+                        items,
+                        item_name,
+                        key_path.as_deref(),
+                        template,
+                    );
                 }
             }
         }

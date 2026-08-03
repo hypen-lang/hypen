@@ -26,6 +26,14 @@ public struct RemoteEngineConfig: Sendable {
     /// Enable debug logging
     public let debugLogging: Bool
 
+    /// Largest single WebSocket message accepted, in bytes.
+    ///
+    /// URLSession defaults this to 1 MiB, which a Hypen `initialTree` can
+    /// exceed on its own — any app embedding an asset in state (a base64
+    /// wallpaper, an inlined image) does. Exceeding it fails the receive and
+    /// closes the socket, which autoReconnect then retries forever.
+    public let maximumMessageSize: Int
+
     public init(
         autoReconnect: Bool = true,
         reconnectInterval: TimeInterval = 3.0,
@@ -34,7 +42,8 @@ public struct RemoteEngineConfig: Sendable {
         readTimeout: TimeInterval = 30.0,
         writeTimeout: TimeInterval = 10.0,
         pingInterval: TimeInterval = 30.0,
-        debugLogging: Bool = false
+        debugLogging: Bool = false,
+        maximumMessageSize: Int = 32 * 1024 * 1024
     ) {
         self.autoReconnect = autoReconnect
         self.reconnectInterval = reconnectInterval
@@ -44,6 +53,7 @@ public struct RemoteEngineConfig: Sendable {
         self.writeTimeout = writeTimeout
         self.pingInterval = pingInterval
         self.debugLogging = debugLogging
+        self.maximumMessageSize = maximumMessageSize
     }
 
     /// Default configuration

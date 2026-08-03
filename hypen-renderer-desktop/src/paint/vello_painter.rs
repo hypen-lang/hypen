@@ -594,7 +594,20 @@ impl VelloPainter {
         }
 
         let radius = item.border.radius * scale_factor;
-        if let Some(grad) = item.background_gradient.as_ref() {
+        // CSS layer order for a `background` value: colour at the bottom,
+        // then the image, then the gradient on top. The wallpaper is exactly
+        // that stack — a darkening `linear-gradient(...)` over a photo.
+        if let Some(src) = item.background_image.as_deref() {
+            if let Some(bg) = background {
+                fill_rect(&mut self.scene, item.rect, bg, radius);
+            }
+            // `center / cover` is what the shorthand asks for and what
+            // `ObjectFit::Cover` does: fill the box, crop the overflow.
+            self.draw_image(item.rect, Some(src), crate::layout::ObjectFit::Cover, radius);
+            if let Some(grad) = item.background_gradient.as_ref() {
+                fill_gradient_rect(&mut self.scene, item.rect, grad, radius);
+            }
+        } else if let Some(grad) = item.background_gradient.as_ref() {
             // Gradient takes precedence over solid `background` when
             // the DSL declared one (`bg-gradient-to-br from-* to-*` or
             // an explicit `linear-gradient(...)`). CSS layers solid
@@ -1605,6 +1618,7 @@ mod tests {
             clip_to: None,
             subtree_root: None,
             background_gradient: None,
+            background_image: None,
             state_variants: crate::style::StateVariants::default(),
             opacity: 1.0,
             transform: crate::layout::Affine2::IDENTITY,

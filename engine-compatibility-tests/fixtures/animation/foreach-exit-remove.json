@@ -1,7 +1,7 @@
 {
   "$schema": "../../schema/test-case.schema.json",
   "name": "foreach-exit-remove",
-  "description": "Shrinking a keyed ForEach list flags every removed item root that carries __anim.exit with transition:true, and all Removes are emitted before the rebuild's Create/Insert patches",
+  "description": "Shrinking a keyed ForEach list flags the removed item root that carries __anim.exit with transition:true; surviving rows are reused (no Remove/Create churn)",
   "category": "animation",
   "priority": "P1",
 
@@ -57,7 +57,7 @@
       ]
     },
     {
-      "description": "Dropping Bob rebuilds the list: flagged Removes for the old item roots first, then Alice is recreated",
+      "description": "Dropping Bob retires exactly Bob's row with a transition-flagged Remove; Alice keeps her node",
       "action": "updateState",
       "stateChange": {
         "paths": ["items"],
@@ -65,22 +65,10 @@
           "items": [{ "id": "a", "name": "Alice" }]
         }
       },
-      "expectedPatchCount": 4,
-      "expectedPatchTypes": ["remove", "remove", "create", "insert"],
-      "expectedPatches": [
-        { "type": "remove", "transition": true },
-        { "type": "remove", "transition": true },
-        {
-          "type": "create",
-          "elementType": "Text",
-          "props": {
-            "0": "Alice",
-            "__anim.exit": { "curve": "easeIn", "duration": 150, "presets": ["fade"] },
-            "key": "a"
-          }
-        },
-        { "type": "insert" }
-      ]
+      "expectedPatchCount": 1,
+      "expectedPatchTypes": ["remove"],
+      "forbiddenPatchTypes": ["create"],
+      "expectedPatches": [{ "type": "remove", "transition": true }]
     }
   ]
 }

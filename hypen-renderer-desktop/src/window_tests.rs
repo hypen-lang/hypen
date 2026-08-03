@@ -357,6 +357,13 @@ fn wset(id: &str, name: &str, value: serde_json::Value) -> Patch {
 const HARNESS_SCALE: f32 = 1.0;
 const HARNESS_VIEWPORT: (u32, u32) = (800, 600);
 
+/// The harness surface as a logical viewport. `HARNESS_SCALE` is the
+/// same conversion the window applies, so tests exercise the real
+/// physical -> logical path rather than asserting against raw pixels.
+fn harness_viewport() -> crate::style::Viewport {
+    crate::layout::logical_viewport(HARNESS_VIEWPORT, HARNESS_SCALE)
+}
+
 /// Animator at manual time 0 (reduced motion explicitly OFF — never
 /// depend on the ambient `HYPEN_REDUCED_MOTION`, see the env-var
 /// test's isolation invariant in `anim_tests`), a tree holding one
@@ -387,11 +394,11 @@ fn mirror_ingest(
     patches: &[Patch],
 ) {
     let out = animator.ingest(patches, tree);
-    if !taffy.apply_patches(&out.forwarded, tree, HARNESS_SCALE, HARNESS_VIEWPORT.0 as f32) {
+    if !taffy.apply_patches(&out.forwarded, tree, HARNESS_SCALE, harness_viewport()) {
         taffy.mark_needs_rebuild();
     }
     for id in &out.restyle {
-        taffy.restyle_node(id, tree, HARNESS_SCALE, HARNESS_VIEWPORT.0 as f32);
+        taffy.restyle_node(id, tree, HARNESS_SCALE, harness_viewport());
     }
 }
 
@@ -460,7 +467,7 @@ fn animation_frame_restyles_retained_taffy_before_layout() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     assert!(frame.invalidate, "mid-glide tick wrote into the tree");
     assert!(frame.rearm, "in-flight work must keep the ticker armed");
@@ -478,7 +485,7 @@ fn animation_frame_restyles_retained_taffy_before_layout() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     assert!(frame.invalidate, "settle writes the exact target");
     assert!(!frame.rearm, "settled → no vsync re-arm");
@@ -489,7 +496,7 @@ fn animation_frame_restyles_retained_taffy_before_layout() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     assert!(
         !frame.invalidate && !frame.rearm,
@@ -508,7 +515,7 @@ fn reduced_motion_toggle_off_rearms_the_ticker() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
         true,
     );
     assert!(!frame.invalidate && !frame.rearm, "nothing in flight yet");
@@ -535,7 +542,7 @@ fn reduced_motion_toggle_off_rearms_the_ticker() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
         false,
     );
     assert!(
@@ -553,7 +560,7 @@ fn reduced_motion_toggle_off_rearms_the_ticker() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     assert!(frame.invalidate, "restarted pulse writes on the next frame");
     assert!(frame.rearm);
@@ -593,14 +600,14 @@ fn reduced_motion_toggle_on_snaps_and_invalidates() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     let frame = drive_reduced_motion_toggle(
         &mut animator,
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
         true,
     );
     assert!(frame.invalidate, "toggle-on snap writes final values");
@@ -782,7 +789,7 @@ fn slide_enter_moves_pixels_and_hit_targets_together() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     assert!(frame.invalidate && frame.rearm);
     let pass = harness_layout(&mut taffy, &tree, &mut text, 2);
@@ -800,7 +807,7 @@ fn slide_enter_moves_pixels_and_hit_targets_together() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     let pass = harness_layout(&mut taffy, &tree, &mut text, 3);
     assert!(pass.item_by_id("btn").unwrap().transform.is_identity());
@@ -851,7 +858,7 @@ fn slide_exit_stays_excluded_while_transformed() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     let pass = harness_layout(&mut taffy, &tree, &mut text, 2);
     let btn = pass.item_by_id("btn").expect("corpse still painted");
@@ -873,7 +880,7 @@ fn slide_exit_stays_excluded_while_transformed() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     assert!(frame.invalidate);
     assert!(tree.get("btn").is_none());
@@ -910,7 +917,7 @@ fn spin_advances_the_item_transform_frame_over_frame() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     assert!(frame.invalidate && frame.rearm);
     let pass = harness_layout(&mut taffy, &tree, &mut text, 2);
@@ -928,7 +935,7 @@ fn spin_advances_the_item_transform_frame_over_frame() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     let pass = harness_layout(&mut taffy, &tree, &mut text, 3);
     let vr = pass.item_by_id("icon").unwrap().visual_rect();
@@ -985,7 +992,7 @@ fn flip_on_move_plays_through_the_window_glue() {
         pass2.item_by_id(id).map(|it| (it.rect.x, it.rect.y))
     });
     assert!(played, "Move with retained TaffyState geometry FLIPs");
-    pass2.refresh_transforms(&tree, HARNESS_VIEWPORT.0 as f32, HARNESS_SCALE);
+    pass2.refresh_transforms(&tree, harness_viewport(), HARNESS_SCALE);
     let b = pass2.item_by_id("b").unwrap();
     let vr = b.visual_rect();
     assert!(
@@ -1001,7 +1008,7 @@ fn flip_on_move_plays_through_the_window_glue() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     assert!(frame.invalidate && frame.rearm);
     let pass3 = harness_layout(&mut taffy, &tree, &mut text, 3);
@@ -1015,7 +1022,7 @@ fn flip_on_move_plays_through_the_window_glue() {
         &mut tree,
         &mut taffy,
         HARNESS_SCALE,
-        HARNESS_VIEWPORT.0 as f32,
+        harness_viewport(),
     );
     assert!(!frame.rearm);
     assert!(!tree.get("b").unwrap().props.contains_key("translateY"));

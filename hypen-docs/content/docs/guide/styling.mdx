@@ -612,6 +612,29 @@ Button { Text("Submit") }
 
 **Platform Support:** Web, Android, iOS
 
+### Variant Limitations
+
+On the web, variants are emitted as CSS rules (a media query for a breakpoint, a
+pseudo-class for a state) and the `default` value is emitted as a rule alongside
+them, so the normal CSS cascade decides which one wins. Precedence is
+`default` < breakpoints (ascending) < `disabled` < `hover` < `focus` < `active`.
+
+Two consequences are worth knowing:
+
+- **Transform applicators do not support variants.** `translateX`, `translateY`,
+  `scale`, `rotate`, `skew` and friends all compose into the single CSS
+  `transform` property, so they cannot be split into per-variant rules without
+  clobbering each other. Passing a value map to one of them applies the
+  `default` and logs a warning naming the applicator; the variants are ignored.
+  Use `.transform({default: "scale(1)", hover: "scale(1.05)"})` instead — the
+  full `transform` string does support variants.
+- **`.transition()` / `.animate()` do not support variants either.** The
+  animation runtime owns those inline styles directly.
+
+**Note:** a prop that carries variants is styled by a class rule rather than an
+inline style. Page-level CSS with higher specificity (an `#id` rule, for example)
+can therefore override it — inline styles could not be overridden that way.
+
 ## Tailwind CSS
 
 Hypen has built-in Tailwind CSS support with responsive breakpoints and interactive state variants. Use the `.tw()` applicator to apply Tailwind utility classes directly.

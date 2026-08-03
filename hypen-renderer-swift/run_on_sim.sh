@@ -196,6 +196,7 @@ else
         sleep 0.3
         echo "Opening deep link: $DEEP_LINK_URL"
         xcrun simctl openurl "$SIMULATOR_ID" "$DEEP_LINK_URL"
+        echo "NOTE: iOS will ask \"Open in HypenGallery?\" — tap Open."
     fi
     echo "HypenGallery is running on $SIMULATOR_NAME."
 fi

@@ -203,25 +203,14 @@ fn should_skip(tc: &TestCase) -> Option<String> {
     }
 
     // Per-fixture skips for known reconciliation strategy differences.
-    // The Rust engine rebuilds ForEach children on count change (correct but not minimal).
     // Conditional re-evaluation on state update uses a different dirty propagation strategy.
-    match tc.name.as_str() {
-        "foreach-dynamic-updates" => {
-            return Some(
-                "ForEach rebuilds all children on count change (8 patches vs expected 2)".into(),
-            );
-        }
-        "when-conditional-rendering" => {
-            return Some(
-                "Conditional dirty propagation: condition node re-evaluation pending".into(),
-            );
-        }
-        "keyed-list-add-remove" => {
-            return Some(
-                "ForEach rebuilds all children on count change (8 patches vs expected 2)".into(),
-            );
-        }
-        _ => {}
+    //
+    // NOTE: "foreach-dynamic-updates" and "keyed-list-add-remove" used to be
+    // skipped here because ForEach rebuilt every child on a count change
+    // (8 patches vs the expected 2). ForEach now goes through the same keyed
+    // reconciliation as iterable elements, so both fixtures run.
+    if tc.name.as_str() == "when-conditional-rendering" {
+        return Some("Conditional dirty propagation: condition node re-evaluation pending".into());
     }
 
     None

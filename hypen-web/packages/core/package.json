@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/core",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "description": "Hypen core - Platform-agnostic reactive UI runtime (types, state, router, events)",
   "type": "module",
   "main": "./dist/index.js",

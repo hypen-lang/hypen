@@ -2,7 +2,7 @@
   "name": "@hypen-space/lsp",
   "displayName": "Hypen Language Support",
   "description": "Language Server Protocol support for the Hypen declarative UI language",
-  "version": "0.5.4",
+  "version": "0.6.0",
   "publisher": "hypen",
   "license": "MIT",
   "type": "module",

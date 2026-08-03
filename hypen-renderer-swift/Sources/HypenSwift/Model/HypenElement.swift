@@ -101,6 +101,11 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     var cachedApplicatorResult: ApplicatorResult?
     var cachedApplicatorRegistryID: ObjectIdentifier?
 
+    /// Viewport the cached result was resolved against. `vw`/`vh` depend on
+    /// it, and nothing mutates the element when the window resizes, so it is
+    /// part of the cache key rather than an invalidation trigger.
+    var cachedApplicatorViewport: CGSize = .zero
+
     /// Re-emit this element's change publisher without mutating it.
     /// Used by `HypenRenderer` when a change to a descendant (e.g. a
     /// control-flow wrapper's children, or a child prop the parent's

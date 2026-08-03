@@ -65,6 +65,8 @@ export default app
           .tw("w-10 h-10 rounded-full border-0 items-center justify-center")
           .backgroundColor("rgba(255, 255, 255, 0.12)")
           .boxShadow("0 16px 32px rgba(2, 6, 23, 0.45)")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(160, easeOut)
           .onClick(@router.push, to: "/")
 
           Text("Search")
@@ -103,11 +105,14 @@ export default app
               Text("@{item.label}")
                 .tw("text-sm md:text-sm lg:text-base font-black")
                 .color("@{item.active ? '#0F172A' : '#CBD5E1'}")
+                .transition(220, easeOut, props: [color])
             }
             .tw("mr-2 px-5 py-3 rounded-full border-0 shadow-lg shrink-0")
             .backgroundColor("@{item.active ? '#FACC15' : 'rgba(236, 72, 153, 0.14)'}")
             .boxShadow("@{item.active ? '0 16px 32px rgba(250, 204, 21, 0.24)' : '0 10px 24px rgba(236, 72, 153, 0.18)'}")
-            .onClick(@actions.selectGenre, genre: "@{item.id}")
+            .opacity({ default: 1, active: 0.7 })
+            .transition(220, easeOut)
+            .onClick(@actions.selectGenre, genre: "@{item.id}", animate: spring)
           }
         }
         .scrollable("horizontal")
@@ -149,9 +154,14 @@ export default app
               .tw("mt-3 py-3 rounded-2xl border-0 shadow-lg items-center justify-center")
               .backgroundColor("@{item.saved ? '#22C55E' : '#2A0B1B'}")
               .boxShadow("@{item.saved ? '0 14px 28px rgba(34, 197, 94, 0.24)' : '0 12px 24px rgba(236, 72, 153, 0.20)'}")
+              .opacity({ default: 1, active: 0.75 })
+              .transition(260, easeOut)
               .onClick(@actions.saveMovie, movieId: "@{item.id}")
             }
             .tw("p-0 border-0")
+            .enter(fade, duration: 260)
+            .exit(fade, duration: 140)
+            .layout(spring)
           }
           .gridColumns({default: 2, md: 3, lg: 4})
           .gap(12)
@@ -172,6 +182,8 @@ export default app
             .tw("mx-5 mt-6 p-6 rounded-3xl border-0 items-center")
             .backgroundColor("rgba(255, 255, 255, 0.10)")
             .boxShadow("0 18px 42px rgba(2, 6, 23, 0.35)")
+            .enter(slide, fade, from: bottom, duration: 280)
+            .exit(fade, duration: 140)
           }
         }
         .tw("pb-8")

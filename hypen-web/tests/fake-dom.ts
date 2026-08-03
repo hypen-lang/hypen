@@ -28,26 +28,49 @@ export class FakeCSSStyleSheet {
   }
 }
 
+/**
+ * Canonicalise a style property name the way a real `CSSStyleDeclaration`
+ * does: `el.style.backgroundColor` and `el.style.setProperty("background-color")`
+ * address the SAME declaration. Without this the fake stores them under two
+ * separate keys, so code that writes camelCase and reads/removes kebab-case
+ * (every applicator handler + the variant machinery) behaves differently in
+ * tests than in a browser. Custom properties (`--x`) pass through untouched.
+ */
+function toStyleKey(name: string): string {
+  if (name.startsWith("--")) return name;
+  return name.replace(/([A-Z])/g, "-$1").toLowerCase();
+}
+
 export class FakeStyle {
   private store: Record<string, string> = {};
 
   constructor() {
     return new Proxy(this, {
       get: (target, prop, receiver) => {
-        if (prop === "setProperty" || prop === "getProperty" || prop === "removeProperty") {
+        if (
+          prop === "setProperty" ||
+          prop === "getProperty" ||
+          prop === "getPropertyValue" ||
+          prop === "removeProperty"
+        ) {
           return (target as any)[prop].bind(target);
         }
         if (typeof prop === "string") {
+          // Indexed access (`style.length` / `style[i]`) mirrors the real
+          // CSSStyleDeclaration, which is how the declaration set of an
+          // element is enumerated.
+          if (prop === "length") return Object.keys(target.store).length;
+          if (/^\d+$/.test(prop)) return Object.keys(target.store)[Number(prop)];
           if (prop in target) {
             return Reflect.get(target, prop, receiver);
           }
-          return target.store[prop];
+          return target.store[toStyleKey(prop)];
         }
         return Reflect.get(target, prop, receiver);
       },
       set: (target, prop, value) => {
         if (typeof prop === "string") {
-          target.store[prop] = String(value);
+          target.store[toStyleKey(prop)] = String(value);
           return true;
         }
         return false;
@@ -63,15 +86,19 @@ export class FakeStyle {
   }
 
   setProperty(name: string, value: string): void {
-    this.store[name] = value;
+    this.store[toStyleKey(name)] = value;
   }
 
   getProperty(name: string): string | undefined {
-    return this.store[name];
+    return this.store[toStyleKey(name)];
+  }
+
+  getPropertyValue(name: string): string {
+    return this.store[toStyleKey(name)] ?? "";
   }
 
   removeProperty(name: string): void {
-    delete this.store[name];
+    delete this.store[toStyleKey(name)];
   }
 }
 

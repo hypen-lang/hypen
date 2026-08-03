@@ -47,6 +47,15 @@ public struct HypenView: View {
                 .environment(\.componentRegistry, componentRegistry)
                 .environment(\.applicatorRegistry, applicatorRegistry)
                 .environment(\.screenWidth, geometry.size.width)
+                // `vw`/`vh` resolve against the space the Hypen root was
+                // actually given, NOT `UIScreen.main.bounds`. A host that
+                // insets us (the Gallery's URL chrome takes 112pt) would
+                // otherwise make `min-h-screen` taller than the area it can
+                // occupy, pushing bottom-anchored content off the screen —
+                // which is exactly what hid the home-screen launcher's dock.
+                // Matches the web, where 100vh is the viewport hosting the
+                // app, not the display.
+                .environment(\.viewportHeight, geometry.size.height)
                 .onAppear {
                     viewModel.connect()
                 }

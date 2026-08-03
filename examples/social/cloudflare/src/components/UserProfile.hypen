@@ -59,23 +59,36 @@ module UserProfile {
         }
         .tw("px-4 pb-3 bg-white")
 
+        // Follow toggle: the fill and the label colour cross-fade instead of
+        // snapping between blue/white and grey/black.
+        //
+        // Node-level `.transition`, NOT `.onClick(..., animate: spring)`. The
+        // browser does stamp the dispatch (`__hypenAnimate` goes out on the
+        // wire), but this app's engine runs in a Cloudflare Worker, and that
+        // host never emits the corresponding `batchAnimation` patch — the
+        // transaction channel is a documented no-op off the browser/Node hosts.
         Button {
             Text("@{state.viewedUser.isFollowing ? 'Following' : 'Follow'}")
                 .tw("text-sm font-semibold")
                 .color("@{state.viewedUser.isFollowing ? '#262626' : '#ffffff'}")
+                .transition(duration: 280, curve: easeOut, props: [color])
         }
         .onClick(@actions.toggleFollow)
         .tw("mx-4 mb-4 p-1.5 rounded-md items-center")
         .backgroundColor("@{state.viewedUser.isFollowing ? '#efefef' : '#0095f6'}")
+        .transition(duration: 280, curve: easeOut, props: [backgroundColor])
 
-        List(@state.viewedUser.posts, key: "id") {
+        // Not an animation change: this route was unreachable until the Post
+        // header started linking here, so its single-column `List` had never
+        // been seen. Matched to Profile.hypen's 3-up grid.
+        Grid(@state.viewedUser.posts, key: "id") {
             Image(src: "@{item.imageUrl}")
-                .width(120)
-                .height(120)
                 .objectFit("cover")
-                .tw("p-px")
+                .tw("aspect-square w-full")
         }
-        .tw("flex-1")
+        .gridColumns(3)
+        .gap(2)
+        .tw("flex-1 border-t border-gray-200 pt-2")
     }
     .tw("flex-1 bg-white")
 }

@@ -40,8 +40,11 @@ import { advancedLayoutHandlers } from "./advanced-layout.js";
 import { backgroundHandlers } from "./background.js";
 import { displayHandlers } from "./display.js";
 import { transitionHandlers } from "./transition.js";
-import { BREAKPOINTS as VARIANT_BREAKPOINTS, VALID_STATES } from "../../variants.js";
+import { BREAKPOINTS as VARIANT_BREAKPOINTS, parseVariantKey } from "../../variants.js";
 import { ariaHandlers } from "./aria.js";
+import { frameworkLoggers } from "@hypen-space/core/logger";
+
+const log = frameworkLoggers.renderer;
 
 /**
  * Tailwind breakpoint values for responsive variants.
@@ -56,9 +59,13 @@ const BREAKPOINTS: Record<string, string> = Object.fromEntries(
  * Singleton stylesheet for variant CSS rules
  */
 let variantStyleSheet: CSSStyleSheet | null = null;
+let variantStyleElement: HTMLStyleElement | null = null;
 
 /**
- * Track inserted rules to avoid duplicates
+ * Track inserted rules to avoid duplicates. Keyed by full rule text and
+ * cleared whenever the stylesheet is (re-)created, so the cache can never
+ * suppress an insert into a *different* sheet than the one it was recorded
+ * against (tests swap `document`; a host page may drop the style element).
  */
 const insertedRules = new Set<string>();
 
@@ -66,25 +73,102 @@ const insertedRules = new Set<string>();
  * Get or create the variant stylesheet
  */
 function getVariantStyleSheet(): CSSStyleSheet {
-  if (!variantStyleSheet) {
+  const stale =
+    !variantStyleSheet ||
+    !variantStyleElement ||
+    variantStyleElement.ownerDocument !== document ||
+    (variantStyleElement as { isConnected?: boolean }).isConnected === false;
+
+  if (stale) {
     const style = document.createElement('style');
     style.id = 'hypen-variants';
     document.head.appendChild(style);
+    variantStyleElement = style;
     variantStyleSheet = style.sheet as CSSStyleSheet;
+    insertedRules.clear();
   }
-  return variantStyleSheet;
+  return variantStyleSheet!;
 }
 
 /**
- * Generate a simple hash for deduplication
+ * Class-name suffix identifying a declaration set.
+ *
+ * A readable prefix (first 8 alphanumerics) keeps generated classes greppable,
+ * but it cannot stand alone: values are read back from the CSSOM already
+ * normalized, so `#333333` and `#333334` both arrive as `rgb(51, 51, 5…` and
+ * truncate to the SAME 8 characters. Two different values sharing a class
+ * means one silently renders as the other, so a full-string djb2 is appended.
  */
 function hashValue(value: any): string {
-  return String(value).replace(/[^a-zA-Z0-9]/g, '').slice(0, 8);
+  const raw = String(value);
+  let hash = 5381;
+  for (let i = 0; i < raw.length; i++) {
+    hash = ((hash << 5) + hash + raw.charCodeAt(i)) | 0;
+  }
+  return `${raw.replace(/[^a-zA-Z0-9]/g, '').slice(0, 8)}-${(hash >>> 0).toString(36)}`;
+}
+
+/**
+ * Applicator bases whose inline styles are owned by the animator
+ * (`dom/anim.ts` writes, captures and restores these longhands directly on
+ * the element). Moving them into the variant stylesheet would put them back
+ * behind the animator's inline writes — the exact shadowing this module
+ * exists to prevent — so they are reported as not variant-expressible.
+ */
+const ANIMATOR_OWNED_BASES = new Set([
+  "transition",
+  "transitionProperty",
+  "transitionDuration",
+  "transitionTimingFunction",
+  "transitionDelay",
+  "animation",
+  "animationName",
+  "animationDuration",
+  "animationTimingFunction",
+  "animationDelay",
+  "animationIterationCount",
+  "animationDirection",
+  "animationFillMode",
+  "animationPlayState",
+]);
+
+/** A prop key split into its base name and (optional) variant qualifiers. */
+interface VariantInfo {
+  /** camelCase base applicator name, e.g. "opacity". */
+  base: string;
+  /** Breakpoint name (validated) or null. */
+  breakpoint: string | null;
+  /** Interaction state (validated) or null. */
+  state: string | null;
+  /** True when the key carries a breakpoint and/or a state. */
+  qualified: boolean;
+}
+
+/** Declarations a value lowers to, or the reason it cannot be lowered. */
+type Lowered =
+  | { decls: Record<string, string>; dataset: Record<string, string>; reason?: undefined }
+  | { reason: string; decls?: undefined; dataset?: undefined };
+
+/** Per-element bookkeeping for props that participate in a variant group. */
+interface VariantMeta {
+  /** Bases with at least one variant-qualified sibling on this element. */
+  bases: Set<string>;
+  /** Qualified key (e.g. "opacity:hover", or "opacity" for the default) -> applied class. */
+  classes: Map<string, string>;
+  /** Bases already warned about, so the warning fires once per element+base. */
+  warned: Set<string>;
 }
 
 export class ApplicatorRegistry {
   private handlers: Map<string, ApplicatorHandler> = new Map();
   private elementState: WeakMap<HTMLElement, Map<string, any>> = new WeakMap();
+  /**
+   * Variant bookkeeping, allocated lazily and ONLY for elements that actually
+   * carry a variant-qualified prop — an element with plain props costs nothing.
+   */
+  private variantMeta: WeakMap<HTMLElement, VariantMeta> = new WeakMap();
+  /** Detached element used to observe what a handler writes. See `lower()`. */
+  private probe: HTMLElement | null = null;
 
   constructor() {
     this.registerDefaults();
@@ -99,6 +183,14 @@ export class ApplicatorRegistry {
 
   /**
    * Apply an applicator to an element
+   *
+   * Variant contract: a prop that has ANY variant-qualified sibling on this
+   * element (`opacity:hover`, `padding@md`, …) has its DEFAULT routed through
+   * the same stylesheet mechanism as the variants, instead of through its
+   * handler's inline write. Both then sit at the same specificity tier and the
+   * normal CSS cascade decides — an inline default can no longer permanently
+   * shadow every variant. Props with no variants are untouched: they still go
+   * through their handler exactly as before.
    */
   apply(element: HTMLElement, name: string, value: any): void {
     // Parse applicator metadata so we can normalize event arguments and retain legacy behavior
@@ -124,6 +216,25 @@ export class ApplicatorRegistry {
       return;
     }
 
+    // Variant routing. A qualified key (`opacity:hover`) always becomes a rule;
+    // an unqualified key becomes a rule too once the element is known to carry
+    // variants for that base, so the default cannot shadow them inline.
+    const variant = this.classifyVariant(handlerName);
+    if (variant) {
+      if (variant.qualified) {
+        this.registerVariantBase(element, variant.base);
+        this.applyVariantRule(element, handlerName, variant, value);
+        return;
+      }
+      if (
+        this.variantMeta.get(element)?.bases.has(variant.base) &&
+        this.applyDefaultAsRule(element, variant.base, value)
+      ) {
+        state.set(handlerName, value);
+        return;
+      }
+    }
+
     if (handler) {
       if (this.isEventApplicator(handlerName)) {
         const normalizedValue = this.normalizeEventValue(previous, value);
@@ -137,6 +248,328 @@ export class ApplicatorRegistry {
       // Fallback: set as CSS property
       this.setStyleProperty(element, handlerName, value);
     }
+  }
+
+  // ==========================================================================
+  // Variant routing
+  // ==========================================================================
+
+  /**
+   * Split an already-arg-stripped applicator name into base + variant markers.
+   *
+   * Returns null for keys the variant machinery must not touch: event
+   * applicators, compound named-arg keys (`padding.top`), and malformed
+   * variants whose leftover base still contains an `@`/`:` (e.g.
+   * `backgroundColor@bogus:hover` — an unknown breakpoint). Those keep their
+   * pre-existing behaviour, which for a malformed variant is "apply nothing".
+   */
+  private classifyVariant(name: string): VariantInfo | null {
+    if (this.isEventApplicator(name)) return null;
+
+    const parsed = parseVariantKey(name);
+    // A named-arg compound key (`padding.top`) is not a variant key.
+    if (parsed.arg !== null) return null;
+
+    const qualified = parsed.breakpoint !== null || parsed.state !== null;
+    if (qualified && (parsed.base.includes("@") || parsed.base.includes(":"))) {
+      return null;
+    }
+
+    return {
+      base: parsed.base,
+      breakpoint: parsed.breakpoint,
+      state: parsed.state,
+      qualified,
+    };
+  }
+
+  private getVariantMeta(element: HTMLElement): VariantMeta {
+    let meta = this.variantMeta.get(element);
+    if (!meta) {
+      meta = { bases: new Set(), classes: new Map(), warned: new Set() };
+      this.variantMeta.set(element, meta);
+    }
+    return meta;
+  }
+
+  /**
+   * Mark `base` as variant-bearing on this element. First time only, an
+   * already-applied inline default is converted to a rule retroactively —
+   * prop application order is not guaranteed, so the variant may well arrive
+   * after the default has already been written inline by its handler.
+   */
+  private registerVariantBase(element: HTMLElement, base: string): void {
+    const meta = this.getVariantMeta(element);
+    if (meta.bases.has(base)) return;
+    meta.bases.add(base);
+    this.convertExistingDefault(element, base);
+  }
+
+  /**
+   * Retroactively move an already-applied default off the inline style and
+   * into a rule. The value is recovered from the per-element applicator state
+   * (handler-backed props) or read straight back off the inline style (props
+   * that took the CSS fallback) — no extra bookkeeping is kept for the far
+   * more common variant-less element.
+   */
+  private convertExistingDefault(element: HTMLElement, base: string): void {
+    if (this.handlers.has(base)) {
+      const stored = this.getElementState(element).get(base);
+      if (stored !== undefined) {
+        this.applyDefaultAsRule(element, base, stored);
+      }
+      return;
+    }
+
+    // Handler-less default: `setStyleProperty` wrote it inline under kebab(base).
+    const cssName = this.toKebabCase(base);
+    const inline = element.style.getPropertyValue(cssName);
+    if (!inline) return;
+
+    const decls = { [cssName]: inline };
+    element.style.removeProperty(cssName);
+    this.emitRule(element, base, base, null, null, decls, true);
+  }
+
+  /**
+   * Apply a variant-qualified prop as a pseudo-class / media-query rule.
+   * Returns silently after warning when the prop cannot be expressed as a
+   * standalone CSS declaration (see `lower`).
+   */
+  private applyVariantRule(
+    element: HTMLElement,
+    key: string,
+    variant: VariantInfo,
+    value: any,
+  ): void {
+    if (value === undefined) {
+      this.setManagedClass(element, key, null);
+      return;
+    }
+
+    const lowered = this.lower(variant.base, value);
+    if (lowered.reason !== undefined) {
+      this.warnUnexpressible(element, variant.base, key, lowered.reason);
+      return;
+    }
+
+    Object.assign(element.dataset, lowered.dataset);
+    this.emitRule(
+      element,
+      key,
+      variant.base,
+      variant.breakpoint,
+      variant.state,
+      lowered.decls,
+      false,
+    );
+  }
+
+  /**
+   * Apply a base/default prop as an unqualified rule so its variants can win.
+   * Returns false when the prop is not expressible as CSS declarations, in
+   * which case the caller falls back to the handler (and the author has been
+   * warned that the variants will not take effect).
+   */
+  private applyDefaultAsRule(element: HTMLElement, base: string, value: any): boolean {
+    if (value === undefined) {
+      this.setManagedClass(element, base, null);
+      return true;
+    }
+
+    const lowered = this.lower(base, value);
+    if (lowered.reason !== undefined) {
+      this.warnUnexpressible(element, base, base, lowered.reason);
+      return false;
+    }
+
+    // The default must not ALSO sit inline: inline beats every class rule, so
+    // a leftover inline write here is exactly the bug this path fixes.
+    for (const prop of Object.keys(lowered.decls)) {
+      element.style.removeProperty(prop);
+    }
+    Object.assign(element.dataset, lowered.dataset);
+    this.emitRule(element, base, base, null, null, lowered.decls, true);
+    return true;
+  }
+
+  /**
+   * Lower `value` for applicator `base` into the CSS declarations it produces,
+   * by running the registered handler against a detached probe element and
+   * reading back what it wrote. Using the handler itself keeps the variant and
+   * the default byte-identical to the inline styling authors already get
+   * (units, shorthands, `{top,right,…}` forms, font loading, …) rather than
+   * re-deriving a second, divergent translation.
+   *
+   * Not expressible (returns a reason, caller warns):
+   * - the handler writes no CSS at all (attribute-only, e.g. `.aria`)
+   * - the handler composes into `style.transform` (`translateX`, `scale`,
+   *   `rotate`, …): those share ONE property, so a per-variant rule would
+   *   clobber every sibling transform contribution instead of composing
+   * - the animator owns the property inline (`.transition` / `.animate`)
+   */
+  private lower(base: string, value: any): Lowered {
+    const handler = this.handlers.get(base);
+
+    if (!handler) {
+      const cssName = this.toKebabCase(base);
+      return { decls: { [cssName]: this.formatCssValue(cssName, value) }, dataset: {} };
+    }
+
+    if (ANIMATOR_OWNED_BASES.has(base)) {
+      return {
+        reason: "the animator owns this property's inline styles",
+      };
+    }
+
+    const probe = this.getProbe();
+    try {
+      handler(probe, value);
+    } catch {
+      this.resetProbe(probe);
+      return { reason: "its handler threw while lowering the value" };
+    }
+
+    const decls: Record<string, string> = {};
+    for (const [prop, entry] of this.readInline(probe)) {
+      decls[prop] = entry.value;
+    }
+    const dataset: Record<string, string> = { ...(probe.dataset as Record<string, string>) };
+    this.resetProbe(probe);
+
+    if (Object.keys(decls).length === 0) {
+      return { reason: "its handler writes no CSS declarations" };
+    }
+    if ("transform" in decls && this.toKebabCase(base) !== "transform") {
+      return {
+        reason: "it composes into the shared `transform` property",
+      };
+    }
+
+    return { decls, dataset };
+  }
+
+  /**
+   * Detached element handlers are replayed against. Created lazily so the
+   * registry can be constructed before a document exists.
+   */
+  private getProbe(): HTMLElement {
+    if (!this.probe) {
+      this.probe = document.createElement("div");
+    }
+    return this.probe;
+  }
+
+  private resetProbe(probe: HTMLElement): void {
+    for (const [, entry] of this.readInline(probe)) {
+      probe.style.removeProperty(entry.key);
+    }
+    for (const key of Object.keys(probe.dataset)) {
+      delete (probe.dataset as Record<string, string>)[key];
+    }
+  }
+
+  /**
+   * Enumerate an element's inline declarations as `cssProp -> {key, value}`.
+   *
+   * Uses the standard indexed `CSSStyleDeclaration` interface. A style object
+   * that does not implement it yields nothing, which surfaces to the caller as
+   * "not expressible" (a warning) rather than as a silently empty rule.
+   */
+  private readInline(element: HTMLElement): Map<string, { key: string; value: string }> {
+    const out = new Map<string, { key: string; value: string }>();
+    const style = element.style as unknown as Record<string, unknown> & CSSStyleDeclaration;
+    const length = style.length;
+    if (typeof length !== "number") return out;
+
+    for (let i = 0; i < length; i++) {
+      const prop = style[i] as unknown as string;
+      if (typeof prop !== "string" || prop === "") continue;
+      const value = style.getPropertyValue(prop);
+      if (!value) continue;
+      out.set(prop, { key: prop, value: String(value) });
+    }
+    return out;
+  }
+
+  /**
+   * Insert the rule for `decls` (deduplicated) and swap the class that carries
+   * it onto the element.
+   *
+   * Unqualified (default) rules are inserted at the FRONT of the sheet: a
+   * `@media` variant rule has the same specificity as the default's rule, so
+   * source order is what makes the variant win. State variants carry a
+   * pseudo-class and outrank both on specificity alone.
+   */
+  private emitRule(
+    element: HTMLElement,
+    key: string,
+    base: string,
+    breakpoint: string | null,
+    state: string | null,
+    decls: Record<string, string>,
+    front: boolean,
+  ): void {
+    const cssName = this.toKebabCase(base).replace(/[^a-zA-Z0-9-]/g, '');
+    const tier =
+      breakpoint && state ? `${breakpoint}-${state}` : breakpoint ?? state ?? "base";
+    const className = `hypen-${cssName}-${tier}-${hashValue(Object.values(decls).join('|'))}`;
+
+    const body = Object.entries(decls)
+      .map(([prop, value]) => `${prop}: ${value};`)
+      .join(' ');
+    const selector = state ? `.${className}:${state}` : `.${className}`;
+    const minWidth = breakpoint ? BREAKPOINTS[breakpoint] : undefined;
+    const rule = minWidth
+      ? `@media (min-width: ${minWidth}) { ${selector} { ${body} } }`
+      : `${selector} { ${body} }`;
+
+    if (!insertedRules.has(rule)) {
+      const sheet = getVariantStyleSheet();
+      try {
+        sheet.insertRule(rule, front ? 0 : sheet.cssRules.length);
+        insertedRules.add(rule);
+      } catch (error) {
+        log.warn(`Could not insert variant rule for "${base}": ${rule}`, error);
+        return;
+      }
+    }
+
+    this.setManagedClass(element, key, className);
+  }
+
+  /**
+   * Swap the class carrying `key`'s rule, dropping the previous one so a
+   * changed value cannot leave two competing rules applied to the element.
+   */
+  private setManagedClass(element: HTMLElement, key: string, className: string | null): void {
+    const meta = this.getVariantMeta(element);
+    const previous = meta.classes.get(key);
+    if (previous === className) return;
+    if (previous) element.classList.remove(previous);
+    if (className) {
+      element.classList.add(className);
+      meta.classes.set(key, className);
+    } else {
+      meta.classes.delete(key);
+    }
+  }
+
+  /** Warn once per element+base that a variant group cannot be honoured. */
+  private warnUnexpressible(
+    element: HTMLElement,
+    base: string,
+    key: string,
+    reason: string,
+  ): void {
+    const meta = this.getVariantMeta(element);
+    if (meta.warned.has(base)) return;
+    meta.warned.add(base);
+    log.warn(
+      `Variant "${key}" has no effect: ".${base}(...)" cannot be expressed as a ` +
+        `standalone CSS rule because ${reason}. The default value still applies; ` +
+        `the state/breakpoint variants are ignored.`,
+    );
   }
 
   /**
@@ -300,6 +733,17 @@ export class ApplicatorRegistry {
       }
     }
 
+    // Register every variant base BEFORE anything is applied, so a default
+    // that happens to come first in the props map is routed straight to the
+    // stylesheet — no inline write to undo, and no flash of a default that
+    // outranks the variant it was meant to be overridden by.
+    for (const baseName of grouped.keys()) {
+      const variant = this.classifyVariant(baseName);
+      if (variant?.qualified) {
+        this.registerVariantBase(element, variant.base);
+      }
+    }
+
     // Apply each applicator with its arguments
     for (const [baseName, args] of grouped.entries()) {
       // If it's a single value (either __value or just "0"), pass just the value
@@ -321,7 +765,13 @@ export class ApplicatorRegistry {
   }
 
   /**
-   * Set a CSS property with automatic unit handling and variant support
+   * Set a CSS property with automatic unit handling.
+   *
+   * WELL-FORMED variant keys never reach here — `apply()` routes them through
+   * `applyVariantRule` (which lowers the value with the prop's own handler).
+   * What is left is a key whose `@bp` / `:state` marker did not resolve to a
+   * known breakpoint/state (`padding@invalid`, `padding:invalid`): those are
+   * dropped rather than written as a nonsense inline property.
    */
   private setStyleProperty(element: HTMLElement, name: string, value: any): void {
     // Reserved double-underscore props (the `__anim.*` channels and any
@@ -329,92 +779,8 @@ export class ApplicatorRegistry {
     // belt-and-braces: never leak them into inline CSS.
     if (name.startsWith("__")) return;
 
-    const atIndex = name.indexOf('@');
-    const colonIndex = name.indexOf(':');
-
-    // Combined responsive + state variant: backgroundColor@md:hover.
-    // Canonical key order is `<prop>@<bp>:<state>`, so the breakpoint sits
-    // between '@' and ':'. Emitted as a pseudo-class rule nested in a media
-    // query so it applies only when BOTH the width matches AND the state holds.
-    if (atIndex !== -1 && colonIndex !== -1 && colonIndex > atIndex) {
-      const prop = name.slice(0, atIndex);
-      const breakpoint = name.slice(atIndex + 1, colonIndex);
-      const state = name.slice(colonIndex + 1);
-      const minWidth = BREAKPOINTS[breakpoint];
-
-      if (minWidth && VALID_STATES.includes(state)) {
-        const cssName = this.toKebabCase(prop);
-        const cssValue = this.formatCssValue(cssName, value);
-        const className = `hypen-${cssName.replace(/[^a-zA-Z0-9-]/g, '')}-${breakpoint}-${state}-${hashValue(value)}`;
-        const ruleKey = `${className}:${cssValue}`;
-
-        if (!insertedRules.has(ruleKey)) {
-          const sheet = getVariantStyleSheet();
-          sheet.insertRule(
-            `@media (min-width: ${minWidth}) { .${className}:${state} { ${cssName}: ${cssValue}; } }`,
-            sheet.cssRules.length
-          );
-          insertedRules.add(ruleKey);
-        }
-
-        element.classList.add(className);
-      }
-      return;
-    }
-
-    // Responsive variant: padding@md, width@lg, etc.
-    if (atIndex !== -1) {
-      const prop = name.slice(0, atIndex);
-      const breakpoint = name.slice(atIndex + 1);
-      const minWidth = BREAKPOINTS[breakpoint];
-
-      if (minWidth) {
-        const cssName = this.toKebabCase(prop);
-        const cssValue = this.formatCssValue(cssName, value);
-        const className = `hypen-${cssName.replace(/[^a-zA-Z0-9-]/g, '')}-${breakpoint}-${hashValue(value)}`;
-        const ruleKey = `${className}:${cssValue}`;
-
-        // Avoid duplicate rule insertion
-        if (!insertedRules.has(ruleKey)) {
-          const sheet = getVariantStyleSheet();
-          sheet.insertRule(
-            `@media (min-width: ${minWidth}) { .${className} { ${cssName}: ${cssValue}; } }`,
-            sheet.cssRules.length
-          );
-          insertedRules.add(ruleKey);
-        }
-
-        element.classList.add(className);
-      }
-      return;
-    }
-
-    // State variant: background-color:hover, border-color:focus, etc.
-    if (colonIndex !== -1) {
-      const prop = name.slice(0, colonIndex);
-      const state = name.slice(colonIndex + 1);
-
-      // Only handle known CSS pseudo-states (shared with the Canvas resolver)
-      if (VALID_STATES.includes(state)) {
-        const cssName = this.toKebabCase(prop);
-        const cssValue = this.formatCssValue(cssName, value);
-        const className = `hypen-${cssName.replace(/[^a-zA-Z0-9-]/g, '')}-${state}-${hashValue(value)}`;
-        const ruleKey = `${className}:${cssValue}`;
-
-        // Avoid duplicate rule insertion
-        if (!insertedRules.has(ruleKey)) {
-          const sheet = getVariantStyleSheet();
-          sheet.insertRule(
-            `.${className}:${state} { ${cssName}: ${cssValue}; }`,
-            sheet.cssRules.length
-          );
-          insertedRules.add(ruleKey);
-        }
-
-        element.classList.add(className);
-      }
-      return;
-    }
+    // Unresolvable variant marker: apply nothing.
+    if (name.includes('@') || name.includes(':')) return;
 
     // Normal property: convert camelCase to kebab-case and apply
     const cssName = this.toKebabCase(name);

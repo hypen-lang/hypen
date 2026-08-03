@@ -1,6 +1,7 @@
 package space.hypen.renderer
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -11,6 +12,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.DpSize
 import space.hypen.renderer.anim.AnimationCoordinator
 import space.hypen.renderer.anim.ClearFocusOnExit
 import space.hypen.renderer.anim.SettingsMotionPreference
@@ -31,6 +33,17 @@ import space.hypen.renderer.render.LocalActionDispatcher
 import space.hypen.renderer.render.applyHypenSemantics
 import space.hypen.renderer.render.LocalComposeRenderer
 import kotlinx.coroutines.flow.collectLatest
+
+/**
+ * Size of the area the Hypen root was given, for resolving `vw`/`vh`.
+ *
+ * `DpSize.Unspecified` until the root measures itself; the size appliers fall
+ * back to the physical display until then. Mirrors the Swift renderer's
+ * `viewportHeight` environment value — `100vh` must mean the viewport hosting
+ * the app, not the display, or a host that insets us (the Gallery's URL
+ * chrome) pushes bottom-anchored content off screen.
+ */
+val LocalHypenViewport = compositionLocalOf { DpSize.Unspecified }
 
 /**
  * Main entry point for rendering a Hypen app.
@@ -135,7 +148,9 @@ fun HypenApp(
             enabled = connectionState == ConnectionState.CONNECTED,
         )
 
-        Box(modifier = modifier.fillMaxSize()) {
+        BoxWithConstraints(modifier = modifier.fillMaxSize()) {
+            val viewport = DpSize(maxWidth, maxHeight)
+            CompositionLocalProvider(LocalHypenViewport provides viewport) {
             when (connectionState) {
                 ConnectionState.CONNECTING,
                 ConnectionState.RECONNECTING,
@@ -173,6 +188,7 @@ fun HypenApp(
                         loadingContent()
                     }
                 }
+            }
             }
         }
     }
@@ -217,12 +233,17 @@ internal fun HypenElement(
         return
     }
 
+    // `vw`/`vh` resolve against the area the Hypen root was given, so the
+    // measured viewport is part of what the modifier depends on — and part of
+    // the `remember` key below, or a rotation would keep the old sizes.
+    val viewport = LocalHypenViewport.current
+
     // Build modifier from applicators with variant support, recomputed only
     // when this element's props change (propsRevision is bumped per touched
-    // element by SET_PROP/REMOVE_PROP)
+    // element by SET_PROP/REMOVE_PROP) or the viewport changes.
     val modifier = if (applicatorRegistry is space.hypen.renderer.applicators.DefaultApplicatorRegistry) {
-        val result = remember(element, element.propsRevision) {
-            applicatorRegistry.applyAllWithVariants(Modifier, element, renderer.createApplicatorContext(element))
+        val result = remember(element, element.propsRevision, viewport) {
+            applicatorRegistry.applyAllWithVariants(Modifier, element, renderer.createApplicatorContext(element, viewport))
         }
 
         if (result.hasVariants) {
@@ -232,8 +253,8 @@ internal fun HypenElement(
             result.baseModifier
         }
     } else {
-        remember(element, element.propsRevision) {
-            applicatorRegistry.applyAll(Modifier, element, renderer.createApplicatorContext(element))
+        remember(element, element.propsRevision, viewport) {
+            applicatorRegistry.applyAll(Modifier, element, renderer.createApplicatorContext(element, viewport))
         }
     }
 

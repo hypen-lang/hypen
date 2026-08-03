@@ -21,13 +21,29 @@
 use crate::style::{
     border_at, border_with, has_explicit_border, margin_with, node_layout_active_states,
     padding_at, padding_with, prop_color_at, prop_dim_with, prop_f32_at, prop_f32_with,
-    Border, Dim, Rgba, VariantState,
+    Border, Dim, Rgba, VariantState, Viewport,
 };
 use crate::text::TextEngine;
 use crate::tree::{Tree, ROOT_ID};
 use std::collections::HashMap;
 use taffy::prelude::*;
 use taffy::style::Overflow;
+
+/// Convert the GPU surface size — which wgpu reports in **physical**
+/// pixels — into the logical (CSS) viewport that breakpoints and
+/// viewport units resolve against.
+///
+/// Geometry deliberately does not go through here: taffy styles are
+/// built in physical px by multiplying lengths by `scale`. Only the
+/// *resolution basis* converts, which is why a 960pt window on a 2x
+/// display must evaluate as `md` (960 ≥ 768) and not `xl` (1920 ≥ 1280).
+pub(crate) fn logical_viewport(viewport_px: (u32, u32), scale: f32) -> Viewport {
+    if scale > 0.0 {
+        Viewport::new(viewport_px.0 as f32 / scale, viewport_px.1 as f32 / scale)
+    } else {
+        Viewport::new(viewport_px.0 as f32, viewport_px.1 as f32)
+    }
+}
 
 /// Default gap between flex children. Zero, matching CSS / iOS /
 /// Android — implicit chrome here turns every Column into a
@@ -414,6 +430,10 @@ pub struct LayoutItem {
     /// at paint time. `None` for the common solid-colour case so
     /// the existing `fill_rect` fast path stays untouched.
     pub background_gradient: Option<crate::style::LinearGradient>,
+    /// Background IMAGE source for this item, from the CSS `background`
+    /// shorthand's `url(...)` layer (`data:` or remote). CSS paints it above
+    /// the solid colour and under the gradient. `None` for the common case.
+    pub background_image: Option<String>,
     /// Paint-time state-variant colour overrides (hover/focus/active/
     /// disabled, optionally breakpoint-combined) for `backgroundColor`,
     /// `color`, and `borderColor`. Precomputed here (node + viewport in
@@ -492,6 +512,11 @@ pub(crate) struct NodeContext {
     /// reflow the text onto two lines. The painter still clips the
     /// drawn glyphs to the laid-out rect.
     max_lines: Option<u32>,
+    /// CSS font weight. Bold glyphs are wider, so the wrap result
+    /// depends on it: measuring at 400 while the painter draws at 700
+    /// makes a bold line that Taffy sized for one line wrap onto two,
+    /// and the box stays a line short of the glyphs drawn into it.
+    font_weight: u16,
 }
 
 /// The live interaction state fed into the layout pass so that
@@ -636,11 +661,11 @@ impl TaffyState {
         patches: &[hypen_engine::Patch],
         tree: &Tree,
         scale: f32,
-        viewport_w: f32,
+        viewport: Viewport,
     ) -> bool {
         let mut all_applied = true;
         for patch in patches {
-            if !self.apply_patch(patch, tree, scale, viewport_w) {
+            if !self.apply_patch(patch, tree, scale, viewport) {
                 all_applied = false;
             }
         }
@@ -658,7 +683,7 @@ impl TaffyState {
         patch: &hypen_engine::Patch,
         tree: &Tree,
         scale: f32,
-        viewport_w: f32,
+        viewport: Viewport,
     ) -> bool {
         use hypen_engine::Patch;
         match patch {
@@ -683,8 +708,8 @@ impl TaffyState {
                         self.renderer_for_taffy.remove(&old);
                     }
                     let active_states = self.interaction.active_states_for(id, node);
-                    let style = node_style_with(node, scale, viewport_w, &active_states);
-                    let ctx = node_context(node, scale, viewport_w);
+                    let style = node_style_with(node, scale, viewport, &active_states);
+                    let ctx = node_context(node, scale, viewport);
                     let taffy_id = self.tree.new_leaf_with_context(style, ctx).ok();
                     if let Some(tid) = taffy_id {
                         self.node_map.insert(id.clone(), tid);
@@ -709,10 +734,10 @@ impl TaffyState {
                 if is_layout_prop(name) {
                     if let Some(node) = tree.get(id) {
                         let active_states = self.interaction.active_states_for(id, node);
-                        let style = node_style_with(node, scale, viewport_w, &active_states);
+                        let style = node_style_with(node, scale, viewport, &active_states);
                         let _ = self.tree.set_style(tid, style);
                         if node.element_type == "Text" {
-                            let ctx = node_context(node, scale, viewport_w);
+                            let ctx = node_context(node, scale, viewport);
                             let _ = self.tree.set_node_context(tid, Some(ctx));
                         }
                     }
@@ -736,10 +761,10 @@ impl TaffyState {
                 };
                 if let Some(node) = tree.get(id) {
                     let active_states = self.interaction.active_states_for(id, node);
-                    let style = node_style_with(node, scale, viewport_w, &active_states);
+                    let style = node_style_with(node, scale, viewport, &active_states);
                     let _ = self.tree.set_style(tid, style);
                     if node.element_type == "Text" {
-                        let ctx = node_context(node, scale, viewport_w);
+                        let ctx = node_context(node, scale, viewport);
                         let _ = self.tree.set_node_context(tid, Some(ctx));
                     }
                 }
@@ -873,15 +898,15 @@ impl TaffyState {
     /// `apply_patch`'s SetProp restyle path never sees it): the retained
     /// Taffy style must follow the interpolated value every tick so
     /// geometry — and hit-testing — track the animation.
-    pub fn restyle_node(&mut self, id: &str, tree: &Tree, scale: f32, viewport_w: f32) {
+    pub fn restyle_node(&mut self, id: &str, tree: &Tree, scale: f32, viewport: Viewport) {
         let (Some(&tid), Some(node)) = (self.node_map.get(id), tree.get(id)) else {
             return;
         };
         let active_states = self.interaction.active_states_for(id, node);
-        let style = node_style_with(node, scale, viewport_w, &active_states);
+        let style = node_style_with(node, scale, viewport, &active_states);
         let _ = self.tree.set_style(tid, style);
         if node.element_type == "Text" {
-            let ctx = node_context(node, scale, viewport_w);
+            let ctx = node_context(node, scale, viewport);
             let _ = self.tree.set_node_context(tid, Some(ctx));
         }
     }
@@ -890,8 +915,8 @@ impl TaffyState {
     /// Called when the structure key flipped on viewport / scale —
     /// breakpoint resolution and HiDPI scaling are baked into
     /// per-node styles at build time, so we have to recompute them.
-    pub fn restyle_all(&mut self, tree: &Tree, scale: f32, viewport: (u32, u32)) {
-        let viewport_w = viewport.0 as f32;
+    pub fn restyle_all(&mut self, tree: &Tree, scale: f32, viewport_px: (u32, u32)) {
+        let viewport = logical_viewport(viewport_px, scale);
         // Re-style every existing node.
         let entries: Vec<(NodeId, String)> = self
             .renderer_for_taffy
@@ -901,10 +926,10 @@ impl TaffyState {
         for (tid, rid) in entries {
             if let Some(node) = tree.get(&rid) {
                 let active_states = self.interaction.active_states_for(&rid, node);
-                let style = node_style_with(node, scale, viewport_w, &active_states);
+                let style = node_style_with(node, scale, viewport, &active_states);
                 let _ = self.tree.set_style(tid, style);
                 if node.element_type == "Text" {
-                    let ctx = node_context(node, scale, viewport_w);
+                    let ctx = node_context(node, scale, viewport);
                     let _ = self.tree.set_node_context(tid, Some(ctx));
                 }
             }
@@ -940,12 +965,12 @@ impl TaffyState {
             // child content and pushed the bottom bar off the bottom
             // edge.
             size: Size {
-                width: length(viewport.0 as f32),
-                height: length(viewport.1 as f32),
+                width: length(viewport_px.0 as f32),
+                height: length(viewport_px.1 as f32),
             },
             min_size: Size {
-                width: length(viewport.0 as f32),
-                height: length(viewport.1 as f32),
+                width: length(viewport_px.0 as f32),
+                height: length(viewport_px.1 as f32),
             },
             ..Default::default()
         };
@@ -1182,7 +1207,7 @@ impl LayoutPass {
     ) -> Self {
         let _ = tree_generation; // tree generation no longer in key
         let key = taffy_structure_key(viewport, scale);
-        let viewport_w_px = viewport.0 as f32;
+        let viewport_logical = logical_viewport(viewport, scale);
         // Interaction state feeds layout-affecting state variants. A
         // change since the last compute means the resolved per-node
         // styles are stale and need a restyle so the new active states
@@ -1212,7 +1237,7 @@ impl LayoutPass {
                     tree,
                     child_id,
                     scale,
-                    viewport_w_px,
+                    viewport_logical,
                     &mut state.renderer_for_taffy,
                     &interaction,
                 ) {
@@ -1303,10 +1328,22 @@ impl LayoutPass {
             } else {
                 known.width.or(match avail.width {
                     AvailableSpace::Definite(w) => Some(w),
-                    AvailableSpace::MinContent | AvailableSpace::MaxContent => None,
+                    // CSS min-content: break at every legal opportunity,
+                    // so the reported width is the widest unbreakable run
+                    // (the longest word). Answering MaxContent here — the
+                    // full unwrapped line — told Taffy the text could not
+                    // break at all, which becomes the item's automatic
+                    // minimum size (`min-width: auto`). Flex items then
+                    // refused to shrink and overflowed the row instead,
+                    // while the painter still wrapped glyphs to the final
+                    // rect: two lines of text drawn into a one-line box,
+                    // spilling out from under their background pills.
+                    AvailableSpace::MinContent => Some(0.0),
+                    AvailableSpace::MaxContent => None,
                 })
             };
-            let (w, h) = text.measure(text_content, ctx.font_size, wrap_width);
+            let (w, h) =
+                text.measure_weighted(text_content, ctx.font_size, wrap_width, ctx.font_weight);
             Size {
                 width: known.width.unwrap_or(w),
                 height: known.height.unwrap_or(h),
@@ -1351,7 +1388,7 @@ impl LayoutPass {
             0.0,
             tree,
             &renderer_for_taffy,
-            viewport_w_px,
+            viewport_logical,
             scale,
             scrolls,
             &mut items,
@@ -1392,7 +1429,7 @@ impl LayoutPass {
         if has_opacity {
             let mut memo: HashMap<String, f32> = HashMap::new();
             for it in items.iter_mut() {
-                it.opacity = effective_opacity(tree, &it.node_id, viewport_w_px, &mut memo);
+                it.opacity = effective_opacity(tree, &it.node_id, viewport_logical, &mut memo);
             }
         }
 
@@ -1403,7 +1440,7 @@ impl LayoutPass {
         // centers) live in the same coordinate space as the emitted
         // rects. Same gating shape as the opacity pass: a tree with no
         // transform props pays one boolean scan.
-        compute_item_transforms(tree, &mut items, viewport_w_px, scale);
+        compute_item_transforms(tree, &mut items, viewport_logical, scale);
 
         let mut by_node_id = HashMap::with_capacity(items.len());
         let mut actionable_ids = Vec::new();
@@ -1461,8 +1498,8 @@ impl LayoutPass {
     /// must reach paint AND hit-testing this same frame, without paying
     /// a full Taffy recompute (transforms are paint/hit-only — Taffy
     /// geometry is untouched by them).
-    pub fn refresh_transforms(&mut self, tree: &Tree, viewport_w: f32, scale: f32) {
-        compute_item_transforms(tree, &mut self.items, viewport_w, scale);
+    pub fn refresh_transforms(&mut self, tree: &Tree, viewport: Viewport, scale: f32) {
+        compute_item_transforms(tree, &mut self.items, viewport, scale);
     }
 
     pub fn hit(&self, x: f32, y: f32) -> Option<&LayoutItem> {
@@ -1719,7 +1756,7 @@ fn build_subtree(
     tree: &Tree,
     node_id: &str,
     scale: f32,
-    viewport_w: f32,
+    viewport: Viewport,
     renderer_for_taffy: &mut HashMap<NodeId, String>,
     interaction: &LayoutInteraction,
 ) -> Option<NodeId> {
@@ -1727,7 +1764,7 @@ fn build_subtree(
     // Per-node active interaction states for layout-affecting state
     // variants. Empty (fast path) unless this node is the hovered /
     // pressed / focused subject or is disabled.
-    let vs = VariantState::paint(viewport_w, interaction.active_states_for(node_id, node));
+    let vs = VariantState::paint(viewport, interaction.active_states_for(node_id, node));
 
     match node.element_type.as_str() {
         et if IMAGE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
@@ -1767,7 +1804,7 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, &vs, scale);
-            apply_alignment_props(&mut style, node, viewport_w);
+            apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
             let id = taffy.new_leaf(style).ok()?;
             renderer_for_taffy.insert(id, node_id.to_string());
@@ -1796,14 +1833,14 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, &vs, scale);
-            apply_alignment_props(&mut style, node, viewport_w);
+            apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
             let id = taffy.new_leaf(style).ok()?;
             renderer_for_taffy.insert(id, node_id.to_string());
             Some(id)
         }
         "Text" => {
-            let font_size = prop_f32_at(node, "fontSize", viewport_w)
+            let font_size = prop_f32_at(node, "fontSize", viewport)
                 .map(|v| v * scale)
                 .unwrap_or(DEFAULT_FONT_SIZE_PX * scale);
             let content = node
@@ -1830,7 +1867,7 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, &vs, scale);
-            apply_alignment_props(&mut style, node, viewport_w);
+            apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
             let id = taffy
                 .new_leaf_with_context(
@@ -1838,7 +1875,8 @@ fn build_subtree(
                     NodeContext {
                         text: Some(content),
                         font_size,
-                        max_lines: resolve_max_lines(node, viewport_w),
+                        max_lines: resolve_max_lines(node, viewport),
+                        font_weight: resolve_font_weight(node, viewport),
                     },
                 )
                 .ok()?;
@@ -1849,15 +1887,21 @@ fn build_subtree(
             // Buttons are flex containers with their own default padding
             // unless overridden by .padding(...).
             let pad = padding_with(node, &vs);
-            let pad_x = if pad.left == 0.0 && pad.right == 0.0 {
-                DEFAULT_BUTTON_PAD_X
-            } else {
+            // Only default when the node declares NO padding. Testing the
+            // resolved value for zero cannot distinguish "unset" from an
+            // explicit `p-0`, so `.tw("p-0")` silently kept the 16pt default
+            // — the launcher's dock icons grew 56pt -> 88pt and four of them
+            // overflowed their `max-w-[260px]` container.
+            let declares_padding = crate::style::declares_padding(node, &vs);
+            let pad_x = if declares_padding {
                 (pad.left + pad.right) * 0.5
-            };
-            let pad_y = if pad.top == 0.0 && pad.bottom == 0.0 {
-                DEFAULT_BUTTON_PAD_Y
             } else {
+                DEFAULT_BUTTON_PAD_X
+            };
+            let pad_y = if declares_padding {
                 (pad.top + pad.bottom) * 0.5
+            } else {
+                DEFAULT_BUTTON_PAD_Y
             };
             // Column-direction Button + no implicit centring — see
             // the matching comment in `node_style`'s actionable
@@ -1886,12 +1930,12 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, &vs, scale);
-            apply_alignment_props(&mut style, node, viewport_w);
+            apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) =
-                    build_subtree(taffy, tree, child_id, scale, viewport_w, renderer_for_taffy, interaction)
+                    build_subtree(taffy, tree, child_id, scale, viewport, renderer_for_taffy, interaction)
                 {
                     children.push(c);
                 }
@@ -1925,12 +1969,12 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, &vs, scale);
-            apply_alignment_props(&mut style, node, viewport_w);
+            apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) =
-                    build_subtree(taffy, tree, child_id, scale, viewport_w, renderer_for_taffy, interaction)
+                    build_subtree(taffy, tree, child_id, scale, viewport, renderer_for_taffy, interaction)
                 {
                     children.push(c);
                 }
@@ -1981,14 +2025,14 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, &vs, scale);
-            apply_alignment_props(&mut style, node, viewport_w);
+            apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
-            apply_overflow_props(&mut style, node, viewport_w);
+            apply_overflow_props(&mut style, node, viewport);
             apply_position_props(&mut style, node, &vs, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) =
-                    build_subtree(taffy, tree, child_id, scale, viewport_w, renderer_for_taffy, interaction)
+                    build_subtree(taffy, tree, child_id, scale, viewport, renderer_for_taffy, interaction)
                 {
                     children.push(c);
                 }
@@ -2023,7 +2067,7 @@ fn build_subtree(
                 ..Default::default()
             };
             apply_flex_props(&mut style, node, &vs, scale);
-            apply_alignment_props(&mut style, node, viewport_w);
+            apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
             // Critical: `apply_overflow_props` here is what turns
             // `.scrollable(true)` into Taffy `overflow: scroll` on
@@ -2034,12 +2078,12 @@ fn build_subtree(
             // didn't. Same goes for `apply_position_props` (Story's
             // `absolute top-0 left-0 right-0` overlay would have been
             // silently re-stacked under the post image otherwise).
-            apply_overflow_props(&mut style, node, viewport_w);
+            apply_overflow_props(&mut style, node, viewport);
             apply_position_props(&mut style, node, &vs, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) =
-                    build_subtree(taffy, tree, child_id, scale, viewport_w, renderer_for_taffy, interaction)
+                    build_subtree(taffy, tree, child_id, scale, viewport, renderer_for_taffy, interaction)
                 {
                     children.push(c);
                 }
@@ -2134,10 +2178,10 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
 pub(crate) fn node_style_with(
     node: &crate::tree::Node,
     scale: f32,
-    viewport_w: f32,
+    viewport: Viewport,
     active_states: &[&str],
 ) -> Style {
-    let vs = VariantState::paint(viewport_w, active_states.to_vec());
+    let vs = VariantState::paint(viewport, active_states.to_vec());
     let et = node.element_type.as_str();
     let mut style = if IMAGE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
         let size_fallback = prop_f32_with(node, "size", &vs);
@@ -2200,15 +2244,18 @@ pub(crate) fn node_style_with(
         }
     } else if ACTIONABLE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
         let pad = padding_with(node, &vs);
-        let pad_x = if pad.left == 0.0 && pad.right == 0.0 {
-            DEFAULT_BUTTON_PAD_X
-        } else {
+        // See the matching branch in `node_style_with`: default only when the
+        // node declares NO padding, so an explicit `p-0` is honoured.
+        let declares_padding = crate::style::declares_padding(node, &vs);
+        let pad_x = if declares_padding {
             (pad.left + pad.right) * 0.5
-        };
-        let pad_y = if pad.top == 0.0 && pad.bottom == 0.0 {
-            DEFAULT_BUTTON_PAD_Y
         } else {
+            DEFAULT_BUTTON_PAD_X
+        };
+        let pad_y = if declares_padding {
             (pad.top + pad.bottom) * 0.5
+        } else {
+            DEFAULT_BUTTON_PAD_Y
         };
         Style {
             display: Display::Flex,
@@ -2337,9 +2384,9 @@ pub(crate) fn node_style_with(
         }
     };
     apply_flex_props(&mut style, node, &vs, scale);
-    apply_alignment_props(&mut style, node, viewport_w);
+    apply_alignment_props(&mut style, node, viewport);
     apply_size_props(&mut style, node, &vs, scale);
-    apply_overflow_props(&mut style, node, viewport_w);
+    apply_overflow_props(&mut style, node, viewport);
     apply_position_props(&mut style, node, &vs, scale);
     style
 }
@@ -2356,8 +2403,8 @@ fn apply_position_props(
     scale: f32,
 ) {
     use crate::style::{prop_dim_with, prop_str_at, Dim};
-    let viewport_w = vs.viewport_w;
-    if let Some(s) = prop_str_at(node, "position", viewport_w) {
+    let viewport = vs.viewport;
+    if let Some(s) = prop_str_at(node, "position", viewport) {
         match s.trim().to_ascii_lowercase().as_str() {
             // Taffy 0.10 only models Absolute vs Relative; `fixed` /
             // `sticky` collapse to Absolute (relative to nearest
@@ -2403,7 +2450,7 @@ fn apply_position_props(
 /// painted past the parent's bounds — e.g. a horizontal Stories row
 /// with five items at `w-20` apiece overflowing into the viewport
 /// margin instead of clipping at the row's right edge.
-fn apply_overflow_props(style: &mut Style, node: &crate::tree::Node, viewport_w: f32) {
+fn apply_overflow_props(style: &mut Style, node: &crate::tree::Node, viewport: Viewport) {
     use crate::style::prop_str_at;
 
     fn parse(s: &str) -> Option<Overflow> {
@@ -2422,7 +2469,7 @@ fn apply_overflow_props(style: &mut Style, node: &crate::tree::Node, viewport_w:
     // container scrolls on (and therefore clips on); the orthogonal
     // axis stays `Visible` so legitimately overflowing content (e.g.
     // a focus-ring stroke from a child) stays painted.
-    let scrollable_axes = match crate::style::prop_str_at(node, "scrollable", viewport_w)
+    let scrollable_axes = match crate::style::prop_str_at(node, "scrollable", viewport)
         .map(|s| s.trim().to_ascii_lowercase())
     {
         Some(s) if s == "horizontal" => Some((Overflow::Scroll, Overflow::Visible)),
@@ -2458,13 +2505,13 @@ fn apply_overflow_props(style: &mut Style, node: &crate::tree::Node, viewport_w:
     }
 
     // CSS-style props win when explicitly set.
-    if let Some(o) = prop_str_at(node, "overflow", viewport_w).and_then(parse) {
+    if let Some(o) = prop_str_at(node, "overflow", viewport).and_then(parse) {
         style.overflow = taffy::Point { x: o, y: o };
     }
-    if let Some(o) = prop_str_at(node, "overflowX", viewport_w).and_then(parse) {
+    if let Some(o) = prop_str_at(node, "overflowX", viewport).and_then(parse) {
         style.overflow.x = o;
     }
-    if let Some(o) = prop_str_at(node, "overflowY", viewport_w).and_then(parse) {
+    if let Some(o) = prop_str_at(node, "overflowY", viewport).and_then(parse) {
         style.overflow.y = o;
     }
 
@@ -2490,11 +2537,12 @@ fn apply_overflow_props(style: &mut Style, node: &crate::tree::Node, viewport_w:
 /// leaves carry a non-empty context (text content + scaled font
 /// size); every other element returns `Default::default()` so the
 /// measure callback short-circuits.
-pub(crate) fn node_context(node: &crate::tree::Node, scale: f32, viewport_w: f32) -> NodeContext {
+pub(crate) fn node_context(node: &crate::tree::Node, scale: f32, viewport: Viewport) -> NodeContext {
     if node.element_type == "Text" {
-        let font_size = prop_f32_at(node, "fontSize", viewport_w)
+        let font_size = prop_f32_at(node, "fontSize", viewport)
             .map(|v| v * scale)
             .unwrap_or(DEFAULT_FONT_SIZE_PX * scale);
+        let font_weight = resolve_font_weight(node, viewport);
         NodeContext {
             text: Some(
                 node.text_content()
@@ -2502,7 +2550,8 @@ pub(crate) fn node_context(node: &crate::tree::Node, scale: f32, viewport_w: f32
                     .unwrap_or_default(),
             ),
             font_size,
-            max_lines: resolve_max_lines(node, viewport_w),
+            max_lines: resolve_max_lines(node, viewport),
+            font_weight,
         }
     } else {
         NodeContext::default()
@@ -2514,9 +2563,9 @@ pub(crate) fn node_context(node: &crate::tree::Node, scale: f32, viewport_w: f32
 /// the renderer should keep at most `n` rendered lines; `None` means
 /// "wrap freely". Falls back to `None` when the value isn't a positive
 /// integer.
-pub(crate) fn resolve_max_lines(node: &crate::tree::Node, viewport_w: f32) -> Option<u32> {
-    let v = prop_f32_at(node, "maxLines", viewport_w)
-        .or_else(|| prop_f32_at(node, "max-lines", viewport_w))?;
+pub(crate) fn resolve_max_lines(node: &crate::tree::Node, viewport: Viewport) -> Option<u32> {
+    let v = prop_f32_at(node, "maxLines", viewport)
+        .or_else(|| prop_f32_at(node, "max-lines", viewport))?;
     if v >= 1.0 {
         Some(v as u32)
     } else {
@@ -2610,24 +2659,56 @@ fn apply_size_props(style: &mut Style, node: &crate::tree::Node, vs: &VariantSta
 /// (the inner container with `rounded-full` was being stretched
 /// horizontally to match its parent's width via the default flex
 /// `align-items: stretch`).
-fn apply_alignment_props(style: &mut Style, node: &crate::tree::Node, viewport_w: f32) {
+fn apply_alignment_props(style: &mut Style, node: &crate::tree::Node, viewport: Viewport) {
     use crate::style::prop_str_at;
-    if let Some(s) = prop_str_at(node, "alignItems", viewport_w) {
+    // Hypen's semantic aliases. These name a *geometric* axis, so which
+    // flex property they map to flips with `flex_direction` — in a Row
+    // `horizontalAlignment` is the main axis (justify), in a Column it
+    // is the cross axis (align). Same convention as the Android and
+    // SwiftUI renderers.
+    //
+    // Read before the CSS names below so an explicit `justifyContent` /
+    // `alignItems` on the same node still wins.
+    //
+    // Desktop understood neither alias, so todo's task rows lost both
+    // their `space-between` (Remove stopped being pushed to the right
+    // edge) and their `center` cross-alignment (text and button sat on
+    // staggered baselines).
+    let column = matches!(
+        style.flex_direction,
+        FlexDirection::Column | FlexDirection::ColumnReverse
+    );
+    for (name, is_main_axis) in [
+        ("horizontalAlignment", !column),
+        ("verticalAlignment", column),
+    ] {
+        let Some(s) = prop_str_at(node, name, viewport) else {
+            continue;
+        };
+        if is_main_axis {
+            if let Some(j) = parse_justify(&s) {
+                style.justify_content = Some(j);
+            }
+        } else if let Some(a) = parse_align(&s) {
+            style.align_items = Some(a);
+        }
+    }
+    if let Some(s) = prop_str_at(node, "alignItems", viewport) {
         if let Some(a) = parse_align(&s) {
             style.align_items = Some(a);
         }
     }
-    if let Some(s) = prop_str_at(node, "alignSelf", viewport_w) {
+    if let Some(s) = prop_str_at(node, "alignSelf", viewport) {
         if let Some(a) = parse_align(&s) {
             style.align_self = Some(a);
         }
     }
-    if let Some(s) = prop_str_at(node, "justifyContent", viewport_w) {
+    if let Some(s) = prop_str_at(node, "justifyContent", viewport) {
         if let Some(j) = parse_justify(&s) {
             style.justify_content = Some(j);
         }
     }
-    if let Some(s) = prop_str_at(node, "justifySelf", viewport_w) {
+    if let Some(s) = prop_str_at(node, "justifySelf", viewport) {
         if let Some(a) = parse_align(&s) {
             style.justify_self = Some(a);
         }
@@ -2778,7 +2859,7 @@ fn emit_items(
     parent_scroll_shift_y: f32,
     tree: &Tree,
     renderer_for_taffy: &HashMap<NodeId, String>,
-    viewport_w: f32,
+    viewport: Viewport,
     scale: f32,
     scrolls: &HashMap<String, f32>,
     out: &mut Vec<LayoutItem>,
@@ -2875,18 +2956,18 @@ fn emit_items(
             let hover_payload = hover_action
                 .as_ref()
                 .and_then(|_| resolve_hover_payload(node));
-            let mut item_border = border_at(node, viewport_w);
+            let mut item_border = border_at(node, viewport);
             // The DSL says `.borderRadius(8)` even when there's no
             // border line — round the fill anyway. The painter checks
             // `is_visible()` independently before stroking.
-            let background_explicit = prop_color_at(node, "backgroundColor", viewport_w);
+            let background_explicit = prop_color_at(node, "backgroundColor", viewport);
             // `hover:` tw variant — the engine expands `hover:bg-white`
             // into a `backgroundColor:hover` prop (and `:hover.0`), which
             // `prop_color_at` finds via its `.0` fallback. Resolved once;
             // the painter applies it while the item is hovered.
             let hover = HoverStyle {
-                background: prop_color_at(node, "backgroundColor:hover", viewport_w),
-                border_color: prop_color_at(node, "borderColor:hover", viewport_w),
+                background: prop_color_at(node, "backgroundColor:hover", viewport),
+                border_color: prop_color_at(node, "borderColor:hover", viewport),
             };
             // Tailwind `bg-gradient-to-* from-* via-* to-*` emits a
             // `background-image: linear-gradient(...)` plus the
@@ -2896,13 +2977,16 @@ fn emit_items(
             // solid-fill case → painter takes its existing fast
             // path. Only the `Container` push reads this today, but
             // we resolve it once here to avoid repeating work.
-            let background_gradient = crate::style::prop_linear_gradient(node, viewport_w);
+            let background_gradient = crate::style::prop_linear_gradient(node, viewport);
+            // The `url(...)` layer of the same value. Resolved once here
+            // beside the gradient so every item kind carries it.
+            let background_image = crate::style::prop_background_image_url(node);
             // Paint-time state-variant colour overrides (hover/focus/
             // active/disabled). Resolved once here for every item kind;
             // empty for the common plain-styled node so the painter's
             // fast path is undisturbed.
-            let item_state_variants = crate::style::state_variants(node, viewport_w);
-            let scrollable = is_scrollable_node(node, viewport_w);
+            let item_state_variants = crate::style::state_variants(node, viewport);
+            let scrollable = is_scrollable_node(node, viewport);
             if scrollable {
                 let off = scrolls.get(rid).copied().unwrap_or(0.0);
                 child_scroll_shift_y = parent_scroll_shift_y + off;
@@ -2936,9 +3020,9 @@ fn emit_items(
                         .and_then(|v| v.as_str())
                         .map(str::to_string);
                     let font_size =
-                        prop_f32_at(node, "fontSize", viewport_w).unwrap_or(DEFAULT_FONT_SIZE_PX);
-                    let font_weight = resolve_font_weight(node, viewport_w);
-                    let color = prop_color_at(node, "color", viewport_w).unwrap_or(Rgba::BLACK);
+                        prop_f32_at(node, "fontSize", viewport).unwrap_or(DEFAULT_FONT_SIZE_PX);
+                    let font_weight = resolve_font_weight(node, viewport);
+                    let color = prop_color_at(node, "color", viewport).unwrap_or(Rgba::BLACK);
                     let background = background_explicit.or(Some(Rgba(0xff, 0xff, 0xff, 0xff)));
                     // Default Input frame, but only when the user
                     // didn't explicitly opt out (e.g. `border-0`).
@@ -2972,6 +3056,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_image: background_image.clone(),
                         state_variants: item_state_variants.clone(),
                         opacity: 1.0,
                         transform: Affine2::IDENTITY,
@@ -2979,21 +3064,21 @@ fn emit_items(
                 }
                 "Text" => {
                     let font_size =
-                        prop_f32_at(node, "fontSize", viewport_w).unwrap_or(DEFAULT_FONT_SIZE_PX);
-                    let font_weight = resolve_font_weight(node, viewport_w);
-                    let color = prop_color_at(node, "color", viewport_w).unwrap_or(Rgba::BLACK);
+                        prop_f32_at(node, "fontSize", viewport).unwrap_or(DEFAULT_FONT_SIZE_PX);
+                    let font_weight = resolve_font_weight(node, viewport);
+                    let color = prop_color_at(node, "color", viewport).unwrap_or(Rgba::BLACK);
                     let content = node
                         .text_content()
                         .map(|c| c.into_owned())
                         .unwrap_or_default();
                     let align =
-                        parse_text_align(crate::style::prop_str_at(node, "textAlign", viewport_w));
-                    let max_lines = resolve_max_lines(node, viewport_w);
+                        parse_text_align(crate::style::prop_str_at(node, "textAlign", viewport));
+                    let max_lines = resolve_max_lines(node, viewport);
                     // Pass padding to the painter so it can shift the
                     // glyph origin / shrink the wrap width without
                     // losing the outer rect (which still drives bg /
                     // border rendering and hit-testing).
-                    let pad = padding_at(node, viewport_w);
+                    let pad = padding_at(node, viewport);
                     let padding_phys = (
                         pad.left * scale,
                         pad.top * scale,
@@ -3023,6 +3108,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_image: background_image.clone(),
                         state_variants: item_state_variants.clone(),
                         opacity: 1.0,
                         transform: Affine2::IDENTITY,
@@ -3053,7 +3139,7 @@ fn emit_items(
                             .and_then(|v| v.as_str())
                             .or_else(|| node.props.get("viewBox").and_then(|v| v.as_str()));
                         let view_box = crate::paint::icon::parse_view_box(view_box_str);
-                        let tint = prop_color_at(node, "color", viewport_w);
+                        let tint = prop_color_at(node, "color", viewport);
                         out.push(LayoutItem {
                             node_id: rid.to_string(),
                             kind: ItemKind::Icon {
@@ -3074,17 +3160,18 @@ fn emit_items(
                             clip_to: parent_clip_to,
                             subtree_root: subtree_root.map(str::to_string),
                             background_gradient: background_gradient.clone(),
+                        background_image: background_image.clone(),
                             state_variants: item_state_variants.clone(),
                             opacity: 1.0,
                             transform: Affine2::IDENTITY,
                         });
                     } else {
                         let src =
-                            crate::style::prop_str_at(node, "src", viewport_w).map(str::to_string);
+                            crate::style::prop_str_at(node, "src", viewport).map(str::to_string);
                         let fit = parse_object_fit(crate::style::prop_str_at(
                             node,
                             "objectFit",
-                            viewport_w,
+                            viewport,
                         ));
                         out.push(LayoutItem {
                             node_id: rid.to_string(),
@@ -3102,6 +3189,7 @@ fn emit_items(
                             clip_to: parent_clip_to,
                             subtree_root: subtree_root.map(str::to_string),
                             background_gradient: background_gradient.clone(),
+                        background_image: background_image.clone(),
                             state_variants: item_state_variants.clone(),
                             opacity: 1.0,
                             transform: Affine2::IDENTITY,
@@ -3127,6 +3215,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_image: background_image.clone(),
                         state_variants: item_state_variants.clone(),
                         opacity: 1.0,
                         transform: Affine2::IDENTITY,
@@ -3159,6 +3248,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_image: background_image.clone(),
                         state_variants: item_state_variants,
                         opacity: 1.0,
                         transform: Affine2::IDENTITY,
@@ -3205,7 +3295,7 @@ fn emit_items(
             child_scroll_shift_y,
             tree,
             renderer_for_taffy,
-            viewport_w,
+            viewport,
             scale,
             scrolls,
             out,
@@ -3242,7 +3332,7 @@ fn emit_items(
 fn effective_opacity(
     tree: &Tree,
     id: &str,
-    viewport_w: f32,
+    viewport: Viewport,
     memo: &mut HashMap<String, f32>,
 ) -> f32 {
     if let Some(v) = memo.get(id) {
@@ -3250,13 +3340,13 @@ fn effective_opacity(
     }
     let own = tree
         .get(id)
-        .and_then(|n| crate::style::prop_f32_at(n, "opacity", viewport_w))
+        .and_then(|n| crate::style::prop_f32_at(n, "opacity", viewport))
         .map(|v| v.clamp(0.0, 1.0))
         .unwrap_or(1.0);
     let inherited = match tree.parent_of(id) {
         Some(parent) if parent != ROOT_ID => {
             let parent = parent.to_string();
-            effective_opacity(tree, &parent, viewport_w, memo)
+            effective_opacity(tree, &parent, viewport, memo)
         }
         _ => 1.0,
     };
@@ -3285,11 +3375,11 @@ fn tree_has_transform_props(tree: &Tree) -> bool {
 /// px-suffixed strings (breakpoint-variant-aware); the fallback strips
 /// a `deg` suffix so `rotate: "45deg"` — the DOM-facing string form —
 /// resolves too.
-fn transform_f32(node: &crate::tree::Node, name: &str, viewport_w: f32) -> Option<f32> {
-    if let Some(v) = prop_f32_at(node, name, viewport_w) {
+fn transform_f32(node: &crate::tree::Node, name: &str, viewport: Viewport) -> Option<f32> {
+    if let Some(v) = prop_f32_at(node, name, viewport) {
         return Some(v);
     }
-    let s = crate::style::prop_str_at(node, name, viewport_w)?;
+    let s = crate::style::prop_str_at(node, name, viewport)?;
     let trimmed = s.trim();
     let stripped = trimmed.strip_suffix("deg").unwrap_or(trimmed);
     stripped.trim().parse::<f32>().ok().filter(|v| v.is_finite())
@@ -3302,13 +3392,13 @@ fn transform_f32(node: &crate::tree::Node, name: &str, viewport_w: f32) -> Optio
 fn node_local_transform(
     node: &crate::tree::Node,
     rect: Rect,
-    viewport_w: f32,
+    viewport: Viewport,
     scale: f32,
 ) -> Affine2 {
-    let tx = transform_f32(node, "translateX", viewport_w).unwrap_or(0.0) * scale;
-    let ty = transform_f32(node, "translateY", viewport_w).unwrap_or(0.0) * scale;
-    let s = transform_f32(node, "scale", viewport_w).unwrap_or(1.0);
-    let rot = transform_f32(node, "rotate", viewport_w).unwrap_or(0.0);
+    let tx = transform_f32(node, "translateX", viewport).unwrap_or(0.0) * scale;
+    let ty = transform_f32(node, "translateY", viewport).unwrap_or(0.0) * scale;
+    let s = transform_f32(node, "scale", viewport).unwrap_or(1.0);
+    let rot = transform_f32(node, "rotate", viewport).unwrap_or(0.0);
     if tx == 0.0 && ty == 0.0 && s == 1.0 && rot == 0.0 {
         return Affine2::IDENTITY;
     }
@@ -3330,7 +3420,7 @@ fn node_local_transform(
 fn cumulative_transform(
     tree: &Tree,
     id: &str,
-    viewport_w: f32,
+    viewport: Viewport,
     scale: f32,
     rects: &HashMap<String, Rect>,
     memo: &mut HashMap<String, Affine2>,
@@ -3341,12 +3431,12 @@ fn cumulative_transform(
     let parent_m = match tree.parent_of(id) {
         Some(parent) if parent != ROOT_ID => {
             let parent = parent.to_string();
-            cumulative_transform(tree, &parent, viewport_w, scale, rects, memo)
+            cumulative_transform(tree, &parent, viewport, scale, rects, memo)
         }
         _ => Affine2::IDENTITY,
     };
     let local = match (tree.get(id), rects.get(id)) {
-        (Some(node), Some(rect)) => node_local_transform(node, *rect, viewport_w, scale),
+        (Some(node), Some(rect)) => node_local_transform(node, *rect, viewport, scale),
         _ => Affine2::IDENTITY,
     };
     let m = parent_m.mul(&local);
@@ -3362,7 +3452,7 @@ fn cumulative_transform(
 pub(crate) fn compute_item_transforms(
     tree: &Tree,
     items: &mut [LayoutItem],
-    viewport_w: f32,
+    viewport: Viewport,
     scale: f32,
 ) {
     if !tree_has_transform_props(tree) {
@@ -3380,7 +3470,7 @@ pub(crate) fn compute_item_transforms(
         .collect();
     let mut memo: HashMap<String, Affine2> = HashMap::new();
     for it in items.iter_mut() {
-        it.transform = cumulative_transform(tree, &it.node_id, viewport_w, scale, &rects, &mut memo);
+        it.transform = cumulative_transform(tree, &it.node_id, viewport, scale, &rects, &mut memo);
     }
 }
 
@@ -3391,8 +3481,8 @@ pub(crate) fn compute_item_transforms(
 ///   social example actually uses.
 /// - `overflow` / `overflowY` prop resolves to `"scroll"` / `"auto"`
 ///   (CSS-style fallback used by tw classes).
-fn is_scrollable_node(node: &crate::tree::Node, viewport_w: f32) -> bool {
-    if let Some(s) = crate::style::prop_str_at(node, "scrollable", viewport_w) {
+fn is_scrollable_node(node: &crate::tree::Node, viewport: Viewport) -> bool {
+    if let Some(s) = crate::style::prop_str_at(node, "scrollable", viewport) {
         let lower = s.trim().to_ascii_lowercase();
         if matches!(
             lower.as_str(),
@@ -3417,9 +3507,9 @@ fn is_scrollable_node(node: &crate::tree::Node, viewport_w: f32) -> bool {
     {
         return true;
     }
-    let v = crate::style::prop_str_at(node, "overflowY", viewport_w)
-        .or_else(|| crate::style::prop_str_at(node, "overflow", viewport_w))
-        .or_else(|| crate::style::prop_str_at(node, "overflowX", viewport_w));
+    let v = crate::style::prop_str_at(node, "overflowY", viewport)
+        .or_else(|| crate::style::prop_str_at(node, "overflow", viewport))
+        .or_else(|| crate::style::prop_str_at(node, "overflowX", viewport));
     matches!(
         v.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
         Some("scroll") | Some("auto"),
@@ -3581,11 +3671,11 @@ fn _root_anchor() -> &'static str {
 /// in the 100..900 range. Strings like `"semibold"` and `"bold"` are
 /// also accepted (matches the engine's resolution of named weights).
 /// Defaults to 400 ("normal") when missing or unparseable.
-pub(crate) fn resolve_font_weight(node: &crate::tree::Node, viewport_w: f32) -> u16 {
-    if let Some(v) = prop_f32_at(node, "fontWeight", viewport_w) {
+pub(crate) fn resolve_font_weight(node: &crate::tree::Node, viewport: Viewport) -> u16 {
+    if let Some(v) = prop_f32_at(node, "fontWeight", viewport) {
         return (v as u16).clamp(100, 900);
     }
-    if let Some(s) = crate::style::prop_str_at(node, "fontWeight", viewport_w) {
+    if let Some(s) = crate::style::prop_str_at(node, "fontWeight", viewport) {
         return parse_named_weight(s);
     }
     400

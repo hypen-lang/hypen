@@ -5,9 +5,21 @@ public struct ApplicatorContext: @unchecked Sendable {
     public let element: HypenElement
     public let actionDispatcher: ActionDispatcher
 
-    public init(element: HypenElement, actionDispatcher: ActionDispatcher) {
+    /// Size of the area the Hypen root was given, for resolving `vw`/`vh`.
+    ///
+    /// Zero on either axis means "not measured" and falls back to the
+    /// physical screen. Applicators can't read the SwiftUI environment, so
+    /// the view layer hands it down here.
+    public let viewportSize: CGSize
+
+    public init(
+        element: HypenElement,
+        actionDispatcher: ActionDispatcher,
+        viewportSize: CGSize = .zero
+    ) {
         self.element = element
         self.actionDispatcher = actionDispatcher
+        self.viewportSize = viewportSize
     }
 }
 
@@ -74,16 +86,25 @@ public final class ApplicatorRegistry: @unchecked Sendable {
 
     /// Apply all applicators with variant support.
     ///
-    /// The result depends only on the element's props, so it is memoized
-    /// on the element and recomputed only after a `setProp`/`removeProp`
-    /// invalidates the cache (or when a different registry renders the
-    /// element).
+    /// The result depends on the element's props AND on the viewport size
+    /// (`vw`/`vh` resolve against it), so it is memoized on the element and
+    /// recomputed after a `setProp`/`removeProp` invalidates the cache, when
+    /// a different registry renders the element, or when the viewport
+    /// changes.
+    ///
+    /// The viewport is part of the key rather than a separate invalidation
+    /// hook because it is ambient: nothing mutates the element when the
+    /// window resizes, rotates, or when the first `GeometryReader` pass
+    /// replaces the unmeasured zero with a real size. Without it, a
+    /// `min-h-screen` element would keep whatever height it resolved on its
+    /// very first composition.
     public func applyAllWithVariants(
         element: HypenElement,
         context: ApplicatorContext
     ) -> ApplicatorResult {
         let registryID = ObjectIdentifier(self)
         if element.cachedApplicatorRegistryID == registryID,
+           element.cachedApplicatorViewport == context.viewportSize,
            let cached = element.cachedApplicatorResult {
             return cached
         }
@@ -91,6 +112,7 @@ public final class ApplicatorRegistry: @unchecked Sendable {
         let result = computeApplicatorResult(element: element, context: context)
         element.cachedApplicatorResult = result
         element.cachedApplicatorRegistryID = registryID
+        element.cachedApplicatorViewport = context.viewportSize
         return result
     }
 

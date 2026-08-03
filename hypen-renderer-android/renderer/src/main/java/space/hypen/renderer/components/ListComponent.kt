@@ -7,10 +7,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
 
@@ -186,60 +187,36 @@ class ListComponent : ComponentHandler {
 }
 
 /**
- * Renders a single list item element with its modifiers and applicators.
- * This is a simplified version of HypenElement rendering for use within Lazy* composables.
+ * Renders one list item through the FULL element pipeline.
+ *
+ * This used to be a private re-implementation of [HypenElement] ("a
+ * simplified version"), which silently dropped everything the real pipeline
+ * layers on: the `__anim.*` playbacks (so `.enter`/`.exit`/`.transition` on
+ * a `List` item never reached the pixels — the exit still deferred teardown
+ * on the coordinator's timer, so a removed row froze for its exit duration
+ * and then snapped), engine-derived accessibility semantics, and applicator
+ * variants. Since it recursed into its own children, the whole subtree under
+ * every `List` was affected. [HypenElement] is `internal` precisely so
+ * handlers can reuse it, so we delegate.
+ *
+ * The Row/Column scopes are cleared first. Lazy item content inherits the
+ * CompositionLocals of the composition that declared the `List`, so an outer
+ * `Column`'s [LocalColumnScope] would still be visible here — and
+ * `Modifier.weight` from a foreign scope is not valid in a Lazy item. The old
+ * simplified renderer avoided that by never applying weight at all; clearing
+ * the scopes preserves exactly that behaviour while everything else in the
+ * pipeline comes back.
  */
 @Composable
 private fun ListItemRenderer(
     element: HypenElement,
     renderer: space.hypen.renderer.render.ComposeRenderer,
 ) {
-    // Check visibility
-    val visible = element.getBoolProp("visible.0")
-        ?: element.getBoolProp("visible")
-        ?: true
-    if (!visible) return
-
-    val componentRegistry = renderer.getComponentRegistry()
-    val applicatorRegistry = renderer.getApplicatorRegistry()
-
-    val handler = componentRegistry.getHandler(element.elementType)
-    if (handler == null) {
-        // Render as a simple box with children
-        Box {
-            RenderListItemChildren(element, renderer)
-        }
-        return
-    }
-
-    // Build modifier from applicators, recomputed only when this
-    // element's props change
-    val modifier = remember(element, element.propsRevision) {
-        applicatorRegistry.applyAll(Modifier, element, renderer.createApplicatorContext(element))
-    }
-
-    // Render the component
-    handler.Render(
-        element = element,
-        modifier = modifier,
-        renderChildren = {
-            RenderListItemChildren(element, renderer)
-        },
-    )
-}
-
-/**
- * Renders children of a list item element.
- */
-@Composable
-private fun RenderListItemChildren(
-    element: HypenElement,
-    renderer: space.hypen.renderer.render.ComposeRenderer,
-) {
-    val children = renderer.getChildren(element.id)
-    for (child in children) {
-        key(child.id) {
-            ListItemRenderer(element = child, renderer = renderer)
-        }
+    CompositionLocalProvider(
+        LocalRowScope provides null,
+        LocalColumnScope provides null,
+        LocalStretchCrossAxis provides false,
+    ) {
+        RenderHypenElement(element = element, renderer = renderer)
     }
 }

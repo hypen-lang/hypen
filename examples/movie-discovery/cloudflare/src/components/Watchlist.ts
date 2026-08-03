@@ -5,6 +5,15 @@ interface WatchlistState {
   movies: Movie[];
   countLabel: string;
   empty: boolean;
+  /**
+   * The row that is the shared-element source for the next navigation into
+   * `/movie/:id`. MovieDetail's hero uses a constant `movie-hero` key (its
+   * own state lands a batch after the navigation renders), so the "key
+   * appears exactly twice" rule is enforced here: exactly one poster
+   * resolves to `movie-hero`, the rest resolve to `""` — no identity, no
+   * warning. `openMovie` writes it synchronously before pushing.
+   */
+  openingId: string;
 }
 
 async function refresh(state: WatchlistState) {
@@ -20,8 +29,18 @@ export default app
     movies: [],
     countLabel: "0 saved",
     empty: true,
+    openingId: "",
   })
-  .onActivated(async (state) => refresh(state))
+  .onActivated(async (state) => {
+    // Consume the shared-element mark — see Home.ts for the full reasoning.
+    state.openingId = "";
+    await refresh(state);
+  })
+  .onAction<{ movieId: string }>("openMovie", ({ state, action, context }) => {
+    if (!action.payload) return;
+    state.openingId = action.payload.movieId;
+    context?.router?.push(`/movie/${action.payload.movieId}`);
+  })
   .onAction<{ movieId: string }>("remove", async ({ state, action }) => {
     if (!action.payload) return;
     const user = getPrimaryUser();
@@ -48,18 +67,21 @@ export default app
               .color("#0F172A")
           }
           .tw("w-12 h-12 rounded-full bg-yellow-300 border-0 items-center justify-center")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(160, easeOut)
           .onClick(@router.push, to: "/search")
         }
         .tw("px-5 pt-6 pb-4 items-center")
 
         Column {
-          List(@state.movies) {
+          List(@state.movies, key: "id") {
             Row {
               Button {
                 Row {
                   Image(src: "@{item.posterUrl}")
                     .tw("w-20 h-28 rounded-2xl mr-4")
-                  .backgroundColor("@{item.posterBg}")
+                    .backgroundColor("@{item.posterBg}")
+                    .sharedElement("@{item.id == state.openingId ? 'movie-hero' : ''}", curve: spring, duration: 340)
 
                   Column {
                     Text("@{item.title}")
@@ -77,7 +99,9 @@ export default app
                 .tw("flex-1 items-center")
               }
               .tw("flex-1 bg-transparent border-0 p-0")
-              .onClick(@router.push, to: "/movie/@{item.id}")
+              .opacity({ default: 1, active: 0.7 })
+              .transition(160, easeOut)
+              .onClick(@actions.openMovie, movieId: "@{item.id}")
 
               Button {
                 Text("−")
@@ -85,9 +109,14 @@ export default app
                   .color("#F8FAFC")
               }
               .tw("w-10 h-10 rounded-full bg-slate-800 border border-slate-700 items-center justify-center")
+              .opacity({ default: 1, active: 0.55 })
+              .transition(160, easeOut)
               .onClick(@actions.remove, movieId: "@{item.id}")
             }
             .tw("mx-5 mb-3 p-3 rounded-2xl bg-slate-900 border border-slate-800 items-center")
+            .enter(slide, fade, from: bottom, duration: 300)
+            .exit(fade, duration: 220)
+            .layout(spring)
           }
 
           If(condition: @state.empty) {
@@ -104,9 +133,13 @@ export default app
                   .color("#0F172A")
               }
               .tw("mt-5 px-5 py-3 rounded-2xl bg-yellow-300 border-0")
+              .opacity({ default: 1, active: 0.7 })
+              .transition(160, easeOut)
               .onClick(@router.push, to: "/search")
             }
             .tw("mx-5 mt-10 p-8 rounded-3xl bg-slate-900 border border-slate-800 items-center")
+            .enter(fade, duration: 320)
+            .exit(fade, duration: 140)
           }
         }
         .tw("pb-8")

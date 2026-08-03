@@ -1384,7 +1384,10 @@ interface Disposable {
     fun destroy(vararg args: Any?) {
       for (arg in args) {
         when (arg) {
-          is Disposable -> arg.destroy()
+          is Disposable -> {
+            arg.destroy()
+          }
+
           is ArrayList<*> -> {
             for (idx in arg.indices) {
               val element = arg[idx]
@@ -1393,6 +1396,7 @@ interface Disposable {
               }
             }
           }
+
           is Map<*, *> -> {
             for (element in arg.values) {
               if (element is Disposable) {
@@ -1400,6 +1404,7 @@ interface Disposable {
               }
             }
           }
+
           is Iterable<*> -> {
             for (element in arg) {
               if (element is Disposable) {
@@ -2747,31 +2752,45 @@ sealed class HypenException : kotlin.Exception() {
 public object FfiConverterTypeHypenError : FfiConverterRustBuffer<HypenException> {
   override fun read(buf: ByteBuffer): HypenException =
     when (buf.getInt()) {
-      1 ->
+      1 -> {
         HypenException.ParseException(
           FfiConverterString.read(buf),
         )
-      2 ->
+      }
+
+      2 -> {
         HypenException.RenderException(
           FfiConverterString.read(buf),
         )
-      3 ->
+      }
+
+      3 -> {
         HypenException.StateException(
           FfiConverterString.read(buf),
         )
-      4 ->
+      }
+
+      4 -> {
         HypenException.ActionException(
           FfiConverterString.read(buf),
         )
-      5 ->
+      }
+
+      5 -> {
         HypenException.ComponentException(
           FfiConverterString.read(buf),
         )
-      6 ->
+      }
+
+      6 -> {
         HypenException.InitializationException(
           FfiConverterString.read(buf),
         )
-      else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
+      }
+
+      else -> {
+        throw RuntimeException("invalid error enum value, something is very wrong!!")
+      }
     }
 
   override fun allocationSize(value: HypenException): ULong =
@@ -2781,26 +2800,31 @@ public object FfiConverterTypeHypenError : FfiConverterRustBuffer<HypenException
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
+
       is HypenException.RenderException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
+
       is HypenException.StateException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
+
       is HypenException.ActionException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
+
       is HypenException.ComponentException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
+
       is HypenException.InitializationException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
@@ -2818,26 +2842,31 @@ public object FfiConverterTypeHypenError : FfiConverterRustBuffer<HypenException
         FfiConverterString.write(value.v1, buf)
         Unit
       }
+
       is HypenException.RenderException -> {
         buf.putInt(2)
         FfiConverterString.write(value.v1, buf)
         Unit
       }
+
       is HypenException.StateException -> {
         buf.putInt(3)
         FfiConverterString.write(value.v1, buf)
         Unit
       }
+
       is HypenException.ActionException -> {
         buf.putInt(4)
         FfiConverterString.write(value.v1, buf)
         Unit
       }
+
       is HypenException.ComponentException -> {
         buf.putInt(5)
         FfiConverterString.write(value.v1, buf)
         Unit
       }
+
       is HypenException.InitializationException -> {
         buf.putInt(6)
         FfiConverterString.write(value.v1, buf)

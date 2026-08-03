@@ -69,6 +69,8 @@ export default app
               .color("#F8FAFC")
           }
           .tw("w-11 h-11 rounded-full bg-slate-900 border-0 items-center justify-center")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(160, easeOut)
           .onClick(@actions.back)
 
           Box {}
@@ -81,6 +83,8 @@ export default app
           }
           .tw("w-11 h-11 rounded-full border border-slate-700 items-center justify-center")
           .backgroundColor("@{state.movie.saved ? '#22C55E' : '#2A0B1B'}")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(260, easeOut)
           .onClick(@actions.toggleSaved)
         }
         .tw("px-5 pt-6 pb-3 items-center")
@@ -88,12 +92,21 @@ export default app
         .width("100%")
         .alignSelf("center")
 
+        // The hero's shared key is STATIC on purpose. A key bound to
+        // \`state.movie.id\` would be a batch too late: the route's DOM is
+        // created in the navigation patch batch — the only batch in which
+        // the renderer matches shared-element keys — while this module's
+        // \`onActivated\` state write lands in the batch after it. The
+        // ambiguity a constant key would normally cause is resolved on the
+        // *source* side instead: the list module marks exactly one poster
+        // as "movie-hero" (via its own \`openingId\`) before it pushes.
         Image(src: "@{state.movie.posterUrl}")
           .objectFit("cover")
           .objectPosition("center")
           .aspectRatio(0.675)
           .tw("self-center mt-2 w-56 md:w-64 lg:w-72 rounded-3xl border border-white/10")
           .backgroundColor("@{state.movie.posterBg}")
+          .sharedElement("movie-hero", curve: spring, duration: 340)
 
         Column {
           Text("@{state.movie.title}")
@@ -131,6 +144,8 @@ export default app
           .tw("mt-6 h-14 rounded-2xl border-0 items-center justify-center")
           .backgroundColor("@{state.movie.saved ? '#22C55E' : '#FACC15'}")
           .boxShadow("@{state.movie.saved ? '0 18px 38px rgba(34, 197, 94, 0.24)' : '0 18px 38px rgba(250, 204, 21, 0.22)'}")
+          .opacity({ default: 1, active: 0.75 })
+          .transition(280, easeOut)
           .onClick(@actions.toggleSaved)
 
           Text("Synopsis")
@@ -151,6 +166,7 @@ export default app
         .maxWidth(760)
         .width("100%")
         .alignSelf("center")
+        .enter(fade, duration: 320)
       }
       .scrollable(true)
       .tw("flex-1")

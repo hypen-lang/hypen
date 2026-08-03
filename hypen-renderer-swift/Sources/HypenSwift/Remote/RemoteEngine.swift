@@ -165,6 +165,14 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
 
         urlSession = URLSession(configuration: sessionConfig, delegate: self, delegateQueue: nil)
         webSocketTask = urlSession?.webSocketTask(with: url)
+        // URLSession caps a single WebSocket message at 1 MiB by default, and
+        // a Hypen `initialTree` routinely exceeds that — any app embedding an
+        // asset in state (a base64 wallpaper, an inlined image) blows past it
+        // on the very first message. The receive then fails, the socket
+        // closes, autoReconnect fires, and the app sits on "Connecting…"
+        // reconnecting every few seconds with no error ever surfaced. Browsers
+        // impose no such limit, so this only ever bit the native clients.
+        webSocketTask?.maximumMessageSize = config.maximumMessageSize
         log.debug("WebSocket task created, resuming...")
         webSocketTask?.resume()
 

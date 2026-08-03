@@ -350,7 +350,16 @@ class ForegroundColorApplicator : ApplicatorHandler {
 }
 
 /**
- * Alias for backgroundColor.
+ * The CSS `background` shorthand.
+ *
+ * This was an alias for `backgroundColor`, so anything that wasn't a flat
+ * colour — a gradient, an image, or a layered combination of both —
+ * silently vanished. The home-screen example's wallpaper arrives as
+ * `linear-gradient(…), url('data:image/png;base64,…') center / cover
+ * no-repeat`, which is exactly that case.
+ *
+ * A bare colour still takes the colour path, so `background("#fff")` is
+ * unchanged.
  */
 class BackgroundApplicator : ApplicatorHandler {
     override val name: String = "background"
@@ -361,5 +370,9 @@ class BackgroundApplicator : ApplicatorHandler {
         modifier: Modifier,
         value: Any?,
         context: ApplicatorContext,
-    ): Modifier = delegate.apply(modifier, value, context)
+    ): Modifier {
+        val layers = CssBackground.parse(value)
+            ?: return delegate.apply(modifier, value, context)
+        return modifier.paintCssBackground(layers)
+    }
 }

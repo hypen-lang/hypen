@@ -11,6 +11,7 @@ use crate::damage::Damage;
 use crate::gpu::Gpu;
 use crate::ime::{apply_ime_transition, ImeEffect};
 use crate::layout::{ItemKind, LayoutPass, TaffyState};
+use crate::style::Viewport;
 use crate::module::HypenModule;
 use crate::paint::vello_painter::VelloPainter;
 use crate::tree::Tree;
@@ -496,7 +497,7 @@ impl App {
             .as_ref()
             .map(|w| w.scale_factor() as f32)
             .unwrap_or(1.0);
-        let viewport_w = self.gpu.as_ref().map(|g| g.size.0 as f32).unwrap_or(0.0);
+        let viewport = self.logical_viewport();
         let mut patches = self.queue.drain();
         let n = patches.len();
         if n == 0 {
@@ -505,7 +506,7 @@ impl App {
             // `duration + delay + 80ms` window elapsed while the redraw
             // ticker was stalled — the corpse must not outlive its
             // grace period just because no frames are being painted.
-            self.finalize_overdue_exits(scale, viewport_w);
+            self.finalize_overdue_exits(scale, viewport);
             self.dispatch_animation_completions();
             return 0;
         }
@@ -636,7 +637,7 @@ impl App {
         // back to a bulk rebuild then.
         if !self
             .taffy
-            .apply_patches(&outcome.forwarded, &self.tree, scale, viewport_w)
+            .apply_patches(&outcome.forwarded, &self.tree, scale, viewport)
         {
             self.taffy.mark_needs_rebuild();
         }
@@ -645,7 +646,7 @@ impl App {
         // restyle their Taffy nodes so geometry leaves the mid-flight
         // pose now, not at the next unrelated restyle.
         for id in &outcome.restyle {
-            self.taffy.restyle_node(id, &self.tree, scale, viewport_w);
+            self.taffy.restyle_node(id, &self.tree, scale, viewport);
         }
         // Backstop: if detached subtrees have piled up past the cap
         // (host detaching without ever re-Attaching or Removing), tear
@@ -670,7 +671,7 @@ impl App {
             .nodes()
             .any(crate::style::node_has_layout_state_variant);
         self.damage.add_full();
-        self.finalize_overdue_exits(scale, viewport_w);
+        self.finalize_overdue_exits(scale, viewport);
         // Route any `.onAnimationComplete` dispatches queued by this batch's
         // exit finalizes (defensive re-Create supersede fires none) and the
         // overdue backbone to the module.
@@ -683,7 +684,37 @@ impl App {
     /// ticker stalled (occluded window drains still call this via
     /// `flush_patches`). The normal settle path is `DesktopAnimator::
     /// tick` inside `redraw`.
-    fn finalize_overdue_exits(&mut self, scale: f32, viewport_w: f32) {
+    /// Viewport width in LOGICAL CSS pixels, for Tailwind breakpoint
+    /// selection.
+    ///
+    /// The GPU surface is sized in PHYSICAL pixels, but the breakpoints it
+    /// gets compared against (`sm` 640 … `xl` 1280) are CSS pixels. Feeding
+    /// the surface width straight in doubled the apparent viewport on a 2x
+    /// display, so a 520pt window reported 1040 and matched `lg` — the
+    /// home-screen launcher picked `lg:max-w-[300px]` for its dock and
+    /// `lg:max-w-[290px]` for its icon grid instead of the base widths, and
+    /// the dock's fourth icon overflowed its container.
+    ///
+    /// Lengths stay physical (taffy styles multiply by `scale`); only the
+    /// breakpoint comparison is logical.
+    /// The window content box in logical (CSS) px — the basis for
+    /// Tailwind breakpoints and `vh`/`vw`/`vmin`/`vmax`. wgpu reports
+    /// the surface in physical px, so this divides by the scale factor.
+    fn logical_viewport(&self) -> Viewport {
+        let physical = self
+            .gpu
+            .as_ref()
+            .map(|g| (g.size.0 as f32, g.size.1 as f32))
+            .unwrap_or((0.0, 0.0));
+        let scale = self
+            .window
+            .as_ref()
+            .map(|w| w.scale_factor() as f32)
+            .unwrap_or(1.0);
+        crate::layout::logical_viewport((physical.0 as u32, physical.1 as u32), scale)
+    }
+
+    fn finalize_overdue_exits(&mut self, scale: f32, viewport: Viewport) {
         let overdue = self.animator.finalize_overdue(&mut self.tree);
         if overdue.is_empty() {
             return;
@@ -707,7 +738,7 @@ impl App {
         self.painter.invalidate_subtree_cache();
         if !self
             .taffy
-            .apply_patches(&overdue, &self.tree, scale, viewport_w)
+            .apply_patches(&overdue, &self.tree, scale, viewport)
         {
             self.taffy.mark_needs_rebuild();
         }
@@ -730,13 +761,13 @@ impl App {
             .as_ref()
             .map(|w| w.scale_factor() as f32)
             .unwrap_or(1.0);
-        let viewport_w = self.gpu.as_ref().map(|g| g.size.0 as f32).unwrap_or(0.0);
+        let viewport = self.logical_viewport();
         let frame = drive_reduced_motion_toggle(
             &mut self.animator,
             &mut self.tree,
             &mut self.taffy,
             scale,
-            viewport_w,
+            viewport,
             on,
         );
         if frame.invalidate {
@@ -789,7 +820,7 @@ impl App {
             &mut self.tree,
             &mut self.taffy,
             scale,
-            w as f32,
+            crate::layout::logical_viewport((w, h), scale),
         );
         // Scrub source tick: advance any in-flight settle and fire elapsed
         // deadlines (the no-flash cleanup window, the scroll rest-debounce
@@ -962,7 +993,11 @@ impl App {
             }
             if flips_played {
                 if let Some(pass) = self.layout.as_mut() {
-                    pass.refresh_transforms(&self.tree, w as f32, scale);
+                    pass.refresh_transforms(
+                        &self.tree,
+                        crate::layout::logical_viewport((w, h), scale),
+                        scale,
+                    );
                 }
                 self.painter.invalidate_subtree_cache();
                 self.damage.add_full();
@@ -1337,7 +1372,14 @@ impl ApplicationHandler<AppEvent> for App {
         }
         let attrs = WindowAttributes::default()
             .with_title(self.title.clone())
-            .with_inner_size(winit::dpi::PhysicalSize::new(
+            // LOGICAL, not physical: `DesktopApp::size(960, 720)` means a
+            // 960x720 *window*, the same units every other toolkit takes and
+            // the same units the UI is authored in. As `PhysicalSize` it was
+            // divided by the scale factor — a 2x display opened the window at
+            // 480x360pt, less than half the requested area, which is what
+            // cropped the home-screen launcher and pushed its dock out of
+            // view.
+            .with_inner_size(winit::dpi::LogicalSize::new(
                 self.initial_size.0,
                 self.initial_size.1,
             ))
@@ -1959,15 +2001,15 @@ pub(crate) fn mirror_tick_outcome(
     tree: &Tree,
     taffy: &mut TaffyState,
     scale: f32,
-    viewport_w: f32,
+    viewport: Viewport,
 ) {
     if !outcome.finalized.is_empty()
-        && !taffy.apply_patches(&outcome.finalized, tree, scale, viewport_w)
+        && !taffy.apply_patches(&outcome.finalized, tree, scale, viewport)
     {
         taffy.mark_needs_rebuild();
     }
     for id in &outcome.restyle {
-        taffy.restyle_node(id, tree, scale, viewport_w);
+        taffy.restyle_node(id, tree, scale, viewport);
     }
 }
 
@@ -1981,12 +2023,12 @@ pub(crate) fn drive_animation_frame(
     tree: &mut Tree,
     taffy: &mut TaffyState,
     scale: f32,
-    viewport_w: f32,
+    viewport: Viewport,
 ) -> FrameAnim {
     let outcome = animator.tick(tree);
     let invalidate = !outcome.is_empty();
     if invalidate {
-        mirror_tick_outcome(&outcome, tree, taffy, scale, viewport_w);
+        mirror_tick_outcome(&outcome, tree, taffy, scale, viewport);
     }
     FrameAnim {
         invalidate,
@@ -2005,13 +2047,13 @@ pub(crate) fn drive_reduced_motion_toggle(
     tree: &mut Tree,
     taffy: &mut TaffyState,
     scale: f32,
-    viewport_w: f32,
+    viewport: Viewport,
     on: bool,
 ) -> FrameAnim {
     let outcome = animator.set_reduced_motion(on, tree);
     let invalidate = !outcome.is_empty();
     if invalidate {
-        mirror_tick_outcome(&outcome, tree, taffy, scale, viewport_w);
+        mirror_tick_outcome(&outcome, tree, taffy, scale, viewport);
     }
     FrameAnim {
         invalidate,

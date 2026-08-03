@@ -87,6 +87,7 @@ export default app
           .tw("p-5 rounded-3xl border-0 items-center")
           .linearGradient("180deg, rgba(255, 255, 255, 0.13) 0%, rgba(255, 255, 255, 0.055) 100%")
           .boxShadow("0 18px 42px rgba(2, 6, 23, 0.35)")
+          .enter(slide, fade, from: bottom, duration: 320)
         }
         .gridColumns(3)
         .gap(12)

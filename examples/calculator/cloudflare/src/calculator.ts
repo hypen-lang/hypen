@@ -167,6 +167,8 @@ export default app
             .onClick(@actions.buttonPress, type: "@{item.type}", value: "@{item.label}")
             .height(72)
             .backgroundColor("@{item.bg}")
+            .opacity({ default: 1, hover: 0.85, active: 0.6 })
+            .transition(120, easeOut)
             .horizontalAlignment("center")
             .verticalAlignment("center")
             .gridColumn("@{item.span}")

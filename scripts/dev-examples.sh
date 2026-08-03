@@ -38,16 +38,43 @@ LOG_DIR="${TMPDIR:-/tmp}/hypen-dev-examples"
 mkdir -p "$LOG_DIR"
 
 # name -> "relative-dir http-port" (ports must match examples/home-screen APPS)
-declare -A EXAMPLES=(
-  [home-screen]="examples/home-screen/cloudflare 8787"
-  [simple]="examples/simple/cf 8788"
-  [todo]="examples/todo/cloudflare 8789"
-  [calorie-counter]="examples/calorie-counter/cloudflare 8790"
-  [movie-discovery]="examples/movie-discovery/cloudflare 8791"
-  [food-ordering]="examples/food-ordering/cloudflare 8792"
-  [social]="examples/social/cloudflare 8793"
-  [calculator]="examples/calculator/cloudflare 8794"
-)
+#
+# Deliberately NOT a `declare -A` associative array: macOS still ships bash
+# 3.2, which has none. Worse, it fails obscurely rather than loudly — bash
+# 3.2 parses `[home-screen]=` as an arithmetic subscript, so `set -u` aborts
+# with "home: unbound variable" (it read `home - screen`). A newline-delimited
+# table + a lookup function works on every bash.
+EXAMPLES_TABLE="
+home-screen examples/home-screen/cloudflare 8787
+simple examples/simple/cf 8788
+todo examples/todo/cloudflare 8789
+calorie-counter examples/calorie-counter/cloudflare 8790
+movie-discovery examples/movie-discovery/cloudflare 8791
+food-ordering examples/food-ordering/cloudflare 8792
+social examples/social/cloudflare 8793
+calculator examples/calculator/cloudflare 8794
+"
+
+# Echoes "relative-dir http-port" for a known name, nothing for an unknown one.
+example_entry() {
+  local want="$1" name rel port
+  while read -r name rel port; do
+    [[ -z "$name" ]] && continue
+    if [[ "$name" == "$want" ]]; then
+      echo "$rel $port"
+      return 0
+    fi
+  done <<<"$EXAMPLES_TABLE"
+  return 1
+}
+
+example_names() {
+  while read -r name _rel _port; do
+    [[ -z "$name" ]] && continue
+    echo "$name"
+  done <<<"$EXAMPLES_TABLE"
+}
+
 DEFAULT_SET=(home-screen simple todo calculator)
 ALL_SET=(home-screen simple todo calorie-counter movie-discovery food-ordering social calculator)
 
@@ -58,8 +85,8 @@ for arg in "$@"; do
     --fresh) FRESH=1 ;;
     all) SELECTED=("${ALL_SET[@]}") ;;
     *)
-      if [[ -z "${EXAMPLES[$arg]:-}" ]]; then
-        echo "Unknown example '$arg'. Known: ${!EXAMPLES[*]}" >&2
+      if ! example_entry "$arg" >/dev/null; then
+        echo "Unknown example '$arg'. Known: $(example_names | tr '\n' ' ')" >&2
         exit 1
       fi
       SELECTED+=("$arg")
@@ -99,7 +126,7 @@ dereference() {
 }
 
 for name in "${SELECTED[@]}"; do
-  read -r rel _port <<<"${EXAMPLES[$name]}"
+  read -r rel _port <<<"$(example_entry "$name")"
   dir="$REPO_ROOT/$rel"
   echo "==> Installing $name ($rel)..."
   (cd "$dir" && bun install --silent)
@@ -121,7 +148,7 @@ trap cleanup EXIT INT TERM
 
 inspector=9230
 for name in "${SELECTED[@]}"; do
-  read -r rel port <<<"${EXAMPLES[$name]}"
+  read -r rel port <<<"$(example_entry "$name")"
   dir="$REPO_ROOT/$rel"
   log="$LOG_DIR/$name.log"
   echo "==> Starting $name on :$port (inspector :$inspector, log: $log)"
@@ -133,7 +160,7 @@ done
 # ---- 5. Wait for readiness -------------------------------------------------
 echo "==> Waiting for servers..."
 for name in "${SELECTED[@]}"; do
-  read -r _rel port <<<"${EXAMPLES[$name]}"
+  read -r _rel port <<<"$(example_entry "$name")"
   for _i in $(seq 1 60); do
     code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 2 "http://localhost:$port/" || true)
     [[ "$code" == "200" ]] && break

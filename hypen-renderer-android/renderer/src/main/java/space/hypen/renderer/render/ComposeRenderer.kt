@@ -5,6 +5,7 @@ import space.hypen.renderer.HypenLoggers
 import space.hypen.renderer.anim.ANIM_PROP_PREFIX
 import space.hypen.renderer.anim.AnimationCompletion
 import space.hypen.renderer.anim.AnimationCompletionSink
+import androidx.compose.ui.unit.DpSize
 import space.hypen.renderer.anim.AnimationCoordinator
 import space.hypen.renderer.anim.animationCompleteAction
 import space.hypen.renderer.applicators.ApplicatorContext
@@ -675,10 +676,14 @@ class ComposeRenderer(
      * gating alone is not enough — a handler can be invoked from focus, IME,
      * or a timer — so this chokepoint checks at dispatch time.
      */
-    fun createApplicatorContext(element: HypenElement): ApplicatorContext {
+    fun createApplicatorContext(
+        element: HypenElement,
+        viewport: DpSize = DpSize.Unspecified,
+    ): ApplicatorContext {
         val dispatcher = actionDispatcher
         return ApplicatorContext(
             element = element,
+            viewport = viewport,
             actionDispatcher =
                 if (dispatcher == null) {
                     null

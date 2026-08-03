@@ -51,6 +51,8 @@ struct HypenElementContentView: View {
 
     @Environment(\.componentRegistry) private var componentRegistry
     @Environment(\.applicatorRegistry) private var applicatorRegistry
+    @Environment(\.screenWidth) private var screenWidth
+    @Environment(\.viewportHeight) private var viewportHeight
     @Environment(\.stretchCrossAxis) private var stretchCrossAxis
     @Environment(\.parentAllowsHorizontalExpansion) private var parentAllowsHorizontalExpansion
     @Environment(\.parentAllowsVerticalExpansion) private var parentAllowsVerticalExpansion
@@ -104,7 +106,8 @@ struct HypenElementContentView: View {
 
         let applicatorContext = ApplicatorContext(
             element: element,
-            actionDispatcher: dispatcher
+            actionDispatcher: dispatcher,
+            viewportSize: CGSize(width: screenWidth, height: viewportHeight)
         )
 
         // Build modifier and variants from applicators
@@ -362,14 +365,24 @@ extension View {
         }()
 
         // Should expand horizontally with .infinity (only when no exact calculated width and no proportional width)
-        let shouldExpandHorizontal = effectiveWidth == nil && allowsHorizontal && (
+        //
+        // A declared `maxWidth` opts the element out: in CSS `max-width` beats
+        // `width`, so `width:100%; max-width:250px` means "fill, but never
+        // past 250". Expanding to `.infinity` out here would wrap the
+        // already-capped frame in a full-width one and leave the content
+        // aligned inside it — which is what made the home-screen launcher's
+        // icon grid sit flush left instead of centred under its parent's
+        // `items-center`. `FillExpansionModifier` (HypenModifier.swift) has
+        // always applied this rule; this expansion simply didn't honour it.
+        let shouldExpandHorizontal = effectiveWidth == nil && allowsHorizontal && modifier.maxWidth == nil && (
             (modifier.weight != nil && modifier.weight! > 0) ||
             (modifier.flexGrow != nil && modifier.flexGrow! > 0) ||
             modifier.fillMaxWidth
         )
 
-        // Check if we should expand to fill available height
-        let shouldExpandVertical = modifier.fillMaxHeight && modifier.fillMaxHeightFraction >= 1.0 && parentHeight == nil
+        // Check if we should expand to fill available height (same max-bound rule).
+        let shouldExpandVertical = modifier.fillMaxHeight && modifier.fillMaxHeightFraction >= 1.0
+            && parentHeight == nil && modifier.maxHeight == nil
 
         // Check if flexShrink(0) - element should not shrink below its size
         let preventShrink = modifier.flexShrink == 0
@@ -592,6 +605,13 @@ private struct ScreenWidthKey: EnvironmentKey {
     static let defaultValue: CGFloat = 0
 }
 
+/// Height of the area the Hypen root was actually given.
+///
+/// Zero means "not measured yet"; callers fall back to the physical screen.
+private struct ViewportHeightKey: EnvironmentKey {
+    static let defaultValue: CGFloat = 0
+}
+
 extension EnvironmentValues {
     @MainActor
     var componentRegistry: ComponentRegistry {
@@ -644,6 +664,12 @@ extension EnvironmentValues {
     var screenWidth: CGFloat {
         get { self[ScreenWidthKey.self] }
         set { self[ScreenWidthKey.self] = newValue }
+    }
+
+    /// Height of the area the Hypen root was given, for `vh` units.
+    var viewportHeight: CGFloat {
+        get { self[ViewportHeightKey.self] }
+        set { self[ViewportHeightKey.self] = newValue }
     }
 }
 

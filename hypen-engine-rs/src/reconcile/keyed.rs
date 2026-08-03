@@ -5,12 +5,13 @@
 //! old-to-new position mappings.
 
 use super::diff::{
-    create_ir_node_tree_impl, reconcile_ir_node_impl, root_remove_patch, ReconcileCtx,
+    create_ir_node_tree_full, reconcile_ir_node_impl, root_remove_patch, ReconcileCtx,
 };
 use super::item_bindings::replace_ir_node_item_bindings;
 use super::Patch;
 use crate::ir::{IRNode, NodeId};
 use indexmap::IndexMap;
+use std::collections::{HashMap, HashSet};
 
 /// Generate a stable key for a list item.
 ///
@@ -55,8 +56,8 @@ pub(crate) fn generate_item_key(
 /// Each rendered child of `parent_id` is keyed by the item's resolved key
 /// (see [`generate_item_key`]). When the new array reorders items, this
 /// function reuses the matching old children, computes a Longest Increasing
-/// Subsequence over their old positions, and emits the minimal set of
-/// `Move` patches. New items are created via `create_ir_node_tree_impl` and
+/// Subsequence over their current positions, and emits the minimal set of
+/// `Move` patches. New items are created via `create_ir_node_tree_full` and
 /// dropped items are removed.
 ///
 /// `ir_templates` is the per-iteration template list — typically one IRNode,
@@ -67,7 +68,7 @@ pub(crate) fn generate_item_key(
 /// `child_key_for(item_key, template_idx)` builds the per-child key. For
 /// single-template lists this is just `item_key`; for multi-template ForEach
 /// it's `format!("{item_key}#{template_idx}")` so siblings from the same item
-/// don't collide.
+/// don't collide (see [`iterable_child_key`]).
 pub(crate) fn reconcile_iterable_children(
     ctx: &mut ReconcileCtx,
     parent_id: NodeId,
@@ -76,6 +77,58 @@ pub(crate) fn reconcile_iterable_children(
     key_path: Option<&str>,
     ir_templates: &[IRNode],
 ) {
+    // Iterable *elements* (List, Grid, …) are their own render parent: the
+    // renderer knows the container node, so logical and render parent agree.
+    reconcile_iterable_children_full(
+        ctx,
+        parent_id,
+        parent_id,
+        items,
+        item_name,
+        key_path,
+        ir_templates,
+    )
+}
+
+/// Per-child key for an iterable's item/template pair.
+///
+/// Single-node templates key straight off the item so the key survives
+/// round-trips through `replace_ir_node_item_bindings` (which stamps
+/// `element.key = item_key`). Multi-node templates disambiguate the siblings
+/// an item expands into with a `#<template_idx>` suffix. Creation sites must
+/// stamp exactly this so the first reconcile finds the children by identity.
+pub(crate) fn iterable_child_key(
+    item_key: &str,
+    template_idx: usize,
+    multi_template: bool,
+) -> String {
+    if multi_template {
+        format!("{}#{}", item_key, template_idx)
+    } else {
+        item_key.to_string()
+    }
+}
+
+/// Keyed reconciliation with an explicit logical/render parent split.
+///
+/// `logical_parent` owns the children in the instance tree; `render_parent`
+/// is what `Insert`/`Move` patches target. They diverge for `IRNode::ForEach`:
+/// items are LOGICAL children of the transparent `__ForEach` container while
+/// their patches address the ForEach's own parent, because the renderer never
+/// materialises the container. Collapsing the two orphans the items under the
+/// grandparent and leaves `ForEach.children` empty, which makes every later
+/// reconcile see a length mismatch and rebuild forever — see the fallback note
+/// in `reconcile_ir_node_impl`'s ForEach arm.
+pub(crate) fn reconcile_iterable_children_full(
+    ctx: &mut ReconcileCtx,
+    logical_parent: NodeId,
+    render_parent: NodeId,
+    items: &[serde_json::Value],
+    item_name: &str,
+    key_path: Option<&str>,
+    ir_templates: &[IRNode],
+) {
+    let parent_id = logical_parent;
     let multi_template = ir_templates.len() > 1;
 
     // Snapshot the parent's existing children + their keys.
@@ -89,16 +142,21 @@ pub(crate) fn reconcile_iterable_children(
     let mut old_unkeyed: Vec<NodeId> = Vec::new();
     for &child_id in &old_children {
         match ctx.tree.get(child_id).and_then(|n| n.key.clone()) {
-            Some(key) => {
+            // Duplicate keys (two items resolving to the same `id`) demote the
+            // later occurrences to unkeyed rather than overwriting the map
+            // entry — an overwritten entry would be neither reused nor removed,
+            // leaking the node into the tree and the element into the renderer.
+            Some(key) if !old_keyed.contains_key(&key) => {
                 old_keyed.insert(key, child_id);
             }
+            Some(_) => old_unkeyed.push(child_id),
             None => old_unkeyed.push(child_id),
         }
     }
 
-    // Detach the old children from the parent up front so create_ir_node_tree_impl
-    // doesn't append at arbitrary positions during the rebuild. We'll set the
-    // final children list at the end.
+    // Detach the old children from the LOGICAL parent up front so creation
+    // doesn't append at arbitrary positions during the pass — the final
+    // children list is rebuilt in desired order as we go.
     if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
         parent_node.children.clear();
     }
@@ -107,17 +165,17 @@ pub(crate) fn reconcile_iterable_children(
     // Track per-child keys so we can stamp them onto the (possibly newly
     // created) tree nodes after the rebuild.
     let mut new_child_keys: Vec<String> = Vec::with_capacity(new_child_ids.capacity());
+    // Children created during this pass, in creation order. `create_*` appends
+    // them at the end of the render parent, so this is the tail of the
+    // post-create render order the placement pass reasons about below.
+    let mut created_ids: Vec<NodeId> = Vec::new();
     let mut unkeyed_idx = 0;
 
     for (item_index, item) in items.iter().enumerate() {
         let item_key = generate_item_key(item, key_path, item_name, item_index);
 
         for (template_idx, template) in ir_templates.iter().enumerate() {
-            let child_key = if multi_template {
-                format!("{}#{}", item_key, template_idx)
-            } else {
-                item_key.clone()
-            };
+            let child_key = iterable_child_key(&item_key, template_idx, multi_template);
 
             let child_id = if let Some(&old_id) = old_keyed.get(&child_key) {
                 // Re-attach the matched child and reconcile in place against
@@ -144,11 +202,22 @@ pub(crate) fn reconcile_iterable_children(
                 unkeyed_idx += 1;
                 old_id
             } else {
-                // Brand new child — create_ir_node_tree_impl will append it
-                // to the parent's children list and emit Create+Insert.
+                // Brand new child — create_ir_node_tree_full hangs it off the
+                // LOGICAL parent while emitting Create + Insert against the
+                // RENDER parent. The Insert appends (before_id: None); the
+                // placement pass below slides it into position when the item
+                // didn't land at the end.
                 let substituted =
                     replace_ir_node_item_bindings(template, item, item_index, item_name, &item_key);
-                create_ir_node_tree_impl(ctx, &substituted, Some(parent_id), false)
+                let created = create_ir_node_tree_full(
+                    ctx,
+                    &substituted,
+                    Some(parent_id),
+                    Some(render_parent),
+                    false,
+                );
+                created_ids.push(created);
+                created
             };
 
             new_child_ids.push(child_id);
@@ -164,29 +233,52 @@ pub(crate) fn reconcile_iterable_children(
         }
     }
 
-    // Compute the longest increasing subsequence of old positions to find
-    // which reused children are already in the right order. Anything not in
-    // the LIS needs an explicit Move patch.
-    let old_positions: Vec<Option<usize>> = new_child_ids
+    // ---- Placement pass -------------------------------------------------
+    //
+    // Reconstruct the render order the patches emitted so far have already
+    // produced: surviving children keep their old relative order, then every
+    // child created above, in creation order (each `Insert` appended). Old
+    // children that are about to be removed are ignored — they only ever sit
+    // *between* survivors, and `Move { before_id }` is an insert-before, so
+    // their presence never changes a survivor's relative position.
+    let retained: HashSet<NodeId> = new_child_ids.iter().copied().collect();
+    let post_create_order: Vec<NodeId> = old_children
         .iter()
-        .map(|new_id| old_children.iter().position(|old_id| old_id == new_id))
+        .copied()
+        .filter(|id| retained.contains(id))
+        .chain(created_ids)
         .collect();
-    let lis = longest_increasing_subsequence(&old_positions);
+    let current_index: HashMap<NodeId, usize> = post_create_order
+        .iter()
+        .enumerate()
+        .map(|(idx, &id)| (id, idx))
+        .collect();
 
-    // Emit Move patches for previously-existing children that need to slide.
-    // Brand-new children (old_position == None) were already inserted via
-    // create_ir_node_tree_impl; reused children that landed in the correct
-    // relative position are in `lis` and need no patch.
-    for (new_idx, &child_id) in new_child_ids.iter().enumerate() {
-        if old_positions[new_idx].is_none() {
-            // Newly created — already inserted by create_ir_node_tree_impl.
+    // Longest increasing subsequence over each desired child's *current*
+    // position: everything in the LIS is already in the right relative order
+    // and needs no patch; everything else needs exactly one Move.
+    let current_positions: Vec<Option<usize>> = new_child_ids
+        .iter()
+        .map(|new_id| current_index.get(new_id).copied())
+        .collect();
+    let mut in_lis = vec![false; new_child_ids.len()];
+    for idx in longest_increasing_subsequence(&current_positions) {
+        in_lis[idx] = true;
+    }
+
+    // Walk backwards so each Move's anchor (`new_child_ids[i + 1]`) is already
+    // in its final position — the forward direction is wrong for any reorder
+    // needing two or more moves (e.g. [a,b,c] → [c,b,a]).
+    for new_idx in (0..new_child_ids.len()).rev() {
+        if in_lis[new_idx] {
             continue;
         }
-        if !lis.contains(&new_idx) {
-            let before_id = new_child_ids.get(new_idx + 1).copied();
-            ctx.patches
-                .push(Patch::move_node(parent_id, child_id, before_id));
-        }
+        let before_id = new_child_ids.get(new_idx + 1).copied();
+        ctx.patches.push(Patch::move_node(
+            render_parent,
+            new_child_ids[new_idx],
+            before_id,
+        ));
     }
 
     // Remove old children that weren't reused. The exit spec must be read

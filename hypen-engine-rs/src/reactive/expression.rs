@@ -772,4 +772,29 @@ mod tests {
         .unwrap();
         assert_eq!(result, json!("VIP Adult"));
     }
+
+    #[test]
+    fn integral_results_interpolate_without_a_trailing_zero() {
+        // exprimo does its arithmetic in f64, so `length(...)` and any
+        // integral arithmetic come back as e.g. 3.0. Templates must render
+        // "3 tasks", never "3.0 tasks" — the formatting guard in
+        // `evaluate_template_string` exists for this, and nothing else
+        // pinned it.
+        let state = json!({ "tasks": [1, 2, 3], "price": 10, "qty": 2 });
+        let evaluator = build_evaluator(&state, None, None);
+
+        let cases = [
+            ("@{length(state.tasks)} tasks", "3 tasks"),
+            ("@{state.price * state.qty}", "20"),
+            ("@{state.price / state.qty}", "5"),
+        ];
+        for (template, expected) in cases {
+            let out = evaluate_template_string(template, &evaluator).unwrap();
+            assert_eq!(out, expected, "template {template} formatted wrong");
+        }
+
+        // Genuinely fractional results must keep their decimals.
+        let out = evaluate_template_string("@{state.price / 4}", &evaluator).unwrap();
+        assert_eq!(out, "2.5");
+    }
 }

@@ -72,7 +72,7 @@ export default app
           }
             .backgroundColor("#FFA7E1")
             .borderRadius(10)
-            .onClick(@actions.addTask)
+            .onClick(@actions.addTask, animate: spring)
         }
           .gap(10)
           .verticalAlignment("center")
@@ -87,7 +87,7 @@ export default app
           }
             .backgroundColor("#333")
             .borderRadius(10)
-            .onClick(@actions.clearDone)
+            .onClick(@actions.clearDone, animate: spring)
         }
           .horizontalAlignment("space-between")
           .verticalAlignment("center")
@@ -97,6 +97,7 @@ export default app
             Text("@{item.text}")
               .color("@{item.done ? '#666' : '#fff'}")
               .textDecoration("@{item.done ? 'line-through' : 'none'}")
+              .transition(200, easeOut)
 
             Button {
               Text("Remove").padding(6).color("#666")
@@ -109,7 +110,10 @@ export default app
             .border("1px solid #333")
             .verticalAlignment("center")
             .horizontalAlignment("space-between")
-            .onClick(@actions.toggleTask, id: "@{item.id}")
+            .enter(slide, fade, from: top)
+            .exit(fade, slide, to: trailing, duration: 180)
+            .layout(spring)
+            .onClick(@actions.toggleTask, id: "@{item.id}", animate: spring)
         }
           .gap(8)
       }

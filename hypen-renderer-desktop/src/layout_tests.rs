@@ -4,6 +4,7 @@
 //! and patch-stream fixtures.
 
 use super::*;
+use crate::style::vp;
 use crate::tree::Tree;
 use hypen_engine::Patch;
 use indexmap::IndexMap;
@@ -1018,7 +1019,7 @@ fn taffy_state_apply_patches_builds_tree_incrementally() {
     let mut tree = Tree::new();
     tree.apply_batch(&patches);
     let mut taffy = TaffyState::new();
-    let applied = taffy.apply_patches(&patches, &tree, 1.0, 800.0);
+    let applied = taffy.apply_patches(&patches, &tree, 1.0, vp(800.0));
     assert!(
         applied,
         "all patch types should be handled by apply_patches"
@@ -1052,7 +1053,7 @@ fn taffy_state_setprop_recomputes_node_style_only() {
     let mut tree = Tree::new();
     tree.apply_batch(&initial);
     let mut taffy = TaffyState::new();
-    assert!(taffy.apply_patches(&initial, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(800.0)));
 
     let setprop = vec![hypen_engine::Patch::SetProp {
         id: "box".into(),
@@ -1060,7 +1061,7 @@ fn taffy_state_setprop_recomputes_node_style_only() {
         value: json!(40),
     }];
     tree.apply_batch(&setprop);
-    assert!(taffy.apply_patches(&setprop, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&setprop, &tree, 1.0, vp(800.0)));
 
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute_with_state(
@@ -1102,7 +1103,7 @@ fn padding_hover_state_variant_changes_geometry_when_hovered() {
 
     // Base (no hover): ~16-tall minimum from padding(8) top+bottom.
     let mut taffy = TaffyState::new();
-    assert!(taffy.apply_patches(&patches, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, vp(800.0)));
     let mut text = TextEngine::new();
     let base = LayoutPass::compute_with_state(
         &mut taffy,
@@ -1183,7 +1184,7 @@ fn padding_hover_only_applies_to_the_hovered_node() {
     let mut tree = Tree::new();
     tree.apply_batch(&patches);
     let mut taffy = TaffyState::new();
-    assert!(taffy.apply_patches(&patches, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, vp(800.0)));
     taffy.set_interaction(crate::layout::LayoutInteraction {
         hovered: Some("a".into()),
         ..Default::default()
@@ -1306,14 +1307,14 @@ fn taffy_state_remove_drops_node_from_tree_and_map() {
     let mut tree = Tree::new();
     tree.apply_batch(&patches);
     let mut taffy = TaffyState::new();
-    assert!(taffy.apply_patches(&patches, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, vp(800.0)));
 
     let remove = vec![hypen_engine::Patch::Remove {
         id: "a".into(),
         transition: false,
     }];
     tree.apply_batch(&remove);
-    assert!(taffy.apply_patches(&remove, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&remove, &tree, 1.0, vp(800.0)));
 
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute_with_state(
@@ -1535,14 +1536,14 @@ fn taffy_state_recreate_existing_id_does_not_orphan_old_node() {
     let mut tree = Tree::new();
     tree.apply_batch(&initial);
     let mut taffy = TaffyState::new();
-    assert!(taffy.apply_patches(&initial, &tree, 1.0, 800.0));
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(800.0)));
     let baseline = taffy.total_node_count();
 
     // Re-Create the same id many times, as a render loop would.
     for _ in 0..50 {
         let recreate = vec![create_patch("a", "Text", &[("0", json!("a"))])];
         tree.apply_batch(&recreate);
-        assert!(taffy.apply_patches(&recreate, &tree, 1.0, 800.0));
+        assert!(taffy.apply_patches(&recreate, &tree, 1.0, vp(800.0)));
     }
 
     assert_eq!(
@@ -2254,6 +2255,7 @@ fn actionable_clip_item(
         clip_to,
         subtree_root: None,
         background_gradient: None,
+        background_image: None,
         state_variants: crate::style::StateVariants::default(),
         opacity: 1.0,
         transform,
@@ -2790,5 +2792,329 @@ fn affine2_inverse_round_trips_and_conjugation_matches_recompute() {
     let _ = shifted;
     for (a, b) in conj.0.iter().zip(want.0.iter()) {
         assert!((a - b).abs() < 1e-3, "conjugation mismatch: {conj:?} vs {want:?}");
+    }
+}
+
+#[test]
+fn logical_viewport_converts_physical_surface_to_css_pixels() {
+    use crate::layout::logical_viewport;
+    // A 960x752pt window on a 2x display: wgpu reports the surface in
+    // physical px, Tailwind breakpoints are CSS px.
+    let v = logical_viewport((1920, 1504), 2.0);
+    assert_eq!(v.w, 960.0);
+    assert_eq!(v.h, 752.0);
+    // 1x passes through untouched.
+    let v1 = logical_viewport((1280, 800), 1.0);
+    assert_eq!(v1.w, 1280.0);
+    assert_eq!(v1.h, 800.0);
+    // A zero scale must not divide by zero.
+    let v0 = logical_viewport((800, 600), 0.0);
+    assert_eq!(v0.w, 800.0);
+    assert_eq!(v0.h, 600.0);
+}
+
+#[test]
+fn breakpoints_resolve_against_logical_not_physical_width() {
+    use crate::layout::logical_viewport;
+    use crate::style::prop_f32_at;
+    // Base 8, md (>=768) 16, xl (>=1280) 64. A 960pt window on a 2x
+    // display is 1920 PHYSICAL px — which would wrongly match `xl`.
+    // It must resolve as `md`.
+    let mut props = std::collections::HashMap::new();
+    props.insert("padding".to_string(), serde_json::json!(8));
+    props.insert("padding@md.0".to_string(), serde_json::json!(16));
+    props.insert("padding@xl.0".to_string(), serde_json::json!(64));
+    let node = crate::tree::Node {
+        id: "n".into(),
+        element_type: "Box".into(),
+        props,
+        semantics: None,
+    };
+    let v = logical_viewport((1920, 1504), 2.0);
+    assert_eq!(prop_f32_at(&node, "padding", v), Some(16.0));
+}
+
+#[test]
+fn shrunk_text_in_a_row_keeps_a_box_tall_enough_for_its_wrapped_lines() {
+    // The movie-discovery featured card: two padded, rounded, coloured
+    // Text pills side by side in a Row. Their combined natural width
+    // exceeds the row, so flex shrinks them and the text re-wraps onto a
+    // second line. The laid-out box must grow to match, or the painter
+    // draws two lines of glyphs over a one-line background — the "8.8"
+    // and "Fi" spilling out from under their pills.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "row"));
+    add_text(&mut tree, "row", "a", "Action, Adventure, Sci-Fi");
+    add_text(&mut tree, "row", "b", "Drama, Thriller, Mystery");
+
+    let mut text = TextEngine::new();
+
+    // Roomy: both fit on one line each.
+    let roomy = LayoutPass::compute(&tree, &mut text, (1600, 600), 1.0);
+    let h_roomy = find_item(&roomy, "a").rect.h;
+
+    // Cramped: the row can't hold both, so they shrink and wrap.
+    let cramped = LayoutPass::compute(&tree, &mut text, (300, 600), 1.0);
+    let a = find_item(&cramped, "a");
+
+    assert!(
+        a.rect.w < 199.0,
+        "expected the pill to be shrunk below its natural width, got {}",
+        a.rect.w
+    );
+    assert!(
+        a.rect.h > h_roomy,
+        "shrunk-and-wrapped text box height ({}) must exceed the \
+         one-line height ({h_roomy}) — otherwise the background pill is \
+         a line shorter than the glyphs drawn into it",
+        a.rect.h
+    );
+}
+
+
+#[test]
+fn padded_text_pill_grows_to_fit_its_wrapped_lines() {
+    // Same as the unpadded case, but the pills carry `px-3 py-1` like
+    // movie-discovery's rating / genre chips. Padding must not stop the
+    // box from growing when the shrunk width forces a second line.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "row"));
+    for (id, content) in [("a", "Action, Adventure, Sci-Fi"), ("b", "Drama, Thriller, Mystery")] {
+        tree.apply(&create_patch(
+            id,
+            "Text",
+            &[
+                ("0", json!(content)),
+                ("paddingLeft", json!(12)),
+                ("paddingRight", json!(12)),
+                ("paddingTop", json!(4)),
+                ("paddingBottom", json!(4)),
+            ],
+        ));
+        tree.apply(&insert_patch("row", id));
+    }
+
+    let mut text = TextEngine::new();
+    let roomy = LayoutPass::compute(&tree, &mut text, (1600, 600), 1.0);
+    let h_roomy = find_item(&roomy, "a").rect.h;
+
+    let cramped = LayoutPass::compute(&tree, &mut text, (300, 600), 1.0);
+    let a = find_item(&cramped, "a");
+    assert!(
+        a.rect.h > h_roomy,
+        "padded pill height ({}) must exceed the one-line height ({h_roomy})",
+        a.rect.h
+    );
+}
+
+
+#[test]
+fn bold_text_is_measured_bold_so_its_box_fits_the_glyphs_drawn() {
+    // movie-discovery's `font-black` rating pill and `font-bold` genre
+    // chip. Layout used to measure every Text at weight 400 while the
+    // painter drew the node's real weight; bold glyphs are wider, so a
+    // line Taffy had sized as fitting wrapped when painted, and the "8.8"
+    // / "Fi" spilled out from under their background pills.
+    //
+    // The box for bold text must therefore be at least as wide as the
+    // box for the same string at regular weight.
+    // In a Row so each Text sizes to its own content rather than
+    // stretching to the root's full width.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "row"));
+    tree.apply(&create_patch("regular", "Text", &[("0", json!("Sci-Fi"))]));
+    tree.apply(&insert_patch("row", "regular"));
+    tree.apply(&create_patch(
+        "bold",
+        "Text",
+        &[("0", json!("Sci-Fi")), ("fontWeight", json!(900))],
+    ));
+    tree.apply(&insert_patch("row", "bold"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1600, 600), 1.0);
+    let regular = find_item(&pass, "regular").rect;
+    let bold = find_item(&pass, "bold").rect;
+
+    assert!(
+        bold.w > regular.w,
+        "black-weight text ({}) should measure wider than regular ({}) —          equal widths mean layout is still measuring at weight 400",
+        bold.w,
+        regular.w
+    );
+}
+
+#[test]
+fn single_argument_linear_gradient_applicator_resolves() {
+    // `.linearGradient("135deg, #EC4899 0%, #F472B6 100%")` — one string
+    // holding the whole CSS body, which is what the DOM renderer lowers
+    // to `linear-gradient(<body>)`. movie-discovery's search button and
+    // featured card both use this form; desktop used to require a second
+    // `colors` argument and painted no gradient at all.
+    use crate::style::{prop_linear_gradient, Viewport};
+    let mut props = std::collections::HashMap::new();
+    props.insert(
+        "linearGradient.0".to_string(),
+        json!("135deg, #EC4899 0%, #F472B6 100%"),
+    );
+    let node = crate::tree::Node {
+        id: "btn".into(),
+        element_type: "Button".into(),
+        props,
+        semantics: None,
+    };
+    let g = prop_linear_gradient(&node, Viewport::new(960.0, 752.0))
+        .expect("single-argument linearGradient must resolve");
+    assert_eq!(g.stops.len(), 2, "expected both colour stops, got {:?}", g.stops);
+    assert_eq!(g.stops[0].color, crate::style::Rgba(0xEC, 0x48, 0x99, 0xff));
+    assert_eq!(g.stops[1].color, crate::style::Rgba(0xF4, 0x72, 0xB6, 0xff));
+}
+
+#[test]
+fn single_argument_linear_gradient_keeps_rgba_stop_alpha() {
+    // The featured card's body uses rgba() stops with real alpha; those
+    // must survive, or the card paints opaque over the page background.
+    use crate::style::{prop_linear_gradient, Viewport};
+    let mut props = std::collections::HashMap::new();
+    props.insert(
+        "linearGradient.0".to_string(),
+        json!("135deg, rgba(236, 72, 153, 0.38) 0%, rgba(8, 8, 8, 0.98) 42%, rgba(244, 114, 182, 0.20) 100%"),
+    );
+    let node = crate::tree::Node {
+        id: "card".into(),
+        element_type: "Row".into(),
+        props,
+        semantics: None,
+    };
+    let g = prop_linear_gradient(&node, Viewport::new(960.0, 752.0))
+        .expect("rgba-stop gradient body must resolve");
+    assert_eq!(g.stops.len(), 3);
+    assert_eq!(g.stops[0].color.3, 97, "0.38 alpha should survive parsing");
+}
+
+#[test]
+fn semantic_alignment_aliases_map_by_axis_not_by_name() {
+    // `.horizontalAlignment` / `.verticalAlignment` name a geometric
+    // axis, so which flex property they drive flips with flex-direction
+    // — the Android and SwiftUI convention. todo's task rows rely on
+    // `horizontalAlignment("space-between")` in a Row to push "Remove"
+    // to the right edge.
+    use taffy::style::{AlignItems, JustifyContent};
+    let mk = |kind: &str| {
+        let mut props = std::collections::HashMap::new();
+        props.insert("horizontalAlignment".to_string(), json!("space-between"));
+        props.insert("verticalAlignment".to_string(), json!("center"));
+        let node = crate::tree::Node {
+            id: "n".into(),
+            element_type: kind.into(),
+            props,
+            semantics: None,
+        };
+        node_style_with(&node, 1.0, vp(960.0), &[])
+    };
+
+    // Row: horizontal is the MAIN axis.
+    let row = mk("Row");
+    assert_eq!(row.justify_content, Some(JustifyContent::SpaceBetween));
+    assert_eq!(row.align_items, Some(AlignItems::Center));
+
+    // Column: the mapping flips. `verticalAlignment` now drives the main
+    // axis, and `space-between` is not a legal align-items value so the
+    // cross axis is simply left alone rather than set to nonsense.
+    let col = mk("Column");
+    assert_eq!(col.justify_content, Some(JustifyContent::Center));
+    assert_eq!(col.align_items, None);
+}
+
+#[test]
+fn css_border_shorthand_sets_width_and_colour() {
+    // `.border("1px solid #333")` — todo's task-row outline. The numeric
+    // read rejects the string, so without shorthand parsing no border was
+    // drawn at all.
+    use crate::style::{border_at, Rgba, Viewport};
+    let mut props = std::collections::HashMap::new();
+    props.insert("border".to_string(), json!("1px solid #333"));
+    let node = crate::tree::Node {
+        id: "row".into(),
+        element_type: "Row".into(),
+        props,
+        semantics: None,
+    };
+    let b = border_at(&node, Viewport::new(960.0, 752.0));
+    assert_eq!(b.width, 1.0, "border width should come from the shorthand");
+    assert_eq!(b.color, Rgba(0x33, 0x33, 0x33, 0xff));
+
+    // Order-independent, and the style keyword is ignored.
+    let mut props2 = std::collections::HashMap::new();
+    props2.insert("border".to_string(), json!("red dashed 2px"));
+    let node2 = crate::tree::Node {
+        id: "r2".into(),
+        element_type: "Row".into(),
+        props: props2,
+        semantics: None,
+    };
+    let b2 = border_at(&node2, Viewport::new(960.0, 752.0));
+    assert_eq!(b2.width, 2.0);
+    assert_eq!(b2.color, Rgba(0xff, 0x00, 0x00, 0xff));
+}
+
+#[test]
+fn max_width_child_stays_centred_as_the_window_resizes() {
+    // The home-screen dock: a `w-full max-w-[280px]` Column centred by
+    // its parent's `items-center`, inside a `min-h-screen` shell. It must
+    // sit centred at every window size, not just the one it was tested
+    // at — this is the "UI is scaled to the window" guarantee, and it is
+    // also the regression guard for the dock drifting off-centre.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "shell",
+        "Column",
+        &[
+            ("alignItems", json!("center")),
+            ("width", json!("100%")),
+            // `min-h-screen` lowers to this; it silently parsed to nothing
+            // before viewport units were supported.
+            ("minHeight", json!("100vh")),
+        ],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "shell"));
+    tree.apply(&create_patch(
+        "dock",
+        "Column",
+        &[("width", json!("100%")), ("maxWidth", json!(280))],
+    ));
+    tree.apply(&insert_patch("shell", "dock"));
+
+    let mut text = TextEngine::new();
+    for (w, h) in [(960u32, 720u32), (1400, 900), (640, 480), (1920, 1080)] {
+        let pass = LayoutPass::compute(&tree, &mut text, (w, h), 1.0);
+        let dock = find_item(&pass, "dock").rect;
+        let shell = find_item(&pass, "shell").rect;
+
+        // Clamped by max-width, never wider than the window.
+        assert!(
+            dock.w <= 280.0 + 0.5,
+            "dock width {} exceeded its 280 max at {w}x{h}",
+            dock.w
+        );
+        assert!(dock.w <= w as f32, "dock wider than the window at {w}x{h}");
+
+        // Centred: equal slack either side, within a rounding pixel.
+        let left = dock.x - shell.x;
+        let right = (shell.x + shell.w) - (dock.x + dock.w);
+        assert!(
+            (left - right).abs() <= 1.0,
+            "dock off-centre at {w}x{h}: {left} left vs {right} right",
+        );
+
+        // The shell follows the window rather than collapsing to content.
+        assert!(
+            shell.h >= h as f32 - 1.0,
+            "shell height {} did not fill the {h}pt window (min-h-screen)",
+            shell.h
+        );
     }
 }

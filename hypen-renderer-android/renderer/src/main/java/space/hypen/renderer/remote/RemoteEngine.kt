@@ -186,12 +186,35 @@ class RemoteEngine(
      */
     fun getSessionId(): String? = currentSessionId
 
+    /**
+     * Read timeout to actually use, guarding a host that configures one at or
+     * below the ping interval — that races the keepalive and drops healthy
+     * idle sockets. Ping/pong already proves liveness, so we widen rather
+     * than honour a value that can only cause false disconnects.
+     */
+    private fun effectiveReadTimeoutMs(): Long {
+        val configured = config.readTimeoutMs
+        val ping = config.pingIntervalMs
+        if (configured > 0 && ping > 0 && configured <= ping) {
+            log.warn(
+                "readTimeout (${configured}ms) <= pingInterval (${ping}ms) races the keepalive; " +
+                    "disabling the read deadline and letting ping/pong detect a dead peer",
+            )
+            return 0
+        }
+        return configured
+    }
+
     private fun establishConnection() {
+        log.error("HYPENDBG establishConnection state=${_connectionState.value}", Throwable("caller"))
         okHttpClient =
             OkHttpClient
                 .Builder()
                 .connectTimeout(config.connectTimeoutMs, TimeUnit.MILLISECONDS)
-                .readTimeout(config.readTimeoutMs, TimeUnit.MILLISECONDS)
+                // A read deadline at or below the ping interval races the
+                // keepalive it depends on and kills healthy idle sockets;
+                // see RemoteEngineConfig.readTimeoutMs.
+                .readTimeout(effectiveReadTimeoutMs(), TimeUnit.MILLISECONDS)
                 .writeTimeout(config.writeTimeoutMs, TimeUnit.MILLISECONDS)
                 .pingInterval(config.pingIntervalMs, TimeUnit.MILLISECONDS)
                 .build()
@@ -244,7 +267,7 @@ class RemoteEngine(
                 code: Int,
                 reason: String,
             ) {
-                log.debug("WebSocket closing: $code - $reason")
+                log.error("HYPENDBG onClosing $code - $reason")
             }
 
             override fun onClosed(
@@ -252,7 +275,7 @@ class RemoteEngine(
                 code: Int,
                 reason: String,
             ) {
-                log.debug("WebSocket closed: $code - $reason")
+                log.error("HYPENDBG onClosed $code - $reason")
                 _connectionState.value = ConnectionState.DISCONNECTED
                 maybeScheduleReconnect()
             }
@@ -363,7 +386,7 @@ class RemoteEngine(
         }
 
         _connectionState.value = ConnectionState.RECONNECTING
-        log.debug("Scheduling reconnect attempt $attempts/${config.maxReconnectAttempts}")
+        log.error("HYPENDBG scheduling reconnect $attempts", Throwable("scheduler"))
 
         reconnectJob?.cancel()
         reconnectJob =

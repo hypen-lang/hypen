@@ -183,11 +183,19 @@ export interface LauncherState {
   accents: Accent[];
 }
 
-/** One tappable icon (tile + label) for the home grid or the dock. */
+/**
+ * One tappable icon (tile + label) for the home grid or the dock.
+ *
+ * `sharedKey` pairs this tile with the matching one in the app's splash
+ * slot, so opening the app flies the icon from the grid into the splash
+ * and scales it up. Only the grid passes a key: the dock repeats the same
+ * four apps, and two sources sharing one key is ambiguous (the renderer
+ * takes the first and warns), so dock taps get the plain route fade.
+ */
 function appIcon(
   a: { name: string; resource: string; iconColor: string; tile: string },
   to: string,
-  { label = true } = {},
+  { label = true, sharedKey = "" } = {},
 ): string {
   return `
           Button {
@@ -197,7 +205,12 @@ function appIcon(
                   .size(28)
                   .color("${a.iconColor}")
               }
-              .tw("w-14 h-14 rounded-2xl ${a.tile} items-center justify-center shadow-lg")
+              .tw("w-14 h-14 rounded-2xl ${a.tile} items-center justify-center shadow-lg")${
+                sharedKey
+                  ? `
+              .sharedElement("${sharedKey}", curve: spring, duration: 340)`
+                  : ""
+              }
               ${
                 label
                   ? `Text("${a.name}")
@@ -209,6 +222,8 @@ function appIcon(
             .tw("items-center")
           }
           .onClick(@router.push, to: "${to}")
+          .opacity({ default: 1, active: 0.65 })
+          .transition(140, easeOut)
           .tw("bg-transparent border-0 p-0")`;
 }
 
@@ -240,28 +255,37 @@ function appRoute(a: LauncherApp): string {
               Column {}
                 .tw("w-16")
             }
-            .tw("items-center justify-between px-3 py-3 bg-gray-900")
+            .tw("items-center justify-between px-3 py-3 ${a.tile}")
+            .enter(fade, duration: 420)
 
             Column {
               HypenApp("${a.url}") {
                 Column {
+                  Column {}
+                    .tw("absolute inset-0 ${a.tile}")
+                    .enter(fade, duration: 420)
+
                   Column {
                     Icon(@resources.${a.resource})
                       .size(34)
                       .color("${a.iconColor}")
                   }
                   .tw("w-20 h-20 rounded-[24px] ${a.tile} items-center justify-center shadow-xl")
+                  .sharedElement("app-${a.slug}", curve: spring, duration: 340)
 
                   Text("${a.name}")
                     .tw("mt-5 text-lg font-semibold")
                     .color("#F9FAFB")
+                    .enter(fade, duration: 260)
 
                   Text("Opening app...")
                     .tw("mt-1 text-xs")
                     .color("#9CA3AF")
+                    .enter(fade, duration: 320)
+                    .animate(pulse, duration: 1600)
                 }
                 .slot("loading")
-                .tw("flex-1 w-full h-full min-h-0 items-center justify-center bg-gray-950")
+                .tw("relative flex-1 w-full h-full min-h-0 items-center justify-center bg-gray-950")
 
                 Column {
                   Text("Couldn't open ${a.name}")
@@ -457,7 +481,16 @@ export function buildLauncherTemplate(apps: LauncherApp[] = APPS): string {
     .map(
       (row) => `
             Row {
-${row.map(({ item, to }) => appIcon(item, to)).join("\n")}
+${row
+  .map(({ item, to }) =>
+    appIcon(item, to, {
+      // Only the embedded apps have a splash slot to fly into; Settings
+      // routes into the launcher itself, so it gets no key (an unmatched
+      // key degrades to a plain navigation and warns in dev).
+      sharedKey: to.startsWith("/app/") ? `app-${to.slice("/app/".length)}` : "",
+    }),
+  )
+  .join("\n")}
             }
             .tw("items-start justify-between w-full")`,
     )
