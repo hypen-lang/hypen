@@ -145,6 +145,9 @@ final class HypenViewModel: ObservableObject {
     private func setupBindings() {
         guard let engine = engine else { return }
         self.actionDispatcher = RemoteActionDispatcher(engine: engine)
+        // `.onAnimationComplete` dispatches ride the same channel as every
+        // other event applicator.
+        renderer.animator.actionDispatcher = self.actionDispatcher
 
         // Element views observe their own HypenElement, so per-patch
         // invalidation never goes through this view model. The HypenView

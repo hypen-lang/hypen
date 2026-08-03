@@ -27,6 +27,13 @@ public enum PatchType: String, Codable, Sendable {
     /// `semantics`; the renderer re-applies it with the same translation it
     /// runs at create. A nil block clears the node's semantics.
     case setSemantics = "SetSemantics"
+    /// Transaction-animation prelude. Mutates no element: it stamps the
+    /// patch batch it heads with an animation spec (carried in `spec`).
+    /// Emitted by the engine at batch index 0 ONLY, and honored only
+    /// there — a prelude anywhere else is not a stamp.
+    /// See `hypen-renderer-swift/ANIMATION.md` ("batchAnimation — the
+    /// transaction prelude").
+    case batchAnimation = "BatchAnimation"
 }
 
 /// Represents a single patch operation on the render tree
@@ -45,6 +52,16 @@ public struct Patch: @unchecked Sendable {
     /// Present on `create` for nodes with derivable a11y and on every
     /// `setSemantics`; nil otherwise.
     public let semantics: [String: Any]?
+    /// Deferred-remove flag on `remove`: this id roots a subtree whose
+    /// node carried an exit animation. The engine-side id is already dead
+    /// (there is no ack round-trip) — the renderer owns the corpse.
+    /// `false` for every non-animated removal, keeping the wire identical
+    /// to the pre-animation protocol.
+    /// See `hypen-renderer-swift/ANIMATION.md` (".enter / .exit").
+    public let transition: Bool
+    /// Animation spec carried by a `batchAnimation` prelude (the raw
+    /// `{duration, curve, delay, ...}` object). nil on every other type.
+    public let spec: [String: Any]?
 
     public init(
         type: PatchType,
@@ -57,7 +74,9 @@ public struct Patch: @unchecked Sendable {
         parentId: String? = nil,
         beforeId: String? = nil,
         eventName: String? = nil,
-        semantics: [String: Any]? = nil
+        semantics: [String: Any]? = nil,
+        transition: Bool = false,
+        spec: [String: Any]? = nil
     ) {
         self.type = type
         self.id = id
@@ -70,6 +89,8 @@ public struct Patch: @unchecked Sendable {
         self.beforeId = beforeId
         self.eventName = eventName
         self.semantics = semantics
+        self.transition = transition
+        self.spec = spec
     }
 }
 
@@ -95,6 +116,7 @@ extension Patch {
         case "detach": type = .detach
         case "attach": type = .attach
         case "setsemantics": type = .setSemantics
+        case "batchanimation": type = .batchAnimation
         default:
             log.warn("Unknown patch type: %@", typeString)
             return nil
@@ -111,7 +133,13 @@ extension Patch {
             parentId: dictionary["parentId"] as? String,
             beforeId: dictionary["beforeId"] as? String,
             eventName: dictionary["eventName"] as? String,
-            semantics: dictionary["semantics"] as? [String: Any]
+            semantics: dictionary["semantics"] as? [String: Any],
+            // Both keys are omitted on the wire when absent (the engine
+            // skips a false `transition`, and only `batchAnimation`
+            // carries a `spec`), so absence must read as the neutral
+            // value rather than as a parse failure.
+            transition: dictionary["transition"] as? Bool ?? false,
+            spec: dictionary["spec"] as? [String: Any]
         )
     }
 
@@ -137,7 +165,7 @@ extension Patch: CustomDebugStringConvertible {
         case .move:
             return "MOVE(\(id ?? "?") -> \(parentId ?? "?"), before: \(beforeId ?? "nil"))"
         case .remove:
-            return "REMOVE(\(id ?? "?"))"
+            return "REMOVE(\(id ?? "?")\(transition ? ", transition" : ""))"
         case .attachEvent:
             return "ATTACH_EVENT(\(id ?? "?"), \(eventName ?? "?"))"
         case .detachEvent:
@@ -148,6 +176,8 @@ extension Patch: CustomDebugStringConvertible {
             return "ATTACH(\(id ?? "?") -> \(parentId ?? "?"), before: \(beforeId ?? "nil"))"
         case .setSemantics:
             return "SET_SEMANTICS(\(id ?? "?"), \(semantics == nil ? "clear" : "block"))"
+        case .batchAnimation:
+            return "BATCH_ANIMATION(\(spec == nil ? "no spec" : "spec"))"
         }
     }
 }

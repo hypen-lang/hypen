@@ -67,6 +67,20 @@ pub fn renderer_id_for(pass: &LayoutPass, target: NodeId) -> Option<String> {
 /// the renderer doesn't track per-frame deltas and AccessKit accepts
 /// full updates without complaint.
 pub fn tree_update_for_layout(pass: &LayoutPass) -> TreeUpdate {
+    tree_update_for_layout_excluding(pass, &|_| false)
+}
+
+/// [`tree_update_for_layout`] with an exclusion predicate, mirroring
+/// [`LayoutPass::hit_excluding`]: excluded items — exit-animating
+/// subtrees, which still paint but are engine-side dead — are dropped
+/// from the published tree entirely, so assistive tech can neither
+/// report nor activate them while the exit plays. Author-id
+/// relationships targeting an excluded node drop with it (same rule as
+/// off-screen targets: dropped rather than dangling).
+pub fn tree_update_for_layout_excluding(
+    pass: &LayoutPass,
+    excluded: &dyn Fn(&str) -> bool,
+) -> TreeUpdate {
     let mut nodes: Vec<(NodeId, Node)> = Vec::with_capacity(pass.items.len() + 1);
 
     // Author-declared id (`.id("panel-1")`) → AccessKit NodeId, for the
@@ -79,6 +93,7 @@ pub fn tree_update_for_layout(pass: &LayoutPass) -> TreeUpdate {
     let author_ids: std::collections::HashMap<&str, NodeId> = pass
         .items
         .iter()
+        .filter(|it| !excluded(&it.node_id))
         .filter_map(|it| {
             pass.a11y
                 .get(&it.node_id)
@@ -87,11 +102,14 @@ pub fn tree_update_for_layout(pass: &LayoutPass) -> TreeUpdate {
         })
         .collect();
 
-    // First pass: emit a node for every layout item, recording its
-    // AccessKit id alongside the original renderer id so the second
-    // pass can build the parent's children list.
+    // First pass: emit a node for every non-excluded layout item,
+    // recording its AccessKit id alongside the original renderer id so
+    // the second pass can build the parent's children list.
     let mut item_ak_ids: Vec<(NodeId, &LayoutItem)> = Vec::with_capacity(pass.items.len());
     for item in &pass.items {
+        if excluded(&item.node_id) {
+            continue;
+        }
         let id = ak_node_id(&item.node_id);
         let mut node = build_node_for(item, pass, &author_ids);
         node.set_bounds(item_rect(item));
@@ -299,11 +317,16 @@ fn rect_contains_rect(outer: &crate::layout::Rect, inner: &crate::layout::Rect) 
 }
 
 fn item_rect(item: &LayoutItem) -> AkRect {
+    // Published bounds are the VISUAL rect — the transform-aware AABB
+    // of the layout box. A transformed item's pixels are where its
+    // assistive-tech bounds are (the same constraint-#5 rule the
+    // pointer hit paths follow via `hit_contains`).
+    let rect = item.visual_rect();
     AkRect::new(
-        item.rect.x as f64,
-        item.rect.y as f64,
-        (item.rect.x + item.rect.w) as f64,
-        (item.rect.y + item.rect.h) as f64,
+        rect.x as f64,
+        rect.y as f64,
+        (rect.x + rect.w) as f64,
+        (rect.y + rect.h) as f64,
     )
 }
 
@@ -389,6 +412,38 @@ mod tests {
             .expect("root node");
         assert_eq!(root.role(), Role::Window);
         assert_eq!(root.children().len(), pass.items.len());
+    }
+
+    #[test]
+    fn tree_update_excludes_exit_animating_items() {
+        // Exit-animating subtrees still paint but are engine-side dead:
+        // the published AccessKit tree must not contain them, or a
+        // screen reader could focus and Click-activate a corpse.
+        let pass = build_pass(|t| {
+            t.apply(&create("keep", "Button", &[("action", json!("@actions.a"))]));
+            t.apply(&insert(ROOT_ID, "keep"));
+            t.apply(&create("dying", "Button", &[("action", json!("@actions.b"))]));
+            t.apply(&insert(ROOT_ID, "dying"));
+        });
+        assert!(pass.item_by_id("dying").is_some(), "still painted mid-exit");
+
+        let update = tree_update_for_layout_excluding(&pass, &|id| id == "dying");
+        let dying_id = ak_node_id("dying");
+        assert!(
+            !update.nodes.iter().any(|(id, _)| *id == dying_id),
+            "excluded item must not be published"
+        );
+        let root = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ROOT_NODE_ID)
+            .map(|(_, n)| n)
+            .expect("root node");
+        assert!(!root.children().contains(&dying_id));
+        assert!(root.children().contains(&ak_node_id("keep")));
+        // The no-op predicate keeps full parity with the plain builder.
+        let full = tree_update_for_layout(&pass);
+        assert_eq!(full.nodes.len(), update.nodes.len() + 1);
     }
 
     #[test]
@@ -769,6 +824,39 @@ mod tests {
         assert_eq!(txt.role(), Role::Label);
         assert_eq!(txt.value(), Some("Hello"));
         assert_eq!(txt.label(), Some("Hello"));
+    }
+
+    #[test]
+    fn published_bounds_follow_the_item_transform() {
+        // A transformed node's AccessKit bounds are the transform-aware
+        // AABB — assistive tech targets the pixels, not the stale Taffy
+        // rect (the same rule the pointer hit paths follow).
+        let pass = build_pass(|t| {
+            t.apply(&create(
+                "btn",
+                "Button",
+                &[
+                    ("action", json!("@actions.go")),
+                    ("width.0", json!(100.0)),
+                    ("height.0", json!(40.0)),
+                    ("translateX.0", json!(200.0)),
+                ],
+            ));
+            t.apply(&insert(ROOT_ID, "btn"));
+        });
+        let item = pass.item_by_id("btn").expect("item");
+        assert!(!item.transform.is_identity());
+        let update = tree_update_for_layout(&pass);
+        let (_, node) = update
+            .nodes
+            .iter()
+            .find(|(id, _)| *id == ak_node_id("btn"))
+            .expect("button node");
+        let bounds = node.bounds().expect("bounds set");
+        assert!(
+            (bounds.x0 - (item.rect.x + 200.0) as f64).abs() < 0.5,
+            "published x0 must be the translated position, got {bounds:?}"
+        );
     }
 
     #[test]

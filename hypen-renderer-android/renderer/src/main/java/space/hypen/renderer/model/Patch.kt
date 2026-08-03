@@ -62,6 +62,21 @@ enum class PatchType {
      */
     @Json(name = "setSemantics")
     SET_SEMANTICS,
+
+    /**
+     * Animation transaction prelude: a batch-wide animation spec
+     * ([Patch.spec]) that applies to every whitelisted prop the batch
+     * writes, on any element.
+     *
+     * Honored at batch index 0 ONLY (protocol invariant 3,
+     * "first-patch-only preludes") — a prelude anywhere else, or inside a
+     * replayed initialTree, is not a stamp. Consumed by
+     * `AnimationCoordinator.beginBatch`; see
+     * `hypen-renderer-android/ANIMATION.md` ("`batchAnimation` — the
+     * transaction prelude").
+     */
+    @Json(name = "batchAnimation")
+    BATCH_ANIMATION,
 }
 
 /**
@@ -86,6 +101,22 @@ data class Patch(
      * on CREATE for elements with derivable a11y and on every SET_SEMANTICS.
      */
     val semantics: Map<String, Any?>? = null,
+    /**
+     * Set on a REMOVE whose subtree root carried an `__anim.exit` spec:
+     * the renderer owns the corpse and may defer teardown to play the
+     * exit (protocol invariant 2, "renderers own corpses"). Only the
+     * flagged root carries it; descendants arrive as plain removes.
+     *
+     * The wire omits the key entirely when false (`serde` skip-if-false),
+     * hence the `false` default. Honoured by `ComposeRenderer.onRemove` —
+     * see `hypen-renderer-android/ANIMATION.md`.
+     */
+    val transition: Boolean = false,
+    /**
+     * Animation spec carried by a [PatchType.BATCH_ANIMATION] prelude
+     * (`{duration, curve, delay, props}`). Null on every other patch type.
+     */
+    val spec: Map<String, Any?>? = null,
 ) {
     companion object {
         /**
@@ -170,11 +201,27 @@ data class Patch(
 
         /**
          * Create a REMOVE patch to delete an element.
+         *
+         * [transition] flags the root of a subtree carrying an
+         * `__anim.exit` spec (see [Patch.transition]).
          */
-        fun remove(id: String) =
+        fun remove(
+            id: String,
+            transition: Boolean = false,
+        ) = Patch(
+            type = PatchType.REMOVE,
+            id = id,
+            transition = transition,
+        )
+
+        /**
+         * Create a BATCH_ANIMATION prelude carrying a batch-wide
+         * animation spec.
+         */
+        fun batchAnimation(spec: Map<String, Any?>?) =
             Patch(
-                type = PatchType.REMOVE,
-                id = id,
+                type = PatchType.BATCH_ANIMATION,
+                spec = spec,
             )
 
         /**

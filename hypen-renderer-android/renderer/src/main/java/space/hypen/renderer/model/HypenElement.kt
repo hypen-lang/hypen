@@ -44,7 +44,75 @@ class HypenElement(
     // per-element invalidation granularity.
     private var propsState: Map<String, Any?> by mutableStateOf(LinkedHashMap(props))
 
-    val props: Map<String, Any?> get() = propsState
+    /**
+     * Presented values written by an in-flight `.transition` glide, keyed by
+     * the same wire prop name (`backgroundColor.0`). They SHADOW the engine
+     * values in [props] for the duration of the animation, so every consumer
+     * — modifier applicators and components alike — sees the interpolated
+     * pose without knowing animation exists. Cleared when the glide settles
+     * (at which point the shadowed value equals the engine value anyway).
+     */
+    private var animatedOverridesState: Map<String, Any?> by mutableStateOf(emptyMap())
+
+    private class MergedProps(
+        val raw: Map<String, Any?>,
+        val overrides: Map<String, Any?>,
+        val merged: Map<String, Any?>,
+    )
+
+    // Plain (non-snapshot) memo of the last merge. Both inputs are snapshot
+    // state and are read below, so observers still subscribe correctly; this
+    // only avoids re-allocating the merged map on every read.
+    @Volatile
+    private var mergedCache: MergedProps? = null
+
+    val props: Map<String, Any?>
+        get() {
+            val raw = propsState
+            val overrides = animatedOverridesState
+            if (overrides.isEmpty()) return raw
+            val cached = mergedCache
+            if (cached != null && cached.raw === raw && cached.overrides === overrides) {
+                return cached.merged
+            }
+            val merged = LinkedHashMap(raw)
+            merged.putAll(overrides)
+            mergedCache = MergedProps(raw, overrides, merged)
+            return merged
+        }
+
+    /**
+     * The engine-declared props, without any animation override. The glide
+     * driver reads targets from here — reading through [props] would return
+     * its own in-flight presented value instead of the new target.
+     */
+    val rawProps: Map<String, Any?> get() = propsState
+
+    /**
+     * Write (or clear, with [clearAnimatedOverride]) one presented value.
+     * Bumps the props revision so remembered modifier chains recompute — an
+     * animating element rebuilds its chain per frame, which is the price of
+     * animating every whitelisted prop through its existing applicator
+     * instead of special-casing a handful in a graphics layer.
+     */
+    fun setAnimatedOverride(name: String, value: Any?) {
+        val next = LinkedHashMap(animatedOverridesState)
+        next[name] = value
+        animatedOverridesState = next
+        bumpPropsRevision()
+    }
+
+    /** Drop one presented value; the engine value shows through again. */
+    fun clearAnimatedOverride(name: String) {
+        if (!animatedOverridesState.containsKey(name)) return
+        val next = LinkedHashMap(animatedOverridesState)
+        next.remove(name)
+        animatedOverridesState = next
+        bumpPropsRevision()
+    }
+
+    /** True while [name] is shadowed by an in-flight glide. */
+    fun hasAnimatedOverride(name: String): Boolean = animatedOverridesState.containsKey(name)
 
     internal fun setProp(name: String, value: Any?) {
         val next = LinkedHashMap(propsState)

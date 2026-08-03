@@ -138,9 +138,45 @@ class CompatibilityTest {
                     "actions" -> runActionTest(testCase)
                     "lifecycle" -> runLifecycleTest(testCase)
                     "state" -> runStateTest(testCase)
-                    "rendering", "reconciliation", "control-flow", "animation" -> {
+                    "rendering", "reconciliation", "control-flow" -> {
                         // These require a full engine implementation
                         println("Skipped: Test category '${testCase.category}' requires full engine (parser/renderer)")
+                    }
+                    "animation" -> {
+                        // Intentional skip. Kotlin DOES have a full engine
+                        // (NativeEngine over uniffi render_source/update_state),
+                        // so this category is not blocked on the same thing as
+                        // the render categories above. What remains, in order
+                        // (graduation checklist: hypen-renderer-android/ANIMATION.md,
+                        // "Conformance graduation (the Kotlin runner)"):
+                        //
+                        //  1. The uniffi FFI change must land — a hard gate.
+                        //     `Patch` needs `transition` on remove and a
+                        //     `BatchAnimation` variant carrying `spec_json`
+                        //     (hypen-engine-rs/src/uniffi/mod.rs), with BOTH
+                        //     binding sets regenerated. Until then
+                        //     `exit-deferred-remove.json` (expects
+                        //     `transition: true`) and `batch-animation-stamp.json`
+                        //     (expects the prelude) cannot pass: the fields do
+                        //     not exist in the generated record. The SDK-side
+                        //     relay for both is already in place
+                        //     (Types.kt `Patch.transition`/`Patch.spec`,
+                        //     NativeEngine.kt `toPatch`).
+                        //  2. A render-category runner must exist here — feed
+                        //     `input.source` + `initialState` through
+                        //     NativeEngine and assert `expected.patches`
+                        //     (types, `__anim.*` props, the flag), mirroring
+                        //     engine-compatibility-tests/runners/rust/tests/compatibility.rs.
+                        //     No such runner exists yet; that is step 2, not a
+                        //     precondition of step 1.
+                        //  3. Then lift this arm, keeping per-fixture
+                        //     `skip.sdks` honored with reason strings.
+                        //
+                        // Renderer behaviour is NOT gated by this: these 20
+                        // fixtures pin engine-side lowering only. The Android
+                        // renderer's own animation support is verified visually
+                        // against the DOM renderer, and it still snaps.
+                        println("Skipped: Test category 'animation' pending the uniffi transition/BatchAnimation FFI change and a Kotlin render-category runner (see hypen-renderer-android/ANIMATION.md)")
                     }
                     else -> {
                         println("Skipped: Unknown test category: ${testCase.category}")

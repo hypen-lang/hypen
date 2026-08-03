@@ -36,6 +36,16 @@ tasks.withType<Test> {
     // or use `../scripts/build-native.sh` if available). Point JNA at
     // the workspace `target/release` directory so the .so is found
     // without requiring the user to set LD_LIBRARY_PATH manually.
+    //
+    // A STALE library fails confusingly, not obviously: the generated
+    // `Patch` record is read POSITIONALLY, so a library built before a
+    // field was added to it writes fewer fields than the bindings read.
+    // The first patch absorbs the mismatch, then the sequence read is
+    // misaligned and the NEXT patch's type lands on garbage —
+    // surfacing as `RuntimeException: invalid enum value, something is
+    // very wrong!!` from `FfiConverterTypePatchType.read`, in a handful
+    // of multi-patch tests while simpler ones still pass. If you see
+    // that, rebuild the native library before debugging anything else.
     val workspaceTarget = file("${project.rootDir}/../target/release").absolutePath
     systemProperty("jna.library.path", workspaceTarget)
     // JNA also reads `java.library.path` for its fallback search.

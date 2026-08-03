@@ -2222,6 +2222,143 @@ fn non_scrollable_container_does_not_emit_clip_to() {
 }
 
 // -----------------------------------------------------------------
+// clip_to is enforced in HIT-TESTING, not just paint (pixel/hit
+// parity, constraint #5). Paint pushes the scrollable ancestor's
+// `clip_to` (vello_painter::draw_item / push_outer_clip), so an item
+// scrolled or transformed past that clip is invisible — and must
+// therefore be unhittable, or a click on empty space would activate a
+// control the user cannot see.
+// -----------------------------------------------------------------
+
+/// Minimal actionable `LayoutItem`, with an optional viewport-space
+/// `clip_to` and a transform, registered so `hit()` considers it.
+fn actionable_clip_item(
+    id: &str,
+    rect: Rect,
+    clip_to: Option<Rect>,
+    transform: Affine2,
+) -> LayoutItem {
+    LayoutItem {
+        node_id: id.to_string(),
+        kind: ItemKind::Container,
+        rect,
+        action: Some("tap".to_string()),
+        action_payload: None,
+        hover_action: None,
+        hover_payload: None,
+        background: None,
+        hover: HoverStyle::default(),
+        border: crate::style::Border::default(),
+        scrollable: None,
+        font_weight: 400,
+        clip_to,
+        subtree_root: None,
+        background_gradient: None,
+        state_variants: crate::style::StateVariants::default(),
+        opacity: 1.0,
+        transform,
+    }
+}
+
+fn single_actionable_pass(item: LayoutItem) -> LayoutPass {
+    let mut by_node_id = std::collections::HashMap::new();
+    by_node_id.insert(item.node_id.clone(), 0usize);
+    LayoutPass {
+        items: vec![item],
+        content_size: (0.0, 0.0),
+        by_node_id,
+        actionable_ids: vec![0],
+        focusable_ids: vec![0],
+        scrollable_ids: vec![],
+        hoverable_ids: vec![0],
+        a11y: std::collections::HashMap::new(),
+    }
+}
+
+#[test]
+fn hit_misses_in_clipped_away_region_hits_in_visible_region() {
+    // An actionable spanning y∈[30,90], clipped to y<50 by its
+    // scrollable ancestor: y∈[30,50) is painted (visible), y∈[50,90) is
+    // cropped away (invisible).
+    let rect = Rect {
+        x: 0.0,
+        y: 30.0,
+        w: 100.0,
+        h: 60.0,
+    };
+    let clip = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 50.0,
+    };
+    let pass = single_actionable_pass(actionable_clip_item(
+        "btn",
+        rect,
+        Some(clip),
+        Affine2::IDENTITY,
+    ));
+    assert_eq!(
+        pass.hit(50.0, 40.0).map(|it| it.node_id.as_str()),
+        Some("btn"),
+        "a click in the VISIBLE (unclipped) part of the item hits it",
+    );
+    assert!(
+        pass.hit(50.0, 70.0).is_none(),
+        "a click in the CLIPPED-AWAY (painted-nothing) part must miss — it is \
+         inside the rect but outside the clip the painter cropped to",
+    );
+    // Every hit lane shares hit_contains, so hover/focus/scroll agree.
+    assert!(pass.hit_hoverable(50.0, 70.0).is_none());
+    assert!(pass.hit_focusable(50.0, 70.0).is_none());
+    // Sanity: without the clip that exact point is a plain rect hit —
+    // proving the clip, not the rect, is what rejects it.
+    let unclipped =
+        single_actionable_pass(actionable_clip_item("btn", rect, None, Affine2::IDENTITY));
+    assert_eq!(
+        unclipped.hit(50.0, 70.0).map(|it| it.node_id.as_str()),
+        Some("btn"),
+        "with no clip the same point falls inside the rect and hits",
+    );
+}
+
+#[test]
+fn transform_pushing_item_wholly_outside_its_clip_is_unhittable() {
+    // Native rect sits inside the clip, but a +200px downward transform
+    // paints the whole item below the clip's bottom edge (y<50) — the
+    // painter shows nothing, so NO viewport point may hit it.
+    let rect = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 40.0,
+    };
+    let clip = Rect {
+        x: 0.0,
+        y: 0.0,
+        w: 100.0,
+        h: 50.0,
+    };
+    let pass = single_actionable_pass(actionable_clip_item(
+        "btn",
+        rect,
+        Some(clip),
+        Affine2::translate(0.0, 200.0),
+    ));
+    // Where the transformed pixels would land (y≈220): outside the clip.
+    assert!(
+        pass.hit(50.0, 220.0).is_none(),
+        "the transformed item paints at y≈220, outside the clip — nothing there to hit",
+    );
+    // Where the untransformed rect used to be (y≈20): inside the clip,
+    // but the transform-inverse maps it out of the rect — nothing painted.
+    assert!(
+        pass.hit(50.0, 20.0).is_none(),
+        "the item vacated its original slot (translated away) — no hit there either",
+    );
+}
+
+// -----------------------------------------------------------------
 // .onHover applicator
 // -----------------------------------------------------------------
 
@@ -2353,4 +2490,305 @@ fn resolve_hover_payload_strips_author_supplied_hovered_flag() {
         payload.as_object().unwrap().get("hovered").is_none(),
         "the author's hovered: literal must be stripped",
     );
+}
+
+// ---------------------------------------------------------------
+// Focus traversal exclusion (exit-animating subtrees leave the Tab
+// order the moment their exit begins)
+// ---------------------------------------------------------------
+
+#[test]
+fn focus_walk_skips_excluded_ids() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    for id in ["b1", "b2", "b3"] {
+        tree.apply(&create_patch(id, "Button", &[("action", json!("@actions.x"))]));
+        tree.apply(&insert_patch("col", id));
+    }
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+    // No-op predicate matches the plain walk exactly.
+    assert_eq!(pass.focus_next(None), Some("b1".into()));
+    assert_eq!(pass.focus_next_excluding(None, &|_| false), Some("b1".into()));
+    // Excluded ids are skipped, continuing to the next candidate…
+    assert_eq!(pass.focus_next_excluding(None, &|id| id == "b1"), Some("b2".into()));
+    assert_eq!(
+        pass.focus_next_excluding(Some("b1"), &|id| id == "b2"),
+        Some("b3".into())
+    );
+    // …including across the wrap.
+    assert_eq!(
+        pass.focus_next_excluding(Some("b3"), &|id| id == "b1"),
+        Some("b2".into())
+    );
+    assert_eq!(
+        pass.focus_prev_excluding(Some("b3"), &|id| id == "b2"),
+        Some("b1".into())
+    );
+    assert_eq!(
+        pass.focus_prev_excluding(Some("b1"), &|id| id == "b3"),
+        Some("b2".into())
+    );
+    // Every focusable excluded: None, never an infinite walk.
+    assert_eq!(pass.focus_next_excluding(Some("b1"), &|_| true), None);
+    assert_eq!(pass.focus_prev_excluding(None, &|_| true), None);
+}
+
+// ---------------------------------------------------------------
+// Effective-opacity gate must open for variant-decorated keys
+// ---------------------------------------------------------------
+
+#[test]
+fn decorated_opacity_key_opens_the_paint_gate() {
+    // A node styled ONLY by a breakpoint-decorated opacity key: the
+    // effective-opacity pass must still run (an exact-key gate left
+    // such a node painting fully opaque while `effective_opacity`
+    // itself resolves the decorated key fine).
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "col",
+        "Column",
+        &[("opacity@md.0", json!(0.5))],
+    ));
+    tree.apply(&insert_patch("root", "col"));
+    add_text(&mut tree, "col", "t", "faded");
+
+    let mut text = TextEngine::new();
+    // 800px viewport ≥ the 768px `md` threshold → the variant is active.
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let col = find_item(&pass, "col");
+    let t = find_item(&pass, "t");
+    assert!((col.opacity - 0.5).abs() < 1e-6, "decorated key must gate in: {}", col.opacity);
+    assert!((t.opacity - 0.5).abs() < 1e-6, "children inherit the decorated value");
+}
+
+// -----------------------------------------------------------------
+// Per-item transforms: static translateX/translateY/scale/rotate props
+// compose into `LayoutItem::transform`, and every hit path reads the
+// transformed geometry (constraint #5: pixels and hit targets agree).
+// -----------------------------------------------------------------
+
+#[test]
+fn static_translate_props_move_the_hit_target() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch(
+        "btn",
+        "Button",
+        &[
+            ("action", json!("@actions.go")),
+            ("width.0", json!(100.0)),
+            ("height.0", json!(40.0)),
+            ("translateX.0", json!(200.0)),
+            ("translateY.0", json!(50.0)),
+        ],
+    ));
+    tree.apply(&insert_patch("col", "btn"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    assert!(!btn.transform.is_identity(), "static transform props light up");
+    // Layout rect is untouched (transforms are paint/hit-only)...
+    assert!(btn.rect.x < 10.0, "Taffy geometry unmoved: {:?}", btn.rect);
+    // ...but the hit target follows the pixels: the untransformed
+    // position misses, the translated one hits.
+    let (cx, cy) = (btn.rect.x + 50.0, btn.rect.y + 20.0);
+    assert!(pass.hit(cx, cy).is_none(), "old position must not hit");
+    let hit = pass.hit(cx + 200.0, cy + 50.0).expect("translated position hits");
+    assert_eq!(hit.node_id, "btn");
+    // Visual rect is the translated AABB.
+    let vr = btn.visual_rect();
+    assert!((vr.x - (btn.rect.x + 200.0)).abs() < 0.5);
+    assert!((vr.y - (btn.rect.y + 50.0)).abs() < 0.5);
+}
+
+#[test]
+fn scale_transforms_hit_about_the_box_center() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch(
+        "btn",
+        "Button",
+        &[
+            ("action", json!("@actions.go")),
+            ("width.0", json!(100.0)),
+            ("height.0", json!(100.0)),
+            ("scale.0", json!(0.5)),
+        ],
+    ));
+    tree.apply(&insert_patch("col", "btn"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    let (cx, cy) = (btn.rect.x + 50.0, btn.rect.y + 50.0);
+    // Center is the transform origin — always inside.
+    assert!(pass.hit(cx, cy).is_some(), "center still hits at 0.5×");
+    // A point 40px from center was inside the unscaled box but is
+    // outside the half-size box (which extends only 25px from center).
+    assert!(pass.hit(cx + 40.0, cy).is_none(), "outside the scaled box");
+    assert!(pass.hit(cx + 20.0, cy).is_some(), "inside the scaled box");
+    // Visual rect shrinks about the center.
+    let vr = btn.visual_rect();
+    assert!((vr.w - 50.0).abs() < 0.5 && (vr.h - 50.0).abs() < 0.5);
+    assert!((vr.x - (btn.rect.x + 25.0)).abs() < 0.5);
+}
+
+#[test]
+fn rotate_transforms_hit_and_degenerate_scale_is_unhittable() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    // A wide flat button rotated 90°: its long axis becomes vertical.
+    tree.apply(&create_patch(
+        "rot",
+        "Button",
+        &[
+            ("action", json!("@actions.rot")),
+            ("width.0", json!(200.0)),
+            ("height.0", json!(20.0)),
+            ("rotate.0", json!(90.0)),
+        ],
+    ));
+    tree.apply(&insert_patch("col", "rot"));
+    tree.apply(&create_patch(
+        "gone",
+        "Button",
+        &[
+            ("action", json!("@actions.gone")),
+            ("width.0", json!(100.0)),
+            ("height.0", json!(100.0)),
+            ("scale.0", json!(0.0)),
+        ],
+    ));
+    tree.apply(&insert_patch("col", "gone"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let rot = find_item(&pass, "rot");
+    let (cx, cy) = (rot.rect.x + 100.0, rot.rect.y + 10.0);
+    // 90° about center: a point 80px right of center (inside the
+    // unrotated long axis) now misses; 80px BELOW center hits.
+    assert!(pass.hit(cx + 80.0, cy).is_none(), "unrotated axis misses");
+    let hit = pass.hit(cx, cy + 80.0).expect("rotated axis hits");
+    assert_eq!(hit.node_id, "rot");
+    // Rotated visual AABB swaps the axes (200×20 → 20×200).
+    let vr = rot.visual_rect();
+    assert!((vr.w - 20.0).abs() < 0.5 && (vr.h - 200.0).abs() < 0.5);
+    // Degenerate scale(0): nothing hittable anywhere on the item.
+    let gone = find_item(&pass, "gone");
+    let (gx, gy) = (gone.rect.x + 50.0, gone.rect.y + 50.0);
+    assert!(!gone.hit_contains(gx, gy), "scale(0) is unhittable");
+}
+
+#[test]
+fn nested_transforms_compose_down_the_tree() {
+    let mut tree = Tree::new();
+    // Parent translated +100 x; child rotated 90° about its own center.
+    tree.apply(&create_patch(
+        "wrap",
+        "Column",
+        &[("translateX.0", json!(100.0))],
+    ));
+    tree.apply(&insert_patch("root", "wrap"));
+    tree.apply(&create_patch(
+        "btn",
+        "Button",
+        &[
+            ("action", json!("@actions.n")),
+            ("width.0", json!(200.0)),
+            ("height.0", json!(20.0)),
+            ("rotate.0", json!(90.0)),
+        ],
+    ));
+    tree.apply(&insert_patch("wrap", "btn"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    // The child's rotation happens about its own (untranslated layout)
+    // center, then the parent's translate carries it +100 x.
+    let (cx, cy) = (btn.rect.x + 100.0, btn.rect.y + 10.0);
+    assert!(pass.hit(cx + 100.0, cy + 80.0).is_some(), "translated+rotated point hits");
+    assert!(pass.hit(cx, cy + 80.0).is_none(), "un-translated rotated point misses");
+    assert!(pass.hit(cx + 100.0 + 80.0, cy).is_none(), "un-rotated translated point misses");
+    // Container (wrap) itself carries a plain translate.
+    let wrap = find_item(&pass, "wrap");
+    let wr = wrap.visual_rect();
+    assert!((wr.x - (wrap.rect.x + 100.0)).abs() < 0.5);
+}
+
+#[test]
+fn transform_free_tree_keeps_identity_and_plain_hits() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch(
+        "btn",
+        "Button",
+        &[("action", json!("@actions.go")), ("width.0", json!(100.0)), ("height.0", json!(40.0))],
+    ));
+    tree.apply(&insert_patch("col", "btn"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    assert!(btn.transform.is_identity());
+    assert_eq!(btn.visual_rect(), btn.rect);
+    assert!(pass.hit(btn.rect.x + 1.0, btn.rect.y + 1.0).is_some());
+}
+
+#[test]
+fn rotate_accepts_deg_suffixed_strings() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch(
+        "r",
+        "Container",
+        &[("width.0", json!(100.0)), ("height.0", json!(20.0)), ("rotate.0", json!("90deg"))],
+    ));
+    tree.apply(&insert_patch("col", "r"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let r = find_item(&pass, "r");
+    let vr = r.visual_rect();
+    assert!((vr.w - 20.0).abs() < 0.5 && (vr.h - 100.0).abs() < 0.5, "\"90deg\" parses: {vr:?}");
+}
+
+#[test]
+fn affine2_inverse_round_trips_and_conjugation_matches_recompute() {
+    let m = Affine2::translate(30.0, -12.0)
+        .mul(&Affine2::translate(50.0, 40.0))
+        .mul(&Affine2::scale(1.5))
+        .mul(&Affine2::rotate_deg(37.0))
+        .mul(&Affine2::translate(-50.0, -40.0));
+    let inv = m.inverse().expect("invertible");
+    let (x, y) = m.apply(12.0, 34.0);
+    let (bx, by) = inv.apply(x, y);
+    assert!((bx - 12.0).abs() < 1e-3 && (by - 34.0).abs() < 1e-3);
+    // Scroll fast path: conjugating by the shift equals recomputing
+    // the transform against shifted rect centers.
+    let shifted = Affine2::translate(0.0, -25.0)
+        .mul(&Affine2::translate(50.0, 15.0))
+        .mul(&Affine2::scale(1.5))
+        .mul(&Affine2::rotate_deg(37.0))
+        .mul(&Affine2::translate(-50.0, -15.0));
+    let local = Affine2::translate(50.0, 40.0)
+        .mul(&Affine2::scale(1.5))
+        .mul(&Affine2::rotate_deg(37.0))
+        .mul(&Affine2::translate(-50.0, -40.0));
+    let conj = local.conjugate_translate(0.0, -25.0);
+    let want = Affine2::translate(50.0, 15.0)
+        .mul(&Affine2::scale(1.5))
+        .mul(&Affine2::rotate_deg(37.0))
+        .mul(&Affine2::translate(-50.0, -15.0));
+    let _ = shifted;
+    for (a, b) in conj.0.iter().zip(want.0.iter()) {
+        assert!((a - b).abs() < 1e-3, "conjugation mismatch: {conj:?} vs {want:?}");
+    }
 }

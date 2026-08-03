@@ -17,6 +17,14 @@ Vello is the eventual GPU rasteriser of choice but is still pinned to wgpu 28;
 when it catches up to wgpu 29 it slots in behind the existing `Painter` trait
 without touching the rest of the crate.
 
+> **Animation.** This renderer has full parity with the DOM renderer across the
+> `__anim.*` channel (transitions, enter/exit, FLIP layout, presets, states,
+> shared elements, scrub/settle, completion events, `animate:` transactions).
+> The authoritative capability matrix — what plays and the recorded narrowings
+> (uniform scale, `shimmer` snap, transform-only shared elements, single-cursor
+> scrub, env-gated reduced motion) — lives in the module docs of
+> [`src/anim.rs`](src/anim.rs).
+
 ## What works today
 
 - Window opens on macOS / Linux / Windows (winit).

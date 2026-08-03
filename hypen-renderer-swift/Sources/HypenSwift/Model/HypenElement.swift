@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import SwiftUI
 
 /// Represents a single element in the Hypen render tree.
 ///
@@ -16,7 +17,10 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     public let elementType: String
     public var props: [String: Any] {
         willSet { objectWillChange.send() }
-        didSet { cachedApplicatorResult = nil }
+        didSet {
+            cachedApplicatorResult = nil
+            cachedAnimSpecs = nil
+        }
     }
     public var children: [String] {
         willSet { objectWillChange.send() }
@@ -30,6 +34,64 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     /// to SwiftUI accessibility modifiers in `applyHypenSemantics`.
     public var semantics: HypenSemantics? {
         willSet { objectWillChange.send() }
+    }
+
+    // MARK: - Animation state (owned by `HypenAnimator`)
+
+    /// Displacement from the element's base pose, driven by an enter or an
+    /// exit playback. `nil` = base pose. The view layer applies it as
+    /// opacity/offset/scale; the animator flips it and lets the implicit
+    /// `.animation(animPoseAnimation, value: animPose)` glide it.
+    public var animPose: HypenAnimPose? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// The animation the next `animPose` change should ride.
+    public var animPoseAnimation: Animation? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// The animation whitelisted prop changes on this node should glide on,
+    /// resolved per batch through the precedence chain (structural >
+    /// transaction > node `.transition` > snap). `nil` snaps.
+    public var animTransitionAnimation: Animation? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// This node sits inside a subtree playing its exit: engine-side dead,
+    /// so it is excluded from hit-testing, event dispatch, focus and
+    /// accessibility for the rest of its life. Invalidates the memoized
+    /// applicator result because the event closures it holds must be
+    /// rebuilt against the suppressed dispatcher.
+    public var isAnimationExcluded: Bool = false {
+        willSet { objectWillChange.send() }
+        didSet {
+            if oldValue != isAnimationExcluded { cachedApplicatorResult = nil }
+        }
+    }
+
+    /// A finite `.animate` preset has run to completion on this node. A
+    /// cached Router `Attach` resumes loops but must never replay a finite
+    /// preset, so the view gate consults this instead of restarting on
+    /// every `onAppear`.
+    public var animateFiniteExhausted: Bool = false
+
+    /// Bumped whenever the `.animate` channel changes, so the view-local
+    /// playback restarts (a changed spec restarts; a removed channel stops).
+    public var animateGeneration: Int = 0 {
+        willSet { objectWillChange.send() }
+    }
+
+    private var cachedAnimSpecs: NodeAnimSpecs?
+
+    /// The node's parsed `__anim.*` channels, memoized until `props`
+    /// change. Parsing is defensive: a malformed channel degrades to `nil`
+    /// (snap) and never poisons its siblings.
+    public var animSpecs: NodeAnimSpecs {
+        if let cached = cachedAnimSpecs { return cached }
+        let parsed = HypenAnim.parseSpecs(props)
+        cachedAnimSpecs = parsed
+        return parsed
     }
 
     /// Applicator pipeline output memoized by `ApplicatorRegistry`.

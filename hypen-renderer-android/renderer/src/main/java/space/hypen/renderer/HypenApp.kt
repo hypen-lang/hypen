@@ -10,6 +10,11 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import space.hypen.renderer.anim.AnimationCoordinator
+import space.hypen.renderer.anim.ClearFocusOnExit
+import space.hypen.renderer.anim.SettingsMotionPreference
+import space.hypen.renderer.anim.rememberHypenAnimation
 import space.hypen.renderer.components.LocalColumnScope
 import space.hypen.renderer.components.LocalParentAllowsHorizontalExpansion
 import space.hypen.renderer.components.LocalRowScope
@@ -48,8 +53,17 @@ fun HypenApp(
     loadingContent: @Composable () -> Unit = { DefaultLoadingContent() },
     errorContent: @Composable (String) -> Unit = { DefaultErrorContent(it) },
 ) {
+    // Live reduced-motion preference: Android's "Remove animations" switch
+    // (ANIMATOR_DURATION_SCALE == 0), observed so a mid-session toggle takes
+    // effect without a reconnect.
+    val context = LocalContext.current
+    val motion = remember(context) { SettingsMotionPreference(context) }
+    DisposableEffect(motion) {
+        onDispose { motion.dispose() }
+    }
+
     // Use url as key to recreate engine when URL changes
-    val renderer = remember(url) { ComposeRenderer() }
+    val renderer = remember(url, motion) { ComposeRenderer(animation = AnimationCoordinator(motion)) }
     val remoteEngine = remember(url) { RemoteEngine(url, config) }
 
     HypenLoggers.app.debug("HypenApp composing: renderer=%s, engine=%s", System.identityHashCode(renderer), System.identityHashCode(remoteEngine))
@@ -272,6 +286,15 @@ internal fun HypenElement(
     // Re-applied on every recomposition, so a SET_SEMANTICS reactive
     // re-emit lands here too.
     finalModifier = finalModifier.applyHypenSemantics(element.semantics)
+
+    // Animation channels (`__anim.*`). The playback layer sits OUTSIDE the
+    // base chain so a graphicsLayer pose transforms the whole element — and
+    // with it the hit target, the focus target and the accessibility node
+    // (protocol invariant 5). An exiting subtree's exclusion modifiers land
+    // here too, outermost, so nothing beneath them can be reached.
+    val animation = rememberHypenAnimation(element, renderer.getAnimationCoordinator())
+    ClearFocusOnExit(animation.exiting)
+    finalModifier = animation.modifier.then(finalModifier)
 
     // Render the component
     handler.Render(

@@ -114,11 +114,40 @@ impl Tree {
         self.nodes.values()
     }
 
+    /// Write a prop directly, bypassing the patch stream. Used by the
+    /// animation runtime ([`crate::anim::DesktopAnimator`]) to write
+    /// per-tick interpolated values into the REAL props — the same
+    /// entries layout, paint, and hit-testing read (design constraint
+    /// #5: never a paint-only presentation layer).
+    pub(crate) fn set_prop_raw(&mut self, id: &str, name: &str, value: Value) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.props.insert(name.to_string(), value);
+        }
+    }
+
+    /// Remove a prop directly (animator settle restoring an
+    /// originally-absent prop). See [`Tree::set_prop_raw`].
+    pub(crate) fn remove_prop_raw(&mut self, id: &str, name: &str) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.props.remove(name);
+        }
+    }
+
     /// Apply a single patch.
     ///
     /// Patches that reference unknown nodes are logged and skipped rather
     /// than panicking — the renderer should be forgiving of out-of-order
     /// streams from buggy hosts during development.
+    ///
+    /// NOTE on animation: this is the RAW structural application. The
+    /// window routes every batch through
+    /// [`crate::anim::DesktopAnimator::ingest`], which honors the
+    /// `Remove { transition: true }` deferred-exit flag and the
+    /// `BatchAnimation` prelude BEFORE patches reach this method —
+    /// a flagged Remove that defers is withheld from the tree until its
+    /// exit settles, and re-applied here at finalize. Calling `apply`
+    /// directly (tests, headless tools) therefore snaps, which is the
+    /// protocol's sanctioned degradation.
     pub fn apply(&mut self, patch: &Patch) {
         match patch {
             Patch::Create {
@@ -241,9 +270,10 @@ impl Tree {
                 self.clear_detached(id);
             }
             // Batch-scoped animation prelude: batch metadata, not a node
-            // op — nothing to record in the tree. The desktop renderer
-            // doesn't animate batch stamps yet, so it snaps (the
-            // protocol's sanctioned degradation for unaware renderers).
+            // op — nothing to record in the tree. The animator consumes
+            // it at batch head in `DesktopAnimator::ingest` (transaction-
+            // scoped interpolation, Option D); if one reaches this raw
+            // path (direct `apply` callers) it is structurally inert.
             Patch::BatchAnimation { .. } => {}
         }
     }

@@ -72,22 +72,39 @@ struct HypenElementContentView: View {
             // Engine-derived accessibility semantics wrap the whole rendered
             // element (label/traits/state → VoiceOver). Re-applied on every
             // re-render, so a `setSemantics` reactive re-emit lands here too.
+            //
+            // The `__anim.*` layer wraps that in turn: the `.animate`
+            // preset playback sits inside so it decorates the rendered
+            // element, and the pose/glide/exclusion state sits outside so
+            // an exiting subtree's accessibility exclusion outranks the
+            // element's own semantics block.
             renderVisibleElement(element)
                 .applyHypenSemantics(element.semantics)
+                .hypenAnimatePreset(element, animator: renderer.animator)
+                .hypenAnimationState(element)
         }
     }
 
     @ViewBuilder
     private func renderVisibleElement(_ element: HypenElement) -> some View {
+        // Event-dispatch plane of the exiting-subtree exclusion: the
+        // engine-side ids under an exit are already dead, so every action
+        // this element could raise is a ghost. Swapping the dispatcher at
+        // context construction is the single chokepoint — component
+        // handlers and applicators both capture it from here.
+        let dispatcher: ActionDispatcher = element.isAnimationExcluded
+            ? HypenSuppressedActionDispatcher.shared
+            : actionDispatcher
+
         let context = ComponentContext(
             element: element,
             renderer: renderer,
-            actionDispatcher: actionDispatcher
+            actionDispatcher: dispatcher
         )
 
         let applicatorContext = ApplicatorContext(
             element: element,
-            actionDispatcher: actionDispatcher
+            actionDispatcher: dispatcher
         )
 
         // Build modifier and variants from applicators

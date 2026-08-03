@@ -60,6 +60,18 @@ object PatchType {
      * the node lost all derivable semantics.
      */
     const val SET_SEMANTICS = "setSemantics"
+
+    /**
+     * Transaction prelude for the animation protocol: a batch-wide
+     * animation spec that applies to every whitelisted prop the batch
+     * writes. Carries the spec in [Patch.spec].
+     *
+     * Honored by renderers at batch index 0 ONLY (protocol invariant 3,
+     * "first-patch-only preludes") — a prelude anywhere else, or inside a
+     * replayed initialTree, is not a stamp. See
+     * `hypen-renderer-android/ANIMATION.md`.
+     */
+    const val BATCH_ANIMATION = "batchAnimation"
 }
 
 /**
@@ -87,7 +99,27 @@ data class Patch(
      * on `create` for nodes with derivable a11y and on every
      * `setSemantics`; null otherwise.
      */
-    val semantics: JsonElement? = null
+    val semantics: JsonElement? = null,
+    /**
+     * Set on a `remove` patch whose subtree root carried an `__anim.exit`
+     * spec: the renderer owns the corpse and may defer teardown to play
+     * the exit (protocol invariant 2). Only the flagged root carries it;
+     * descendants arrive as plain removes.
+     *
+     * Declared non-null with a `false` default on purpose: the Rust wire
+     * format skips the field when false (`serde` skip-if-false,
+     * `reconcile/patch.rs`), and kotlinx's default `encodeDefaults = false`
+     * reproduces exactly that — `false` is omitted, `true` is emitted — so
+     * [HypenServer]'s `Json.encodeToJsonElement(patch)` relay stays
+     * byte-identical to the TS host for every non-animated remove.
+     */
+    val transition: Boolean = false,
+    /**
+     * Batch-animation spec carried by a [PatchType.BATCH_ANIMATION]
+     * prelude (`{duration, curve, delay, props}`). Null on every other
+     * patch type, so it is omitted from the relayed JSON.
+     */
+    val spec: JsonElement? = null
 )
 
 /**

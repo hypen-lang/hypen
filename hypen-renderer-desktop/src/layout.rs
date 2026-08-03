@@ -75,6 +75,144 @@ impl Rect {
     }
 }
 
+/// 2D affine transform in the painter's physical-pixel space, stored as
+/// the six coefficients `[a, b, c, d, e, f]` mapping
+/// `(x, y) → (a·x + c·y + e, b·x + d·y + f)` — the same layout kurbo's
+/// `Affine` uses, so the painter converts losslessly.
+///
+/// This is the paint-AND-hit-test transform for a [`LayoutItem`]: the
+/// node's own `translateX` / `translateY` / `scale` / `rotate` props
+/// composed with every ancestor's (nested transforms compose down the
+/// tree, CSS-style). The one composition is consumed by the Vello
+/// painter (pixels), the `hit_*` paths (pointer targets), the AccessKit
+/// bounds, and the caret/pointer→local mapping — the project's
+/// non-negotiable rule: pixels never move without hit targets moving
+/// identically.
+///
+/// Composition per node follows the DOM renderer's canonical
+/// `TRANSFORM_ORDER` (`translateX, translateY, scale, rotate` — CSS
+/// individual-function semantics: the translation is applied OUTSIDE
+/// the scale/rotate, so a translated node travels the authored distance
+/// regardless of its scale). The transform origin is the CENTER of the
+/// node's layout box, matching the canvas painter's default
+/// (`transformOriginX/Y` default 0.5). Reconciliation note: the canvas
+/// painter folds the translation INSIDE its scale/rotate (ctx op order
+/// `translate(c) · S · R · translate(-c + t)`), so under a combined
+/// scale+slide the canvas offset is scaled (24px × 0.95 = 22.8px) where
+/// DOM/desktop travel the full 24px — desktop follows the DOM/CSS
+/// composition, the reference the animation protocol was designed
+/// against.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Affine2(pub [f32; 6]);
+
+impl Affine2 {
+    pub const IDENTITY: Affine2 = Affine2([1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+
+    pub fn is_identity(&self) -> bool {
+        self == &Self::IDENTITY
+    }
+
+    pub fn translate(tx: f32, ty: f32) -> Self {
+        Affine2([1.0, 0.0, 0.0, 1.0, tx, ty])
+    }
+
+    pub fn scale(s: f32) -> Self {
+        Affine2([s, 0.0, 0.0, s, 0.0, 0.0])
+    }
+
+    /// Rotation by `deg` degrees (the prop vocabulary's unit — canvas
+    /// `parseFloat(props.rotate)` treats the number as degrees and the
+    /// DOM spin keyframes run 0deg → 360deg).
+    pub fn rotate_deg(deg: f32) -> Self {
+        let r = deg.to_radians();
+        let (sin, cos) = (r.sin(), r.cos());
+        Affine2([cos, sin, -sin, cos, 0.0, 0.0])
+    }
+
+    /// Compose: `self.then_apply_after(other)` — the returned transform
+    /// applies `other` FIRST, then `self` (standard matrix product
+    /// `self × other`).
+    pub fn mul(&self, other: &Affine2) -> Affine2 {
+        let [a1, b1, c1, d1, e1, f1] = self.0;
+        let [a2, b2, c2, d2, e2, f2] = other.0;
+        Affine2([
+            a1 * a2 + c1 * b2,
+            b1 * a2 + d1 * b2,
+            a1 * c2 + c1 * d2,
+            b1 * c2 + d1 * d2,
+            a1 * e2 + c1 * f2 + e1,
+            b1 * e2 + d1 * f2 + f1,
+        ])
+    }
+
+    pub fn apply(&self, x: f32, y: f32) -> (f32, f32) {
+        let [a, b, c, d, e, f] = self.0;
+        (a * x + c * y + e, b * x + d * y + f)
+    }
+
+    /// Inverse, or `None` for a degenerate transform (`scale(0)`
+    /// collapses the item to a point — nothing is hittable, matching
+    /// how a zero-determinant CSS transform renders nothing targetable).
+    pub fn inverse(&self) -> Option<Affine2> {
+        let [a, b, c, d, e, f] = self.0;
+        let det = a * d - b * c;
+        if det.abs() < 1e-6 {
+            return None;
+        }
+        let inv_det = 1.0 / det;
+        Some(Affine2([
+            d * inv_det,
+            -b * inv_det,
+            -c * inv_det,
+            a * inv_det,
+            (c * f - d * e) * inv_det,
+            (b * e - a * f) * inv_det,
+        ]))
+    }
+
+    /// Conjugate by a uniform translation: `T(dx,dy) · self · T(-dx,-dy)`.
+    /// This is the exact update for the scroll fast path — when every
+    /// item rect shifts by `(dx, dy)` without a re-emit, each cumulative
+    /// transform (whose origin terms embed the emit-time rect centers)
+    /// shifts by the same conjugation (`∏ T(d)·Lᵢ·T(-d) = T(d)·(∏Lᵢ)·T(-d)`).
+    pub fn conjugate_translate(&self, dx: f32, dy: f32) -> Affine2 {
+        Affine2::translate(dx, dy)
+            .mul(self)
+            .mul(&Affine2::translate(-dx, -dy))
+    }
+
+    /// Axis-aligned bounding box of `rect` under this transform — the
+    /// item's VISUAL rect (AccessKit bounds, damage regions, paint
+    /// culling all read this).
+    pub fn aabb_of(&self, rect: Rect) -> Rect {
+        if self.is_identity() {
+            return rect;
+        }
+        let corners = [
+            self.apply(rect.x, rect.y),
+            self.apply(rect.x + rect.w, rect.y),
+            self.apply(rect.x, rect.y + rect.h),
+            self.apply(rect.x + rect.w, rect.y + rect.h),
+        ];
+        let mut min_x = f32::INFINITY;
+        let mut min_y = f32::INFINITY;
+        let mut max_x = f32::NEG_INFINITY;
+        let mut max_y = f32::NEG_INFINITY;
+        for (x, y) in corners {
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+        Rect {
+            x: min_x,
+            y: min_y,
+            w: (max_x - min_x).max(0.0),
+            h: (max_y - min_y).max(0.0),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ItemKind {
     Text {
@@ -283,6 +421,30 @@ pub struct LayoutItem {
     /// `InteractionState` without the renderer tree. `is_empty()` in the
     /// common no-variant case → painter fast path.
     pub state_variants: crate::style::StateVariants,
+    /// Effective opacity `0..=1` for this item's paint: the node's own
+    /// `opacity` prop multiplied down from its ancestors (CSS-style
+    /// group inheritance, approximated per item). `1.0` — fully opaque
+    /// — in the common case; computed in a post-pass after emission,
+    /// gated on any tree node actually carrying an opacity prop, so the
+    /// no-opacity tree pays one boolean scan. The Vello painter wraps
+    /// the item's draws in an alpha layer when this is `< 1`. This is
+    /// what makes `fade` enters/exits, `pulse`, and `.transition` on
+    /// `opacity` honest on desktop.
+    pub opacity: f32,
+    /// Cumulative paint/hit transform for this item: the node's own
+    /// `translateX` / `translateY` / `scale` / `rotate` props composed
+    /// with every ancestor's (see [`Affine2`] for composition order and
+    /// origin). Identity — the overwhelmingly common case — costs
+    /// nothing: the post-pass that fills this is gated on any tree node
+    /// actually carrying a transform prop, and every consumer takes an
+    /// `is_identity()` fast path. Filled by the transform post-pass
+    /// after emission; consumed by the Vello painter, every `hit_*`
+    /// path, the AccessKit bounds, and pointer→local mapping — one
+    /// resolution shared by pixels and hit targets (constraint #5).
+    /// Static transform props and animator-driven ones ride this same
+    /// field: the animator writes the interpolated values into the REAL
+    /// tree props, and this post-pass reads them back like any other.
+    pub transform: Affine2,
 }
 
 pub struct LayoutPass {
@@ -702,6 +864,25 @@ impl TaffyState {
                 make_stack_overlay_absolute(&mut s);
             }
             let _ = self.tree.set_style(child, s);
+        }
+    }
+
+    /// Re-style a single node from its current renderer-tree props.
+    /// Called by the window when the animation runtime writes a
+    /// layout-affecting prop directly into the tree (no patch flows, so
+    /// `apply_patch`'s SetProp restyle path never sees it): the retained
+    /// Taffy style must follow the interpolated value every tick so
+    /// geometry — and hit-testing — track the animation.
+    pub fn restyle_node(&mut self, id: &str, tree: &Tree, scale: f32, viewport_w: f32) {
+        let (Some(&tid), Some(node)) = (self.node_map.get(id), tree.get(id)) else {
+            return;
+        };
+        let active_states = self.interaction.active_states_for(id, node);
+        let style = node_style_with(node, scale, viewport_w, &active_states);
+        let _ = self.tree.set_style(tid, style);
+        if node.element_type == "Text" {
+            let ctx = node_context(node, scale, viewport_w);
+            let _ = self.tree.set_node_context(tid, Some(ctx));
         }
     }
 
@@ -1195,6 +1376,35 @@ impl LayoutPass {
             }
         }
 
+        // Effective opacity post-pass: propagate `opacity` props down the
+        // renderer tree multiplicatively (CSS group-opacity semantics,
+        // approximated per item — see `LayoutItem::opacity`). Gated on
+        // any node actually carrying the prop so the common tree pays a
+        // single boolean scan and no per-item ancestor walks. The scan
+        // is a prefix match, not exact-key lookups, so variant-decorated
+        // keys (`opacity@md.0`, `opacity:hover.0`) open the gate too —
+        // `effective_opacity` resolves them breakpoint-aware via
+        // `prop_f32_at`, and an exact-key gate would leave a node styled
+        // ONLY by a decorated key painting at full opacity.
+        let has_opacity = tree
+            .nodes()
+            .any(|n| n.props.keys().any(|k| k.starts_with("opacity")));
+        if has_opacity {
+            let mut memo: HashMap<String, f32> = HashMap::new();
+            for it in items.iter_mut() {
+                it.opacity = effective_opacity(tree, &it.node_id, viewport_w_px, &mut memo);
+            }
+        }
+
+        // Transform post-pass: compose `translateX` / `translateY` /
+        // `scale` / `rotate` (static props AND animator-driven writes —
+        // one resolution path) into a cumulative per-item affine. Runs
+        // AFTER the page-scroll shift so transform origins (rect
+        // centers) live in the same coordinate space as the emitted
+        // rects. Same gating shape as the opacity pass: a tree with no
+        // transform props pays one boolean scan.
+        compute_item_transforms(tree, &mut items, viewport_w_px, scale);
+
         let mut by_node_id = HashMap::with_capacity(items.len());
         let mut actionable_ids = Vec::new();
         let mut focusable_ids = Vec::new();
@@ -1244,14 +1454,41 @@ impl LayoutPass {
         self.by_node_id.get(id).map(|&i| &self.items[i])
     }
 
+    /// Recompute the per-item transform post-pass against the CURRENT
+    /// tree props, in place. Used by the window after the animator
+    /// writes FLIP invert props into the tree mid-frame (after this
+    /// pass's items were already emitted): the freshly-started invert
+    /// must reach paint AND hit-testing this same frame, without paying
+    /// a full Taffy recompute (transforms are paint/hit-only — Taffy
+    /// geometry is untouched by them).
+    pub fn refresh_transforms(&mut self, tree: &Tree, viewport_w: f32, scale: f32) {
+        compute_item_transforms(tree, &mut self.items, viewport_w, scale);
+    }
+
     pub fn hit(&self, x: f32, y: f32) -> Option<&LayoutItem> {
+        self.hit_excluding(x, y, &|_| false)
+    }
+
+    /// [`LayoutPass::hit`] with an exclusion predicate. Items whose node
+    /// id the predicate rejects are skipped and the search continues to
+    /// items beneath them. Used by the window to exclude exit-animating
+    /// subtrees — engine-side those ids are already dead, so the corpse
+    /// must not swallow clicks while its exit plays.
+    pub fn hit_excluding(
+        &self,
+        x: f32,
+        y: f32,
+        excluded: &dyn Fn(&str) -> bool,
+    ) -> Option<&LayoutItem> {
         // Walk actionables in reverse paint order — topmost wins.
-        // O(n_actionables) instead of O(n_items).
+        // O(n_actionables) instead of O(n_items). `hit_contains` is the
+        // transform-aware containment (constraint #5: a transformed
+        // pixel's hit target is at the transformed position).
         self.actionable_ids
             .iter()
             .rev()
             .map(|&i| &self.items[i])
-            .find(|it| it.rect.contains(x, y))
+            .find(|it| it.hit_contains(x, y) && !excluded(&it.node_id))
     }
 
     /// Topmost element with an `onHover` applicator under the cursor.
@@ -1259,11 +1496,22 @@ impl LayoutPass {
     /// aren't gated to actionable types (a plain Row / Container can
     /// opt in via `.onHover(...)`).
     pub fn hit_hoverable(&self, x: f32, y: f32) -> Option<&LayoutItem> {
+        self.hit_hoverable_excluding(x, y, &|_| false)
+    }
+
+    /// [`LayoutPass::hit_hoverable`] with an exclusion predicate (see
+    /// [`LayoutPass::hit_excluding`]).
+    pub fn hit_hoverable_excluding(
+        &self,
+        x: f32,
+        y: f32,
+        excluded: &dyn Fn(&str) -> bool,
+    ) -> Option<&LayoutItem> {
         self.hoverable_ids
             .iter()
             .rev()
             .map(|&i| &self.items[i])
-            .find(|it| it.rect.contains(x, y))
+            .find(|it| it.hit_contains(x, y) && !excluded(&it.node_id))
     }
 
     /// Topmost focusable item under the cursor — actionables OR text
@@ -1271,21 +1519,43 @@ impl LayoutPass {
     /// an Input focuses it for typing; clicking a Button focuses *and*
     /// the matching mouse-up dispatches its action).
     pub fn hit_focusable(&self, x: f32, y: f32) -> Option<&LayoutItem> {
+        self.hit_focusable_excluding(x, y, &|_| false)
+    }
+
+    /// [`LayoutPass::hit_focusable`] with an exclusion predicate (see
+    /// [`LayoutPass::hit_excluding`]).
+    pub fn hit_focusable_excluding(
+        &self,
+        x: f32,
+        y: f32,
+        excluded: &dyn Fn(&str) -> bool,
+    ) -> Option<&LayoutItem> {
         self.focusable_ids
             .iter()
             .rev()
             .map(|&i| &self.items[i])
-            .find(|it| it.rect.contains(x, y))
+            .find(|it| it.hit_contains(x, y) && !excluded(&it.node_id))
     }
 
     /// Topmost scrollable Container under the cursor. Used by the
     /// wheel handler to route scroll to the innermost scrollable.
     pub fn hit_scrollable(&self, x: f32, y: f32) -> Option<&LayoutItem> {
+        self.hit_scrollable_excluding(x, y, &|_| false)
+    }
+
+    /// [`LayoutPass::hit_scrollable`] with an exclusion predicate (see
+    /// [`LayoutPass::hit_excluding`]).
+    pub fn hit_scrollable_excluding(
+        &self,
+        x: f32,
+        y: f32,
+        excluded: &dyn Fn(&str) -> bool,
+    ) -> Option<&LayoutItem> {
         self.scrollable_ids
             .iter()
             .rev()
             .map(|&i| &self.items[i])
-            .find(|it| it.rect.contains(x, y))
+            .find(|it| it.hit_contains(x, y) && !excluded(&it.node_id))
     }
 
     /// All actionable items in document (paint) order.
@@ -1302,28 +1572,58 @@ impl LayoutPass {
     /// order. If `current` is `None` or unknown, returns the first
     /// focusable. If `current` is the last, wraps to the first.
     pub fn focus_next(&self, current: Option<&str>) -> Option<String> {
-        if self.focusable_ids.is_empty() {
+        self.focus_next_excluding(current, &|_| false)
+    }
+
+    /// [`LayoutPass::focus_next`] with an exclusion predicate (see
+    /// [`LayoutPass::hit_excluding`]): excluded ids — exit-animating
+    /// subtrees, whose nodes still paint but are engine-side dead —
+    /// are skipped, continuing (with wrap) to the next non-excluded
+    /// focusable. `None` when every focusable is excluded.
+    pub fn focus_next_excluding(
+        &self,
+        current: Option<&str>,
+        excluded: &dyn Fn(&str) -> bool,
+    ) -> Option<String> {
+        let n = self.focusable_ids.len();
+        if n == 0 {
             return None;
         }
-        let idx = current
+        let start = current
             .and_then(|c| {
                 self.focusable_ids
                     .iter()
                     .position(|&i| self.items[i].node_id == c)
             })
-            .map(|i| (i + 1) % self.focusable_ids.len())
+            .map(|i| (i + 1) % n)
             .unwrap_or(0);
-        Some(self.items[self.focusable_ids[idx]].node_id.clone())
+        for step in 0..n {
+            let id = &self.items[self.focusable_ids[(start + step) % n]].node_id;
+            if !excluded(id) {
+                return Some(id.clone());
+            }
+        }
+        None
     }
 
     /// Node id of the focusable that precedes `current` in document
     /// order. Wraps to the last when `current` is the first.
     pub fn focus_prev(&self, current: Option<&str>) -> Option<String> {
+        self.focus_prev_excluding(current, &|_| false)
+    }
+
+    /// [`LayoutPass::focus_prev`] with an exclusion predicate (see
+    /// [`LayoutPass::focus_next_excluding`]).
+    pub fn focus_prev_excluding(
+        &self,
+        current: Option<&str>,
+        excluded: &dyn Fn(&str) -> bool,
+    ) -> Option<String> {
         let n = self.focusable_ids.len();
         if n == 0 {
             return None;
         }
-        let idx = current
+        let start = current
             .and_then(|c| {
                 self.focusable_ids
                     .iter()
@@ -1331,7 +1631,13 @@ impl LayoutPass {
             })
             .map(|i| (i + n - 1) % n)
             .unwrap_or(n - 1);
-        Some(self.items[self.focusable_ids[idx]].node_id.clone())
+        for step in 0..n {
+            let id = &self.items[self.focusable_ids[(start + n - step) % n]].node_id;
+            if !excluded(id) {
+                return Some(id.clone());
+            }
+        }
+        None
     }
 }
 
@@ -1340,6 +1646,66 @@ impl LayoutItem {
     /// (Buttons, Cards, Links) plus text-input elements.
     pub fn is_focusable(&self) -> bool {
         self.action.is_some() || matches!(self.kind, ItemKind::Input { .. })
+    }
+
+    /// Transform-aware pointer containment: the viewport-space point is
+    /// inverse-transformed into item space and tested against the
+    /// layout rect — correct under scale + rotate + translate, and under
+    /// nested transforms (the cumulative transform composes them all).
+    /// A degenerate transform (`scale(0)`) makes the item unhittable.
+    /// EVERY pointer hit path (`hit_*`) routes through this so pixels
+    /// and hit targets can never disagree.
+    pub fn hit_contains(&self, x: f32, y: f32) -> bool {
+        // An ancestor scrollable's overflow clip (`clip_to`) crops this
+        // item in VIEWPORT space, OUTSIDE its own transform — CSS
+        // overflow semantics, and exactly what paint does: the clip is
+        // pushed on the main scene under `Affine::IDENTITY`, before the
+        // item's affine (see `vello_painter::draw_item` / the
+        // `push_outer_clip` sites). A point outside that clip is never
+        // painted, so it must never hit either — otherwise an item
+        // scrolled/transformed past its scrollable ancestor's edge stays
+        // clickable through the (now empty) space it vacated. Test the
+        // RAW viewport point here, before the transform-inverse below,
+        // because `clip_to` lives in the same space as the raw point (it
+        // rides `rect` through every page-scroll shift).
+        if let Some(clip) = self.clip_to {
+            if !clip.contains(x, y) {
+                return false;
+            }
+        }
+        if self.transform.is_identity() {
+            return self.rect.contains(x, y);
+        }
+        match self.transform.inverse() {
+            Some(inv) => {
+                let (lx, ly) = inv.apply(x, y);
+                self.rect.contains(lx, ly)
+            }
+            None => false,
+        }
+    }
+
+    /// Map a viewport-space point into this item's LOCAL (layout-rect)
+    /// space — the space `rect`, text metrics, and caret math live in.
+    /// Identity transform returns the point unchanged; a degenerate
+    /// transform (unhittable anyway) also falls back to the unchanged
+    /// point so caret math degrades gracefully.
+    pub fn to_local(&self, x: f32, y: f32) -> (f32, f32) {
+        if self.transform.is_identity() {
+            return (x, y);
+        }
+        match self.transform.inverse() {
+            Some(inv) => inv.apply(x, y),
+            None => (x, y),
+        }
+    }
+
+    /// The item's VISUAL rect: the axis-aligned bounding box of the
+    /// layout rect under the cumulative transform. What AccessKit
+    /// publishes, damage regions cover, and paint culling tests —
+    /// `rect` itself stays the untransformed Taffy geometry.
+    pub fn visual_rect(&self) -> Rect {
+        self.transform.aabb_of(self.rect)
     }
 }
 
@@ -2607,6 +2973,8 @@ fn emit_items(
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         state_variants: item_state_variants.clone(),
+                        opacity: 1.0,
+                        transform: Affine2::IDENTITY,
                     });
                 }
                 "Text" => {
@@ -2656,6 +3024,8 @@ fn emit_items(
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         state_variants: item_state_variants.clone(),
+                        opacity: 1.0,
+                        transform: Affine2::IDENTITY,
                     });
                 }
                 et if IMAGE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
@@ -2705,6 +3075,8 @@ fn emit_items(
                             subtree_root: subtree_root.map(str::to_string),
                             background_gradient: background_gradient.clone(),
                             state_variants: item_state_variants.clone(),
+                            opacity: 1.0,
+                            transform: Affine2::IDENTITY,
                         });
                     } else {
                         let src =
@@ -2731,6 +3103,8 @@ fn emit_items(
                             subtree_root: subtree_root.map(str::to_string),
                             background_gradient: background_gradient.clone(),
                             state_variants: item_state_variants.clone(),
+                            opacity: 1.0,
+                            transform: Affine2::IDENTITY,
                         });
                     }
                 }
@@ -2754,6 +3128,8 @@ fn emit_items(
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         state_variants: item_state_variants.clone(),
+                        opacity: 1.0,
+                        transform: Affine2::IDENTITY,
                     });
                 }
                 _ => {
@@ -2784,6 +3160,8 @@ fn emit_items(
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         state_variants: item_state_variants,
+                        opacity: 1.0,
+                        transform: Affine2::IDENTITY,
                     });
                 }
             }
@@ -2854,6 +3232,155 @@ fn emit_items(
         if let Some(meta) = out[idx].scrollable.as_mut() {
             meta.content_h = content_h;
         }
+    }
+}
+
+/// Effective opacity for `id`: its own `opacity` prop (clamped to
+/// `0..=1`, default fully opaque) multiplied by every ancestor's, up to
+/// the synthetic root. Memoized per layout pass — the memo makes the
+/// whole-items pass O(nodes) instead of O(items × depth).
+fn effective_opacity(
+    tree: &Tree,
+    id: &str,
+    viewport_w: f32,
+    memo: &mut HashMap<String, f32>,
+) -> f32 {
+    if let Some(v) = memo.get(id) {
+        return *v;
+    }
+    let own = tree
+        .get(id)
+        .and_then(|n| crate::style::prop_f32_at(n, "opacity", viewport_w))
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(1.0);
+    let inherited = match tree.parent_of(id) {
+        Some(parent) if parent != ROOT_ID => {
+            let parent = parent.to_string();
+            effective_opacity(tree, &parent, viewport_w, memo)
+        }
+        _ => 1.0,
+    };
+    let eff = own * inherited;
+    memo.insert(id.to_string(), eff);
+    eff
+}
+
+/// The transform prop vocabulary the desktop resolves at paint/hit
+/// time: the four whitelisted animatable transform props. Matches what
+/// the canvas painter reads per node (its `scaleX`/`scaleY`/`skew*`
+/// extras are outside the animation whitelist and stay desktop-ignored,
+/// a recorded narrowing).
+fn tree_has_transform_props(tree: &Tree) -> bool {
+    tree.nodes().any(|n| {
+        n.props.keys().any(|k| {
+            k.starts_with("translateX")
+                || k.starts_with("translateY")
+                || k.starts_with("scale")
+                || k.starts_with("rotate")
+        })
+    })
+}
+
+/// Read a transform prop as f32. `prop_f32_at` handles numbers and
+/// px-suffixed strings (breakpoint-variant-aware); the fallback strips
+/// a `deg` suffix so `rotate: "45deg"` — the DOM-facing string form —
+/// resolves too.
+fn transform_f32(node: &crate::tree::Node, name: &str, viewport_w: f32) -> Option<f32> {
+    if let Some(v) = prop_f32_at(node, name, viewport_w) {
+        return Some(v);
+    }
+    let s = crate::style::prop_str_at(node, name, viewport_w)?;
+    let trimmed = s.trim();
+    let stripped = trimmed.strip_suffix("deg").unwrap_or(trimmed);
+    stripped.trim().parse::<f32>().ok().filter(|v| v.is_finite())
+}
+
+/// One node's LOCAL transform about the center of its layout box.
+/// `translateX`/`translateY` are logical px (multiplied by the HiDPI
+/// `scale` into the physical space rects live in); `scale` is a factor;
+/// `rotate` is degrees. Composition order and origin: see [`Affine2`].
+fn node_local_transform(
+    node: &crate::tree::Node,
+    rect: Rect,
+    viewport_w: f32,
+    scale: f32,
+) -> Affine2 {
+    let tx = transform_f32(node, "translateX", viewport_w).unwrap_or(0.0) * scale;
+    let ty = transform_f32(node, "translateY", viewport_w).unwrap_or(0.0) * scale;
+    let s = transform_f32(node, "scale", viewport_w).unwrap_or(1.0);
+    let rot = transform_f32(node, "rotate", viewport_w).unwrap_or(0.0);
+    if tx == 0.0 && ty == 0.0 && s == 1.0 && rot == 0.0 {
+        return Affine2::IDENTITY;
+    }
+    let cx = rect.x + rect.w * 0.5;
+    let cy = rect.y + rect.h * 0.5;
+    Affine2::translate(tx, ty)
+        .mul(&Affine2::translate(cx, cy))
+        .mul(&Affine2::scale(s))
+        .mul(&Affine2::rotate_deg(rot))
+        .mul(&Affine2::translate(-cx, -cy))
+}
+
+/// Cumulative transform for `id`: every ancestor's local transform (in
+/// root→leaf order) composed with the node's own — nested transforms
+/// compose down the tree, CSS-style. Memoized per pass so the whole
+/// items walk is O(nodes). Nodes without an emitted item (the synthetic
+/// root; never a live ancestor of an emitted item, since culling skips
+/// whole subtrees) contribute identity.
+fn cumulative_transform(
+    tree: &Tree,
+    id: &str,
+    viewport_w: f32,
+    scale: f32,
+    rects: &HashMap<String, Rect>,
+    memo: &mut HashMap<String, Affine2>,
+) -> Affine2 {
+    if let Some(m) = memo.get(id) {
+        return *m;
+    }
+    let parent_m = match tree.parent_of(id) {
+        Some(parent) if parent != ROOT_ID => {
+            let parent = parent.to_string();
+            cumulative_transform(tree, &parent, viewport_w, scale, rects, memo)
+        }
+        _ => Affine2::IDENTITY,
+    };
+    let local = match (tree.get(id), rects.get(id)) {
+        (Some(node), Some(rect)) => node_local_transform(node, *rect, viewport_w, scale),
+        _ => Affine2::IDENTITY,
+    };
+    let m = parent_m.mul(&local);
+    memo.insert(id.to_string(), m);
+    m
+}
+
+/// Transform post-pass over the emitted items (see the call site in
+/// `compute_inner_state` and [`LayoutPass::refresh_transforms`]).
+/// Gated on any node carrying a transform prop; when the gate is
+/// closed every item is reset to identity (the refresh path can run
+/// after a settle removed the last transform prop).
+pub(crate) fn compute_item_transforms(
+    tree: &Tree,
+    items: &mut [LayoutItem],
+    viewport_w: f32,
+    scale: f32,
+) {
+    if !tree_has_transform_props(tree) {
+        for it in items.iter_mut() {
+            it.transform = Affine2::IDENTITY;
+        }
+        return;
+    }
+    // Rect side-map for origin resolution — ancestors of an emitted
+    // item are always emitted themselves (culling skips whole
+    // subtrees), so every origin an item needs is present.
+    let rects: HashMap<String, Rect> = items
+        .iter()
+        .map(|it| (it.node_id.clone(), it.rect))
+        .collect();
+    let mut memo: HashMap<String, Affine2> = HashMap::new();
+    for it in items.iter_mut() {
+        it.transform = cumulative_transform(tree, &it.node_id, viewport_w, scale, &rects, &mut memo);
     }
 }
 

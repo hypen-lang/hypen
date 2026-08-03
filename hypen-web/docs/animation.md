@@ -205,7 +205,9 @@ A pose flip reaches renderers as ordinary `SetProp`/`RemoveProp` patches under t
 
 - **DOM** — pose flips glide via CSS transitions, exactly like hand-written `.transition` + prop changes.
 - **Canvas 2D** — the numeric ticker interpolates them; the `.transition` capability matrix applies unchanged (colors interpolate in RGBA, `cornerRadius` snaps, etc.).
-- **iOS / Android / Desktop** — poses switch instantly (snap). The UI is always in the correct pose on every platform; only the motion differs.
+- **Desktop (Vello)** — the tick interpolator glides pose flips per the `.transition` matrix above (numeric + color; `cornerRadius` interpolates; uniform scale).
+- **iOS (SwiftUI)** — pose flips glide through the same per-element implicit animation the `.transition` channel uses, so the engine-synthesized spec drives them for free.
+- **Android** — poses switch instantly (snap). The UI is always in the correct pose on every platform; only the motion differs.
 
 The engine also ships the active label as the reserved `__anim.states` prop (`{"label": "expanded"}`, or `null` in the fallback-to-base pose) — animation-aware renderers use it to time the settle and stamp `.onAnimationComplete` payloads; renderers that ignore it lose nothing.
 
@@ -253,7 +255,7 @@ A shared key present on only one side of a navigation is silent by design (step 
 - **Transform-only continuity.** The FLIP interpolates position and size. Corner radius and opacity do not interpolate, and there is no content crossfade — if the two nodes' content differs, the incoming content appears at the source geometry and travels. Pairs that mostly match visually (same image, similar radius) look seamless; wildly different pairs look like what they are: one element morphing in size.
 - **No overlay proxy.** The incoming element itself animates; the outgoing element is not kept visible or resurrected during the flight.
 - **Approximate under rotated/scaled bases.** The inverted transform is prepended to the node's own base transform and its transform-origin is pinned for the flight; that is exact for untransformed and translated nodes, approximate when the node's base transform rotates or scales it.
-- **DOM only.** The Canvas, iOS, Android, and desktop renderers ignore the props — a plain navigation (see the renderer table below). Under reduced motion nothing is measured and nothing plays, everywhere.
+- **DOM and desktop.** The native desktop (Vello) renderer also plays shared-element FLIPs, with narrowings: transform-only continuity, a single **uniform** scale factor (the DOM's independent `(sx, sy)` averages — exact when aspect is preserved), and a **global** reduced-motion skip (no `.motion(essential)` exemption). The Canvas, iOS, and Android renderers ignore the props — a plain navigation (see the renderer table below). Under reduced motion nothing is measured and nothing plays, everywhere.
 
 ## `.scrub()` / `.settle()` — Gesture and Scroll Bindings
 
@@ -334,7 +336,7 @@ Dragging works unchanged — direct manipulation is the user's own hand, not dec
 
 `.scrub` requires, on the same node: a `.states` block declaring **both** the `from:` and `to:` labels, and a `.settle(bind: @state.…)`. Any hard violation — unknown pose label, missing/invalid `over:`, missing `.settle` or its `bind:`, no `.states` block — warns **once**, naming the reason, and the node degrades to plain `.states` behavior; never an error. A `.settle` without a `.scrub` warns and is ignored; one `.scrub`/`.settle` per node (extras warn and drop).
 
-The pair lowers to four reserved props (`__anim.scrub`, `__anim.scrubSettle`, `__anim.scrubBind`, `__anim.scrubPoses` — the materialized endpoint values). **DOM only in v1**: the Canvas, iOS, Android, and desktop renderers ignore all four — the node still shows the correct pose whenever the bound state changes by other means; only the direct manipulation is missing.
+The pair lowers to four reserved props (`__anim.scrub`, `__anim.scrubSettle`, `__anim.scrubBind`, `__anim.scrubPoses` — the materialized endpoint values). **DOM and desktop in v1**: the native desktop (Vello) renderer also scrubs, via a renderer-resident scrubber driven off winit pointer/wheel events, with narrowings — winit's single OS cursor stands in for per-element pointer capture, multi-touch is moot (one cursor), and only numeric + color pose endpoints interpolate. The Canvas, iOS, and Android renderers ignore all four — the node still shows the correct pose whenever the bound state changes by other means; only the direct manipulation is missing.
 
 ## `.onAnimationComplete()` — Completion Events
 
@@ -407,7 +409,7 @@ export default app
 
 ### Per-renderer behavior
 
-The DOM renderer implements all five firing points; the Canvas renderer implements the first four with identical payloads (`sharedElement` never fires there — Canvas doesn't play shared-element FLIPs). Renderers that don't animate (iOS, Android, desktop today) never dispatch completions — nothing played. Treat completions as motion choreography, not as the only path to a correct end state: a machine like the one above still lands in a sensible pose everywhere, it just skips the timed hop on snapping renderers.
+The DOM renderer implements all five firing points; the native desktop (Vello) renderer likewise dispatches all five (`sharedElement` included). The Canvas and iOS renderers implement the first four with identical payloads (`sharedElement` never fires on either — neither plays shared-element FLIPs). Renderers that don't animate (Android today) never dispatch completions — nothing played. Treat completions as motion choreography, not as the only path to a correct end state: a machine like the one above still lands in a sensible pose everywhere, it just skips the timed hop on snapping renderers.
 
 ## `animate:` — Transaction-Scoped Dispatch Animation
 
@@ -461,7 +463,7 @@ Transaction glides fire no `.onAnimationComplete` — completions belong to node
 
 ### Renderer and host support
 
-Both web renderers honor the stamp: the DOM renderer via scoped CSS transitions, the Canvas renderer by using the spec as its tick-interpolation spec (its usual capability matrix applies — e.g. `cornerRadius` still snaps there). Renderers that don't animate ignore the stamp; the batch is wire-identical to an unstamped one otherwise.
+Both web renderers honor the stamp: the DOM renderer via scoped CSS transitions, the Canvas renderer by using the spec as its tick-interpolation spec (its usual capability matrix applies — e.g. `cornerRadius` still snaps there). The native desktop (Vello) renderer also honors it — it consumes the engine's `batchAnimation` patch directly (not via UniFFI) and applies the spec through its tick animator. Renderers that don't animate ignore the stamp; the batch is wire-identical to an unstamped one otherwise.
 
 `animate:` is **TypeScript-host-only** for now: it stamps on the browser engine and on Node/Bun remote servers. On Go and Kotlin hosts the dispatch works and handlers run normally — the reserved key that carries the stamp is stripped before handlers see the payload, so it never leaks into user code — but nothing stamps and the resulting flush snaps. (Go's state-sync path notifies synchronously per mutation and has no animation envelope; honest stamping there is tracked separately — see `hypen-golang/CHANGELOG.md`.) Mobile renderers behind UniFFI never receive the stamp at all.
 
@@ -565,9 +567,9 @@ Animation degrades gracefully by design: the animation channel rides along as re
 |----------|---------------|--------------------|-----------|------------|-----------|------------------|----------------------|------------------------|----------|
 | DOM (web) | Yes — CSS transitions | Yes — removal deferred until exit settles | Yes — FLIP | Yes — CSS keyframes | Yes — pose flips glide | Yes — cross-route FLIP | Yes — drag/scroll scrubbing + settle write | Yes — all five firing points | Full support |
 | Canvas 2D | Yes — numeric ticker (`cornerRadius` snaps) | Yes — removal deferred until exit settles | Snap (moves jump) | `pulse` / `spin` / `shake` (`shimmer` is static) | Yes — per the `.transition` matrix | Ignores the props (plain navigation) | Ignores the props (poses still flip via state) | Yes — four firing points (no `sharedElement`) | Near-full support — see the matrix below |
-| iOS (SwiftUI) | Snap | Snap (instant removal) | Snap | Static | Instant pose switch | Ignores the props (plain navigation) | Ignores the props | Never dispatches | Ignores animation props |
+| Desktop (Vello) | Yes — tick interpolator (transforms + hit-testing follow) | Yes — removal deferred until exit settles | Yes — FLIP (same-redraw removal-sibling shift snaps) | `pulse` / `spin` / `shake` (`shimmer` snaps) | Yes — pose flips glide | Yes — cross-route FLIP (transform-only, uniform scale, reduced-motion skip) | Yes — drag/scroll scrubbing + settle write (single OS cursor) | Yes — all five firing points | Full parity — see the desktop matrix below |
+| iOS (SwiftUI) | Yes — per-element implicit animation (pinned curves) | Yes — removal deferred until exit settles | Snap (moves jump) | `pulse` / `spin` / `shimmer` / `shake` (one-sided shake) | Yes — pose flips glide | Ignores the props (plain navigation) | Ignores the props | Yes — four firing points (no `sharedElement`) | Daily-driver channels supported — see the iOS matrix below |
 | Android (Compose) | Snap | Snap (instant removal) | Snap | Static | Instant pose switch | Ignores the props (plain navigation) | Ignores the props | Never dispatches | Ignores animation props |
-| Desktop (Vello) | Snap | Snap (instant removal) | Snap | Static | Instant pose switch | Ignores the props (plain navigation) | Ignores the props | Never dispatches | Ignores animation props |
 
 "Snap" means the UI is identical, minus the motion — nothing errors, nothing leaks. `.states` needs no renderer support at all (pose flips are ordinary prop patches), which is why even snapping renderers always show the correct pose.
 
@@ -590,6 +592,34 @@ The Canvas renderer has no compositor, so it plays the animation channel with a 
 | `.scrub` / `.settle` | Gesture/scroll scrubbing | Silent no-op — all four `__anim.scrub*` props are ignored (no playback, no listeners, no engine traffic). The node still flips poses whenever the bound state changes by other means. |
 | Any | Reduced motion | Everything snaps: transitions land their targets, enters are skipped, `.animate` never starts, exits remove immediately. The preference is live — toggling it mid-session snaps all in-flight motion. Nodes flagged `.motion(essential)` are exempt per node (see the Reduced Motion section). |
 | Any | Unknown or malformed spec | Silent no-op. |
+
+### Desktop (Vello) capability matrix
+
+The native desktop renderer has **full animation parity** with the DOM renderer, implemented as a tick-based twin of the Canvas animator (`hypen-renderer-desktop/src/anim.rs` — the capability matrix there is the source of truth). The window's demand-driven redraw loop is the clock (the engine never ticks); every interpolated value — transforms included — is written into the real node props that Taffy layout and hit-testing read, so pointer, wheel, AccessKit, and caret targeting follow the animated geometry. It plays `.transition`, `.enter`/`.exit`, `.layout` FLIP, `.animate`, `.states`, `.sharedElement`, `.scrub`/`.settle`, `animate:` transaction stamps, and dispatches all five `.onAnimationComplete` firing points. The recorded v1 narrowings:
+
+| Channel | Desktop behavior |
+|---------|------------------|
+| `.transition` | Numeric + color props interpolate (`cornerRadius` interpolates too, unlike Canvas). Transform props (`translateX`/`translateY`/`scale`/`rotate`) feed a per-item affine consumed by paint AND hit-testing. |
+| `.scale` / transforms | **Uniform scale only** — the affine has a single scale factor, so the DOM's independent `(sx, sy)` collapses to their average (exact when aspect is preserved). Composition follows the DOM/CSS order (translation outside scale/rotate), not the Canvas order. |
+| `.animate` `shimmer` | **Snaps** — a DOM gradient-overlay effect with no honest desktop equivalent (the one remaining no-op; `pulse`/`spin`/`shake` play). |
+| `.layout` removal-sibling FLIP | Plays, **except** when an exit finalizes in the same redraw as a non-empty patch batch (the cached pre-teardown layout is already gone) — those siblings snap. The idle-frame path FLIPs correctly. |
+| `.sharedElement` | Transform-only continuity (no corner-radius/opacity interpolation, no content crossfade, no overlay proxy), **uniform scale**, and a **global reduced-motion skip** (no `.motion(essential)` exemption — cross-route continuity is decorative). |
+| `.scrub` / `.settle` | winit's single OS cursor stands in for per-element pointer capture; **multi-touch is moot** (one cursor); only **numeric + color pose endpoints** interpolate (a non-interpolable pose pair snaps). |
+| Reduced motion | Gated by the `HYPEN_REDUCED_MOTION` env var + a programmatic setter (no reliable cross-platform OS query exists), not `matchMedia`. The per-node `.motion(essential)` opt-out works as elsewhere. |
+
+### iOS (SwiftUI) capability matrix
+
+The iOS renderer plays the daily-driver channels natively: SwiftUI's own animation system is the interpolator (the engine never ticks), driven by a per-element implicit `.animation(_:value:)` whose animation the renderer resolves per patch batch through the normative precedence chain (structural > transaction > node `.transition` > snap). Curves are the pinned CSS beziers, and `spring` is the fixed overshoot bezier `cubic-bezier(0.34, 1.56, 0.64, 1)` — **not** SwiftUI's physics spring. The recorded v1 narrowings:
+
+| Channel | iOS behavior |
+|---------|--------------|
+| `.transition` | Whitelisted prop changes glide on the resolved animation. SwiftUI's implicit animation is view-scoped rather than property-scoped, so a batch that changes both an in-scope and an out-of-scope prop on the same node animates both; a scoped spec still correctly ignores out-of-scope changes as a *trigger*. |
+| `.enter` / `.exit` | Played as `opacity` / `offset` / `scale` poses (`fade` / `slide` 24pt / `scale` 0.95), with the deferred-remove contract: the subtree stays alive and in layout, is excluded from hit-testing, event dispatch and accessibility immediately, and finalizes on the `duration + delay + 80ms` backbone. Focus/IME exclusion is a best-effort first-responder resign when the exiting subtree contains an input. |
+| `.layout` | Snap — moves jump. Not implemented in v1. |
+| `.animate` | `pulse` / `spin` / `shimmer` play with the normative timing; **`shake` is one-sided** (0 → 6pt) because SwiftUI's autoreversing repeat bounces between two endpoints only — same amplitude, duration and repeat count as the DOM's ±6/±4px oscillation. |
+| `.sharedElement`, `.scrub` / `.settle` | Ignored — plain navigation, no gesture scrubbing. Not implemented in v1. |
+| `.onAnimationComplete` | Four firing points (`enter`, `exit`, `states`, finite `<preset>`) with DOM payload parity. Settles are timer-derived rather than callback-derived, so an interrupted playback is superseded by cancelling its timer. |
+| Reduced motion | `accessibilityReduceMotion` (the SwiftUI environment in views, `UIAccessibility`/`NSWorkspace` at patch-apply time). Everything snaps and flagged removes finalize synchronously; the per-node `.motion(essential)` opt-out works as elsewhere. |
 
 ## Legacy: `.transition("...")` String Form (Deprecated)
 

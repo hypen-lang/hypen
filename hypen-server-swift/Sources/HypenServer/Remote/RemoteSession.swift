@@ -194,6 +194,32 @@ public protocol SessionHost: AnyObject, Sendable {
     func onSessionDestroyed(_ session: RemoteSession, client: ClientInfo)
 }
 
+// MARK: - Reserved dispatch payload keys
+
+/// The cross-boundary payload key TypeScript renderers use to carry an
+/// event applicator's `animate:` transaction-animation stamp (Option D)
+/// across `dispatchAction`. It is a renderer→host directive, never handler
+/// data: TS hosts lift it into a distinct Action field; the Swift host does
+/// not implement transaction stamping, so the key is stripped here —
+/// module handlers must never observe it either way.
+///
+/// Mirrors `reservedAnimateKey` (`hypen-golang/remote/session.go`) and
+/// `RESERVED_ANIMATE_KEY` (`hypen-kotlin/.../core/HypenServer.kt`).
+let reservedAnimateKey = "__hypenAnimate"
+
+/// Removes the reserved transaction-animation stamp from a decoded dispatch
+/// payload, if present. Non-dictionary payloads (including `nil`) pass
+/// through untouched, and so does a plain user-data `animate` key — only the
+/// reserved key is a directive.
+func stripReservedAnimateKey(_ payload: Any?) -> Any? {
+    guard var dict = payload as? [String: Any],
+          dict.keys.contains(reservedAnimateKey) else {
+        return payload
+    }
+    dict.removeValue(forKey: reservedAnimateKey)
+    return dict
+}
+
 // MARK: - RemoteSession
 
 /// One client's worth of server-side state. Transport-agnostic.
@@ -793,6 +819,11 @@ public final class RemoteSession: @unchecked Sendable {
     /// for client-side inspection; patches flow through the onPatches
     /// callback installed in buildEngineAndModuleInstance.
     private func handleDispatchAction(actionName: String, payload: Any?) {
+        // Strip the reserved transaction-animation stamp BEFORE either
+        // dispatch path — the typed ModuleInstance route and the legacy
+        // untyped shim both take their payload from here.
+        let sanitizedPayload = stripReservedAnimateKey(payload)
+
         lock.lock()
         let mi = moduleInstance
         lock.unlock()
@@ -805,11 +836,11 @@ public final class RemoteSession: @unchecked Sendable {
         // through ModuleInstance wins.
         if let shim = host.legacyActionHandler {
             let currentState = mi.state.snapshot()
-            if let newState = shim(actionName, payload, currentState) {
+            if let newState = shim(actionName, sanitizedPayload, currentState) {
                 mi.state.replace(newState)
             }
         } else {
-            mi.dispatchAction(actionName, payload: payload)
+            mi.dispatchAction(actionName, payload: sanitizedPayload)
         }
 
         // Send a stateUpdate message for client-side state inspection.

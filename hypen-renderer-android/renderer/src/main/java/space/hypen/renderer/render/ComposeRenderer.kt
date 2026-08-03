@@ -2,6 +2,11 @@ package space.hypen.renderer.render
 
 import androidx.compose.runtime.*
 import space.hypen.renderer.HypenLoggers
+import space.hypen.renderer.anim.ANIM_PROP_PREFIX
+import space.hypen.renderer.anim.AnimationCompletion
+import space.hypen.renderer.anim.AnimationCompletionSink
+import space.hypen.renderer.anim.AnimationCoordinator
+import space.hypen.renderer.anim.animationCompleteAction
 import space.hypen.renderer.applicators.ApplicatorContext
 import space.hypen.renderer.applicators.ApplicatorRegistry
 import space.hypen.renderer.applicators.createDefaultApplicatorRegistry
@@ -22,7 +27,23 @@ private val log = HypenLoggers.renderer
 class ComposeRenderer(
     private val componentRegistry: ComponentRegistry = createDefaultComponentRegistry(),
     private val applicatorRegistry: ApplicatorRegistry = createDefaultApplicatorRegistry(),
+    /**
+     * Owns every `__anim.*` decision (see [AnimationCoordinator]). Injectable
+     * so hosts can supply a live reduced-motion preference and tests can
+     * supply a deterministic scheduler.
+     */
+    private val animation: AnimationCoordinator = AnimationCoordinator(),
 ) : Renderer {
+    init {
+        // Naturally-settled playbacks dispatch the element's
+        // `.onAnimationComplete` action through the renderer's own action
+        // channel, ungated: an exit completion by definition fires from
+        // inside an exiting subtree.
+        animation.setCompletionSink(
+            AnimationCompletionSink { id, completion -> dispatchCompletion(id, completion) },
+        )
+    }
+
     // Lock for synchronizing access to elements and rootId across threads
     private val lock = Any()
 
@@ -38,6 +59,17 @@ class ComposeRenderer(
     // `remember`, `rememberScrollState`, focus, and animation state
     // across the detach → attach cycle.
     private val detachedIds = mutableSetOf<String>()
+
+    // Animation transaction prelude for the batch currently being applied
+    // (null when the batch carried no prelude). Guarded by [lock].
+    //
+    // Set from batch index 0 ONLY — protocol invariant 3,
+    // "first-patch-only preludes": a `batchAnimation` patch at any other
+    // index, or inside a replayed initialTree, is not a stamp. Each batch
+    // overwrites this (with null when unstamped), which is the protocol's
+    // "clear at flush" — the value must outlive `applyPatches` because the
+    // consumer is composition, which runs after this returns.
+    private var batchAnimationSpec: Map<String, Any?>? = null
 
     // Snapshot-backed so composables reading [getRootId] recompose when
     // the root changes; per-element updates flow through each element's
@@ -89,6 +121,18 @@ class ComposeRenderer(
         // Snapshot listeners while holding the lock so the list cannot be
         // modified between the copy and the iteration.
         val listenersSnapshot = synchronized(lock) {
+            // Protocol invariant 3, "first-patch-only preludes": the stamp is
+            // read from batch index 0 ONLY — a `batchAnimation` patch at any
+            // other index, or inside a replayed initialTree, is not a stamp,
+            // which is what stops concatenated batches from over-scoping.
+            // Compose has no ambient transaction, so the spec is held for the
+            // batch and consulted per whitelisted prop write, DOM/canvas
+            // style, then cleared at flush.
+            batchAnimationSpec = patches.firstOrNull()
+                ?.takeIf { it.type == PatchType.BATCH_ANIMATION }
+                ?.spec
+            animation.beginBatch(batchAnimationSpec)
+
             // First pass: apply all patches, collecting any inserts that fail
             // because parent/child doesn't exist yet (patch ordering issue from engine)
             val deferredInserts = mutableListOf<Patch>()
@@ -116,6 +160,10 @@ class ComposeRenderer(
                     applyPatch(patch, deferredNotifications)
                 }
             }
+
+            // Flush: queue the enters this batch earned and drop the
+            // transaction stamp (strictly batch-scoped).
+            animation.endBatch()
 
             stateListeners.toList()
         }
@@ -145,7 +193,20 @@ class ComposeRenderer(
             PatchType.DETACH -> onDetach(patch)
             PatchType.ATTACH -> onAttach(patch)
             PatchType.SET_SEMANTICS -> onSetSemantics(patch)
+            PatchType.BATCH_ANIMATION -> onBatchAnimation(patch)
         }
+    }
+
+    /**
+     * Animation transaction prelude — mutates no tree state.
+     *
+     * The stamp is picked up in [applyPatches] from batch index 0 only;
+     * this handler runs for every prelude in the batch, and a prelude at
+     * any other index is deliberately inert (protocol invariant 3, which
+     * is what stops concatenated batches from over-scoping).
+     */
+    private fun onBatchAnimation(patch: Patch) {
+        log.debug { "Batch animation prelude: spec=${patch.spec}" }
     }
 
     /**
@@ -205,6 +266,12 @@ class ComposeRenderer(
             rootIdState = id
         }
 
+        // Parse every `__anim.*` channel and register enter eligibility. A
+        // node created in this batch is the ONLY node that may enter-animate
+        // (a cached Router attach never does), and the first-ever batch is
+        // suppressed so initial render doesn't cascade.
+        animation.noteCreate(id, props)
+
         deferred.add { listeners -> listeners.forEach { it.onElementCreated(element) } }
     }
 
@@ -213,8 +280,12 @@ class ComposeRenderer(
         val name = patch.name ?: return
 
         val element = elements[id] ?: return
+        // Captured BEFORE the write: it is the glide's start value.
+        val previous = element.rawProps[name]
         element.setProp(name, patch.value)
         element.bumpPropsRevision()
+
+        noteAnimation(id, name, patch.value, previous)
 
         // Handle special props
         if (name == "0" || name == "text") {
@@ -225,14 +296,30 @@ class ComposeRenderer(
         log.debug { "Set prop: $id.$name = ${patch.value}" }
     }
 
+    /**
+     * Route one prop write to the animation coordinator: an `__anim.*` write
+     * re-parses that channel, anything else is a candidate for a glide
+     * (transaction stamp > node `.transition` > snap).
+     */
+    private fun noteAnimation(id: String, name: String, value: Any?, previous: Any?) {
+        if (name.startsWith(ANIM_PROP_PREFIX)) {
+            animation.noteAnimProp(id, name, value)
+        } else {
+            animation.noteSetProp(id, name, previous)
+        }
+    }
+
     private fun onRemoveProp(patch: Patch) {
         val id = patch.id ?: return
         val name = patch.name ?: return
 
         val element = elements[id] ?: return
+        val previous = element.rawProps[name]
         if (element.removeProp(name)) {
             element.bumpPropsRevision()
         }
+
+        noteAnimation(id, name, null, previous)
 
         if (name == "0" || name == "text") {
             element.textContent = null
@@ -297,11 +384,48 @@ class ComposeRenderer(
         onInsert(patch)
     }
 
+    /**
+     * The deferred-remove contract (protocol invariant 2, "renderers own
+     * corpses"): a `Remove{transition:true}` means the engine-side id is
+     * already dead — there is no ack round-trip. When the flagged root
+     * carries a usable `__anim.exit` spec the renderer keeps the subtree
+     * alive, excludes it from interaction immediately, plays the exit, and
+     * finalizes on natural settle OR the `duration + delay + 80ms` timeout
+     * backbone, whichever is first.
+     *
+     * Wire ordering is root-first: the flagged root arrives before its
+     * descendants' PLAIN removes, so a plain remove landing inside an
+     * already-exiting subtree defers to that root's finalize instead of
+     * tearing the subtree out from under the playback.
+     *
+     * A flagged root with no exit spec (or under reduced motion) falls
+     * through to the ordinary immediate teardown — the sanctioned snap.
+     */
     private fun onRemove(patch: Patch, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
         val id = patch.id ?: return
+        val element = elements[id] ?: return
 
+        if (patch.transition) {
+            val subtree = mutableSetOf(id)
+            collectSubtreeIds(element, subtree)
+            if (animation.beginExit(id, subtree) { finalizeDeferredRemove(id) }) {
+                log.debug { "REMOVE: exit deferred for $id (${subtree.size} ids held)" }
+                return
+            }
+            log.debug { "REMOVE: exit-flagged root $id has no usable exit spec — snapping" }
+        } else if (animation.deferToExitingAncestor(id) { finalizeDeferredRemove(id) }) {
+            log.debug { "REMOVE: $id defers to its exiting ancestor" }
+            return
+        }
+
+        evictSubtree(id, deferred)
+    }
+
+    /** Immediate teardown: the pre-animation behaviour, unchanged. */
+    private fun evictSubtree(id: String, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
         val element = elements.remove(id) ?: return
         detachedIds.remove(id)
+        animation.forget(id)
 
         // Remove from parent's children
         element.parentId?.let { parentId ->
@@ -319,10 +443,39 @@ class ComposeRenderer(
         deferred.add { listeners -> listeners.forEach { it.onElementRemoved(id) } }
     }
 
+    /**
+     * Teardown for a remove the animation layer deferred. Runs off the patch
+     * thread (natural settle or the timeout backbone), so it takes the lock
+     * itself and notifies listeners after releasing it.
+     */
+    private fun finalizeDeferredRemove(id: String) {
+        val notifications = mutableListOf<(List<RendererStateListener>) -> Unit>()
+        val listenersSnapshot =
+            synchronized(lock) {
+                if (elements[id] == null) return
+                evictSubtree(id, notifications)
+                stateListeners.toList()
+            }
+        for (notification in notifications) {
+            notification(listenersSnapshot)
+        }
+        _treeVersion.value++
+        listenersSnapshot.forEach { it.onTreeChanged() }
+    }
+
+    /** Every id at-or-under [element], captured before any tree mutation. */
+    private fun collectSubtreeIds(element: HypenElement, into: MutableSet<String>) {
+        for (childId in element.children.toList()) {
+            if (!into.add(childId)) continue
+            elements[childId]?.let { collectSubtreeIds(it, into) }
+        }
+    }
+
     private fun removeDescendants(element: HypenElement, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
         for (childId in element.children.toList()) {
             val child = elements.remove(childId) ?: continue
             detachedIds.remove(childId)
+            animation.forget(childId)
             deferred.add { listeners -> listeners.forEach { it.onElementRemoved(childId) } }
             removeDescendants(child, deferred)
         }
@@ -391,6 +544,7 @@ class ComposeRenderer(
             child.parentId = null
             rootIdState = id
             detachedIds.remove(id)
+            animation.noteAttach(id)
             log.debug { "Attached at root: $id" }
             return
         }
@@ -411,6 +565,7 @@ class ComposeRenderer(
         parent.addChild(id, patch.beforeId)
 
         detachedIds.remove(id)
+        animation.noteAttach(id)
         log.debug { "Attached: $id -> $parentId (before: ${patch.beforeId ?: "end"})" }
     }
 
@@ -430,8 +585,12 @@ class ComposeRenderer(
         synchronized(lock) {
             elements.clear()
             detachedIds.clear()
+            batchAnimationSpec = null
             rootIdState = null
         }
+        // Drops in-flight playbacks and their finalize timers without
+        // running them — the tree they would tear down is already gone.
+        animation.reset()
         _treeVersion.value++
     }
 
@@ -446,6 +605,34 @@ class ComposeRenderer(
      */
     fun getDetachedIds(): List<String> = synchronized(lock) {
         detachedIds.toList()
+    }
+
+    /**
+     * Animation spec stamped on the most recently applied batch, or null
+     * if that batch carried no [PatchType.BATCH_ANIMATION] prelude at
+     * index 0. Consumed by [animation] during the batch; kept observable
+     * for tests and diagnostics.
+     */
+    fun getBatchAnimationSpec(): Map<String, Any?>? = synchronized(lock) {
+        batchAnimationSpec
+    }
+
+    /** The animation state machine driving this tree's `__anim.*` channels. */
+    fun getAnimationCoordinator(): AnimationCoordinator = animation
+
+    /**
+     * Fire an element's `.onAnimationComplete` action for a NATURALLY settled
+     * playback. Payload is the applicator's own named args with the
+     * completion fields written last, so `animation`/`state` can never be
+     * shadowed.
+     */
+    private fun dispatchCompletion(id: String, completion: AnimationCompletion) {
+        val element = getElement(id) ?: return
+        val action = animationCompleteAction(element.props) ?: return
+        val payload = LinkedHashMap<String, Any?>(action.payload)
+        payload.putAll(completion.toPayload())
+        log.debug { "Animation complete on $id: ${completion.animation}" }
+        actionDispatcher?.dispatch(action.actionName, payload)
     }
 
     override fun dispatchAction(
@@ -481,11 +668,30 @@ class ComposeRenderer(
 
     /**
      * Create applicator context for an element.
+     *
+     * The dispatcher is wrapped in the exiting-subtree guard: an element
+     * inside a deferred (exiting) subtree is engine-side DEAD the moment the
+     * flagged Remove is emitted, so nothing under it may dispatch. Pointer
+     * gating alone is not enough — a handler can be invoked from focus, IME,
+     * or a timer — so this chokepoint checks at dispatch time.
      */
-    fun createApplicatorContext(element: HypenElement): ApplicatorContext =
-        ApplicatorContext(
+    fun createApplicatorContext(element: HypenElement): ApplicatorContext {
+        val dispatcher = actionDispatcher
+        return ApplicatorContext(
             element = element,
-            actionDispatcher = actionDispatcher,
+            actionDispatcher =
+                if (dispatcher == null) {
+                    null
+                } else {
+                    ActionDispatcher { action, payload ->
+                        if (animation.isInExitingSubtree(element.id)) {
+                            log.debug { "Dropping '$action' from exiting subtree ${element.id}" }
+                        } else {
+                            dispatcher.dispatch(action, payload)
+                        }
+                    }
+                },
         )
+    }
 
 }

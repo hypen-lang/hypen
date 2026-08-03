@@ -27,6 +27,21 @@ public final class HypenRenderer: ObservableObject {
     /// scroll position across the detach → attach cycle.
     private(set) public var detachedIds: Set<String> = []
 
+    /// Animation spec stamped on the patch batch currently being applied,
+    /// from a `batchAnimation` prelude at batch index 0 (a prelude
+    /// anywhere else is not a stamp). nil for unstamped batches.
+    ///
+    /// Consumed by `animator.transactionTiming`, which resolves it against
+    /// the precedence chain (structural > transaction > node `.transition`
+    /// > snap) for every node the batch touches. Kept here as the raw
+    /// wire object for hosts and diagnostics; cleared per batch.
+    private(set) public var currentBatchAnimation: [String: Any]?
+
+    /// The `__anim.*` runtime: enter/exit playbacks, the deferred-remove
+    /// contract, glide-animation resolution, and `.onAnimationComplete`
+    /// dispatch. See `hypen-renderer-swift/ANIMATION.md`.
+    public private(set) lazy var animator = HypenAnimator(renderer: self)
+
     @Published private(set) public var rootId: String?
 
     // Reactive state. `treeVersion` still counts patch batches for
@@ -87,9 +102,27 @@ public final class HypenRenderer: ObservableObject {
     public func applyPatches(_ patches: [Patch]) {
         log.debug("Applying \(patches.count) patches")
 
+        // Transaction-animation prelude: a stamp ONLY at batch index 0.
+        // Anywhere else (including inside an accumulated/replayed
+        // initialTree) it is not a stamp, which is what stops concatenated
+        // batches from over-scoping. Stays set for the duration of the
+        // batch so patch application can read it.
+        if let first = patches.first, first.type == .batchAnimation {
+            currentBatchAnimation = first.spec
+        } else {
+            currentBatchAnimation = nil
+        }
+        animator.beginBatch(patches)
+
         for patch in patches {
             applyPatch(patch)
         }
+
+        // Resolve everything that depends on the batch as a whole: the
+        // effective glide animation per touched node (transaction > node
+        // `.transition` > snap), the queued enters, and the `.states` /
+        // `.animate` re-arms.
+        animator.endBatch()
 
         treeVersion += 1
         log.debug("Tree version now: \(treeVersion), rootId: \(rootId ?? "nil")")
@@ -124,7 +157,16 @@ public final class HypenRenderer: ObservableObject {
             applyAttach(patch)
         case .setSemantics:
             applySetSemantics(patch)
+        case .batchAnimation:
+            applyBatchAnimation(patch)
         }
+    }
+
+    /// Transaction-animation prelude. Mutates no element — the spec is
+    /// consumed as a batch-level stamp in `applyPatches` (index 0 only),
+    /// so this only records that the prelude arrived.
+    private func applyBatchAnimation(_ patch: Patch) {
+        log.debug("BATCH_ANIMATION: \(patch.spec == nil ? "no spec" : "spec present")")
     }
 
     private func applyCreate(_ patch: Patch) {
@@ -147,6 +189,8 @@ public final class HypenRenderer: ObservableObject {
             rootId = id
             log.debug("Root element set: %@ (%@)", id, elementType)
         }
+
+        animator.noteCreate(element)
 
         listener?.onElementCreated(element)
         log.debug("Created element: %@ (%@)", id, elementType)
@@ -189,6 +233,7 @@ public final class HypenRenderer: ObservableObject {
         }
 
         element.setProp(name, value: patch.value)
+        animator.noteProps(changedOn: element)
         notifyHostAncestor(of: element)
         log.debug("Set prop: \(id).\(name)")
     }
@@ -205,6 +250,7 @@ public final class HypenRenderer: ObservableObject {
         }
 
         element.setProp(name, value: nil)
+        animator.noteProps(changedOn: element)
         notifyHostAncestor(of: element)
         log.debug("Removed prop: \(id).\(name)")
     }
@@ -324,15 +370,71 @@ public final class HypenRenderer: ObservableObject {
             return
         }
 
-        // Remove from parent
+        // Deferred-remove contract: a `transition: true` flag means this id
+        // roots a subtree whose node carried an exit animation, and the
+        // engine-side id is already dead (no ack round-trip — the renderer
+        // owns the corpse). The animator keeps the subtree alive, excludes
+        // it from interaction immediately, plays the exit, and finalizes on
+        // the `duration + delay + 80ms` backbone. It also swallows plain
+        // Removes for ids INSIDE an exiting subtree, which defer to the
+        // root's finalize rather than tearing children out from under a
+        // playing exit. See `hypen-renderer-swift/ANIMATION.md`,
+        // ".enter / .exit — the deferred-remove contract".
+        if animator.noteRemove(patch: patch, element: element) {
+            return
+        }
+
+        tearDownSubtree(id)
+    }
+
+    /// Unlink `id` from its parent and purge it and its descendants from
+    /// the element map. The synchronous teardown path shared by plain
+    /// removes and the animator's exit finalize.
+    func tearDownSubtree(_ id: String) {
+        guard let element = elements[id] else { return }
+
         if let parentId = element.parentId, let parent = elements[parentId] {
             parent.removeChild(id)
             bubbleControlFlowChange(from: parent)
         }
 
-        // Recursively remove children
         removeElementAndChildren(id)
         log.debug("Removed: \(id)")
+    }
+
+    /// Announce a structural change that did not come from a patch batch —
+    /// today only the animator's exit finalize, which tears a subtree down
+    /// on its own timer, outside `applyPatches`.
+    func notifyTreeChanged() {
+        treeVersion += 1
+        listener?.onTreeChanged()
+    }
+
+    /// Every id at-or-under `id`, including `id` itself.
+    func subtreeIds(of id: String) -> Set<String> {
+        var out: Set<String> = []
+        var stack = [id]
+        while let current = stack.popLast() {
+            guard out.insert(current).inserted else { continue }
+            guard let element = elements[current] else { continue }
+            stack.append(contentsOf: element.children)
+        }
+        return out
+    }
+
+    /// True when `id` sits at-or-under a Router-detached (cached) root.
+    /// Such nodes keep reconciling engine-side but are not on screen, so
+    /// animation completions from them dispatch nothing.
+    func isInDetachedSubtree(_ id: String) -> Bool {
+        guard !detachedIds.isEmpty else { return false }
+        var current: String? = id
+        var hops = 0
+        while let currentId = current, hops < 1024 {
+            if detachedIds.contains(currentId) { return true }
+            current = elements[currentId]?.parentId
+            hops += 1
+        }
+        return false
     }
 
     private func removeElementAndChildren(_ id: String) {
@@ -348,6 +450,7 @@ public final class HypenRenderer: ObservableObject {
         // Evict from the detached set in case the engine removed a
         // subtree while it was off-screen (e.g. Router LRU eviction).
         detachedIds.remove(id)
+        animator.noteElementRemoved(id)
         listener?.onElementRemoved(id: id)
 
         // Clear root if this was the root
@@ -497,6 +600,8 @@ public final class HypenRenderer: ObservableObject {
     public func clear() {
         elements.removeAll()
         detachedIds.removeAll()
+        currentBatchAnimation = nil
+        animator.reset()
         rootId = nil
         treeVersion += 1
         resetEpoch += 1

@@ -7,11 +7,15 @@ shared-element transitions (`.sharedElement`), the **cheap subset of
 Option D** transaction scope (`animate:` on event applicators, stamped onto
 the patch batch via a `batchAnimation` prelude), and **Option G scrub
 bindings** (`.scrub`/`.settle` between `.states` poses, renderer-resident)
-are shipped (engine + DOM renderer + Canvas 2D renderer for A/B/C/D/E/F;
-H and G are DOM-only so far — Canvas, iOS, Android, and desktop snap by
+are shipped (engine + DOM renderer + Canvas 2D renderer for A/B/C/D/E/F,
+and the native **desktop (Vello) renderer now with FULL parity across
+A–H + G**, its recorded narrowings pulled from the `anim.rs` capability
+matrix — see the desktop parity note and the renderer table in §3). H and
+G otherwise remain DOM-and-desktop only — Canvas and iOS/Android snap by
 ignoring the new props/flag/prelude, which for H means a plain navigation
 and for G a node that flips poses only when its bound state changes by
-other means, and never dispatch completions; D's stamping is additionally
+other means; iOS and Android additionally never dispatch completions
+(desktop and both web renderers do); D's stamping is additionally
 **TS-host-only** — Go and Kotlin hosts strip the dispatch stamp, see the
 host matrix in §3).
 The normative as-shipped surface is the *Shipped v1* section in §3 —
@@ -295,9 +299,12 @@ end of this section): engine
 lowering (`ir/anim.rs` + `ir/expand.rs`), the deferred remove protocol, the
 shared TS animation module (`@hypen-space/core`), the DOM renderer
 (`packages/web/src/dom/anim.ts` + `anim-styles.ts` + `anim-complete.ts`),
-and the Canvas 2D renderer (`packages/web/src/canvas/anim.ts` — see the
-Canvas parity note below; Canvas does not play H). iOS, Android, and
-desktop degrade to snap by ignoring the `__anim.*` props and the
+the Canvas 2D renderer (`packages/web/src/canvas/anim.ts` — see the
+Canvas parity note below; Canvas does not play H or G), and the native
+**desktop (Vello) renderer** (`hypen-renderer-desktop/src/anim.rs` — a
+tick-based twin of the Canvas animator carrying FULL A–H + G parity; see
+the desktop parity note below for its recorded narrowings). iOS and Android
+degrade to snap by ignoring the `__anim.*` props and the
 `transition` flag — the spec-sanctioned behavior, no changes required there
 (they also never dispatch completion events: nothing plays, nothing
 completes; for H, ignoring the props means a plain navigation).
@@ -460,6 +467,76 @@ finalize; unknown or malformed specs parse to null and are silent no-ops.
 Canvas caveat shared with static transform props: enter/exit transforms are
 paint-time, so an entering node hit-tests at its final layout box for the
 brief playback.
+
+**Desktop (Vello) parity (shipped).** The native desktop renderer plays the
+same `__anim.*` channels — A–H plus G — through `DesktopAnimator`
+(`hypen-renderer-desktop/src/anim.rs`), the tick-based twin of the Canvas
+animator: the window's demand-driven redraw loop is the clock (the engine
+never ticks — constraint #1), it re-arms only while animations are in
+flight and stands down when the last one settles, and the vocabulary
+(curves/presets/whitelist) is reused directly from `hypen_engine::ir::anim`
+so it cannot drift from the engine's lowering. Constraint #5 is honored
+literally: every interpolated value — including the transform props
+`translateX`/`translateY`/`scale`/`rotate`, composed as per-item affines —
+is written into the REAL renderer `Tree` props that Taffy layout, item
+emission, and hit-testing all read, so pointer/wheel/AccessKit/caret
+targeting follow the animated geometry (transforms move the painted+hittable
+presentation, never layout). Desktop **dispatches `.onAnimationComplete`
+completions on natural settle** exactly like the web renderers (all five
+firing points, `sharedElement` included), **honors the `batchAnimation`
+transaction prelude**, **plays shared-element FLIPs** across the Router
+Detach/Attach seam, and **supports `.scrub`/`.settle`** via a
+renderer-resident scrubber driven off the winit pointer/wheel events. What
+still degrades — all recorded in the `anim.rs` capability-matrix module docs
+as sanctioned narrowings, the same family as the Canvas `cornerRadius`/
+`shimmer` cuts:
+
+- **Uniform scale only.** Desktop's per-item transform is an `Affine2` with
+  a single scale factor, so the DOM's independent `(sx, sy)` collapses to
+  their average — exact when the aspect ratio is preserved, approximate
+  otherwise. Applies to `.scale`, the `scale` enter preset, and shared
+  elements.
+- **`shimmer` snaps.** It is a DOM gradient-overlay effect with no honest
+  desktop equivalent (no gradient-overlay machinery in the painter) — the
+  one remaining `.animate` no-op, exactly the Canvas cut; `pulse`/`spin`/
+  `shake` all play.
+- **Shared elements: transform-only continuity + uniform scale + global
+  reduced-motion skip.** The FLIP interpolates translate + (uniform) scale
+  only — no corner-radius or content crossfade, no overlay proxy (the
+  detached source is never resurrected). Cross-route continuity is
+  decorative, so desktop shared FLIPs are GLOBALLY skipped under reduced
+  motion (no `.motion(essential)` exemption, unlike the node-level
+  playbacks).
+- **Scrub narrowings.** winit exposes a single OS cursor with no per-element
+  pointer capture, so a claimed drag routes every move to that one cursor
+  until release (the desktop equivalent of `setPointerCapture`); multi-touch
+  is moot by construction (one cursor, so the "ignore other pointerIds" rule
+  holds for free); and only numeric + color pose endpoints interpolate (a
+  non-interpolable pose pair snaps, the same cut `.transition` takes).
+- **Same-redraw removal-sibling FLIP snap.** The #146 removal-sibling FLIP
+  (a `.layout` sibling reflowing into a removed node's gap) needs the cached
+  pre-teardown layout to measure its First rect. When an exit finalizes in
+  the SAME redraw as a non-empty patch batch — which has already dropped the
+  cached layout — those siblings snap instead of sliding; the dominant path
+  (an exit settling on idle frames with no concurrent batch) FLIPs
+  correctly.
+- **Reduced motion is renderer-config, not an OS query.** No reliable
+  cross-platform reduced-motion query exists in this stack (winit exposes
+  none), so the gate is the `HYPEN_REDUCED_MOTION` env var plus the
+  programmatic `set_reduced_motion` setter (default off) — a recorded
+  narrowing against the DOM/canvas OS-query behavior; the per-node
+  `.motion(essential)` opt-out works as everywhere else.
+
+**Transform composition — Canvas vs DOM/desktop.** One cross-renderer
+divergence worth flagging: desktop composes its per-item affines following
+the DOM renderer's canonical `TRANSFORM_ORDER` with the translation applied
+OUTSIDE the scale/rotate (CSS individual-transform-function semantics), so a
+translated node travels the authored distance regardless of its scale.
+Canvas folds the translation INSIDE its scale/rotate, so under a combined
+scale+slide a 24px offset at 0.95× travels 22.8px on Canvas where DOM and
+desktop travel the full 24px. **Desktop follows the DOM/CSS composition —
+the reference the animation protocol was designed against** (see `Affine2`
+in `layout.rs`).
 
 **`.states { onState(...) }` (Option C, shipped).** Named visual states via a
 block applicator with `onState(<label>)` heads — this syntax **supersedes the
@@ -647,9 +724,11 @@ on-screen after the navigation, so it must neither source a FLIP out of a
 still-visible element nor shadow the real outgoing source; still-visible
 keyed nodes are simply not sources. Rotation/scale base transforms make the
 prepended invert approximate (exact for identity and translate bases).
-Canvas, iOS, Android, and desktop ignore both props — plain navigation, the
-sanctioned total degradation — so H ships renderer-by-renderer exactly as
-its S-row predicted.
+Canvas, iOS, and Android ignore both props — plain navigation, the
+sanctioned total degradation. The native desktop (Vello) renderer DOES play
+H, with its own recorded v1 narrowings (transform-only continuity, UNIFORM
+scale, and a GLOBAL reduced-motion skip — see the desktop parity note
+above) — so H ships renderer-by-renderer exactly as its S-row predicted.
 
 **Feel check (visually verified in-browser).** The shipped defaults were
 confirmed in a real browser session driving the list→detail→back flow: the
@@ -779,7 +858,8 @@ completions belong to node-level playbacks.
 |---|---|
 | DOM renderer | Honors the prelude (scoped CSS transitions, restore-on-settle) |
 | Canvas 2D renderer | Honors the prelude (tick interpolation spec; canvas snap matrix still applies) |
-| uniffi (iOS/Android/desktop) | **Drops** the prelude (`InternalPatch::BatchAnimation → None`) — mobile snaps, matching the Remove-flag policy; carrying it needs a `spec_json` field on the flat FFI record and both binding sets regenerated, deferred with the rest of the non-web animation work |
+| Native desktop (Vello) renderer | **Honors** the prelude — it consumes the engine's `BatchAnimation` patch directly (not through UniFFI) and applies the transaction spec through `DesktopAnimator`, same precedence as the web renderers |
+| uniffi (iOS/Android) | **Drops** the prelude (`InternalPatch::BatchAnimation → None`) — mobile snaps, matching the Remove-flag policy; carrying it needs a `spec_json` field on the flat FFI record and both binding sets regenerated, deferred with the rest of the non-web animation work |
 | Go SDK | **Relays but never generates**: `Patch.Spec` (`json:"spec,omitempty"`) exists so engine-emitted preludes survive transit, but dispatch-side stamping was evaluated and **declined** with recorded reasons — the Go observable notifies synchronously per mutation (no batch boundary to hang "first flush" on) and the Go host syncs state over the envelope-less full-patch WASI path (`NotifyStateChange` → `hypen_update_state`); the remote host strips the reserved `__hypenAnimate` dispatch key before handlers run. TS-host-only status documented in `hypen-golang/CHANGELOG.md` |
 | Kotlin host | Strips the reserved dispatch key before handlers run; no stamping |
 
@@ -917,9 +997,13 @@ instead of vanishing, presets suspending under scrub per the precedence
 rule, ANY states label completing the awaitingCleanup handshake, and the
 `>= 0.5` settle tie pinned by test.
 
-**v1 narrowings, recorded against the §G sketch.** (1) **DOM-only**: the
-Canvas renderer ignores all four channels (pinned by test — no playback,
-no listeners, no engine traffic; iOS/Android/desktop likewise), so G ships
+**v1 narrowings, recorded against the §G sketch.** (1) **DOM + desktop**:
+the Canvas renderer ignores all four channels (pinned by test — no
+playback, no listeners, no engine traffic; iOS/Android likewise), while the
+native desktop (Vello) renderer DOES play G through a renderer-resident
+`DesktopScrubber`, with its own recorded narrowings — winit's single OS
+cursor as the pointer-capture equivalent, multi-touch moot, numeric+color
+pose endpoints only (see the desktop parity note in §3); so G ships
 renderer-by-renderer like H did. (2) **Multi-touch is noise**: only the
 claiming pointer participates; a second finger neither retargets nor
 cancels. (3) **`of:` degrades, never fails**: an unmatched container name
@@ -1246,10 +1330,10 @@ coordination construct**. Hypen should follow that spine, in dependency order:
 | 2 | **B** `.enter`/`.exit`/`.layout` — **shipped** | The one thing only the engine can do (deferred remove). With A+B, Hypen matches the daily-driver animation DX of SwiftUI/Compose. |
 | 3 | **E (presets only)** — **shipped** | Built-in `pulse`/`spin`/`shimmer`/`shake` applied via `.animate(name, ...)`; author-defined `animation` blocks are **rejected** (maintainer decision — no custom keyframe DSL, see §E). |
 | 4 | **C** `.states` — **shipped** (`onState` heads) | Choreography, once A's semantics are proven. Shipped as per-node pose switches lowering to A's channel (StateSwitch props + a synthesized `.transition`); the group-timing/stagger envelope stays deferred. |
-| 5 | **H** shared elements — **shipped** (DOM) | Pure renderer track — needs only A's `__anim` channel and the existing Detach/Attach seam, so it started early and shipped renderer-by-renderer as predicted: DOM first, silent degradation covering the stragglers (Canvas/iOS/Android/desktop pending). Shipped ahead of D/F/G precisely because it cost the engine nothing. |
+| 5 | **H** shared elements — **shipped** (DOM + desktop) | Pure renderer track — needs only A's `__anim` channel and the existing Detach/Attach seam, so it started early and shipped renderer-by-renderer as predicted: DOM first, then the native desktop (Vello) renderer (transform-only + uniform-scale + global reduced-motion skip narrowings), silent degradation covering the stragglers (Canvas/iOS/Android pending). Shipped ahead of D/F/G precisely because it cost the engine nothing. |
 | 6 | **D** transaction scope — **cheap subset shipped** | The cheap subset shipped first exactly as planned (`animate:` on event applicators → the `batchAnimation` prelude; TS hosts only — see the as-shipped D contract in §3); the full SDK `animate()` block waits on the dispatch pipeline growing batch metadata. Defined from day one as an *override* of node defaults so precedence never changes under authors. |
 | 7 | **F** machine model — **`.onAnimationComplete` shipped** | Decided: machines live in module code. `.onAnimationComplete` shipped together with C, as argued — it's the piece that makes module-resident machines work. |
-| 8 | **G** scrub bindings — **shipped** (DOM) | Shipped after C exactly as re-anchored: `.scrub` interpolates between two `.states` poses (engine materializes the endpoint values as `__anim.scrubPoses`), `.settle(bind:)` writes the winning label through the `.bind` channel. Per-renderer as predicted — engine lowering everywhere, DOM renderer first; Canvas/iOS/Android/desktop ignore the four channels (see the as-shipped G contract in §3). |
+| 8 | **G** scrub bindings — **shipped** (DOM + desktop) | Shipped after C exactly as re-anchored: `.scrub` interpolates between two `.states` poses (engine materializes the endpoint values as `__anim.scrubPoses`), `.settle(bind:)` writes the winning label through the `.bind` channel. Per-renderer as predicted — engine lowering everywhere, DOM renderer first, then the native desktop (Vello) renderer via a renderer-resident `DesktopScrubber` (single-OS-cursor / multi-touch-moot / numeric+color-endpoint narrowings); Canvas/iOS/Android ignore the four channels (see the as-shipped G contract in §3). |
 
 The deliberate rejections, for the record: no ambient unscoped implicit
 animation (SwiftUI's deprecated modifier), no wrapper components for exit
@@ -1280,10 +1364,10 @@ How far does A–H actually stretch? Scenario coverage, honestly scored:
 | Staggered *entrance* of a list | B+C | ⚠️ needs `stagger:` on a container's `.enter` — trivial extension, spec it in B (**deferred** with C's stagger envelope) |
 | Sequencing ("draw check, then pulse, then fade") | F | ✅ shipped — `.onAnimationComplete` advances the module-resident machine |
 | Motion with memory (press-release vs hover-leave paths) | F | ✅ machine in module code |
-| Gesture-driven scrubbing (bottom sheet drag, pull-to-refresh) | G | ✅ shipped (DOM) — `.scrub`/`.settle` between `.states` poses, renderer-resident; other renderers ignore the channels |
-| Scroll-linked (collapsing header, parallax) | G | ✅ shipped (DOM) — `source: scroll` maps a container offset through the same progress formula, with rest-debounced endpoint writes |
-| Shared-element / hero transitions | H | ✅ shipped (DOM) — engine tags identity, the renderer matches geometry; transform-only in v1 |
-| Fling/decay physics | G | ✅ shipped (DOM) — velocity-projected `.settle` (100ms sample window, 150ms projection) |
+| Gesture-driven scrubbing (bottom sheet drag, pull-to-refresh) | G | ✅ shipped (DOM + desktop) — `.scrub`/`.settle` between `.states` poses, renderer-resident (desktop via `DesktopScrubber`, single-OS-cursor narrowing); Canvas/iOS/Android ignore the channels |
+| Scroll-linked (collapsing header, parallax) | G | ✅ shipped (DOM + desktop) — `source: scroll` maps a container offset through the same progress formula, with rest-debounced endpoint writes |
+| Shared-element / hero transitions | H | ✅ shipped (DOM + desktop) — engine tags identity, the renderer matches geometry; transform-only in v1 (desktop adds uniform-scale + global reduced-motion-skip narrowings) |
+| Fling/decay physics | G | ✅ shipped (DOM + desktop) — velocity-projected `.settle` (100ms sample window, 150ms projection) |
 | Text/blur/path-morph animation | — | ❌ outside the animatable whitelist by design |
 | Character/mascot-grade motion | — | ❌ wrong tool; hand-writing this in any DSL is, too |
 
