@@ -2009,7 +2009,7 @@ checksum = "6dbf3de79e51f3d586ab4cb9d5c3e2c14aa28ed23d180cf89b4df0454a69cc87"
 
 [[package]]
 name = "hypen-browser"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "dirs",
  "env_logger",
@@ -2036,7 +2036,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-engine"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "console_error_panic_hook",
  "criterion",
@@ -2059,7 +2059,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-parser"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "ariadne",
  "chumsky",
@@ -2072,7 +2072,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-renderer-desktop"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "accesskit",
  "accesskit_winit",
@@ -2116,7 +2116,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-server"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "hypen-engine",
  "hypen-parser",
@@ -2128,7 +2128,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-tailwind-parse"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "serde",
  "serde_json",

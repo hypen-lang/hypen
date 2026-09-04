@@ -11,7 +11,7 @@
     "@hypen-space/core": "file:../../../hypen-web/packages/core",
     "@hypen-space/cf": "file:../../../hypen-web/packages/cf",
     "@hypen-space/web": "file:../../../hypen-web/packages/web",
-    "hypen-engine": "0.6.3"
+    "hypen-engine": "0.6.4"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250101.0",

@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/web-engine",
-  "version": "0.6.3",
+  "version": "0.6.4",
   "description": "Hypen browser engine - WASM engine + orchestrator for browser SPAs",
   "type": "module",
   "main": "./dist/index.js",
@@ -36,8 +36,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@hypen-space/core": "^0.6.3",
-    "@hypen-space/web": "^0.6.3"
+    "@hypen-space/core": "^0.6.4",
+    "@hypen-space/web": "^0.6.4"
   },
   "devDependencies": {
     "@types/bun": "latest",
