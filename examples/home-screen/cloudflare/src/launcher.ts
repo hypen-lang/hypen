@@ -2,10 +2,8 @@ import { app } from "@hypen-space/core";
 import { durableObjectStore, withKey } from "@hypen-space/cf";
 import {
   CROP_KEYS,
-  SWATCH_CROP,
-  WALLPAPER_CROPS,
   WALLPAPER_PHOTOS,
-  unsplashUrl,
+  wallpaperAssetUrl,
   type CropKey,
   type UnsplashPhoto,
 } from "./unsplash";
@@ -25,8 +23,8 @@ import { fetchWeather, getGeo } from "./geo";
 // a swatch restyles the whole phone through ordinary reactive updates.
 // Choices persist in the Durable Object.
 //
-// The photo wallpapers stream from Unsplash's Wallpapers topic (see
-// unsplash.ts), and the binding is a responsive value map rather than a single
+// The photo wallpapers are sourced from Unsplash and deployed with this Worker
+// as static assets (see unsplash.ts). The binding is a responsive value map rather than a single
 // value: `.background({default: …, sm: …, md: …, lg: …, xl: …})` lowers to one
 // media-query rule per breakpoint, so each window downloads the rendition cut
 // for its own size instead of every screen sharing one bitmap.
@@ -263,11 +261,11 @@ function dslString(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\s+/g, " ").trim();
 }
 
-/** The per-breakpoint `background` values for one Unsplash photo. */
+/** The per-breakpoint `background` values for one hosted photo. */
 function photoCss(photo: UnsplashPhoto): Record<CropKey, string> {
   const css = {} as Record<CropKey, string>;
   for (const key of CROP_KEYS) {
-    const url = unsplashUrl(photo, WALLPAPER_CROPS[key]);
+    const url = wallpaperAssetUrl(photo, key);
     css[key] = `${SCRIM}, url('${url}') center / cover no-repeat ${PHOTO_BASE}`;
   }
   return css;
@@ -286,7 +284,7 @@ function photoWallpaper(photo: UnsplashPhoto): Wallpaper {
     name: photo.name,
     credit: `Photo · ${photo.credit}`,
     css: photoCss(photo),
-    swatch: `url('${unsplashUrl(photo, SWATCH_CROP)}') center / cover no-repeat ${PHOTO_BASE}`,
+    swatch: `url('${wallpaperAssetUrl(photo, "swatch")}') center / cover no-repeat ${PHOTO_BASE}`,
     selected: false,
   };
 }
@@ -295,8 +293,9 @@ function gradientWallpaper(id: string, name: string, value: string): Wallpaper {
   return { id, name, credit: "Gradient", css: flatCss(value), swatch: value, selected: false };
 }
 
-// Bumped for the new persisted shape (photo ids replaced the "torres" preset).
-const HOME_STATE_KEY = "home-screen:v5";
+// v5 became unreadable in the original shared `/ws` Durable Object. Keep the
+// old value intact for diagnosis and move new sessions onto a clean key.
+const HOME_STATE_KEY = "home-screen:v6";
 
 const WALLPAPERS: Wallpaper[] = [
   ...WALLPAPER_PHOTOS.map(photoWallpaper),
@@ -348,6 +347,8 @@ const ACCENTS: Accent[] = [
 
 export interface LauncherState {
   location: string;
+  /** Renderer hover target; transient and intentionally not persisted. */
+  hoveredIcon: string;
   /** Selected wallpaper preset id. */
   wallpaperId: string;
   /**
@@ -409,6 +410,10 @@ function applyClock(state: LauncherState): void {
 
 /** One ticker per module instance; cleared on destroy. */
 const clockTimers = new WeakMap<object, ReturnType<typeof setInterval>>();
+const weatherRequests = new WeakMap<
+  object,
+  { controller: AbortController; timeout: ReturnType<typeof setTimeout> }
+>();
 
 /**
  * One tappable icon (tile + label) for the home grid or the dock.
@@ -424,6 +429,9 @@ function appIcon(
   to: string,
   { label = true, sharedKey = "" } = {},
 ): string {
+  // Grid and dock repeat the first four apps, so include the surface in the
+  // hover identity. Hovering one instance must not scale its twin as well.
+  const hoverKey = `${label ? "grid" : "dock"}:${to}`;
   return `
           Button {
             Column {
@@ -435,7 +443,9 @@ function appIcon(
               .tw("w-[60px] h-[60px] rounded-[19px] items-center justify-center border border-white/20 shadow-xl")
               .background("${a.tile}")
               .width({default: 60, md: 66})
-              .height({default: 60, md: 66})${
+              .height({default: 60, md: 66})
+              .scale("@{state.hoveredIcon == '${hoverKey}' ? 1.07 : 1}")
+              .transition(duration: 150, curve: easeOut, props: [scale])${
                 sharedKey
                   ? `
               .sharedElement("${sharedKey}", curve: spring, duration: 340)`
@@ -452,6 +462,8 @@ function appIcon(
             .tw("items-center")
           }
           .onClick(@router.push, to: "${to}")
+          .onHover(@actions.iconHover, icon: "${hoverKey}", hovered: true)
+          .onMouseLeave(@actions.iconHover, icon: "${hoverKey}", hovered: false)
           .opacity({ default: 1, active: 0.65 })
           .transition(140, easeOut)
           .tw("bg-transparent border-0 p-0 w-[60px]")`;
@@ -500,38 +512,43 @@ function appRoute(a: LauncherApp): string {
 
             Column {
               HypenApp("${a.url}") {
-                Column {
+                // Stack layers the bloom under the splash content — no CSS
+                // positioning needed, both children fill the loading slot.
+                Stack {
                   // Soft bloom in the app's brand colour so the splash isn't
                   // a flat black sheet — it breathes behind the icon while
                   // the connection comes up.
                   Box {}
                     .background("radial-gradient(85% 60% at 50% 38%, ${a.glow} 0%, rgba(3, 7, 18, 0) 70%)")
-                    .tw("absolute inset-0")
+                    .tw("w-full h-full")
                     .enter(fade, duration: 600)
                     .animate(pulse, duration: 2600)
 
                   Column {
-                    Icon(@resources.${a.resource})
-                      .size(46)
-                      .color("${a.iconColor}")
+                    Column {
+                      Icon(@resources.${a.resource})
+                        .size(46)
+                        .color("${a.iconColor}")
+                    }
+                    .tw("w-[76px] h-[76px] rounded-[22px] items-center justify-center border border-white/20 shadow-2xl")
+                    .background("${a.tile}")
+                    .sharedElement("app-${a.slug}", curve: spring, duration: 340)
+
+                    Text("${a.name}")
+                      .tw("mt-6 text-[15px] font-semibold")
+                      .color("#F9FAFB")
+                      .enter(fade, duration: 260)
+
+                    Text("Connecting…")
+                      .tw("mt-1.5 text-xs")
+                      .color("#6B7280")
+                      .enter(fade, duration: 320)
+                      .animate(pulse, duration: 1600)
                   }
-                  .tw("w-[76px] h-[76px] rounded-[22px] items-center justify-center border border-white/20 shadow-2xl")
-                  .background("${a.tile}")
-                  .sharedElement("app-${a.slug}", curve: spring, duration: 340)
-
-                  Text("${a.name}")
-                    .tw("mt-6 text-[15px] font-semibold")
-                    .color("#F9FAFB")
-                    .enter(fade, duration: 260)
-
-                  Text("Connecting…")
-                    .tw("mt-1.5 text-xs")
-                    .color("#6B7280")
-                    .enter(fade, duration: 320)
-                    .animate(pulse, duration: 1600)
+                  .tw("w-full h-full items-center justify-center")
                 }
                 .slot("loading")
-                .tw("relative flex-1 w-full h-full min-h-0 items-center justify-center bg-gray-950")
+                .tw("flex-1 w-full h-full min-h-0 bg-gray-950")
 
                 Column {
                   Column {
@@ -923,6 +940,7 @@ ${appRoutes}
 function initialLauncherState(): LauncherState {
   return {
     location: "/",
+    hoveredIcon: "",
     wallpaperId: WALLPAPERS[0]!.id,
     wallpaper: WALLPAPERS[0]!.css.default,
     wallpaperSm: WALLPAPERS[0]!.css.sm,
@@ -958,11 +976,32 @@ interface PersistedChoices {
 
 const baseStore = durableObjectStore<LauncherState>(withKey<LauncherState>(() => HOME_STATE_KEY));
 
+function settleWithin<T>(operation: Promise<T>, fallback: T, timeoutMs = 750): Promise<T> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(fallback), timeoutMs);
+    operation.then(
+      (value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      },
+      () => {
+        clearTimeout(timeout);
+        resolve(fallback);
+      },
+    );
+  });
+}
+
 const launcherStore: typeof baseStore = {
   __bindStorage: (storage) => baseStore.__bindStorage(storage),
   resolveKey: (state, moduleName, sessionId) => baseStore.resolveKey(state, moduleName, sessionId),
   async load(key) {
-    const saved = (await baseStore.load(key)) as PersistedChoices | LauncherState | null;
+    // Persistence is optional for this demo. A damaged or unavailable DO
+    // value must never hold the protocol handshake behind an unbounded read.
+    const saved = (await settleWithin(baseStore.load(key), null)) as
+      | PersistedChoices
+      | LauncherState
+      | null;
     if (!saved || typeof saved.wallpaperId !== "string") return null;
     const wallpaper = WALLPAPERS.find((w) => w.id === saved.wallpaperId) ?? WALLPAPERS[0]!;
     const accent = ACCENTS.find((a) => a.id === saved.accentId) ?? ACCENTS[0]!;
@@ -987,7 +1026,7 @@ const launcherStore: typeof baseStore = {
       wallpaperId: state.wallpaperId,
       accentId: state.accentId,
     };
-    await baseStore.save(key, choices as unknown as LauncherState);
+    await settleWithin(baseStore.save(key, choices as unknown as LauncherState), undefined);
   },
   delete: (key) => baseStore.delete(key),
 };
@@ -995,7 +1034,7 @@ const launcherStore: typeof baseStore = {
 export default app
   .defineState<LauncherState>(initialLauncherState())
   .persist(launcherStore)
-  .onCreated(async (state) => {
+  .onCreated((state) => {
     // Geo was parked by the DO's fetch before any handler runs, so the first
     // render already shows the viewer's local time; the ticker keeps the
     // minutes honest for as long as the session lives.
@@ -1003,16 +1042,27 @@ export default app
     const timer = setInterval(() => applyClock(state), 30_000);
     clockTimers.set(state as object, timer);
 
+    // Weather is supplementary. Never hold the protocol's initialTree behind
+    // a third-party request: render immediately, then stream weather in when
+    // it arrives. Abort a slow request so it cannot keep a DO event alive.
     const geo = getGeo();
-    const weather = await fetchWeather(geo);
-    if (weather) {
-      state.weatherIcon = weather.icon;
-      state.weatherTemp = weather.temp;
-      state.weatherDesc = weather.description;
-      state.weatherHiLo = weather.hiLo;
-      state.weatherCity = geo.city;
-      state.weatherReady = true;
-    }
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 3_500);
+    weatherRequests.set(state as object, { controller, timeout });
+    void fetchWeather(geo, controller.signal)
+      .then((weather) => {
+        if (!weather || controller.signal.aborted) return;
+        state.weatherIcon = weather.icon;
+        state.weatherTemp = weather.temp;
+        state.weatherDesc = weather.description;
+        state.weatherHiLo = weather.hiLo;
+        state.weatherCity = geo.city;
+        state.weatherReady = true;
+      })
+      .finally(() => {
+        clearTimeout(timeout);
+        weatherRequests.delete(state as object);
+      });
   })
   .onActivated((state) => {
     applyClock(state);
@@ -1020,6 +1070,26 @@ export default app
   .onDestroyed((state) => {
     const timer = clockTimers.get(state as object);
     if (timer !== undefined) clearInterval(timer);
+    clockTimers.delete(state as object);
+
+    const request = weatherRequests.get(state as object);
+    if (request) {
+      clearTimeout(request.timeout);
+      request.controller.abort();
+      weatherRequests.delete(state as object);
+    }
+  })
+  .onAction<{ icon: string; hovered: boolean }>("iconHover", ({ action, state }) => {
+    const icon = action.payload?.icon;
+    if (typeof icon !== "string" || icon === "") return;
+
+    if (action.payload?.hovered === true) {
+      if (state.hoveredIcon !== icon) state.hoveredIcon = icon;
+    } else if (state.hoveredIcon === icon) {
+      // A late leave from icon A must not collapse icon B after the pointer
+      // has already crossed onto it.
+      state.hoveredIcon = "";
+    }
   })
   .onAction<{ id: string }>("setWallpaper", ({ action, state }) => {
     const id = action.payload?.id;

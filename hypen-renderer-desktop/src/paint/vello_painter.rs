@@ -64,6 +64,10 @@ struct CachedSubtree {
     /// `append` call so the clip stays fixed in viewport space
     /// while items inside translate with scroll.
     clip_to: Option<LayoutRect>,
+    /// Radius of `clip_to` in physical pixels. Stored with the cached
+    /// fragment because changing a clipping ancestor's radius changes the
+    /// pixels even when the descendant scene itself is unchanged.
+    clip_radius: f32,
     /// Renderer node ids of every item encoded into this fragment.
     /// Backs [`VelloPainter::invalidate_subtrees_containing`]: a
     /// paint-only patch batch drops exactly the entries whose id set
@@ -141,6 +145,10 @@ pub struct VelloPainter {
     /// full source (previously the cap also had to absorb
     /// `(src, w, h, fit, radius)` duplicates which no longer exist).
     image_cache: indexmap::IndexMap<String, vello::peniko::ImageData>,
+    /// Preformatted once-per-second native metrics label. Feature-gated so
+    /// production painters retain no field, branch, or paint work.
+    #[cfg(feature = "dev-overlay")]
+    dev_overlay: Option<(String, f32)>,
 }
 
 const IMAGE_CACHE_CAP: usize = 128;
@@ -163,6 +171,8 @@ impl VelloPainter {
             subtree_cache: indexmap::IndexMap::new(),
             last_viewport: None,
             last_image_load_gen: 0,
+            #[cfg(feature = "dev-overlay")]
+            dev_overlay: None,
             #[cfg(test)]
             subtree_cache_hits: 0,
             #[cfg(test)]
@@ -225,6 +235,20 @@ impl VelloPainter {
 
     pub fn interaction_mut(&mut self) -> &mut InteractionState {
         &mut self.interaction
+    }
+
+    #[cfg(feature = "dev-overlay")]
+    pub(crate) fn set_dev_overlay(&mut self, label: &str, top: f32) {
+        match self.dev_overlay.as_mut() {
+            Some((current, current_top)) => {
+                if current != label {
+                    current.clear();
+                    current.push_str(label);
+                }
+                *current_top = top;
+            }
+            None => self.dev_overlay = Some((label.into(), top)),
+        }
     }
 
     /// Reset and rebuild the scene from the given layout. Returns a
@@ -332,7 +356,49 @@ impl VelloPainter {
                 ),
             );
         }
+        #[cfg(feature = "dev-overlay")]
+        self.draw_dev_overlay(viewport, scale_factor);
         &self.scene
+    }
+
+    /// Paint after every Hypen item and scrollbar, making this a true native
+    /// overlay that cannot be reordered, clipped, or scrolled by app content.
+    #[cfg(feature = "dev-overlay")]
+    fn draw_dev_overlay(&mut self, viewport: (u32, u32), scale_factor: f32) {
+        let Some((label, top)) = self.dev_overlay.clone() else {
+            return;
+        };
+        let font_size = 11.0 * scale_factor;
+        let line_height = 14.0 * scale_factor;
+        let pad_x = 7.0 * scale_factor;
+        let pad_y = 3.0 * scale_factor;
+        let right = 8.0 * scale_factor;
+        let (text_w, _) =
+            self.text
+                .measure_weighted_line_height(&label, font_size, None, 600, line_height);
+        let rect = LayoutRect {
+            x: (viewport.0 as f32 - text_w - pad_x * 2.0 - right).max(0.0),
+            y: top * scale_factor,
+            w: text_w + pad_x * 2.0,
+            h: line_height + pad_y * 2.0,
+        };
+        fill_rect(
+            &mut self.scene,
+            rect,
+            Rgba(0x12, 0x14, 0x18, 0xe6),
+            6.0 * scale_factor,
+        );
+        self.text.draw_text_into_scene_line_height(
+            &mut self.scene,
+            &label,
+            rect.x + pad_x,
+            rect.y + pad_y,
+            font_size,
+            Rgba(0xf8, 0xfa, 0xfc, 0xff),
+            None,
+            600,
+            line_height,
+        );
     }
 
     /// Drop cached image tiles when memory pressure or a scene reset
@@ -395,38 +461,53 @@ impl VelloPainter {
             return;
         }
 
-        // Vello scene fragments cannot be safely replayed when they contain
-        // bitmap resources: `Scene::append` composes vector transforms, but
-        // the encoded image patch retains its absolute sampling transform.
-        // That made Food's Grid card frames and text scroll while the photos
-        // stayed at their old coordinates (then vanished behind the fixed
-        // scroll clip). Draw bitmap-bearing subtrees directly; decoded source
-        // pixels remain cached in `image_cache`, so this avoids refetch/decode
-        // while keeping the bitmap, rounded clip, and card geometry together.
-        let has_bitmap = items.iter().any(|item| {
-            matches!(item.kind, ItemKind::Image { .. })
-                || item.background_image.is_some()
-                || item.background_layers.as_ref().is_some_and(|layers| {
-                    layers
-                        .layers
-                        .iter()
-                        .any(|layer| matches!(layer, crate::style::BackgroundLayer::Image(_)))
-                })
-        });
-        if has_bitmap {
-            let outer_clip = items[0].clip_to;
-            let pushed = push_outer_clip(&mut self.scene, outer_clip);
-            for item in items {
-                self.draw_item_no_outer_clip(item, scale_factor, outer_clip);
+        // Vello applies Scene::append's transform to encoded path/glyph
+        // transforms, but replaying mixed image fragments has proven unsafe in
+        // the live renderer: bitmap and card geometry can separate during a
+        // retained scroll. Keep bitmap-bearing items on the direct path while
+        // still caching the vector/text runs around them. This preserves paint
+        // order (surface -> image -> labels) and avoids the old all-or-nothing
+        // fallback that re-encoded the entire card on every wheel frame.
+        let mut vector_start = 0;
+        for (index, item) in items.iter().enumerate() {
+            if !item_has_bitmap(item) {
+                continue;
             }
+            if vector_start < index {
+                self.paint_cached_subtree_fragment(
+                    &items[vector_start..index],
+                    root_id,
+                    scale_factor,
+                );
+            }
+            let pushed = push_outer_clip(&mut self.scene, item.clip_to, item.clip_radius);
+            self.draw_item_no_outer_clip(item, scale_factor, item.clip_to, item.clip_radius);
             if pushed {
                 self.scene.pop_layer();
             }
+            vector_start = index + 1;
+        }
+        if vector_start < items.len() {
+            self.paint_cached_subtree_fragment(&items[vector_start..], root_id, scale_factor);
+        }
+    }
+
+    /// Cache/replay a bitmap-free contiguous run from one scroll subtree.
+    /// Membership is already part of the key, so multiple runs from the same
+    /// root cannot alias one another.
+    fn paint_cached_subtree_fragment(
+        &mut self,
+        items: &[crate::layout::LayoutItem],
+        root_id: &str,
+        scale_factor: f32,
+    ) {
+        if items.is_empty() {
             return;
         }
 
         let key = subtree_cache_key(root_id, items, &self.interaction);
         let outer_clip = items[0].clip_to;
+        let outer_clip_radius = items[0].clip_radius;
         let current_origin_y = items[0].rect.y;
 
         // Cache lookup. `self.subtree_cache` and `self.scene` are
@@ -450,10 +531,13 @@ impl VelloPainter {
             let splice_valid = items[0]
                 .transform
                 .approx_eq(&cached.transform.conjugate_translate(0.0, dy), 1e-3);
-            if cached.clip_to == outer_clip && splice_valid {
+            if cached.clip_to == outer_clip
+                && cached.clip_radius == outer_clip_radius
+                && splice_valid
+            {
                 // Split-borrow: `cached.scene` reads `self.subtree_cache`,
                 // `self.scene` is the disjoint mut target.
-                let pushed = push_outer_clip(&mut self.scene, outer_clip);
+                let pushed = push_outer_clip(&mut self.scene, outer_clip, outer_clip_radius);
                 self.scene
                     .append(&cached.scene, Some(Affine::translate((0.0, dy as f64))));
                 if pushed {
@@ -475,7 +559,7 @@ impl VelloPainter {
         // parameter — swap, draw, swap back.
         let prev_scene = std::mem::replace(&mut self.scene, Scene::new());
         for item in items {
-            self.draw_item_no_outer_clip(item, scale_factor, outer_clip);
+            self.draw_item_no_outer_clip(item, scale_factor, outer_clip, outer_clip_radius);
         }
         let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
 
@@ -491,6 +575,7 @@ impl VelloPainter {
                 scene: sub_scene,
                 origin_y: current_origin_y,
                 clip_to: outer_clip,
+                clip_radius: outer_clip_radius,
                 item_ids: items.iter().map(|it| it.node_id.clone()).collect(),
                 transform: items[0].transform,
             },
@@ -498,7 +583,7 @@ impl VelloPainter {
         // Append the just-cached scene at identity translation. Same
         // disjoint-field split-borrow as the hit branch.
         let cached = &self.subtree_cache[&key];
-        let pushed = push_outer_clip(&mut self.scene, outer_clip);
+        let pushed = push_outer_clip(&mut self.scene, outer_clip, outer_clip_radius);
         self.scene.append(&cached.scene, None);
         if pushed {
             self.scene.pop_layer();
@@ -517,6 +602,7 @@ impl VelloPainter {
         item: &crate::layout::LayoutItem,
         scale_factor: f32,
         outer_clip: Option<LayoutRect>,
+        outer_clip_radius: f32,
     ) {
         // Skip the per-item clip if it matches the outer clip we
         // already pushed at the subtree level — `draw_item` would
@@ -524,15 +610,21 @@ impl VelloPainter {
         // (rare; normally everything in a subtree shares the same
         // scrollable ancestor), leave it alone. The clip is threaded
         // as a parameter so no per-item `LayoutItem` clone is needed.
-        if item.clip_to == outer_clip {
-            self.draw_item_with(item, scale_factor, None, item.transform);
+        if item.clip_to == outer_clip && item.clip_radius == outer_clip_radius {
+            self.draw_item_with(item, scale_factor, None, 0.0, item.transform);
         } else {
             self.draw_item(item, scale_factor);
         }
     }
 
     fn draw_item(&mut self, item: &crate::layout::LayoutItem, scale_factor: f32) {
-        self.draw_item_with(item, scale_factor, item.clip_to, item.transform);
+        self.draw_item_with(
+            item,
+            scale_factor,
+            item.clip_to,
+            item.clip_radius,
+            item.transform,
+        );
     }
 
     /// `draw_item` body with the outer clip and transform threaded as
@@ -545,6 +637,7 @@ impl VelloPainter {
         item: &crate::layout::LayoutItem,
         scale_factor: f32,
         clip_to: Option<LayoutRect>,
+        clip_radius: f32,
         transform: crate::layout::Affine2,
     ) {
         // Per-item transform (static `translateX` / `translateY` /
@@ -563,9 +656,15 @@ impl VelloPainter {
         // pixels and hit targets move identically by construction.
         if !transform.is_identity() {
             let prev_scene = std::mem::replace(&mut self.scene, Scene::new());
-            self.draw_item_with(item, scale_factor, None, crate::layout::Affine2::IDENTITY);
+            self.draw_item_with(
+                item,
+                scale_factor,
+                None,
+                0.0,
+                crate::layout::Affine2::IDENTITY,
+            );
             let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
-            let pushed = push_outer_clip(&mut self.scene, clip_to);
+            let pushed = push_outer_clip(&mut self.scene, clip_to, clip_radius);
             self.scene
                 .append(&sub_scene, Some(affine2_to_kurbo(transform)));
             if pushed {
@@ -584,12 +683,7 @@ impl VelloPainter {
         // pushes its own.
         let outer_clip_active = clip_to.is_some();
         if let Some(clip) = clip_to {
-            let r = vello::kurbo::Rect::new(
-                clip.x as f64,
-                clip.y as f64,
-                (clip.x + clip.w) as f64,
-                (clip.y + clip.h) as f64,
-            );
+            let r = rounded_rect_path(clip, clip_radius);
             self.scene.push_layer(
                 vello::peniko::Fill::NonZero,
                 vello::peniko::BlendMode::default(),
@@ -1545,10 +1639,14 @@ impl VelloPainter {
         if !self.image_cache.contains_key(src) {
             // Load source via the existing async cache (HTTP / local
             // file decode runs on the worker). Returns Arc<Pixmap>.
-            let pm = {
+            // Probe the decoded hot tier first: asking the source cache to
+            // "ensure" an already-decoded image needlessly acquires its
+            // mutex and, for test/preseeded sources, can even enqueue a fake
+            // load that invalidates the scene cache on completion.
+            let pm = crate::paint::image::loaded_source(src).or_else(|| {
                 crate::paint::image::ensure_loaded_public(src);
                 crate::paint::image::loaded_source(src)
-            };
+            });
             let Some(pm) = pm else {
                 return;
             };
@@ -2085,17 +2183,23 @@ fn subtree_cache_key(
     h.finish()
 }
 
+fn item_has_bitmap(item: &crate::layout::LayoutItem) -> bool {
+    matches!(item.kind, ItemKind::Image { .. })
+        || item.background_image.is_some()
+        || item.background_layers.as_ref().is_some_and(|layers| {
+            layers
+                .layers
+                .iter()
+                .any(|layer| matches!(layer, crate::style::BackgroundLayer::Image(_)))
+        })
+}
+
 /// Push an outer-clip layer (the scrollable ancestor's rect) onto
 /// `scene`. Returns `true` if a layer was pushed and the caller must
 /// `pop_layer()` to balance. `Option::None` → no clip → no-op.
-fn push_outer_clip(scene: &mut Scene, outer_clip: Option<LayoutRect>) -> bool {
+fn push_outer_clip(scene: &mut Scene, outer_clip: Option<LayoutRect>, clip_radius: f32) -> bool {
     let Some(clip) = outer_clip else { return false };
-    let r = vello::kurbo::Rect::new(
-        clip.x as f64,
-        clip.y as f64,
-        (clip.x + clip.w) as f64,
-        (clip.y + clip.h) as f64,
-    );
+    let r = rounded_rect_path(clip, clip_radius);
     scene.push_layer(
         vello::peniko::Fill::NonZero,
         vello::peniko::BlendMode::default(),
@@ -2441,6 +2545,7 @@ mod tests {
             scrollable: None,
             font_weight: 400,
             clip_to: None,
+            clip_radius: 0.0,
             subtree_root: None,
             background_gradient: None,
             background_layers: None,
@@ -2482,6 +2587,39 @@ mod tests {
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         // A non-empty scene encodes at least one fill command.
         assert!(scene.encoding().path_tags.len() > 0);
+    }
+
+    #[cfg(feature = "dev-overlay")]
+    #[test]
+    fn development_metrics_paint_after_the_app_scene() {
+        let layout = LayoutPass {
+            items: vec![item("content", 20.0, 20.0, 80.0, 40.0)],
+            content_size: (120.0, 80.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+        let mut plain = VelloPainter::new();
+        let plain_paths = plain
+            .build_scene(&layout, (400, 200), 1.0, 0.0)
+            .encoding()
+            .n_paths;
+
+        let mut with_hud = VelloPainter::new();
+        with_hud.set_dev_overlay("RAM 192 MB  CPU 8.0%  FRAME 8.3 ms  120 FPS", 6.0);
+        let hud_paths = with_hud
+            .build_scene(&layout, (400, 200), 1.0, 0.0)
+            .encoding()
+            .n_paths;
+
+        assert!(
+            hud_paths > plain_paths,
+            "the native HUD must append its surface and glyph paths after app content"
+        );
     }
 
     #[test]
@@ -2602,6 +2740,22 @@ mod tests {
         painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(painter.subtree_cache_misses(), 3);
         assert_eq!(painter.subtree_cache_hits(), 3);
+    }
+
+    #[test]
+    fn subtree_cache_reencodes_when_rounded_clip_changes() {
+        let mut painter = VelloPainter::new();
+        let mut layout = three_post_layout();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 3);
+
+        for item in &mut layout.items {
+            item.clip_radius = 16.0;
+        }
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+
+        assert_eq!(painter.subtree_cache_hits(), 0);
+        assert_eq!(painter.subtree_cache_misses(), 6);
     }
 
     #[test]
@@ -2791,7 +2945,7 @@ mod tests {
     }
 
     #[test]
-    fn scrolled_image_subtree_draws_directly_at_its_current_rect() {
+    fn scrolled_image_subtree_draws_bitmap_directly_at_its_current_rect() {
         use std::sync::Arc;
 
         let src = "test://scrolled-food-card";
@@ -2826,9 +2980,10 @@ mod tests {
         assert!(first_at_original_y);
 
         image.rect.y -= 100.0;
-        let shifted_to_new_y = painter
+        let shifted_scene = painter
             .build_scene(&pass_for(image), (800, 600), 1.0, 0.0)
-            .encoding()
+            .encoding();
+        let shifted_to_new_y = shifted_scene
             .transforms
             .iter()
             .any(|transform| (transform.translation[1] - 100.0).abs() < 0.01);
@@ -2838,7 +2993,65 @@ mod tests {
         assert_eq!(painter.subtree_cache_len(), 0);
         assert!(
             shifted_to_new_y,
-            "the bitmap itself must be encoded at the scrolled card rect"
+            "the bitmap must be encoded directly at the scrolled card rect"
+        );
+    }
+
+    #[test]
+    fn mixed_image_card_caches_vector_runs_without_caching_the_bitmap() {
+        use std::sync::Arc;
+
+        let src = "test://mixed-food-card";
+        let mut pixels = tiny_skia::Pixmap::new(10, 10).expect("image fixture");
+        pixels.fill(tiny_skia::Color::from_rgba8(0xff, 0x80, 0x00, 0xff));
+        crate::paint::image::test_seed_decoded(src, Arc::new(pixels));
+
+        let make_pass = |offset: f32| {
+            let mut surface = item_in("card", "card", 0.0, 100.0 - offset, 200.0, 180.0);
+            surface.clip_to = Some(LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 400.0,
+            });
+            let mut image = item_in("photo", "card", 0.0, 100.0 - offset, 200.0, 100.0);
+            image.kind = ItemKind::Image {
+                src: Some(src.to_string()),
+                fit: crate::layout::ObjectFit::Fill,
+            };
+            image.clip_to = surface.clip_to;
+            let mut caption = item_in("caption", "card", 8.0, 208.0 - offset, 120.0, 20.0);
+            caption.clip_to = surface.clip_to;
+            LayoutPass {
+                items: vec![surface, image, caption],
+                content_size: (300.0, 800.0),
+                by_node_id: std::collections::HashMap::new(),
+                actionable_ids: vec![],
+                focusable_ids: vec![],
+                scrollable_ids: vec![],
+                hoverable_ids: vec![],
+                a11y: std::collections::HashMap::new(),
+                a11y_hash: 0,
+            }
+        };
+
+        let mut painter = VelloPainter::new();
+        painter.build_scene(&make_pass(0.0), (300, 400), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 2);
+        assert_eq!(painter.subtree_cache_hits(), 0);
+
+        let shifted_has_bitmap_transform = painter
+            .build_scene(&make_pass(40.0), (300, 400), 1.0, 0.0)
+            .encoding()
+            .transforms
+            .iter()
+            .any(|transform| (transform.translation[1] - 60.0).abs() < 0.01);
+
+        assert_eq!(painter.subtree_cache_hits(), 2);
+        assert_eq!(painter.subtree_cache_misses(), 2);
+        assert!(
+            shifted_has_bitmap_transform,
+            "the image stays direct while the surrounding vector runs hit cache"
         );
     }
 

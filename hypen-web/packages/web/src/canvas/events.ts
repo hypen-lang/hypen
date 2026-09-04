@@ -8,6 +8,15 @@ import type { VirtualNode, Point, Rectangle } from "./types.js";
 import { isPointInRoundedRect } from "./utils.js";
 import { dispatchNodeEvent } from "./dispatch.js";
 import {
+  isFormControl,
+  isToggleControl,
+  isSliderControl,
+  isControlDisabled,
+  activateToggle,
+  finishSliderDrag as finishSliderDragCommit,
+  updateSliderDrag,
+} from "./controls.js";
+import {
   beginScrubberDrag,
   cancelScrubberDrag,
   commitScrubberDrag,
@@ -63,6 +72,8 @@ export class CanvasEventManager {
   private mouseDownNode: VirtualNode | null = null;
   /** Scrubber the pointer is currently dragging (local preview, no dispatch). */
   private scrubbingNode: VirtualNode | null = null;
+  /** Slider currently being dragged, if any. Mirrors `scrubbingNode`. */
+  private slidingNode: VirtualNode | null = null;
   private focusManager: FocusManager | null = null;
   private editablePointerHandler: ((node: VirtualNode, point: Point) => void) | null = null;
 
@@ -339,6 +350,21 @@ export class CanvasEventManager {
    * Walk up from a hit node to the nearest Scrubber (the widget is a leaf,
    * so this normally resolves to the hit itself).
    */
+  /**
+   * Nearest form control at or above `node`.
+   *
+   * Same lift as `findClickableAncestor`: a press on the label inside a
+   * Checkbox has to operate the checkbox, not fall through to the container.
+   */
+  private findFormControlAncestor(node: VirtualNode | null): VirtualNode | null {
+    let current = node;
+    while (current) {
+      if (isFormControl(current)) return current;
+      current = current.parent;
+    }
+    return null;
+  }
+
   private findScrubberAncestor(node: VirtualNode | null): VirtualNode | null {
     let current = node;
     while (current) {
@@ -378,11 +404,15 @@ export class CanvasEventManager {
    * already consumed leaves scrubbingNode null; then this only tidies up.
    */
   private onWindowRelease(e: MouseEvent): void {
-    if (!this.scrubbingNode) {
-      this.disarmWindowRelease();
+    if (this.scrubbingNode) {
+      this.finishScrubberDrag(e);
       return;
     }
-    this.finishScrubberDrag(e);
+    if (this.slidingNode) {
+      this.finishSliderDrag();
+      return;
+    }
+    this.disarmWindowRelease();
   }
 
   /**
@@ -392,6 +422,21 @@ export class CanvasEventManager {
    * mouseup, window pointerup/mouseup, and the missed-release guard in
    * onMouseMove — funnels here so commit semantics cannot diverge.
    */
+  /**
+   * End a slider drag exactly once: the value was written and `input`
+   * dispatched on every move; this sends the single `change`. Every release
+   * path — canvas mouseup/click, window release, the buttonless-move guard,
+   * and removal of the node — funnels here.
+   */
+  private finishSliderDrag(): void {
+    const slider = this.slidingNode;
+    if (!slider) return;
+    this.slidingNode = null;
+    this.disarmWindowRelease();
+    finishSliderDragCommit(this.engine, slider);
+    this.requestRedraw();
+  }
+
   private finishScrubberDrag(e: MouseEvent): void {
     const scrubber = this.scrubbingNode;
     if (!scrubber) return;
@@ -425,6 +470,18 @@ export class CanvasEventManager {
       updateScrubberDrag(this.scrubbingNode, scrubberFractionAt(this.scrubbingNode, point.x));
       this.requestRedraw();
       return;
+    }
+
+    if (this.slidingNode) {
+      // Same buttonless-release guard the scrubber uses: a drag that ended
+      // where no listener saw it must finalize rather than follow the cursor.
+      if (e.buttons === 0) {
+        this.finishSliderDrag();
+      } else {
+        updateSliderDrag(this.engine, this.slidingNode, point.x);
+        this.requestRedraw();
+        return;
+      }
     }
 
     const hit = this.hitTest(point);
@@ -485,6 +542,17 @@ export class CanvasEventManager {
       this.requestRedraw();
     }
 
+    // Press on a slider starts a drag and seeks immediately, so a click
+    // anywhere on the track jumps the thumb there — the same affordance the
+    // scrubber and every native slider give.
+    const control = this.findFormControlAncestor(hit);
+    if (control && isSliderControl(control) && !isControlDisabled(control)) {
+      this.slidingNode = control;
+      updateSliderDrag(this.engine, control, point.x);
+      this.armWindowRelease();
+      this.requestRedraw();
+    }
+
     this.mouseDownNode = node;
 
     // Track pressed (`:active`) state so paint-time `:active` variants resolve.
@@ -528,6 +596,9 @@ export class CanvasEventManager {
     if (this.scrubbingNode) {
       this.finishScrubberDrag(e);
     }
+    // A slider drag ends on release too (click may not follow if press and
+    // release straddled the canvas edge).
+    this.finishSliderDrag();
 
     const hit = this.hitTest(point);
     const node = this.findClickableAncestor(hit) ?? hit;
@@ -592,6 +663,22 @@ export class CanvasEventManager {
     ) {
       toggleVideoPlayback(videoNode.id);
       this.requestRedraw();
+    }
+
+    // A slider drag ends here; its value is already committed.
+    this.finishSliderDrag();
+
+    // Operate a toggle before the generic click dispatch, so a control that
+    // also carries `onClick` gets both its state change and its action.
+    const control = this.findFormControlAncestor(hit);
+    if (
+      control &&
+      isToggleControl(control) &&
+      control === this.findFormControlAncestor(this.mouseDownNode)
+    ) {
+      if (activateToggle(this.engine, control)) {
+        this.requestRedraw();
+      }
     }
 
     if (node && node.clickable && node === this.mouseDownNode) {
@@ -686,6 +773,33 @@ export class CanvasEventManager {
   /**
    * Cleanup
    */
+  /**
+   * Drop pointer state that refers to `node` or a descendant — called before
+   * a subtree is removed or detached, so a slider removed mid-drag stops
+   * receiving writes and a pressed node does not stay `:active` forever.
+   */
+  clearIfWithin(node: VirtualNode): void {
+    const within = (candidate: VirtualNode | null): boolean => {
+      for (let cur = candidate; cur; cur = cur.parent) if (cur === node) return true;
+      return false;
+    };
+    if (within(this.slidingNode)) {
+      // No `change`: the node is engine-dead.
+      this.slidingNode = null;
+      if (!this.scrubbingNode) this.disarmWindowRelease();
+    }
+    if (within(this.scrubbingNode)) {
+      cancelScrubberDrag();
+      this.scrubbingNode = null;
+      if (!this.slidingNode) this.disarmWindowRelease();
+    }
+    if (within(this.mouseDownNode)) {
+      this.mouseDownNode!.pressed = false;
+      this.mouseDownNode = null;
+    }
+    if (within(this.hoveredNode)) this.hoveredNode = null;
+  }
+
   destroy(): void {
     this.canvas.removeEventListener("mousemove", this.boundOnMouseMove);
     this.canvas.removeEventListener("mousedown", this.boundOnMouseDown);
@@ -696,6 +810,7 @@ export class CanvasEventManager {
     if (this.mouseDownNode) this.mouseDownNode.pressed = false;
     if (this.scrubbingNode) cancelScrubberDrag();
     this.scrubbingNode = null;
+    this.slidingNode = null;
     this.disarmWindowRelease();
     this.rootNode = null;
     this.hoveredNode = null;

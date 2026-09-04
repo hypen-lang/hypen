@@ -7,7 +7,7 @@
 //! per-pixel writes; on a modern GPU per-frame paint cost moves off
 //! the main thread entirely.
 //!
-//! Vello 0.8 is pinned to wgpu 28; that's what we depend on too.
+//! Vello 0.10 uses wgpu 29; that's what we depend on too.
 //! Vello's compute pipeline writes to an intermediate
 //! `Rgba8Unorm + STORAGE_BINDING` texture; a `TextureBlitter` then
 //! copies that intermediate into the real surface texture (which
@@ -21,6 +21,26 @@ use std::sync::Arc;
 use vello::util::{RenderContext, RenderSurface};
 use vello::{AaConfig, AaSupport, Renderer, RendererOptions, Scene};
 use winit::window::Window;
+
+/// Result of one swapchain present attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PresentStatus {
+    /// A frame reached the compositor.
+    Presented,
+    /// The surface could not provide a drawable yet. The caller should retry
+    /// after a short delay; this is normal around minimise/restore, Spaces,
+    /// display changes, and live surface reconfiguration.
+    Retry(SurfaceRetryReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SurfaceRetryReason {
+    Lost,
+    Outdated,
+    Timeout,
+    Occluded,
+    Validation,
+}
 
 pub struct Gpu {
     /// Vello's render-context owns the wgpu device / queue / adapter
@@ -109,18 +129,31 @@ impl Gpu {
     /// Render `scene` to the next surface texture and present it.
     /// `scene` is owned by the caller (the painter); the painter
     /// rebuilds it per frame from `LayoutPass.items`.
-    pub fn present(&mut self, scene: &Scene) -> Result<(), &'static str> {
+    pub(crate) fn present(&mut self, scene: &Scene) -> Result<PresentStatus, &'static str> {
         let device_handle = &self.render_ctx.devices[self.surface.dev_id];
         let device = &device_handle.device;
         let queue = &device_handle.queue;
 
         let surface_texture = match self.surface.surface.get_current_texture() {
-            Ok(t) => t,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
+            wgpu::CurrentSurfaceTexture::Success(t)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(t) => t,
+            wgpu::CurrentSurfaceTexture::Lost => {
                 self.surface.surface.configure(device, &self.surface.config);
-                return Ok(());
+                return Ok(PresentStatus::Retry(SurfaceRetryReason::Lost));
             }
-            Err(_) => return Err("surface unavailable"),
+            wgpu::CurrentSurfaceTexture::Outdated => {
+                self.surface.surface.configure(device, &self.surface.config);
+                return Ok(PresentStatus::Retry(SurfaceRetryReason::Outdated));
+            }
+            wgpu::CurrentSurfaceTexture::Timeout => {
+                return Ok(PresentStatus::Retry(SurfaceRetryReason::Timeout));
+            }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                return Ok(PresentStatus::Retry(SurfaceRetryReason::Occluded));
+            }
+            wgpu::CurrentSurfaceTexture::Validation => {
+                return Ok(PresentStatus::Retry(SurfaceRetryReason::Validation));
+            }
         };
         let params = vello::RenderParams {
             base_color: self.base_color,
@@ -161,7 +194,7 @@ impl Gpu {
         if let Err(e) = device.poll(wgpu::PollType::Poll) {
             log::warn!("device poll failed: {e:?}");
         }
-        Ok(())
+        Ok(PresentStatus::Presented)
     }
 
     /// Render the current Vello scene into a readable RGBA texture and save a

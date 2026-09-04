@@ -46,14 +46,17 @@ Row {
             }
             .tw("items-center")
 
+            // Cart count badge, pinned to the top-end corner of the Stack.
             If(condition: "@{state.cartCount > 0}") {
                 Column {
                     Text("@{state.cartCount}")
                         .tw("text-[10px] font-bold text-white")
                 }
-                .tw("absolute -top-1 right-2 w-5 h-5 rounded-full bg-orange-500 items-center justify-center")
+                .tw("w-5 h-5 rounded-full bg-orange-500 items-center justify-center")
             }
         }
+        .horizontalAlignment("end")
+        .verticalAlignment("start")
     }
     .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
     .opacity({ default: 1, active: 0.6 })

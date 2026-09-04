@@ -175,6 +175,17 @@ describe("HypenDurableObject (Cloudflare glue)", () => {
     });
   });
 
+  describe("webSocketError()", () => {
+    test("is a no-op when no session exists for the socket", async () => {
+      const ctx = createMockState();
+      const ws = createMockWebSocket();
+      const dObj = new NoEngineDO(ctx as any, {}, singleModuleConfig());
+      await expect(
+        dObj.webSocketError(ws as any, new Error("connection reset")),
+      ).resolves.toBeUndefined();
+    });
+  });
+
   describe("storage binding", () => {
     test("binds DO storage to the primary module's persistence store on fetch", async () => {
       const ctx = createMockState();

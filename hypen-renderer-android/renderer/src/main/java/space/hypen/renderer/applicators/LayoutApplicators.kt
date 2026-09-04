@@ -7,7 +7,77 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 
 /**
- * Applicator for alignment.
+ * Element types whose handler resolves the alignment props itself:
+ * Column/Row/List fold them into an Arrangement, and
+ * App/Badge/Box/Button/Center/Container/Stack into a Box `contentAlignment`
+ * (see components/ContentAlignment.kt). Card/Grid/SafeArea size and paint a
+ * frame *inside* this modifier chain.
+ *
+ * On those the component keeps winning and the applicators below stand down.
+ * Applying both would fight: `wrapContent*` measures the node at its content
+ * size, so a Card would paint its surface at content width instead of
+ * centring what is inside it, and a Column would end up aligned twice.
+ */
+private val alignmentOwningTypes = setOf(
+    "app", "badge", "box", "button", "card", "center", "column", "container",
+    "grid", "list", "row", "safearea", "stack",
+)
+
+private fun ApplicatorContext.componentOwnsAlignment(): Boolean =
+    element.elementType.lowercase() in alignmentOwningTypes
+
+/**
+ * Content alignment applicators (`alignment`, `justifyContent`/`alignItems`
+ * from `.tw()` classes, and the Hypen-native `horizontalAlignment`/
+ * `verticalAlignment`).
+ *
+ * These were read only *inside* Column/Row/Stack/List/Badge, so on every
+ * other container they were dropped and content stayed pinned top-start —
+ * the same gap the Swift renderer closed with its JustifyContentApplicator
+ * (Applicators/LayoutApplicators.swift).
+ *
+ * Compose expresses "align my content inside the box my size applicators
+ * established" as `wrapContent*`: the node is measured at its content size
+ * and placed within the incoming constraints. That only reads correctly when
+ * everything which must keep the full box — size, border, background,
+ * padding, the click target — sits outside it, which is why these run in the
+ * innermost CONTENT_ALIGNMENT band.
+ *
+ * Flex's main axis in the default row direction is horizontal, so
+ * `justifyContent` drives the horizontal side and `alignItems` the vertical,
+ * matching the reading Swift settled on.
+ *
+ * KNOWN LIMIT: these only take effect in a wrap-content parent. HypenApp
+ * appends its stretch policy (`fillMaxWidth()` for a stretch Column child,
+ * `fillMaxWidth(fraction)` for `.fillMaxWidth()`) AFTER the whole applicator
+ * chain, i.e. inside this band, and `wrapContentWidth(center).fillMaxWidth()`
+ * fills - so `Text("x").tw("justify-center")` inside `Column.tw("items-stretch")`
+ * still sits at the start. The owning containers resolve the props themselves
+ * (`hypenContentAlignment`) precisely to escape this; leaf types under a
+ * stretch parent need the policy modifier moved ahead of this band.
+ */
+private fun alignHorizontally(
+    modifier: Modifier,
+    value: Any?,
+    context: ApplicatorContext,
+): Modifier {
+    if (context.componentOwnsAlignment()) return modifier
+    val alignment = AlignmentApplicator.parseHorizontalAlignment(value) ?: return modifier
+    return modifier.wrapContentWidth(alignment)
+}
+
+private fun alignVertically(
+    modifier: Modifier,
+    value: Any?,
+    context: ApplicatorContext,
+): Modifier {
+    if (context.componentOwnsAlignment()) return modifier
+    val alignment = AlignmentApplicator.parseVerticalAlignment(value) ?: return modifier
+    return modifier.wrapContentHeight(alignment)
+}
+
+/**
+ * Applicator for alignment - both axes at once, e.g. `.alignment(center)`.
  */
 class AlignmentApplicator : ApplicatorHandler {
     override val name: String = "alignment"
@@ -17,9 +87,9 @@ class AlignmentApplicator : ApplicatorHandler {
         value: Any?,
         context: ApplicatorContext,
     ): Modifier {
-        // Note: Alignment in Compose is typically handled at the parent level
-        // This is a simplified version
-        return modifier
+        if (context.componentOwnsAlignment()) return modifier
+        val alignment = parseAlignment(value) ?: return modifier
+        return modifier.wrapContentSize(alignment)
     }
 
     companion object {
@@ -37,22 +107,78 @@ class AlignmentApplicator : ApplicatorHandler {
                 else -> null
             }
 
+        // The flex spellings (`flex-start`, `flex-end`) and the leading/
+        // trailing synonyms are accepted alongside the native tokens so a
+        // `.tw()` class and a hand-written applicator resolve identically —
+        // the same token set Column/Row already match on.
         fun parseVerticalAlignment(value: Any?): Alignment.Vertical? =
             when (value?.toString()?.lowercase()) {
-                "top" -> Alignment.Top
-                "center" -> Alignment.CenterVertically
-                "bottom" -> Alignment.Bottom
+                "top", "start", "flex-start" -> Alignment.Top
+                "center", "centervertically" -> Alignment.CenterVertically
+                "bottom", "end", "flex-end" -> Alignment.Bottom
                 else -> null
             }
 
         fun parseHorizontalAlignment(value: Any?): Alignment.Horizontal? =
             when (value?.toString()?.lowercase()) {
-                "start", "left" -> Alignment.Start
-                "center" -> Alignment.CenterHorizontally
-                "end", "right" -> Alignment.End
+                "start", "left", "leading", "flex-start" -> Alignment.Start
+                "center", "centerhorizontally" -> Alignment.CenterHorizontally
+                "end", "right", "trailing", "flex-end" -> Alignment.End
                 else -> null
             }
     }
+}
+
+/**
+ * Applicator for justifyContent (CSS main axis -> horizontal).
+ */
+class JustifyContentApplicator : ApplicatorHandler {
+    override val name: String = "justifyContent"
+
+    override fun apply(
+        modifier: Modifier,
+        value: Any?,
+        context: ApplicatorContext,
+    ): Modifier = alignHorizontally(modifier, value, context)
+}
+
+/**
+ * Applicator for horizontalAlignment (Hypen-native spelling of the above).
+ */
+class HorizontalAlignmentApplicator : ApplicatorHandler {
+    override val name: String = "horizontalAlignment"
+
+    override fun apply(
+        modifier: Modifier,
+        value: Any?,
+        context: ApplicatorContext,
+    ): Modifier = alignHorizontally(modifier, value, context)
+}
+
+/**
+ * Applicator for alignItems (CSS cross axis -> vertical).
+ */
+class AlignItemsApplicator : ApplicatorHandler {
+    override val name: String = "alignItems"
+
+    override fun apply(
+        modifier: Modifier,
+        value: Any?,
+        context: ApplicatorContext,
+    ): Modifier = alignVertically(modifier, value, context)
+}
+
+/**
+ * Applicator for verticalAlignment (Hypen-native spelling of the above).
+ */
+class VerticalAlignmentApplicator : ApplicatorHandler {
+    override val name: String = "verticalAlignment"
+
+    override fun apply(
+        modifier: Modifier,
+        value: Any?,
+        context: ApplicatorContext,
+    ): Modifier = alignVertically(modifier, value, context)
 }
 
 /**

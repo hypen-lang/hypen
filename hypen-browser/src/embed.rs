@@ -68,6 +68,10 @@ pub struct Embed {
     pub remote: Option<Arc<RemoteModule>>,
     /// Rewritten root ids the embed inserted under the host node.
     pub app_root_ids: Vec<String>,
+    /// Root ids the embedded app currently has linked to its synthetic root.
+    /// Router-cached roots remain in `app_root_ids` while absent here, so a
+    /// connection-status reconciliation must not revive every visited route.
+    pub active_root_ids: Vec<String>,
     /// Host-owned slot children, by kind, in insertion order.
     pub loading_slot_ids: Vec<String>,
     pub error_slot_ids: Vec<String>,
@@ -90,6 +94,7 @@ impl Embed {
             url,
             remote: None,
             app_root_ids: Vec::new(),
+            active_root_ids: Vec::new(),
             loading_slot_ids: Vec::new(),
             error_slot_ids: Vec::new(),
             detached: HashSet::new(),
@@ -142,7 +147,7 @@ impl Embed {
         for id in &self.error_slot_ids {
             set_visible(&mut out, &mut self.detached, &self.host_id, id, show_error);
         }
-        for id in &self.app_root_ids {
+        for id in &self.active_root_ids {
             set_visible(
                 &mut out,
                 &mut self.detached,
@@ -453,6 +458,7 @@ mod tests {
 
         // Connection failed: error re-attaches under the host, roots detach.
         e.app_root_ids.push("e1:1".into());
+        e.active_root_ids.push("e1:1".into());
         e.status = EmbedStatus::Error;
         let out = e.reconcile_visibility();
         assert!(out

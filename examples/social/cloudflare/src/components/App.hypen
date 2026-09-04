@@ -1,6 +1,7 @@
 module App {
     Column {
-    Router {
+        SafeArea {
+            Router {
         Route(path: "/") {
             Column {
                 HomePage()
@@ -61,6 +62,10 @@ module App {
             .tw("flex-1 h-full min-h-0 overflow-hidden bg-white")
         }
 
+        Route(path: "/dm/:id") {
+            Conversation()
+        }
+
         Route(path: "/comments/:postId") {
             Comments()
         }
@@ -68,8 +73,10 @@ module App {
         Route(path: "/story/:id") {
             Story()
         }
-    }
-    .tw("flex-1 w-full h-full min-h-0 overflow-hidden")
+            }
+            .tw("flex-1 w-full h-full min-h-0 overflow-hidden")
+        }
+        .tw("flex-1 w-full h-full min-h-0 overflow-hidden")
     }
     .tw("flex-1 w-full h-screen min-h-0 overflow-hidden bg-white")
 }

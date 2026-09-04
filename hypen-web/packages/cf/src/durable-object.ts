@@ -210,6 +210,19 @@ export abstract class HypenDurableObject {
    * state via the bound store.
    */
   async webSocketClose(ws: WebSocket, _code: number, _reason: string): Promise<void> {
+    await this.destroySession(ws);
+  }
+
+  /**
+   * Cloudflare reports abnormal socket termination separately from a clean
+   * close. Treat both paths identically so session state, timers, and module
+   * lifecycle resources cannot leak inside a long-lived DO isolate.
+   */
+  async webSocketError(ws: WebSocket, _error: unknown): Promise<void> {
+    await this.destroySession(ws);
+  }
+
+  private async destroySession(ws: WebSocket): Promise<void> {
     const session = this.sessions.get(ws);
     if (!session) return;
     this.sessions.delete(ws);

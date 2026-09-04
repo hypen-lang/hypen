@@ -84,7 +84,6 @@ extension ComponentRegistry {
         registry.register(SpacerComponent())
         registry.register(StackComponent())
         registry.register(ListComponent())
-        registry.register(ScrollViewComponent())
         registry.register(GridComponent())
         registry.register(SafeAreaComponent())
 
@@ -94,6 +93,11 @@ extension ComponentRegistry {
         registry.register(ParagraphComponent())
         registry.register(ImageComponent())
         registry.register(DividerComponent())
+
+        // Accessibility components
+        // Without a handler this falls through to the container fallback in
+        // HypenElementView, which renders screen-reader-only content visibly.
+        registry.register(VisuallyHiddenComponent())
 
         // Interactive components
         registry.register(ButtonComponent())

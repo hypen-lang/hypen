@@ -378,8 +378,10 @@ private struct GridAwareImageContent: View {
                         }
                     }
                 } else {
-                    Image(systemName: "photo")
-                        .foregroundColor(.gray)
+                    // No source (yet): reserve the box but paint nothing, like
+                    // web's `<img>` without `src` and Android's empty Box — a
+                    // bound `src` that fills in later must not flash a glyph.
+                    Color.clear
                 }
         }
         .accessibilityLabel(alt)

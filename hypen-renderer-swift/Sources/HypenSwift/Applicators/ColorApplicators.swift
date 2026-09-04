@@ -51,12 +51,19 @@ public struct BackgroundApplicator: ApplicatorHandler {
 
 // MARK: - Foreground Color Applicator
 
+/// SwiftUI/Compose spelling of `color`. When a node sets both, `color` wins
+/// on every renderer (DOM `color.ts`, canvas `INHERITED_PROP_ALIASES`,
+/// Android `ContentColor.kt`), so the alias yields whenever the canonical
+/// prop is present — regardless of the registry's key-sorted apply order,
+/// which would otherwise run this one last and let it clobber `color`.
 public struct ForegroundColorApplicator: ApplicatorHandler {
     public let name = "foregroundcolor"
 
     public init() {}
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        let props = context.element.props
+        if props["color"] != nil || props["color.0"] != nil { return }
         if let color = ColorParser.parse(value) {
             modifier.foregroundColor = color
         }

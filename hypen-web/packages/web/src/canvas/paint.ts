@@ -19,8 +19,9 @@ import {
   cssLengthToPx,
   cssLengthToPxForFont,
   cssLineHeightToPx,
-  isDisplayNone,
+  isLayoutHidden,
   inheritedTextProp,
+  ownTextColor,
 } from "./utils.js";
 import {
   PLAYBACK_REPORT_INTERVAL_MS,
@@ -110,17 +111,13 @@ const STATE_UNSAFE_TYPES = new Set([
   "image",
   "video",
   "divider",
-  "separator",
   "checkbox",
   "radio",
   "switch",
-  "toggle",
   "slider",
   "scrubber",
-  "progress",
   "progressbar",
   "spinner",
-  "loading",
   "card",
   "badge",
   "avatar",
@@ -204,10 +201,11 @@ export function paintNode(
   cull?: Rectangle | null,
 ): void {
   if (!node.visible || !node.layout) return;
-  // `display: none` (Tailwind `hidden`, often paired with `md:flex`). The
+  // Out of the visual flow: `display: none` (Tailwind `hidden`, often paired
+  // with `md:flex`) or a screen-reader-only `VisuallyHidden` wrapper. The
   // layout pass already gave it a zero box, but a zero-box Text/Image still
   // paints its placeholder — skip the whole subtree instead.
-  if (isDisplayNone(node.props)) return;
+  if (isLayoutHidden(node)) return;
   if (cull && canCullSubtree(node, cull)) return;
 
   const type = node.type.toLowerCase();
@@ -283,7 +281,6 @@ export function paintNode(
       // Spacer is invisible, just takes up space
       break;
     case "divider":
-    case "separator":
       paintDivider(ctx, node);
       break;
     case "checkbox":
@@ -293,7 +290,6 @@ export function paintNode(
       paintRadio(ctx, node);
       break;
     case "switch":
-    case "toggle":
       paintSwitch(ctx, node);
       break;
     case "slider":
@@ -302,12 +298,10 @@ export function paintNode(
     case "scrubber":
       paintScrubber(ctx, node);
       break;
-    case "progress":
     case "progressbar":
       paintProgress(ctx, node);
       break;
     case "spinner":
-    case "loading":
       paintSpinner(ctx, node);
       break;
     case "card":
@@ -791,7 +785,7 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const value = edit ? edit.value : (props.value || "");
   const placeholder = props.placeholder || "";
   const text = value || placeholder;
-  const textColor = value ? (props.color || "#000000") : "#999999";
+  const textColor = value ? (ownTextColor(props) || "#000000") : "#999999";
 
   const fontSize = cssLengthToPx(props.fontSize) ?? 16;
   const fontWeight = props.fontWeight || "normal";
@@ -867,7 +861,7 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
 
   // IME composition underline (dashed, under the composing range)
   if (edit.compStart !== null && edit.compEnd !== null && edit.compEnd > edit.compStart) {
-    ctx.strokeStyle = props.color || "#000000";
+    ctx.strokeStyle = ownTextColor(props) || "#000000";
     ctx.lineWidth = 1;
     ctx.setLineDash([2, 2]);
     for (const r of rangeToRects(ctx, g, edit.compStart, edit.compEnd)) {
@@ -882,7 +876,7 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   // Caret (hidden while a range is selected, blinks via the edit timer)
   if (edit.caretVisible && edit.selStart === edit.selEnd) {
     const caret = offsetToCaretRect(ctx, g, edit.selEnd);
-    ctx.fillStyle = props.color || "#000000";
+    ctx.fillStyle = ownTextColor(props) || "#000000";
     ctx.fillRect(caret.x, caret.y + 1, 1.5, caret.height - 2);
   }
 
@@ -906,7 +900,7 @@ function paintSelect(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     ?? node.children.find(child => child.type.toLowerCase() === "text")?.props[0]
     ?? "Select…";
   const fontSize = cssLengthToPx(props.fontSize) ?? 16;
-  ctx.fillStyle = props.color || "#111827";
+  ctx.fillStyle = ownTextColor(props) || "#111827";
   ctx.font = `${props.fontWeight || "normal"} ${fontSize}px ${props.fontFamily || "system-ui, sans-serif"}`;
   ctx.textBaseline = "middle";
   ctx.textAlign = "left";
@@ -2460,7 +2454,7 @@ function paintScrubber(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   }
 
   const fraction = getScrubberFraction(node);
-  const fillColor = props.fillColor || props.color || "#ffffff";
+  const fillColor = props.fillColor || ownTextColor(props) || "#ffffff";
   if (fraction > 0) {
     if (typeof fillColor === "string" && fillColor.includes("gradient")) {
       ctx.fillStyle = resolveCanvasPaint(ctx, fillColor, x, trackY, width * fraction, trackHeight);
@@ -3036,7 +3030,7 @@ function paintDivider(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const props = node.props;
 
   const orientation = props.orientation || "horizontal";
-  const color = props.color || props.backgroundColor || "#e0e0e0";
+  const color = ownTextColor(props) || props.backgroundColor || "#e0e0e0";
   const thickness = cssLengthToPx(props.thickness) ?? 1;
 
   ctx.strokeStyle = color;
@@ -3115,7 +3109,8 @@ function paintRadio(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const radius = size / 2;
 
   // Properly parse boolean values (handle string "false")
-  const checkedValue = props.checked !== undefined ? props.checked : props.value;
+  // Only `checked`: a radio's `value` is its option id, not its state.
+  const checkedValue = props.checked ?? props["checked.0"];
   const checked = checkedValue === true || checkedValue === "true" || (checkedValue !== false && checkedValue !== "false" && !!checkedValue);
 
   // Outer circle background
@@ -3218,7 +3213,7 @@ function paintSlider(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
 
   // Track fill
   const fillWidth = width * percentage;
-  const fillColor = props.fillColor || props.color || "#007bff";
+  const fillColor = props.fillColor || ownTextColor(props) || "#007bff";
 
   // Support gradient fills
   if (typeof fillColor === "string" && fillColor.includes("gradient")) {
@@ -3275,7 +3270,7 @@ function paintProgress(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     const fillWidth = width * percentage;
 
     // Support gradient fills
-    const fillColor = props.fillColor || props.color || "#007bff";
+    const fillColor = props.fillColor || ownTextColor(props) || "#007bff";
     if (typeof fillColor === "string" && fillColor.includes("gradient")) {
       ctx.fillStyle = resolveCanvasPaint(ctx, fillColor, x, y, fillWidth, height);
     } else {
@@ -3309,7 +3304,7 @@ function paintSpinner(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const centerY = layout.y + size / 2;
   const radius = size / 2 - 4;
   const thickness = cssLengthToPx(props.thickness) ?? 4;
-  const color = props.color || "#3b82f6";
+  const color = ownTextColor(props) || "#3b82f6";
 
   // Use timestamp for animation if available
   const animated = props.animated ?? props["animated.0"] ?? true;
@@ -3394,7 +3389,7 @@ function paintBadge(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   // Text content
   const text = String(props[0] || props.text || "");
   if (text) {
-    ctx.fillStyle = props.color || "#ffffff";
+    ctx.fillStyle = ownTextColor(props) || "#ffffff";
     ctx.font = `${props.fontWeight || "bold"} ${props.fontSize || 10}px ${props.fontFamily || "sans-serif"}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -3438,7 +3433,7 @@ function paintAvatar(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   // Text initials if provided
   const text = String(props[0] || props.text || props.initials || "");
   if (text) {
-    ctx.fillStyle = props.color || "#ffffff";
+    ctx.fillStyle = ownTextColor(props) || "#ffffff";
     ctx.font = `${props.fontWeight || "bold"} ${props.fontSize || size / 2.5}px ${props.fontFamily || "sans-serif"}`;
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
@@ -3504,7 +3499,7 @@ function paintAudio(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
 
   const buttonRadius = Math.min(15, Math.max(9, height * 0.28));
   const buttonX = x + 12 + buttonRadius;
-  ctx.fillStyle = props.color || "#374151";
+  ctx.fillStyle = ownTextColor(props) || "#374151";
   ctx.beginPath();
   ctx.arc(buttonX, middleY, buttonRadius, 0, Math.PI * 2);
   ctx.fill();
@@ -3543,7 +3538,7 @@ function paintIcon(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const size = Math.min(layout.width, layout.height);
   const x = layout.x;
   const y = layout.y;
-  const color = props.color || props["color.0"] || "#000000";
+  const color = ownTextColor(props) || "#000000";
 
   // Server-resolved SVG path data (from engine's ResourceRegistry)
   const iconPaths: Array<{
@@ -3652,7 +3647,7 @@ function paintLink(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const props = node.props;
 
   const text = String(props[0] || props.text || "");
-  const color = node.hovered ? (props.hoverColor || "#0056b3") : (props.color || "#007bff");
+  const color = node.hovered ? (props.hoverColor || "#0056b3") : (ownTextColor(props) || "#007bff");
   const fontSize = cssLengthToPx(props.fontSize) ?? 16;
   const fontWeight = props.fontWeight || "normal";
   const fontFamily = props.fontFamily || "system-ui, sans-serif";

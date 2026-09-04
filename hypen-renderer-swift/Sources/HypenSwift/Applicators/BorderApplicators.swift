@@ -55,6 +55,42 @@ public struct BorderWidthApplicator: ApplicatorHandler {
     }
 }
 
+// MARK: - Per-side Border Width Applicators
+
+/// `borderTopWidth` / `borderRightWidth` / `borderBottomWidth` /
+/// `borderLeftWidth` — what Tailwind's `border-t` / `border-b` / `border-x`
+/// lower to. Sets the matching per-side width on the modifier; the colour
+/// comes from `borderColor` (defaulting to `.primary` like the uniform width).
+public struct BorderSideWidthApplicator: ApplicatorHandler {
+    public enum Side: Sendable { case top, right, bottom, left }
+
+    public let name: String
+    private let side: Side
+
+    public init(_ side: Side) {
+        self.side = side
+        switch side {
+        case .top: name = "bordertopwidth"
+        case .right: name = "borderrightwidth"
+        case .bottom: name = "borderbottomwidth"
+        case .left: name = "borderleftwidth"
+        }
+    }
+
+    public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        guard let width = parseCGFloat(value) else { return }
+        switch side {
+        case .top: modifier.borderTopWidth = width
+        case .right: modifier.borderRightWidth = width
+        case .bottom: modifier.borderBottomWidth = width
+        case .left: modifier.borderLeftWidth = width
+        }
+        if modifier.borderColor == nil {
+            modifier.borderColor = .primary
+        }
+    }
+}
+
 // MARK: - Border Color Applicator
 
 public struct BorderColorApplicator: ApplicatorHandler {

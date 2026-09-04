@@ -22,6 +22,7 @@ import type {
   LayoutFunction,
 } from "./types.js";
 import { computeLayout, initTaffyLayout } from "./layout.js";
+import { FORM_CONTROL_TYPES } from "./controls.js";
 import { clearTextCache } from "./text.js";
 import {
   paintNode,
@@ -72,7 +73,7 @@ export class CanvasRenderer implements Renderer {
   private ctx: CanvasRenderingContext2D;
   private engine: IEngine;
   private options: CanvasRendererOptions;
-  
+
   private rootNode: VirtualNode | null = null;
   private nodes = new Map<string, VirtualNode>();
 
@@ -84,14 +85,14 @@ export class CanvasRenderer implements Renderer {
    * (`t{hash}.{idx}`), so registered skeletons stay valid across clears.
    */
   private templateExpander = new TemplateExpander();
-  
+
   private eventManager: CanvasEventManager;
   private scrollManager: ScrollManager;
   private selectionManager: SelectionManager;
   private accessibilityLayer: AccessibilityLayer;
   private focusManager: FocusManager;
   private textEditor: TextEditController;
-  
+
   private dirtyTracker: DirtyRectTracker;
 
   /**
@@ -217,6 +218,7 @@ export class CanvasRenderer implements Renderer {
     this.focusManager = new FocusManager(this.accessibilityLayer, engine, {
       getNode: (id) => this.nodes.get(id),
       isAuxFocusTarget: (el) => this.textEditor.isProxyElement(el),
+      requestRedraw: () => this.scheduleRedraw(),
       onFocusChange: (next) => {
         if (next && isEditableNode(next)) {
           const el = this.accessibilityLayer.getElement(next.id);
@@ -460,11 +462,26 @@ export class CanvasRenderer implements Renderer {
       opacity: parseFloat(rawProps.opacity) || 1,
       clickable:
         lowerType === "button" ||
+        // Form controls are operated by pointer (toggle, or drag for a
+        // slider), so they need the pointer cursor and the hit-test lift
+        // even when the author wired no `onClick`.
+        FORM_CONTROL_TYPES.has(lowerType) ||
+        // A Link carrying a destination is inherently activatable, the way
+        // `<a href>` is on the DOM. The module-backed Link wires its own
+        // `onClick` and was already covered by the clause below; this only
+        // adds the bare primitive form, so it gets the pointer cursor and a
+        // hit-test target rather than reading as inert decoration.
+        (lowerType === "link" &&
+          (rawProps["0"] != null || rawProps.to != null || rawProps.href != null)) ||
         rawProps.onClick != null ||
         rawProps.onclick != null ||
         rawProps.action != null,
       hoverable: true,
-      focusable: lowerType === "input" || lowerType === "textarea" || lowerType === "button",
+      focusable:
+        lowerType === "input" ||
+        lowerType === "textarea" ||
+        lowerType === "button" ||
+        FORM_CONTROL_TYPES.has(lowerType),
       focused: false,
       hovered: false,
     };
@@ -737,6 +754,7 @@ export class CanvasRenderer implements Renderer {
     // focus state follows.
     this.textEditor.endIfWithin(node);
     this.focusManager.clearIfWithin(node);
+    this.eventManager.clearIfWithin(node);
 
     // Off-screen (cached-route) videos must stop playing audio, but their
     // offscreen elements stay alive so re-attach resumes from the same
@@ -791,6 +809,7 @@ export class CanvasRenderer implements Renderer {
       // AT activation can no longer reach it during the exit window.
       this.textEditor.endIfWithin(node);
       this.focusManager.clearIfWithin(node);
+    this.eventManager.clearIfWithin(node);
       this.accessibilityLayer.markExiting(id);
       return;
     }
@@ -814,6 +833,7 @@ export class CanvasRenderer implements Renderer {
     // End any edit session inside the removed subtree; focus state follows.
     this.textEditor.endIfWithin(node);
     this.focusManager.clearIfWithin(node);
+    this.eventManager.clearIfWithin(node);
 
     // Drop the mirror element and its subtree's id mappings.
     this.accessibilityLayer.removeNode(node);

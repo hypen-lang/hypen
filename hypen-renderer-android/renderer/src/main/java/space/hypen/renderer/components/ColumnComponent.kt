@@ -15,7 +15,6 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import space.hypen.renderer.applicators.ColorParser
 import space.hypen.renderer.model.HypenElement
 
 /**
@@ -130,9 +129,8 @@ class ColumnComponent : ComponentHandler {
             // For stretch, use IntrinsicSize.Min so children know the width to stretch to
             .let { if (isStretch) it.width(IntrinsicSize.Min) else it }
 
-        // Check for color prop to propagate to children via LocalContentColor
-        val colorStr = element.getStringProp("color.0")
-        val contentColor = if (colorStr != null) ColorParser.parse(colorStr) else null
+        // Content colour propagated to children via LocalContentColor
+        val contentColor = hypenContentColor(element)
 
         // Preserve a finite-width capability inherited from the parent. This
         // lets a nested wrap-content Column grow around an explicit

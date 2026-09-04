@@ -26,6 +26,10 @@ struct GalleryBrowserView: View {
     @State private var isConnected: Bool = false
     @State private var isLoading: Bool = false
     @State private var isFullscreen: Bool = false
+    /// Browser chrome collapses to a floating URL pill once a hosted app has
+    /// loaded (like the desktop shell's island). Only meaningful on the app
+    /// screen; Home always shows the docked toolbar.
+    @State private var isChromeCollapsed: Bool = false
     /// Bumped when the user taps refresh — used as part of the HypenView `.id`
     /// to force a fresh WebSocket connection (same pattern as Android's
     /// `refreshKey`).
@@ -42,6 +46,26 @@ struct GalleryBrowserView: View {
 
     private var canGoBack: Bool { !history.isEmpty }
 
+    private var isAppScreen: Bool {
+        if case .app = currentScreen { return true }
+        return false
+    }
+
+    private var toolbar: some View {
+        BrowserToolbar(
+            currentUrl: currentUrl,
+            isConnected: isConnected,
+            isLoading: isLoading,
+            canGoBack: canGoBack,
+            isFullscreen: isFullscreen,
+            onUrlSubmit: { submitted in connect(to: submitted) },
+            onBackTap: goBack,
+            onHomeTap: goHome,
+            onRefreshTap: refresh,
+            onFullscreenToggle: { isFullscreen.toggle() }
+        )
+    }
+
     var body: some View {
         // Toolbar is pinned to the top safe-area via `safeAreaInset`
         // instead of being a sibling in a top-down VStack. Reason:
@@ -55,31 +79,60 @@ struct GalleryBrowserView: View {
         // regardless of the keyboard's bottom inset, and adjusts
         // the content's bottom inset instead. Net effect: the URL
         // pill never enters the unsafe Island region.
-        content
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            // The `ShapeStyle` overload already bleeds into every safe-area
-            // edge (`ignoresSafeAreaEdges` defaults to `.all`), which is what
-            // edge-to-edge hosting needs: the backdrop reaches the screen
-            // edges even where the hosted app doesn't paint its own.
-            .background(Color(.systemBackground))
-            .safeAreaInset(edge: .top, spacing: 0) {
-                if !isFullscreen {
-                    BrowserToolbar(
+        //
+        // On the app screen the chrome instead FLOATS over the hosted app
+        // (which runs edge-to-edge under it): a Dynamic-Island-sized URL pill
+        // once the app has loaded, or the full toolbar while expanded. Tapping
+        // the content outside an expanded toolbar collapses it again.
+        ZStack(alignment: .top) {
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                // The `ShapeStyle` overload already bleeds into every safe-area
+                // edge (`ignoresSafeAreaEdges` defaults to `.all`), which is what
+                // edge-to-edge hosting needs: the backdrop reaches the screen
+                // edges even where the hosted app doesn't paint its own.
+                .background(Color(.systemBackground))
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    if !isFullscreen && !isAppScreen {
+                        toolbar
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+                }
+
+            if isAppScreen && !isFullscreen {
+                if !isChromeCollapsed {
+                    // Tap-away target: anywhere on the content collapses the
+                    // expanded toolbar. Sits below the toolbar in the ZStack so
+                    // the toolbar's own controls still win.
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .ignoresSafeArea()
+                        .onTapGesture { withAnimation { isChromeCollapsed = true } }
+                }
+                if isChromeCollapsed {
+                    CollapsedUrlPill(
                         currentUrl: currentUrl,
                         isConnected: isConnected,
                         isLoading: isLoading,
-                        canGoBack: canGoBack,
-                        isFullscreen: isFullscreen,
-                        onUrlSubmit: { submitted in connect(to: submitted) },
-                        onBackTap: goBack,
-                        onHomeTap: goHome,
-                        onRefreshTap: refresh,
-                        onFullscreenToggle: { isFullscreen.toggle() }
+                        // Same dark chip as Android, below the status bar — no
+                        // Dynamic Island special-casing (it read as a smeared Island).
+                        blendsWithDynamicIsland: false,
+                        onTap: { withAnimation { isChromeCollapsed = false } }
                     )
-                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .transition(.opacity.combined(with: .scale(scale: 0.9, anchor: .top)))
+                } else {
+                    toolbar
+                        .transition(.move(edge: .top).combined(with: .opacity))
                 }
             }
-            .animation(.easeInOut(duration: 0.2), value: isFullscreen)
+        }
+        .animation(.easeInOut(duration: 0.2), value: isFullscreen)
+        .animation(.easeInOut(duration: 0.2), value: isChromeCollapsed)
+        // Auto-collapse once the app is up; expanding again is a tap on the
+        // pill. Re-arms on every (re)connect so a refresh collapses too.
+        .onChange(of: isConnected) { _, connected in
+            if connected && isAppScreen { isChromeCollapsed = true }
+        }
         .sheet(isPresented: $showComponentGallery) {
             NavigationStack(path: $componentPath) {
                 ComponentListView(onItemSelected: { item in
@@ -120,17 +173,15 @@ struct GalleryBrowserView: View {
     /// mobile browser's viewport — that is what makes a `SafeArea` demo show
     /// real padding instead of nothing.
     ///
-    /// The top only bleeds in fullscreen. While the browser toolbar is visible
-    /// it already sits between the notch and the content, so the content
-    /// starts below it and there is nothing left at the top for a `SafeArea`
-    /// element to clear — the shell's chrome has already accounted for it, and
-    /// `hypenEdgeToEdgeHost` therefore reports a top inset of zero. Letting the
-    /// content bleed *under* the toolbar instead (and feeding the toolbar's
-    /// measured height back as the top inset) would look identical for
-    /// `SafeArea` apps while hiding the top ~110pt of every app that doesn't
-    /// use `SafeArea` behind the chrome, so we don't.
+    /// The top bleeds as well: the browser chrome on the app screen is a
+    /// floating pill (or a transient expanded toolbar) overlaid on the app,
+    /// not a docked bar above it, so the hosted content owns the whole
+    /// screen and `SafeArea` pads by the device's real top inset.
     private var contentBleedEdges: Edge.Set {
-        isFullscreen ? .all : [.bottom, .horizontal]
+        // The app screen's chrome floats (see `body`), so the hosted app
+        // always runs under the top edge too and `SafeArea` gets the real
+        // top inset.
+        .all
     }
 
     @ViewBuilder
@@ -215,9 +266,17 @@ struct GalleryBrowserView: View {
         guard !normalized.isEmpty else { return }
         let entryName = name ?? extractNameFromUrl(normalized)
         storage.addOrUpdate(name: entryName, url: normalized)
+        // Reconnecting to the URL that is already open (deep link, home-screen
+        // tap) must still tear the view down: HypenView is keyed on
+        // url+refreshKey, and without a new key there is no onAppear, so the
+        // connected flag — and the chrome auto-collapse — never fires.
+        if case .app(let url) = currentScreen, url == normalized {
+            refreshKey &+= 1
+        }
         navigate(to: .app(url: normalized))
         isLoading = true
         isConnected = false
+        isChromeCollapsed = false
     }
 
     private func navigate(to screen: BrowserScreen) {
@@ -316,7 +375,7 @@ struct HypenEdgeToEdgeHost: ViewModifier {
     /// with the safe area, which is what makes this value stable for content
     /// that has opted out of it.
     @MainActor
-    private static func currentWindowInsets() -> UIEdgeInsets {
+    static func currentWindowInsets() -> UIEdgeInsets {
         let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
         let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
         return scene?.keyWindow?.safeAreaInsets ?? .zero

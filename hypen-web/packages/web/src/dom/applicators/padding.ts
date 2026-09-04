@@ -4,6 +4,7 @@
 
 import type { ApplicatorHandler } from "./types.js";
 import { toCssLength as toCssLengthShared } from "./size.js";
+import { hasSpacingNamedKey, resolveSpacingKeys } from "./spacing-keys.js";
 
 // Format a value as a CSS length. Delegates to the shared helper in
 // `size.ts` so `dp` / `sp` / `pt` normalise to `px` (CSS doesn't understand
@@ -38,17 +39,22 @@ export const paddingHandler: ApplicatorHandler = (el, value) => {
     return;
   }
 
-  // Named-keys form: { top, right, bottom, left }
-  if (
-    value.left !== undefined ||
-    value.right !== undefined ||
-    value.top !== undefined ||
-    value.bottom !== undefined
-  ) {
-    if (value.left !== undefined) el.style.paddingLeft = toCssLength(value.left);
-    if (value.right !== undefined) el.style.paddingRight = toCssLength(value.right);
-    if (value.top !== undefined) el.style.paddingTop = toCssLength(value.top);
-    if (value.bottom !== undefined) el.style.paddingBottom = toCssLength(value.bottom);
+  // Named-keys form: physical edges, the horizontal/vertical axes, and the
+  // direction-aware start/end pair.
+  if (hasSpacingNamedKey(value)) {
+    const edges = resolveSpacingKeys(value);
+    if (edges.top !== undefined) el.style.paddingTop = toCssLength(edges.top);
+    if (edges.bottom !== undefined) el.style.paddingBottom = toCssLength(edges.bottom);
+    if (edges.left !== undefined) el.style.paddingLeft = toCssLength(edges.left);
+    if (edges.right !== undefined) el.style.paddingRight = toCssLength(edges.right);
+    // Written after the physical edges so a logical key wins the cascade,
+    // matching Swift's `leading ?? start ?? left` precedence.
+    if (edges.inlineStart !== undefined) {
+      el.style.setProperty("padding-inline-start", toCssLength(edges.inlineStart));
+    }
+    if (edges.inlineEnd !== undefined) {
+      el.style.setProperty("padding-inline-end", toCssLength(edges.inlineEnd));
+    }
     return;
   }
 

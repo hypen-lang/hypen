@@ -49,7 +49,7 @@ class CardComponent : ComponentHandler {
                     bottom = style.padding.bottom,
                 ),
             ) {
-                renderChildren()
+                ProvideHypenContentColor(element, renderChildren)
             }
         }
     }

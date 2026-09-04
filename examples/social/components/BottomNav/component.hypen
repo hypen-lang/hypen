@@ -16,14 +16,6 @@ Row {
     .onClick(@router.push, to: "/search")
 
     Button {
-        Icon(@resources.plus-square)
-            .size(26)
-            .color("#8e8e8e")
-    }
-    .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
-    .onClick(@router.push, to: "/")
-
-    Button {
         Icon(@resources.heart)
             .size(26)
             .color("@{state.location == '/notifications' ? '#262626' : '#8e8e8e'}")
@@ -38,5 +30,4 @@ Row {
     .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
     .onClick(@router.push, to: "/profile")
 }
-// pb-6 reserves space for the iPhone home indicator / Siri area.
-.tw("px-3 pt-1 pb-6 bg-white border-t border-gray-200 items-center justify-around")
+.tw("px-3 py-1 bg-white border-t border-gray-200 items-center justify-around")

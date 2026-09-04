@@ -108,7 +108,10 @@ function describe(code: number): { icon: string; label: string } {
   return { icon: "cloud-sun", label: "Mild" };
 }
 
-export async function fetchWeather(geo: ConnectionGeo): Promise<Weather | null> {
+export async function fetchWeather(
+  geo: ConnectionGeo,
+  signal?: AbortSignal,
+): Promise<Weather | null> {
   try {
     const url = new URL("https://api.open-meteo.com/v1/forecast");
     url.searchParams.set("latitude", String(geo.latitude));
@@ -117,7 +120,7 @@ export async function fetchWeather(geo: ConnectionGeo): Promise<Weather | null> 
     url.searchParams.set("daily", "temperature_2m_max,temperature_2m_min");
     url.searchParams.set("forecast_days", "1");
     url.searchParams.set("timezone", geo.timezone);
-    const response = await fetch(url.toString());
+    const response = await fetch(url.toString(), { signal });
     if (!response.ok) return null;
     const data = (await response.json()) as {
       current?: { temperature_2m?: number; weather_code?: number };

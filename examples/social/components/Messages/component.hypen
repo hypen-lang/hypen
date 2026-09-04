@@ -6,7 +6,7 @@ module Messages {
                     .tw("text-xl")
             }
             .onClick(@router.push, to: "/")
-            .tw("bg-transparent p-2")
+            .tw("w-10 h-10 bg-transparent border-0 p-2 rounded-xl items-center justify-center hover:bg-gray-100")
 
             Text("@{state.currentUser.username}")
                 .tw("text-base font-semibold flex-1 text-center")
@@ -19,7 +19,9 @@ module Messages {
         List(@state.messages, key: "id") {
             Row {
                 Image(src: "@{item.user.avatarUrl}")
-                    .tw("size-14 rounded-full")
+                    .width(48)
+                    .height(48)
+                    .tw("rounded-full shrink-0")
 
                 Column {
                     Text("@{item.user.username}")
@@ -31,7 +33,7 @@ module Messages {
                             .tw("text-sm text-gray-400")
                     }
                 }
-                .tw("pl-3 flex-1")
+                .tw("pl-3 flex-1 min-w-0")
 
                 Column {
                     If(condition: "@{item.isUnread}") {
@@ -41,10 +43,11 @@ module Messages {
                 }
                 .tw("w-4 items-center")
             }
-            .tw("py-3 px-4 items-center cursor-pointer hover:bg-gray-50")
+            .tw("mx-3 my-1 py-3 px-3 items-center cursor-pointer rounded-2xl overflow-hidden hover:bg-gray-100")
             .onClick(@router.push, to: "/dm/@{item.id}")
         }
-        .tw("flex-1")
+        .tw("flex-1 py-1")
     }
-    .tw("flex-1 w-full bg-white")
+    .tw("flex-1 w-full bg-white md:max-w-[630px] md:border-x md:border-gray-200")
+    .alignSelf("center")
 }

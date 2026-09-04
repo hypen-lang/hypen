@@ -88,12 +88,11 @@ export default app
         .tw("px-5 pt-6 pb-3 items-center")
         .maxWidth(900)
         .width("100%")
-        .alignSelf("center")
 
         Image(src: "@{state.movie.posterUrl}")
           .objectFit("cover")
           .aspectRatio(0.72)
-          .tw("self-center mt-2 w-52 md:w-64 rounded-3xl border border-white/10")
+          .tw("mt-2 w-52 md:w-64 rounded-3xl border border-white/10")
           .backgroundColor("#16161E")
           .boxShadow("0 24px 48px rgba(0, 0, 0, 0.55)")
 
@@ -107,7 +106,7 @@ export default app
               .tw("text-sm")
               .color("#8E8E9A")
           }
-          .tw("mt-3 items-center justify-center self-center")
+          .tw("mt-3 w-full items-center justify-center")
 
           Row {
             Button {
@@ -155,9 +154,9 @@ export default app
         .tw("px-5")
         .maxWidth(680)
         .width("100%")
-        .alignSelf("center")
         .enter(fade, duration: 320)
       }
+      .horizontalAlignment("center")
       .scrollable(true)
       .tw("flex-1")
       .backgroundColor("#0A0A0F")

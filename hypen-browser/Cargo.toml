@@ -15,6 +15,11 @@ default = []
 # dependency, so a video-enabled build must be paired with the platform's
 # runtime/plugins instead of silently producing a binary that fails at launch.
 video = ["hypen-renderer-desktop/video"]
+# Forward the renderer's opt-in performance HUD. Production Browser builds do
+# not include the sampler or overlay unless this feature is explicitly set.
+dev-overlay = ["hypen-renderer-desktop/dev-overlay"]
+# Convenient development build umbrella. Add future dev-only tooling here.
+dev = ["dev-overlay"]
 
 [dependencies]
 hypen-engine = { version = "0.6.3", path = "../hypen-engine-rs" }

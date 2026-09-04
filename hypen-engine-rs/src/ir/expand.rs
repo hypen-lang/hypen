@@ -33,8 +33,13 @@ fn css_to_camel_case(name: &str) -> String {
 /// Returns a Vec of (prop_name, value) pairs with `.0` suffix,
 /// consistent with regular applicator props.
 /// CSS hyphenated names are converted to camelCase.
-fn expand_tailwind_classes(classes: &str) -> Vec<(String, Value)> {
-    let output = hypen_tailwind_parse::parse_classes(classes);
+///
+/// Positioning classes (`absolute`, `relative`, `top-0`, …) are a hard error
+/// from the Tailwind crate — Hypen has no CSS positioning model — and are
+/// surfaced as `Err(message)` so the caller can fail the element loudly.
+fn expand_tailwind_classes(classes: &str) -> Result<Vec<(String, Value)>, String> {
+    let output = hypen_tailwind_parse::parse_classes(classes)
+        .map_err(|e| format!(".tw(\"{classes}\"): {e}"))?;
     let mut props = Vec::new();
 
     // Add base properties (no variant)
@@ -59,7 +64,7 @@ fn expand_tailwind_classes(classes: &str) -> Vec<(String, Value)> {
         }
     }
 
-    props
+    Ok(props)
 }
 
 /// Extract all @{state.xxx} and @{item.xxx} bindings from a template string
@@ -161,11 +166,18 @@ fn insert_applicator_prop(props: &mut Props, name: &str, idx_key: &str, value: V
     props.insert(format!("{name}.{idx_key}"), value);
 }
 
+/// Lower applicators into `props`.
+///
+/// Returns `Some(message)` when an applicator is a hard error (currently only
+/// `.tw(...)` containing CSS positioning classes). The message has already
+/// been logged; element-level callers turn it into an `__Error` node so the
+/// mistake is impossible to miss instead of silently rendering a broken layout.
 fn process_applicators(
     applicators: &[hypen_parser::ApplicatorSpecification],
     props: &mut Props,
     element_type: &str,
-) {
+) -> Option<String> {
+    let mut hard_error: Option<String> = None;
     // `.states { onState(...) }` is collected here but applied only AFTER
     // every other applicator has merged into props: pose lowering captures
     // the node's *final* base value per overridden key as the switch default,
@@ -222,8 +234,19 @@ fn process_applicators(
                         }
                     }
                 };
-                for (prop_key, prop_value) in expand_tailwind_classes(&class_string) {
-                    props.insert(prop_key, prop_value);
+                match expand_tailwind_classes(&class_string) {
+                    Ok(expanded) => {
+                        for (prop_key, prop_value) in expanded {
+                            props.insert(prop_key, prop_value);
+                        }
+                    }
+                    Err(message) => {
+                        crate::log_warn!(
+                            crate::logger::LogScope::Engine,
+                            "{element_type}: {message}"
+                        );
+                        hard_error.get_or_insert(format!("{element_type}: {message}"));
+                    }
                 }
             }
             continue;
@@ -418,6 +441,8 @@ fn process_applicators(
     // states phase so the pose-label cross-validation sees the collected
     // labels (via the "__anim.states" switch the states phase inserts).
     apply_scrub_applicators(&scrub_applicators, &settle_applicators, props);
+
+    hard_error
 }
 
 /// Apply the node's `.scrub`/`.settle` pair (Option G) to its final props.
@@ -610,7 +635,9 @@ fn apply_states_applicator(
         }
 
         let mut pose_props = Props::new();
-        process_applicators(&allowed, &mut pose_props, element_type);
+        // Pose bodies can't host `.tw` positioning either, but the outer
+        // element already turns that into an `__Error`; just drop the return.
+        let _ = process_applicators(&allowed, &mut pose_props, element_type);
 
         let mut static_props = indexmap::IndexMap::new();
         for (key, value) in &pose_props {
@@ -790,12 +817,15 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
                 element.props.insert(key, value);
             }
 
-            // Convert applicators to props
-            process_applicators(
+            // Convert applicators to props. A hard applicator error (e.g.
+            // `.tw("absolute")`) replaces the element with an `__Error` node.
+            if let Some(message) = process_applicators(
                 &component.applicators,
                 &mut element.props,
                 &element.element_type,
-            );
+            ) {
+                return error_element(message);
+            }
 
             // Optional key from first positional string argument
             if let Some(hypen_parser::Argument::Positioned {
@@ -1323,7 +1353,9 @@ fn convert_foreach(component: &ComponentSpecification) -> IRNode {
         }
     }
 
-    process_applicators(&component.applicators, &mut props, "ForEach");
+    if let Some(message) = process_applicators(&component.applicators, &mut props, "ForEach") {
+        return error_element(message);
+    }
     let template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
 
     let Some(source) = source else {
@@ -1381,7 +1413,11 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
     // Build the ForEach IR node for iteration
     let template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
     let mut foreach_props = Props::new();
-    process_applicators(&component.applicators, &mut foreach_props, element_type);
+    if let Some(message) =
+        process_applicators(&component.applicators, &mut foreach_props, element_type)
+    {
+        return error_element(message);
+    }
 
     let foreach_ir = IRNode::ForEach {
         source,
@@ -1751,6 +1787,39 @@ pub(crate) fn propagate_module_scope_ir_node(node: &mut IRNode, scope: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tw_positioning_classes_lower_to_error_element() {
+        let component =
+            hypen_parser::parse_component(r#"Column { Text("x") }.tw("p-4 absolute top-0")"#)
+                .expect("parse");
+        let node = super::ast_to_ir_node(&component);
+        let super::IRNode::Element(el) = node else {
+            panic!("expected element");
+        };
+        assert_eq!(el.element_type, "__Error");
+        let msg = el
+            .props
+            .get("message")
+            .and_then(|v| match v {
+                super::Value::Static(serde_json::Value::String(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("message prop");
+        assert!(msg.contains("absolute"), "{msg}");
+        assert!(msg.contains("Stack"), "{msg}");
+    }
+
+    #[test]
+    fn tw_without_positioning_still_lowers_normally() {
+        let component =
+            hypen_parser::parse_component(r#"Column { Text("x") }.tw("p-4 z-10")"#).expect("parse");
+        let super::IRNode::Element(el) = super::ast_to_ir_node(&component) else {
+            panic!("expected element");
+        };
+        assert_eq!(el.element_type, "Column");
+        assert!(el.props.contains_key("zIndex.0"));
+    }
+
     use super::*;
     use hypen_parser::parse_component;
 

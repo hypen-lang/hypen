@@ -2,7 +2,7 @@
  * Textarea Component
  */
 
-import type { ComponentHandler } from "./index.js";
+import { hasProp, toBool, type ComponentHandler } from "./index.js";
 
 export const textareaHandler: ComponentHandler = {
   create(): HTMLElement {
@@ -29,8 +29,8 @@ export const textareaHandler: ComponentHandler = {
     }
 
     // Placeholder
-    if (props.placeholder !== undefined) {
-      textarea.placeholder = String(props.placeholder);
+    if (hasProp(props, "placeholder")) {
+      textarea.placeholder = props.placeholder === undefined ? "" : String(props.placeholder);
     }
 
     // Rows
@@ -43,14 +43,21 @@ export const textareaHandler: ComponentHandler = {
       textarea.cols = Number(props.cols);
     }
 
-    // Disabled
-    if (props.disabled !== undefined) {
-      textarea.disabled = Boolean(props.disabled);
+    // Disabled. `hasProp` rather than `!== undefined`: a RemoveProp arrives as
+    // the key present and undefined, and must clear the attribute.
+    if (hasProp(props, "disabled")) {
+      textarea.disabled = toBool(props.disabled);
     }
 
     // Readonly
-    if (props.readonly !== undefined) {
-      textarea.readOnly = Boolean(props.readonly);
+    if (hasProp(props, "readonly")) {
+      textarea.readOnly = toBool(props.readonly);
+    }
+
+    // Listed in COMPONENT_HTML_ATTRS, so it never falls through to the
+    // applicator — it has to be honoured here or not at all.
+    if (props.name !== undefined) {
+      textarea.name = String(props.name);
     }
   },
 };

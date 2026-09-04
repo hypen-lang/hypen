@@ -45,7 +45,7 @@
  *   any built-in spinner).
  */
 
-import type { ComponentHandler } from "./index.js";
+import { toBool, type ComponentHandler } from "./index.js";
 import {
   getEngine,
   findEngine,
@@ -479,12 +479,6 @@ function normalizeHeaders(value: unknown): Record<string, string> | null {
   }
 
   return null;
-}
-
-/** Boolean props may arrive as booleans or serialized strings. */
-function toBool(value: unknown): boolean {
-  if (value === "false" || value === "0") return false;
-  return Boolean(value);
 }
 
 function clampIndex(index: number, length: number): number {

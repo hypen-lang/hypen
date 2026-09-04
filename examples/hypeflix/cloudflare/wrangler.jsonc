@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "rules": [
     { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
-    { "type": "Text", "globs": ["**/dist/client/*.js"], "fallthrough": true }
+    { "type": "Text", "globs": ["**/dist/client/*.js", "../../../../hypen-web/packages/cf/dist/client/*.js"], "fallthrough": true }
   ],
   "durable_objects": {
     "bindings": [{ "name": "HYPEFLIX_DO", "class_name": "HypeflixDO" }]

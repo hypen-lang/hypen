@@ -154,7 +154,10 @@ fi
 echo "Build succeeded."
 
 # --- Find built .app ---
-APP_PATH="$(find "$DERIVED_DATA" -type d -name 'HypenGallery.app' -path '*Debug-iphonesimulator*' 2>/dev/null | head -1)"
+# Newest first: DerivedData can hold more than one Products tree (a nested
+# DerivedData/HypenGallery/... from an older Xcode run), and `head -1` on an
+# unsorted find installed a stale build while the fresh one sat next to it.
+APP_PATH="$(find "$DERIVED_DATA" -type d -name 'HypenGallery.app' -path '*Debug-iphonesimulator*' -print0 2>/dev/null | xargs -0 ls -td 2>/dev/null | head -1)"
 if [ -z "$APP_PATH" ] || [ ! -d "$APP_PATH" ]; then
     echo "Could not locate built HypenGallery.app under $DERIVED_DATA" >&2
     exit 2

@@ -2,7 +2,7 @@
  * Select Component
  */
 
-import type { ComponentHandler } from "./index.js";
+import { hasProp, toBool, type ComponentHandler } from "./index.js";
 
 export const selectHandler: ComponentHandler = {
   create(): HTMLElement {
@@ -14,30 +14,25 @@ export const selectHandler: ComponentHandler = {
   applyProps(el: HTMLElement, props: Record<string, any>): void {
     const select = el as HTMLSelectElement;
 
-    // Value property
-    if (props.value !== undefined) {
-      select.value = String(props.value);
-    }
-
     // Disabled
-    if (props.disabled !== undefined) {
-      select.disabled = Boolean(props.disabled);
+    if (hasProp(props, "disabled")) {
+      select.disabled = toBool(props.disabled);
     }
 
     // Multiple
-    if (props.multiple !== undefined) {
-      select.multiple = Boolean(props.multiple);
+    if (hasProp(props, "multiple")) {
+      select.multiple = toBool(props.multiple);
     }
 
     // Options array
     if (props.options && Array.isArray(props.options)) {
       // Clear existing options
       select.innerHTML = "";
-      
+
       // Add new options
       props.options.forEach((opt: any) => {
         const option = document.createElement("option");
-        
+
         if (typeof opt === "string") {
           option.value = opt;
           option.textContent = opt;
@@ -46,9 +41,15 @@ export const selectHandler: ComponentHandler = {
           option.textContent = String(opt.label ?? opt.value ?? "");
           if (opt.disabled) option.disabled = true;
         }
-        
+
         select.appendChild(option);
       });
+    }
+
+    // Value AFTER options: rebuilding the option list resets the selection,
+    // so a merged prop set (SetProp on `options`) would otherwise lose it.
+    if (props.value !== undefined) {
+      select.value = String(props.value);
     }
   },
 };

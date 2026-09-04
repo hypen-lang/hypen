@@ -57,6 +57,7 @@ import { counterExample } from "./components/counter.ts";
 import { calculatorExample } from "./components/calculator.ts";
 import { onboardingExample } from "./components/onboarding.ts";
 import { todoExample } from "./components/todo.ts";
+import { reviewExample } from "./components/review.ts";
 
 // Import applicator examples
 import { paddingExample } from "./applicators/padding.ts";
@@ -139,6 +140,7 @@ const COMPONENTS: GalleryExample[] = [
   { key: "calculator", name: "Calculator", category: "component", ...calculatorExample },
   { key: "onboarding", name: "Onboarding", category: "component", ...onboardingExample },
   { key: "todo", name: "Todo", category: "component", ...todoExample },
+  { key: "review", name: "Review", category: "component", ...reviewExample },
 ];
 
 const APPLICATORS: GalleryExample[] = [

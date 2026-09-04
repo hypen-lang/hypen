@@ -73,8 +73,13 @@ struct Tab {
     /// Renderer-visible IDs the tab inserted at root level (rewritten
     /// to be children of the shell's viewport). Drives the
     /// `Detach` / `Attach` patch pairs the wrapper emits on tab
-    /// switch and the `Remove` patches it emits on close.
+    /// close. This includes Router-cached roots that are not currently
+    /// visible.
     app_root_ids: Vec<String>,
+    /// Root ids the remote app currently considers visible. A Router can
+    /// leave several entries in `app_root_ids` while only one route is linked
+    /// to `root`; tab suspension must restore this set, not every cached root.
+    active_root_ids: Vec<String>,
     /// Patches buffered while the shell's viewport hadn't been
     /// discovered yet. Replayed once the viewport is known.
     queued: Vec<Patch>,
@@ -91,6 +96,35 @@ struct Tab {
     /// streaming, but a raw host may not — one expander per tab
     /// (per session) makes the merged stream template-free either way.
     expander: hypen_engine::TemplateExpander,
+}
+
+fn track_tab_roots(tab: &mut Tab, patches: &[Patch], viewport: &str) {
+    for patch in patches {
+        match patch {
+            Patch::Insert { parent_id, id, .. }
+            | Patch::Attach { parent_id, id, .. }
+            | Patch::Move { parent_id, id, .. }
+                if parent_id.as_ref() == viewport =>
+            {
+                if !tab.app_root_ids.iter().any(|root| root == id.as_ref()) {
+                    tab.app_root_ids.push(id.to_string());
+                }
+                if !tab.active_root_ids.iter().any(|root| root == id.as_ref()) {
+                    tab.active_root_ids.push(id.to_string());
+                }
+            }
+            Patch::Detach { id } => {
+                tab.active_root_ids
+                    .retain(|root| root.as_str() != id.as_ref());
+            }
+            Patch::Remove { id, .. } => {
+                tab.app_root_ids.retain(|root| root.as_str() != id.as_ref());
+                tab.active_root_ids
+                    .retain(|root| root.as_str() != id.as_ref());
+            }
+            _ => {}
+        }
+    }
 }
 
 pub struct BrowserModule {
@@ -369,6 +403,7 @@ impl BrowserModule {
             id_prefix: id_prefix.clone(),
             remote: None,
             app_root_ids: Vec::new(),
+            active_root_ids: Vec::new(),
             queued: Vec::new(),
             // Brand-new tab is active and its patches go straight to
             // the viewport — no Detach needed for incoming root
@@ -641,7 +676,7 @@ impl BrowserModule {
                 return;
             }
             tab.attached = false;
-            tab.app_root_ids
+            tab.active_root_ids
                 .iter()
                 .map(|id| Patch::Detach {
                     id: id.as_str().into(),
@@ -676,7 +711,7 @@ impl BrowserModule {
                 return;
             }
             tab.attached = true;
-            tab.app_root_ids
+            tab.active_root_ids
                 .iter()
                 .map(|id| Patch::Attach {
                     parent_id: viewport.as_str().into(),
@@ -1041,15 +1076,7 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
                                     &mut local_roots,
                                 );
                                 if let Some(t) = g.tabs.get_mut(&tid) {
-                                    t.app_root_ids
-                                        .extend(local_roots.iter().map(|r| r.to_string()));
-                                    // Filter out roots that were
-                                    // Removed in the same drain.
-                                    for p in &rewritten {
-                                        if let Patch::Remove { id, .. } = p {
-                                            t.app_root_ids.retain(|tr| tr.as_str() != id.as_ref());
-                                        }
-                                    }
+                                    track_tab_roots(t, &rewritten, &viewport);
                                 }
                                 queued_flush.extend(rewritten);
                                 // Background tabs: detach the freshly
@@ -1144,20 +1171,17 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
                     transition: false,
                 });
             }
+            tab.active_root_ids.clear();
         }
-        // Track new root ids so future Detach / Attach / Remove
-        // patches know which ids to operate on.
-        tab.app_root_ids
-            .extend(new_roots.iter().map(|r| r.to_string()));
-        // Filter out any roots that were just removed by the same
-        // batch.
+        // Keep ownership (all cached Router roots) separate from the remote
+        // app's currently linked route. Browser tab suspension restores only
+        // `active_root_ids`; otherwise switching back to a HomeScreen tab
+        // revives Hypeflix, Social, MovieDB, etc. at the same time.
+        track_tab_roots(tab, &rewritten, &viewport);
+        // Drop pending roots removed by the same batch before the background
+        // tab visibility pass below.
         for p in &rewritten {
             if let Patch::Remove { id, .. } = p {
-                tab.app_root_ids
-                    .retain(|tracked| tracked.as_str() != id.as_ref());
-                // Also drop the matching pending new_root if the
-                // worker emitted Create + Insert + Remove all in the
-                // same batch (rare but possible).
                 new_roots.retain(|nr| nr != id);
             }
         }
@@ -1639,7 +1663,14 @@ fn process_embed_patches(inner: &Arc<Mutex<Inner>>, marker: &str, patches: &[Pat
     // the old session would linger under the host. The same-id root's
     // prelude Remove is immediately followed by its re-Create in the
     // batch, so nothing flashes.
-    let has_replacement_root = new_roots.iter().any(|r| created.contains(r.as_ref()));
+    // A normal Router transition creates the incoming route root while
+    // detaching the outgoing root in the same batch. Preserve that cached
+    // root; a reconnect InitialTree creates a root without a route Detach.
+    let has_route_cache_detach = rewritten
+        .iter()
+        .any(|patch| matches!(patch, Patch::Detach { .. }));
+    let has_replacement_root =
+        !has_route_cache_detach && new_roots.iter().any(|r| created.contains(r.as_ref()));
     if has_replacement_root && !embed.app_root_ids.is_empty() {
         for old in embed.app_root_ids.drain(..) {
             embed.detached.remove(&old);
@@ -1648,14 +1679,40 @@ fn process_embed_patches(inner: &Arc<Mutex<Inner>>, marker: &str, patches: &[Pat
                 transition: false,
             });
         }
+        embed.active_root_ids.clear();
     }
-    embed
-        .app_root_ids
-        .extend(new_roots.iter().map(|r| r.to_string()));
+    // Ownership and visibility are separate: Router Detach keeps an owned
+    // root cached but removes it from the active set. Status recovery may
+    // re-attach only the roots the remote app currently considers active.
     for p in &rewritten {
-        if let Patch::Remove { id, .. } = p {
-            embed.app_root_ids.retain(|r| r.as_str() != id.as_ref());
-            embed.detached.remove(id.as_ref());
+        match p {
+            Patch::Insert { parent_id, id, .. }
+            | Patch::Attach { parent_id, id, .. }
+            | Patch::Move { parent_id, id, .. }
+                if parent_id.as_ref() == host =>
+            {
+                if !embed.app_root_ids.iter().any(|root| root == id.as_ref()) {
+                    embed.app_root_ids.push(id.to_string());
+                }
+                if !embed.active_root_ids.iter().any(|root| root == id.as_ref()) {
+                    embed.active_root_ids.push(id.to_string());
+                }
+                embed.detached.remove(id.as_ref());
+            }
+            Patch::Detach { id } if embed.app_root_ids.iter().any(|root| root == id.as_ref()) => {
+                embed
+                    .active_root_ids
+                    .retain(|root| root.as_str() != id.as_ref());
+                embed.detached.insert(id.to_string());
+            }
+            Patch::Remove { id, .. } => {
+                embed.app_root_ids.retain(|r| r.as_str() != id.as_ref());
+                embed
+                    .active_root_ids
+                    .retain(|root| root.as_str() != id.as_ref());
+                embed.detached.remove(id.as_ref());
+            }
+            _ => {}
         }
     }
 
@@ -1917,6 +1974,42 @@ mod tests {
         // Enter the launcher's MovieDB route, which creates the nested embed.
         module.dispatch_action("router.push", Some(json!({"to": "/app/movies"})));
         std::thread::sleep(std::time::Duration::from_secs(5));
+        {
+            let inner = module.inner.lock().unwrap();
+            let live_cinebox_ids: Vec<String> = inner
+                .tree
+                .nodes()
+                .filter(|node| {
+                    node.element_type == "Text" && node.text_content().as_deref() == Some("Cinebox")
+                })
+                .filter(|node| {
+                    let mut top = node.id.as_str();
+                    while top != hypen_renderer_desktop::tree::ROOT_ID {
+                        let Some(parent) = inner.tree.parent_of(top) else {
+                            break;
+                        };
+                        top = parent;
+                    }
+                    top == hypen_renderer_desktop::tree::ROOT_ID
+                })
+                .map(|node| node.id.clone())
+                .collect();
+            assert_eq!(
+                live_cinebox_ids.len(),
+                1,
+                "MovieDB must graft exactly one live Cinebox tree; live ids: {live_cinebox_ids:?}\nembeds: {}\n{}",
+                inner
+                    .embeds
+                    .iter()
+                    .map(|(marker, embed)| format!(
+                        "{marker} host={} roots={:?} detached={:?}",
+                        embed.host_id, embed.app_root_ids, embed.detached
+                    ))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+                serialize_tree(&inner.tree),
+            );
+        }
         let marker = {
             let inner = module.inner.lock().unwrap();
             inner
@@ -2028,16 +2121,20 @@ mod tests {
 
         let home_heading_id = {
             let inner = module.inner.lock().unwrap();
-            let id = inner
+            let candidate = inner
                 .tree
                 .nodes()
                 .find(|node| {
                     node.element_type == "Text"
                         && node.text_content().as_deref() == Some("Crave Cart")
                 })
-                .map(|node| node.id.clone())
-                .expect("Food Home heading must remain in Browser's merged tree");
-            id
+                .map(|node| node.id.clone());
+            candidate.unwrap_or_else(|| {
+                panic!(
+                    "Food Home heading must remain in Browser's merged tree:\n{}",
+                    serialize_tree(&inner.tree)
+                )
+            })
         };
 
         let batches = batches.lock().unwrap();
@@ -2315,6 +2412,7 @@ mod tests {
                     id_prefix: "a99:".into(),
                     remote: None,
                     app_root_ids: vec!["a99:1".into(), "a99:2".into()],
+                    active_root_ids: vec!["a99:1".into(), "a99:2".into()],
                     queued: Vec::new(),
                     attached: true,
                     expander: hypen_engine::TemplateExpander::new(),
@@ -2362,6 +2460,7 @@ mod tests {
                         id_prefix: format!("a{n}:"),
                         remote: None,
                         app_root_ids: vec![format!("a{n}:1")],
+                        active_root_ids: vec![format!("a{n}:1")],
                         queued: Vec::new(),
                         attached: n == 3,
                         expander: hypen_engine::TemplateExpander::new(),
@@ -2523,6 +2622,7 @@ mod tests {
                 id_prefix: prefix.into(),
                 remote: None,
                 app_root_ids: roots.iter().map(|s| (*s).to_string()).collect(),
+                active_root_ids: roots.iter().map(|s| (*s).to_string()).collect(),
                 queued: Vec::new(),
                 attached,
                 expander: hypen_engine::TemplateExpander::new(),
@@ -2738,6 +2838,66 @@ mod tests {
             returned.contains("Cached Home"),
             "Attach must restore the cached route after Search:\n{returned}",
         );
+    }
+
+    #[test]
+    fn tab_resume_restores_only_the_active_nested_app_route() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-home", "a3:", &[], true);
+        module.inner.lock().unwrap().active_tab_id = Some("tab-home".into());
+
+        // HomeScreen root, followed by its cached Hypeflix app route.
+        ingest_tab_batch(
+            &module,
+            "tab-home",
+            &[create_with("1", "Column", &[]), insert("root", "1")],
+        );
+        ingest_tab_batch(
+            &module,
+            "tab-home",
+            &[
+                Patch::Detach { id: "1".into() },
+                create_with("2", "Column", &[]),
+                insert("root", "2"),
+                create_with("21", "Text", &[("0", json!("HYPEFLIX"))]),
+                insert("2", "21"),
+            ],
+        );
+
+        // Leaving and returning to the Browser tab must not revive cached
+        // Home beside Hypeflix.
+        module.detach_tab("tab-home");
+        module.attach_tab("tab-home");
+        let viewport = module.inner.lock().unwrap().viewport_id.clone().unwrap();
+        {
+            let inner = module.inner.lock().unwrap();
+            assert_eq!(inner.tree.parent_of("a3:2"), Some(viewport.as_str()));
+            assert_eq!(inner.tree.parent_of("a3:1"), None);
+        }
+
+        // Switch the launcher's active route from Hypeflix to MovieDB, then
+        // suspend/resume once more. Only MovieDB may be linked to the viewport;
+        // every earlier app remains cached and detached.
+        ingest_tab_batch(
+            &module,
+            "tab-home",
+            &[
+                Patch::Detach { id: "2".into() },
+                create_with("3", "Column", &[]),
+                insert("root", "3"),
+                create_with("31", "Text", &[("0", json!("Cinebox"))]),
+                insert("3", "31"),
+            ],
+        );
+        module.detach_tab("tab-home");
+        module.attach_tab("tab-home");
+
+        let inner = module.inner.lock().unwrap();
+        assert_eq!(inner.tabs["tab-home"].app_root_ids.len(), 3);
+        assert_eq!(inner.tabs["tab-home"].active_root_ids, vec!["a3:3"]);
+        assert_eq!(inner.tree.parent_of("a3:1"), None);
+        assert_eq!(inner.tree.parent_of("a3:2"), None);
+        assert_eq!(inner.tree.parent_of("a3:3"), Some(viewport.as_str()));
     }
 
     #[test]
@@ -3277,6 +3437,87 @@ mod tests {
         assert_eq!(
             inner.embeds.get("e1:").unwrap().app_root_ids,
             vec!["e1:7".to_string()],
+        );
+        assert_eq!(
+            inner.embeds.get("e1:").unwrap().active_root_ids,
+            vec!["e1:7".to_string()],
+        );
+    }
+
+    #[test]
+    fn embed_status_recovery_restores_only_the_active_router_root() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        forward(
+            &module.inner,
+            &process_embed_patches(
+                &module.inner,
+                "e1:",
+                &[create_with("1", "Column", &[]), insert("root", "1")],
+            ),
+        );
+
+        // The nested app's Router caches root 1 and activates a freshly
+        // created root 2. This is navigation, not a reconnect replacement.
+        let route_change = process_embed_patches(
+            &module.inner,
+            "e1:",
+            &[
+                Patch::Detach { id: "1".into() },
+                create_with("2", "Column", &[]),
+                insert("root", "2"),
+            ],
+        );
+        assert!(
+            !route_change
+                .iter()
+                .any(|patch| matches!(patch, Patch::Remove { id, .. } if id.as_ref() == "e1:1")),
+            "Router navigation must preserve the cached outgoing root: {route_change:?}",
+        );
+        forward(&module.inner, &route_change);
+        {
+            let inner = module.inner.lock().unwrap();
+            let embed = &inner.embeds["e1:"];
+            assert_eq!(
+                embed.app_root_ids,
+                vec!["e1:1".to_string(), "e1:2".to_string()]
+            );
+            assert_eq!(embed.active_root_ids, vec!["e1:2".to_string()]);
+            assert!(embed.detached.contains("e1:1"));
+        }
+
+        // A connection error hides the active root. Recovery must restore
+        // root 2 only; reattaching cached root 1 would stack two full apps.
+        let error_patches = {
+            let mut inner = module.inner.lock().unwrap();
+            let embed = inner.embeds.get_mut("e1:").unwrap();
+            embed.status = EmbedStatus::Error;
+            embed.reconcile_visibility()
+        };
+        assert!(error_patches
+            .iter()
+            .any(|patch| matches!(patch, Patch::Detach { id } if id.as_ref() == "e1:2")));
+        forward(&module.inner, &error_patches);
+
+        let recovered = {
+            let mut inner = module.inner.lock().unwrap();
+            let embed = inner.embeds.get_mut("e1:").unwrap();
+            embed.status = EmbedStatus::Connected;
+            embed.reconcile_visibility()
+        };
+        assert!(recovered.iter().any(|patch| matches!(patch,
+            Patch::Attach { id, .. } if id.as_ref() == "e1:2"
+        )));
+        assert!(
+            !recovered.iter().any(|patch| matches!(patch,
+                Patch::Attach { id, .. } if id.as_ref() == "e1:1"
+            )),
+            "cached inactive root must stay detached: {recovered:?}",
         );
     }
 

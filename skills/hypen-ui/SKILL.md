@@ -382,13 +382,22 @@ Applicators are chained with dot notation after components. Any unrecognized app
 .flexShrink(0)
 .flexDirection("row")             // row, column
 .display("flex")
-.position("absolute")
-.top(0)
-.left(0)
-.right(0)
-.bottom(0)
 .zIndex(10)
 .overflow("hidden")
+```
+
+**No CSS positioning.** Hypen has no `absolute`/`relative`/`fixed`/`sticky`,
+no `top`/`left`/`inset`, and `.tw()` rejects those classes with an error.
+Overlay with `Stack { ... }` and place children via the Stack's
+`.horizontalAlignment()`/`.verticalAlignment()` plus margins:
+
+```hypen
+Stack {
+    Image(src: "@{state.avatar}").tw("w-14 h-14 rounded-full")
+    Icon(@resources.plus).tw("w-5 h-5 rounded-full bg-blue-500")
+}
+.horizontalAlignment("end")
+.verticalAlignment("end")
 ```
 
 ### Grid

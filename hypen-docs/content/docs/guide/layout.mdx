@@ -142,6 +142,11 @@ Useful for centering loading indicators, modals, or any content that needs to be
 
 Similar to Box, stacks children on the z-axis for overlapping layouts. Useful for creating layered UI elements like badges on cards.
 
+Hypen has **no CSS positioning** — `absolute`/`relative`/`top-*`/`inset-*`
+(and the `.position()` applicator) don't exist on native renderers, and the
+Tailwind parser rejects them with an error. Place overlaid children with the
+Stack's `.horizontalAlignment()` / `.verticalAlignment()` and margins instead:
+
 ```hypen
 Stack {
     Card {
@@ -149,10 +154,10 @@ Stack {
     }
 
     Badge("New")
-        .position("absolute")
-        .top(8)
-        .right(8)
+        .margin(8)
 }
+.horizontalAlignment("end")
+.verticalAlignment("start")
 ```
 
 **Platform Support:** Web, Android, iOS

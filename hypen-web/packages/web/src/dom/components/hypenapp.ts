@@ -60,6 +60,22 @@ interface HypenAppInstance {
 // Store active HypenApp instances for cleanup
 const activeInstances = new WeakMap<HTMLElement, HypenAppInstance>();
 
+/** Convert a remote-UI WebSocket endpoint into the origin for its media. */
+export function remoteAssetBaseUrl(remoteUrl: string): string | undefined {
+  try {
+    const base = new URL(remoteUrl);
+    if (base.protocol === "ws:") base.protocol = "http:";
+    else if (base.protocol === "wss:") base.protocol = "https:";
+    else if (base.protocol !== "http:" && base.protocol !== "https:") return undefined;
+    base.pathname = "/";
+    base.search = "";
+    base.hash = "";
+    return base.href;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Connection-state → visibility controller for one HypenApp container.
  *
@@ -228,7 +244,10 @@ export const hypenAppHandler: ComponentHandler = {
       maxReconnectAttempts: props.maxReconnectAttempts ?? 10,
     });
 
-    const renderer = new Renderer(contentHost, engine, undefined, { routeFocus: "off" });
+    const renderer = new Renderer(contentHost, engine, undefined, {
+      routeFocus: "off",
+      assetBaseUrl: remoteAssetBaseUrl(url),
+    });
     const instance: HypenAppInstance = {
       engine,
       renderer,

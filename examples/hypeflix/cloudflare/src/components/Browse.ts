@@ -56,7 +56,6 @@ const rail = (title: string, binding: string) => `
           .color("#F8FAFC")
           .maxWidth(1280)
           .width("100%")
-          .alignSelf("center")
         Row {
           ForEach(items: @state.${binding}, key: "id") {
             Button {
@@ -85,8 +84,7 @@ const rail = (title: string, binding: string) => `
         .scrollable("horizontal")
         .tw("px-5 md:px-10 flex-row")
         .maxWidth(1280)
-        .width("100%")
-        .alignSelf("center")`;
+        .width("100%")`;
 
 export default app
   .module("Browse")
@@ -128,19 +126,20 @@ export default app
       Column {
         Row {
           Text("HYPEFLIX")
-            .tw("flex-1 text-2xl md:text-3xl font-black tracking-[0.2em]")
+            .tw("text-2xl md:text-3xl md:flex-1 font-black tracking-[0.2em]")
             .color("#E50914")
           Text("Public-domain cinema, streamed from the Internet Archive")
-            .tw("text-[11px] text-right")
+            .tw("text-[11px] text-left mt-1.5 md:mt-0 md:text-right")
             .color("#6B6B78")
         }
-        .tw("px-5 md:px-10 pt-6 pb-4 items-center")
+        .tw("px-5 md:px-10 pt-6 pb-4 items-start md:items-center")
+        .flexDirection({ default: "column", md: "row" })
         .maxWidth(1280)
         .width("100%")
-        .alignSelf("center")
 
-        // ---- Featured hero -------------------------------------------------
-        Row {
+        Column {
+          // ---- Featured hero -----------------------------------------------
+          Row {
           Column {
             Text("FEATURED TONIGHT")
               .tw("text-[10px] font-bold tracking-widest text-left")
@@ -186,47 +185,52 @@ export default app
             }
             .tw("mt-5 items-center")
           }
-          .tw("flex-1 min-w-0 pr-4 md:pr-10 items-start")
+          .tw("w-full min-w-0 md:w-auto md:flex-1 md:pr-10 items-start")
 
           Image(src: "@{state.featured.posterUrl}")
             .objectFit("cover")
-            .tw("w-28 h-[168px] md:w-44 md:h-64 rounded-2xl shrink-0 border border-white/10")
+            .tw("w-full h-44 mb-5 md:mb-0 md:w-44 md:h-64 rounded-2xl shrink-0 border border-white/10")
             .backgroundColor("#16161E")
             .boxShadow("0 20px 44px rgba(0, 0, 0, 0.55)")
-        }
-        .tw("mx-5 md:mx-10 p-5 md:p-8 rounded-3xl border border-white/10 items-center")
-        .backgroundColor("rgba(229, 9, 20, 0.06)")
-        .maxWidth(1200)
-        .alignSelf("center")
-
-        // ---- Marathon banner (playlist showcase) ---------------------------
-        Button {
-          Row {
-            Icon(@resources.queue)
-              .size(22)
-              .color("#E50914")
-            Column {
-              Text("Midnight Creature Marathon")
-                .tw("text-[15px] font-bold text-left")
-                .color("#F8FAFC")
-              Text("Three creature features, one continuous stream — a Video playlist demo")
-                .tw("text-xs mt-0.5 text-left")
-                .color("#8E8E9A")
-            }
-            .tw("flex-1 min-w-0 ml-3 items-start")
-            Icon(@resources.play)
-              .size(16)
-              .color("#F8FAFC")
           }
-          .tw("items-center")
+          .tw("p-5 md:p-8 rounded-3xl border border-white/10 items-stretch md:items-center")
+          .flexDirection({ default: "column-reverse", md: "row" })
+          .backgroundColor("rgba(229, 9, 20, 0.06)")
+          .maxWidth(1200)
+          .width("100%")
+
+          // ---- Marathon banner (playlist showcase) -------------------------
+          Button {
+            Row {
+              Icon(@resources.queue)
+                .size(22)
+                .color("#E50914")
+              Column {
+                Text("Midnight Creature Marathon")
+                  .tw("text-[15px] font-bold text-left")
+                  .color("#F8FAFC")
+                Text("Three creature features, one continuous stream — a Video playlist demo")
+                  .tw("text-xs mt-0.5 text-left")
+                  .color("#8E8E9A")
+              }
+              .tw("flex-1 min-w-0 ml-3 items-start")
+              Icon(@resources.play)
+                .size(16)
+                .color("#F8FAFC")
+            }
+            .tw("items-center")
+          }
+          .tw("mt-4 p-4 rounded-2xl border border-white/10 items-stretch")
+          .backgroundColor("rgba(255, 255, 255, 0.04)")
+          .maxWidth(1200)
+          .width("100%")
+          .opacity({ default: 1, active: 0.7 })
+          .transition(160, easeOut)
+          .onClick(@actions.playMarathon)
         }
-        .tw("mx-5 md:mx-10 mt-4 p-4 rounded-2xl border border-white/10 items-stretch")
-        .backgroundColor("rgba(255, 255, 255, 0.04)")
-        .maxWidth(1200)
-        .alignSelf("center")
-        .opacity({ default: 1, active: 0.7 })
-        .transition(160, easeOut)
-        .onClick(@actions.playMarathon)
+        .tw("px-5 md:px-10 items-center")
+        .maxWidth(1280)
+        .width("100%")
 
         // ---- My list -------------------------------------------------------
         If(condition: "@{state.hasMyList}") {
@@ -259,7 +263,6 @@ export default app
           }
           .maxWidth(1280)
           .width("100%")
-          .alignSelf("center")
         }
 
         // ---- Genre rails ---------------------------------------------------
@@ -275,8 +278,8 @@ ${rail("Comedy classics", "comedy")}
           .color("#4A4A55")
           .maxWidth(1280)
           .width("100%")
-          .alignSelf("center")
       }
+      .horizontalAlignment("center")
       .scrollable(true)
       .tw("flex-1")
       .backgroundColor("#0A0A0F")

@@ -19,7 +19,7 @@ fn main() {
         module.open_url(&url);
     }
 
-    DesktopApp::new()
+    let app = DesktopApp::new()
         .title("Hypen Browser")
         // Taskbar / window-switcher icon on Windows + Linux/X11. The
         // macOS Dock and Windows Explorer icons come from the packaged
@@ -43,7 +43,12 @@ fn main() {
         .shortcut(Shortcut::cmd("l"), "focus_url", None)
         .shortcut(Shortcut::cmd("r"), "refresh", None)
         .shortcut(Shortcut::cmd("w"), "go_home", None)
-        .shortcut(Shortcut::plain("Escape"), "esc", None)
-        .module(module)
-        .run();
+        .shortcut(Shortcut::plain("Escape"), "esc", None);
+
+    // Keep performance diagnostics in the actual titlebar corner, independent
+    // of the floating browser island and hosted app content.
+    #[cfg(feature = "dev-overlay")]
+    let app = app.dev_overlay_top(6.0);
+
+    app.module(module).run();
 }

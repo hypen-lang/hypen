@@ -92,7 +92,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_basic() {
-        let output = parse_classes("p-4 text-blue-500 bg-white");
+        let output = parse_classes("p-4 text-blue-500 bg-white").unwrap();
         assert_eq!(output.base.len(), 3);
 
         let props = output.to_props();
@@ -103,7 +103,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_with_breakpoints() {
-        let output = parse_classes("p-4 md:p-8 lg:p-12");
+        let output = parse_classes("p-4 md:p-8 lg:p-12").unwrap();
 
         let props = output.to_props();
         assert_eq!(props.get("padding"), Some(&"1rem".to_string()));
@@ -113,7 +113,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_with_hover() {
-        let output = parse_classes("bg-white hover:bg-blue-500");
+        let output = parse_classes("bg-white hover:bg-blue-500").unwrap();
 
         let props = output.to_props();
         assert_eq!(props.get("background-color"), Some(&"#ffffff".to_string()));
@@ -125,7 +125,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_layout() {
-        let output = parse_classes("flex justify-center items-center gap-4");
+        let output = parse_classes("flex justify-center items-center gap-4").unwrap();
 
         let props = output.to_props();
         assert_eq!(props.get("display"), Some(&"flex".to_string()));
@@ -136,7 +136,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_sizing() {
-        let output = parse_classes("w-full h-screen max-w-lg");
+        let output = parse_classes("w-full h-screen max-w-lg").unwrap();
 
         let props = output.to_props();
         assert_eq!(props.get("width"), Some(&"100%".to_string()));

@@ -17,7 +17,7 @@ import {
   cssLengthToPxWithBasis,
   parseCalcLength,
   setCssViewport,
-  isDisplayNone,
+  isLayoutHidden,
   inheritedTextProp,
 } from "./utils.js";
 import { measureText } from "./text.js";
@@ -48,9 +48,7 @@ const INTRINSIC_SIZED = new Set([
   "checkbox",
   "radio",
   "switch",
-  "toggle",
   "spinner",
-  "loading",
 ]);
 
 /**
@@ -71,7 +69,28 @@ const INTRINSIC_SIZED = new Set([
  * page. Keep this list explicit (rather than "unknown ⇒ row") so an
  * unrecognised custom component behaves like the DOM's transparent wrapper.
  */
-const ROW_FLOW_TYPES = new Set(["row", "tabs", "hstack", "badge"]);
+/**
+ * Resolve the gap for both axes.
+ *
+ * `rowGap` / `columnGap` are registered applicators on DOM, Android and Swift
+ * but the canvas only ever read the shorthand `gap`, so per-axis gaps were
+ * silently dropped. The shorthand remains the fallback for either axis.
+ */
+function resolveGap(props: Record<string, any>): { row: number; column: number } {
+  const shorthand = cssLengthToPx(props.gap) ?? 0;
+  return {
+    row: cssLengthToPx(props.rowGap) ?? shorthand,
+    column: cssLengthToPx(props.columnGap) ?? shorthand,
+  };
+}
+
+/** Gap along a container's main axis: rows stack vertically, columns across. */
+function mainAxisGap(props: Record<string, any>, isCol: boolean): number {
+  const { row, column } = resolveGap(props);
+  return isCol ? row : column;
+}
+
+const ROW_FLOW_TYPES = new Set(["row", "tabs", "badge"]);
 
 /**
  * Does this node lay its children out along the vertical axis?
@@ -356,7 +375,7 @@ function carriesHorizontalDemand(node: VirtualNode): boolean {
 
   const type = node.type.toLowerCase();
   if (type === "grid" || type === "list") return true;
-  if (type === "divider" || type === "separator") {
+  if (type === "divider") {
     return node.props.orientation !== "vertical";
   }
   if (type === "row") {
@@ -668,7 +687,7 @@ function buildTaffyStyle(
     style.flexGrow = 1;
     style.flexShrink = 1;
     style.flexBasis = 0;
-  } else if (type === "divider" || type === "separator") {
+  } else if (type === "divider") {
     const orientation = props.orientation || "horizontal";
     const thickness = cssLengthToPx(props.thickness) ?? 1;
     if (orientation === "vertical") {
@@ -688,7 +707,7 @@ function buildTaffyStyle(
       width: widthIsSet ? widthDimension : sz,
       height: heightIsSet ? heightDimension : sz,
     };
-  } else if (type === "switch" || type === "toggle") {
+  } else if (type === "switch") {
     style.size = {
       width: widthIsSet ? widthDimension : 44,
       height: heightIsSet ? heightDimension : 24,
@@ -705,12 +724,12 @@ function buildTaffyStyle(
       width: widthIsSet ? widthDimension : 200,
       height: heightIsSet ? heightDimension : 20,
     };
-  } else if (type === "progress" || type === "progressbar") {
+  } else if (type === "progressbar") {
     style.size = {
       width: widthIsSet ? widthDimension : 200,
       height: heightIsSet ? heightDimension : 8,
     };
-  } else if (type === "spinner" || type === "loading") {
+  } else if (type === "spinner") {
     const sz = cssLengthToPx(props.size) ?? 24;
     style.size = {
       width: widthIsSet ? widthDimension : sz,
@@ -852,9 +871,10 @@ function buildTaffyStyle(
   }
 
   // --- Gap -------------------------------------------------------------------
-  const gap = cssLengthToPx(props.gap) ?? 0;
-  if (gap > 0) {
-    style.gap = { width: gap, height: gap };
+  const { row: rowGap, column: columnGap } = resolveGap(props);
+  if (rowGap > 0 || columnGap > 0) {
+    // Taffy's `width` is the between-columns gap, `height` the between-rows.
+    style.gap = { width: columnGap, height: rowGap };
   }
 
   // --- Aspect ratio ----------------------------------------------------------
@@ -949,10 +969,10 @@ function buildTaffyStyle(
     style.overflow = { x: o, y: o };
   }
 
-  // --- display: none (Tailwind `hidden`) -------------------------------------
+  // --- Out of flow (Tailwind `hidden`, VisuallyHidden) -----------------------
   // Applied LAST so it overrides the flex/grid display chosen above. Taffy
   // removes the node (and its subtree) from layout entirely, matching CSS.
-  if (isDisplayNone(props)) {
+  if (isLayoutHidden(node)) {
     style.display = T.Display.None;
   }
 
@@ -1640,7 +1660,7 @@ function layoutVideoSlots(ctx: CanvasRenderingContext2D, node: VirtualNode): voi
   if (isVideoNode(node) && node.children.length > 0 && node.layout) {
     const rect = node.layout;
     for (const child of node.children) {
-      if (videoSlotName(child) === null || isDisplayNone(child.props)) {
+      if (videoSlotName(child) === null || isLayoutHidden(child)) {
         zeroLayoutSubtree(child, rect.x, rect.y);
         continue;
       }
@@ -1793,8 +1813,7 @@ function intrinsicSizeFallback(
       return { width: availW, height: availH };
     case "spacer":
       return { width: null, height: null };
-    case "divider":
-    case "separator": {
+    case "divider": {
       const thickness = cssLengthToPx(props.thickness) ?? 1;
       return props.orientation === "vertical"
         ? { width: thickness, height: availH }
@@ -1806,17 +1825,14 @@ function intrinsicSizeFallback(
       return { width: sz, height: sz };
     }
     case "switch":
-    case "toggle":
       return { width: 44, height: 24 };
     case "slider":
       return { width: 200, height: 20 };
     case "scrubber":
       return { width: 200, height: 20 };
-    case "progress":
     case "progressbar":
       return { width: 200, height: 8 };
-    case "spinner":
-    case "loading": {
+    case "spinner": {
       const sz = cssLengthToPx(props.size) ?? 24;
       return { width: sz, height: sz };
     }
@@ -1913,7 +1929,7 @@ function measureFallback(
   fillH: boolean,
   pinnedW?: number,
 ): FallbackSize {
-  if (isDisplayNone(node.props)) return { width: 0, height: 0 };
+  if (isLayoutHidden(node)) return { width: 0, height: 0 };
 
   const cacheKey = `${availW}|${availH}|${fillW ? 1 : 0}|${fillH ? 1 : 0}|${pinnedW ?? ""}`;
   let perNode = fallbackMeasureCache?.get(node);
@@ -2027,14 +2043,14 @@ function measureChildrenFallback(
   const type = node.type.toLowerCase();
   const isStack = type === "stack";
   const isCol = isColumnFlow(node);
-  const gap = cssLengthToPx(node.props.gap) ?? 0;
+  const gap = mainAxisGap(node.props, isCol);
 
   let main = 0;
   let cross = 0;
   let count = 0;
 
   for (const child of node.children) {
-    if (isDisplayNone(child.props)) continue;
+    if (isLayoutHidden(child)) continue;
     if (child.props.position === "absolute") continue;
     const m = readMarginFallback(child.props);
     // In a column the child's width is the cross axis: when the container's
@@ -2150,7 +2166,7 @@ function placeFallback(
     contentHeight: Math.max(0, height - box.padding.top - box.padding.bottom - borderWidth * 2),
   };
 
-  if (isDisplayNone(props)) return;
+  if (isLayoutHidden(node)) return;
   // Video slot children are placed by `layoutVideoSlots` against the
   // player's own rect, which only exists once this node is placed.
   if (isVideoNode(node)) return;
@@ -2176,14 +2192,14 @@ function placeChildrenFallback(ctx: CanvasRenderingContext2D, parent: VirtualNod
   const contentH = layout.contentHeight;
 
   const inFlow = parent.children.filter(
-    (c) => !isDisplayNone(c.props) && c.props.position !== "absolute",
+    (c) => !isLayoutHidden(c) && c.props.position !== "absolute",
   );
 
   if (parent.type.toLowerCase() === "stack") {
     placeStackChildrenFallback(ctx, parent, inFlow);
   } else if (inFlow.length > 0) {
     const isCol = isColumnFlow(parent);
-    const gap = cssLengthToPx(props.gap) ?? 0;
+    const gap = mainAxisGap(props, isCol);
     const availMain = isCol ? contentH : contentW;
     const availCross = isCol ? contentW : contentH;
     const scrollAxes = readScrollAxes(props);
@@ -2369,7 +2385,7 @@ function placeChildrenFallback(ctx: CanvasRenderingContext2D, parent: VirtualNod
 
   // --- Absolutely positioned children ---------------------------------------
   for (const child of parent.children) {
-    if (isDisplayNone(child.props)) {
+    if (isLayoutHidden(child)) {
       placeFallback(ctx, child, originX, originY, 0, 0);
       continue;
     }

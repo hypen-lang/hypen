@@ -2,9 +2,9 @@
  * Hypen Todo on Cloudflare — the hypen-landing todo sample as a worker.
  *
  * This entry wires in the WASM engine and shared browser client explicitly.
- * The default worker routing keys every `/ws` connection to the SAME Durable
- * Object and `syncActions: true` mirrors state updates to every socket on it —
- * one shared todo list per deployment, live in all tabs.
+ * The hosted client gives each browser session its own Durable Object. If a
+ * session has multiple sockets, `syncActions: true` mirrors updates between
+ * those sockets without mixing unrelated visitors' todo state.
  */
 
 import { defineHypenWorker } from "@hypen-space/cf";

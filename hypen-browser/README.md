@@ -37,6 +37,16 @@ extra step:
 cargo run --release -p hypen-browser
 ```
 
+For a development build with an always-on native frame-time / equivalent FPS / process CPU / resident
+RAM overlay, enable `dev`. The sampler and HUD are completely absent from
+normal builds:
+
+```bash
+cargo run -p hypen-browser --features dev
+# Combine with inline media when the GStreamer runtime is installed:
+cargo run -p hypen-browser --features dev,video
+```
+
 The base build shows Video posters and chrome but intentionally carries no
 native decoder. To play inline Video/Audio, install GStreamer and enable the
 Browser's forwarding feature:

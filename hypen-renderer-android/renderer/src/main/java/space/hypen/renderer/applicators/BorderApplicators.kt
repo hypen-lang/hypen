@@ -5,7 +5,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.RoundRect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -220,13 +222,19 @@ class BorderApplicator : ApplicatorHandler {
         context: ApplicatorContext,
     ): Modifier =
         when (value) {
-            is Number -> modifier.border(value.toFloat().dp, Color.Black)
+            // Same non-positive guard as BorderWidthApplicator: `border(0.dp)`
+            // still strokes a hairline ring in Compose.
+            is Number -> if (value.toFloat() <= 0f) modifier else modifier.border(value.toFloat().dp, Color.Black)
             is Map<*, *> -> {
                 val width = (value["width"] as? Number)?.toFloat()?.dp ?: 1.dp
-                val color = ColorParser.parse(value["color"]) ?: Color.Black
-                val style = (value["style"] as? String) ?: "solid"
-                val corners = resolveCompoundBorderCorners(value, context.element.props)
-                modifier.styledBorder(width, color, style, corners)
+                if (width.value <= 0f) {
+                    modifier
+                } else {
+                    val color = ColorParser.parse(value["color"]) ?: Color.Black
+                    val style = (value["style"] as? String) ?: "solid"
+                    val corners = resolveCompoundBorderCorners(value, context.element.props)
+                    modifier.styledBorder(width, color, style, corners)
+                }
             }
             else -> modifier
         }
@@ -276,8 +284,12 @@ class BorderWidthApplicator : ApplicatorHandler {
 
 /**
  * Applicator for borderColor.
- * If borderWidth is also set on this element, defers to BorderWidthApplicator which produces
- * the complete border. Otherwise applies a 1dp border with this color.
+ *
+ * Only records the colour: the width applicators (`borderWidth` and the
+ * per-side `borderTopWidth` … `borderLeftWidth`) read it back and draw the
+ * border. A colour with no width draws nothing — the CSS semantics the DOM
+ * renderer already has. (It used to paint a full 1dp box, which turned
+ * Tailwind's `border-b border-gray-100` into a border on all four sides.)
  */
 class BorderColorApplicator : ApplicatorHandler {
     override val name: String = "borderColor"
@@ -286,13 +298,63 @@ class BorderColorApplicator : ApplicatorHandler {
         modifier: Modifier,
         value: Any?,
         context: ApplicatorContext,
-    ): Modifier {
-        // If borderWidth is set, it will handle the complete border with this color
-        val hasBorderWidth = context.element.props.keys.any { it.startsWith("borderWidth") }
-        if (hasBorderWidth) return modifier
+    ): Modifier = modifier
+}
 
-        val color = ColorParser.parse(value) ?: return modifier
-        return modifier.border(1.dp, color)
+/** Which physical edge a per-side border width applicator paints. */
+enum class BorderSide { TOP, RIGHT, BOTTOM, LEFT }
+
+/**
+ * Applicator for `borderTopWidth` / `borderRightWidth` / `borderBottomWidth` /
+ * `borderLeftWidth` — what Tailwind's `border-t` / `border-b` / `border-x`
+ * lower to. Paints a straight stripe along one physical edge (like CSS: a
+ * per-side border ignores the corner radius) in `borderColor`, so a
+ * `border-b border-gray-100` post card gets a bottom divider instead of a
+ * full box. Widths of zero or less draw nothing (`border-b-0`).
+ */
+class BorderSideWidthApplicator(private val side: BorderSide) : ApplicatorHandler {
+    override val name: String = when (side) {
+        BorderSide.TOP -> "borderTopWidth"
+        BorderSide.RIGHT -> "borderRightWidth"
+        BorderSide.BOTTOM -> "borderBottomWidth"
+        BorderSide.LEFT -> "borderLeftWidth"
+    }
+
+    override fun apply(
+        modifier: Modifier,
+        value: Any?,
+        context: ApplicatorContext,
+    ): Modifier {
+        val width =
+            when (value) {
+                is Number -> value.toFloat().dp
+                is String -> parseCssUnit(value) ?: return modifier
+                else -> return modifier
+            }
+        if (width.value <= 0f) return modifier
+
+        val style = (context.element.props["borderStyle.0"] as? String)
+            ?: (context.element.props["borderStyle"] as? String)
+            ?: "solid"
+        if (style.equals("none", ignoreCase = true)) return modifier
+
+        val colorValue = context.element.props["borderColor.0"] ?: context.element.props["borderColor"]
+        val color = ColorParser.parse(colorValue) ?: Color.Gray
+
+        // Draw AFTER the content: the element's background modifier sits later
+        // in the chain (BORDER priority precedes BACKGROUND, like CSS), so a
+        // `drawBehind` stripe would be painted over by the background.
+        return modifier.drawWithContent {
+            drawContent()
+            val w = width.toPx()
+            val (topLeft, rectSize) = when (side) {
+                BorderSide.TOP -> Offset.Zero to Size(size.width, w)
+                BorderSide.BOTTOM -> Offset(0f, size.height - w) to Size(size.width, w)
+                BorderSide.LEFT -> Offset.Zero to Size(w, size.height)
+                BorderSide.RIGHT -> Offset(size.width - w, 0f) to Size(w, size.height)
+            }
+            drawRect(color = color, topLeft = topLeft, size = rectSize)
+        }
     }
 }
 

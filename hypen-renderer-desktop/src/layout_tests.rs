@@ -2639,6 +2639,125 @@ fn overflow_hidden_container_clips_descendant_paint_without_becoming_scrollable(
     assert!(clip.scrollable.is_none());
 }
 
+#[test]
+fn embedded_scroller_clip_is_intersected_with_the_host_below_its_header() {
+    // Home Screen app-frame shape: fixed chrome, then an overflow-hidden
+    // HypenApp host containing an app-owned scroller. The inner clip must not
+    // replace the host clip, even if the embedded surface overflows upward.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "frame",
+        "Column",
+        &[("width.0", json!(400)), ("height.0", json!(300))],
+    ));
+    tree.apply(&insert_patch("root", "frame"));
+    tree.apply(&create_patch(
+        "chrome",
+        "Row",
+        &[
+            ("width.0", json!(400)),
+            ("height.0", json!(40)),
+            ("flexShrink.0", json!(0)),
+        ],
+    ));
+    tree.apply(&insert_patch("frame", "chrome"));
+    tree.apply(&create_patch(
+        "host",
+        "Column",
+        &[
+            ("width.0", json!(400)),
+            ("height.0", json!(260)),
+            ("overflow.0", json!("hidden")),
+            ("flexShrink.0", json!(0)),
+        ],
+    ));
+    tree.apply(&insert_patch("frame", "host"));
+    tree.apply(&create_patch(
+        "feed",
+        "Column",
+        &[
+            ("width.0", json!(400)),
+            ("height.0", json!(300)),
+            ("marginTop.0", json!(-30)),
+            ("scrollable.0", json!(true)),
+            ("flexShrink.0", json!(0)),
+        ],
+    ));
+    tree.apply(&insert_patch("host", "feed"));
+    tree.apply(&create_patch(
+        "post",
+        "Container",
+        &[("width.0", json!(400)), ("height.0", json!(600))],
+    ));
+    tree.apply(&insert_patch("feed", "post"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute_with_scrolls(
+        &tree,
+        &mut text,
+        (400, 300),
+        1.0,
+        0.0,
+        &HashMap::from([("feed".to_string(), 100.0)]),
+    );
+    let chrome = find_item(&pass, "chrome");
+    let host = find_item(&pass, "host");
+    let feed = find_item(&pass, "feed");
+    let post = find_item(&pass, "post");
+    let clip = post
+        .clip_to
+        .expect("embedded feed descendants must be clipped");
+
+    assert!(
+        feed.rect.y < host.rect.y,
+        "fixture must overflow toward the chrome"
+    );
+    assert_eq!(clip, host.rect.intersection(feed.rect));
+    assert!(
+        clip.y >= chrome.rect.y + chrome.rect.h,
+        "embedded content clip {clip:?} must remain below frame chrome {:?}",
+        chrome.rect
+    );
+}
+
+#[test]
+fn rounded_video_overflow_passes_its_exact_radius_to_controls_slot() {
+    // Hypeflix shape: the authored controls are a full-player overlay. The
+    // Video surface and its descendants must share one rounded clip; otherwise
+    // the controls' dark scrim repaints square pixels over the rounded bottom
+    // corners of the decoded frame.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "video",
+        "Video",
+        &[
+            ("width.0", json!(320)),
+            ("height.0", json!(180)),
+            ("cornerRadius.0", json!(16)),
+            ("overflow.0", json!("hidden")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "video"));
+    tree.apply(&create_patch(
+        "controls",
+        "Column",
+        &[("slot.0", json!("controls"))],
+    ));
+    tree.apply(&insert_patch("video", "controls"));
+    add_text(&mut tree, "controls", "play", "Pause");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 2.0);
+    let video = find_item(&pass, "video");
+    let controls = find_item(&pass, "controls");
+    let play = find_item(&pass, "play");
+
+    assert_eq!(controls.clip_to, Some(video.rect));
+    assert_eq!(play.clip_to, Some(video.rect));
+    assert_eq!(controls.clip_radius, 32.0);
+    assert_eq!(play.clip_radius, 32.0);
+}
+
 // -----------------------------------------------------------------
 // clip_to is enforced in HIT-TESTING, not just paint (pixel/hit
 // parity, constraint #5). Paint pushes the scrollable ancestor's
@@ -2672,6 +2791,7 @@ fn actionable_clip_item(
         scrollable: None,
         font_weight: 400,
         clip_to,
+        clip_radius: 0.0,
         subtree_root: None,
         background_gradient: None,
         background_layers: None,
@@ -6602,6 +6722,126 @@ mod container_shift {
         let scrolls = HashMap::from([("scroller".to_string(), 60.0)]);
         let fresh = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
         assert_items_match(&shifted, &fresh);
+    }
+
+    #[test]
+    fn partially_visible_card_reintersects_fixed_scroller_clip_after_shift() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "scroller",
+            "Column",
+            &[
+                ("overflow", json!("scroll")),
+                ("height", json!(120.0)),
+                ("width", json!(400.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "scroller"));
+        tree.apply(&create_patch(
+            "filler",
+            "Container",
+            &[("height", json!(100.0)), ("flexShrink", json!(0.0))],
+        ));
+        tree.apply(&insert_patch("scroller", "filler"));
+        tree.apply(&create_patch(
+            "card",
+            "Column",
+            &[
+                ("overflow", json!("hidden")),
+                ("height", json!(100.0)),
+                ("width", json!(300.0)),
+                ("flexShrink", json!(0.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("scroller", "card"));
+        tree.apply(&create_patch(
+            "photo",
+            "Image",
+            &[
+                ("src", json!("test://partially-visible-card")),
+                ("height", json!(100.0)),
+                ("width", json!(300.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("card", "photo"));
+
+        let mut text = TextEngine::new();
+        let vp = crate::style::Viewport::new(VP.0 as f32, VP.1 as f32);
+        let mut shifted =
+            LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &HashMap::new());
+        let outer = shifted.item_by_id("scroller").unwrap().rect;
+        let before = shifted.item_by_id("photo").unwrap().clip_to.unwrap();
+        assert_eq!(before.y, 100.0);
+        assert_eq!(before.h, 20.0);
+
+        shifted.shift_container_scroll(&tree, "scroller", 40.0, vp, 1.0);
+        let card = shifted.item_by_id("card").unwrap().rect;
+        let after = shifted.item_by_id("photo").unwrap().clip_to.unwrap();
+        assert_eq!(after, card.intersection(outer));
+        assert_eq!(after.y, 60.0);
+        assert_eq!(after.h, 60.0);
+
+        let scrolls = HashMap::from([("scroller".to_string(), 40.0)]);
+        let fresh = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        assert_items_match(&shifted, &fresh);
+    }
+
+    #[test]
+    fn retained_reemit_matches_full_layout_after_a_long_feed_scroll() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "feed",
+            "Column",
+            &[
+                ("overflow", json!("scroll")),
+                ("height", json!(600.0)),
+                ("width", json!(800.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "feed"));
+        for i in 0..120 {
+            let id = format!("card{i}");
+            tree.apply(&create_patch(
+                &id,
+                "Card",
+                &[
+                    ("height", json!(100.0)),
+                    ("flexShrink", json!(0.0)),
+                    ("overflow", json!("hidden")),
+                ],
+            ));
+            tree.apply(&insert_patch("feed", &id));
+            let label = format!("label{i}");
+            tree.apply(&create_patch(
+                &label,
+                "Text",
+                &[("0", json!(format!("Restaurant {i}")))],
+            ));
+            tree.apply(&insert_patch(&id, &label));
+        }
+
+        let mut state = TaffyState::new();
+        let mut text = TextEngine::new();
+        let initial = LayoutPass::compute_with_state(
+            &mut state,
+            &tree,
+            &mut text,
+            VP,
+            1.0,
+            0.0,
+            &HashMap::new(),
+            1,
+        );
+        assert!(initial.item_by_id("card0").is_some());
+        assert!(initial.item_by_id("card70").is_none());
+
+        let scrolls = HashMap::from([("feed".to_string(), 7_000.0)]);
+        let reemitted = LayoutPass::reemit_with_state(&state, &tree, VP, 1.0, 0.0, &scrolls);
+        let fresh = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        assert!(reemitted.item_by_id("card70").is_some());
+        assert!(reemitted.item_by_id("card0").is_none());
+        assert_items_match(&reemitted, &fresh);
+        assert_eq!(reemitted.content_size, fresh.content_size);
     }
 
     #[test]

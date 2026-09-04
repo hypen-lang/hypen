@@ -2,7 +2,7 @@
  * Checkbox Component
  */
 
-import type { ComponentHandler } from "./index.js";
+import { hasProp, toBool, type ComponentHandler } from "./index.js";
 
 export const checkboxHandler: ComponentHandler = {
   create(): HTMLElement {
@@ -24,24 +24,26 @@ export const checkboxHandler: ComponentHandler = {
     input.style.margin = "0";
     input.style.flexShrink = "0";
     input.style.accentColor = "#3b82f6";
-    
+
     wrapper.appendChild(input);
-    
+
     return wrapper;
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    const input = el.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    // Match on the marker `create` stamps rather than on the tag+type pair:
+    // it is the same element, and it survives the `cloneNode` template path.
+    const input = el.querySelector('[data-hypen-checkbox="true"]') as HTMLInputElement;
     if (!input) return;
 
     // Checked state
-    if (props.checked !== undefined) {
-      input.checked = Boolean(props.checked);
+    if (hasProp(props, "checked")) {
+      input.checked = toBool(props.checked);
     }
 
     // Disabled
-    if (props.disabled !== undefined) {
-      input.disabled = Boolean(props.disabled);
+    if (hasProp(props, "disabled")) {
+      input.disabled = toBool(props.disabled);
     }
 
     // Label text
@@ -52,7 +54,7 @@ export const checkboxHandler: ComponentHandler = {
         node => node.nodeType === Node.TEXT_NODE
       );
       textNodes.forEach(node => node.remove());
-      
+
       // Add new label text
       el.appendChild(document.createTextNode(String(label)));
     }

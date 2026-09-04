@@ -38,11 +38,50 @@ const HEADING_FONT_SIZES: Record<number, number> = {
   6: 10.72,
 };
 
+/**
+ * Alternate spellings accepted for an inherited text prop.
+ *
+ * `.foregroundColor(…)` is the registered applicator name on Swift and
+ * Android, where it feeds the very same text colour as `.color(…)`. The
+ * canvas only ever looked at `color`, so a `.foregroundColor()` subtree
+ * painted black. Aliases are consulted AFTER the canonical name on each
+ * node, so an element that sets both keeps `color` winning.
+ */
+const INHERITED_PROP_ALIASES: Record<string, string[]> = {
+  color: ["foregroundColor"],
+};
+
+/**
+ * A node's own text colour, under any spelling it can arrive in.
+ *
+ * `inheritedTextProp` already resolves the `foregroundColor` alias, but only
+ * the text painter goes through it — every other painter (Input, Select,
+ * Switch, Icon, Link, Spinner, …) reads `props.color` straight off the node.
+ * Without this those components honour `.color()` and silently ignore
+ * `.foregroundColor()`, which both native renderers accept.
+ *
+ * Returns undefined when unset so callers keep their own default.
+ */
+export function ownTextColor(props: Record<string, any>): any {
+  return (
+    props.color ??
+    props["color.0"] ??
+    props.foregroundColor ??
+    props["foregroundColor.0"]
+  );
+}
+
 /** Resolve CSS-inherited text props through the retained virtual parent chain. */
 export function inheritedTextProp(node: VirtualNode, name: string): any {
+  const aliases = INHERITED_PROP_ALIASES[name];
   let current: VirtualNode | null = node;
   while (current) {
     if (current.props[name] !== undefined) return current.props[name];
+    if (aliases) {
+      for (const alias of aliases) {
+        if (current.props[alias] !== undefined) return current.props[alias];
+      }
+    }
     if (current.type.toLowerCase() === "heading") {
       const level = Math.max(1, Math.min(6, Number(current.props.level ?? 2) || 2));
       if (name === "fontSize") return HEADING_FONT_SIZES[level];
@@ -326,12 +365,32 @@ export function cssLineHeightToPx(value: any, fontSizePx: number): number | null
 
 /**
  * True when the node opts out of layout entirely (`display: none`, which
- * Tailwind's `hidden` compiles to). Lives here so BOTH layout and paint can
- * ask the same question — a `hidden md:flex` node must be skipped by both
- * passes, and the two modules cannot import each other.
+ * Tailwind's `hidden` compiles to). Callers go through `isLayoutHidden`.
  */
 export function isDisplayNone(props: Record<string, any>): boolean {
   return props.display === "none";
+}
+
+/**
+ * True for a `VisuallyHidden` wrapper — the screen-reader-only ("sr-only")
+ * pattern documented in hypen-docs/content/docs/guide/accessibility.mdx.
+ * The DOM renderer clips its span out of the visual layout while leaving it
+ * in the accessibility tree; on canvas the equivalent is to keep the node in
+ * the a11y mirror but drop it from both the layout and the paint pass.
+ */
+export function isVisuallyHidden(node: VirtualNode): boolean {
+  return node.type.toLowerCase() === "visuallyhidden";
+}
+
+/**
+ * True when the node contributes neither pixels nor layout space. Lives here
+ * so BOTH layout and paint can ask the same question — a `hidden md:flex`
+ * node must be skipped by both passes, and the two modules cannot import
+ * each other. A `VisuallyHidden` subtree is skipped exactly like
+ * `display: none`; the mirror in `accessibility.ts` keeps it announced.
+ */
+export function isLayoutHidden(node: VirtualNode): boolean {
+  return isDisplayNone(node.props) || isVisuallyHidden(node);
 }
 
 /**
@@ -344,6 +403,44 @@ export function isDisplayNone(props: Record<string, any>): boolean {
  * - `{0, 1, ...}` — positional applicator args from the engine, mapped via
  *   CSS shorthand semantics (1=all, 2=v/h, 3=t/h/b, 4=t/r/b/l)
  */
+/**
+ * Resolve the named-keys form, or null when no named key is present.
+ *
+ * `.padding(horizontal: 16, vertical: 8)` is documented and both native
+ * renderers honour it; the canvas used to test only top/right/bottom/left, so
+ * an object carrying just the axis keys fell through to the positional branch
+ * and produced all-zero spacing.
+ */
+function pickNamed(value: Record<string, any>): BoxSpacing | null {
+  const pick = (...keys: string[]): any => {
+    for (const k of keys) {
+      if (value[k] !== undefined) return value[k];
+    }
+    return undefined;
+  };
+
+  const top = pick("top", "vertical");
+  const bottom = pick("bottom", "vertical");
+  const left = pick("leading", "start", "left", "horizontal");
+  const right = pick("trailing", "end", "right", "horizontal");
+
+  if (
+    top === undefined &&
+    bottom === undefined &&
+    left === undefined &&
+    right === undefined
+  ) {
+    return null;
+  }
+
+  return {
+    top: cssLengthToPx(top) ?? 0,
+    right: cssLengthToPx(right) ?? 0,
+    bottom: cssLengthToPx(bottom) ?? 0,
+    left: cssLengthToPx(left) ?? 0,
+  };
+}
+
 export function parseSpacing(value: any): BoxSpacing {
   if (typeof value === "number") {
     return { top: value, right: value, bottom: value, left: value };
@@ -355,20 +452,12 @@ export function parseSpacing(value: any): BoxSpacing {
   }
 
   if (typeof value === "object" && value !== null) {
-    // Named-keys form takes priority when any side is named.
-    if (
-      value.top !== undefined ||
-      value.right !== undefined ||
-      value.bottom !== undefined ||
-      value.left !== undefined
-    ) {
-      return {
-        top: cssLengthToPx(value.top) ?? 0,
-        right: cssLengthToPx(value.right) ?? 0,
-        bottom: cssLengthToPx(value.bottom) ?? 0,
-        left: cssLengthToPx(value.left) ?? 0,
-      };
-    }
+    // Named-keys form takes priority when any side is named. An axis key is
+    // the fallback for its two edges, and the logical keys resolve to
+    // physical ones — the canvas has no writing direction, so this matches
+    // Swift's LTR behaviour (`leading ?? start ?? left ?? horizontal`).
+    const named = pickNamed(value);
+    if (named !== null) return named;
 
     // Positional form: walk contiguous "0", "1", … keys.
     const args: number[] = [];

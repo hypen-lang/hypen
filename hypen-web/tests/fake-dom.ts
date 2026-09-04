@@ -107,7 +107,27 @@ export class FakeElement {
   public dataset: Record<string, string> = {};
   public parentNode: FakeElement | FakeDocument | null = null;
   public children: FakeElement[] = [];
-  public textContent = "";
+  private _textContent = "";
+
+  /**
+   * Assigning `textContent` detaches every child, as the real DOM does.
+   *
+   * It used to be a plain field, so a handler that replaced its content with
+   * `el.textContent = "..."` left stale children behind in tests while
+   * destroying them in a browser — masking exactly the class of bug where a
+   * partial prop update blanks an element (Avatar's img, Icon's svg).
+   */
+  get textContent(): string {
+    return this._textContent;
+  }
+
+  set textContent(value: string) {
+    for (const child of this.children) {
+      child.parentNode = null;
+    }
+    this.children = [];
+    this._textContent = value;
+  }
   public attributes: Record<string, string> = {};
   private classSet = new Set<string>();
   public classList = {
@@ -324,6 +344,59 @@ export class FakeElement {
     return name in this.attributes ? this.attributes[name] : null;
   }
 
+  /**
+   * Minimal descendant matching for the selector shapes component handlers
+   * actually use: `[attr="value"]`, `[attr]`, and a bare tag name.
+   *
+   * Without this, handlers that reach for a sub-element they built in
+   * `create()` (ProgressBar's bar, Avatar's img) could not be covered by any
+   * fake-dom test at all.
+   */
+  private matchesSelector(selector: string): boolean {
+    // A comma list matches if any branch does, as in the real DOM. Without
+    // this a perfectly ordinary `querySelector("input,select,textarea")`
+    // silently returns null here and a real bug reads as fixed.
+    if (selector.includes(",")) {
+      return selector
+        .split(",")
+        .some((part) => part.trim() && this.matchesSelector(part.trim()));
+    }
+
+    const attr = selector.match(/^\[([^\]=]+)(?:="([^"]*)")?\]$/);
+    if (attr) {
+      const [, name, value] = attr;
+      const actual =
+        name.startsWith("data-")
+          ? this.dataset[
+              name
+                .slice(5)
+                .replace(/-([a-z])/g, (_, c: string) => c.toUpperCase())
+            ]
+          : this.getAttribute(name) ?? undefined;
+      if (actual === undefined || actual === null) return false;
+      return value === undefined || String(actual) === value;
+    }
+    return this.tagName.toLowerCase() === selector.trim().toLowerCase();
+  }
+
+  querySelector(selector: string): FakeElement | null {
+    for (const child of this.children) {
+      if (child.matchesSelector(selector)) return child;
+      const nested = child.querySelector(selector);
+      if (nested) return nested;
+    }
+    return null;
+  }
+
+  querySelectorAll(selector: string): FakeElement[] {
+    const found: FakeElement[] = [];
+    for (const child of this.children) {
+      if (child.matchesSelector(selector)) found.push(child);
+      found.push(...child.querySelectorAll(selector));
+    }
+    return found;
+  }
+
   get firstElementChild(): FakeElement | null {
     return this.children[0] ?? null;
   }
@@ -353,6 +426,20 @@ export class FakeDocument {
 
   createElement(tag: string): FakeElement {
     const element = new FakeElement(tag.toUpperCase());
+    element.ownerDocument = this;
+    this.nodes.push(element);
+    return element;
+  }
+
+  /**
+   * SVG elements, for handlers that build inline SVG (Icon).
+   *
+   * Namespaces are not modelled — the tag is all any handler here reads back.
+   * Without this the Icon handler throws on its resolved-paths branch, so
+   * that branch could not be covered at all.
+   */
+  createElementNS(_namespace: string, tag: string): FakeElement {
+    const element = new FakeElement(tag.toLowerCase());
     element.ownerDocument = this;
     this.nodes.push(element);
     return element;

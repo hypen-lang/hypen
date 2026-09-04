@@ -1101,12 +1101,16 @@ public struct StackComponent: ComponentHandler {
         modifier: HypenModifier,
         children: @escaping () -> AnyView
     ) -> AnyView {
+        // `justifyContent` is the horizontal axis and `alignItems` the
+        // vertical, as for Box/Button here (JustifyContentApplicator), on
+        // Android (`hypenContentAlignment`) and on the canvas. Stack used to
+        // read them the other way round.
         let alignment = StackAlignmentResolver.resolve(
             context.element.getStringProp("alignment.0"),
             horizontal: context.element.getStringProp("horizontalAlignment.0")
-                ?? context.element.getStringProp("alignItems.0"),
+                ?? context.element.getStringProp("justifyContent.0"),
             vertical: context.element.getStringProp("verticalAlignment.0")
-                ?? context.element.getStringProp("justifyContent.0")
+                ?? context.element.getStringProp("alignItems.0")
         )
 
         // Stack wraps content by default — matches Android's Box and Canvas's
@@ -1115,12 +1119,22 @@ public struct StackComponent: ComponentHandler {
         let hasPositiveWeight = (modifier.weight ?? 0) > 0
         let shouldExpand = modifier.fillMaxWidth || hasPositiveWeight
 
+        // Children are rendered directly into the ZStack (not via the generic
+        // `children()` closure): that closure hands back an `AnyView`-erased
+        // `ForEach`, and a type-erased ForEach inside a ZStack no longer
+        // unrolls into separate children — the ZStack then sees ONE child and
+        // its `alignment` has nothing to align. That is why a Stack with
+        // `.horizontalAlignment("end")` only placed its badge correctly when
+        // it also carried padding/border (hypenModifier's frame alignment did
+        // the work); a bare Stack silently fell back to top-leading.
         return AnyView(
             StackContentView(
                 alignment: alignment,
                 shouldExpand: shouldExpand,
                 modifier: modifier,
-                children: children
+                childElements: context.renderer.getChildren(of: context.element.id),
+                renderer: context.renderer,
+                actionDispatcher: context.actionDispatcher
             )
         )
     }
@@ -1168,25 +1182,32 @@ private struct StackContentView: View {
     let alignment: Alignment
     let shouldExpand: Bool
     let modifier: HypenModifier
-    let children: () -> AnyView
+    let childElements: [HypenElement]
+    let renderer: HypenRenderer
+    let actionDispatcher: ActionDispatcher
 
     @Environment(\.parentAllowsHorizontalExpansion) private var parentAllowsHorizontalExpansion
     @Environment(\.parentAllowsVerticalExpansion) private var parentAllowsVerticalExpansion
     @Environment(\.parentExplicitHeight) private var parentExplicitHeight
 
     var body: some View {
-        // Wrap children with environment for percentage sizing
-        let wrappedChildren = AnyView(
-            children()
-                .environment(\.parentExplicitHeight, modifier.explicitContentHeight)
-                .environment(\.parentExplicitWidth, modifier.explicitContentWidth)
-                .environment(\.parentAllowsHorizontalExpansion, modifier.fillMaxWidth || modifier.width != nil)
-                .environment(\.parentAllowsVerticalExpansion, modifier.fillMaxHeight || modifier.height != nil)
-        )
-
         let content: AnyView = {
+            // Each child is a direct ZStack member (see StackComponent.render).
+            // Stack is an overlay container, so its children never inherit a
+            // cross-axis stretch from an enclosing Column/Row.
             let base = AnyView(ZStack(alignment: alignment) {
-                wrappedChildren
+                ForEach(childElements, id: \.id) { childElement in
+                    HypenElementView(
+                        elementId: childElement.id,
+                        renderer: renderer,
+                        actionDispatcher: actionDispatcher
+                    )
+                    .environment(\.stretchCrossAxis, .none)
+                    .environment(\.parentExplicitHeight, modifier.explicitContentHeight)
+                    .environment(\.parentExplicitWidth, modifier.explicitContentWidth)
+                    .environment(\.parentAllowsHorizontalExpansion, modifier.fillMaxWidth || modifier.width != nil)
+                    .environment(\.parentAllowsVerticalExpansion, modifier.fillMaxHeight || modifier.height != nil)
+                }
             })
 
             // A Stack is an overlay container, so it is safe to establish its
@@ -1366,38 +1387,6 @@ func resolveListLayout(
             overflow == "auto" || overflow == "scroll"
         )
     )
-}
-
-// MARK: - ScrollView Component
-
-public struct ScrollViewComponent: ComponentHandler {
-    public let typeName = "scrollview"
-
-    public init() {}
-
-    public func render(
-        context: ComponentContext,
-        modifier: HypenModifier,
-        children: @escaping () -> AnyView
-    ) -> AnyView {
-        let horizontal = context.element.getBoolProp("horizontal.0") ?? false
-        let showsIndicators = context.element.getBoolProp("showsIndicators.0") ?? true
-
-        // Propagate expansion permissions to children
-        let allowsHorizontalExpansion = modifier.fillMaxWidth || modifier.width != nil
-        let allowsVerticalExpansion = modifier.fillMaxHeight || modifier.height != nil
-        let explicitWidth = modifier.width
-
-        return AnyView(
-            ScrollView(horizontal ? .horizontal : .vertical, showsIndicators: showsIndicators) {
-                children()
-                    .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
-                    .environment(\.parentAllowsVerticalExpansion, allowsVerticalExpansion)
-                    .environment(\.parentExplicitWidth, explicitWidth)
-            }
-            .hypenModifier(modifier)
-        )
-    }
 }
 
 // MARK: - Grid Component

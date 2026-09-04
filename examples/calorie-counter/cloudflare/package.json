@@ -8,8 +8,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@hypen-space/core": "0.6.3",
-    "@hypen-space/cf": "0.6.3",
+    "@hypen-space/core": "file:../../../hypen-web/packages/core",
+    "@hypen-space/cf": "file:../../../hypen-web/packages/cf",
+    "@hypen-space/web": "file:../../../hypen-web/packages/web",
     "hypen-engine": "0.6.3"
   },
   "devDependencies": {

@@ -16,6 +16,40 @@ fn cursor_icons_match_web_affordances() {
     assert_eq!(cursor_icon_for_targets(true, true), CursorIcon::Text);
 }
 
+#[test]
+fn surface_recovery_is_bounded_and_resets_after_success() {
+    let mut recovery = SurfaceRecovery::default();
+    let mut delays = Vec::new();
+
+    for _ in 0..MAX_SURFACE_RETRY_ATTEMPTS {
+        delays.push(recovery.schedule().expect("retry should schedule"));
+        assert!(recovery.take_scheduled());
+    }
+    assert_eq!(
+        delays,
+        [16, 32, 64, 128, 256, 256].map(std::time::Duration::from_millis)
+    );
+    assert!(recovery.schedule().is_none());
+
+    recovery.recovered();
+    assert_eq!(
+        recovery.schedule(),
+        Some(std::time::Duration::from_millis(16))
+    );
+}
+
+#[test]
+fn surface_recovery_coalesces_duplicate_retry_requests() {
+    let mut recovery = SurfaceRecovery::default();
+    assert_eq!(
+        recovery.schedule(),
+        Some(std::time::Duration::from_millis(16))
+    );
+    assert!(recovery.schedule().is_none());
+    assert!(recovery.take_scheduled());
+    assert!(!recovery.take_scheduled());
+}
+
 mod paint_only_gate {
     use super::*;
     use serde_json::json;
@@ -387,6 +421,80 @@ fn typing_sequence_preserves_character_order() {
         );
         assert_eq!(sel, Selection::caret(input.len()));
     }
+}
+
+#[test]
+fn fast_controlled_input_burst_ignores_delayed_server_echoes() {
+    let mut edits = HashMap::new();
+    let mut edit = OptimisticInputEdit::default();
+    for value in ["p", "pi", "piz", "pizz", "pizza"] {
+        edit.push(value.into());
+    }
+    edits.insert("search".into(), edit);
+
+    for stale in ["p", "pi", "piz", "pizz"] {
+        let mut patches = vec![Patch::SetProp {
+            id: "search".into(),
+            name: "value".into(),
+            value: json!(stale),
+        }];
+        reconcile_optimistic_input_echoes(&mut patches, &mut edits);
+        assert!(patches.is_empty(), "stale echo {stale:?} must be swallowed");
+        assert_eq!(edits["search"].value, "pizza");
+    }
+
+    let mut latest = vec![Patch::SetProp {
+        id: "search".into(),
+        name: "value".into(),
+        value: json!("pizza"),
+    }];
+    reconcile_optimistic_input_echoes(&mut latest, &mut edits);
+    assert_eq!(
+        latest.len(),
+        1,
+        "the latest acknowledgement may reach the Tree"
+    );
+    assert!(edits.is_empty(), "the acknowledged draft must be released");
+}
+
+#[test]
+fn focused_input_remains_editable_between_keypress_and_redraw() {
+    let mut tree = Tree::new();
+    tree.apply(&Patch::Create {
+        id: "search".into(),
+        element_type: "Input".into(),
+        props: std::sync::Arc::new(indexmap::IndexMap::from([
+            ("bind".into(), json!("query")),
+            ("value".into(), json!("p")),
+        ])),
+        semantics: None,
+    });
+    let mut optimistic = HashMap::new();
+    let mut edit = OptimisticInputEdit::default();
+    edit.push("pi".into());
+    optimistic.insert("search".into(), edit);
+
+    let state = input_impl::controlled_input_state(&tree, &optimistic, "search");
+
+    assert_eq!(state, Some(("pi".into(), "query".into())));
+}
+
+#[test]
+fn authoritative_server_input_change_supersedes_an_optimistic_draft() {
+    let mut edits = HashMap::new();
+    let mut edit = OptimisticInputEdit::default();
+    edit.push("local".into());
+    edits.insert("search".into(), edit);
+    let mut patches = vec![Patch::SetProp {
+        id: "search".into(),
+        name: "value".into(),
+        value: json!("server reset"),
+    }];
+
+    reconcile_optimistic_input_echoes(&mut patches, &mut edits);
+
+    assert_eq!(patches.len(), 1);
+    assert!(edits.is_empty());
 }
 
 // -----------------------------------------------------------------
@@ -1039,6 +1147,154 @@ fn slide_exit_stays_excluded_while_transformed() {
     );
     assert!(frame.invalidate);
     assert!(tree.get("btn").is_none());
+}
+
+#[test]
+fn animated_route_exit_drops_node_id_layout_overrides_before_next_route_layout() {
+    // MovieDB's Home -> MovieDetail navigation combines all of the pieces
+    // that exposed this crash:
+    //
+    // 1. the outgoing route contains an alignSelf(center) content-sized
+    //    row like MovieDB's centred rails/hero content;
+    // 2. the route is removed through a deferred exit animation; and
+    // 3. the incoming route is already live when that exit settles.
+    //
+    // The fit-content pass stores entries by Taffy NodeId. Finalising the
+    // exit removes those Taffy nodes incrementally, so the next layout must
+    // not try to restore an override through the now-dead SlotMap key.
+    let (mut animator, mut tree, mut taffy) = harness();
+    let mut text = TextEngine::new();
+    mirror_ingest(
+        &mut animator,
+        &mut tree,
+        &mut taffy,
+        &[
+            wcreate(
+                "home-route",
+                "Column",
+                &[
+                    ("alignItems", json!("stretch")),
+                    (
+                        "__anim.exit",
+                        json!({ "presets": ["fade"], "duration": 140, "curve": "linear" }),
+                    ),
+                ],
+            ),
+            winsert("col", "home-route"),
+            wcreate(
+                "centred-rail",
+                "Row",
+                &[("alignSelf", json!("center")), ("maxWidth", json!(1200.0))],
+            ),
+            winsert("home-route", "centred-rail"),
+            wcreate(
+                "grow",
+                "Column",
+                &[("flex", json!(1.0)), ("minWidth", json!(0.0))],
+            ),
+            winsert("centred-rail", "grow"),
+            wcreate("rail-label", "Text", &[("0", json!("Featured tonight"))]),
+            winsert("grow", "rail-label"),
+        ],
+    );
+
+    // Populate the fit-content override map on the retained Taffy tree.
+    let scrolls = HashMap::new();
+    let home = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (220, 600),
+        HARNESS_SCALE,
+        0.0,
+        &scrolls,
+        1,
+    );
+    assert!(home.item_by_id("centred-rail").is_some());
+    assert!(
+        taffy.fit_width_override_len() > 0,
+        "fixture must populate the NodeId-keyed fit-content map"
+    );
+
+    // Router navigation: the old route exits while the new route enters.
+    // The engine sends the flagged root first and its plain descendant
+    // removals after it; DesktopAnimator holds the whole teardown until the
+    // root's fade settles.
+    mirror_ingest(
+        &mut animator,
+        &mut tree,
+        &mut taffy,
+        &[
+            Patch::Remove {
+                id: "home-route".into(),
+                transition: true,
+            },
+            Patch::Remove {
+                id: "centred-rail".into(),
+                transition: false,
+            },
+            Patch::Remove {
+                id: "grow".into(),
+                transition: false,
+            },
+            Patch::Remove {
+                id: "rail-label".into(),
+                transition: false,
+            },
+            wcreate(
+                "detail-route",
+                "Column",
+                &[(
+                    "__anim.enter",
+                    json!({ "presets": ["fade"], "duration": 320, "curve": "linear" }),
+                )],
+            ),
+            winsert("col", "detail-route"),
+            wcreate("title", "Text", &[("0", json!("Inception"))]),
+            winsert("detail-route", "title"),
+        ],
+    );
+
+    // The outgoing route is still retained in flow during its fade.
+    let during = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (220, 600),
+        HARNESS_SCALE,
+        0.0,
+        &scrolls,
+        2,
+    );
+    assert!(during.item_by_id("home-route").is_some());
+    assert!(during.item_by_id("detail-route").is_some());
+
+    animator.set_manual_time_ms(140.0);
+    let settled = drive_animation_frame(
+        &mut animator,
+        &mut tree,
+        &mut taffy,
+        HARNESS_SCALE,
+        crate::layout::logical_viewport((220, 600), HARNESS_SCALE),
+    );
+    assert!(settled.invalidate, "the outgoing route finalized");
+    assert!(tree.get("home-route").is_none());
+
+    // Regression: this used to panic in TaffyTree::style with
+    // "invalid SlotMap key used" while clearing the removed route's
+    // fit-content width override.
+    let detail = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (220, 600),
+        HARNESS_SCALE,
+        0.0,
+        &scrolls,
+        3,
+    );
+    assert!(detail.item_by_id("title").is_some());
+    assert!(detail.item_by_id("centred-rail").is_none());
 }
 
 #[test]
@@ -2129,6 +2385,185 @@ mod focus_reveal {
         assert_eq!(
             reveal_target_for(&tree, &pass, "r5", vp),
             RevealTarget::Page
+        );
+    }
+}
+
+// ---------------------------------------------------------------
+// Nested wheel chaining: Hypeflix's vertical Browse scroller contains
+// horizontal poster rails. A vertical wheel over a rail must bubble to
+// Browse instead of being swallowed by the innermost scrollable hit.
+// ---------------------------------------------------------------
+
+mod wheel_chaining {
+    use super::*;
+    use crate::layout::LayoutPass;
+    use crate::text::TextEngine;
+    use serde_json::json;
+
+    fn node(
+        tree: &mut Tree,
+        id: &str,
+        element_type: &str,
+        parent: &str,
+        props: &[(&str, serde_json::Value)],
+    ) {
+        tree.apply(&Patch::Create {
+            id: id.into(),
+            element_type: element_type.into(),
+            props: std::sync::Arc::new(
+                props
+                    .iter()
+                    .map(|(key, value)| (key.to_string(), value.clone()))
+                    .collect(),
+            ),
+            semantics: None,
+        });
+        tree.apply(&Patch::Insert {
+            parent_id: parent.into(),
+            id: id.into(),
+            before_id: None,
+        });
+    }
+
+    fn hypeflix_browse_layout(inner_axis: &str) -> LayoutPass {
+        let mut tree = Tree::new();
+        node(
+            &mut tree,
+            "browse",
+            "Column",
+            ROOT_ID,
+            &[
+                ("width.0", json!(400)),
+                ("height.0", json!(300)),
+                ("scrollable.0", json!(true)),
+            ],
+        );
+        node(
+            &mut tree,
+            "rail",
+            if inner_axis == "horizontal" {
+                "Row"
+            } else {
+                "Column"
+            },
+            "browse",
+            &[
+                ("width.0", json!(400)),
+                ("height.0", json!(180)),
+                ("flexShrink.0", json!(0)),
+                ("scrollable.0", json!(inner_axis)),
+            ],
+        );
+        node(
+            &mut tree,
+            "rail-content",
+            "Container",
+            "rail",
+            &[
+                ("width.0", json!(800)),
+                (
+                    "height.0",
+                    json!(if inner_axis == "horizontal" { 180 } else { 500 }),
+                ),
+                ("flexShrink.0", json!(0)),
+            ],
+        );
+        node(
+            &mut tree,
+            "more-rails",
+            "Container",
+            "browse",
+            &[
+                ("width.0", json!(400)),
+                ("height.0", json!(600)),
+                ("flexShrink.0", json!(0)),
+            ],
+        );
+
+        LayoutPass::compute(&tree, &mut TextEngine::new(), (400, 300), 1.0)
+    }
+
+    #[test]
+    fn vertical_wheel_over_horizontal_rail_bubbles_to_browse() {
+        let layout = hypeflix_browse_layout("horizontal");
+        let WheelRoute::Container(target) =
+            wheel_route(&layout, &HashMap::new(), 100.0, 100.0, 64.0, &|_| false)
+        else {
+            panic!("outer Browse scroller should consume the wheel");
+        };
+
+        assert_eq!(target.id, "browse");
+        assert_eq!(target.offset, 64.0);
+        assert_eq!(
+            layout
+                .item_by_id("rail")
+                .unwrap()
+                .scrollable
+                .unwrap()
+                .content_h,
+            layout.item_by_id("rail").unwrap().rect.h,
+            "the horizontal rail has no vertical range and must not swallow dy"
+        );
+    }
+
+    #[test]
+    fn innermost_vertical_scroller_still_consumes_when_it_can_move() {
+        let layout = hypeflix_browse_layout("vertical");
+        let WheelRoute::Container(target) =
+            wheel_route(&layout, &HashMap::new(), 100.0, 100.0, 64.0, &|_| false)
+        else {
+            panic!("inner vertical surface should consume the wheel");
+        };
+
+        assert_eq!(target.id, "rail");
+        assert_eq!(target.offset, 64.0);
+    }
+
+    #[test]
+    fn exhausted_full_screen_feed_blocks_page_fallback() {
+        // Social/Home shape: the explicit feed occupies the viewport and owns
+        // all of its overflow. At its bottom, a further wheel must be a no-op;
+        // treating the synthetic page as another ancestor moves the entire app
+        // above the window and exposes a blank band below its bottom nav.
+        let layout = hypeflix_browse_layout("horizontal");
+        let browse = layout.item_by_id("browse").unwrap();
+        let meta = browse.scrollable.unwrap();
+        let max = (meta.content_h - browse.rect.h).max(0.0);
+        let offsets = HashMap::from([("browse".to_string(), max)]);
+
+        assert_eq!(
+            wheel_route(&layout, &offsets, 100.0, 100.0, 64.0, &|_| false),
+            WheelRoute::Blocked
+        );
+    }
+
+    #[test]
+    fn pointer_outside_explicit_scrollables_drives_the_unique_main_feed() {
+        let layout = hypeflix_browse_layout("horizontal");
+        let WheelRoute::Container(target) =
+            wheel_route(&layout, &HashMap::new(), 500.0, 500.0, 64.0, &|_| false)
+        else {
+            panic!("the unique vertical feed should own wheel events over fixed chrome");
+        };
+        assert_eq!(target.id, "browse");
+        assert_eq!(target.offset, 64.0);
+    }
+
+    #[test]
+    fn a_document_without_explicit_scrollables_uses_page_scroll() {
+        let mut tree = Tree::new();
+        node(
+            &mut tree,
+            "document",
+            "Column",
+            ROOT_ID,
+            &[("width.0", json!(400)), ("height.0", json!(800))],
+        );
+        let layout = LayoutPass::compute(&tree, &mut TextEngine::new(), (400, 300), 1.0);
+        assert_eq!(
+            wheel_route(&layout, &HashMap::new(), 100.0, 100.0, 64.0, &|_| false),
+            WheelRoute::Page
         );
     }
 }

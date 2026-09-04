@@ -25,6 +25,8 @@ pub mod accessibility;
 pub mod anim;
 pub mod app;
 pub(crate) mod damage;
+#[cfg(feature = "dev-overlay")]
+pub(crate) mod dev_overlay;
 pub mod gpu;
 pub(crate) mod ime;
 pub mod layout;

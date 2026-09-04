@@ -64,6 +64,13 @@ public struct HypenModifier {
     public var borderColor: Color?
     public var cornerRadius: CGFloat = 0
     public var borderStyle: String = "solid"
+    /// Per-side overrides (`borderTopWidth` … — Tailwind `border-t`/`border-b`).
+    /// `nil` means "use `borderWidth`". Any set side switches the border to
+    /// the directional renderer: straight stripes per edge, like CSS.
+    public var borderTopWidth: CGFloat?
+    public var borderRightWidth: CGFloat?
+    public var borderBottomWidth: CGFloat?
+    public var borderLeftWidth: CGFloat?
 
     // MARK: - Visual Effects
 
@@ -189,6 +196,10 @@ public struct HypenModifier {
         // Border overrides
         if override.explicitlySetProperties.contains("borderWidth") { result.borderWidth = override.borderWidth }
         if let bc = override.borderColor { result.borderColor = bc }
+        if let v = override.borderTopWidth { result.borderTopWidth = v }
+        if let v = override.borderRightWidth { result.borderRightWidth = v }
+        if let v = override.borderBottomWidth { result.borderBottomWidth = v }
+        if let v = override.borderLeftWidth { result.borderLeftWidth = v }
         if override.explicitlySetProperties.contains("cornerRadius") { result.cornerRadius = override.cornerRadius }
         if override.explicitlySetProperties.contains("borderStyle") { result.borderStyle = override.borderStyle }
 
@@ -295,8 +306,16 @@ extension View {
             .padding(.bottom, modifier.paddingBottom)
             .padding(.leading, modifier.paddingLeading)
             .padding(.trailing, modifier.paddingTrailing)
-            // Establish the decorated border box after its internal padding.
-            // Border is an overlay and therefore does not add to these bounds.
+            // The border ring sits OUTSIDE the padding and inside the border
+            // box, exactly like CSS / Compose: `p-0.5` + `border-2` leaves a
+            // visible 2pt gap between content and ring. Reserving the ring
+            // here (instead of stroking the edge as a zero-size overlay) is
+            // what keeps a bordered avatar identical across web/Android/iOS.
+            .padding(.top, modifier.layoutBorderInsets.top)
+            .padding(.bottom, modifier.layoutBorderInsets.bottom)
+            .padding(.leading, modifier.layoutBorderInsets.leading)
+            .padding(.trailing, modifier.layoutBorderInsets.trailing)
+            // Establish the decorated border box after padding + border.
             .applyBorderBoxSizing(modifier)
             // Fill expansion is also a declared outer size, so percentage/full
             // widths include padding instead of growing beyond the requested box.
@@ -479,18 +498,55 @@ extension HypenModifier {
     /// Hypen dimensions use border-box sizing, so percentages must resolve from
     /// this content box rather than from the declared outer dimension.
     var explicitContentWidth: CGFloat? {
-        width.map { max(0, $0 - paddingLeading - paddingTrailing) }
+        width.map { max(0, $0 - paddingLeading - paddingTrailing - layoutBorderInsets.leading - layoutBorderInsets.trailing) }
     }
 
     var explicitContentHeight: CGFloat? {
-        height.map { max(0, $0 - paddingTop - paddingBottom) }
+        height.map { max(0, $0 - paddingTop - paddingBottom - layoutBorderInsets.top - layoutBorderInsets.bottom) }
+    }
+
+    /// Whether a border is drawn at all (a width without a colour, or
+    /// `borderStyle: none`, draws nothing and takes no layout space).
+    var drawsBorder: Bool {
+        borderColor != nil && borderStyle != "none"
+    }
+
+    /// Whether any side overrides the uniform width — the border is then
+    /// rendered as per-edge stripes instead of one stroked shape.
+    var hasDirectionalBorder: Bool {
+        borderTopWidth != nil || borderRightWidth != nil || borderBottomWidth != nil || borderLeftWidth != nil
+    }
+
+    /// Effective drawn width per physical edge (0 when nothing is drawn).
+    var effectiveBorderWidths: (top: CGFloat, right: CGFloat, bottom: CGFloat, left: CGFloat) {
+        guard drawsBorder else { return (0, 0, 0, 0) }
+        return (
+            max(0, borderTopWidth ?? borderWidth),
+            max(0, borderRightWidth ?? borderWidth),
+            max(0, borderBottomWidth ?? borderWidth),
+            max(0, borderLeftWidth ?? borderWidth)
+        )
+    }
+
+    /// Border width that participates in layout (uniform case): a drawn
+    /// border consumes a ring of space inside the border box (outside the
+    /// padding), matching CSS border-box and Compose `Modifier.border` +
+    /// padding order.
+    var layoutBorderWidth: CGFloat {
+        (borderWidth > 0 && drawsBorder) ? borderWidth : 0
+    }
+
+    /// Per-edge layout space taken by the border. Leading/trailing map to
+    /// left/right — Hypen borders are physical, like CSS `border-left`.
+    var layoutBorderInsets: EdgeInsets {
+        let w = effectiveBorderWidths
+        return EdgeInsets(top: w.top, leading: w.left, bottom: w.bottom, trailing: w.right)
     }
 
     /// Content proposal that yields an exact filled border box after this
-    /// element's own padding is applied. Borders are overlays in HypenSwift,
-    /// so they do not consume layout space here.
+    /// element's own padding and border ring are applied.
     func contentHeight(forFilledBorderBox borderBoxHeight: CGFloat) -> CGFloat {
-        max(0, borderBoxHeight - paddingTop - paddingBottom)
+        max(0, borderBoxHeight - paddingTop - paddingBottom - layoutBorderInsets.top - layoutBorderInsets.bottom)
     }
 
     /// Whether one explicit axis can deterministically resolve the other axis
@@ -856,11 +912,26 @@ extension View {
 
     @ViewBuilder
     func borderOverlay(_ modifier: HypenModifier) -> some View {
-        if modifier.borderWidth > 0, let borderColor = modifier.borderColor, modifier.borderStyle != "none" {
+        if modifier.hasDirectionalBorder, let borderColor = modifier.borderColor, modifier.borderStyle != "none" {
+            // Per-side widths (`border-t`, `border-b`, …): straight stripes
+            // along each edge inside the bounds, ignoring the corner radius —
+            // the CSS rendering of a single-side border.
+            let w = modifier.effectiveBorderWidths
+            self.overlay(
+                Canvas { ctx, size in
+                    if w.top > 0 { ctx.fill(Path(CGRect(x: 0, y: 0, width: size.width, height: w.top)), with: .color(borderColor)) }
+                    if w.bottom > 0 { ctx.fill(Path(CGRect(x: 0, y: size.height - w.bottom, width: size.width, height: w.bottom)), with: .color(borderColor)) }
+                    if w.left > 0 { ctx.fill(Path(CGRect(x: 0, y: 0, width: w.left, height: size.height)), with: .color(borderColor)) }
+                    if w.right > 0 { ctx.fill(Path(CGRect(x: size.width - w.right, y: 0, width: w.right, height: size.height)), with: .color(borderColor)) }
+                }
+                .allowsHitTesting(false)
+            )
+        } else if modifier.borderWidth > 0, let borderColor = modifier.borderColor, modifier.borderStyle != "none" {
             switch borderRenderingStyle(modifier.borderStyle, width: modifier.borderWidth) {
             case .dashed(let dash):
                 self.overlay(
                     RoundedRectangle(cornerRadius: modifier.cornerRadius)
+                        .inset(by: modifier.borderWidth / 2)
                         .stroke(style: StrokeStyle(
                             lineWidth: modifier.borderWidth,
                             dash: dash
@@ -870,6 +941,7 @@ extension View {
             case .dotted(let dash):
                 self.overlay(
                     RoundedRectangle(cornerRadius: modifier.cornerRadius)
+                        .inset(by: modifier.borderWidth / 2)
                         .stroke(style: StrokeStyle(
                             lineWidth: modifier.borderWidth,
                             lineCap: .round,
@@ -882,15 +954,19 @@ extension View {
                 self.overlay(
                     ZStack {
                         RoundedRectangle(cornerRadius: modifier.cornerRadius)
+                            .inset(by: modifier.borderWidth / 6)
                             .stroke(borderColor, lineWidth: modifier.borderWidth / 3)
-                        RoundedRectangle(cornerRadius: max(0, modifier.cornerRadius - modifier.borderWidth * 2 / 3))
+                        RoundedRectangle(cornerRadius: modifier.cornerRadius)
+                            .inset(by: modifier.borderWidth * 5 / 6)
                             .stroke(borderColor, lineWidth: modifier.borderWidth / 3)
-                            .padding(modifier.borderWidth * 2 / 3)
                     }
                 )
             case .solid:
+                // Inset by half the line width so the full stroke lies inside
+                // the bounds — the ring of space `hypenModifier` reserved for it.
                 self.overlay(
                     RoundedRectangle(cornerRadius: modifier.cornerRadius)
+                        .inset(by: modifier.borderWidth / 2)
                         .stroke(borderColor, lineWidth: modifier.borderWidth)
                 )
             }

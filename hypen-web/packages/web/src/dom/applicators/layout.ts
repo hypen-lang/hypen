@@ -45,6 +45,20 @@ export function mapAlignmentValue(value: string): string {
   }
 }
 
+/**
+ * Grid hosts (Stack/Grid) place children with `justify-items` /
+ * `align-items`, and the *grid* keywords are `start`/`end` — `flex-start` /
+ * `flex-end` are only guaranteed for flex containers, and browsers reject
+ * `justify-items: flex-end` on a grid, silently leaving the stylesheet's
+ * `start`. (That is why a `Stack.horizontalAlignment("end")` badge stayed
+ * bottom-left on the web while Android put it bottom-right.)
+ */
+function gridAlignmentValue(mapped: string): string {
+  if (mapped === "flex-start") return "start";
+  if (mapped === "flex-end") return "end";
+  return mapped;
+}
+
 function isGridAlignmentHost(el: HTMLElement): boolean {
   const type = el.dataset.hypenType?.toLowerCase();
   if (type === "stack" || type === "grid") return true;
@@ -56,8 +70,8 @@ export const layoutHandlers: Record<string, ApplicatorHandler> = {
   alignment: (el, value) => {
     const val = mapAlignmentValue(String(value));
     if (isGridAlignmentHost(el)) {
-      el.style.justifyItems = val;
-      el.style.alignItems = val;
+      el.style.justifyItems = gridAlignmentValue(val);
+      el.style.alignItems = gridAlignmentValue(val);
     } else {
       el.style.justifyContent = val;
       el.style.alignItems = val;
@@ -66,13 +80,15 @@ export const layoutHandlers: Record<string, ApplicatorHandler> = {
   // Unified alignment API - works for both Column and Row
   verticalAlignment: (el, value) => {
     const val = mapAlignmentValue(String(value));
-    // Check display and flex-direction to determine which CSS property to set
-    const flexDirection = el.style.flexDirection || getComputedStyle(el).flexDirection;
 
     if (isGridAlignmentHost(el)) {
       // For Grid (Stack): use align-items to align children vertically
-      el.style.alignItems = val;
-    } else if (flexDirection === "column" || flexDirection === "column-reverse") {
+      el.style.alignItems = gridAlignmentValue(val);
+      return;
+    }
+    // Check flex-direction to determine which CSS property to set
+    const flexDirection = el.style.flexDirection || getComputedStyle(el).flexDirection;
+    if (flexDirection === "column" || flexDirection === "column-reverse") {
       // For column: vertical is the main axis (justify-content)
       el.style.justifyContent = val;
     } else {
@@ -94,13 +110,15 @@ export const layoutHandlers: Record<string, ApplicatorHandler> = {
       return;
     }
     const val = mapAlignmentValue(String(value));
-    // Check display and flex-direction to determine which CSS property to set
-    const flexDirection = el.style.flexDirection || getComputedStyle(el).flexDirection;
 
     if (isGridAlignmentHost(el)) {
       // For Grid (Stack): use justify-items to align children horizontally
-      el.style.justifyItems = val;
-    } else if (flexDirection === "column" || flexDirection === "column-reverse") {
+      el.style.justifyItems = gridAlignmentValue(val);
+      return;
+    }
+    // Check flex-direction to determine which CSS property to set
+    const flexDirection = el.style.flexDirection || getComputedStyle(el).flexDirection;
+    if (flexDirection === "column" || flexDirection === "column-reverse") {
       // For column: horizontal is the cross axis (align-items)
       el.style.alignItems = val;
     } else if (flexDirection === "row" || flexDirection === "row-reverse") {

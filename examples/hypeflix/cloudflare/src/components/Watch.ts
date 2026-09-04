@@ -210,7 +210,6 @@ export default app
         .tw("px-5 pt-5 pb-4 items-center")
         .maxWidth(1100)
         .width("100%")
-        .alignSelf("center")
         }
 
         // ---- Resolving the stream ------------------------------------------
@@ -227,7 +226,6 @@ export default app
           .tw("px-5 items-center")
           .maxWidth(1100)
           .width("100%")
-          .alignSelf("center")
           .exit(fade, duration: 140)
         }
 
@@ -332,7 +330,6 @@ export default app
             .tw("mx-5 w-full aspect-video rounded-2xl border border-white/10 overflow-hidden")
             .backgroundColor("#000000")
             .maxWidth("@{state.playerMaxWidth}")
-            .alignSelf("center")
             .enter(fade, duration: 240)
         }
 
@@ -356,7 +353,6 @@ export default app
           .tw("px-5 items-center")
           .maxWidth(1100)
           .width("100%")
-          .alignSelf("center")
           .enter(fade, duration: 240)
         }
 
@@ -386,7 +382,6 @@ export default app
           .tw("mx-5 py-14 px-6 rounded-2xl border border-white/10 items-center justify-center")
           .backgroundColor("rgba(229, 9, 20, 0.05)")
           .maxWidth(680)
-          .alignSelf("center")
           .enter(fade, duration: 240)
         }
 
@@ -413,10 +408,10 @@ export default app
           .tw("mx-5 mt-6 py-10 px-6 rounded-2xl border border-white/10 items-center justify-center")
           .backgroundColor("rgba(255, 255, 255, 0.04)")
           .maxWidth(680)
-          .alignSelf("center")
           .enter(fade, duration: 240)
         }
       }
+      .horizontalAlignment("center")
       .scrollable(true)
       .tw("flex-1")
       .backgroundColor("#050508")

@@ -29,6 +29,9 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     register(AudioComponent())
     register(DividerComponent())
 
+    // Screen-reader-only wrapper: paints nothing, occupies no space
+    register(VisuallyHiddenComponent())
+
     // Form components
     register(InputComponent())
     register(TextAreaComponent())

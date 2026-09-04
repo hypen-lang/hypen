@@ -30,6 +30,8 @@ pub struct DesktopApp {
     reduced_motion: Option<bool>,
     window_icon: Option<winit::window::Icon>,
     safe_area_insets: crate::layout::SafeAreaInsets,
+    #[cfg(feature = "dev-overlay")]
+    dev_overlay_top: f32,
     screenshot_path: Option<PathBuf>,
 }
 
@@ -44,6 +46,8 @@ impl DesktopApp {
             reduced_motion: None,
             window_icon: None,
             safe_area_insets: crate::layout::SafeAreaInsets::default(),
+            #[cfg(feature = "dev-overlay")]
+            dev_overlay_top: 8.0,
             screenshot_path: None,
         }
     }
@@ -74,6 +78,14 @@ impl DesktopApp {
     /// ```
     pub fn safe_area_insets(mut self, insets: crate::layout::SafeAreaInsets) -> Self {
         self.safe_area_insets = insets;
+        self
+    }
+
+    /// Place the opt-in native development HUD below embedder-owned chrome.
+    /// This API is compiled out together with the HUD in ordinary builds.
+    #[cfg(feature = "dev-overlay")]
+    pub fn dev_overlay_top(mut self, top: f32) -> Self {
+        self.dev_overlay_top = top.max(0.0);
         self
     }
 
@@ -268,6 +280,22 @@ impl DesktopApp {
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
 
+        // Sample once per second without turning the demand-driven renderer
+        // into a permanent animation loop. The thread exits with the loop.
+        #[cfg(feature = "dev-overlay")]
+        {
+            let metrics_proxy = proxy.clone();
+            std::thread::Builder::new()
+                .name("hypen-dev-overlay".into())
+                .spawn(move || loop {
+                    std::thread::sleep(crate::dev_overlay::SAMPLE_INTERVAL);
+                    if metrics_proxy.send_event(AppEvent::DevOverlayTick).is_err() {
+                        break;
+                    }
+                })
+                .expect("spawn development overlay sampler");
+        }
+
         // Wire the patch callback BEFORE mount so the SDK's deferred
         // initial render lands in our queue. (See hypen-sdk-rs commit
         // that moved render_ir_node from new() to mount().) Patches
@@ -312,6 +340,8 @@ impl DesktopApp {
         app.set_unified_titlebar(self.unified_titlebar);
         app.set_window_icon(self.window_icon.clone());
         app.set_safe_area_insets(self.safe_area_insets);
+        #[cfg(feature = "dev-overlay")]
+        app.set_dev_overlay_top(self.dev_overlay_top);
         if let Some(on) = self.reduced_motion {
             app.set_reduced_motion(on);
         }

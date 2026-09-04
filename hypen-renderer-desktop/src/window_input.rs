@@ -6,6 +6,39 @@
 
 use super::*;
 
+/// Resolve editing state directly from the renderer Tree, with the newest
+/// unacknowledged local value taking precedence. Keyboard delivery must not
+/// depend on a LayoutPass: a second key can legally arrive before the first
+/// key's requested redraw.
+pub(crate) fn controlled_input_state(
+    tree: &Tree,
+    optimistic: &HashMap<String, OptimisticInputEdit>,
+    id: &str,
+) -> Option<(String, String)> {
+    let node = tree.get(id)?;
+    if !node.element_type.eq_ignore_ascii_case("Input") {
+        return None;
+    }
+    let bind_path = node
+        .props
+        .get("bind")
+        .or_else(|| node.props.get("bind.0"))?
+        .as_str()?
+        .to_string();
+    let value = optimistic
+        .get(id)
+        .map(|edit| edit.value.clone())
+        .or_else(|| {
+            node.props
+                .get("value")
+                .or_else(|| node.props.get("value.0"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    Some((value, bind_path))
+}
+
 impl App {
     /// Find the focused Input (if any) and return `(node_id, value, bind_path)`.
     pub(super) fn focused_input(&self) -> Option<(String, String, String)> {
@@ -18,14 +51,8 @@ impl App {
         if self.exit_excluded(&id) {
             return None;
         }
-        let layout = self.layout.as_ref()?;
-        let item = layout.item_by_id(&id)?;
-        match &item.kind {
-            ItemKind::Input {
-                value, bind_path, ..
-            } => bind_path.as_ref().map(|p| (id, value.clone(), p.clone())),
-            _ => None,
-        }
+        let (value, bind_path) = controlled_input_state(&self.tree, &self.optimistic_inputs, &id)?;
+        Some((id, value, bind_path))
     }
 
     /// Look up an Input's `(value, font_size, rect)` by node id. Used
@@ -120,6 +147,10 @@ impl App {
         }
         self.input_selections.insert(id.clone(), new_sel);
         if new_value != value {
+            self.optimistic_inputs
+                .entry(id.clone())
+                .or_default()
+                .push(new_value.clone());
             // Optimistic local update: stamp the Input's `value` prop
             // directly into the Tree before dispatching to the engine.
             // The engine will eventually echo back a SetProp patch with
@@ -137,8 +168,22 @@ impl App {
                 value: serde_json::Value::String(new_value.clone()),
             };
             self.tree.apply(&patch);
-            self.tree_generation = self.tree_generation.wrapping_add(1);
-            self.layout = None;
+            // `value` is paint/a11y state, not geometry. Refresh the cached
+            // item in place so another keyboard event arriving before the
+            // redraw can still resolve the focused Input. Invalidating the
+            // whole layout here made burst typing drop every event that landed
+            // between the first key and its paint.
+            let scale = self
+                .window
+                .as_ref()
+                .map(|window| window.scale_factor() as f32)
+                .unwrap_or(1.0);
+            let viewport = self.logical_viewport();
+            if let Some(layout) = self.layout.as_mut() {
+                let affected = HashSet::from([id.clone()]);
+                layout.refresh_paint_only(&self.tree, &affected, viewport, scale);
+                self.layout_generation = self.layout_generation.wrapping_add(1);
+            }
             // Same reason as `flush_patches`: the focused Input's
             // cached scene fragment now has the wrong text and needs
             // re-encoding. Bulk-clear; the next paint rebuilds only

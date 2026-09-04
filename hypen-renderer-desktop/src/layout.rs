@@ -396,6 +396,37 @@ impl Rect {
     pub fn contains(&self, x: f32, y: f32) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
+
+    fn intersection(self, other: Self) -> Self {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+        let right = (self.x + self.w).min(other.x + other.w);
+        let bottom = (self.y + self.h).min(other.y + other.h);
+        Self {
+            x,
+            y,
+            w: (right - x).max(0.0),
+            h: (bottom - y).max(0.0),
+        }
+    }
+}
+
+/// Collapse two nested clip rectangles into the one effective clip carried by
+/// a [`LayoutItem`]. Preserve a rounded outline only when the intersection is
+/// wholly owned by one input; a partial overlap cannot be represented by one
+/// rounded rectangle without incorrectly rounding a stationary cut edge.
+fn intersect_clip_rects(a: Rect, a_radius: f32, b: Rect, b_radius: f32) -> (Rect, f32) {
+    let intersection = a.intersection(b);
+    let radius = if intersection == a && intersection == b {
+        a_radius.max(b_radius)
+    } else if intersection == a {
+        a_radius
+    } else if intersection == b {
+        b_radius
+    } else {
+        0.0
+    };
+    (intersection, radius)
 }
 
 /// 2D affine transform in the painter's physical-pixel space, stored as
@@ -839,6 +870,12 @@ pub struct LayoutItem {
     /// ancestor is the synthetic page root (or with no scrollable
     /// ancestor at all).
     pub clip_to: Option<Rect>,
+    /// Corner radius of the clipping ancestor represented by `clip_to`, in
+    /// physical pixels. A rounded `overflow-hidden` surface (notably Video)
+    /// must clip descendants with the same outline as its own background;
+    /// keeping only the rectangle lets full-bleed overlays repaint the four
+    /// corner pixels square.
+    pub clip_radius: f32,
     /// Renderer-tree id of the "direct child of the nearest
     /// scrollable ancestor" this item belongs to. Items with the
     /// same `subtree_root` form one painter-side cache unit — each
@@ -1192,6 +1229,13 @@ impl TaffyState {
         self.wrapped_probes.len()
     }
 
+    /// Number of content-sized flex nodes whose authored auto width is
+    /// temporarily overridden by the fit-content pre-pass.
+    #[cfg(test)]
+    pub(crate) fn fit_width_override_len(&self) -> usize {
+        self.fit_widths.len()
+    }
+
     /// The memoised `(content_width, measured_height)` pairs, ordered so
     /// two passes can be compared. Lets a test assert that entries were
     /// genuinely re-measured rather than reused, which is the part of
@@ -1326,6 +1370,23 @@ impl TaffyState {
         self.wrapped_probes.clear();
     }
 
+    /// Forget every retained record keyed by one Taffy node before that
+    /// node is removed from the SlotMap.
+    ///
+    /// Keeping this in one place is a correctness boundary: `NodeId` embeds
+    /// a SlotMap generation, so even a map consulted only on the next frame
+    /// will panic if it retains a removed key. Route exits exposed the two
+    /// easy-to-miss records here (`fit_widths` and
+    /// `text_height_overrides`), while the other maps happened to already be
+    /// cleared independently at each removal site.
+    fn forget_node_records(&mut self, tid: NodeId) {
+        self.renderer_for_taffy.remove(&tid);
+        self.fit_widths.remove(&tid);
+        self.text_height_overrides.remove(&tid);
+        self.wrapped_probes.remove(&tid);
+        self.viewport_deps.remove(&tid);
+    }
+
     /// Update the interaction snapshot used to resolve layout-affecting
     /// state variants. The window calls this before each compute. When
     /// the tree has no layout-affecting state variants, the window
@@ -1343,11 +1404,9 @@ impl TaffyState {
     pub fn remove_node(&mut self, id: &str) {
         if let Some(tid) = self.node_map.remove(id) {
             let _ = self.tree.remove(tid);
-            self.renderer_for_taffy.remove(&tid);
-            // This id is dead; drop its per-node records rather than
-            // leave them for the next rebuild to re-point at a live node.
-            self.wrapped_probes.remove(&tid);
-            self.viewport_deps.remove(&tid);
+            // This id is dead; drop every per-node record rather than leave
+            // a stale SlotMap key for the next layout.
+            self.forget_node_records(tid);
         }
     }
 
@@ -1435,7 +1494,7 @@ impl TaffyState {
                             let _ = self.tree.remove_child(parent, old);
                         }
                         let _ = self.tree.remove(old);
-                        self.renderer_for_taffy.remove(&old);
+                        self.forget_node_records(old);
                     }
                     let active_states = self.interaction.active_states_for(id, node);
                     let style = node_style_with(
@@ -1609,9 +1668,7 @@ impl TaffyState {
                         let _ = self.tree.remove_child(parent, tid);
                     }
                     let _ = self.tree.remove(tid);
-                    self.renderer_for_taffy.remove(&tid);
-                    self.viewport_deps.remove(&tid);
-                    self.wrapped_probes.remove(&tid);
+                    self.forget_node_records(tid);
                 }
                 true
             }
@@ -2296,6 +2353,87 @@ impl LayoutPass {
         )
     }
 
+    /// Re-emit the visible item window from an already-computed retained
+    /// Taffy tree. Sustained scrolling periodically moves beyond the cached
+    /// cull window; rebuilding item membership must happen then, but rerunning
+    /// flex layout and text measurement is wasted work because no style,
+    /// structure, viewport, or intrinsic input changed. Keeping this path
+    /// separate removes the half-viewport hitch without weakening culling.
+    pub(crate) fn reemit_with_state(
+        state: &TaffyState,
+        tree: &Tree,
+        viewport: (u32, u32),
+        scale: f32,
+        scroll_y: f32,
+        scrolls: &HashMap<String, f32>,
+    ) -> Self {
+        debug_assert!(state.root_initialised);
+        let viewport_logical = logical_viewport(viewport, scale);
+        let mut items = Vec::new();
+        let mut content_size = (0.0_f32, 0.0_f32);
+        let cull_viewport = Some(Rect {
+            x: 0.0,
+            y: scroll_y,
+            w: viewport.0 as f32,
+            h: viewport.1 as f32,
+        });
+        emit_items(
+            &state.tree,
+            state.root,
+            0.0,
+            0.0,
+            0.0,
+            tree,
+            &state.renderer_for_taffy,
+            viewport_logical,
+            scale,
+            scrolls,
+            &mut items,
+            &mut content_size,
+            cull_viewport,
+            None,
+            0.0,
+            None,
+        );
+
+        if scroll_y != 0.0 {
+            for item in &mut items {
+                item.rect.y -= scroll_y;
+                if let Some(clip) = item.clip_to.as_mut() {
+                    clip.y -= scroll_y;
+                }
+            }
+        }
+
+        if tree.has_opacity_props() {
+            let mut memo: HashMap<String, f32> = HashMap::new();
+            for item in &mut items {
+                item.opacity = effective_opacity(tree, &item.node_id, viewport_logical, &mut memo);
+            }
+        }
+        compute_item_transforms_gated(
+            tree,
+            &mut items,
+            viewport_logical,
+            scale,
+            tree.has_transform_props(),
+        );
+
+        let indexes = build_item_indexes(&items);
+        let (a11y, a11y_hash) = collect_item_semantics(tree, &items);
+        Self {
+            items,
+            content_size,
+            by_node_id: indexes.by_node_id,
+            actionable_ids: indexes.actionable_ids,
+            focusable_ids: indexes.focusable_ids,
+            scrollable_ids: indexes.scrollable_ids,
+            hoverable_ids: indexes.hoverable_ids,
+            a11y,
+            a11y_hash,
+        }
+    }
+
     fn compute_inner(
         tree: &Tree,
         text: &mut TextEngine,
@@ -2631,6 +2769,7 @@ impl LayoutPass {
             &mut content_size,
             cull_viewport,
             None,
+            0.0,
             None,
         );
 
@@ -2878,39 +3017,6 @@ impl LayoutPass {
             memo.insert(id.to_string(), v);
             v
         }
-        // Nearest clipping STRICT ancestor (the owner emit anchored
-        // `clip_to` to), memoized. This includes both scroll containers and
-        // ordinary `overflow: hidden` surfaces such as Food's rounded menu
-        // cards. When that card moves inside an outer scroller, its clip must
-        // move with it; treating the outer scroller as the owner left the
-        // card's image clipped at its pre-scroll coordinates.
-        let mut owner_memo: HashMap<String, Option<String>> = HashMap::new();
-        fn clip_owner(
-            tree: &Tree,
-            id: &str,
-            viewport: Viewport,
-            memo: &mut HashMap<String, Option<String>>,
-        ) -> Option<String> {
-            if let Some(v) = memo.get(id) {
-                return v.clone();
-            }
-            let v = match tree.parent_of(id) {
-                Some(p) if p == crate::tree::ROOT_ID => None,
-                Some(p) => {
-                    if tree.get(p).is_some_and(|n| {
-                        is_scrollable_node(n, viewport) || clips_overflow_node(n, viewport)
-                    }) {
-                        Some(p.to_string())
-                    } else {
-                        let p = p.to_string();
-                        clip_owner(tree, &p, viewport, memo)
-                    }
-                }
-                None => None,
-            };
-            memo.insert(id.to_string(), v.clone());
-            v
-        }
         let mut shifted_any = false;
         for it in self.items.iter_mut() {
             if !is_strict_descendant(tree, &it.node_id, container_id, &mut desc_memo) {
@@ -2918,17 +3024,17 @@ impl LayoutPass {
             }
             shifted_any = true;
             it.rect.y -= delta;
-            if it.clip_to.is_some() {
-                let owner = clip_owner(tree, &it.node_id, viewport, &mut owner_memo);
-                let owner_shifts = owner.as_deref().is_some_and(|o| {
-                    o != container_id && is_strict_descendant(tree, o, container_id, &mut desc_memo)
-                });
-                if owner_shifts {
-                    if let Some(clip) = it.clip_to.as_mut() {
-                        clip.y -= delta;
-                    }
-                }
-            }
+        }
+        // `clip_to` is the intersection of every clipping ancestor, not a
+        // rectangle owned by exactly one ancestor. Shifting that intersection
+        // blindly is wrong when one edge belongs to the stationary scroller
+        // and another belongs to a moving rounded card: the stationary edge
+        // drifts, content disappears, then snaps back on the next full emit.
+        // Rebuild the effective intersections from the newly-shifted ancestor
+        // rects instead. This is still an O(visible-items) scroll fast path and
+        // is exactly equivalent to a fresh emit for partially clipped cards.
+        if shifted_any {
+            self.refresh_effective_clips(tree, viewport, scale);
         }
         // Exact transform refresh against the shifted rects. Gated:
         // the no-transform tree resets to identity in O(items).
@@ -2950,6 +3056,59 @@ impl LayoutPass {
             if let Some(item) = self.item_by_id_mut(container_id) {
                 if let Some(meta) = item.scrollable.as_mut() {
                     meta.baked_offset += delta;
+                }
+            }
+        }
+    }
+
+    /// Rebuild each emitted item's single effective clip from all clipping
+    /// ancestors. `emit_items` performs the same intersection while walking
+    /// top-down; the container-scroll fast path calls this after it changes
+    /// cached rects so fixed and moving clip edges cannot drift apart.
+    fn refresh_effective_clips(&mut self, tree: &Tree, viewport: Viewport, scale: f32) {
+        // Resolve against the pass's existing O(1) id index. Building a fresh
+        // String-keyed map here allocated once per visible item per wheel
+        // frame, which is measurable on image-heavy feeds in debug builds.
+        // Compute into a compact side vector first, then apply it in one
+        // mutable pass so no renderer ids need to be cloned.
+        let effective: Vec<Option<(Rect, f32)>> = self
+            .items
+            .iter()
+            .map(|item| {
+                let mut clip: Option<(Rect, f32)> = None;
+                let mut ancestor = tree.parent_of(&item.node_id);
+                while let Some(id) = ancestor {
+                    if id == crate::tree::ROOT_ID {
+                        break;
+                    }
+                    if let (Some(node), Some(&idx)) = (tree.get(id), self.by_node_id.get(id)) {
+                        if is_scrollable_node(node, viewport) || clips_overflow_node(node, viewport)
+                        {
+                            let ancestor_item = &self.items[idx];
+                            let next = (ancestor_item.rect, ancestor_item.border.radius * scale);
+                            clip = Some(match clip {
+                                None => next,
+                                Some((current, current_radius)) => {
+                                    intersect_clip_rects(current, current_radius, next.0, next.1)
+                                }
+                            });
+                        }
+                    }
+                    ancestor = tree.parent_of(id);
+                }
+                clip
+            })
+            .collect();
+
+        for (item, clip) in self.items.iter_mut().zip(effective) {
+            match clip {
+                Some((rect, radius)) => {
+                    item.clip_to = Some(rect);
+                    item.clip_radius = radius;
+                }
+                None => {
+                    item.clip_to = None;
+                    item.clip_radius = 0.0;
                 }
             }
         }
@@ -3035,17 +3194,29 @@ impl LayoutPass {
 
     /// [`LayoutPass::hit_scrollable`] with an exclusion predicate (see
     /// [`LayoutPass::hit_excluding`]).
-    pub fn hit_scrollable_excluding(
-        &self,
+    pub fn hit_scrollable_excluding<'a>(
+        &'a self,
         x: f32,
         y: f32,
-        excluded: &dyn Fn(&str) -> bool,
-    ) -> Option<&LayoutItem> {
+        excluded: &'a dyn Fn(&str) -> bool,
+    ) -> Option<&'a LayoutItem> {
+        self.scrollable_hits_excluding(x, y, excluded).next()
+    }
+
+    /// Every scrollable under the pointer, innermost/topmost first.
+    /// Wheel routing uses the full chain so a horizontal rail or a vertical
+    /// scroller already at its boundary can bubble the delta to its parent.
+    pub fn scrollable_hits_excluding<'a>(
+        &'a self,
+        x: f32,
+        y: f32,
+        excluded: &'a dyn Fn(&str) -> bool,
+    ) -> impl Iterator<Item = &'a LayoutItem> + 'a {
         self.scrollable_ids
             .iter()
             .rev()
             .map(|&i| &self.items[i])
-            .find(|it| it.hit_contains(x, y) && !excluded(&it.node_id))
+            .filter(move |it| it.hit_contains(x, y) && !excluded(&it.node_id))
     }
 
     /// All actionable items in document (paint) order.
@@ -5833,6 +6004,9 @@ fn emit_items(
     // no scrollable ancestor, or this *is* the scrollable container
     // (whose own bg/border isn't clipped — only its descendants are).
     parent_clip_to: Option<Rect>,
+    // Rounded outline belonging to `parent_clip_to`, already scaled to
+    // physical pixels. Zero keeps the common rectangular clip fast path.
+    parent_clip_radius: f32,
     // `subtree_root`: renderer-tree id of the direct child of the
     // nearest scrollable ancestor that this item belongs to. Threaded
     // through so each emitted LayoutItem can carry its painter-side
@@ -5901,6 +6075,7 @@ fn emit_items(
     // The container's own row (bg / border) keeps `parent_clip_to`
     // — only its scrolling content gets clipped.
     let mut child_clip_to = parent_clip_to;
+    let mut child_clip_radius = parent_clip_radius;
 
     if let Some(rid) = renderer_id.as_deref() {
         if let Some(node) = tree.get(rid) {
@@ -5960,15 +6135,27 @@ fn emit_items(
                 child_scroll_shift_y = parent_scroll_shift_y + scroll_off;
             }
             if scrollable || clips_overflow_node(node, viewport) {
-                // Anchor descendant clipping to this container's
-                // own rect. Even if the container itself is inside
-                // a larger scrollable, the painter clips to the
-                // innermost — Vello's nested push_layer composes,
-                // but the engine emit only needs the immediate
-                // ancestor: nested scrollables aren't a real use
-                // case in the social example and would need their
-                // own scroll-routing rework anyway.
-                child_clip_to = Some(rect);
+                // A LayoutItem carries one painter clip, so nested CSS clips
+                // must be collapsed to their intersection. Replacing the
+                // outer app-frame clip with an embedded app's own scroller
+                // let Social/Home content paint over the launcher's header.
+                // When one rectangle wholly owns the intersection we retain
+                // its rounded outline; a partial overlap falls back to the
+                // exact rectangular intersection because one rounded rect
+                // cannot encode two independently clipped corner sets.
+                let own_radius = item_border.radius * scale;
+                match child_clip_to {
+                    None => {
+                        child_clip_to = Some(rect);
+                        child_clip_radius = own_radius;
+                    }
+                    Some(parent_clip) => {
+                        let (intersection, radius) =
+                            intersect_clip_rects(parent_clip, child_clip_radius, rect, own_radius);
+                        child_clip_to = Some(intersection);
+                        child_clip_radius = radius;
+                    }
+                }
             }
             match node.element_type.as_str() {
                 et if CONTROL_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
@@ -6071,6 +6258,7 @@ fn emit_items(
                         scrollable: None,
                         font_weight: 400,
                         clip_to: parent_clip_to,
+                        clip_radius: parent_clip_radius,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         background_layers: background_layers.clone(),
@@ -6131,6 +6319,7 @@ fn emit_items(
                         scrollable: None,
                         font_weight,
                         clip_to: parent_clip_to,
+                        clip_radius: parent_clip_radius,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         background_layers: background_layers.clone(),
@@ -6186,6 +6375,7 @@ fn emit_items(
                         scrollable: None,
                         font_weight,
                         clip_to: parent_clip_to,
+                        clip_radius: parent_clip_radius,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         background_layers: background_layers.clone(),
@@ -6241,6 +6431,7 @@ fn emit_items(
                             scrollable: None,
                             font_weight: 400,
                             clip_to: parent_clip_to,
+                            clip_radius: parent_clip_radius,
                             subtree_root: subtree_root.map(str::to_string),
                             background_gradient: background_gradient.clone(),
                             background_layers: background_layers.clone(),
@@ -6276,6 +6467,7 @@ fn emit_items(
                             scrollable: None,
                             font_weight: 400,
                             clip_to: parent_clip_to,
+                            clip_radius: parent_clip_radius,
                             subtree_root: subtree_root.map(str::to_string),
                             background_gradient: background_gradient.clone(),
                             background_layers: background_layers.clone(),
@@ -6312,6 +6504,7 @@ fn emit_items(
                         scrollable: None,
                         font_weight: 400,
                         clip_to: parent_clip_to,
+                        clip_radius: parent_clip_radius,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         background_layers: background_layers.clone(),
@@ -6363,6 +6556,7 @@ fn emit_items(
                         scrollable: None,
                         font_weight: 400,
                         clip_to: parent_clip_to,
+                        clip_radius: parent_clip_radius,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         background_layers: background_layers.clone(),
@@ -6400,6 +6594,7 @@ fn emit_items(
                         scrollable: None,
                         font_weight: 400,
                         clip_to: parent_clip_to,
+                        clip_radius: parent_clip_radius,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         background_layers: background_layers.clone(),
@@ -6446,6 +6641,7 @@ fn emit_items(
                         },
                         font_weight: 400,
                         clip_to: parent_clip_to,
+                        clip_radius: parent_clip_radius,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
                         background_layers: background_layers.clone(),
@@ -6594,6 +6790,7 @@ fn emit_items(
             natural_bounds,
             cull_viewport,
             child_clip_to,
+            child_clip_radius,
             child_subtree_root.as_deref(),
         );
         if scrollable_idx.is_some() {

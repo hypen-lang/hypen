@@ -141,6 +141,13 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
             if let str = value as? String {
                 return str
             }
+            // A JSON `null` decodes to `NSNull`; stringifying it yields the
+            // literal "<null>", which e.g. made `Image(src: null)` try to load
+            // an asset named "<null>" instead of rendering empty until the
+            // real URL arrived in a follow-up SetProp.
+            if value is NSNull {
+                return nil
+            }
             return String(describing: value)
         }
         return nil

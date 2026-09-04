@@ -6,6 +6,8 @@
 
 import type { Semantics } from "@hypen-space/core/types";
 import type { VirtualNode } from "./types.js";
+import { isToggleControl, isSliderControl, isChecked, sliderRange } from "./controls.js";
+import { isVisuallyHidden } from "./utils.js";
 import {
   findEnclosingVideoNode,
   getScrubberFraction,
@@ -316,6 +318,19 @@ export class AccessibilityLayer {
         caretColor: "transparent",
         overflow: "hidden",
       });
+      if (isVisuallyHidden(node)) {
+        // Layout and paint skip this subtree, so it has no painted bounds to
+        // mirror — but a zero-size box is invisible to the geometry-driven
+        // browse modes this overlay exists to serve. Stamp the same clipped
+        // 1px box the DOM renderer's sr-only span uses instead.
+        Object.assign(element.style, {
+          width: "1px",
+          height: "1px",
+          margin: "-1px",
+          clip: "rect(0, 0, 0, 0)",
+          whiteSpace: "nowrap",
+        });
+      }
       this.nodeMap.set(node.id, element);
     }
 
@@ -464,6 +479,11 @@ export class AccessibilityLayer {
     const element = this.nodeMap.get(node.id);
     if (!element || !node.layout) return;
 
+    // A VisuallyHidden subtree is out of the canvas flow entirely, so its
+    // (zero) layout box says nothing: leave the sr-only box `createNode`
+    // stamped, and let the descendants sit in it as ordinary static flow.
+    if (isVisuallyHidden(node)) return;
+
     // Video composition slots are shown/hidden, not mounted/unmounted: a
     // slot the normative table hides keeps its subtree (and its state) but
     // must not be announced or reachable, so it drops out of the mirror
@@ -480,6 +500,7 @@ export class AccessibilityLayer {
     if (isScrubberNode(node)) {
       this.syncScrubberValue(element, node);
     }
+    this.syncControlState(element, node);
 
     const x = node.layout.x - scrollX;
     const y = node.layout.y - scrollY;
@@ -501,6 +522,28 @@ export class AccessibilityLayer {
     const childScrollY = scrollY + (node.scrollState?.scrollY ?? 0);
     for (const child of node.children) {
       this.syncNodePosition(child, x, y, childScrollX, childScrollY);
+    }
+  }
+
+  /**
+   * Live state for the operable form controls. `semantics.checked` only
+   * reflects what the engine derived from a bind target; an `.onChange`-only
+   * control, or one whose optimistic flip the engine has not echoed yet,
+   * would otherwise announce its old state. Sliders get the value triple a
+   * `role="slider"` needs, which the engine never carries.
+   */
+  private syncControlState(element: HTMLElement, node: VirtualNode): void {
+    if (isToggleControl(node)) {
+      element.setAttribute("aria-checked", String(isChecked(node)));
+      return;
+    }
+    if (isSliderControl(node)) {
+      const { min, max } = sliderRange(node);
+      const value = parseFloat(node.props.value);
+      element.setAttribute("aria-valuemin", String(min));
+      element.setAttribute("aria-valuemax", String(max));
+      if (Number.isFinite(value)) element.setAttribute("aria-valuenow", String(value));
+      else element.removeAttribute("aria-valuenow");
     }
   }
 
@@ -575,6 +618,11 @@ export class AccessibilityLayer {
         return document.createElement(`h${level}`);
       }
 
+      case "visuallyhidden":
+        // Screen-reader-only wrapper — same tag the DOM renderer uses. The
+        // sr-only clipping is applied in `createNode`.
+        return document.createElement("span");
+
       case "text": {
         const span = document.createElement("span");
         span.textContent = String(node.props[0] || node.props.text || "");
@@ -640,6 +688,9 @@ export class AccessibilityLayer {
     // shadow node's ARIA attributes. `applyShadowSemantics` clears anything
     // it set previously that the current block no longer produces.
     applyShadowSemantics(element, node.semantics);
+    // Re-assert after semantics: `applyShadowSemantics` clears attributes it
+    // no longer produces, and aria-checked is one it may have produced.
+    this.syncControlState(element, node);
 
     this.syncVisibility(element, node);
   }

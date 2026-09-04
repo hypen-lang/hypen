@@ -201,13 +201,14 @@ WebSocket Server ──► RemoteEngine ──► HypenRenderer ──► HypenV
 
 | Category | Components |
 |----------|------------|
-| **Layout** | Column, Row, Box, Container, Center, Spacer, Stack, List, Grid, ScrollView |
+| **Layout** | Column, Row, Box, Container, Center, Spacer, Stack, List, Grid |
 | **Content** | Text, Heading, Paragraph, Image, Divider |
 | **Interactive** | Button, Link |
 | **Form** | Input, TextArea, Checkbox, Switch, Slider, Select |
 | **UI** | Card, Spinner, ProgressBar, Badge, Avatar |
 | **Media** | Audio, Video |
 | **Router** | Router, Route |
+| **Accessibility** | VisuallyHidden |
 
 ### Supported Applicators
 

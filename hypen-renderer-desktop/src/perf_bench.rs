@@ -286,6 +286,113 @@ fn feed_batch(posts: usize) -> Vec<Patch> {
     batch
 }
 
+/// Search's Food-app shape: one viewport-sized scroll container with a
+/// 5-column, 30-card Grid. Each card carries a distinct 800x600 bitmap plus
+/// the same small text stack as RestaurantCard.hypen.
+fn food_grid_batch(active_images: usize) -> Vec<Patch> {
+    const CARDS: usize = 30;
+    let mut batch = vec![
+        create(
+            "food_scroll",
+            "Column",
+            &[
+                ("scrollable", json!(true)),
+                ("width", json!(1440.0)),
+                ("height", json!(900.0)),
+                ("backgroundColor", json!("#fafaf9")),
+            ],
+        ),
+        insert("root", "food_scroll"),
+        create(
+            "food_grid",
+            "Grid",
+            &[
+                ("gridColumns", json!(5.0)),
+                ("gap", json!(18.0)),
+                ("padding", json!(32.0)),
+                ("width", json!(1440.0)),
+            ],
+        ),
+        insert("food_scroll", "food_grid"),
+    ];
+
+    for i in 0..CARDS {
+        let card = format!("food_card_{i}");
+        let image = format!("food_image_{i}");
+        let info = format!("food_info_{i}");
+        let name = format!("food_name_{i}");
+        let meta = format!("food_meta_{i}");
+        let fee = format!("food_fee_{i}");
+        batch.extend([
+            create(
+                &card,
+                "Column",
+                &[
+                    ("width", json!("100%")),
+                    ("backgroundColor", json!("#ffffff")),
+                    ("borderRadius", json!(16.0)),
+                    ("overflow", json!("hidden")),
+                ],
+            ),
+            insert("food_grid", &card),
+            create(
+                &image,
+                "Image",
+                &[
+                    (
+                        "src",
+                        json!((i < active_images)
+                            .then(|| format!("bench://food/{i}"))
+                            .unwrap_or_default()),
+                    ),
+                    ("width", json!("100%")),
+                    ("height", json!(176.0)),
+                    ("objectFit", json!("cover")),
+                ],
+            ),
+            insert(&card, &image),
+            create(
+                &info,
+                "Column",
+                &[("padding", json!(14.0)), ("gap", json!(4.0))],
+            ),
+            insert(&card, &info),
+            create(
+                &name,
+                "Text",
+                &[
+                    ("0", json!(format!("Restaurant {i}"))),
+                    ("fontSize", json!(15.0)),
+                    ("fontWeight", json!("bold")),
+                ],
+            ),
+            insert(&info, &name),
+            create(
+                &meta,
+                "Text",
+                &[
+                    ("0", json!("Italian · 20–30 min · 1.2 km")),
+                    ("fontSize", json!(12.0)),
+                    ("color", json!("#6b7280")),
+                ],
+            ),
+            insert(&info, &meta),
+            create(
+                &fee,
+                "Text",
+                &[
+                    ("0", json!("Free delivery")),
+                    ("fontSize", json!(12.0)),
+                    ("fontWeight", json!("semibold")),
+                    ("color", json!("#16a34a")),
+                ],
+            ),
+            insert(&info, &fee),
+        ]);
+    }
+    batch
+}
+
 /// This revision's flush-time painter invalidation + relayout decision
 /// for a one-patch batch. Kept as the single swap point for
 /// main-vs-branch runs. Returns `Some(affected)` when this revision
@@ -574,12 +681,14 @@ fn run_frame_update(
         let (shift, emit_drift) = meta
             .map(|m| (off - m.baked_offset, off - m.emitted_offset))
             .unwrap_or((0.0, 0.0));
-        if meta.is_none() || emit_drift.abs() > reemit_threshold {
+        if meta.is_none() {
             generation += 1;
             let text = painter.text_engine_mut();
             pass = LayoutPass::compute_with_state(
                 &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
             );
+        } else if emit_drift.abs() > reemit_threshold {
+            pass = LayoutPass::reemit_with_state(&taffy, &tree, viewport, scale, 0.0, &scrolls);
         } else if shift.abs() > f32::EPSILON {
             pass.shift_container_scroll(&tree, "feed", shift, vp_logical, scale);
         }
@@ -648,6 +757,255 @@ fn perf_bench_frame_update_matrix() {
         for (tname, posts, density) in tiers {
             run_frame_update(vname, tname, posts, density, vp, scale);
         }
+    }
+}
+
+/// End-to-end reproduction of the Food Search grid's warm scroll. Unlike the
+/// general frame matrix, this includes Vello's GPU work and waits for each
+/// submission to finish, so image-atlas upload/raster cost cannot hide in the
+/// queue. Pipeline creation, image decoding, and the first cache fills happen
+/// before the measured samples.
+#[test]
+#[ignore = "manual GPU perf benchmark"]
+fn perf_bench_food_grid_scroll() {
+    const VIEWPORT: (u32, u32) = (2880, 1800);
+    const SCALE: f32 = 2.0;
+    const CARD_COUNT: usize = 30;
+    const WARMUP_FRAMES: usize = 4;
+    const MEASURED_FRAMES: usize = 30;
+
+    fn env_usize(name: &str, default: usize) -> usize {
+        std::env::var(name)
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(default)
+    }
+
+    fn report(name: &str, mut samples: Vec<Duration>) {
+        samples.sort();
+        let median = samples[samples.len() / 2];
+        let p95 = samples[((samples.len() * 95) / 100).min(samples.len() - 1)];
+        let max = samples[samples.len() - 1];
+        let fps = 1.0 / median.as_secs_f64();
+        println!(
+            "[food-scroll] {name:<17} median {median:>10.3?}  p95 {p95:>10.3?}  max {max:>10.3?}  ({fps:>6.1} fps equivalent)"
+        );
+    }
+
+    // Seed 30 distinct, already-decoded 800x600 sources. Distinct allocations
+    // matter: Vello keys image resources by Blob identity, just like the 30
+    // distinct Unsplash responses used by the real app.
+    let active_images = env_usize("HYPEN_FOOD_BENCH_IMAGES", CARD_COUNT).min(CARD_COUNT);
+    let source_size = (
+        env_usize("HYPEN_FOOD_BENCH_IMAGE_WIDTH", 800) as u32,
+        env_usize("HYPEN_FOOD_BENCH_IMAGE_HEIGHT", 600) as u32,
+    );
+    assert!(source_size.0 > 0 && source_size.1 > 0);
+    for i in 0..active_images {
+        let mut pixmap = tiny_skia::Pixmap::new(source_size.0, source_size.1)
+            .expect("allocate Food benchmark source");
+        pixmap.fill(tiny_skia::Color::from_rgba8(
+            32 + (i as u8).wrapping_mul(37),
+            64 + (i as u8).wrapping_mul(53),
+            96 + (i as u8).wrapping_mul(71),
+            255,
+        ));
+        crate::paint::image::test_seed_decoded(&format!("bench://food/{i}"), Arc::new(pixmap));
+    }
+
+    let batch = food_grid_batch(active_images);
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    tree.apply_batch(&batch);
+    let vp_logical = crate::layout::logical_viewport(VIEWPORT, SCALE);
+    if !taffy.apply_patches(&batch, &tree, SCALE, vp_logical) {
+        taffy.mark_needs_rebuild();
+    }
+    let mut painter = VelloPainter::new();
+    let mut scrolls = HashMap::new();
+    let mut pass = {
+        let text = painter.text_engine_mut();
+        LayoutPass::compute_with_state(&mut taffy, &tree, text, VIEWPORT, SCALE, 0.0, &scrolls, 0)
+    };
+    let scroll_item = pass
+        .item_by_id("food_scroll")
+        .expect("Food fixture must emit its scroll container");
+    let scroll_meta = scroll_item
+        .scrollable
+        .expect("Food fixture must overflow its scroll container");
+    let max_scroll = (scroll_meta.content_h - scroll_item.rect.h).max(0.0);
+    assert!(max_scroll > 0.0, "Food fixture did not overflow");
+
+    let emitted_images = pass
+        .items
+        .iter()
+        .filter(|item| matches!(item.kind, crate::layout::ItemKind::Image { .. }))
+        .count();
+    let viewport_rect = crate::layout::Rect {
+        x: 0.0,
+        y: 0.0,
+        w: VIEWPORT.0 as f32,
+        h: VIEWPORT.1 as f32,
+    };
+    let visible_images = pass
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(item.kind, crate::layout::ItemKind::Image { .. })
+                && crate::damage::rects_intersect(item.visual_rect(), viewport_rect)
+        })
+        .count();
+    println!(
+        "[food-scroll] fixture           30 cards, {active_images} sourced images ({emitted_images} Image nodes, {visible_images} visible), {}x{} source, {:.1} MiB decoded source data, viewport {}x{} @2x",
+        source_size.0,
+        source_size.1,
+        (active_images * source_size.0 as usize * source_size.1 as usize * 4) as f64
+            / (1024.0 * 1024.0),
+        VIEWPORT.0,
+        VIEWPORT.1,
+    );
+
+    // Walk the entire list before timing. This mirrors the reported case:
+    // every source has been seen, decoded, and wrapped as ImageData already.
+    let mut warm_offset = 0.0f32;
+    while warm_offset <= max_scroll {
+        scrolls.insert("food_scroll".to_string(), warm_offset);
+        pass = LayoutPass::reemit_with_state(&taffy, &tree, VIEWPORT, SCALE, 0.0, &scrolls);
+        std::hint::black_box(painter.build_scene(&pass, VIEWPORT, SCALE, 0.0));
+        warm_offset += VIEWPORT.1 as f32 * 0.4;
+    }
+    scrolls.insert("food_scroll".to_string(), 0.0);
+    pass = LayoutPass::reemit_with_state(&taffy, &tree, VIEWPORT, SCALE, 0.0, &scrolls);
+
+    // Off-screen wgpu target: no swapchain or vsync, so the result is stable
+    // GPU completion time rather than time spent waiting for a display slot.
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+    let mut gpu = match pollster::block_on(wgpu::util::initialize_adapter_from_env_or_default(
+        &instance, None,
+    )) {
+        Ok(adapter) => {
+            let adapter_info = adapter.get_info();
+            let (device, queue) =
+                pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
+                    .expect("request Food benchmark device");
+            let renderer = vello::Renderer::new(
+                &device,
+                vello::RendererOptions {
+                    use_cpu: false,
+                    antialiasing_support: vello::AaSupport::area_only(),
+                    num_init_threads: std::num::NonZeroUsize::new(1),
+                    pipeline_cache: None,
+                },
+            )
+            .expect("create Food benchmark Vello renderer");
+            let target = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("food-scroll-benchmark-target"),
+                size: wgpu::Extent3d {
+                    width: VIEWPORT.0,
+                    height: VIEWPORT.1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+            let params = vello::RenderParams {
+                base_color: vello::peniko::Color::from_rgba8(0xfb, 0xfb, 0xfd, 0xff),
+                width: VIEWPORT.0,
+                height: VIEWPORT.1,
+                antialiasing_method: vello::AaConfig::Area,
+            };
+            println!(
+                "[food-scroll] adapter           {} ({:?})",
+                adapter_info.name, adapter_info.backend
+            );
+            Some((device, queue, renderer, target, target_view, params))
+        }
+        Err(error) => {
+            println!("[food-scroll] adapter           unavailable ({error}); GPU timings skipped");
+            None
+        }
+    };
+
+    let mut offset = 0.0f32;
+    let mut direction = 1.0f32;
+    let step = 48.0 * SCALE;
+    for _ in 0..WARMUP_FRAMES {
+        offset = (offset + direction * step).clamp(0.0, max_scroll);
+        if offset >= max_scroll || offset <= 0.0 {
+            direction = -direction;
+        }
+        let baked = pass
+            .item_by_id("food_scroll")
+            .and_then(|item| item.scrollable)
+            .map(|meta| meta.baked_offset)
+            .unwrap_or(0.0);
+        pass.shift_container_scroll(&tree, "food_scroll", offset - baked, vp_logical, SCALE);
+        let scene = painter.build_scene(&pass, VIEWPORT, SCALE, 0.0);
+        if let Some((device, queue, renderer, _, target_view, params)) = gpu.as_mut() {
+            renderer
+                .render_to_texture(device, queue, scene, target_view, params)
+                .expect("warm Food benchmark frame");
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("wait for warm Food benchmark frame");
+        } else {
+            std::hint::black_box(scene);
+        }
+    }
+
+    let mut layout_samples = Vec::with_capacity(MEASURED_FRAMES);
+    let mut scene_samples = Vec::with_capacity(MEASURED_FRAMES);
+    let mut gpu_samples = Vec::with_capacity(MEASURED_FRAMES);
+    let mut total_samples = Vec::with_capacity(MEASURED_FRAMES);
+    for _ in 0..MEASURED_FRAMES {
+        let total_started = Instant::now();
+        offset = (offset + direction * step).clamp(0.0, max_scroll);
+        if offset >= max_scroll || offset <= 0.0 {
+            direction = -direction;
+        }
+
+        let layout_started = Instant::now();
+        let baked = pass
+            .item_by_id("food_scroll")
+            .and_then(|item| item.scrollable)
+            .map(|meta| meta.baked_offset)
+            .unwrap_or(0.0);
+        pass.shift_container_scroll(&tree, "food_scroll", offset - baked, vp_logical, SCALE);
+        layout_samples.push(layout_started.elapsed());
+
+        let scene_started = Instant::now();
+        let scene = painter.build_scene(&pass, VIEWPORT, SCALE, 0.0);
+        scene_samples.push(scene_started.elapsed());
+
+        if let Some((device, queue, renderer, _, target_view, params)) = gpu.as_mut() {
+            let gpu_started = Instant::now();
+            renderer
+                .render_to_texture(device, queue, scene, target_view, params)
+                .expect("render Food benchmark frame");
+            device
+                .poll(wgpu::PollType::wait_indefinitely())
+                .expect("wait for Food benchmark frame");
+            gpu_samples.push(gpu_started.elapsed());
+        } else {
+            std::hint::black_box(scene);
+        }
+        total_samples.push(total_started.elapsed());
+    }
+
+    report("layout shift", layout_samples);
+    report("scene encode", scene_samples);
+    if gpu_samples.is_empty() {
+        report("CPU total", total_samples);
+    } else {
+        report("GPU completion", gpu_samples);
+        report("total frame", total_samples);
     }
 }
 

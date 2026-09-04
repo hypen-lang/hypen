@@ -8,7 +8,7 @@
 use crate::accessibility::{renderer_id_for, tree_update_for_layout_excluding};
 use crate::anim::{DesktopAnimator, DesktopScrubber, ScrubPointerUp, TickOutcome};
 use crate::damage::Damage;
-use crate::gpu::Gpu;
+use crate::gpu::{Gpu, PresentStatus};
 use crate::ime::{apply_ime_transition, ImeEffect};
 use crate::layout::{ItemKind, LayoutPass, TaffyState};
 use crate::module::HypenModule;
@@ -71,6 +71,22 @@ impl Selection {
             anchor: self.anchor.min(max),
             head: self.head.min(max),
         }
+    }
+}
+
+/// Renderer-local value plus the values dispatched to the engine but not yet
+/// acknowledged by its patch stream. Remote controlled Inputs need this small
+/// ledger: an older WebSocket echo must never replace a newer local keystroke.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct OptimisticInputEdit {
+    value: String,
+    pending: VecDeque<String>,
+}
+
+impl OptimisticInputEdit {
+    fn push(&mut self, value: String) {
+        self.value = value.clone();
+        self.pending.push_back(value);
     }
 }
 
@@ -142,6 +158,45 @@ pub enum AppEvent {
     /// We don't carry a payload because the renderer always re-reads
     /// its caches on the next frame.
     Wake,
+    /// Delayed repaint after the swapchain temporarily had no drawable.
+    /// Separate from `Wake` so a timer made stale by a successful frame can
+    /// be ignored instead of causing an unnecessary repaint.
+    SurfaceRetry,
+    /// Once-per-second process metrics sample for the opt-in native HUD.
+    #[cfg(feature = "dev-overlay")]
+    DevOverlayTick,
+}
+
+const MAX_SURFACE_RETRY_ATTEMPTS: u8 = 6;
+
+#[derive(Debug, Default)]
+struct SurfaceRecovery {
+    attempts: u8,
+    scheduled: bool,
+}
+
+impl SurfaceRecovery {
+    fn schedule(&mut self) -> Option<std::time::Duration> {
+        if self.scheduled || self.attempts >= MAX_SURFACE_RETRY_ATTEMPTS {
+            return None;
+        }
+        // 16, 32, 64, 128, 256, 256 ms: fast for a one-frame hiccup,
+        // bounded so a genuinely unavailable surface cannot spin forever.
+        let shift = self.attempts.min(4);
+        let delay = std::time::Duration::from_millis(16_u64 << shift);
+        self.attempts += 1;
+        self.scheduled = true;
+        Some(delay)
+    }
+
+    fn take_scheduled(&mut self) -> bool {
+        std::mem::take(&mut self.scheduled)
+    }
+
+    fn recovered(&mut self) {
+        self.attempts = 0;
+        self.scheduled = false;
+    }
 }
 
 impl From<AkEvent> for AppEvent {
@@ -343,6 +398,9 @@ pub struct App {
     /// dispatch); we only need to remember the caret + selection range
     /// between keystrokes / mouse events.
     input_selections: HashMap<String, Selection>,
+    /// Unacknowledged controlled-Input edits. See
+    /// [`reconcile_optimistic_input_echoes`].
+    optimistic_inputs: HashMap<String, OptimisticInputEdit>,
     /// Renderer node id of an Input whose text is currently being
     /// drag-selected. `Some(id)` between mouse-down inside that Input
     /// and the next mouse-up; `head` updates on every CursorMoved.
@@ -461,6 +519,8 @@ pub struct App {
     /// raster tiles) get dropped on the occlude edge so the process
     /// can trim while hidden.
     is_occluded: bool,
+    /// Bounded retry state for transient swapchain acquisition failures.
+    surface_recovery: SurfaceRecovery,
     /// Keyboard shortcuts registered via [`crate::DesktopApp::shortcut`].
     /// Checked before the per-key default handling so a binding
     /// always wins over the renderer's built-in Tab / Enter / Space
@@ -476,6 +536,16 @@ pub struct App {
     /// per-window icons (the Dock icon comes from the .app bundle's
     /// .icns, and Wayland has no window-icon protocol).
     window_icon: Option<winit::window::Icon>,
+    /// Native process-performance HUD, absent from production builds.
+    #[cfg(feature = "dev-overlay")]
+    dev_overlay: crate::dev_overlay::DevOverlay,
+    #[cfg(feature = "dev-overlay")]
+    dev_overlay_top: f32,
+    /// Set only for the once-per-second metrics refresh. The resulting
+    /// maintenance present updates the HUD but must not become the reported
+    /// application frame time. Any real app/window work clears it.
+    #[cfg(feature = "dev-overlay")]
+    dev_overlay_only_redraw: bool,
     /// Video `onError` dedupe: `"node_id\u{0}poster_url"` keys for
     /// which we already dispatched the element's `onError` action.
     /// The failure registry entries are sticky (like
@@ -574,6 +644,7 @@ impl App {
             focus_visible: false,
             modifiers: ModifiersState::default(),
             input_selections: HashMap::new(),
+            optimistic_inputs: HashMap::new(),
             dragging_input: None,
             last_click_at: None,
             last_click_pos: PhysicalPosition::new(0.0, 0.0),
@@ -597,9 +668,16 @@ impl App {
             patch_window_start: None,
             patch_window_flushes: 0,
             is_occluded: false,
+            surface_recovery: SurfaceRecovery::default(),
             shortcuts: Vec::new(),
             unified_titlebar: false,
             window_icon: None,
+            #[cfg(feature = "dev-overlay")]
+            dev_overlay: crate::dev_overlay::DevOverlay::new(),
+            #[cfg(feature = "dev-overlay")]
+            dev_overlay_top: 8.0,
+            #[cfg(feature = "dev-overlay")]
+            dev_overlay_only_redraw: false,
             dispatched_media_errors: std::collections::HashSet::new(),
             #[cfg(feature = "video")]
             video_error_keys: std::collections::HashSet::new(),
@@ -1122,6 +1200,11 @@ impl App {
         self.window_icon = icon;
     }
 
+    #[cfg(feature = "dev-overlay")]
+    pub fn set_dev_overlay_top(&mut self, top: f32) {
+        self.dev_overlay_top = top.max(0.0);
+    }
+
     pub fn set_screenshot_path(&mut self, path: Option<std::path::PathBuf>) {
         self.screenshot_path = path;
         self.screenshot_ready_at = None;
@@ -1167,6 +1250,7 @@ impl App {
         // Lower template patches first: everything downstream (scrubber,
         // animator, Tree, Taffy mirror) consumes the plain wire.
         let mut patches = self.template_expander.expand(self.queue.drain());
+        reconcile_optimistic_input_echoes(&mut patches, &mut self.optimistic_inputs);
         let n = patches.len();
         if n == 0 {
             // Overdue-exit backbone: even a patch-less flush (occluded
@@ -1574,6 +1658,10 @@ impl App {
     }
 
     fn redraw(&mut self) {
+        #[cfg(feature = "dev-overlay")]
+        let frame_started = std::time::Instant::now();
+        #[cfg(feature = "dev-overlay")]
+        let overlay_only = std::mem::take(&mut self.dev_overlay_only_redraw);
         self.flush_patches();
 
         // Feature `video`: one or more decoded frames landed since the
@@ -1806,11 +1894,11 @@ impl App {
                     .fold(0.0f32, f32::max)
             })
             .unwrap_or(0.0);
-        let scroll_outside_buffer =
-            !key_match || page_emit_drift + max_chain_drift > scroll_recompute_threshold;
-        let cache_miss = self.layout.is_none() || !key_match || scroll_outside_buffer;
+        let layout_inputs_changed = self.layout.is_none() || !key_match;
+        let scroll_window_stale = !layout_inputs_changed
+            && page_emit_drift + max_chain_drift > scroll_recompute_threshold;
         let mut flips_played = false;
-        if cache_miss {
+        if layout_inputs_changed {
             let pass = LayoutPass::compute_with_state(
                 &mut self.taffy,
                 &self.tree,
@@ -1871,6 +1959,23 @@ impl App {
                 self.painter.invalidate_subtree_cache();
                 self.damage.add_full();
             }
+        } else if scroll_window_stale {
+            // Only the cull window moved. Taffy's geometry is still valid:
+            // no tree/style/viewport/intrinsic input changed, so rerunning
+            // flex layout and text measurement here creates a periodic pause
+            // every half viewport for no visual benefit. Re-walk the retained
+            // geometry to refresh visible membership and exact nested clips.
+            self.layout = Some(LayoutPass::reemit_with_state(
+                &self.taffy,
+                &self.tree,
+                (w, h),
+                scale,
+                self.scroll_y,
+                &self.scrollables,
+            ));
+            self.last_scroll_y_in_layout = self.scroll_y;
+            self.last_scroll_y_emitted = self.scroll_y;
+            self.layout_generation = self.layout_generation.wrapping_add(1);
         } else {
             if (self.scroll_y - self.last_scroll_y_in_layout).abs() > f32::EPSILON {
                 // Scroll-only fast path: re-shift the cached items by the
@@ -1936,6 +2041,9 @@ impl App {
         // painter takes `&mut self.painter`; both fields live on
         // `self`, so we lift the immutable borrow up first.
         let pass = self.layout.as_ref().expect("layout populated above");
+        #[cfg(feature = "dev-overlay")]
+        self.painter
+            .set_dev_overlay(self.dev_overlay.label(), self.dev_overlay_top);
         let scene = self.painter.build_scene(pass, (w, h), scale, self.scroll_y);
         let new_scroll = clamp_scroll(self.scroll_y, pass.content_size.1, h as f32);
         if (new_scroll - self.scroll_y).abs() > f32::EPSILON {
@@ -1955,10 +2063,24 @@ impl App {
         if let Some(w) = self.window.as_ref() {
             w.pre_present_notify();
         }
-        let gpu = self.gpu.as_mut().expect("gpu set");
-        if let Err(e) = gpu.present(scene) {
-            log::warn!("present failed: {e}");
-        }
+        let present_result = self.gpu.as_mut().expect("gpu set").present(scene);
+        let retry_surface = match present_result {
+            Ok(PresentStatus::Presented) => {
+                self.surface_recovery.recovered();
+                #[cfg(feature = "dev-overlay")]
+                self.dev_overlay
+                    .frame_presented(frame_started.elapsed(), overlay_only);
+                false
+            }
+            Ok(PresentStatus::Retry(reason)) => {
+                log::warn!("surface present deferred: {reason:?}");
+                true
+            }
+            Err(e) => {
+                log::warn!("present failed: {e}");
+                false
+            }
+        };
 
         // Screenshot mode waits briefly after the first non-empty frame. The
         // first paint queues local image fetches; their worker wakes the event
@@ -1979,7 +2101,11 @@ impl App {
                 }
                 Some(ready_at) if now >= ready_at && !self.screenshot_complete => {
                     let path = self.screenshot_path.as_ref().expect("checked above");
-                    match gpu.capture_scene_png(scene, path, self.initial_size) {
+                    match self.gpu.as_mut().expect("gpu set").capture_scene_png(
+                        scene,
+                        path,
+                        self.initial_size,
+                    ) {
                         Ok(()) => {
                             log::info!("desktop screenshot saved to {}", path.display());
                             self.screenshot_complete = true;
@@ -1993,6 +2119,13 @@ impl App {
                 }
                 _ => {}
             }
+        }
+
+        // `scene` borrows the painter and may also be used by screenshot
+        // capture above. Schedule only after its final use so recovery can
+        // mutably access the rest of the app without extending that borrow.
+        if retry_surface {
+            self.schedule_surface_retry();
         }
 
         self.publish_accessibility();
@@ -2025,10 +2158,32 @@ impl App {
     /// + `request_redraw` directly so that mouse-only-moving frames
     /// stay scoped.
     fn request_redraw_full(&mut self) {
+        #[cfg(feature = "dev-overlay")]
+        {
+            self.dev_overlay_only_redraw = false;
+        }
         self.damage.add_full();
         if let Some(w) = self.window.as_ref() {
             w.request_redraw();
         }
+    }
+
+    fn schedule_surface_retry(&mut self) {
+        let was_scheduled = self.surface_recovery.scheduled;
+        let Some(delay) = self.surface_recovery.schedule() else {
+            if !was_scheduled && self.surface_recovery.attempts >= MAX_SURFACE_RETRY_ATTEMPTS {
+                log::warn!(
+                    "surface recovery exhausted after {MAX_SURFACE_RETRY_ATTEMPTS} attempts; \
+                     waiting for focus, resize, or restore"
+                );
+            }
+            return;
+        };
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            let _ = proxy.send_event(AppEvent::SurfaceRetry);
+        });
     }
 
     /// Look up an item's drawn rect, expanded by a few px so damage
@@ -2480,12 +2635,38 @@ impl ApplicationHandler<AppEvent> for App {
                     self.request_redraw_full();
                 }
             }
+            AppEvent::SurfaceRetry => {
+                // A successful frame or a later focus/resize can beat this
+                // timer. `recovered()` clears the marker, making that stale
+                // event a no-op instead of an unnecessary extra frame.
+                if self.surface_recovery.take_scheduled() && !self.is_occluded {
+                    self.request_redraw_full();
+                }
+            }
+            #[cfg(feature = "dev-overlay")]
+            AppEvent::DevOverlayTick => {
+                self.dev_overlay.sample();
+                if !self.is_occluded {
+                    self.dev_overlay_only_redraw = true;
+                    self.damage.add_full();
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+            }
         }
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         if let (Some(adapter), Some(window)) = (self.ak.as_mut(), self.window.as_ref()) {
             adapter.process_event(window, &event);
+        }
+        // A real OS/app event arriving before a scheduled metrics-only paint
+        // upgrades that paint to a real frame. RedrawRequested itself must not
+        // clear the marker: it is the event carrying the HUD refresh.
+        #[cfg(feature = "dev-overlay")]
+        if !matches!(&event, WindowEvent::RedrawRequested) {
+            self.dev_overlay_only_redraw = false;
         }
         match event {
             WindowEvent::CloseRequested => {
@@ -2529,6 +2710,7 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(gpu) = self.gpu.as_mut() {
                     gpu.resize(size.width, size.height);
                 }
+                self.surface_recovery.recovered();
                 self.layout = None;
                 self.damage.add_full();
                 self.redraw();
@@ -2811,47 +2993,50 @@ impl ApplicationHandler<AppEvent> for App {
                 if dy.abs() > f32::EPSILON {
                     let cx = self.cursor.x as f32;
                     let cy = self.cursor.y as f32;
-                    // Topmost scrollable Container under the cursor wins
-                    // — fall back to page scroll when there isn't one.
-                    let target = self.layout.as_ref().and_then(|l| {
-                        l.hit_scrollable_excluding(cx, cy, &|id| {
+                    // The innermost scrollable that can actually consume this
+                    // vertical delta wins. If it has no vertical range (the
+                    // common horizontal-poster-rail case), chain through the
+                    // remaining scrollable ancestors. Only route to page
+                    // scrolling when the pointer is outside every explicit
+                    // scroll container: an exhausted full-screen feed owns the
+                    // gesture and must not expose the window background.
+                    let route = self.layout.as_ref().map_or(WheelRoute::Page, |layout| {
+                        wheel_route(layout, &self.scrollables, cx, cy, dy, &|id| {
                             self.animator.is_exit_excluded(&self.tree, id)
                         })
                     });
                     let mut container_damage: Option<crate::layout::Rect> = None;
                     let mut full_damage = false;
-                    if let Some(item) = target {
-                        let meta = item.scrollable.unwrap();
-                        let max = (meta.content_h - item.rect.h).max(0.0);
-                        let id = item.node_id.clone();
-                        let cur = self.scrollables.get(&id).copied().unwrap_or(0.0);
-                        let new = (cur + dy).clamp(0.0, max);
-                        if (new - cur).abs() > f32::EPSILON {
-                            // Per-container scroll: only items inside
-                            // this container moved. Damage = the
-                            // container's rect (children clip to it).
-                            container_damage = Some(item.rect);
-                            self.scrollables.insert(id, new);
+                    match route {
+                        WheelRoute::Container(target) => {
+                            // Per-container scroll: only items inside this
+                            // container moved. Damage = the container's rect
+                            // (children clip to it).
+                            container_damage = Some(target.rect);
+                            self.scrollables.insert(target.id, target.offset);
                         }
-                    } else {
-                        let viewport_h = self.gpu.as_ref().map(|g| g.size.1 as f32).unwrap_or(0.0);
-                        // `LayoutPass.content_size.1` is the *total* content
-                        // height already, not "content above the current
-                        // scroll position" — adding scroll_y inflated the
-                        // cap and let the user wheel past the end until
-                        // the next frame's redraw-time clamp caught up.
-                        let content_h = self
-                            .layout
-                            .as_ref()
-                            .map(|l| l.content_size.1)
-                            .unwrap_or(0.0);
-                        let new = clamp_scroll(self.scroll_y + dy, content_h, viewport_h);
-                        if (new - self.scroll_y).abs() > f32::EPSILON {
-                            self.scroll_y = new;
-                            // Page scroll moves every item — repaint
-                            // the whole surface.
-                            full_damage = true;
+                        WheelRoute::Page => {
+                            let viewport_h =
+                                self.gpu.as_ref().map(|g| g.size.1 as f32).unwrap_or(0.0);
+                            // `LayoutPass.content_size.1` is the *total* content
+                            // height already, not "content above the current
+                            // scroll position" — adding scroll_y inflated the
+                            // cap and let the user wheel past the end until
+                            // the next frame's redraw-time clamp caught up.
+                            let content_h = self
+                                .layout
+                                .as_ref()
+                                .map(|l| l.content_size.1)
+                                .unwrap_or(0.0);
+                            let new = clamp_scroll(self.scroll_y + dy, content_h, viewport_h);
+                            if (new - self.scroll_y).abs() > f32::EPSILON {
+                                self.scroll_y = new;
+                                // Page scroll moves every item — repaint
+                                // the whole surface.
+                                full_damage = true;
+                            }
                         }
+                        WheelRoute::Blocked => {}
                     }
                     if let Some(rect) = container_damage {
                         self.damage.add_region(rect);
@@ -2947,6 +3132,13 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
             }
+            WindowEvent::Focused(true) => {
+                // macOS can restore focus without a matching
+                // `Occluded(false)`. Give the swapchain a fresh bounded
+                // recovery budget and force a frame even for a static scene.
+                self.surface_recovery.recovered();
+                self.request_redraw_full();
+            }
             WindowEvent::Focused(false) => {
                 // A claimed scrub drag has no OS pointer-capture on desktop
                 // (winit exposes none — see anim.rs' scrub narrowings), so a
@@ -2987,6 +3179,7 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
                 self.is_occluded = occluded;
+                self.surface_recovery.recovered();
                 if occluded {
                     // Drain whatever's in the queue right now so its
                     // Arc'd props release; clear the paint-side raster
@@ -3043,6 +3236,8 @@ impl ApplicationHandler<AppEvent> for App {
         // session that re-renders forms or chat composers accumulates
         // tens of thousands.
         self.input_selections
+            .retain(|id, _| self.tree.get(id).is_some());
+        self.optimistic_inputs
             .retain(|id, _| self.tree.get(id).is_some());
 
         // No value-clamping pass here. The previous version walked
@@ -3550,6 +3745,162 @@ pub(crate) fn reveal_target_for(
 pub(crate) fn clamp_scroll(y: f32, content_h: f32, viewport_h: f32) -> f32 {
     let max = (content_h - viewport_h).max(0.0);
     y.clamp(0.0, max)
+}
+
+/// Prevent delayed controlled-Input echoes from rolling back newer local
+/// edits. The engine's action channel is ordered, so each matching value
+/// acknowledges the oldest matching pending edit. Intermediate echoes are
+/// swallowed; only the acknowledgement of the current draft reaches the Tree.
+/// A value the renderer never sent is authoritative server state and clears
+/// the draft instead of being hidden forever.
+pub(crate) fn reconcile_optimistic_input_echoes(
+    patches: &mut Vec<Patch>,
+    edits: &mut HashMap<String, OptimisticInputEdit>,
+) {
+    enum Decision {
+        Keep,
+        Drop,
+        KeepAndClear(String),
+    }
+
+    patches.retain(|patch| {
+        let decision = match patch {
+            Patch::Create { id, .. } => {
+                edits.remove(id.as_ref());
+                Decision::Keep
+            }
+            Patch::RemoveProp { id, name } if name == "value" || name == "value.0" => {
+                edits.remove(id.as_ref());
+                Decision::Keep
+            }
+            Patch::SetProp { id, name, value } if name == "value" || name == "value.0" => {
+                let id = id.to_string();
+                let Some(edit) = edits.get_mut(&id) else {
+                    return true;
+                };
+                let Some(incoming) = value.as_str() else {
+                    return {
+                        edits.remove(&id);
+                        true
+                    };
+                };
+                match edit.pending.iter().position(|pending| pending == incoming) {
+                    Some(position) => {
+                        edit.pending.drain(..=position);
+                        if edit.pending.is_empty() && incoming == edit.value {
+                            Decision::KeepAndClear(id)
+                        } else {
+                            Decision::Drop
+                        }
+                    }
+                    None => Decision::KeepAndClear(id),
+                }
+            }
+            Patch::Remove { id, .. } => {
+                edits.remove(id.as_ref());
+                Decision::Keep
+            }
+            _ => Decision::Keep,
+        };
+
+        match decision {
+            Decision::Keep => true,
+            Decision::Drop => false,
+            Decision::KeepAndClear(id) => {
+                edits.remove(&id);
+                true
+            }
+        }
+    });
+}
+
+/// A scrollable container that can consume the current wheel delta.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WheelContainerTarget {
+    pub(crate) id: String,
+    pub(crate) rect: crate::layout::Rect,
+    pub(crate) offset: f32,
+}
+
+/// Where one vertical wheel delta belongs.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum WheelRoute {
+    /// An explicit scroll container can consume the delta.
+    Container(WheelContainerTarget),
+    /// No explicit scroll container is under the pointer; use page scroll.
+    Page,
+    /// The pointer is inside an explicit scroll chain, but every member is at
+    /// its requested boundary (or has no vertical range). The chain owns the
+    /// gesture, so falling through to the synthetic page would outscroll a
+    /// full-screen app and expose the window background.
+    Blocked,
+}
+
+/// Resolve nested wheel chaining without mutating window state. Candidates
+/// arrive innermost first; ones with no range or no movement in the requested
+/// direction are skipped so the delta bubbles outward.
+pub(crate) fn wheel_route(
+    layout: &crate::layout::LayoutPass,
+    offsets: &HashMap<String, f32>,
+    x: f32,
+    y: f32,
+    delta: f32,
+    excluded: &dyn Fn(&str) -> bool,
+) -> WheelRoute {
+    let mut saw_scrollable = false;
+    for item in layout.scrollable_hits_excluding(x, y, excluded) {
+        saw_scrollable = true;
+        if let Some(target) = item.scrollable.and_then(|meta| {
+            let max = (meta.content_h - item.rect.h).max(0.0);
+            let current = offsets.get(&item.node_id).copied().unwrap_or(0.0);
+            let offset = (current + delta).clamp(0.0, max);
+            ((offset - current).abs() > f32::EPSILON).then(|| WheelContainerTarget {
+                id: item.node_id.clone(),
+                rect: item.rect,
+                offset,
+            })
+        }) {
+            return WheelRoute::Container(target);
+        }
+    }
+
+    // Fixed navigation, browser chrome, and other siblings often sit outside
+    // an app's one full-screen feed. A wheel over those surfaces should still
+    // drive that unambiguous main scroller; falling back to synthetic page
+    // scroll moves the *entire* app out of its viewport and exposes blank
+    // window space. Nested/independent scroll areas remain pointer-routed: if
+    // more than one off-pointer container could consume the delta, there is no
+    // safe target and the gesture is blocked.
+    let mut global_target = None;
+    for item in layout.scrollable_items() {
+        if excluded(&item.node_id) {
+            continue;
+        }
+        saw_scrollable = true;
+        let Some(meta) = item.scrollable else {
+            continue;
+        };
+        let max = (meta.content_h - item.rect.h).max(0.0);
+        let current = offsets.get(&item.node_id).copied().unwrap_or(0.0);
+        let offset = (current + delta).clamp(0.0, max);
+        if (offset - current).abs() <= f32::EPSILON {
+            continue;
+        }
+        let target = WheelContainerTarget {
+            id: item.node_id.clone(),
+            rect: item.rect,
+            offset,
+        };
+        if global_target.replace(target).is_some() {
+            return WheelRoute::Blocked;
+        }
+    }
+
+    match (saw_scrollable, global_target) {
+        (_, Some(target)) => WheelRoute::Container(target),
+        (true, None) => WheelRoute::Blocked,
+        (false, None) => WheelRoute::Page,
+    }
 }
 
 /// One scrollable container whose live offset (`App::scrollables`)

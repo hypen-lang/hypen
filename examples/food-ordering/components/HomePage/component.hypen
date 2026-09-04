@@ -64,7 +64,7 @@ Column {
     Grid(@state.restaurants, key: "id") {
         RestaurantCard()
     }
-    .gridColumns({default: 1, md: 2, lg: 3, xl: 4, 2xl: 5})
+    .gridColumns({default: 1, sm: 2, md: 3, lg: 4, xl: 5})
     .gap(18)
     .tw("px-4 pb-4 w-full")
 }

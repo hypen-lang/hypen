@@ -2,7 +2,7 @@
  * Audio Component
  */
 
-import type { ComponentHandler } from "./index.js";
+import { hasProp, toBool, type ComponentHandler } from "./index.js";
 
 export const audioHandler: ComponentHandler = {
   create(): HTMLElement {
@@ -25,23 +25,25 @@ export const audioHandler: ComponentHandler = {
     }
 
     // Controls
-    if (props.controls !== undefined) {
-      audio.controls = Boolean(props.controls);
+    if (hasProp(props, "controls")) {
+      // Removing the prop restores the visible transport `create` opts into;
+      // it does not go headless.
+      audio.controls = props.controls === undefined ? true : toBool(props.controls);
     }
 
     // Autoplay
-    if (props.autoplay !== undefined) {
-      audio.autoplay = Boolean(props.autoplay);
+    if (hasProp(props, "autoplay")) {
+      audio.autoplay = toBool(props.autoplay);
     }
 
     // Loop
-    if (props.loop !== undefined) {
-      audio.loop = Boolean(props.loop);
+    if (hasProp(props, "loop")) {
+      audio.loop = toBool(props.loop);
     }
 
     // Muted
-    if (props.muted !== undefined) {
-      audio.muted = Boolean(props.muted);
+    if (hasProp(props, "muted")) {
+      audio.muted = toBool(props.muted);
     }
   },
 };

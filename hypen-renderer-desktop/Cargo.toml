@@ -25,6 +25,9 @@ mimalloc = ["dep:mimalloc"]
 # pipeline (see `src/media/`); without it the renderer keeps the
 # poster + play-glyph presentation byte-for-byte.
 video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+# Native development HUD showing presented FPS plus this process's CPU and
+# resident-memory usage. Entirely compiled out of production builds.
+dev-overlay = ["dep:sysinfo"]
 
 [dependencies]
 hypen-engine = { version = "0.6.3", path = "../hypen-engine-rs" }
@@ -36,15 +39,14 @@ serde_json = { workspace = true }
 
 # Phase 1: windowing + GPU surface + GPU raster + text
 winit = "0.30.13"
-# Pinned to 28 to match Vello 0.8's pinned wgpu. When Vello 0.9+
-# (which targets wgpu 29 / 30) lands as stable, bump both.
-wgpu = "28"
+# Keep this aligned with Vello so both crates share the same GPU types.
+wgpu = "29"
 # Kept for the rounded-rect / icon mask + the image render cache's
 # off-screen tiles. The on-screen scene goes through Vello.
 tiny-skia = "0.12.0"
-# Vello 0.8 — GPU compute-shader 2D rasteriser. Replaces the CPU
-# blit pipeline for the on-screen surface.
-vello = "0.8"
+# Vello 0.10 preserves image-atlas residency across renders, avoiding
+# repeated uploads of already-cached images during scrolling.
+vello = "0.10"
 cosmic-text = "0.19.0"
 taffy = "0.10.1"
 
@@ -124,6 +126,10 @@ fontdb = "0.23"
 # text would have set internally. Already a transitive dep of cosmic-
 # text 0.19; pinned here for direct use.
 sys-locale = "0.3"
+
+# Process CPU/RSS sampling for the opt-in development HUD. Keep only the
+# system feature: disk, network, users, and hardware sensors are irrelevant.
+sysinfo = { version = "0.38.3", optional = true, default-features = false, features = ["system"] }
 
 # Faster heap allocator opt-in. Library can't set the global allocator
 # itself (only the final binary can); we re-export the type behind the

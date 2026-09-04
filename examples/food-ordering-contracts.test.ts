@@ -33,7 +33,7 @@ describe("Food ordering layout contracts", () => {
 
     expect(home).toContain('Grid(@state.restaurants, key: "id")');
     expect(home).toContain(
-      ".gridColumns({default: 1, md: 2, lg: 3, xl: 4, 2xl: 5})",
+      ".gridColumns({default: 1, sm: 2, md: 3, lg: 4, xl: 5})",
     );
     expect(home).toContain('.tw("w-full xl:w-3/5")');
     expect(home).not.toContain(".maxWidth(1240)");
@@ -89,7 +89,7 @@ describe("Food ordering layout contracts", () => {
     expect(search).toContain(".onInput(@actions.search)");
     expect(search).toContain('Grid(@state.searchResults, key: "id")');
     expect(search).toContain(
-      ".gridColumns({default: 1, md: 2, lg: 3, xl: 4, 2xl: 5})",
+      ".gridColumns({default: 1, sm: 2, md: 3, lg: 4, xl: 5})",
     );
     expect(search).not.toContain(".display(");
     expect(search).not.toContain(".gridTemplateColumns(");

@@ -2,6 +2,16 @@
 
 Native desktop renderer for Hypen.
 
+## Development performance HUD
+
+Build with `--features dev-overlay` to paint a native, non-interactive HUD over
+the final scene showing process CPU and resident RAM plus the last rendered
+frame's cost and its equivalent continuous FPS. Hypen is demand-driven, so an
+idle window keeps its last frame measurement instead of reporting a misleading
+zero FPS.
+It samples once per second without forcing the demand-driven renderer to run
+continuously. Production builds do not include the sampler dependency or HUD.
+
 ## Status: Phase 15 (tw breakpoints + SVG icon rasterisation)
 
 The renderer drives a real `hypen-server::ModuleInstance<S>` through the
@@ -9,13 +19,10 @@ standard SDK lifecycle (`instantiate` → `on_patches` → `mount` → click →
 `dispatch_action` → patches → repaint). Stack:
 
 - **winit 0.30** — windowing + event loop
-- **wgpu 29** — surface + present (CPU pixmap → texture → fullscreen blit)
-- **tiny-skia 0.12** — CPU 2D rasteriser
+- **wgpu 29** — GPU device, surface, and presentation
+- **Vello 0.10** — GPU 2D rasteriser with a persistent image atlas
+- **tiny-skia 0.12** — off-screen image and icon-mask work
 - **cosmic-text 0.19** — font shaping + glyph rasterisation
-
-Vello is the eventual GPU rasteriser of choice but is still pinned to wgpu 28;
-when it catches up to wgpu 29 it slots in behind the existing `Painter` trait
-without touching the rest of the crate.
 
 > **Animation.** This renderer has full parity with the DOM renderer across the
 > `__anim.*` channel (transitions, enter/exit, FLIP layout, presets, states,

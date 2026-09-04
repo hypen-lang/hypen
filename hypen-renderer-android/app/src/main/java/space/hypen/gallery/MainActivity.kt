@@ -14,6 +14,10 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -90,6 +94,10 @@ fun GalleryBrowser(
     var isFullscreen by remember { mutableStateOf(false) }
     var isLoading by remember { mutableStateOf(false) }
     var isConnected by remember { mutableStateOf(false) }
+    // Browser chrome collapses to a floating URL pill once a hosted app has
+    // loaded (like the desktop shell's island). Only meaningful on the App
+    // screen; Home/QR always show the full toolbar.
+    var isChromeCollapsed by remember { mutableStateOf(false) }
     // Incremented on refresh; used as a `key()` to force HypenAppContent to tear down
     // and re-establish its WebSocket connection.
     var refreshKey by remember { mutableIntStateOf(0) }
@@ -130,7 +138,25 @@ fun GalleryBrowser(
         appStorage.addOrUpdateApp(appName, normalizedUrl)
         recentApps = appStorage.getRecentApps()
         isLoading = true
+        isChromeCollapsed = false
+        // Reconnecting to the URL that is already open (deep link, home tap)
+        // must still tear the content down: HypenAppContent is keyed on
+        // url+refreshKey, and without a new key its connection callbacks —
+        // and the chrome auto-collapse — never fire again.
+        val current = currentScreen
+        if (current is BrowserScreen.App && current.url == normalizedUrl) {
+            isConnected = false
+            refreshKey++
+        }
         navigateTo(BrowserScreen.App(normalizedUrl))
+    }
+
+    // Auto-collapse the chrome once the app is up; expanding again is a tap
+    // on the pill. Re-arms on every (re)connect so a refresh collapses too.
+    LaunchedEffect(isConnected, currentScreen) {
+        if (isConnected && currentScreen is BrowserScreen.App) {
+            isChromeCollapsed = true
+        }
     }
 
     // Handle hypenpreview:// deep link
@@ -176,34 +202,43 @@ fun GalleryBrowser(
         }
     }
 
+    val isAppScreen = currentScreen is BrowserScreen.App
+
+    @Composable
+    fun toolbar(modifier: Modifier) {
+        BrowserToolbar(
+            currentUrl = currentUrl,
+            isConnected = isConnected,
+            isLoading = isLoading,
+            canGoBack = canGoBack,
+            isFullscreen = isFullscreen,
+            onUrlSubmit = { url -> connectToUrl(url) },
+            onBackClick = { goBack() },
+            onHomeClick = { goHome() },
+            onRefreshClick = {
+                if (currentScreen is BrowserScreen.App) {
+                    isConnected = false
+                    isLoading = true
+                    refreshKey++
+                }
+            },
+            onScanQrClick = { navigateTo(BrowserScreen.QRScanner) },
+            onFullscreenToggle = { isFullscreen = !isFullscreen },
+            modifier = modifier,
+        )
+    }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Column(modifier = Modifier.fillMaxSize()) {
-            // Browser toolbar (hidden in fullscreen)
+            // Gallery screens (Home / QR) keep the classic docked toolbar. On the
+            // App screen the chrome floats over the content instead (see the
+            // overlay below), so nothing is docked here.
             AnimatedVisibility(
-                visible = !isFullscreen,
+                visible = !isFullscreen && !isAppScreen,
                 enter = slideInVertically { -it },
                 exit = slideOutVertically { -it },
             ) {
-                BrowserToolbar(
-                    currentUrl = currentUrl,
-                    isConnected = isConnected,
-                    isLoading = isLoading,
-                    canGoBack = canGoBack,
-                    isFullscreen = isFullscreen,
-                    onUrlSubmit = { url -> connectToUrl(url) },
-                    onBackClick = { goBack() },
-                    onHomeClick = { goHome() },
-                    onRefreshClick = {
-                        if (currentScreen is BrowserScreen.App) {
-                            isConnected = false
-                            isLoading = true
-                            refreshKey++
-                        }
-                    },
-                    onScanQrClick = { navigateTo(BrowserScreen.QRScanner) },
-                    onFullscreenToggle = { isFullscreen = !isFullscreen },
-                    modifier = Modifier.statusBarsPadding(),
-                )
+                toolbar(Modifier.statusBarsPadding())
             }
 
             // Bottom system-bar padding for the gallery's *own* screens. It used to sit
@@ -212,23 +247,6 @@ fun GalleryBrowser(
             // `SafeArea` inside the hosted app found nothing left to pad by. The gallery
             // chrome keeps the padding; the hosted surface goes edge-to-edge.
             val galleryChromeInsets = if (!isFullscreen) Modifier.navigationBarsPadding() else Modifier
-
-            // What `SafeArea` inside a hosted app should pad by (null = every edge resolves
-            // from `WindowInsets.safeDrawing`).
-            //
-            // The toolbar is a sibling *above* the content in this Column and carries its own
-            // `statusBarsPadding()`, so the content already starts below the status bar — but
-            // a sibling's inset padding is only consumed for its own subtree, so the content
-            // still reports the full top inset. Zeroing it stops every SafeArea from pushing
-            // its content down by a status bar that is not actually overlapping it. The other
-            // edges stay null: the hosted surface genuinely does run under the navigation bar
-            // and any side cutouts, and safeDrawing is the right answer there.
-            //
-            // In fullscreen the toolbar is gone and the system bars are hidden, so the real
-            // safeDrawing insets (≈0, cutouts aside) are already correct — no override.
-            val hostedSafeAreaInsets = remember(isFullscreen) {
-                if (isFullscreen) null else HypenSafeAreaInsets(top = 0.dp)
-            }
 
             // Main content
             Box(modifier = Modifier.fillMaxSize()) {
@@ -263,12 +281,15 @@ fun GalleryBrowser(
                     }
 
                     is BrowserScreen.App -> {
+                        // The hosted app always runs edge-to-edge under the floating
+                        // chrome, so `SafeArea` inside it resolves every edge from the
+                        // real `safeDrawing` insets (null = no override).
                         // key() forces a fresh HypenAppContent instance on refresh, which
                         // tears down the existing WebSocket and reconnects cleanly.
                         key(screen.url, refreshKey) {
                             HypenAppContent(
                                 url = screen.url,
-                                safeAreaInsets = hostedSafeAreaInsets,
+                                safeAreaInsets = null,
                                 onConnected = {
                                     isConnected = true
                                     isLoading = false
@@ -282,6 +303,46 @@ fun GalleryBrowser(
                         }
                     }
                 }
+            }
+        }
+
+        // Floating chrome over a hosted app: a Dynamic-Island-sized URL pill once
+        // the app has loaded, or the full toolbar while expanded. Tapping the
+        // content outside an expanded toolbar collapses it again.
+        if (isAppScreen && !isFullscreen) {
+            if (!isChromeCollapsed) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .clickable(
+                            interactionSource = remember { MutableInteractionSource() },
+                            indication = null,
+                        ) { isChromeCollapsed = true }
+                )
+            }
+            AnimatedVisibility(
+                visible = isChromeCollapsed,
+                enter = fadeIn(),
+                exit = fadeOut(),
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding()
+                    .padding(top = 6.dp),
+            ) {
+                CollapsedUrlPill(
+                    currentUrl = currentUrl,
+                    isConnected = isConnected,
+                    isLoading = isLoading,
+                    onClick = { isChromeCollapsed = false },
+                )
+            }
+            AnimatedVisibility(
+                visible = !isChromeCollapsed,
+                enter = slideInVertically { -it } + fadeIn(),
+                exit = slideOutVertically { -it } + fadeOut(),
+                modifier = Modifier.align(Alignment.TopCenter),
+            ) {
+                toolbar(Modifier.statusBarsPadding())
             }
         }
 

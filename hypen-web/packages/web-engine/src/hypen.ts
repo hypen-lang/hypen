@@ -469,8 +469,11 @@ export class Hypen {
 
     // List of built-in DOM elements that should NOT be resolved.
     // Kept in sync with the engine's DEFAULT_PRIMITIVES
-    // (hypen-engine-rs/src/ir/component.rs), plus the web-only
-    // Canvas/ScrollView hosts this renderer handles natively.
+    // (hypen-engine-rs/src/ir/component.rs), plus the web-only Canvas host
+    // this renderer handles natively. `tests/builtin-primitives.test.ts`
+    // asserts the two lists agree -- they had drifted apart by SafeArea and
+    // Scrubber, which the engine pre-registers itself so the omission never
+    // surfaced.
     const builtInElements = new Set([
       "Text",
       "Column",
@@ -501,9 +504,10 @@ export class Hypen {
       "Audio",
       "Paragraph",
       "Icon",
+      "SafeArea",
+      "Scrubber",
       // Web-only primitives (not in the engine list)
       "Canvas",
-      "ScrollView",
     ]);
 
     this.engine.setComponentResolver(

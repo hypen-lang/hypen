@@ -1,5 +1,13 @@
 module Story {
-    Column {
+    // Stack overlays the header chrome on top of the full-bleed image; the
+    // Stack's default top-start alignment pins the header to the top edge.
+    Stack {
+        // Full-bleed on mobile; on md+ a centered, rounded phone-frame story
+        // instead of one edge-to-edge stretched image.
+        Image(src: "@{state.story.imageUrl}")
+            .tw("w-full h-full md:max-w-[420px] md:mx-auto md:my-6 md:rounded-2xl")
+            .objectFit("cover")
+
         Row {
             Image(src: "@{state.story.user.avatarUrl}")
                 .tw("size-8 rounded-full")
@@ -14,13 +22,7 @@ module Story {
             .onClick(@router.push, to: "/")
             .tw("bg-transparent p-2")
         }
-        .tw("py-3 px-4 items-center absolute top-0 left-0 right-0 z-10 w-full md:max-w-[420px] md:mx-auto")
-
-        // Full-bleed on mobile; on md+ a centered, rounded phone-frame story
-        // instead of one edge-to-edge stretched image.
-        Image(src: "@{state.story.imageUrl}")
-            .tw("w-full flex-1 min-h-0 md:max-w-[420px] md:mx-auto md:my-6 md:rounded-2xl")
-            .objectFit("cover")
+        .tw("py-3 px-4 items-center w-full md:max-w-[420px] md:mx-auto")
     }
-    .tw("flex-1 w-full bg-black relative")
+    .tw("flex-1 w-full bg-black")
 }

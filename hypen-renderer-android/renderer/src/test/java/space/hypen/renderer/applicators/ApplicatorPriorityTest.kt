@@ -76,4 +76,19 @@ class ApplicatorPriorityTest {
         // gradients), so it belongs in the layer band, not the colour band.
         assertTrue(order("background") >= order("backgroundimage"))
     }
+
+    @Test
+    fun `content alignment runs innermost, after everything that keeps the full box`() {
+        // `wrapContent*` measures the node at its content size and aligns it
+        // inside the incoming constraints. Size, border, background, padding
+        // and the click target must all sit outside it, or a centred Box
+        // would paint its background at content width and only be tappable
+        // where the content is.
+        for (name in listOf("alignment", "justifycontent", "alignitems", "horizontalalignment", "verticalalignment")) {
+            assertTrue(name, order("width") < order(name))
+            assertTrue(name, order("backgroundcolor") < order(name))
+            assertTrue(name, order("padding") < order(name))
+            assertTrue(name, order("onclick") < order(name))
+        }
+    }
 }

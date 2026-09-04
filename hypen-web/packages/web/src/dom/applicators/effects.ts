@@ -4,6 +4,7 @@
 
 import type { ApplicatorHandler } from "./types.js";
 import { toCssLength } from "./size.js";
+import { setCssFunction, fnArg } from "./css-functions.js";
 
 export const effectsHandlers: Record<string, ApplicatorHandler> = {
   // Shadow effects
@@ -68,53 +69,17 @@ export const effectsHandlers: Record<string, ApplicatorHandler> = {
     el.style.backdropFilter = String(value);
   },
 
-  // Individual filter functions
-  blur: (el, value) => {
-    const val = toCssLength(value);
-    const current = el.style.filter || "";
-    el.style.filter = current ? `${current} blur(${val})` : `blur(${val})`;
-  },
-
-  brightness: (el, value) => {
-    const current = el.style.filter || "";
-    el.style.filter = current ? `${current} brightness(${value})` : `brightness(${value})`;
-  },
-
-  contrast: (el, value) => {
-    const current = el.style.filter || "";
-    el.style.filter = current ? `${current} contrast(${value})` : `contrast(${value})`;
-  },
-
-  grayscale: (el, value) => {
-    const current = el.style.filter || "";
-    el.style.filter = current ? `${current} grayscale(${value})` : `grayscale(${value})`;
-  },
-
-  hueRotate: (el, value) => {
-    const val = String(value);
-    const current = el.style.filter || "";
-    el.style.filter = current ? `${current} hue-rotate(${val})` : `hue-rotate(${val})`;
-  },
-
-  invert: (el, value) => {
-    const current = el.style.filter || "";
-    el.style.filter = current ? `${current} invert(${value})` : `invert(${value})`;
-  },
-
-  saturate: (el, value) => {
-    const current = el.style.filter || "";
-    el.style.filter = current ? `${current} saturate(${value})` : `saturate(${value})`;
-  },
-
-  sepia: (el, value) => {
-    const current = el.style.filter || "";
-    el.style.filter = current ? `${current} sepia(${value})` : `sepia(${value})`;
-  },
-
-  dropShadow: (el, value) => {
-    const current = el.style.filter || "";
-    el.style.filter = current ? `${current} drop-shadow(${value})` : `drop-shadow(${value})`;
-  },
+  // Individual filter functions — each replaces its own function inside
+  // `style.filter` (see css-functions.ts); they compose with each other.
+  blur: (el, value) => setCssFunction(el, "filter", "blur", fnArg(value, (v) => toCssLength(v as any))),
+  brightness: (el, value) => setCssFunction(el, "filter", "brightness", fnArg(value)),
+  contrast: (el, value) => setCssFunction(el, "filter", "contrast", fnArg(value)),
+  grayscale: (el, value) => setCssFunction(el, "filter", "grayscale", fnArg(value)),
+  hueRotate: (el, value) => setCssFunction(el, "filter", "hue-rotate", fnArg(value)),
+  invert: (el, value) => setCssFunction(el, "filter", "invert", fnArg(value)),
+  saturate: (el, value) => setCssFunction(el, "filter", "saturate", fnArg(value)),
+  sepia: (el, value) => setCssFunction(el, "filter", "sepia", fnArg(value)),
+  dropShadow: (el, value) => setCssFunction(el, "filter", "drop-shadow", fnArg(value)),
 
   // Blend modes
   mixBlendMode: (el, value) => {

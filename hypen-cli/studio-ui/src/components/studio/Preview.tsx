@@ -273,7 +273,7 @@ export function Preview({
       const BUILTIN_ELEMENTS = new Set([
         "Text", "Column", "Row", "Stack", "Box", "Button", "Image",
         "Spacer", "Divider", "Input", "Textarea", "Checkbox", "Switch",
-        "Select", "Option", "List", "LazyColumn", "LazyRow", "ScrollView",
+        "Select", "Option", "List", "LazyColumn", "LazyRow",
         "Link", "Icon", "Badge", "Card", "Dialog", "Overlay",
       ]);
 

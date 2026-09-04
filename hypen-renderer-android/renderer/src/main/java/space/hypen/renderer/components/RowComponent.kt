@@ -155,7 +155,7 @@ class RowComponent : ComponentHandler {
                     gapPx = gap ?: 0f,
                     horizontalArrangement = horizontalArrangement,
                     verticalAlignment = verticalAlignment,
-                    content = renderChildren,
+                    content = { ProvideHypenContentColor(element, renderChildren) },
                 )
             }
         } else {
@@ -169,7 +169,7 @@ class RowComponent : ComponentHandler {
                     LocalRowScope provides this,
                     LocalStretchCrossAxis provides isStretch,
                 ) {
-                    renderChildren()
+                    ProvideHypenContentColor(element, renderChildren)
                 }
             }
         }

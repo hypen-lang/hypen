@@ -25,7 +25,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextRange
@@ -324,4 +328,73 @@ fun BrowserToolbar(
             }
         }
     }
+}
+
+
+/**
+ * Collapsed browser chrome: a small floating pill, roughly the width of an
+ * iPhone Dynamic Island, showing connection status + the current URL.
+ * Mirrors the collapsed "island" of the desktop `hypen-browser` shell
+ * (`hypen-browser/src/shell.rs`): dark chip, status dot, URL, chevron.
+ * Tapping expands back to the full [BrowserToolbar].
+ */
+@Composable
+fun CollapsedUrlPill(
+    currentUrl: String,
+    isConnected: Boolean,
+    isLoading: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val statusColor = when {
+        isLoading -> Color(0xFF8A8F98)
+        isConnected -> Color(0xFF22C55E)
+        else -> Color(0xFFEF4444)
+    }
+    Row(
+        modifier = modifier
+            .widthIn(min = 120.dp, max = 180.dp)
+            .height(32.dp)
+            .clip(CircleShape)
+            .background(Color(0xFF1F1F24))
+            .border(1.dp, Color(0xFF26262C), CircleShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(statusColor)
+        )
+        Text(
+            text = displayHost(currentUrl),
+            style = TextStyle(color = Color(0xFFF4F4F5), fontSize = 12.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Text(
+            text = "\u25BE",
+            style = TextStyle(color = Color(0xFF8A8F98), fontSize = 10.sp),
+        )
+    }
+}
+
+/** `ws://10.0.2.2:3000/path` → `10.0.2.2:3000` — what fits in a pill. */
+internal fun displayHost(url: String): String {
+    var stripped = url
+    for (prefix in listOf("wss://", "ws://", "https://", "http://")) {
+        if (stripped.startsWith(prefix)) {
+            stripped = stripped.removePrefix(prefix)
+            break
+        }
+    }
+    return stripped.substringBefore('/').ifEmpty { url }
 }

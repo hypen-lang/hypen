@@ -1,11 +1,19 @@
 package space.hypen.renderer.components
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.requiredSize
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.sp
+import com.squareup.moshi.Moshi
+import space.hypen.renderer.HypenLoggers
+import space.hypen.renderer.applicators.ColorParser
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
@@ -29,9 +37,6 @@ class IconComponent : ComponentHandler {
         modifier: Modifier,
         renderChildren: @Composable () -> Unit,
     ) {
-        val iconPaths = element.props["__iconPaths"] as? List<*>
-            ?: element.props["__iconPaths.0"] as? List<*>
-
         val viewBoxStr = element.getStringProp("__iconViewBox.0")
             ?: element.getStringProp("__iconViewBox")
             ?: "0 0 24 24"
@@ -43,74 +48,90 @@ class IconComponent : ComponentHandler {
         val colorStr = element.getStringProp("color.0")
             ?: element.getStringProp("color")
 
-        val color = colorStr?.let { parseColor(it) } ?: Color.Unspecified
+        val color = colorStr?.let { ColorParser.parse(it) } ?: Color.Unspecified
 
         val viewBox = remember(viewBoxStr) { parseViewBox(viewBoxStr) }
 
-        if (iconPaths != null && iconPaths.isNotEmpty()) {
-            val parsedPaths = remember(iconPaths) {
-                iconPaths.mapNotNull { it as? Map<*, *> }.map { pathData ->
-                    IconPathData(
-                        d = pathData["d"] as? String ?: "",
-                        fill = pathData["fill"] as? String ?: "none",
-                        stroke = pathData["stroke"] as? String ?: "currentColor",
-                        strokeWidth = (pathData["strokeWidth"] as? Number)?.toFloat() ?: 2f,
-                        strokeLinecap = pathData["strokeLinecap"] as? String ?: "round",
-                        strokeLinejoin = pathData["strokeLinejoin"] as? String ?: "round",
-                    )
-                }
+        val rawPaths = element.props["__iconPaths"] ?: element.props["__iconPaths.0"]
+        val parsedPaths = remember(rawPaths) { resolveIconPaths(rawPaths) }
+
+        // The `size` applicator already put width/height on `modifier` from the
+        // same `size.0` prop, so the Canvas would be double-framed and — when
+        // an ancestor hands down a zero constraint (e.g. a Row allocating a
+        // zero flex basis) — `Modifier.size` coerces to 0x0 and draws nothing.
+        // `requiredSize` ignores incoming constraints, mirroring the Swift
+        // renderer which strips width/height before framing its Canvas.
+        val sized = modifier.requiredSize(size.dp)
+
+        if (parsedPaths.isNullOrEmpty()) {
+            // Never emit nothing: a missing icon must still reserve its box
+            // (otherwise the wrapping Button collapses to its padding) and
+            // must be diagnosable. iOS/web show the icon name as a placeholder.
+            val name = element.getStringProp("0") ?: element.getStringProp("name") ?: "?"
+            HypenLoggers.components.warn {
+                "Icon(${element.id}) '$name' has no usable __iconPaths " +
+                    "(value=${rawPaths?.javaClass?.simpleName ?: "null"}); " +
+                    "props=${element.props.keys}"
             }
+            Box(modifier = sized, contentAlignment = Alignment.Center) {
+                Text(
+                    text = name,
+                    fontSize = (size * 0.4f).sp,
+                    color = if (color != Color.Unspecified) color else Color.Gray,
+                    maxLines = 1,
+                    overflow = TextOverflow.Clip,
+                )
+            }
+            return
+        }
 
-            Canvas(
-                modifier = modifier.size(size.dp)
-            ) {
-                val scaleX = this.size.width / viewBox.width
-                val scaleY = this.size.height / viewBox.height
+        Canvas(modifier = sized) {
+            val scaleX = this.size.width / viewBox.width
+            val scaleY = this.size.height / viewBox.height
 
-                for (pathData in parsedPaths) {
-                    val path = parseSVGPath(pathData.d, scaleX, scaleY)
+            for (pathData in parsedPaths) {
+                val path = parseSVGPath(pathData.d, scaleX, scaleY)
 
-                    val resolvedColor = if (color != Color.Unspecified) color else Color.Black
+                val resolvedColor = if (color != Color.Unspecified) color else Color.Black
 
-                    // Fill
-                    if (pathData.fill != "none") {
-                        val fillColor = if (pathData.fill == "currentColor") resolvedColor
-                        else parseColor(pathData.fill) ?: resolvedColor
-                        drawPath(path, fillColor)
+                // Fill
+                if (pathData.fill != "none") {
+                    val fillColor = if (pathData.fill == "currentColor") resolvedColor
+                    else ColorParser.parse(pathData.fill) ?: resolvedColor
+                    drawPath(path, fillColor)
+                }
+
+                // Stroke
+                if (pathData.stroke != "none") {
+                    val strokeColor = if (pathData.stroke == "currentColor") resolvedColor
+                    else ColorParser.parse(pathData.stroke) ?: resolvedColor
+
+                    val cap = when (pathData.strokeLinecap) {
+                        "round" -> StrokeCap.Round
+                        "square" -> StrokeCap.Square
+                        else -> StrokeCap.Butt
+                    }
+                    val join = when (pathData.strokeLinejoin) {
+                        "round" -> StrokeJoin.Round
+                        "bevel" -> StrokeJoin.Bevel
+                        else -> StrokeJoin.Miter
                     }
 
-                    // Stroke
-                    if (pathData.stroke != "none") {
-                        val strokeColor = if (pathData.stroke == "currentColor") resolvedColor
-                        else parseColor(pathData.stroke) ?: resolvedColor
-
-                        val cap = when (pathData.strokeLinecap) {
-                            "round" -> StrokeCap.Round
-                            "square" -> StrokeCap.Square
-                            else -> StrokeCap.Butt
-                        }
-                        val join = when (pathData.strokeLinejoin) {
-                            "round" -> StrokeJoin.Round
-                            "bevel" -> StrokeJoin.Bevel
-                            else -> StrokeJoin.Miter
-                        }
-
-                        drawPath(
-                            path,
-                            strokeColor,
-                            style = Stroke(
-                                width = pathData.strokeWidth * scaleX,
-                                cap = cap,
-                                join = join,
-                            )
+                    drawPath(
+                        path,
+                        strokeColor,
+                        style = Stroke(
+                            width = pathData.strokeWidth * scaleX,
+                            cap = cap,
+                            join = join,
                         )
-                    }
+                    )
                 }
             }
         }
     }
 
-    private data class IconPathData(
+    internal data class IconPathData(
         val d: String,
         val fill: String,
         val stroke: String,
@@ -118,6 +139,44 @@ class IconComponent : ComponentHandler {
         val strokeLinecap: String,
         val strokeLinejoin: String,
     )
+
+    companion object {
+        private val jsonListAdapter by lazy {
+            Moshi.Builder().build().adapter(List::class.java)
+        }
+
+        /**
+         * Normalise the engine's `__iconPaths` prop into path records.
+         *
+         * The wire value is a JSON array of objects (Moshi decodes it to
+         * `List<Map>`), but be tolerant of a JSON-encoded string as well so a
+         * transport that stringifies nested values degrades to a warning
+         * rather than an invisible icon. Returns null when nothing usable.
+         */
+        internal fun resolveIconPaths(raw: Any?): List<IconPathData>? {
+            val list: List<*> = when (raw) {
+                is List<*> -> raw
+                is String -> runCatching { jsonListAdapter.fromJson(raw) }.getOrNull() ?: return null
+                else -> return null
+            }
+            val paths = list.mapNotNull { it as? Map<*, *> }.mapNotNull { pathData ->
+                val d = pathData["d"] as? String ?: return@mapNotNull null
+                IconPathData(
+                    d = d,
+                    fill = pathData["fill"] as? String ?: "none",
+                    stroke = pathData["stroke"] as? String ?: "currentColor",
+                    strokeWidth = when (val w = pathData["strokeWidth"]) {
+                        is Number -> w.toFloat()
+                        is String -> w.toFloatOrNull() ?: 2f
+                        else -> 2f
+                    },
+                    strokeLinecap = pathData["strokeLinecap"] as? String ?: "round",
+                    strokeLinejoin = pathData["strokeLinejoin"] as? String ?: "round",
+                )
+            }
+            return paths.ifEmpty { null }
+        }
+    }
 
     private data class ViewBox(
         val x: Float = 0f,
@@ -132,37 +191,6 @@ class IconComponent : ComponentHandler {
             ViewBox(parts[0], parts[1], parts[2], parts[3])
         } else {
             ViewBox()
-        }
-    }
-
-    private fun parseColor(str: String): Color? {
-        return try {
-            when {
-                str.startsWith("#") -> {
-                    val hex = str.removePrefix("#")
-                    when (hex.length) {
-                        3 -> {
-                            val r = hex[0].toString().repeat(2).toInt(16)
-                            val g = hex[1].toString().repeat(2).toInt(16)
-                            val b = hex[2].toString().repeat(2).toInt(16)
-                            Color(r, g, b)
-                        }
-                        6 -> Color(android.graphics.Color.parseColor(str))
-                        8 -> Color(android.graphics.Color.parseColor(str))
-                        else -> null
-                    }
-                }
-                str.startsWith("rgb") -> null // Simplified — could parse rgb() later
-                str == "black" -> Color.Black
-                str == "white" -> Color.White
-                str == "red" -> Color.Red
-                str == "green" -> Color.Green
-                str == "blue" -> Color.Blue
-                str == "gray" || str == "grey" -> Color.Gray
-                else -> null
-            }
-        } catch (_: Exception) {
-            null
         }
     }
 

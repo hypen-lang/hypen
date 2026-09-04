@@ -336,37 +336,9 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
         return Some(vec![CssProperty::new("grid-auto-rows", value)]);
     }
 
-    // Position
-    match utility {
-        "static" => return Some(vec![CssProperty::new("position", "static")]),
-        "fixed" => return Some(vec![CssProperty::new("position", "fixed")]),
-        "absolute" => return Some(vec![CssProperty::new("position", "absolute")]),
-        "relative" => return Some(vec![CssProperty::new("position", "relative")]),
-        "sticky" => return Some(vec![CssProperty::new("position", "sticky")]),
-        _ => {}
-    }
-
-    // Inset (top, right, bottom, left)
-    if let Some(val) = utility.strip_prefix("inset-") {
-        let value = inset_value(val)?;
-        return Some(vec![CssProperty::new("inset", value)]);
-    }
-    if let Some(val) = utility.strip_prefix("top-") {
-        let value = inset_value(val)?;
-        return Some(vec![CssProperty::new("top", value)]);
-    }
-    if let Some(val) = utility.strip_prefix("right-") {
-        let value = inset_value(val)?;
-        return Some(vec![CssProperty::new("right", value)]);
-    }
-    if let Some(val) = utility.strip_prefix("bottom-") {
-        let value = inset_value(val)?;
-        return Some(vec![CssProperty::new("bottom", value)]);
-    }
-    if let Some(val) = utility.strip_prefix("left-") {
-        let value = inset_value(val)?;
-        return Some(vec![CssProperty::new("left", value)]);
-    }
+    // Positioning (`static`/`absolute`/`relative`/…) and inset utilities are
+    // rejected up-front in `parser::forbidden_utility_reason` — Hypen has no
+    // CSS positioning model; overlays are `Stack { ... }` + alignment.
 
     // Z-index
     //
@@ -673,67 +645,6 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
     None
 }
 
-fn inset_value(key: &str) -> Option<&'static str> {
-    match key {
-        "0" => Some("0px"),
-        "px" => Some("1px"),
-        "0.5" => Some("0.125rem"),
-        "1" => Some("0.25rem"),
-        "1.5" => Some("0.375rem"),
-        "2" => Some("0.5rem"),
-        "2.5" => Some("0.625rem"),
-        "3" => Some("0.75rem"),
-        "3.5" => Some("0.875rem"),
-        "4" => Some("1rem"),
-        "5" => Some("1.25rem"),
-        "6" => Some("1.5rem"),
-        "7" => Some("1.75rem"),
-        "8" => Some("2rem"),
-        "9" => Some("2.25rem"),
-        "10" => Some("2.5rem"),
-        "11" => Some("2.75rem"),
-        "12" => Some("3rem"),
-        "14" => Some("3.5rem"),
-        "16" => Some("4rem"),
-        "20" => Some("5rem"),
-        "24" => Some("6rem"),
-        "28" => Some("7rem"),
-        "32" => Some("8rem"),
-        "36" => Some("9rem"),
-        "40" => Some("10rem"),
-        "44" => Some("11rem"),
-        "48" => Some("12rem"),
-        "52" => Some("13rem"),
-        "56" => Some("14rem"),
-        "60" => Some("15rem"),
-        "64" => Some("16rem"),
-        "72" => Some("18rem"),
-        "80" => Some("20rem"),
-        "96" => Some("24rem"),
-        "auto" => Some("auto"),
-        "1/2" => Some("50%"),
-        "1/3" => Some("33.333333%"),
-        "2/3" => Some("66.666667%"),
-        "1/4" => Some("25%"),
-        "3/4" => Some("75%"),
-        "full" => Some("100%"),
-        _ => None,
-    }
-}
-
-/// Parse arbitrary layout values like `top-[10px]`, `inset-[5%]`
-pub fn parse_arbitrary(prefix: &str, value: &str) -> Option<Vec<CssProperty>> {
-    let property = match prefix {
-        "top" => "top",
-        "right" => "right",
-        "bottom" => "bottom",
-        "left" => "left",
-        "inset" => "inset",
-        _ => return None,
-    };
-    Some(vec![CssProperty::new(property, value)])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -792,18 +703,13 @@ mod tests {
         assert_eq!(props[0].property, "grid-template-columns");
     }
 
+    /// Positioning is not a layout utility in Hypen — it never maps to CSS.
+    /// (The hard error is raised one level up, in `parser::parse_class`.)
     #[test]
-    fn test_position() {
-        let props = parse("absolute").unwrap();
-        assert_eq!(props[0].property, "position");
-        assert_eq!(props[0].value, "absolute");
-    }
-
-    #[test]
-    fn test_top() {
-        let props = parse("top-0").unwrap();
-        assert_eq!(props[0].property, "top");
-        assert_eq!(props[0].value, "0px");
+    fn test_position_and_inset_never_map() {
+        for utility in ["absolute", "relative", "fixed", "sticky", "static", "top-0", "inset-0", "-left-2"] {
+            assert!(parse(utility).is_none(), "{utility} must not map to CSS");
+        }
     }
 
     /// Regression: z-index used to hardcode 0/10/20/30/40/50/auto, so any

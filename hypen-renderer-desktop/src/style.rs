@@ -2684,14 +2684,26 @@ pub fn prop_dim_at(node: &Node, name: &str, viewport: Viewport) -> Option<Dim> {
 /// participate in layout), falling back to the bare / dotted / kebab
 /// percent reads and finally the numeric length chain.
 pub fn prop_dim_with(node: &Node, name: &str, vs: &VariantState) -> Option<Dim> {
-    // If a variant-decorated key wins, prefer its percent value first so
-    // `width:hover.0 = "50%"` resolves as a percent rather than falling
-    // through to the length chain.
+    // A winning variant owns the WHOLE dimension, regardless of whether its
+    // unit family matches the base. In particular, Hypeflix uses
+    // `width.0 = "100%"` with `width@md.0 = "11rem"` (and a sibling uses
+    // `"auto"`). Reading only variant percentages here and then probing the
+    // bare percent made the base `100%` incorrectly beat both wide values.
     if let Some(decorated) = pick_base(node, name, vs.viewport.w, &vs.active_states) {
         if decorated != name {
-            if let Some(s) = prop_str(node, &decorated) {
-                if let Some(pct) = parse_percent(s) {
-                    return Some(Dim::Percent(pct));
+            if let Some(value) = lookup_prop(node, &decorated) {
+                if let Some(s) = value.as_str() {
+                    if let Some(pct) = parse_percent(s) {
+                        return Some(Dim::Percent(pct));
+                    }
+                    // `auto` is an authored override, not an invalid value
+                    // that should fall through to the base dimension.
+                    if s.trim().eq_ignore_ascii_case("auto") {
+                        return None;
+                    }
+                }
+                if let Some(length) = value_to_f32(value, Some(vs.viewport)) {
+                    return Some(Dim::Length(length));
                 }
             }
         }
@@ -4180,6 +4192,40 @@ mod tests {
                 &VariantState::paint(vp(800.0), vec!["focus"])
             ),
             Some(Dim::Length(200.0))
+        );
+    }
+
+    #[test]
+    fn breakpoint_length_overrides_base_percent_dimension() {
+        let node = node_with(&[
+            ("width.0", serde_json::json!("100%")),
+            ("width@md.0", serde_json::json!("11rem")),
+        ]);
+
+        assert_eq!(
+            prop_dim_with(&node, "width", &VariantState::layout(vp(640.0))),
+            Some(Dim::Percent(1.0))
+        );
+        assert_eq!(
+            prop_dim_with(&node, "width", &VariantState::layout(vp(1024.0))),
+            Some(Dim::Length(176.0))
+        );
+    }
+
+    #[test]
+    fn breakpoint_auto_overrides_base_percent_dimension() {
+        let node = node_with(&[
+            ("width.0", serde_json::json!("100%")),
+            ("width@md.0", serde_json::json!("auto")),
+        ]);
+
+        assert_eq!(
+            prop_dim_with(&node, "width", &VariantState::layout(vp(640.0))),
+            Some(Dim::Percent(1.0))
+        );
+        assert_eq!(
+            prop_dim_with(&node, "width", &VariantState::layout(vp(1024.0))),
+            None
         );
     }
 

@@ -32,6 +32,7 @@ import {
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { parseHypenDocument, getContextAtPosition, isInString, initWasmParser, isWasmParserAvailable } from "./parser";
 import { a11yDiagnostics, initWasmEngine } from "./a11y";
+import { tailwindDiagnostics } from "./tailwind";
 import { computeQuickFix } from "./quickfix";
 
 // Create a connection for the server
@@ -220,6 +221,10 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
   // No-op until the engine WASM has loaded; parse failures return [] so a
   // syntax error is never double-reported.
   diagnostics.push(...a11yDiagnostics(text));
+
+  // `.tw("absolute …")` & friends: CSS positioning is a hard error in the
+  // engine's Tailwind parser (Hypen has no positioning model); mirror it here.
+  diagnostics.push(...tailwindDiagnostics(text));
 
   // Send the computed diagnostics to VSCode
   connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
