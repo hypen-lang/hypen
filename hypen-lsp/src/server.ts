@@ -231,7 +231,7 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 
 const commonComponents = [
   // Layout
-  "Column", "Row", "Container", "Box", "Center", "Stack", "Grid", "Spacer", "Divider",
+  "Column", "Row", "Container", "Box", "Center", "Stack", "Grid", "Spacer", "Divider", "SafeArea",
   // Content
   "Text", "Heading", "Paragraph", "Image", "Avatar", "Badge", "Card", "Spinner", "ProgressBar",
   // Input
@@ -352,6 +352,13 @@ const componentSignatures: Record<string, ComponentSignature> = {
     label: "Divider",
     documentation: "A thin horizontal line for visual separation. Style with `.color()` and `.height()`.\n\n```hypen\nColumn {\n  Text(\"Above\")\n  Divider\n  Text(\"Below\")\n}\n```",
     parameters: []
+  },
+  SafeArea: {
+    label: "SafeArea(edges?: List) { children }",
+    documentation: "Full-size vertical container that pads its content by the device safe-area insets (notch, status bar, home indicator). By default all four edges are inset; pass `edges` to limit which ones.\n\n```hypen\nSafeArea {\n  Column {\n    Text(\"Content clear of the notch\")\n  }\n}\n\nSafeArea(edges: [\"top\", \"bottom\"]) {\n  Text(\"Only vertical insets applied\")\n}\n```\n\nEmbedders can override the insets per edge (renderer option / environment value); unspecified edges keep the platform default.",
+    parameters: [
+      { label: "edges", documentation: "List of edges to inset: `\"top\"`, `\"right\"`, `\"bottom\"`, `\"left\"`. Omitted or empty means all four. Unknown values are ignored." }
+    ]
   },
 
   // ── Content ──

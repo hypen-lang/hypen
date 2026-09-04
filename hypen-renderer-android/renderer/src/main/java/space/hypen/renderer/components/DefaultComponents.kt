@@ -17,6 +17,7 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     register(SpacerComponent())
     register(StackComponent())
     register(GridComponent())
+    register(SafeAreaComponent())
 
     // Content components
     register(TextComponent())

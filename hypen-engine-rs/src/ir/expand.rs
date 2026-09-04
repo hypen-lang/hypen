@@ -350,7 +350,18 @@ fn process_applicators(
                         .keys()
                         .all(|k| crate::portable::variant::is_variant_token(k))
                 {
-                    for (variant, value) in map {
+                    // Emit in canonical precedence order (default, then
+                    // breakpoints ascending, then states). The parser's map is
+                    // a `HashMap`, so its iteration order is arbitrary — and
+                    // the DOM renderer appends one equal-specificity CSS rule
+                    // per variant and lets the cascade pick the LAST match, so
+                    // an arbitrary order would hand `sm` the win over `lg` on a
+                    // wide window, differently on each run.
+                    let mut entries: Vec<_> = map.iter().collect();
+                    entries.sort_by_key(|(variant, _)| {
+                        crate::portable::variant::variant_token_rank(variant)
+                    });
+                    for (variant, value) in entries {
                         let prop_key = if variant == crate::portable::variant::DEFAULT_KEY {
                             format!("{}.0", applicator.name)
                         } else if crate::portable::variant::is_breakpoint(variant) {
@@ -2108,6 +2119,35 @@ mod tests {
         } else {
             panic!("expected static padding@md.0");
         }
+    }
+
+    #[test]
+    fn test_value_map_variant_props_are_ordered_by_precedence() {
+        // The parser hands the map over as a HashMap, so emit order has to be
+        // imposed by the engine: default, breakpoints ascending, then states.
+        // The DOM renderer appends one equal-specificity rule per variant and
+        // lets the cascade pick the last match, so an arbitrary order would
+        // let `sm` beat `lg` on a wide window — differently on each run.
+        let input = r#"Box {}.background({xl: "e", default: "a", hover: "f", md: "c", sm: "b", lg: "d"})"#;
+        let element = parse_to_element(input);
+
+        let order: Vec<&str> = element
+            .props
+            .keys()
+            .map(|k| k.as_str())
+            .filter(|k| k.starts_with("background"))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "background.0",
+                "background@sm.0",
+                "background@md.0",
+                "background@lg.0",
+                "background@xl.0",
+                "background:hover.0",
+            ],
+        );
     }
 
     #[test]

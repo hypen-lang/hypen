@@ -86,6 +86,7 @@ extension ComponentRegistry {
         registry.register(ListComponent())
         registry.register(ScrollViewComponent())
         registry.register(GridComponent())
+        registry.register(SafeAreaComponent())
 
         // Content components
         registry.register(TextComponent())

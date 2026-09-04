@@ -34,6 +34,7 @@ import { selectExample } from "./components/select.ts";
 import { spacerExample } from "./components/spacer.ts";
 import { stackExample } from "./components/stack.ts";
 import { dividerExample } from "./components/divider.ts";
+import { safeareaExample } from "./components/safearea.ts";
 import { gridExample } from "./components/grid.ts";
 import { cardExample } from "./components/card.ts";
 import { headingExample } from "./components/heading.ts";
@@ -115,6 +116,7 @@ const COMPONENTS: GalleryExample[] = [
   { key: "spacer", name: "Spacer", category: "component", ...spacerExample },
   { key: "stack", name: "Stack", category: "component", ...stackExample },
   { key: "divider", name: "Divider", category: "component", ...dividerExample },
+  { key: "safearea", name: "SafeArea", category: "component", ...safeareaExample },
   { key: "grid", name: "Grid", category: "component", ...gridExample },
   { key: "card", name: "Card", category: "component", ...cardExample },
   { key: "heading", name: "Heading", category: "component", ...headingExample },

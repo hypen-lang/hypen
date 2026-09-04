@@ -9,6 +9,8 @@
 //!
 //! - `Row` → row.
 //! - `Column` / `Container` / unknown → column.
+//! - `SafeArea` → column, full-size, padded by the embedder's
+//!   [`SafeAreaInsets`] on the edges its `edges` prop selects.
 //!
 //! Style props understood (`style.rs` has the full list):
 //!
@@ -162,6 +164,213 @@ pub const DEFAULT_VIDEO_WIDTH_PX: f32 = 320.0;
 /// use their natural aspect; a video has none until (unless) a poster
 /// loads, so the universal 16:9 default applies.
 pub const DEFAULT_VIDEO_ASPECT: f32 = 16.0 / 9.0;
+
+/// Element type of the safe-area container (`SafeArea { ... }`). The
+/// engine emits primitive element types verbatim in their DSL spelling
+/// — `SafeArea` arrives PascalCase on the wire, exactly like
+/// `ProgressBar` — and we match it case-insensitively like every other
+/// container type here.
+pub const SAFE_AREA_TYPE: &str = "SafeArea";
+
+/// Desktop's base platform safe-area insets: zero on every edge. A
+/// desktop window has no notch, home indicator or rounded-corner
+/// region, so with standard OS decorations an unconfigured `SafeArea`
+/// is exactly a full-size `Column`.
+///
+/// The one native unsafe region a desktop window CAN have is the
+/// window-controls bar (close / minimize / maximize) drawn over the
+/// content — which only happens when the embedder opts into the macOS
+/// unified titlebar ([`crate::DesktopApp::unified_titlebar`]); on
+/// Windows and Linux the native decorations live outside the client
+/// area. The window wiring accounts for that via
+/// [`window_controls_platform_insets`] and
+/// `TaffyState::set_platform_safe_area`, so this constant stays the
+/// zero base. Embedders with some other unsafe region (an overlay HUD,
+/// a custom client-side titlebar of their own) declare it through
+/// [`SafeAreaInsets`].
+pub const DESKTOP_SAFE_AREA_DEFAULT: crate::style::Padding = crate::style::Padding {
+    top: 0.0,
+    right: 0.0,
+    bottom: 0.0,
+    left: 0.0,
+};
+
+/// Height in logical px of the macOS window-controls strip (the
+/// close / minimize / maximize "traffic lights") when the unified
+/// titlebar merges it into the content: the standard NSWindow titlebar
+/// is 28 pt and the buttons sit centered inside it.
+pub const WINDOW_CONTROLS_BAR_HEIGHT: f32 = 28.0;
+
+/// The platform safe-area insets for a window's decoration setup:
+/// the window-controls bar is unsafe only where it is actually drawn
+/// over the content, i.e. under the macOS unified titlebar
+/// (`fullSizeContentView`). Everywhere else native decorations sit
+/// outside the client area and every edge stays zero.
+///
+/// Pure so it is testable off-macOS: callers pass
+/// `cfg!(target_os = "macos")` for `macos`.
+pub fn window_controls_platform_insets(
+    unified_titlebar: bool,
+    macos: bool,
+) -> crate::style::Padding {
+    if unified_titlebar && macos {
+        crate::style::Padding {
+            top: WINDOW_CONTROLS_BAR_HEIGHT,
+            ..DESKTOP_SAFE_AREA_DEFAULT
+        }
+    } else {
+        DESKTOP_SAFE_AREA_DEFAULT
+    }
+}
+
+/// Embedder-supplied safe-area insets, in **logical** px, one optional
+/// value per edge.
+///
+/// `None` on an edge means "use the platform default for that edge" —
+/// [`DESKTOP_SAFE_AREA_DEFAULT`], i.e. zero. Overrides therefore merge
+/// per-edge over the defaults rather than replacing them wholesale:
+/// `SafeAreaInsets::default().with_top(28.0)` pads only the top and
+/// leaves the other three edges at the platform value. Desktop's
+/// defaults happen to be zero, but the merge shape is deliberately the
+/// same one the iOS / Android / web renderers use, where they are not.
+///
+/// ```rust
+/// use hypen_renderer_desktop::SafeAreaInsets;
+/// // Reserve room for a 28pt custom titlebar drawn over the content.
+/// let insets = SafeAreaInsets::default().with_top(28.0);
+/// assert_eq!(insets.resolved().top, 28.0);
+/// assert_eq!(insets.resolved().bottom, 0.0);
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct SafeAreaInsets {
+    pub top: Option<f32>,
+    pub right: Option<f32>,
+    pub bottom: Option<f32>,
+    pub left: Option<f32>,
+}
+
+impl SafeAreaInsets {
+    /// Override every edge with the same value.
+    pub fn all(v: f32) -> Self {
+        Self {
+            top: Some(v),
+            right: Some(v),
+            bottom: Some(v),
+            left: Some(v),
+        }
+    }
+
+    pub fn with_top(mut self, v: f32) -> Self {
+        self.top = Some(v);
+        self
+    }
+
+    pub fn with_right(mut self, v: f32) -> Self {
+        self.right = Some(v);
+        self
+    }
+
+    pub fn with_bottom(mut self, v: f32) -> Self {
+        self.bottom = Some(v);
+        self
+    }
+
+    pub fn with_left(mut self, v: f32) -> Self {
+        self.left = Some(v);
+        self
+    }
+
+    /// Merge the per-edge overrides over the zero base defaults. The
+    /// result is the *effective* inset for each edge, still in logical
+    /// px (the layout multiplies by `scale` on its way into Taffy).
+    /// Inside the renderer prefer [`Self::resolved_over`] with the
+    /// window's actual platform insets.
+    pub fn resolved(self) -> crate::style::Padding {
+        self.resolved_over(DESKTOP_SAFE_AREA_DEFAULT)
+    }
+
+    /// Merge the per-edge overrides over the given platform defaults —
+    /// an edge left `None` falls back to the platform value for that
+    /// edge, an edge that is `Some` (including `Some(0.0)`) wins.
+    pub fn resolved_over(self, d: crate::style::Padding) -> crate::style::Padding {
+        crate::style::Padding {
+            top: self.top.unwrap_or(d.top),
+            right: self.right.unwrap_or(d.right),
+            bottom: self.bottom.unwrap_or(d.bottom),
+            left: self.left.unwrap_or(d.left),
+        }
+    }
+
+    /// The overrides with every unset edge pinned to the platform value
+    /// — the fully-determined insets the layout actually applies.
+    fn or_defaults(self, d: crate::style::Padding) -> SafeAreaInsets {
+        let r = self.resolved_over(d);
+        SafeAreaInsets {
+            top: Some(r.top),
+            right: Some(r.right),
+            bottom: Some(r.bottom),
+            left: Some(r.left),
+        }
+    }
+
+    /// Fold into a `TaffyState` structure key so changing the insets at
+    /// runtime forces a restyle of the existing tree.
+    fn hash_into(self, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        for edge in [self.top, self.right, self.bottom, self.left] {
+            edge.map(f32::to_bits).hash(h);
+        }
+    }
+}
+
+/// Resolve the safe-area padding a `SafeArea` node contributes, in
+/// logical px: the effective insets (embedder overrides merged over the
+/// platform defaults) masked by the node's `edges` prop.
+///
+/// `edges` is a JSON array of `"top"` / `"right"` / `"bottom"` /
+/// `"left"` (`SafeArea(edges: ["top", "bottom"])`), read from the plain
+/// key or its `.0` applicator-flattened form like every other list prop.
+/// Absent, non-array, or without any usable entry → all four edges; an
+/// explicit non-empty list is honored literally (unknown names dropped,
+/// never widening back to all four), matching the other renderers.
+fn safe_area_padding(node: &crate::tree::Node, insets: SafeAreaInsets) -> crate::style::Padding {
+    let effective = insets.resolved();
+    let listed = node
+        .props
+        .get("edges")
+        .or_else(|| node.props.get("edges.0"))
+        .and_then(|v| v.as_array());
+    let Some(listed) = listed else {
+        return effective;
+    };
+    // The all-edges default applies only when the author gave us nothing to
+    // go on (absent prop, non-array, or a list with no usable entries). An
+    // explicit non-empty list is honored literally: unknown edge names are
+    // ignored rather than fatal — the prop crosses the wire from user DSL —
+    // so a list that names only unknown edges insets nothing, never silently
+    // widening back to all four. Matches the Swift/Android/web renderers.
+    let mut out = crate::style::Padding::default();
+    let mut candidates = false;
+    for name in listed.iter().filter_map(|v| v.as_str()) {
+        let name = name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        candidates = true;
+        match name.to_ascii_lowercase().as_str() {
+            "top" => out.top = effective.top,
+            "right" => out.right = effective.right,
+            "bottom" => out.bottom = effective.bottom,
+            "left" => out.left = effective.left,
+            _ => {}
+        }
+    }
+    if candidates {
+        out
+    } else {
+        effective
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -773,6 +982,18 @@ pub struct TaffyState {
     /// viewport hasn't moved, re-writing the identical root style only
     /// cleared the root's layout cache for nothing.
     last_root_viewport: Option<(u32, u32)>,
+    /// Embedder-configured safe-area insets, applied as padding by every
+    /// `SafeArea` node. Set from the window / app config; defaults to
+    /// "no overrides", which falls back per-edge to `platform_safe_area`.
+    /// Folded (as the effective values) into the structure key so a
+    /// runtime change restyles.
+    safe_area: SafeAreaInsets,
+    /// The window's own platform safe-area insets — non-zero only for a
+    /// decoration setup that draws the window-controls bar over the
+    /// content (macOS unified titlebar; see
+    /// [`window_controls_platform_insets`]). Embedder overrides merge
+    /// per-edge over these.
+    platform_safe_area: crate::style::Padding,
 }
 
 impl TaffyState {
@@ -798,7 +1019,45 @@ impl TaffyState {
             fit_widths: HashMap::new(),
             fit_pass_dirty: true,
             last_root_viewport: None,
+            safe_area: SafeAreaInsets::default(),
+            platform_safe_area: DESKTOP_SAFE_AREA_DEFAULT,
         }
+    }
+
+    /// Configure the safe-area insets every `SafeArea` node pads itself
+    /// by. Per-edge `None` keeps the platform default for that edge
+    /// (zero on desktop), so partial overrides merge. Changing the
+    /// value marks the styles stale — the next compute sees a different
+    /// structure key and restyles.
+    pub fn set_safe_area_insets(&mut self, insets: SafeAreaInsets) {
+        self.safe_area = insets;
+    }
+
+    /// The configured safe-area insets.
+    pub fn safe_area_insets(&self) -> SafeAreaInsets {
+        self.safe_area
+    }
+
+    /// Configure the window's platform safe-area insets — the values an
+    /// edge falls back to when the embedder override leaves it `None`.
+    /// Zero everywhere by default; the window wiring sets the
+    /// window-controls bar here when the macOS unified titlebar draws
+    /// it over the content. Like [`Self::set_safe_area_insets`], a
+    /// change surfaces through the structure key and restyles on the
+    /// next compute.
+    pub fn set_platform_safe_area(&mut self, platform: crate::style::Padding) {
+        self.platform_safe_area = platform;
+    }
+
+    /// The window's platform safe-area insets.
+    pub fn platform_safe_area(&self) -> crate::style::Padding {
+        self.platform_safe_area
+    }
+
+    /// The fully-determined insets the layout applies: embedder
+    /// overrides merged per-edge over the platform values.
+    fn effective_safe_area(&self) -> SafeAreaInsets {
+        self.safe_area.or_defaults(self.platform_safe_area)
     }
 
     /// Force a full rebuild on the next compute. Called when an
@@ -907,7 +1166,8 @@ impl TaffyState {
                         self.renderer_for_taffy.remove(&old);
                     }
                     let active_states = self.interaction.active_states_for(id, node);
-                    let style = node_style_with(node, scale, viewport, &active_states);
+                    let style =
+                        node_style_with(node, scale, viewport, &active_states, self.effective_safe_area());
                     let ctx = node_context(node, scale, viewport);
                     let taffy_id = self.tree.new_leaf_with_context(style, ctx).ok();
                     if let Some(tid) = taffy_id {
@@ -944,7 +1204,8 @@ impl TaffyState {
                 if is_layout_prop_key(name) {
                     if let Some(node) = tree.get(id) {
                         let active_states = self.interaction.active_states_for(id, node);
-                        let style = node_style_with(node, scale, viewport, &active_states);
+                        let style =
+                            node_style_with(node, scale, viewport, &active_states, self.effective_safe_area());
                         let _ = self.tree.set_style(tid, style);
                         if node.element_type == "Text" {
                             let ctx = node_context(node, scale, viewport);
@@ -991,7 +1252,8 @@ impl TaffyState {
                 };
                 if let Some(node) = tree.get(id) {
                     let active_states = self.interaction.active_states_for(id, node);
-                    let style = node_style_with(node, scale, viewport, &active_states);
+                    let style =
+                        node_style_with(node, scale, viewport, &active_states, self.effective_safe_area());
                     let _ = self.tree.set_style(tid, style);
                     if node.element_type == "Text" {
                         let ctx = node_context(node, scale, viewport);
@@ -1179,7 +1441,7 @@ impl TaffyState {
             return;
         };
         let active_states = self.interaction.active_states_for(id, node);
-        let style = node_style_with(node, scale, viewport, &active_states);
+        let style = node_style_with(node, scale, viewport, &active_states, self.effective_safe_area());
         let _ = self.tree.set_style(tid, style);
         // The freshly-built style has an `auto` width again, so any
         // fit-content override we wrote is gone — drop the bookkeeping
@@ -1211,7 +1473,7 @@ impl TaffyState {
         for (tid, rid) in entries {
             if let Some(node) = tree.get(&rid) {
                 let active_states = self.interaction.active_states_for(&rid, node);
-                let style = node_style_with(node, scale, viewport, &active_states);
+                let style = node_style_with(node, scale, viewport, &active_states, self.effective_safe_area());
                 let _ = self.tree.set_style(tid, style);
                 if node.element_type == "Text" {
                     let ctx = node_context(node, scale, viewport);
@@ -1374,7 +1636,7 @@ impl Default for TaffyState {
 /// this key — the renderer's `tree_generation` is decoupled from
 /// Taffy's structure key on purpose so a typing keystroke (one
 /// `SetProp` patch) doesn't force a full Taffy restyle.
-fn taffy_structure_key(viewport: (u32, u32), scale: f32) -> u64 {
+fn taffy_structure_key(viewport: (u32, u32), scale: f32, safe_area: SafeAreaInsets) -> u64 {
     use std::hash::{Hash, Hasher};
     // Width and scale change resolved Style values: tw breakpoints
     // (`md:`, `lg:`) gate on width, and HiDPI scaling multiplies every
@@ -1386,6 +1648,10 @@ fn taffy_structure_key(viewport: (u32, u32), scale: f32) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     viewport.0.hash(&mut h);
     scale.to_bits().hash(&mut h);
+    // Safe-area insets bake into every SafeArea node's padding, so an
+    // embedder changing them mid-session has to restyle for the same
+    // reason a scale change does.
+    safe_area.hash_into(&mut h);
     h.finish()
 }
 
@@ -1411,6 +1677,61 @@ impl LayoutPass {
     /// scroll-aware entry points pass `cull = true` internally.
     pub fn compute(tree: &Tree, text: &mut TextEngine, viewport: (u32, u32), scale: f32) -> Self {
         Self::compute_inner(tree, text, viewport, scale, 0.0, &HashMap::new(), false)
+    }
+
+    /// [`Self::compute`] with embedder-configured safe-area insets —
+    /// the one-shot counterpart of [`TaffyState::set_safe_area_insets`],
+    /// for tests and pre-renders that don't retain a `TaffyState`.
+    pub fn compute_with_insets(
+        tree: &Tree,
+        text: &mut TextEngine,
+        viewport: (u32, u32),
+        scale: f32,
+        insets: SafeAreaInsets,
+    ) -> Self {
+        let mut state = TaffyState::new();
+        state.set_safe_area_insets(insets);
+        Self::compute_inner_state(
+            &mut state,
+            tree,
+            text,
+            viewport,
+            scale,
+            0.0,
+            &HashMap::new(),
+            0,
+            false,
+        )
+    }
+
+    /// [`Self::compute_with_insets`] that also sets the window's
+    /// platform safe-area insets (see
+    /// [`TaffyState::set_platform_safe_area`]) — for tests and
+    /// pre-renders exercising a decoration setup, e.g.
+    /// [`window_controls_platform_insets`]`(true, true)` to lay out as
+    /// under the macOS unified titlebar on any host OS.
+    pub fn compute_with_safe_area(
+        tree: &Tree,
+        text: &mut TextEngine,
+        viewport: (u32, u32),
+        scale: f32,
+        insets: SafeAreaInsets,
+        platform: crate::style::Padding,
+    ) -> Self {
+        let mut state = TaffyState::new();
+        state.set_safe_area_insets(insets);
+        state.set_platform_safe_area(platform);
+        Self::compute_inner_state(
+            &mut state,
+            tree,
+            text,
+            viewport,
+            scale,
+            0.0,
+            &HashMap::new(),
+            0,
+            false,
+        )
     }
 
     /// Page-only scroll, no culling — kept for tests and the demo
@@ -1518,7 +1839,7 @@ impl LayoutPass {
         cull: bool,
     ) -> Self {
         let _ = tree_generation; // tree generation no longer in key
-        let key = taffy_structure_key(viewport, scale);
+        let key = taffy_structure_key(viewport, scale, state.effective_safe_area());
         let viewport_logical = logical_viewport(viewport, scale);
         // Interaction state feeds layout-affecting state variants. A
         // change since the last compute means the resolved per-node
@@ -1535,6 +1856,10 @@ impl LayoutPass {
         // up front so the `&mut state.tree` borrow during the bulk
         // rebuild doesn't conflict with the immutable read.
         let interaction = state.interaction.clone();
+        // Same reason — `build_subtree` takes it by value while
+        // `&mut state.tree` is borrowed. Effective values: embedder
+        // overrides merged over the window's platform insets.
+        let safe_area = state.effective_safe_area();
 
         if needs_rebuild {
             // Cold start or out-of-sync after an unhandled patch.
@@ -1554,6 +1879,7 @@ impl LayoutPass {
                     viewport_logical,
                     &mut state.renderer_for_taffy,
                     &interaction,
+                    safe_area,
                 ) {
                     root_children.push(node_id);
                 }
@@ -2601,6 +2927,7 @@ fn build_subtree(
     viewport: Viewport,
     renderer_for_taffy: &mut HashMap<NodeId, String>,
     interaction: &LayoutInteraction,
+    safe_area: SafeAreaInsets,
 ) -> Option<NodeId> {
     let node = tree.get(node_id)?;
     // Per-node active interaction states for layout-affecting state
@@ -2679,6 +3006,7 @@ fn build_subtree(
                     viewport,
                     renderer_for_taffy,
                     interaction,
+                    safe_area,
                 ) {
                     let tagged = tree
                         .get(child_id)
@@ -2828,9 +3156,16 @@ fn build_subtree(
             apply_size_props(&mut style, node, &vs, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
-                if let Some(c) =
-                    build_subtree(taffy, tree, child_id, scale, viewport, renderer_for_taffy, interaction)
-                {
+                if let Some(c) = build_subtree(
+                    taffy,
+                    tree,
+                    child_id,
+                    scale,
+                    viewport,
+                    renderer_for_taffy,
+                    interaction,
+                    safe_area,
+                ) {
                     children.push(c);
                 }
             }
@@ -2867,9 +3202,16 @@ fn build_subtree(
             apply_size_props(&mut style, node, &vs, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
-                if let Some(c) =
-                    build_subtree(taffy, tree, child_id, scale, viewport, renderer_for_taffy, interaction)
-                {
+                if let Some(c) = build_subtree(
+                    taffy,
+                    tree,
+                    child_id,
+                    scale,
+                    viewport,
+                    renderer_for_taffy,
+                    interaction,
+                    safe_area,
+                ) {
                     children.push(c);
                 }
             }
@@ -2925,9 +3267,47 @@ fn build_subtree(
             apply_position_props(&mut style, node, &vs, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
-                if let Some(c) =
-                    build_subtree(taffy, tree, child_id, scale, viewport, renderer_for_taffy, interaction)
-                {
+                if let Some(c) = build_subtree(
+                    taffy,
+                    tree,
+                    child_id,
+                    scale,
+                    viewport,
+                    renderer_for_taffy,
+                    interaction,
+                    safe_area,
+                ) {
+                    children.push(c);
+                }
+            }
+            let id = taffy.new_with_children(style, &children).ok()?;
+            renderer_for_taffy.insert(id, node_id.to_string());
+            Some(id)
+        }
+        et if et.eq_ignore_ascii_case(SAFE_AREA_TYPE) => {
+            // Full-size vertical container that pads itself by the
+            // effective safe-area insets on the edges its `edges` prop
+            // selects — see `safe_area_style`. Zero insets by default
+            // on desktop, so an unconfigured SafeArea lays out exactly
+            // like a full-size Column.
+            let mut style = safe_area_style(node, &vs, scale, safe_area);
+            apply_flex_props(&mut style, node, &vs, scale);
+            apply_alignment_props(&mut style, node, viewport);
+            apply_size_props(&mut style, node, &vs, scale);
+            apply_overflow_props(&mut style, node, viewport);
+            apply_position_props(&mut style, node, &vs, scale);
+            let mut children = Vec::new();
+            for child_id in tree.children_of(node_id) {
+                if let Some(c) = build_subtree(
+                    taffy,
+                    tree,
+                    child_id,
+                    scale,
+                    viewport,
+                    renderer_for_taffy,
+                    interaction,
+                    safe_area,
+                ) {
                     children.push(c);
                 }
             }
@@ -2976,9 +3356,16 @@ fn build_subtree(
             apply_position_props(&mut style, node, &vs, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
-                if let Some(c) =
-                    build_subtree(taffy, tree, child_id, scale, viewport, renderer_for_taffy, interaction)
-                {
+                if let Some(c) = build_subtree(
+                    taffy,
+                    tree,
+                    child_id,
+                    scale,
+                    viewport,
+                    renderer_for_taffy,
+                    interaction,
+                    safe_area,
+                ) {
                     children.push(c);
                 }
             }
@@ -3084,6 +3471,10 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
             | "flex-direction"
             | "gridcolumns"
             | "grid-columns"
+            // SafeArea's edge mask — picks which safe-area insets land
+            // in the node's Taffy padding (`safe_area_style`), so a
+            // live change to it has to restyle like any other padding.
+            | "edges"
             | "inset"
             | "overflow"
             | "overflowx"
@@ -3115,6 +3506,7 @@ pub(crate) fn node_style_with(
     scale: f32,
     viewport: Viewport,
     active_states: &[&str],
+    safe_area: SafeAreaInsets,
 ) -> Style {
     let vs = VariantState::paint(viewport, active_states.to_vec());
     let et = node.element_type.as_str();
@@ -3247,6 +3639,9 @@ pub(crate) fn node_style_with(
             border: border_to_taffy(border_with(node, &vs), scale),
             ..Default::default()
         }
+    } else if et.eq_ignore_ascii_case(SAFE_AREA_TYPE) {
+        // Mirror of `build_subtree`'s SafeArea branch.
+        safe_area_style(node, &vs, scale, safe_area)
     } else if et.eq_ignore_ascii_case("Grid") {
         // Mirror of `build_subtree`'s Grid branch — see that comment
         // for the rationale (Search's explore feed needs N equal
@@ -3328,6 +3723,54 @@ pub(crate) fn node_style_with(
     apply_overflow_props(&mut style, node, viewport);
     apply_position_props(&mut style, node, &vs, scale);
     style
+}
+
+/// Base Taffy style for a `SafeArea` container: a full-size vertical
+/// stack (like `App` / a root `Container`) whose padding is the
+/// effective safe-area inset on each included edge, on top of whatever
+/// padding the node itself declares.
+///
+/// The insets are added to the user's padding rather than carried by a
+/// separate wrapper node: Taffy expresses padding as one length per
+/// edge on the node itself, so the sum produces exactly the geometry a
+/// nested wrapper would (inset box outside, user padding inside) with
+/// no second Taffy node per SafeArea, and `.padding(16)` keeps working
+/// unchanged. The SafeArea's own background still fills the whole box
+/// — padding is inside the border box — so it stays full-bleed under
+/// the insets.
+///
+/// Both axes default to 100% of the parent; an explicit `width` /
+/// `height` prop still wins because `apply_size_props` runs after this.
+fn safe_area_style(
+    node: &crate::tree::Node,
+    vs: &VariantState,
+    scale: f32,
+    insets: SafeAreaInsets,
+) -> Style {
+    let pad = padding_with(node, vs);
+    let inset = safe_area_padding(node, insets);
+    let gap_v = prop_f32_with(node, "gap", vs).unwrap_or(DEFAULT_GAP_PX) * scale;
+    Style {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Column,
+        size: Size {
+            width: Dimension::percent(1.0),
+            height: Dimension::percent(1.0),
+        },
+        padding: Rect_ {
+            left: length((pad.left + inset.left) * scale),
+            right: length((pad.right + inset.right) * scale),
+            top: length((pad.top + inset.top) * scale),
+            bottom: length((pad.bottom + inset.bottom) * scale),
+        },
+        margin: margin_to_taffy(margin_with(node, vs), scale),
+        border: border_to_taffy(border_with(node, vs), scale),
+        gap: Size {
+            width: length(gap_v),
+            height: length(gap_v),
+        },
+        ..Default::default()
+    }
 }
 
 /// Base Taffy style for a media (`Video`) leaf. Sized like `Image`

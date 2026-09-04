@@ -17,7 +17,9 @@ import space.hypen.renderer.anim.AnimationCoordinator
 import space.hypen.renderer.anim.ClearFocusOnExit
 import space.hypen.renderer.anim.SettingsMotionPreference
 import space.hypen.renderer.anim.rememberHypenAnimation
+import space.hypen.renderer.components.HypenSafeAreaInsets
 import space.hypen.renderer.components.LocalColumnScope
+import space.hypen.renderer.components.LocalHypenSafeAreaInsets
 import space.hypen.renderer.components.LocalParentAllowsHorizontalExpansion
 import space.hypen.renderer.components.LocalRowScope
 import space.hypen.renderer.components.LocalStretchCrossAxis
@@ -55,6 +57,10 @@ val LocalHypenViewport = compositionLocalOf { DpSize.Unspecified }
  * @param navigation Back-button navigation options. Pass [NavigationOptions.DEFAULT] to enable
  *   with default settings, a custom [NavigationOptions] to configure the action name,
  *   or null (default) to disable back-button handling.
+ * @param safeAreaInsets Overrides the insets `SafeArea` elements pad by. Per-edge optional and
+ *   merged over the platform default, so `HypenSafeAreaInsets(bottom = 0.dp)` keeps the real
+ *   top inset and zeroes only the bottom. Null (default) means every edge uses
+ *   `WindowInsets.safeDrawing`.
  * @param loadingContent Content to show while connecting
  * @param errorContent Content to show on error
  */
@@ -64,6 +70,7 @@ fun HypenApp(
     modifier: Modifier = Modifier,
     config: RemoteEngineConfig = RemoteEngineConfig.DEFAULT,
     navigation: NavigationOptions? = null,
+    safeAreaInsets: HypenSafeAreaInsets? = null,
     loadingContent: @Composable () -> Unit = { DefaultLoadingContent() },
     errorContent: @Composable (String) -> Unit = { DefaultErrorContent(it) },
 ) {
@@ -141,6 +148,7 @@ fun HypenApp(
         LocalActionDispatcher provides actionDispatcher,
         LocalComposeRenderer provides renderer,
         LocalParentAllowsHorizontalExpansion provides true,
+        LocalHypenSafeAreaInsets provides safeAreaInsets,
     ) {
         // Wire up back-button handling when navigation is enabled
         BackNavigationDispatcher(

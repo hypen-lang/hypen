@@ -73,7 +73,7 @@ impl Rgba {
 }
 
 /// Box-model padding in physical pixels.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Padding {
     pub top: f32,
     pub right: f32,

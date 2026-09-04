@@ -156,6 +156,8 @@ import { RerenderTracker, type DebugConfig, defaultDebugConfig } from "./debug.j
 import { setEngine, disposeHypenElement } from "./element-data.js";
 import { ensureA11yStyles } from "./a11y-styles.js";
 import { ensureAnimStyles } from "./anim-styles.js";
+import type { SafeAreaInsetOverrides } from "../safe-area.js";
+import { createSafeAreaHandler } from "./components/safearea.js";
 
 // Interface for the engine that renderer needs
 interface IEngine {
@@ -172,6 +174,16 @@ export interface DOMRendererOptions {
    * renderer for focus on every navigation.
    */
   routeFocus?: "auto" | "off";
+
+  /**
+   * Per-edge override for the insets the `SafeArea` component pads by.
+   * Each edge is optional and merges over the browser's own
+   * `env(safe-area-inset-*)` value, so `{ bottom: 0 }` zeroes only the
+   * bottom edge. Values are CSS px numbers or any CSS length string —
+   * the escape hatch for embedders (native shells, kiosk frames) whose
+   * real unsafe regions the browser cannot report.
+   */
+  safeAreaInsets?: SafeAreaInsetOverrides;
 }
 
 export class DOMRenderer {
@@ -299,6 +311,13 @@ export class DOMRenderer {
     // Text render as muted gray.
     if (!container.style.color) {
       container.style.color = "#000000";
+    }
+
+    // Embedder-supplied safe-area insets: re-register SafeArea with a
+    // handler bound to them (the default registration uses the browser's
+    // own `env(safe-area-inset-*)` values).
+    if (options?.safeAreaInsets) {
+      this.components.register("safearea", createSafeAreaHandler(options.safeAreaInsets));
     }
 
     // Register canvas component and applicators
@@ -1075,6 +1094,18 @@ export class DOMRenderer {
         delete element.dataset.hypenSlot;
       }
       this.notifyParentChildrenChanged(element);
+      return;
+    }
+
+    // SafeArea's `edges` selects which edges carry inset padding, so a
+    // change has to go back through the handler. The generic applicator
+    // path would only emit a bogus `edges` CSS declaration — and canvas
+    // re-derives the same thing from props on its next layout pass.
+    if (
+      (name === "edges" || name === "edges.0") &&
+      element.dataset.hypenType === "safearea"
+    ) {
+      this.components.get("safearea")?.applyProps?.(element, { edges: value });
       return;
     }
 

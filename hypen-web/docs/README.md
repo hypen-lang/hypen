@@ -5,7 +5,7 @@ Welcome to the Hypen component and applicator documentation. This reference guid
 ## Table of Contents
 
 ### Components
-- [Layout Components](./components/layout.md) - Row, Column, Container, Center, Stack, Grid, Spacer, Divider
+- [Layout Components](./components/layout.md) - Row, Column, Container, Center, Stack, Grid, Spacer, Divider, SafeArea
 - [Text Components](./components/text.md) - Text, Heading, Paragraph
 - [Form Components](./components/forms.md) - Input, Button, Textarea, Checkbox, Select, Switch, Slider
 - [Media Components](./components/media.md) - Image, Video, Audio, Icon

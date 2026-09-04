@@ -21,6 +21,11 @@ import {
 } from "./utils.js";
 import { measureText } from "./text.js";
 import {
+  SAFE_AREA_EDGES,
+  getEffectiveSafeAreaInsets,
+  resolveSafeAreaEdges,
+} from "../safe-area.js";
+import {
   getImageNaturalAspect,
   getVideoIntrinsicAspect,
   isVideoNode,
@@ -77,6 +82,23 @@ function isColumnFlow(node: VirtualNode): boolean {
   // `List` is the DSL's stack iterator: vertical unless asked otherwise.
   if (type === "list") return node.props.direction !== "horizontal";
   return !ROW_FLOW_TYPES.has(type);
+}
+
+/**
+ * SafeArea: add the effective safe-area inset to the node's padding on each
+ * edge the `edges` prop selects (all four when absent/empty).
+ *
+ * Additive on purpose — the DOM renderer's element carries safe-area padding
+ * alongside the authored `.padding()`, and canvas has no separate box to
+ * hang one of them on, so the two simply sum here. Mutates `p` in place;
+ * every caller owns a freshly parsed BoxSpacing.
+ */
+function addSafeAreaPadding(p: BoxSpacing, props: Record<string, any>): void {
+  const insets = getEffectiveSafeAreaInsets();
+  const edges = resolveSafeAreaEdges(props.edges);
+  for (const edge of SAFE_AREA_EDGES) {
+    if (edges.has(edge)) p[edge] += insets[edge];
+  }
 }
 
 /**
@@ -486,7 +508,7 @@ function buildTaffyStyle(
   const h = parseSize(props.height);
 
   // Component-type defaults
-  if (type === "app" || type === "spacer") {
+  if (type === "app" || type === "spacer" || type === "safearea") {
     style.size = {
       width: w !== null ? w : "100%",
       height: h !== null ? h : "100%",
@@ -599,6 +621,7 @@ function buildTaffyStyle(
   if (props.paddingRight !== undefined) p.right = cssLengthToPx(props.paddingRight) ?? 0;
   if (props.paddingBottom !== undefined) p.bottom = cssLengthToPx(props.paddingBottom) ?? 0;
   if (props.paddingLeft !== undefined) p.left = cssLengthToPx(props.paddingLeft) ?? 0;
+  if (type === "safearea") addSafeAreaPadding(p, props);
   style.padding = { top: p.top, right: p.right, bottom: p.bottom, left: p.left };
 
   // --- Border ----------------------------------------------------------------
@@ -1452,19 +1475,20 @@ function readMarginFallback(props: Record<string, any>): BoxSpacing {
   return m;
 }
 
-function readPaddingFallback(props: Record<string, any>): BoxSpacing {
+function readPaddingFallback(props: Record<string, any>, type?: string): BoxSpacing {
   const p = parseSpacing(props.padding || 0);
   if (props.paddingTop !== undefined) p.top = cssLengthToPx(props.paddingTop) ?? 0;
   if (props.paddingRight !== undefined) p.right = cssLengthToPx(props.paddingRight) ?? 0;
   if (props.paddingBottom !== undefined) p.bottom = cssLengthToPx(props.paddingBottom) ?? 0;
   if (props.paddingLeft !== undefined) p.left = cssLengthToPx(props.paddingLeft) ?? 0;
+  if (type === "safearea") addSafeAreaPadding(p, props);
   return p;
 }
 
-function readBoxFallback(props: Record<string, any>): FallbackBox {
+function readBoxFallback(props: Record<string, any>, type?: string): FallbackBox {
   return {
     margin: readMarginFallback(props),
-    padding: readPaddingFallback(props),
+    padding: readPaddingFallback(props, type),
     border: cssLengthToPx(props.borderWidth) ?? 0,
   };
 }
@@ -1508,6 +1532,7 @@ function intrinsicSizeFallback(
   switch (type) {
     case "app":
     case "spacer":
+    case "safearea":
       return { width: availW, height: availH };
     case "divider":
     case "separator": {
@@ -1638,7 +1663,7 @@ function measureFallback(
 
   const props = node.props;
   const type = node.type.toLowerCase();
-  const box = readBoxFallback(props);
+  const box = readBoxFallback(props, type);
   const insetW = box.padding.left + box.padding.right + box.border * 2;
   const insetH = box.padding.top + box.padding.bottom + box.border * 2;
 
@@ -1835,7 +1860,7 @@ function placeFallback(
   height: number,
 ): void {
   const props = node.props;
-  const box = readBoxFallback(props);
+  const box = readBoxFallback(props, node.type.toLowerCase());
   const borderWidth = box.border;
 
   node.layout = {

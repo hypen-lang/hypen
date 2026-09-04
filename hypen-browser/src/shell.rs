@@ -415,7 +415,17 @@ pub struct TabsUpdatePayload {
 /// }
 /// ```
 ///
-/// The home content is padded so it doesn't sit under the chrome bar.
+/// The shell's own screens (home, connecting, error) and the docked
+/// debug pane sit inside that full-bleed viewport too, so they are
+/// padded down past the chrome. Those paddings are derived from
+/// [`crate::chrome`] — the same constants that describe the window's
+/// safe-area top inset — rather than hand-tuned, so "how tall is the
+/// chrome" has exactly one definition.
+///
+/// Deliberately NOT a `SafeArea`: the renderer's insets are per-window
+/// and the browser forwards one merged tree, so a `SafeArea` here would
+/// be inset by the value that exists for the *hosted app's* benefit and
+/// double-count against this padding. See `crate::chrome`.
 ///
 /// The toolbar's left inset is platform-dependent: on macOS the
 /// unified title bar puts the traffic-light cluster on the toolbar's
@@ -424,7 +434,21 @@ pub struct TabsUpdatePayload {
 /// left edge like the rest of the toolbar padding.
 fn shell_ui() -> String {
     let inset = if cfg!(target_os = "macos") { 82 } else { 8 };
-    SHELL_UI.replace("__TOOLBAR_LEFT_INSET__", &inset.to_string())
+    // Home + status screens are vertically centred, so they only need
+    // the chrome's height plus a breathing gap; only the toolbar shows
+    // on the home screen (a collapsed island still renders the toolbar
+    // when nothing is open).
+    let home_top = crate::chrome::TOOLBAR_HEIGHT + 32.0;
+    let status_top = crate::chrome::TOOLBAR_HEIGHT + 56.0;
+    // The debug pane is right-docked and full height, exactly where the
+    // toolbar's `{ }` / `⊞` / caret buttons and the tab strip's `+` live
+    // — clear the whole expanded chrome so they stay clickable.
+    let devtools_top = crate::chrome::max_chrome_height();
+    SHELL_UI
+        .replace("__TOOLBAR_LEFT_INSET__", &inset.to_string())
+        .replace("__HOME_TOP_PAD__", &format!("{home_top:.0}"))
+        .replace("__STATUS_TOP_PAD__", &format!("{status_top:.0}"))
+        .replace("__DEVTOOLS_TOP_PAD__", &format!("{devtools_top:.0}"))
 }
 
 const SHELL_UI: &str = r##"
@@ -495,7 +519,7 @@ Stack {
                 }
             }
                 .padding(56)
-                .paddingTop(96)
+                .paddingTop(__HOME_TOP_PAD__)
                 .width("100%")
                 .height("100%")
                 .alignItems("center")
@@ -525,7 +549,7 @@ Stack {
                 .width("100%")
                 .height("100%")
                 .padding(56)
-                .paddingTop(120)
+                .paddingTop(__STATUS_TOP_PAD__)
                 .alignItems("center")
                 .backgroundColor("#161616")
         }
@@ -573,7 +597,7 @@ Stack {
                 .width("100%")
                 .height("100%")
                 .padding(56)
-                .paddingTop(120)
+                .paddingTop(__STATUS_TOP_PAD__)
                 .alignItems("center")
                 .backgroundColor("#161616")
         }
@@ -828,7 +852,7 @@ Stack {
         }
             .width("100%")
             .height("100%")
-            .paddingTop(52)
+            .paddingTop(__DEVTOOLS_TOP_PAD__)
             .justifyContent("flex-end")
     }
 }
@@ -897,6 +921,24 @@ mod tests {
         );
         instance.mount();
         (instance, rx)
+    }
+
+    #[test]
+    fn shell_ui_substitutes_every_placeholder() {
+        // A missed `__PLACEHOLDER__` parses as a bare reference rather
+        // than erroring, so it would silently render as no padding at
+        // all — assert the template is fully filled in.
+        let ui = shell_ui();
+        assert!(
+            !ui.contains("__"),
+            "unsubstituted placeholder left in the shell DSL",
+        );
+        // The chrome-derived paddings land as plain numbers.
+        let expect = format!(".paddingTop({:.0})", crate::chrome::max_chrome_height());
+        assert!(
+            ui.contains(&expect),
+            "debug pane should clear the full expanded chrome ({expect})",
+        );
     }
 
     #[test]

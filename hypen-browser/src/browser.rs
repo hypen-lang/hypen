@@ -2226,6 +2226,110 @@ mod tests {
         );
     }
 
+    /// End-to-end check of the safe-area integration: a hosted app that
+    /// wraps its content in `SafeArea` must come out padded clear of the
+    /// island chrome, while the SafeArea itself still fills the window
+    /// (so its background bleeds behind the chrome).
+    ///
+    /// Lays the *merged* tree (shell chrome + tab content) out through
+    /// the desktop renderer's own layout pass with the insets `main.rs`
+    /// installs, and contrasts it with the same tree at zero insets —
+    /// which is what the browser did before, content pinned at y=0
+    /// underneath the toolbar.
+    #[test]
+    fn hosted_apps_draw_under_the_island_and_clear_only_the_window_controls() {
+        use hypen_renderer_desktop::layout::LayoutPass;
+        use hypen_renderer_desktop::text::TextEngine;
+
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-fg", "a9:", &[], true);
+        module.inner.lock().unwrap().active_tab_id = Some("tab-fg".into());
+        // Tell the shell about the tab too, so it swaps the home screen
+        // out of the viewport and renders the island chrome overlay.
+        push_tabs(
+            &module.shell,
+            vec![TabInfo {
+                id: "tab-fg".into(),
+                url: "ws://tab-fg".into(),
+                name: "tab-fg".into(),
+                status: "connected".into(),
+                status_message: String::new(),
+            }],
+            Some("tab-fg".into()),
+        );
+
+        // The app's own tree: a full-bleed SafeArea wrapping its content.
+        let out = ingest_tab_batch(
+            &module,
+            "tab-fg",
+            &[
+                create_with(
+                    "1",
+                    "SafeArea",
+                    &[("width.0", json!("100%")), ("height.0", json!("100%"))],
+                ),
+                insert("root", "1"),
+                create_with("2", "Text", &[("0", json!("Hello from the app"))]),
+                insert("1", "2"),
+            ],
+        );
+        let id_of = |element_type: &str| -> String {
+            out.iter()
+                .find_map(|p| match p {
+                    Patch::Create {
+                        id,
+                        element_type: t,
+                        ..
+                    } if &**t == element_type => Some(id.to_string()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("no {element_type} in the forwarded stream: {out:?}"))
+        };
+        let (safe_area, text) = (id_of("SafeArea"), id_of("Text"));
+
+        let inner = module.inner.lock().unwrap();
+        let mut fonts = TextEngine::new();
+        let viewport = (1024, 720);
+        let rect = |pass: &LayoutPass, id: &str| pass.item_by_id(id).expect("laid out").rect;
+
+        // The browser configures no safe-area insets of its own: the
+        // island chrome is a floating overlay hosted apps draw under by
+        // design, so a SafeArea-wrapped app lays out full-bleed — the
+        // chrome is NOT reserved.
+        let bare = LayoutPass::compute(&inner.tree, &mut fonts, viewport, 1.0);
+        let area = rect(&bare, &safe_area);
+        assert_eq!(
+            (area.x, area.y, area.h),
+            (0.0, 0.0, viewport.1 as f32),
+            "the SafeArea itself stays full-bleed",
+        );
+        assert_eq!(
+            rect(&bare, &text).y,
+            0.0,
+            "the island chrome must not push hosted content down",
+        );
+
+        // The one inset the browser window does get comes from the
+        // renderer itself: under the macOS unified titlebar (main.rs
+        // sets `.unified_titlebar(true)`) the window-controls bar is
+        // the platform top inset, and SafeArea content clears exactly
+        // that. Simulated explicitly so the assertion holds on any
+        // host OS.
+        let macos = LayoutPass::compute_with_safe_area(
+            &inner.tree,
+            &mut fonts,
+            viewport,
+            1.0,
+            hypen_renderer_desktop::SafeAreaInsets::default(),
+            hypen_renderer_desktop::window_controls_platform_insets(true, true),
+        );
+        assert_eq!(
+            (rect(&macos, &safe_area).y, rect(&macos, &text).y),
+            (0.0, hypen_renderer_desktop::WINDOW_CONTROLS_BAR_HEIGHT),
+            "SafeArea content clears the window-controls bar and nothing more",
+        );
+    }
+
     #[test]
     fn close_active_tab_attaches_next_survivor() {
         // Two tabs; close the active one; the surviving tab should

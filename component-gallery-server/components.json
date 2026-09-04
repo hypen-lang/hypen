@@ -15,6 +15,7 @@
   { "name": "Spacer", "deeplink": "spacer" },
   { "name": "Stack", "deeplink": "stack" },
   { "name": "Divider", "deeplink": "divider" },
+  { "name": "SafeArea", "deeplink": "safearea" },
   { "name": "Grid", "deeplink": "grid" },
   { "name": "Card", "deeplink": "card" },
   { "name": "Heading", "deeplink": "heading" },

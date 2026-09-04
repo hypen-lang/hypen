@@ -28,6 +28,7 @@ pub struct DesktopApp {
     unified_titlebar: bool,
     reduced_motion: Option<bool>,
     window_icon: Option<winit::window::Icon>,
+    safe_area_insets: crate::layout::SafeAreaInsets,
 }
 
 impl DesktopApp {
@@ -40,7 +41,37 @@ impl DesktopApp {
             unified_titlebar: false,
             reduced_motion: None,
             window_icon: None,
+            safe_area_insets: crate::layout::SafeAreaInsets::default(),
         }
+    }
+
+    /// Declare the window's safe-area insets, in logical px. `SafeArea`
+    /// containers pad themselves by these on whichever edges their
+    /// `edges` prop selects.
+    ///
+    /// Desktop's platform default is zero on every edge — a desktop
+    /// window has no notch or home indicator — with one exception:
+    /// under [`Self::unified_titlebar`] on macOS, the window-controls
+    /// bar (close / minimize / maximize) is drawn over the content, so
+    /// the renderer installs its height
+    /// ([`crate::layout::WINDOW_CONTROLS_BAR_HEIGHT`]) as the platform
+    /// top inset automatically. So by default a `SafeArea { ... }` lays
+    /// out exactly like a full-size `Column`, except that it clears the
+    /// controls bar when there is one. Overrides are per-edge and merge
+    /// over the platform values, so an embedder declares only the edges
+    /// it additionally covers:
+    ///
+    /// ```rust,ignore
+    /// use hypen_renderer_desktop::{DesktopApp, SafeAreaInsets};
+    /// DesktopApp::new()
+    ///     // Reserve a 40px bottom overlay HUD; top keeps the platform
+    ///     // value (the controls bar under a unified titlebar, else 0).
+    ///     .safe_area_insets(SafeAreaInsets::default().with_bottom(40.0))
+    ///     .run();
+    /// ```
+    pub fn safe_area_insets(mut self, insets: crate::layout::SafeAreaInsets) -> Self {
+        self.safe_area_insets = insets;
+        self
     }
 
     /// Programmatically force reduced motion on or off for this window.
@@ -99,8 +130,10 @@ impl DesktopApp {
     /// and content extends full-height under it (`fullSizeContentView`)
     /// so the app draws edge-to-edge with the traffic lights floating
     /// over the top. The app is responsible for insetting its own
-    /// top-left content so nothing hides behind the traffic lights.
-    /// No-op on other platforms.
+    /// top-left content so nothing hides behind the traffic lights —
+    /// content inside a `SafeArea { ... }` gets that for free: the
+    /// controls bar becomes the window's platform safe-area top inset
+    /// (see [`Self::safe_area_insets`]). No-op on other platforms.
     pub fn unified_titlebar(mut self, on: bool) -> Self {
         self.unified_titlebar = on;
         self
@@ -265,6 +298,7 @@ impl DesktopApp {
         app.set_shortcuts(self.shortcuts.clone());
         app.set_unified_titlebar(self.unified_titlebar);
         app.set_window_icon(self.window_icon.clone());
+        app.set_safe_area_insets(self.safe_area_insets);
         if let Some(on) = self.reduced_motion {
             app.set_reduced_motion(on);
         }

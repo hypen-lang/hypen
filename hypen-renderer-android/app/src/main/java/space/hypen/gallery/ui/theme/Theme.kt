@@ -6,8 +6,6 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
@@ -46,8 +44,14 @@ fun HypenGalleryTheme(
     if (!view.isInEditMode) {
         SideEffect {
             val window = (view.context as Activity).window
-            window.statusBarColor = Color.White.toArgb()
-            WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
+            // The activities call `enableEdgeToEdge()`, which already makes the system bars
+            // transparent so app content (and any Hypen `SafeArea`) can draw underneath them.
+            // Painting `window.statusBarColor` here would put an opaque bar back on top —
+            // and it is a deprecated no-op from API 35 anyway. All the theme still owns is
+            // the icon contrast against whatever the app draws behind the bars.
+            val insetsController = WindowCompat.getInsetsController(window, view)
+            insetsController.isAppearanceLightStatusBars = !darkTheme
+            insetsController.isAppearanceLightNavigationBars = !darkTheme
         }
     }
 

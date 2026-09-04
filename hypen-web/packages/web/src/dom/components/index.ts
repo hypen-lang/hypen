@@ -126,6 +126,7 @@ export class ComponentRegistry {
     const { iconHandler } = require("./icon.js");
     const { visuallyHiddenHandler } = require("./visuallyhidden.js");
     const { tabsHandler, tabHandler, tabPanelHandler, optionHandler } = require("./tabs.js");
+    const { safeAreaHandler } = require("./safearea.js");
 
     this.register("app", appHandler);
     this.register("visuallyhidden", visuallyHiddenHandler);
@@ -167,5 +168,6 @@ export class ComponentRegistry {
     this.register("router", routerHandler);
     this.register("route", routeHandler);
     this.register("hypenapp", hypenAppHandler);
+    this.register("safearea", safeAreaHandler);
   }
 }

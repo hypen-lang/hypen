@@ -10,17 +10,37 @@ far side, so the loop never closes. Glossy top sheen over everything.
 Paths are drawn directly (no SVG rasteriser needed), supersampled at
 4096px and downscaled per size.
 
-Outputs (all under this directory):
+Outputs (desktop, under this directory):
   icons/icon-{16,32,48,64,128,256,512,1024}.png   full-bleed rounded tile
   icons/icon.png                                  512px copy (Linux desktop icon)
   icons/icon.ico                                  Windows multi-size icon
   icons/icon.icns                                 macOS icon (Apple margin variant)
+
+Outputs (Android gallery, ../../hypen-renderer-android/app/src/main/res/):
+  mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher_background.png  adaptive bg layer, 108dp
+  mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher_foreground.png  adaptive fg layer, 108dp
+  mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher_monochrome.png  themed-icon layer, 108dp
+  mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher.png             legacy square, 48..192
+  mipmap-{m,h,xh,xxh,xxxh}dpi/ic_launcher_round.png       legacy round, 48..192
+  mipmap-anydpi-v26/ic_launcher{,_round}.xml              adaptive-icon manifests
+  Stale ic_launcher*.webp placeholders in those mipmap dirs are deleted (same
+  resource names as the PNGs, so leaving them would be a duplicate resource).
+  The adaptive layers now live in mipmap/, so the old Android Studio
+  drawable/ic_launcher_{background,foreground}.xml vectors are unreferenced
+  and have been dropped from the app.
+
+Outputs (iOS gallery, ../../hypen-renderer-swift/Gallery/HypenGallery/
+         HypenGallery/Assets.xcassets/AppIcon.appiconset/):
+  icon-1024.png                                   1024px opaque square, no alpha,
+                                                  unrounded (iOS applies its mask)
+  Contents.json                                   universal 1024 slot naming it
 
 Requires:  pip install pillow numpy
 Run:       python3 generate-icons.py
 """
 
 import io
+import json
 import math
 import re
 import struct
@@ -31,6 +51,13 @@ from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 HERE = Path(__file__).resolve().parent
 OUT = HERE / "icons"
+REPO = HERE.parents[1]
+ANDROID_RES = REPO / "hypen-renderer-android/app/src/main/res"
+IOS_APPICON = (
+    REPO
+    / "hypen-renderer-swift/Gallery/HypenGallery/HypenGallery"
+    / "Assets.xcassets/AppIcon.appiconset"
+)
 
 # ---------------------------------------------------------------------------
 # Brand geometry — verbatim from hypen-docs/public/favicon.svg (795x795 space).
@@ -68,6 +95,24 @@ RING_B = 0.165  # semi-minor axis, fraction of edge
 RING_W = 0.020  # stroke width, fraction of edge
 TAIL = 0.80  # fraction of the orbit the comet tail covers before fading out
 TAIL_GAMMA = 1.25  # taper curve — higher = dimmer sooner behind the head
+
+# Android adaptive icons: layers are a 108dp square of which only the centre
+# 72dp is guaranteed visible under any launcher mask — 66.67% safe zone.
+ADAPTIVE_SAFE = 2.0 / 3.0
+ADAPTIVE_DPI = {  # density bucket -> 108dp layer edge in px
+    "mdpi": 108,
+    "hdpi": 162,
+    "xhdpi": 216,
+    "xxhdpi": 324,
+    "xxxhdpi": 432,
+}
+LEGACY_DPI = {  # density bucket -> pre-API-26 launcher icon edge in px
+    "mdpi": 48,
+    "hdpi": 72,
+    "xhdpi": 96,
+    "xxhdpi": 144,
+    "xxxhdpi": 192,
+}
 
 
 def flatten_path(d, steps=48):
@@ -225,9 +270,9 @@ def sparkle(layer, x, y, r_long, r_short):
     )
 
 
-def render_master():
-    """Full-bleed rounded glossy tile at SS resolution."""
-    # Vertical gradient background.
+def tile_backdrop():
+    """The tile's backdrop alone: vertical gradient plus the warm glow
+    rising off the wings. No mark, no rounding — square and opaque."""
     grad = Image.linear_gradient("L").resize((SS, SS))
     bg = Image.composite(
         Image.new("RGBA", (SS, SS), BG_BOTTOM),
@@ -235,12 +280,23 @@ def render_master():
         grad,
     )
 
-    # Warm glow rising off the wings.
     glow = Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
     gd = ImageDraw.Draw(glow)
     gd.ellipse([SS * 0.06, SS * 0.52, SS * 0.62, SS * 1.10], fill=(255, 167, 225, 76))
     gd.ellipse([SS * 0.42, SS * 0.56, SS * 0.98, SS * 1.12], fill=(255, 236, 167, 64))
     bg.alpha_composite(glow.filter(ImageFilter.GaussianBlur(SS * 0.10)))
+    return bg
+
+
+def render_master(backdrop=True, gloss=True, rounded=True):
+    """Full-bleed rounded glossy tile at SS resolution.
+
+    The defaults are the desktop icon. ``rounded=False`` leaves the square
+    opaque tile iOS wants (it applies its own mask); ``backdrop=False,
+    gloss=False, rounded=False`` leaves just the mark and its comet on
+    transparency — the Android adaptive foreground layer.
+    """
+    bg = tile_backdrop() if backdrop else Image.new("RGBA", (SS, SS), (0, 0, 0, 0))
 
     # Comet tail: the orbit ellipse, colored with the brand gradient
     # and multiplied by the angular fade so it trails off the starburst
@@ -299,24 +355,57 @@ def render_master():
     sparkle(bg, tip_x, tip_y, SS * 0.058, SS * 0.012)
 
     # Glossy top sheen — a wide highlight ellipse fading down the tile.
-    dome = Image.new("L", (SS, SS), 0)
-    ImageDraw.Draw(dome).ellipse([-SS * 0.25, -SS * 0.78, SS * 1.25, SS * 0.50], fill=255)
-    fade = (
-        Image.linear_gradient("L")
-        .resize((SS, SS))
-        .point(lambda v: max(0, 58 - v * 58 // 130))
-    )
-    gloss = Image.new("RGBA", (SS, SS), (255, 255, 255, 0))
-    gloss.putalpha(ImageChops.multiply(dome, fade))
-    bg.alpha_composite(gloss)
+    if gloss:
+        dome = Image.new("L", (SS, SS), 0)
+        ImageDraw.Draw(dome).ellipse(
+            [-SS * 0.25, -SS * 0.78, SS * 1.25, SS * 0.50], fill=255
+        )
+        fade = (
+            Image.linear_gradient("L")
+            .resize((SS, SS))
+            .point(lambda v: max(0, 58 - v * 58 // 130))
+        )
+        sheen_layer = Image.new("RGBA", (SS, SS), (255, 255, 255, 0))
+        sheen_layer.putalpha(ImageChops.multiply(dome, fade))
+        bg.alpha_composite(sheen_layer)
 
     # Rounded-corner alpha mask.
-    mask = Image.new("L", (SS, SS), 0)
-    ImageDraw.Draw(mask).rounded_rectangle(
-        [0, 0, SS - 1, SS - 1], radius=int(SS * CORNER), fill=255
-    )
-    bg.putalpha(mask)
+    if rounded:
+        mask = Image.new("L", (SS, SS), 0)
+        ImageDraw.Draw(mask).rounded_rectangle(
+            [0, 0, SS - 1, SS - 1], radius=int(SS * CORNER), fill=255
+        )
+        bg.putalpha(mask)
     return bg
+
+
+def render_monochrome():
+    """Flat-white silhouette of mark + comet on transparency, for the
+    Android themed-icon (monochrome) layer, which is tinted by the system
+    and so must carry its shape in the alpha channel alone. Only the hard
+    shapes — no glow, halo or shadow, which would tint into mud."""
+    layer = Image.new("RGBA", (SS, SS), (255, 255, 255, 0))
+    layer.putalpha(ImageChops.multiply(ring_alpha(RING_W), comet_fade_mask()))
+
+    scale = SS / BRAND_SPACE * MARK_SCALE
+    off = SS * (1.0 - MARK_SCALE) / 2.0
+    d = ImageDraw.Draw(layer)
+    for path in (WING_PINK, WING_YELLOW, H_GLYPH):
+        draw_path(d, path, WHITE, scale, dx=off, dy=off)
+
+    th = math.radians(RING_TILT)
+    x = SS / 2 + SS * RING_A * math.cos(th)
+    y = SS / 2 - SS * RING_A * math.sin(th)
+    r_long, r_short = SS * 0.058, SS * 0.012
+    d.polygon(
+        [(x, y - r_long), (x + r_short, y), (x, y + r_long), (x - r_short, y)],
+        fill=WHITE,
+    )
+    d.polygon(
+        [(x - r_long, y), (x, y + r_short), (x + r_long, y), (x, y - r_short)],
+        fill=WHITE,
+    )
+    return layer
 
 
 def at(master, size):
@@ -357,6 +446,117 @@ def write_icns(master, path):
     path.write_bytes(b"icns" + struct.pack(">I", len(chunks) + 8) + chunks)
 
 
+# ---------------------------------------------------------------------------
+# Android — adaptive layers + legacy mipmaps, written into the gallery app.
+# ---------------------------------------------------------------------------
+
+ADAPTIVE_XML = """<?xml version="1.0" encoding="utf-8"?>
+<!-- Generated by hypen-browser/assets/generate-icons.py — do not hand-edit. -->
+<adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+    <background android:drawable="@mipmap/ic_launcher_background" />
+    <foreground android:drawable="@mipmap/ic_launcher_foreground" />
+    <monochrome android:drawable="@mipmap/ic_launcher_monochrome" />
+</adaptive-icon>
+"""
+
+
+def safe_zone_layer(art, size):
+    """An adaptive-icon layer: ``art`` scaled into the centre 66.67% of a
+    108dp canvas, the region every launcher mask is guaranteed to keep."""
+    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    inner = max(1, round(size * ADAPTIVE_SAFE))
+    off = (size - inner) // 2
+    canvas.alpha_composite(art.resize((inner, inner), Image.LANCZOS), (off, off))
+    return canvas
+
+
+def circular(square_master, size):
+    """Full-bleed circular crop of the square tile — the legacy round icon."""
+    img = at(square_master, size)
+    mask = Image.new("L", (size * 4, size * 4), 0)
+    ImageDraw.Draw(mask).ellipse([0, 0, size * 4 - 1, size * 4 - 1], fill=255)
+    img.putalpha(mask.resize((size, size), Image.LANCZOS))
+    return img
+
+
+def write_android(tile_master, square_master):
+    if not ANDROID_RES.is_dir():
+        print(f"skipped Android: {ANDROID_RES} not found")
+        return 0
+
+    backdrop = tile_backdrop()
+    foreground = render_master(backdrop=False, gloss=False, rounded=False)
+    monochrome = render_monochrome()
+
+    written = 0
+    for bucket, edge in ADAPTIVE_DPI.items():
+        d = ANDROID_RES / f"mipmap-{bucket}"
+        d.mkdir(parents=True, exist_ok=True)
+        at(backdrop, edge).convert("RGB").save(d / "ic_launcher_background.png")
+        safe_zone_layer(foreground, edge).save(d / "ic_launcher_foreground.png")
+        safe_zone_layer(monochrome, edge).save(d / "ic_launcher_monochrome.png")
+        written += 3
+
+    for bucket, edge in LEGACY_DPI.items():
+        d = ANDROID_RES / f"mipmap-{bucket}"
+        at(tile_master, edge).save(d / "ic_launcher.png")
+        circular(square_master, edge).save(d / "ic_launcher_round.png")
+        written += 2
+        # The Android Studio placeholders share these resource names; leaving
+        # them beside the PNGs is a duplicate-resource build failure.
+        for stale in sorted(d.glob("ic_launcher*.webp")):
+            stale.unlink()
+            print(f"removed stale placeholder {stale.relative_to(ANDROID_RES)}")
+
+    anydpi = ANDROID_RES / "mipmap-anydpi-v26"
+    anydpi.mkdir(parents=True, exist_ok=True)
+    for name in ("ic_launcher.xml", "ic_launcher_round.xml"):
+        (anydpi / name).write_text(ADAPTIVE_XML)
+        written += 1
+    return written
+
+
+# ---------------------------------------------------------------------------
+# iOS — one opaque 1024 square; iOS rounds it itself.
+# ---------------------------------------------------------------------------
+
+IOS_CONTENTS = {
+    "images": [
+        {
+            "filename": "icon-1024.png",
+            "idiom": "universal",
+            "platform": "ios",
+            "size": "1024x1024",
+        },
+        {
+            "appearances": [{"appearance": "luminosity", "value": "dark"}],
+            "idiom": "universal",
+            "platform": "ios",
+            "size": "1024x1024",
+        },
+        {
+            "appearances": [{"appearance": "luminosity", "value": "tinted"}],
+            "idiom": "universal",
+            "platform": "ios",
+            "size": "1024x1024",
+        },
+    ],
+    "info": {"author": "xcode", "version": 1},
+}
+
+
+def write_ios(square_master):
+    if not IOS_APPICON.is_dir():
+        print(f"skipped iOS: {IOS_APPICON} not found")
+        return 0
+    # Flattened to RGB: App Store icons must be opaque, with no alpha channel.
+    at(square_master, 1024).convert("RGB").save(IOS_APPICON / "icon-1024.png")
+    (IOS_APPICON / "Contents.json").write_text(
+        json.dumps(IOS_CONTENTS, indent=2) + "\n"
+    )
+    return 2
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     master = render_master()
@@ -377,6 +577,14 @@ def main():
 
     write_icns(master, OUT / "icon.icns")
     print(f"wrote {len(sizes) + 3} icon files to {OUT}")
+
+    square = render_master(rounded=False)
+    n = write_android(master, square)
+    if n:
+        print(f"wrote {n} icon files to {ANDROID_RES}")
+    n = write_ios(square)
+    if n:
+        print(f"wrote {n} icon files to {IOS_APPICON}")
 
 
 if __name__ == "__main__":

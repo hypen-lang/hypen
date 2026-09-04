@@ -48,6 +48,7 @@ pub mod video_v2;
 pub mod window;
 
 pub use app::DesktopApp;
+pub use layout::{window_controls_platform_insets, SafeAreaInsets, WINDOW_CONTROLS_BAR_HEIGHT};
 pub use module::HypenModule;
 pub use painter::{PaintTarget, Painter};
 pub use remote::{ConnectionStatus, RemoteModule};

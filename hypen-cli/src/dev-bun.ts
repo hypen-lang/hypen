@@ -122,7 +122,9 @@ function getDefaultHtmlTemplate(entry: string): string {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- viewport-fit=cover lets the page extend under notches/rounded corners so
+       env(safe-area-inset-*) reports real values for the SafeArea component. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Hypen App</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }

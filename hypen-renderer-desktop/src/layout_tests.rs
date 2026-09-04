@@ -3056,7 +3056,7 @@ fn semantic_alignment_aliases_map_by_axis_not_by_name() {
             props,
             semantics: None,
         };
-        node_style_with(&node, 1.0, vp(960.0), &[])
+        node_style_with(&node, 1.0, vp(960.0), &[], SafeAreaInsets::default())
     };
 
     // Row: horizontal is the MAIN axis.
@@ -5012,6 +5012,7 @@ fn layout_prop_classifier_covers_every_taffy_fed_prop() {
         "verticalAlignment",
         "alignContent", // was a dead camelCase arm in a lowercased match
         "align-content",
+        "edges", // SafeArea's inset mask → Taffy padding
     ] {
         assert!(
             crate::layout::is_layout_prop_key(name),
@@ -5270,5 +5271,351 @@ mod container_shift {
         scrolls.insert("outer".to_string(), 30.0);
         let fresh = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
         assert_items_match(&shifted, &fresh);
+    }
+}
+
+/// `SafeArea` — a full-size vertical container that pads itself by the
+/// embedder-configured safe-area insets on whichever edges its `edges`
+/// prop selects. Desktop's platform defaults are zero on every edge, so
+/// an unconfigured SafeArea is a plain full-size Column.
+mod safe_area {
+    use super::*;
+
+    const VP: (u32, u32) = (800, 600);
+
+    /// A SafeArea under the root with one child that fills its content
+    /// box, so a single rect reads back all four resolved insets:
+    /// `x`/`y` are the left/top inset and `w`/`h` are the viewport minus
+    /// the horizontal / vertical pair.
+    fn safe_area_tree(props: &[(&str, Value)]) -> Tree {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("sa", "SafeArea", props));
+        tree.apply(&insert_patch("root", "sa"));
+        tree.apply(&create_patch(
+            "fill",
+            "Container",
+            &[("width", json!("100%")), ("height", json!("100%"))],
+        ));
+        tree.apply(&insert_patch("sa", "fill"));
+        tree
+    }
+
+    fn layout(tree: &Tree, insets: SafeAreaInsets) -> LayoutPass {
+        let mut text = TextEngine::new();
+        LayoutPass::compute_with_insets(tree, &mut text, VP, 1.0, insets)
+    }
+
+    /// `(x, y, w, h)` of the content-box-filling child.
+    fn content_box(pass: &LayoutPass) -> (f32, f32, f32, f32) {
+        let r = find_item(pass, "fill").rect;
+        (r.x, r.y, r.w, r.h)
+    }
+
+    #[test]
+    fn default_insets_lay_out_as_a_plain_full_size_container() {
+        let tree = safe_area_tree(&[]);
+        let pass = layout(&tree, SafeAreaInsets::default());
+
+        // Full-size on BOTH axes, like App / a root Container.
+        let sa = find_item(&pass, "sa").rect;
+        assert_eq!(
+            (sa.w, sa.h),
+            (800.0, 600.0),
+            "SafeArea should fill the viewport; got {sa:?}"
+        );
+        // Zero platform insets → no padding at all.
+        assert_eq!(content_box(&pass), (0.0, 0.0, 800.0, 600.0));
+    }
+
+    #[test]
+    fn window_controls_are_unsafe_only_under_a_macos_unified_titlebar() {
+        use crate::layout::{window_controls_platform_insets, WINDOW_CONTROLS_BAR_HEIGHT};
+        let merged = window_controls_platform_insets(true, true);
+        assert_eq!(
+            (merged.top, merged.right, merged.bottom, merged.left),
+            (WINDOW_CONTROLS_BAR_HEIGHT, 0.0, 0.0, 0.0),
+        );
+        // Native decorations outside the client area → nothing unsafe.
+        for (unified, macos) in [(true, false), (false, true), (false, false)] {
+            let p = window_controls_platform_insets(unified, macos);
+            assert_eq!((p.top, p.right, p.bottom, p.left), (0.0, 0.0, 0.0, 0.0));
+        }
+    }
+
+    #[test]
+    fn platform_insets_pad_safe_areas_without_any_embedder_override() {
+        use crate::layout::{window_controls_platform_insets, WINDOW_CONTROLS_BAR_HEIGHT};
+        let tree = safe_area_tree(&[]);
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute_with_safe_area(
+            &tree,
+            &mut text,
+            VP,
+            1.0,
+            SafeAreaInsets::default(),
+            window_controls_platform_insets(true, true),
+        );
+        // SafeArea itself stays full-bleed; only the content clears the
+        // controls bar.
+        let sa = find_item(&pass, "sa").rect;
+        assert_eq!((sa.w, sa.h), (800.0, 600.0));
+        assert_eq!(
+            content_box(&pass),
+            (
+                0.0,
+                WINDOW_CONTROLS_BAR_HEIGHT,
+                800.0,
+                600.0 - WINDOW_CONTROLS_BAR_HEIGHT
+            ),
+        );
+    }
+
+    #[test]
+    fn embedder_overrides_win_per_edge_over_the_platform_insets() {
+        use crate::layout::window_controls_platform_insets;
+        let tree = safe_area_tree(&[]);
+        let mut text = TextEngine::new();
+        // Explicit top: 0 beats the controls-bar platform value; the
+        // bottom override stacks independently.
+        let pass = LayoutPass::compute_with_safe_area(
+            &tree,
+            &mut text,
+            VP,
+            1.0,
+            SafeAreaInsets::default().with_top(0.0).with_bottom(40.0),
+            window_controls_platform_insets(true, true),
+        );
+        assert_eq!(content_box(&pass), (0.0, 0.0, 800.0, 560.0));
+    }
+
+    #[test]
+    fn safe_area_resolves_to_its_own_branch_not_the_container_catchall() {
+        // The generic container catchall is content-height. If
+        // `SafeArea` ever stopped matching (a casing change on the
+        // wire, say) this is the assertion that catches it: the same
+        // tree spelled `Column` does NOT fill the viewport.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        add_text(&mut tree, "col", "t1", "Inside");
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, VP, 1.0);
+        let col = find_item(&pass, "col").rect;
+        assert!(
+            col.h < 600.0,
+            "a plain Column should be content-height, got {col:?}"
+        );
+    }
+
+    #[test]
+    fn configured_insets_pad_all_edges_and_stay_full_bleed() {
+        let tree = safe_area_tree(&[]);
+        let pass = layout(&tree, SafeAreaInsets::all(20.0));
+
+        // Padding is inside the border box, so the SafeArea's own rect
+        // (and therefore its background) still covers the viewport.
+        let sa = find_item(&pass, "sa").rect;
+        assert_eq!((sa.x, sa.y, sa.w, sa.h), (0.0, 0.0, 800.0, 600.0));
+        // Content is inset on every edge.
+        assert_eq!(content_box(&pass), (20.0, 20.0, 760.0, 560.0));
+    }
+
+    #[test]
+    fn edges_prop_selects_which_edges_are_padded() {
+        let tree = safe_area_tree(&[("edges", json!(["top", "left"]))]);
+        let pass = layout(&tree, SafeAreaInsets::all(20.0));
+        assert_eq!(content_box(&pass), (20.0, 20.0, 780.0, 580.0));
+
+        // The complementary pair, to prove the mask isn't order- or
+        // name-position dependent.
+        let tree = safe_area_tree(&[("edges", json!(["bottom", "right"]))]);
+        let pass = layout(&tree, SafeAreaInsets::all(20.0));
+        assert_eq!(content_box(&pass), (0.0, 0.0, 780.0, 580.0));
+    }
+
+    #[test]
+    fn edges_accepts_the_applicator_flattened_key_and_odd_casing() {
+        // `.edges(["Top"])` arrives as `edges.0`; casing and whitespace
+        // come straight from user DSL.
+        let tree = safe_area_tree(&[("edges.0", json!([" Top ", "LEFT"]))]);
+        let pass = layout(&tree, SafeAreaInsets::all(20.0));
+        assert_eq!(content_box(&pass), (20.0, 20.0, 780.0, 580.0));
+    }
+
+    #[test]
+    fn absent_empty_and_unparseable_edges_fall_back_to_all_edges() {
+        let all = (20.0, 20.0, 760.0, 560.0);
+        for props in [
+            vec![],
+            vec![("edges", json!([]))],
+            vec![("edges", json!(["", "  "]))],
+            // Not an array at all — never fatal, just ignored.
+            vec![("edges", json!("top"))],
+        ] {
+            let tree = safe_area_tree(&props);
+            let pass = layout(&tree, SafeAreaInsets::all(20.0));
+            assert_eq!(content_box(&pass), all, "props: {props:?}");
+        }
+    }
+
+    #[test]
+    fn explicit_list_of_only_unknown_edges_insets_nothing() {
+        // An explicit non-empty list is honored literally: unknown names
+        // are dropped, and losing the last recognized entry must not
+        // silently widen back to all four edges. Same contract as the
+        // Swift, Android, and web renderers.
+        let tree = safe_area_tree(&[("edges", json!(["nope", "middle"]))]);
+        let pass = layout(&tree, SafeAreaInsets::all(20.0));
+        assert_eq!(content_box(&pass), (0.0, 0.0, 800.0, 600.0));
+    }
+
+    #[test]
+    fn per_edge_overrides_merge_over_the_platform_defaults() {
+        // Only the bottom is overridden; the other three keep the
+        // desktop platform value (zero).
+        let insets = SafeAreaInsets::default().with_bottom(24.0);
+        assert_eq!(insets.resolved().bottom, 24.0);
+        assert_eq!(insets.resolved().top, 0.0);
+        assert_eq!(insets.resolved().left, 0.0);
+        assert_eq!(insets.resolved().right, 0.0);
+
+        let tree = safe_area_tree(&[]);
+        let pass = layout(&tree, insets);
+        assert_eq!(content_box(&pass), (0.0, 0.0, 800.0, 576.0));
+
+        // The merge is per-edge, not all-or-nothing: overriding one
+        // edge of an otherwise-uniform set leaves the rest alone.
+        let insets = SafeAreaInsets::all(20.0).with_top(0.0);
+        let pass = layout(&safe_area_tree(&[]), insets);
+        assert_eq!(content_box(&pass), (20.0, 0.0, 760.0, 580.0));
+    }
+
+    #[test]
+    fn user_padding_adds_to_the_safe_area_inset() {
+        let tree = safe_area_tree(&[("padding", json!(10.0))]);
+        let pass = layout(&tree, SafeAreaInsets::all(20.0));
+        assert_eq!(content_box(&pass), (30.0, 30.0, 740.0, 540.0));
+    }
+
+    #[test]
+    fn insets_are_logical_px_and_scale_with_hidpi() {
+        let tree = safe_area_tree(&[]);
+        let mut text = TextEngine::new();
+        // 800×600 logical on a 2x display.
+        let pass = LayoutPass::compute_with_insets(
+            &tree,
+            &mut text,
+            (1600, 1200),
+            2.0,
+            SafeAreaInsets::all(20.0),
+        );
+        let r = find_item(&pass, "fill").rect;
+        assert_eq!((r.x, r.y, r.w, r.h), (40.0, 40.0, 1520.0, 1120.0));
+    }
+
+    #[test]
+    fn nested_safe_areas_each_apply_their_own_insets() {
+        let mut tree = safe_area_tree(&[]);
+        // Replace the filler with an inner SafeArea holding it.
+        tree.apply(&create_patch("inner", "SafeArea", &[]));
+        tree.apply(&insert_patch("sa", "inner"));
+        tree.apply(&insert_patch("inner", "fill"));
+
+        let pass = layout(&tree, SafeAreaInsets::all(20.0));
+        // Outer insets 20, inner insets 20 again — no special-casing,
+        // the padding simply nests.
+        assert_eq!(content_box(&pass), (40.0, 40.0, 720.0, 520.0));
+    }
+
+    #[test]
+    fn empty_safe_area_still_lays_out() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("sa", "SafeArea", &[]));
+        tree.apply(&insert_patch("root", "sa"));
+        let pass = layout(&tree, SafeAreaInsets::all(20.0));
+        let sa = find_item(&pass, "sa").rect;
+        assert_eq!((sa.w, sa.h), (800.0, 600.0));
+    }
+
+    #[test]
+    fn a_live_edges_setprop_restyles_the_node() {
+        // `edges` feeds Taffy padding, so the incremental patch gate
+        // (`is_layout_prop_key`) has to treat it as layout-affecting —
+        // otherwise a module toggling the mask keeps the old insets.
+        let tree = safe_area_tree(&[("edges", json!(["top"]))]);
+        let mut taffy = TaffyState::new();
+        taffy.set_safe_area_insets(SafeAreaInsets::all(20.0));
+        taffy.mark_needs_rebuild();
+        let mut text = TextEngine::new();
+        let before = LayoutPass::compute_with_state(
+            &mut taffy,
+            &tree,
+            &mut text,
+            VP,
+            1.0,
+            0.0,
+            &HashMap::new(),
+            1,
+        );
+        assert_eq!(content_box(&before), (0.0, 20.0, 800.0, 580.0));
+
+        let patch = Patch::SetProp {
+            id: "sa".into(),
+            name: "edges".into(),
+            value: json!(["left"]),
+        };
+        let mut tree = tree;
+        tree.apply(&patch);
+        assert!(taffy.apply_patches(
+            std::slice::from_ref(&patch),
+            &tree,
+            1.0,
+            crate::style::Viewport::new(VP.0 as f32, VP.1 as f32),
+        ));
+        let after = LayoutPass::compute_with_state(
+            &mut taffy,
+            &tree,
+            &mut text,
+            VP,
+            1.0,
+            0.0,
+            &HashMap::new(),
+            2,
+        );
+        assert_eq!(content_box(&after), (20.0, 0.0, 780.0, 600.0));
+    }
+
+    #[test]
+    fn changing_the_insets_on_a_retained_state_restyles() {
+        // The `TaffyState` restyle path goes through `node_style_with`,
+        // not `build_subtree` — and only runs when the structure key
+        // moves, which is why the insets are folded into it.
+        let tree = safe_area_tree(&[]);
+        let mut taffy = TaffyState::new();
+        let mut text = TextEngine::new();
+        let before = LayoutPass::compute_with_state(
+            &mut taffy,
+            &tree,
+            &mut text,
+            VP,
+            1.0,
+            0.0,
+            &HashMap::new(),
+            1,
+        );
+        assert_eq!(content_box(&before), (0.0, 0.0, 800.0, 600.0));
+
+        taffy.set_safe_area_insets(SafeAreaInsets::all(20.0));
+        let after = LayoutPass::compute_with_state(
+            &mut taffy,
+            &tree,
+            &mut text,
+            VP,
+            1.0,
+            0.0,
+            &HashMap::new(),
+            2,
+        );
+        assert_eq!(content_box(&after), (20.0, 20.0, 760.0, 560.0));
     }
 }

@@ -29,6 +29,13 @@ fn main() {
         .size(1024, 720)
         // Safari-style: merge the macOS title bar into the app. The
         // shell insets its toolbar so the traffic lights sit clear.
+        // This also makes the renderer treat the window-controls bar as
+        // the window's platform safe-area top inset, so a hosted app's
+        // `SafeArea { ... }` clears the traffic lights automatically.
+        // The island chrome is deliberately NOT declared as an inset:
+        // it is a floating overlay (collapsing to a pill), and hosted
+        // apps are expected to draw under it — see
+        // `hypen_browser::chrome`.
         .unified_titlebar(true)
         // Browser-style keyboard shortcuts. Cmd is taken interchangeably
         // with Ctrl by the renderer so the same combos fire across

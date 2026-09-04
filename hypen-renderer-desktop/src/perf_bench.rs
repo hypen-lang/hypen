@@ -350,7 +350,7 @@ fn perf_bench_style_resolution() {
     let vp = viewport_logical();
     time_it("node_style_with × 20k (12-prop node)", 1, 5, || {
         for _ in 0..20_000 {
-            std::hint::black_box(crate::layout::node_style_with(node, SCALE, vp, &[]));
+            std::hint::black_box(crate::layout::node_style_with(node, SCALE, vp, &[], crate::layout::SafeAreaInsets::default()));
         }
     });
 }

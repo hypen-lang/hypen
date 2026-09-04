@@ -39,6 +39,7 @@ pub const DEFAULT_PRIMITIVES: &[&str] = &[
     "Audio",
     "Paragraph",
     "Icon",
+    "SafeArea",
 ];
 
 /// Result from component resolution

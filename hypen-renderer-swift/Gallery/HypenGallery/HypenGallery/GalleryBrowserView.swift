@@ -7,6 +7,7 @@
 //
 
 import SwiftUI
+import UIKit
 import HypenSwift
 
 /// Which screen is currently shown in the browser shell.
@@ -56,6 +57,10 @@ struct GalleryBrowserView: View {
         // pill never enters the unsafe Island region.
         content
             .frame(maxWidth: .infinity, maxHeight: .infinity)
+            // The `ShapeStyle` overload already bleeds into every safe-area
+            // edge (`ignoresSafeAreaEdges` defaults to `.all`), which is what
+            // edge-to-edge hosting needs: the backdrop reaches the screen
+            // edges even where the hosted app doesn't paint its own.
             .background(Color(.systemBackground))
             .safeAreaInset(edge: .top, spacing: 0) {
                 if !isFullscreen {
@@ -109,6 +114,26 @@ struct GalleryBrowserView: View {
 
     // MARK: - Content
 
+    /// Edges the hosted Hypen content is allowed to bleed into.
+    ///
+    /// The bottom and the sides always bleed, so a hosted app reaches under
+    /// the home indicator (and under the landscape side insets) exactly like a
+    /// mobile browser's viewport — that is what makes a `SafeArea` demo show
+    /// real padding instead of nothing.
+    ///
+    /// The top only bleeds in fullscreen. While the browser toolbar is visible
+    /// it already sits between the notch and the content, so the content
+    /// starts below it and there is nothing left at the top for a `SafeArea`
+    /// element to clear — the shell's chrome has already accounted for it, and
+    /// `hypenEdgeToEdgeHost` therefore reports a top inset of zero. Letting the
+    /// content bleed *under* the toolbar instead (and feeding the toolbar's
+    /// measured height back as the top inset) would look identical for
+    /// `SafeArea` apps while hiding the top ~110pt of every app that doesn't
+    /// use `SafeArea` behind the chrome, so we don't.
+    private var contentBleedEdges: Edge.Set {
+        isFullscreen ? .all : [.bottom, .horizontal]
+    }
+
     @ViewBuilder
     private var content: some View {
         switch currentScreen {
@@ -158,6 +183,9 @@ struct GalleryBrowserView: View {
             // A composite id forces HypenView to tear down and reconnect on
             // refresh, without us having to touch HypenView internals.
             .id("\(url)-\(refreshKey)")
+            // Host the app edge-to-edge and hand the renderer the insets it is
+            // bleeding under, so `SafeArea` elements pad themselves correctly.
+            .hypenEdgeToEdgeHost(edges: contentBleedEdges)
             .onAppear {
                 isLoading = true
                 // HypenView doesn't expose a connection callback, so we flip
@@ -212,6 +240,79 @@ struct GalleryBrowserView: View {
         isConnected = false
         isLoading = true
         refreshKey &+= 1
+    }
+}
+
+// MARK: - Edge-to-edge Hypen hosting
+
+extension View {
+    /// Host Hypen content edge-to-edge and publish the insets it is bleeding
+    /// under, so `SafeArea` elements can pad themselves correctly.
+    ///
+    /// - Parameter edges: the edges the content may bleed into. Edges left out
+    ///   keep SwiftUI's own inset — the surrounding chrome already owns that
+    ///   space — and are published as a zero inset so a `SafeArea` element
+    ///   doesn't pad a second time for something the host already handled.
+    func hypenEdgeToEdgeHost(edges: Edge.Set) -> some View {
+        modifier(HypenEdgeToEdgeHost(edges: edges))
+    }
+}
+
+/// Lets hosted Hypen content out of the safe area and tells the renderer, in
+/// points, what it is now bleeding under.
+struct HypenEdgeToEdgeHost: ViewModifier {
+    let edges: Edge.Set
+
+    @State private var windowInsets: UIEdgeInsets = .zero
+
+    func body(content: Content) -> some View {
+        // `Edge.Set` speaks leading/trailing while `HypenSafeAreaInsets` (like
+        // UIKit) speaks physical left/right. The gallery only ever bleeds both
+        // horizontal edges together, so a single check covers them and no
+        // layout-direction mapping is needed here.
+        let bleedsHorizontally = edges.contains(.leading) || edges.contains(.trailing)
+
+        return content
+            // `.container` only, never `.keyboard`: the content still shrinks
+            // when the keyboard appears, so the keyboard behaviour documented
+            // in `GalleryBrowserView.body` is untouched. All this gives up is
+            // the device's own unsafe regions.
+            .ignoresSafeArea(.container, edges: edges)
+            // State the insets explicitly instead of leaving it to the
+            // renderer's GeometryReader: what a GeometryProxy reports for a
+            // view that has just opted out of the safe area is precisely the
+            // detail a demo should not depend on. The override merges per edge
+            // over the platform values, and here every edge is supplied, so
+            // what `SafeArea` pads by is exactly what this host put around it.
+            .hypenSafeAreaInsets(
+                HypenSafeAreaInsets(
+                    top: edges.contains(.top) ? windowInsets.top : 0,
+                    right: bleedsHorizontally ? windowInsets.right : 0,
+                    bottom: edges.contains(.bottom) ? windowInsets.bottom : 0,
+                    left: bleedsHorizontally ? windowInsets.left : 0
+                )
+            )
+            .onAppear { windowInsets = Self.currentWindowInsets() }
+            // Re-read whenever the hosting area resizes: rotation trades the
+            // notch inset for the landscape side insets.
+            .onGeometryChange(for: CGSize.self) { proxy in
+                proxy.size
+            } action: { _ in
+                windowInsets = Self.currentWindowInsets()
+            }
+    }
+
+    /// The device's real safe-area insets, read from the active window.
+    ///
+    /// Deliberately not read from a `GeometryReader`: the window keeps
+    /// reporting the physical insets no matter what the views inside it do
+    /// with the safe area, which is what makes this value stable for content
+    /// that has opted out of it.
+    @MainActor
+    private static func currentWindowInsets() -> UIEdgeInsets {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let scene = scenes.first(where: { $0.activationState == .foregroundActive }) ?? scenes.first
+        return scene?.keyWindow?.safeAreaInsets ?? .zero
     }
 }
 

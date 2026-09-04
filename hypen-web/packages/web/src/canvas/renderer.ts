@@ -49,6 +49,7 @@ import {
 import { applyVariants, invalidateVariantCache, deriveNodeComputed } from "./variants.js";
 import { CanvasAnimator } from "./anim.js";
 import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
+import { setSafeAreaInsetOverrides } from "../safe-area.js";
 
 const DEFAULT_OPTIONS: CanvasRendererOptions = {
   devicePixelRatio: typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
@@ -976,6 +977,11 @@ export class CanvasRenderer implements Renderer {
     if (!variantsChanged && !this.layoutDirty) return;
 
     this.refreshComputedProps(this.rootNode);
+
+    // Publish this renderer's SafeArea inset overrides for the layout pass
+    // (module-level, same per-frame stamping as `setCssViewport`), so two
+    // canvases with different overrides each lay out against their own.
+    setSafeAreaInsetOverrides(this.options.safeAreaInsets);
 
     computeLayout(
       this.ctx,

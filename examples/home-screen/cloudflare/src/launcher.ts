@@ -1,6 +1,14 @@
 import { app } from "@hypen-space/core";
 import { durableObjectStore, withKey } from "@hypen-space/cf";
-import homeWallpaper from "./assets/home-wallpaper";
+import {
+  CROP_KEYS,
+  SWATCH_CROP,
+  WALLPAPER_CROPS,
+  WALLPAPER_PHOTOS,
+  unsplashUrl,
+  type CropKey,
+  type UnsplashPhoto,
+} from "./unsplash";
 import { fetchWeather, getGeo } from "./geo";
 
 // Hypen Home — a phone-style home screen that launches OTHER Hypen apps.
@@ -12,11 +20,16 @@ import { fetchWeather, getGeo } from "./geo";
 // literally just a URL.
 //
 // The Settings icon opens a route of the launcher itself (no embed):
-// wallpaper presets and an accent color, both plain state. The wallpaper is
-// an applicator binding — `.background("@{state.wallpaper}")` — and the
-// accent tints the app-frame chrome, so picking a swatch restyles the whole
-// phone through ordinary reactive updates. Choices persist in the Durable
-// Object.
+// wallpaper presets and an accent color, both plain state. The accent tints
+// the app-frame chrome and the wallpaper is an applicator binding, so picking
+// a swatch restyles the whole phone through ordinary reactive updates.
+// Choices persist in the Durable Object.
+//
+// The photo wallpapers stream from Unsplash's Wallpapers topic (see
+// unsplash.ts), and the binding is a responsive value map rather than a single
+// value: `.background({default: …, sm: …, md: …, lg: …, xl: …})` lowers to one
+// media-query rule per breakpoint, so each window downloads the rendition cut
+// for its own size instead of every screen sharing one bitmap.
 //
 // The DSL template is generated from the APPS list with plain string
 // interpolation — a nice reminder that Hypen templates are just strings.
@@ -203,8 +216,16 @@ const SETTINGS_ICON = {
 interface Wallpaper {
   id: string;
   name: string;
-  /** CSS background value — bound straight into `.background(...)`. */
-  css: string;
+  /** Row subtitle: the photographer for a photo, the kind for a gradient. */
+  credit: string;
+  /**
+   * One full CSS `background` value per breakpoint, keyed like an applicator
+   * value map. Photos vary per tier (different Unsplash rendition); gradients
+   * repeat the same string, which costs nothing and keeps the shape uniform.
+   */
+  css: Record<CropKey, string>;
+  /** Thumbnail-sized background for the 36px swatch in Settings. */
+  swatch: string;
   selected: boolean;
 }
 
@@ -214,17 +235,109 @@ interface Accent {
   selected: boolean;
 }
 
-const PHOTO_WALLPAPER = `linear-gradient(180deg, rgba(3, 7, 18, 0.08), rgba(3, 7, 18, 0.6)), url('${homeWallpaper}') center / cover no-repeat`;
-const HOME_STATE_KEY = "home-screen:v4";
+/**
+ * Scrim painted over every photo wallpaper.
+ *
+ * The home screen puts white status text, a white clock and white icon labels
+ * directly on the wallpaper, and a topic photo can be bright anywhere. Two
+ * stops — a light wash at the top for the status bar, a heavier one at the
+ * bottom for the dock — keep all of that legible without muddying the photo.
+ */
+const SCRIM = "linear-gradient(180deg, rgba(3, 7, 18, 0.25), rgba(3, 7, 18, 0.62))";
+
+/**
+ * Base colour behind the photo. In the `background` shorthand the colour
+ * belongs to the last layer, so it paints instantly while the Unsplash
+ * rendition is still in flight — no white flash on a cold load.
+ */
+const PHOTO_BASE = "#0B1020";
+
+/**
+ * Escape a value for a double-quoted string in the generated DSL.
+ *
+ * Preset names and photographer credits are copied out of Unsplash, so they
+ * are not ours to trust as template fragments: a quote or a backslash in a
+ * credit would otherwise end the DSL string early.
+ */
+function dslString(value: string): string {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\s+/g, " ").trim();
+}
+
+/** The per-breakpoint `background` values for one Unsplash photo. */
+function photoCss(photo: UnsplashPhoto): Record<CropKey, string> {
+  const css = {} as Record<CropKey, string>;
+  for (const key of CROP_KEYS) {
+    const url = unsplashUrl(photo, WALLPAPER_CROPS[key]);
+    css[key] = `${SCRIM}, url('${url}') center / cover no-repeat ${PHOTO_BASE}`;
+  }
+  return css;
+}
+
+/** A gradient preset needs no renditions — the same value at every tier. */
+function flatCss(value: string): Record<CropKey, string> {
+  const css = {} as Record<CropKey, string>;
+  for (const key of CROP_KEYS) css[key] = value;
+  return css;
+}
+
+function photoWallpaper(photo: UnsplashPhoto): Wallpaper {
+  return {
+    id: photo.id,
+    name: photo.name,
+    credit: `Photo · ${photo.credit}`,
+    css: photoCss(photo),
+    swatch: `url('${unsplashUrl(photo, SWATCH_CROP)}') center / cover no-repeat ${PHOTO_BASE}`,
+    selected: false,
+  };
+}
+
+function gradientWallpaper(id: string, name: string, value: string): Wallpaper {
+  return { id, name, credit: "Gradient", css: flatCss(value), swatch: value, selected: false };
+}
+
+// Bumped for the new persisted shape (photo ids replaced the "torres" preset).
+const HOME_STATE_KEY = "home-screen:v5";
 
 const WALLPAPERS: Wallpaper[] = [
-  { id: "torres", name: "Torres Night", css: PHOTO_WALLPAPER, selected: true },
-  { id: "indigo", name: "Indigo Night", css: "linear-gradient(180deg, #312e81, #0f172a)", selected: false },
-  { id: "sunset", name: "Sunset", css: "linear-gradient(180deg, #7c2d12, #831843)", selected: false },
-  { id: "emerald", name: "Deep Emerald", css: "linear-gradient(180deg, #064e3b, #022c22)", selected: false },
-  { id: "graphite", name: "Graphite", css: "linear-gradient(180deg, #334155, #0f172a)", selected: false },
-  { id: "hypen", name: "Hypen Pink", css: "linear-gradient(180deg, #831843, #1e1b4b)", selected: false },
-];
+  ...WALLPAPER_PHOTOS.map(photoWallpaper),
+  gradientWallpaper("indigo", "Indigo Night", "linear-gradient(180deg, #312e81, #0f172a)"),
+  gradientWallpaper("sunset", "Sunset", "linear-gradient(180deg, #7c2d12, #831843)"),
+  gradientWallpaper("emerald", "Deep Emerald", "linear-gradient(180deg, #064e3b, #022c22)"),
+  gradientWallpaper("graphite", "Graphite", "linear-gradient(180deg, #334155, #0f172a)"),
+  gradientWallpaper("hypen", "Hypen Pink", "linear-gradient(180deg, #831843, #1e1b4b)"),
+].map((wallpaper, index) => ({ ...wallpaper, selected: index === 0 }));
+
+/**
+ * The wallpaper applicator, shared by the home and settings routes.
+ *
+ * This is the media-query half of the story. A value map on an applicator
+ * lowers to one CSS rule per breakpoint (`@media (min-width: 768px) { … }` for
+ * `md`, and so on), so the browser — not the server, and not a resize
+ * listener — decides which Unsplash rendition to download. Only the matching
+ * rule's `url()` is ever fetched.
+ *
+ * Every tier is a binding, so switching preset in Settings restyles all five
+ * rules through the ordinary reactive path. Keep the keys in ascending order:
+ * breakpoint rules share specificity, so the later rule in the sheet wins.
+ */
+const WALLPAPER_BACKGROUND =
+  '.background({' +
+  'default: "@{state.wallpaper}", ' +
+  'sm: "@{state.wallpaperSm}", ' +
+  'md: "@{state.wallpaperMd}", ' +
+  'lg: "@{state.wallpaperLg}", ' +
+  'xl: "@{state.wallpaperXl}"' +
+  '})';
+
+/** Copy a preset's five renditions onto the state fields the DSL binds. */
+function applyWallpaper(state: LauncherState, wallpaper: Wallpaper): void {
+  state.wallpaperId = wallpaper.id;
+  state.wallpaper = wallpaper.css.default;
+  state.wallpaperSm = wallpaper.css.sm;
+  state.wallpaperMd = wallpaper.css.md;
+  state.wallpaperLg = wallpaper.css.lg;
+  state.wallpaperXl = wallpaper.css.xl;
+}
 
 const ACCENTS: Accent[] = [
   { id: "blue", color: "#93C5FD", selected: true },
@@ -237,8 +350,20 @@ export interface LauncherState {
   location: string;
   /** Selected wallpaper preset id. */
   wallpaperId: string;
-  /** Current wallpaper CSS — bound by `.background(...)` on every screen. */
+  /**
+   * Current wallpaper CSS, one field per breakpoint. `WALLPAPER_BACKGROUND`
+   * binds all five into a single `.background({default: …, sm: …, …})`, which
+   * the renderer lowers to one media-query rule each — so a desktop window
+   * downloads the desktop-sized Unsplash rendition and a phone downloads the
+   * phone-sized one. Flat fields rather than a nested object: dependency
+   * tracking is path-based, and replacing a parent object wholesale is a
+   * clumsier way to signal five changed leaves.
+   */
   wallpaper: string;
+  wallpaperSm: string;
+  wallpaperMd: string;
+  wallpaperLg: string;
+  wallpaperXl: string;
   /** Selected accent preset id. */
   accentId: string;
   /** Current accent color — tints back buttons, titles, and checkmarks. */
@@ -336,7 +461,10 @@ function appIcon(
 function appRoute(a: LauncherApp): string {
   return `
         Route(path: "/app/${a.slug}") {
-          Column {
+          // Top/side insets keep the frame chrome clear of the notch;
+          // the bottom edge is left to the embedded app, which brings
+          // its own SafeArea if it wants one.
+          SafeArea(edges: ["top", "left", "right"]) {
             Row {
               // iOS-style "back to Home" capsule — the accent from Settings
               // tints the chevron; the label stays neutral.
@@ -439,14 +567,14 @@ function settingsRoute(): string {
                 Button {
                   Row {
                     Box {}
-                      .background("${wallpaper.css}")
+                      .background("${wallpaper.swatch}")
                       .tw("w-9 h-9 rounded-lg border border-white/20")
 
                     Column {
-                      Text("${wallpaper.name}")
+                      Text("${dslString(wallpaper.name)}")
                         .tw("text-[15px] font-medium text-left")
                         .color("#F9FAFB")
-                      Text("@{state.wallpaperId == '${wallpaper.id}' ? 'Selected' : 'Wallpaper'}")
+                      Text("${dslString(wallpaper.credit)}")
                         .tw("text-xs mt-0.5 text-left")
                         .color("#9CA3AF")
                     }
@@ -503,100 +631,106 @@ function settingsRoute(): string {
 
   return `
         Route(path: "/settings") {
+          // Wallpaper on the wrapper, not the SafeArea -- see the home route.
+          // overflow-auto stays on the SafeArea so the list scrolls inside the
+          // safe region while the wallpaper behind it holds still.
           Column {
-            Column {
-              Row {
-                Button {
+            SafeArea {
+              Column {
+                Row {
+                  Button {
+                    Row {
+                      Icon(@resources.chevron-left)
+                        .size(20)
+                        .color("@{state.accent}")
+                      Text("Home")
+                        .tw("text-[17px] font-medium")
+                        .color("@{state.accent}")
+                    }
+                    .tw("items-center")
+                  }
+                  .onClick(@router.push, to: "/")
+                  .opacity({ default: 1, active: 0.6 })
+                  .transition(140, easeOut)
+                  .tw("bg-transparent border-0 px-0 py-2")
+
+                  Column {}
+                    .tw("flex-1")
+                }
+                .tw("items-center w-full")
+
+                Text("Settings")
+                  .tw("text-[34px] font-bold mt-1")
+                  .color("#F9FAFB")
+              }
+              .tw("px-5 pt-3 pb-2 w-full items-start")
+
+              Column {
+                Column {
                   Row {
-                    Icon(@resources.chevron-left)
-                      .size(20)
-                      .color("@{state.accent}")
-                    Text("Home")
-                      .tw("text-[17px] font-medium")
-                      .color("@{state.accent}")
-                  }
-                  .tw("items-center")
-                }
-                .onClick(@router.push, to: "/")
-                .opacity({ default: 1, active: 0.6 })
-                .transition(140, easeOut)
-                .tw("bg-transparent border-0 px-0 py-2")
-
-                Column {}
-                  .tw("flex-1")
-              }
-              .tw("items-center w-full")
-
-              Text("Settings")
-                .tw("text-[34px] font-bold mt-1")
-                .color("#F9FAFB")
-            }
-            .tw("px-5 pt-3 pb-2 w-full items-start")
-
-            Column {
-              Column {
-                Row {
-                  Column {
-                    Icon(@resources.image)
-                      .size(20)
-                      .color("#ffffff")
-                  }
-                  .tw("w-8 h-8 rounded-lg bg-sky-500 items-center justify-center")
-                  Text("Wallpaper")
-                    .tw("text-[15px] font-medium ml-3 flex-1")
-                    .color("#F9FAFB")
-                }
-                .tw("items-center px-3 pt-3 pb-1")
-${wallpaperRows}
-              }
-              .tw("w-full rounded-2xl bg-black/30 border border-white/10 overflow-hidden")
-              .backdropFilter("blur(20px)")
-
-              Column {
-                Row {
-                  Column {
-                    Icon(@resources.palette)
-                      .size(20)
-                      .color("#ffffff")
-                  }
-                  .tw("w-8 h-8 rounded-lg bg-pink-500 items-center justify-center")
-                  Text("Appearance")
-                    .tw("text-[15px] font-medium ml-3 flex-1")
-                    .color("#F9FAFB")
-                }
-                .tw("items-center px-3 pt-3 pb-1")
-${accentRows}
-              }
-              .tw("w-full rounded-2xl bg-black/30 border border-white/10 overflow-hidden mt-5")
-              .backdropFilter("blur(20px)")
-
-              Column {
-                Row {
-                  Column {
-                    Icon(@resources.settings)
-                      .size(20)
-                      .color("#ffffff")
-                  }
-                  .tw("w-8 h-8 rounded-lg bg-gray-500 items-center justify-center")
-                  Column {
-                    Text("Hypen Home")
-                      .tw("text-[15px] font-medium")
+                    Column {
+                      Icon(@resources.image)
+                        .size(20)
+                        .color("#ffffff")
+                    }
+                    .tw("w-8 h-8 rounded-lg bg-sky-500 items-center justify-center")
+                    Text("Wallpaper")
+                      .tw("text-[15px] font-medium ml-3 flex-1")
                       .color("#F9FAFB")
-                    Text("Cloudflare Worker")
-                      .tw("text-xs mt-0.5")
-                      .color("#9CA3AF")
                   }
-                  .tw("ml-3 flex-1 items-start")
+                  .tw("items-center px-3 pt-3 pb-1")
+  ${wallpaperRows}
                 }
-                .tw("items-center p-3")
+                .tw("w-full rounded-2xl bg-black/30 border border-white/10 overflow-hidden")
+                .backdropFilter("blur(20px)")
+
+                Column {
+                  Row {
+                    Column {
+                      Icon(@resources.palette)
+                        .size(20)
+                        .color("#ffffff")
+                    }
+                    .tw("w-8 h-8 rounded-lg bg-pink-500 items-center justify-center")
+                    Text("Appearance")
+                      .tw("text-[15px] font-medium ml-3 flex-1")
+                      .color("#F9FAFB")
+                  }
+                  .tw("items-center px-3 pt-3 pb-1")
+  ${accentRows}
+                }
+                .tw("w-full rounded-2xl bg-black/30 border border-white/10 overflow-hidden mt-5")
+                .backdropFilter("blur(20px)")
+
+                Column {
+                  Row {
+                    Column {
+                      Icon(@resources.settings)
+                        .size(20)
+                        .color("#ffffff")
+                    }
+                    .tw("w-8 h-8 rounded-lg bg-gray-500 items-center justify-center")
+                    Column {
+                      Text("Hypen Home")
+                        .tw("text-[15px] font-medium")
+                        .color("#F9FAFB")
+                      Text("Cloudflare Worker")
+                        .tw("text-xs mt-0.5")
+                        .color("#9CA3AF")
+                    }
+                    .tw("ml-3 flex-1 items-start")
+                  }
+                  .tw("items-center p-3")
+                }
+                .tw("w-full rounded-2xl bg-black/30 border border-white/10 overflow-hidden mt-5")
+                .backdropFilter("blur(20px)")
               }
-              .tw("w-full rounded-2xl bg-black/30 border border-white/10 overflow-hidden mt-5")
-              .backdropFilter("blur(20px)")
+              .tw("px-5 pt-2 w-full")
             }
-            .tw("px-5 pt-2 w-full")
+            .tw("flex-1 w-full items-center overflow-auto pb-8")
           }
-          .background("@{state.wallpaper}")
-          .tw("flex-1 min-h-screen w-full items-center overflow-auto pb-8")
+          ${WALLPAPER_BACKGROUND}
+          .tw("flex-1 min-h-screen w-full items-center")
         }`;
 }
 
@@ -647,117 +781,129 @@ ${cells.join("\n")}
     Column {
       Router {
         Route(path: "/") {
+          // The wallpaper is painted by a wrapper OUTSIDE the SafeArea, not by
+          // the SafeArea itself. Both look full-bleed today (SafeArea applies its
+          // insets as padding, and a background covers the padding band), but
+          // painting outside keeps the wallpaper independent of how SafeArea
+          // models its insets -- and of whether it generates a box at all: a
+          // SafeArea rendered as display:contents paints no background whatsoever.
+          // The wrapper runs edge to edge under the notch / status bar / home
+          // indicator; the SafeArea inside keeps the status row, widget, grid and
+          // dock within the safe region.
           Column {
-            // ----- Status bar -----
-            Row {
-              Text("@{state.timeLabel}")
-                .tw("text-[13px] font-semibold tracking-wide")
-                .color("#F9FAFB")
+            SafeArea {
+              // ----- Status bar -----
               Row {
-                Icon(@resources.signal)
-                  .size(14)
+                Text("@{state.timeLabel}")
+                  .tw("text-[13px] font-semibold tracking-wide")
                   .color("#F9FAFB")
-                Icon(@resources.wifi)
-                  .size(15)
-                  .color("#F9FAFB")
-                Icon(@resources.battery)
-                  .size(20)
-                  .color("#F9FAFB")
-              }
-              .tw("items-center gap-1.5")
-            }
-            .tw("items-center justify-between px-7 pt-3.5 pb-5 w-full")
-
-            // ----- Clock + weather widget -----
-            Button {
-              Row {
-                Column {
-                  Text("@{state.timeLabel}")
-                    .tw("text-[44px] font-light leading-none tracking-tight text-left")
-                    .color("#FFFFFF")
-                  Text("@{state.dateLabel}")
-                    .tw("text-[13px] font-medium mt-2 text-left")
-                    .color("#D1D5DB")
+                Row {
+                  Icon(@resources.signal)
+                    .size(14)
+                    .color("#F9FAFB")
+                  Icon(@resources.wifi)
+                    .size(15)
+                    .color("#F9FAFB")
+                  Icon(@resources.battery)
+                    .size(20)
+                    .color("#F9FAFB")
                 }
-                .tw("flex-1 items-start")
+                .tw("items-center gap-1.5")
+              }
+              .tw("items-center justify-between px-7 pt-3.5 pb-5 w-full")
 
-                If(condition: "@{state.weatherReady}") {
+              // ----- Clock + weather widget -----
+              Button {
+                Row {
                   Column {
-                    Row {
-                      If(condition: "@{state.weatherIcon == 'sun'}") {
-                        Icon(@resources.sun)
-                          .size(20)
-                          .color("#FDE68A")
-                      }
-                      If(condition: "@{state.weatherIcon == 'cloud-sun'}") {
-                        Icon(@resources.cloud-sun)
-                          .size(20)
-                          .color("#FDE68A")
-                      }
-                      If(condition: "@{state.weatherIcon == 'cloud'}") {
-                        Icon(@resources.cloud)
-                          .size(20)
-                          .color("#E5E7EB")
-                      }
-                      If(condition: "@{state.weatherIcon == 'rain'}") {
-                        Icon(@resources.rain)
-                          .size(20)
-                          .color("#BFDBFE")
-                      }
-                      If(condition: "@{state.weatherIcon == 'snow'}") {
-                        Icon(@resources.snow)
-                          .size(20)
-                          .color("#E0F2FE")
-                      }
-                      Text("@{state.weatherTemp}")
-                        .tw("text-[22px] font-semibold ml-1.5")
-                        .color("#FFFFFF")
-                    }
-                    .tw("items-center")
-
-                    Text("@{state.weatherDesc}")
-                      .tw("text-xs font-medium mt-1 text-right")
+                    Text("@{state.timeLabel}")
+                      .tw("text-[44px] font-light leading-none tracking-tight text-left")
+                      .color("#FFFFFF")
+                    Text("@{state.dateLabel}")
+                      .tw("text-[13px] font-medium mt-2 text-left")
                       .color("#D1D5DB")
-                    Text("@{state.weatherCity}")
-                      .tw("text-[11px] mt-0.5 text-right")
-                      .color("#9CA3AF")
-                    Text("@{state.weatherHiLo}")
-                      .tw("text-[11px] mt-0.5 text-right")
-                      .color("#9CA3AF")
                   }
-                  .tw("items-end shrink-0")
-                  .enter(fade, duration: 320)
+                  .tw("flex-1 items-start")
+
+                  If(condition: "@{state.weatherReady}") {
+                    Column {
+                      Row {
+                        If(condition: "@{state.weatherIcon == 'sun'}") {
+                          Icon(@resources.sun)
+                            .size(20)
+                            .color("#FDE68A")
+                        }
+                        If(condition: "@{state.weatherIcon == 'cloud-sun'}") {
+                          Icon(@resources.cloud-sun)
+                            .size(20)
+                            .color("#FDE68A")
+                        }
+                        If(condition: "@{state.weatherIcon == 'cloud'}") {
+                          Icon(@resources.cloud)
+                            .size(20)
+                            .color("#E5E7EB")
+                        }
+                        If(condition: "@{state.weatherIcon == 'rain'}") {
+                          Icon(@resources.rain)
+                            .size(20)
+                            .color("#BFDBFE")
+                        }
+                        If(condition: "@{state.weatherIcon == 'snow'}") {
+                          Icon(@resources.snow)
+                            .size(20)
+                            .color("#E0F2FE")
+                        }
+                        Text("@{state.weatherTemp}")
+                          .tw("text-[22px] font-semibold ml-1.5")
+                          .color("#FFFFFF")
+                      }
+                      .tw("items-center")
+
+                      Text("@{state.weatherDesc}")
+                        .tw("text-xs font-medium mt-1 text-right")
+                        .color("#D1D5DB")
+                      Text("@{state.weatherCity}")
+                        .tw("text-[11px] mt-0.5 text-right")
+                        .color("#9CA3AF")
+                      Text("@{state.weatherHiLo}")
+                        .tw("text-[11px] mt-0.5 text-right")
+                        .color("#9CA3AF")
+                    }
+                    .tw("items-end shrink-0")
+                    .enter(fade, duration: 320)
+                  }
                 }
+                .tw("items-center w-full")
               }
-              .tw("items-center w-full")
-            }
-            .tw("w-full max-w-[330px] md:max-w-[350px] rounded-[26px] bg-black/25 border border-white/10 p-5 mt-1")
-            .backdropFilter("blur(20px)")
-            .opacity({ default: 1, active: 0.8 })
-            .transition(150, easeOut)
-            .onClick(@router.push, to: "/settings")
-            .enter(fade, duration: 300)
-
-            // ----- App grid -----
-            Column {
-${homeGrid}
-            }
-            .tw("gap-5 mt-7 w-full max-w-[330px] md:max-w-[350px]")
-
-            Column {}
-              .tw("flex-1")
-
-            // ----- Dock -----
-            Column {
-              Row {
-${dock}
-              }
-              .tw("items-center justify-between bg-white/10 border border-white/10 rounded-[30px] px-4 py-3.5 w-full shadow-2xl")
+              .tw("w-full max-w-[330px] md:max-w-[350px] rounded-[26px] bg-black/25 border border-white/10 p-5 mt-1")
               .backdropFilter("blur(20px)")
+              .opacity({ default: 1, active: 0.8 })
+              .transition(150, easeOut)
+              .onClick(@router.push, to: "/settings")
+              .enter(fade, duration: 300)
+
+              // ----- App grid -----
+              Column {
+  ${homeGrid}
+              }
+              .tw("gap-5 mt-7 w-full max-w-[330px] md:max-w-[350px]")
+
+              Column {}
+                .tw("flex-1")
+
+              // ----- Dock -----
+              Column {
+                Row {
+  ${dock}
+                }
+                .tw("items-center justify-between bg-white/10 border border-white/10 rounded-[30px] px-4 py-3.5 w-full shadow-2xl")
+                .backdropFilter("blur(20px)")
+              }
+              .tw("mb-4 w-full max-w-[330px] md:max-w-[350px]")
             }
-            .tw("mb-4 w-full max-w-[330px] md:max-w-[350px]")
+            .tw("flex-1 w-full items-center")
           }
-          .background("@{state.wallpaper}")
+          ${WALLPAPER_BACKGROUND}
           .tw("flex-1 min-h-screen w-full items-center")
         }
 ${settingsRoute()}
@@ -776,8 +922,12 @@ ${appRoutes}
 function initialLauncherState(): LauncherState {
   return {
     location: "/",
-    wallpaperId: "torres",
-    wallpaper: PHOTO_WALLPAPER,
+    wallpaperId: WALLPAPERS[0]!.id,
+    wallpaper: WALLPAPERS[0]!.css.default,
+    wallpaperSm: WALLPAPERS[0]!.css.sm,
+    wallpaperMd: WALLPAPERS[0]!.css.md,
+    wallpaperLg: WALLPAPERS[0]!.css.lg,
+    wallpaperXl: WALLPAPERS[0]!.css.xl,
     accentId: "blue",
     accent: ACCENTS[0]!.color,
     wallpapers: WALLPAPERS,
@@ -793,11 +943,12 @@ function initialLauncherState(): LauncherState {
   };
 }
 
-// Persist only the user's choices, not the whole state: the photo wallpaper
-// is a ~0.5MB data URI baked into `wallpaper`/`wallpapers`, which blows the
-// DO storage per-value limit (SQLITE_TOOBIG) if saved wholesale. Ids are
-// enough — css/accent rehydrate from the preset tables on load, and the
-// clock/weather fields are per-connection anyway.
+// Persist only the user's choices, not the whole state. Ids are enough: the
+// preset tables rebuild every rendition on load, so a refreshed `WALLPAPER_PHOTOS`
+// reaches returning visitors instead of being pinned by whatever was saved.
+// (It also keeps the saved value tiny — this used to hold a ~0.5MB base64
+// wallpaper, which blew the DO per-value limit until it was trimmed out.)
+// The clock/weather fields are per-connection anyway.
 interface PersistedChoices {
   location: string;
   wallpaperId: string;
@@ -818,7 +969,11 @@ const launcherStore: typeof baseStore = {
       ...initialLauncherState(),
       location: typeof saved.location === "string" ? saved.location : "/",
       wallpaperId: wallpaper.id,
-      wallpaper: wallpaper.css,
+      wallpaper: wallpaper.css.default,
+      wallpaperSm: wallpaper.css.sm,
+      wallpaperMd: wallpaper.css.md,
+      wallpaperLg: wallpaper.css.lg,
+      wallpaperXl: wallpaper.css.xl,
       wallpapers: WALLPAPERS.map((w) => ({ ...w, selected: w.id === wallpaper.id })),
       accentId: accent.id,
       accent: accent.color,
@@ -869,8 +1024,7 @@ export default app
     const id = action.payload?.id;
     const wp = state.wallpapers.find((w) => w.id === id);
     if (!wp) return;
-    state.wallpaperId = wp.id;
-    state.wallpaper = wp.css;
+    applyWallpaper(state, wp);
     state.wallpapers = state.wallpapers.map((w) => ({ ...w, selected: w.id === id }));
   })
   .onAction<{ id: string }>("setAccent", ({ action, state }) => {

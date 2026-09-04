@@ -52,6 +52,7 @@ enum GalleryItems {
         GalleryItem(name: "Select", path: "/components/select", description: "Dropdown selection", isApplicator: false),
         GalleryItem(name: "Spacer", path: "/components/spacer", description: "Flexible space", isApplicator: false),
         GalleryItem(name: "Stack", path: "/components/stack", description: "Overlays children", isApplicator: false),
+        GalleryItem(name: "SafeArea", path: "/components/safearea", description: "Pads content past the notch and home indicator", isApplicator: false),
         GalleryItem(name: "Divider", path: "/components/divider", description: "Visual separator", isApplicator: false),
         GalleryItem(name: "Grid", path: "/components/grid", description: "Grid layout", isApplicator: false),
         GalleryItem(name: "Card", path: "/components/card", description: "Styled card container", isApplicator: false),

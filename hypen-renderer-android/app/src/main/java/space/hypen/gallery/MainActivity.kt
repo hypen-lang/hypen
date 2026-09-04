@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenApp
+import space.hypen.renderer.components.HypenSafeAreaInsets
 import space.hypen.renderer.remote.RemoteEngineConfig
 import space.hypen.gallery.ui.theme.HypenGalleryTheme
 
@@ -205,18 +206,32 @@ fun GalleryBrowser(
                 )
             }
 
+            // Bottom system-bar padding for the gallery's *own* screens. It used to sit
+            // on the content Box below, which meant it applied to hosted Hypen apps too —
+            // and `Modifier.navigationBarsPadding()` consumes the inset it applies, so a
+            // `SafeArea` inside the hosted app found nothing left to pad by. The gallery
+            // chrome keeps the padding; the hosted surface goes edge-to-edge.
+            val galleryChromeInsets = if (!isFullscreen) Modifier.navigationBarsPadding() else Modifier
+
+            // What `SafeArea` inside a hosted app should pad by (null = every edge resolves
+            // from `WindowInsets.safeDrawing`).
+            //
+            // The toolbar is a sibling *above* the content in this Column and carries its own
+            // `statusBarsPadding()`, so the content already starts below the status bar — but
+            // a sibling's inset padding is only consumed for its own subtree, so the content
+            // still reports the full top inset. Zeroing it stops every SafeArea from pushing
+            // its content down by a status bar that is not actually overlapping it. The other
+            // edges stay null: the hosted surface genuinely does run under the navigation bar
+            // and any side cutouts, and safeDrawing is the right answer there.
+            //
+            // In fullscreen the toolbar is gone and the system bars are hidden, so the real
+            // safeDrawing insets (≈0, cutouts aside) are already correct — no override.
+            val hostedSafeAreaInsets = remember(isFullscreen) {
+                if (isFullscreen) null else HypenSafeAreaInsets(top = 0.dp)
+            }
+
             // Main content
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .then(
-                        if (!isFullscreen) {
-                            Modifier.navigationBarsPadding()
-                        } else {
-                            Modifier
-                        }
-                    )
-            ) {
+            Box(modifier = Modifier.fillMaxSize()) {
                 when (val screen = currentScreen) {
                     is BrowserScreen.Home -> {
                         HomeScreen(
@@ -229,7 +244,9 @@ fun GalleryBrowser(
                                 recentApps = appStorage.getRecentApps()
                             },
                             onScanQrClick = { navigateTo(BrowserScreen.QRScanner) },
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(galleryChromeInsets)
                         )
                     }
 
@@ -239,7 +256,9 @@ fun GalleryBrowser(
                                 connectToUrl(scannedUrl)
                             },
                             onBack = { goBack() },
-                            modifier = Modifier.fillMaxSize()
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .then(galleryChromeInsets)
                         )
                     }
 
@@ -249,6 +268,7 @@ fun GalleryBrowser(
                         key(screen.url, refreshKey) {
                             HypenAppContent(
                                 url = screen.url,
+                                safeAreaInsets = hostedSafeAreaInsets,
                                 onConnected = {
                                     isConnected = true
                                     isLoading = false
@@ -300,6 +320,7 @@ private fun HypenAppContent(
     onConnected: () -> Unit,
     onError: () -> Unit,
     modifier: Modifier = Modifier,
+    safeAreaInsets: HypenSafeAreaInsets? = null,
 ) {
     // Track if we've notified the parent about connection
     var hasNotifiedConnected by remember { mutableStateOf(false) }
@@ -308,6 +329,7 @@ private fun HypenAppContent(
         url = url,
         modifier = modifier,
         config = RemoteEngineConfig.DEBUG,
+        safeAreaInsets = safeAreaInsets,
         loadingContent = {
             Box(
                 modifier = Modifier.fillMaxSize(),

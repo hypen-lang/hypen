@@ -56,6 +56,16 @@ public struct HypenView: View {
                 // Matches the web, where 100vh is the viewport hosting the
                 // app, not the display.
                 .environment(\.viewportHeight, geometry.size.height)
+                // Real safe area of the space the Hypen root was given, read
+                // from the same GeometryReader as `vw`/`vh` and consumed by
+                // `SafeArea` elements. When the host already respects the
+                // safe area (the default), SwiftUI has consumed it before we
+                // are measured and reports zero here — which is the right
+                // answer: there is nothing left for `SafeArea` to inset. A
+                // host that opts into the full screen with `.ignoresSafeArea()`
+                // gets the real values. The root itself deliberately does NOT
+                // ignore the safe area; that stays the embedder's choice.
+                .environment(\.hypenPlatformSafeAreaInsets, HypenSafeArea.PlatformInsets(geometry.safeAreaInsets))
                 .onAppear {
                     viewModel.connect()
                 }

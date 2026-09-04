@@ -103,6 +103,7 @@ Text(@spacetime.messages)               // Data source reference
 | `List { }` | Virtualized scrollable list |
 | `Spacer()` | Flexible space |
 | `Divider()` | Separator line |
+| `SafeArea { }` | Vertical stack padded by device safe-area insets; optional `edges: ["top", ...]` (default: all four) |
 
 ### Content
 | Component | Description |

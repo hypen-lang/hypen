@@ -1032,8 +1032,26 @@ impl App {
 
     /// Enable the macOS Safari-style unified title bar. Applied on
     /// window creation in `resumed`.
+    ///
+    /// Merging the title bar into the content puts the window-controls
+    /// bar (close / minimize / maximize) OVER the app, so this also
+    /// installs it as the window's platform safe-area top inset —
+    /// `SafeArea` nodes then clear the controls by default, with
+    /// per-edge embedder overrides still winning. On Windows / Linux
+    /// native decorations stay outside the client area and the platform
+    /// insets stay zero.
     pub fn set_unified_titlebar(&mut self, on: bool) {
         self.unified_titlebar = on;
+        let platform = crate::layout::window_controls_platform_insets(
+            on,
+            cfg!(target_os = "macos"),
+        );
+        if self.taffy.platform_safe_area() != platform {
+            self.taffy.set_platform_safe_area(platform);
+            self.layout = None;
+            self.painter.invalidate_subtree_cache();
+            self.damage.add_full();
+        }
     }
 
     /// Set the window / taskbar icon. Applied on window creation in
@@ -1406,6 +1424,29 @@ impl App {
             self.taffy.mark_needs_rebuild();
         }
         self.damage.add_full();
+    }
+
+    /// Configure the safe-area insets every `SafeArea` node pads itself
+    /// by, in logical px. Per-edge `None` (the default for all four)
+    /// keeps the desktop platform value — zero, except for the top edge
+    /// under the macOS unified titlebar, where the window-controls bar
+    /// drawn over the content is the platform inset (see
+    /// [`Self::set_unified_titlebar`]). An embedder therefore only sets
+    /// the edges it additionally covers (e.g. a custom client-side
+    /// titlebar drawn over the top of the content).
+    ///
+    /// Safe to call after the window is up: the insets bake into each
+    /// SafeArea's Taffy padding, and `TaffyState` folds them into its
+    /// structure key, so the next compute restyles the existing tree.
+    pub fn set_safe_area_insets(&mut self, insets: crate::layout::SafeAreaInsets) {
+        if self.taffy.safe_area_insets() == insets {
+            return;
+        }
+        self.taffy.set_safe_area_insets(insets);
+        self.layout = None;
+        self.painter.invalidate_subtree_cache();
+        self.damage.add_full();
+        self.request_redraw_full();
     }
 
     /// Programmatic reduced-motion toggle (see the `HYPEN_REDUCED_MOTION`

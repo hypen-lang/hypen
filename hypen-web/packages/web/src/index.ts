@@ -32,6 +32,14 @@ export { RerenderTracker, type DebugConfig, defaultDebugConfig } from "./dom/deb
 // HypenApp - Embed remote Hypen apps
 export { hypenAppHandler, disconnectHypenApp } from "./dom/components/hypenapp.js";
 
+// SafeArea - notch/home-indicator aware container (shared by both renderers)
+export { safeAreaHandler, createSafeAreaHandler } from "./dom/components/safearea.js";
+export type {
+  SafeAreaEdge,
+  SafeAreaInsets,
+  SafeAreaInsetOverrides,
+} from "./safe-area.js";
+
 // ============================================================================
 // CANVAS RENDERER
 // ============================================================================

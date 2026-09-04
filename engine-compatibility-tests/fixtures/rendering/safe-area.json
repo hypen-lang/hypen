@@ -1,0 +1,41 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "safe-area",
+  "description": "SafeArea expands as a primitive element; `edges` is passed through as a list prop and is absent when not specified",
+  "category": "rendering",
+  "priority": "P1",
+
+  "input": {
+    "source": "Column { SafeArea { Text(\"Default\") } SafeArea(edges: [\"top\", \"bottom\"]) { Text(\"Filtered\") } }",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 10,
+    "patches": [
+      { "type": "create", "elementType": "Column" },
+      {
+        "type": "create",
+        "elementType": "SafeArea",
+        "absentProps": ["edges"]
+      },
+      { "type": "create", "elementType": "Text", "props": { "0": "Default" } },
+      {
+        "type": "create",
+        "elementType": "SafeArea",
+        "props": { "edges": ["top", "bottom"] }
+      },
+      { "type": "create", "elementType": "Text", "props": { "0": "Filtered" } },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

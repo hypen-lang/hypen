@@ -115,6 +115,32 @@ Column {
 }
 ```
 
+### SafeArea
+
+Full-size vertical container that pads its content by the device safe-area
+insets (notch, status bar, home indicator). Use it as the outermost container
+of a screen.
+
+```hypen
+SafeArea {
+    Column {
+        Text("Clear of the notch and the home indicator")
+    }
+}
+```
+
+Pass `edges` to inset only some sides — omitted or empty means all four:
+
+```hypen
+SafeArea(edges: ["top"]) {
+    Text("Only the top inset is applied")
+}
+```
+
+Embedders can override the insets per edge; unspecified edges keep the platform
+default. See [Layout → SafeArea](/docs/guide/layout#safearea) for the per-renderer
+override APIs and the iOS Safari `viewport-fit=cover` caveat.
+
 ## Content Components
 
 ### Text
@@ -657,6 +683,7 @@ If(condition: @state.hasNotifications) {
 | Column, Row, Box | Yes | Yes | Yes |
 | Center, Stack, Grid | Yes | Yes | Yes |
 | List, Spacer, Divider | Yes | Yes | Yes |
+| SafeArea | Yes | Yes | Yes |
 | Text, Heading, Paragraph | Yes | Yes | Yes |
 | Image | Yes | Yes | Yes |
 | Button, Input, Textarea | Yes | Yes | Yes |

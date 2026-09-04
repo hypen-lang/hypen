@@ -11,6 +11,8 @@ home-screen/
 └── cloudflare/
     ├── src/
     │   ├── launcher.ts    # APPS list + generated home-screen DSL + module
+    │   ├── unsplash.ts    # wallpaper photos + the per-breakpoint crop ladder
+    │   ├── geo.ts         # request.cf geo + Open-Meteo weather
     │   └── worker.ts      # defineHypenWorker wiring
     ├── wrangler.jsonc
     ├── package.json
@@ -75,12 +77,29 @@ protocol.) Then deploy the launcher itself.
   Adding an app to the phone is one entry in a list.
 - **Reactive theming** — the ⚙ Settings icon opens the launcher's own
   `/settings` route: wallpaper presets and an accent color, both plain state.
-  The wallpaper is an applicator binding (`.background("@{state.wallpaper}")`)
-  and the accent tints the app-frame chrome, so picking a swatch restyles the
-  phone through ordinary reactive updates — including the *detached* home
-  route in the Router cache (the engine emits the `SetProp` against the
-  kept-alive subtree, so navigating back shows the new wallpaper instantly).
-  Both choices persist in the Durable Object across reloads and deploys.
+  The wallpaper is an applicator binding and the accent tints the app-frame
+  chrome, so picking a swatch restyles the phone through ordinary reactive
+  updates — including the *detached* home route in the Router cache (the
+  engine emits the `SetProp` against the kept-alive subtree, so navigating
+  back shows the new wallpaper instantly). Both choices persist in the
+  Durable Object across reloads and deploys.
+- **Responsive wallpapers, from Unsplash** — the photo presets come from
+  Unsplash's [Wallpapers topic](https://unsplash.com/t/wallpapers), hotlinked
+  from `images.unsplash.com` (an imgix endpoint), so one photo id yields as
+  many renditions as we want. The binding is a *value map* rather than a
+  single value:
+
+  ```
+  .background({default: "@{state.wallpaper}", sm: "…", md: "…", lg: "…", xl: "…"})
+  ```
+
+  which lowers to one `@media (min-width: …)` rule per breakpoint. The
+  browser downloads only the rule that matches, so a desktop window pulls a
+  3072×1728 crop and a phone pulls 1080×1920 — and the *aspect* changes too,
+  so a wide window gets a landscape crop instead of a portrait one scaled up.
+  `auto=format` serves AVIF/WebP where supported. No API key: to change the
+  set, swap photo ids into `WALLPAPER_PHOTOS` in `src/unsplash.ts` and the
+  settings picker follows.
 
 ## Notes
 

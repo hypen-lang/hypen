@@ -311,6 +311,9 @@ export function paintNode(
     case "app":
     case "container":
     case "box":
+    // SafeArea paints like any other container: its background fills the
+    // whole box, insets included, and only its children are inset.
+    case "safearea":
       paintContainer(ctx, node);
       break;
     default:

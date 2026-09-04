@@ -5,6 +5,7 @@
  */
 
 import type { Semantics } from "@hypen-space/core/types";
+import type { SafeAreaInsets } from "../safe-area.js";
 
 export interface VirtualNode {
   id: string;
@@ -141,6 +142,14 @@ export interface CanvasRendererOptions {
   // sessions start from mirror focus.
   enableAccessibility?: boolean;
   enableHitTesting?: boolean;
+
+  /**
+   * Per-edge override for the insets the `SafeArea` component pads by, in
+   * CSS px. Each edge is optional and merges over the value probed from
+   * `env(safe-area-inset-*)` (0 outside a browser), so `{ bottom: 0 }`
+   * zeroes only the bottom edge.
+   */
+  safeAreaInsets?: Partial<SafeAreaInsets>;
 
   // Performance
   enableDirtyRects?: boolean;

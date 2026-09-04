@@ -159,6 +159,11 @@ struct ComponentPreviewView: View {
             }
         )
         .id(item.id)
+        // Same edge-to-edge hosting as the browser shell, minus the top: this
+        // preview lives under a navigation bar that already owns that space,
+        // so only the bottom (home indicator) and the landscape side insets
+        // are actually unsafe here.
+        .hypenEdgeToEdgeHost(edges: [.bottom, .horizontal])
         .navigationTitle("\(item.name) Preview")
         .navigationBarTitleDisplayMode(.inline)
     }
