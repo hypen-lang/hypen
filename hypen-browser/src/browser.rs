@@ -33,6 +33,10 @@
 //! `nodes` map are decoupled so a detached subtree keeps its
 //! `Node` entries and reconnect with `Attach` doesn't rebuild).
 
+use crate::embed::{
+    embed_url, is_hypenapp, rewrite_embed_patch_actions, slot_of, split_embed_marker, Embed,
+    EmbedStatus, MAX_EMBED_DEPTH,
+};
 use crate::shell::{
     build_shell_module, push_debug_log, push_recents, push_tabs, ShellCommand, ShellState, TabInfo,
     SHELL_ACTIONS, SHELL_BIND_PATHS,
@@ -127,6 +131,22 @@ struct Inner {
     tabs: IndexMap<String, Tab>,
     /// Id of the active tab. `None` when the home screen is showing.
     active_tab_id: Option<String>,
+    /// Live `HypenApp` embeds keyed by their marker/prefix (`e1:`).
+    /// Registered when a HypenApp Create flows through any stream
+    /// (tab or parent embed); torn down when the host node is
+    /// Removed or the owning tab closes.
+    embeds: IndexMap<String, Embed>,
+    /// Monotonic counter for embed marker allocation. Never reused, so
+    /// a stale action name can't route to a fresh embed.
+    next_embed_id: u64,
+    /// `detached id → parent at detach time`. `Tree::apply(Detach)`
+    /// deletes the `parent_by_child` entry, so an ancestor walk through
+    /// the shadow tree dead-ends at every detach boundary; this map
+    /// bridges those gaps so a `Remove` above a cached (Detached) route
+    /// still tears down the embeds inside it. Maintained by the embed
+    /// lifecycle scan (server-stream Detach/Attach) and by the slot
+    /// reconcile paths (our own Detaches).
+    detached_parents: std::collections::HashMap<String, String>,
     /// Shadow copy of the full forwarded UI tree (shell chrome + the
     /// active tab's content), kept in sync by `forward`. Serialised on
     /// demand by the `dump_tree` debug button.
@@ -143,6 +163,9 @@ impl Inner {
             seen_first_root_child: false,
             tabs: IndexMap::new(),
             active_tab_id: None,
+            embeds: IndexMap::new(),
+            next_embed_id: 1,
+            detached_parents: std::collections::HashMap::new(),
             tree: Tree::new(),
         }
     }
@@ -180,7 +203,13 @@ impl BrowserModule {
         // through to whatever the renderer wired into `on_patches`.
         let inner_for_shell = Arc::clone(&inner);
         shell.on_patches(move |patches: &[Patch]| {
-            let forwarded = process_shell_patches(&inner_for_shell, patches);
+            let mut forwarded = process_shell_patches(&inner_for_shell, patches);
+            // The pre-viewport flush can carry tab batches (and thus
+            // HypenApp creates) — run the embed lifecycle over the
+            // combined stream. Shell-origin ids carry no stream prefix,
+            // so shell patches are inert to the scan.
+            let extra = handle_embed_lifecycle(&inner_for_shell, &forwarded);
+            forwarded.extend(extra);
             forward(&inner_for_shell, &forwarded);
         });
 
@@ -359,7 +388,11 @@ impl BrowserModule {
                 "hypen-browser: tab {tab_id_for_remote} on_patches: {} patches in",
                 patches.len(),
             );
-            let rewritten = process_tab_patches(&inner_for_remote, &tab_id_for_remote, patches);
+            let mut rewritten = process_tab_patches(&inner_for_remote, &tab_id_for_remote, patches);
+            // HypenApp embeds: register / tear down any the batch
+            // creates or removes, and reconcile their slot visibility.
+            let extra = handle_embed_lifecycle(&inner_for_remote, &rewritten);
+            rewritten.extend(extra);
             log::debug!(
                 "hypen-browser: tab {tab_id_for_remote} rewritten {} → forwarding",
                 rewritten.len(),
@@ -485,10 +518,46 @@ impl BrowserModule {
     /// `refresh_active_tab` (which immediately opens a replacement),
     /// and `go_home` (which closes the lot in one pass).
     fn close_tab_silent(&self, tab_id: &str) {
-        let removed = {
+        let (removed, dead_embeds, mut embed_detached) = {
             let mut inner = self.inner.lock().expect("inner poisoned");
-            inner.tabs.shift_remove(tab_id)
+            let removed = inner.tabs.shift_remove(tab_id);
+            // Tear down the tab's embeds too — transitively, so an
+            // embed hosted inside another embed dies with the tab.
+            // Linked embed nodes are descendants of the tab's roots
+            // and die with the Removes below; anything an embed
+            // Detached (slot children, errored roots) sits in no
+            // children list and needs its own Remove, or it leaks.
+            let mut dead: Vec<Embed> = Vec::new();
+            let mut detached_ids: Vec<String> = Vec::new();
+            if let Some(tab) = removed.as_ref() {
+                let mut owners: Vec<String> = vec![tab.id_prefix.clone()];
+                while let Some(owner) = owners.pop() {
+                    let doomed: Vec<String> = inner
+                        .embeds
+                        .iter()
+                        .filter(|(_, e)| e.owner_prefix == owner)
+                        .map(|(m, _)| m.clone())
+                        .collect();
+                    for marker in doomed {
+                        if let Some(e) = inner.embeds.shift_remove(&marker) {
+                            owners.push(e.id_prefix.clone());
+                            detached_ids.extend(e.detached.iter().cloned());
+                            dead.push(e);
+                        }
+                    }
+                }
+                // Drop the detach-bridge entries the closing tab owned
+                // (server-cached routes and dead embeds' slots alike).
+                let tab_prefix = tab.id_prefix.clone();
+                let dead_prefixes: Vec<String> = dead.iter().map(|e| e.id_prefix.clone()).collect();
+                inner.detached_parents.retain(|k, _| {
+                    !k.starts_with(&tab_prefix)
+                        && !dead_prefixes.iter().any(|p| k.starts_with(p.as_str()))
+                });
+            }
+            (removed, dead, detached_ids)
         };
+        drop(dead_embeds);
         let Some(tab) = removed else {
             return;
         };
@@ -496,7 +565,7 @@ impl BrowserModule {
         // detached tabs' nodes still live in `Tree.nodes` but aren't
         // children of anything, so `Remove` still tears them down via
         // `remove_subtree`. Either way we send Remove for each id.
-        let removes: Vec<Patch> = tab
+        let mut removes: Vec<Patch> = tab
             .app_root_ids
             .iter()
             .map(|id| Patch::Remove {
@@ -504,6 +573,12 @@ impl BrowserModule {
                 transition: false,
             })
             .collect();
+        embed_detached.sort();
+        embed_detached.dedup();
+        removes.extend(embed_detached.into_iter().map(|id| Patch::Remove {
+            id: id.into(),
+            transition: false,
+        }));
         if !removes.is_empty() {
             forward(&self.inner, &removes);
         }
@@ -634,6 +709,59 @@ impl BrowserModule {
         }
     }
 
+    /// Route a dispatched action to the embed its marker names.
+    /// Returns `false` when the name (or bind path) carries no live
+    /// embed marker, so the normal shell/tab routing takes over.
+    fn try_dispatch_embed(&self, name: &str, payload: &Option<Value>) -> bool {
+        // Two shapes: `e3:playFeatured` (an @actions / @router ref) and
+        // `__hypen_bind` whose payload path is `e3:query`.
+        let (remote, name, payload) = {
+            let g = self.inner.lock().expect("inner poisoned");
+            if name == "__hypen_bind" {
+                let Some(path) = payload
+                    .as_ref()
+                    .and_then(|p| p.get("path"))
+                    .and_then(|p| p.as_str())
+                else {
+                    return false;
+                };
+                let Some((marker, rest)) = split_embed_marker(path, |m| g.embeds.contains_key(m))
+                else {
+                    return false;
+                };
+                let Some(remote) = g
+                    .embeds
+                    .get(&marker)
+                    .and_then(|e| e.remote.as_ref().map(Arc::clone))
+                else {
+                    return true; // marker matched but worker gone — swallow
+                };
+                let mut rewritten = payload.clone().unwrap_or(Value::Null);
+                if let Some(obj) = rewritten.as_object_mut() {
+                    obj.insert("path".into(), Value::String(rest.to_string()));
+                }
+                (remote, "__hypen_bind".to_string(), Some(rewritten))
+            } else {
+                let Some((marker, rest)) = split_embed_marker(name, |m| g.embeds.contains_key(m))
+                else {
+                    return false;
+                };
+                let Some(remote) = g
+                    .embeds
+                    .get(&marker)
+                    .and_then(|e| e.remote.as_ref().map(Arc::clone))
+                else {
+                    return true;
+                };
+                (remote, rest.to_string(), payload.clone())
+            }
+        };
+        log::debug!("hypen-browser: dispatch_action {name} → embed");
+        remote.dispatch_action(&name, payload);
+        record_console(&self.shell, format!("▶ out  embed action {name}"));
+        true
+    }
+
     /// Snapshot the current tab list + active id and push it into the
     /// shell so the strip re-renders.
     fn publish_tabs(&self) {
@@ -663,6 +791,13 @@ impl HypenModule for BrowserModule {
     }
 
     fn dispatch_action(&self, name: &str, payload: Option<Value>) {
+        // HypenApp embeds first: action names (and `__hypen_bind`
+        // paths) from embedded subtrees carry the embed's marker —
+        // spliced in by `rewrite_embed_patch_actions` — because the
+        // renderer's dispatch path has no node identity to route by.
+        if self.try_dispatch_embed(name, &payload) {
+            return;
+        }
         let target = classify_dispatch(name, payload.as_ref());
         log::debug!(
             "hypen-browser: dispatch_action name={name} target={} \
@@ -977,6 +1112,409 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
         }
     }
     rewritten
+}
+
+// ---------------------------------------------------------------------------
+// HypenApp embeds
+// ---------------------------------------------------------------------------
+
+/// The stream prefix a rewritten id carries (`"a1:12"` → `"a1:"`).
+/// `None` for shell-origin ids, which are never prefixed.
+fn stream_prefix_of(id: &str) -> Option<String> {
+    id.find(':').map(|i| id[..=i].to_string())
+}
+
+/// How many embed hops sit above `owner_prefix` (a tab prefix is depth
+/// 0). Guards against an app that embeds itself recursively.
+fn embed_depth(embeds: &IndexMap<String, Embed>, owner_prefix: &str) -> usize {
+    let mut depth = 0;
+    let mut current = owner_prefix.to_string();
+    while let Some(e) = embeds.get(&current) {
+        depth += 1;
+        if depth > MAX_EMBED_DEPTH {
+            break;
+        }
+        current = e.owner_prefix.clone();
+    }
+    depth
+}
+
+/// Mirror a slot-reconcile batch into `detached_parents`: the ids we
+/// Detach are host children, so the host is their bridge parent for
+/// the Remove-scan's ancestor walk; an Attach makes them live again.
+fn track_reconcile(
+    detached_parents: &mut std::collections::HashMap<String, String>,
+    host: &str,
+    patches: &[Patch],
+) {
+    for p in patches {
+        match p {
+            Patch::Detach { id } => {
+                detached_parents.insert(id.to_string(), host.to_string());
+            }
+            Patch::Attach { id, .. } => {
+                detached_parents.remove(id.as_ref());
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Scan an already-rewritten batch for embed lifecycle events:
+///
+/// * a `HypenApp` Create registers a new embed (connected after the
+///   lock is released, exactly like `open_tab` does for tabs);
+/// * an Insert / Attach of a direct child under a known host records
+///   the child's slot tag and reconciles visibility;
+/// * a Remove whose subtree contains a host tears the embed down
+///   (its nodes die with the subtree; we just drop the worker).
+///
+/// Returns extra patches (slot Detach / Attach) to append to the batch
+/// — they touch ids the batch just inserted, so they must ride in the
+/// same forward() call to stay ordered.
+fn handle_embed_lifecycle(inner: &Arc<Mutex<Inner>>, batch: &[Patch]) -> Vec<Patch> {
+    use std::collections::HashMap;
+
+    let mut extra: Vec<Patch> = Vec::new();
+    let mut to_connect: Vec<String> = Vec::new();
+    let mut torn_down: Vec<Embed> = Vec::new();
+    {
+        let mut g = inner.lock().expect("inner poisoned");
+        // Props of nodes created in THIS batch — slot children are
+        // created alongside their Insert, before `forward` has applied
+        // anything to the shadow tree.
+        let mut created: HashMap<&str, &Arc<IndexMap<String, Value>>> = HashMap::new();
+        for patch in batch {
+            match patch {
+                Patch::Create {
+                    id,
+                    element_type,
+                    props,
+                    ..
+                } => {
+                    created.insert(id.as_ref(), props);
+                    if !is_hypenapp(element_type) {
+                        continue;
+                    }
+                    let Some(owner_prefix) = stream_prefix_of(id) else {
+                        // Shell-origin id — the shell can't embed.
+                        continue;
+                    };
+                    // A re-Create of a host that already has a live
+                    // embed (tab server restarted and re-sent its tree
+                    // with the same ids) REPLACES it: tear the old one
+                    // down and reclaim its grafted / detached nodes so
+                    // the fresh embed doesn't render alongside stale
+                    // content or leak subtrees.
+                    let stale: Option<String> = g
+                        .embeds
+                        .iter()
+                        .find(|(_, e)| e.host_id.as_str() == id.as_ref())
+                        .map(|(m, _)| m.clone());
+                    if let Some(old_marker) = stale {
+                        if let Some(old) = g.embeds.shift_remove(&old_marker) {
+                            log::info!(
+                                "hypen-browser: embed {old_marker} replaced (host {id} re-created)",
+                            );
+                            for stale_id in old.app_root_ids.iter().chain(old.detached.iter()) {
+                                g.detached_parents.remove(stale_id);
+                                extra.push(Patch::Remove {
+                                    id: stale_id.as_str().into(),
+                                    transition: false,
+                                });
+                            }
+                            torn_down.push(old);
+                        }
+                    }
+                    if embed_depth(&g.embeds, &owner_prefix) >= MAX_EMBED_DEPTH {
+                        log::warn!(
+                            "hypen-browser: HypenApp at {id} exceeds max embed depth \
+                             ({MAX_EMBED_DEPTH}); not connecting",
+                        );
+                        continue;
+                    }
+                    let Some(url) = embed_url(props) else {
+                        log::warn!("hypen-browser: HypenApp at {id} has no url prop");
+                        continue;
+                    };
+                    let marker = format!("e{}:", g.next_embed_id);
+                    g.next_embed_id += 1;
+                    log::info!(
+                        "hypen-browser: embed {marker} → {url} (host {id}, owner {owner_prefix})",
+                    );
+                    g.embeds.insert(
+                        marker.clone(),
+                        Embed::new(marker.clone(), id.to_string(), owner_prefix, url),
+                    );
+                    to_connect.push(marker);
+                }
+                Patch::Detach { id } => {
+                    // `Tree::apply(Detach)` deletes the parent link, so
+                    // remember it — the Remove-scan's ancestor walk
+                    // needs to cross detach boundaries (a cached route
+                    // holding an embed, removed via an ancestor).
+                    if let Some(parent) = g.tree.parent_of(id) {
+                        let parent = parent.to_string();
+                        g.detached_parents.insert(id.to_string(), parent);
+                    }
+                }
+                Patch::Insert { parent_id, id, .. } | Patch::Attach { parent_id, id, .. } => {
+                    // Re-linked — the node is reachable through live
+                    // parent links again.
+                    g.detached_parents.remove(id.as_ref());
+                    let Some((marker, embed_prefix)) = g
+                        .embeds
+                        .iter()
+                        .find(|(_, e)| e.host_id.as_str() == parent_id.as_ref())
+                        .map(|(m, e)| (m.clone(), e.id_prefix.clone()))
+                    else {
+                        continue;
+                    };
+                    // Only host-owned children get slot handling; the
+                    // embed's own roots are tracked by
+                    // `process_embed_patches` and skipped here.
+                    if id.as_ref().starts_with(embed_prefix.as_str()) {
+                        continue;
+                    }
+                    let slot = created
+                        .get(id.as_ref())
+                        .and_then(|p| slot_of(p))
+                        .map(str::to_string);
+                    // Fall back to the shadow tree for children that
+                    // were created in an earlier batch (router-cache
+                    // re-attach).
+                    let slot = slot.or_else(|| {
+                        g.tree
+                            .get(id)
+                            .and_then(|n| {
+                                n.props
+                                    .get("slot.0")
+                                    .or_else(|| n.props.get("slot"))
+                                    .and_then(|v| v.as_str())
+                            })
+                            .map(str::to_string)
+                    });
+                    let Some(embed) = g.embeds.get_mut(&marker) else {
+                        continue;
+                    };
+                    match slot.as_deref() {
+                        Some("loading") => {
+                            if !embed.loading_slot_ids.iter().any(|s| s == id.as_ref()) {
+                                embed.loading_slot_ids.push(id.to_string());
+                            }
+                        }
+                        Some("error") => {
+                            if !embed.error_slot_ids.iter().any(|s| s == id.as_ref()) {
+                                embed.error_slot_ids.push(id.to_string());
+                            }
+                        }
+                        _ => continue,
+                    }
+                    let host = embed.host_id.clone();
+                    let patches = embed.reconcile_visibility();
+                    track_reconcile(&mut g.detached_parents, &host, &patches);
+                    extra.extend(patches);
+                }
+                Patch::Remove { id, .. } => {
+                    // Tear down every embed whose host sits inside the
+                    // removed subtree. The shadow tree hasn't applied
+                    // this batch yet, so live ancestor chains are
+                    // intact; `detached_parents` bridges the gaps
+                    // Detach cut (a cached route holding an embed,
+                    // removed via an ancestor above the detach point).
+                    let doomed: Vec<String> = g
+                        .embeds
+                        .iter()
+                        .filter(|(_, e)| {
+                            let mut cur = Some(e.host_id.as_str());
+                            while let Some(c) = cur {
+                                if c == id.as_ref() {
+                                    return true;
+                                }
+                                cur = g
+                                    .tree
+                                    .parent_of(c)
+                                    .or_else(|| g.detached_parents.get(c).map(String::as_str));
+                            }
+                            false
+                        })
+                        .map(|(marker, _)| marker.clone())
+                        .collect();
+                    for marker in doomed {
+                        if let Some(e) = g.embeds.shift_remove(&marker) {
+                            log::info!(
+                                "hypen-browser: embed {marker} torn down (host {} removed)",
+                                e.host_id,
+                            );
+                            // The subtree Remove reclaims linked nodes
+                            // only — anything this embed Detached (slot
+                            // children while connected, roots while
+                            // errored) sits in no children list and
+                            // must be removed explicitly or it leaks.
+                            for d in &e.detached {
+                                g.detached_parents.remove(d);
+                                extra.push(Patch::Remove {
+                                    id: d.as_str().into(),
+                                    transition: false,
+                                });
+                            }
+                            torn_down.push(e);
+                        }
+                        to_connect.retain(|m| m != &marker);
+                    }
+                    g.detached_parents.remove(id.as_ref());
+                }
+                _ => {}
+            }
+        }
+    }
+    // Dropping a RemoteModule Arc shuts down its worker — do it
+    // outside the lock, like `close_tab_silent`.
+    drop(torn_down);
+    for marker in to_connect {
+        connect_embed(inner, marker);
+    }
+    extra
+}
+
+/// Open the embed's WebSocket and wire its callbacks. Runs without the
+/// inner lock held (mirrors `open_tab`): the worker thread's callbacks
+/// take the lock themselves.
+fn connect_embed(inner: &Arc<Mutex<Inner>>, marker: String) {
+    let url = {
+        let g = inner.lock().expect("inner poisoned");
+        match g.embeds.get(&marker) {
+            Some(e) => e.url.clone(),
+            // Torn down before we got here (host removed in the same
+            // batch) — nothing to connect.
+            None => return,
+        }
+    };
+    let remote = Arc::new(RemoteModule::connect(url, "App"));
+
+    let inner_for_patches = Arc::clone(inner);
+    let marker_for_patches = marker.clone();
+    remote.on_patches(Arc::new(move |patches: &[Patch]| {
+        let mut rewritten = process_embed_patches(&inner_for_patches, &marker_for_patches, patches);
+        // Embedded apps can embed further apps.
+        let extra = handle_embed_lifecycle(&inner_for_patches, &rewritten);
+        rewritten.extend(extra);
+        if !rewritten.is_empty() {
+            forward(&inner_for_patches, &rewritten);
+        }
+    }));
+
+    let inner_for_status = Arc::clone(inner);
+    let marker_for_status = marker.clone();
+    remote.on_status(move |status| {
+        let error = matches!(status, ConnectionStatus::Failed { .. });
+        log::info!("hypen-browser: embed {marker_for_status} status -> {status:?}");
+        if !error {
+            // Loading stays until the first patch batch; reconnects
+            // keep showing the last live tree, like the web embed.
+            return;
+        }
+        let patches = {
+            let mut g = inner_for_status.lock().expect("inner poisoned");
+            let Some(embed) = g.embeds.get_mut(&marker_for_status) else {
+                return;
+            };
+            embed.status = EmbedStatus::Error;
+            let host = embed.host_id.clone();
+            let patches = embed.reconcile_visibility();
+            track_reconcile(&mut g.detached_parents, &host, &patches);
+            patches
+        };
+        if !patches.is_empty() {
+            forward(&inner_for_status, &patches);
+        }
+    });
+
+    remote.mount();
+
+    let stale = {
+        let mut g = inner.lock().expect("inner poisoned");
+        match g.embeds.get_mut(&marker) {
+            Some(e) => {
+                e.remote = Some(remote);
+                None
+            }
+            // Embed vanished while we were connecting — drop the
+            // fresh worker immediately.
+            None => Some(remote),
+        }
+    };
+    drop(stale);
+}
+
+/// Translate one embed's patches into the merged stream: template
+/// expansion, id prefixing, re-rooting onto the HypenApp host node,
+/// and action-name marking — plus replacement-root handling for
+/// reconnects and the loading→connected slot flip on the first batch.
+fn process_embed_patches(inner: &Arc<Mutex<Inner>>, marker: &str, patches: &[Patch]) -> Vec<Patch> {
+    let mut g = inner.lock().expect("inner poisoned");
+    let Some(embed) = g.embeds.get_mut(marker) else {
+        return Vec::new();
+    };
+    let patches = embed.expander.expand(patches.to_vec());
+    let prefix = embed.id_prefix.clone();
+    let host = embed.host_id.clone();
+
+    let mut new_roots: Vec<Arc<str>> = Vec::new();
+    let rewritten: Vec<Patch> = rewrite_tab_batch(patches, &prefix, &host, &mut new_roots)
+        .into_iter()
+        .map(|p| rewrite_embed_patch_actions(p, &prefix))
+        .collect();
+
+    let embed = g.embeds.get_mut(marker).expect("embed still present");
+
+    // A fresh root created in this batch while old roots exist means
+    // the server re-sent its tree (reconnect / new session): replace,
+    // don't stack.
+    let created: std::collections::HashSet<&str> = rewritten
+        .iter()
+        .filter_map(|p| match p {
+            Patch::Create { id, .. } => Some(id.as_ref()),
+            _ => None,
+        })
+        .collect();
+    let mut prelude: Vec<Patch> = Vec::new();
+    // A root CREATED in this batch (an Attach never counts) means the
+    // server re-sent its tree — a fresh session after a reconnect.
+    // That holds even when the fresh session reuses the same node ids
+    // (engines restart NodeId allocation, so re-sent roots usually DO
+    // collide): remove every old root first, or nodes present only in
+    // the old session would linger under the host. The same-id root's
+    // prelude Remove is immediately followed by its re-Create in the
+    // batch, so nothing flashes.
+    let has_replacement_root = new_roots.iter().any(|r| created.contains(r.as_ref()));
+    if has_replacement_root && !embed.app_root_ids.is_empty() {
+        for old in embed.app_root_ids.drain(..) {
+            embed.detached.remove(&old);
+            prelude.push(Patch::Remove {
+                id: old.into(),
+                transition: false,
+            });
+        }
+    }
+    embed
+        .app_root_ids
+        .extend(new_roots.iter().map(|r| r.to_string()));
+    for p in &rewritten {
+        if let Patch::Remove { id, .. } = p {
+            embed.app_root_ids.retain(|r| r.as_str() != id.as_ref());
+            embed.detached.remove(id.as_ref());
+        }
+    }
+
+    // First live batch: the embedded tree owns the frame now.
+    let mut out = prelude;
+    out.extend(rewritten);
+    if embed.status != EmbedStatus::Connected {
+        embed.status = EmbedStatus::Connected;
+        out.extend(embed.reconcile_visibility());
+    }
+    out
 }
 
 /// Rewrite a whole batch of tab-origin patches. `new_roots` collects
@@ -1800,5 +2338,418 @@ mod tests {
             sink.lock().unwrap().extend_from_slice(patches);
         }));
         assert!(!captured.lock().unwrap().is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // HypenApp embeds
+    // -----------------------------------------------------------------
+
+    fn create_with(id: &str, element_type: &str, entries: &[(&str, Value)]) -> Patch {
+        let mut m = IndexMap::new();
+        for (k, v) in entries {
+            m.insert((*k).to_string(), v.clone());
+        }
+        Patch::Create {
+            id: id.into(),
+            element_type: element_type.into(),
+            props: Arc::new(m),
+            semantics: None,
+        }
+    }
+
+    fn insert(parent: &str, id: &str) -> Patch {
+        Patch::Insert {
+            parent_id: parent.into(),
+            id: id.into(),
+            before_id: None,
+        }
+    }
+
+    /// Feed a raw tab batch through the same pipeline the tab's
+    /// on_patches closure runs: rewrite, embed lifecycle, forward.
+    fn ingest_tab_batch(module: &Arc<BrowserModule>, tab_id: &str, batch: &[Patch]) -> Vec<Patch> {
+        let mut rewritten = process_tab_patches(&module.inner, tab_id, batch);
+        let extra = handle_embed_lifecycle(&module.inner, &rewritten);
+        rewritten.extend(extra);
+        forward(&module.inner, &rewritten);
+        rewritten
+    }
+
+    /// A launcher-style app-route batch: route Column → HypenApp with a
+    /// loading and an error slot child. Raw (unprefixed) ids.
+    fn hypenapp_route_batch(url: &str) -> Vec<Patch> {
+        vec![
+            create_with("50", "Column", &[]),
+            insert("root", "50"),
+            create_with(
+                "51",
+                "HypenApp",
+                &[("0", json!(url)), ("flex.0", json!("1"))],
+            ),
+            insert("50", "51"),
+            create_with("52", "Column", &[("slot.0", json!("loading"))]),
+            insert("51", "52"),
+            create_with("53", "Column", &[("slot.0", json!("error"))]),
+            insert("51", "53"),
+        ]
+    }
+
+    #[test]
+    fn hypenapp_create_registers_embed_and_hides_error_slot() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+
+        // Port 1 refuses instantly — the worker just retries in the
+        // background until the module (and its embeds) drop.
+        let out = ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+
+        let inner = module.inner.lock().unwrap();
+        assert_eq!(inner.embeds.len(), 1);
+        let (marker, embed) = inner.embeds.iter().next().unwrap();
+        assert_eq!(marker, "e1:");
+        assert_eq!(embed.host_id, "a9:51");
+        assert_eq!(embed.owner_prefix, "a9:");
+        assert_eq!(embed.url, "ws://127.0.0.1:1/nope");
+        assert_eq!(embed.loading_slot_ids, vec!["a9:52".to_string()]);
+        assert_eq!(embed.error_slot_ids, vec!["a9:53".to_string()]);
+        // The error slot is hidden while loading; the loading slot stays.
+        assert!(
+            out.iter()
+                .any(|p| matches!(p, Patch::Detach { id } if id.as_ref() == "a9:53")),
+            "expected a Detach for the error slot, got {out:?}",
+        );
+        assert!(!out
+            .iter()
+            .any(|p| matches!(p, Patch::Detach { id } if id.as_ref() == "a9:52")));
+    }
+
+    #[test]
+    fn embed_patches_graft_under_host_and_carry_action_markers() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+
+        // Simulate the embed's initial tree arriving from its server.
+        let batch = vec![
+            create_with("1", "Column", &[]),
+            insert("root", "1"),
+            create_with(
+                "2",
+                "Button",
+                &[
+                    ("onClick.0", json!("@actions.play")),
+                    ("bind", json!("query")),
+                ],
+            ),
+            insert("1", "2"),
+        ];
+        let out = process_embed_patches(&module.inner, "e1:", &batch);
+
+        // Root re-rooted onto the HypenApp host, ids prefixed.
+        assert!(
+            out.iter().any(|p| matches!(
+                p,
+                Patch::Insert { parent_id, id, .. }
+                    if parent_id.as_ref() == "a9:51" && id.as_ref() == "e1:1"
+            )),
+            "expected the embed root under the host, got {out:?}",
+        );
+        // Action + bind props carry the marker.
+        let button = out.iter().find_map(|p| match p {
+            Patch::Create { id, props, .. } if id.as_ref() == "e1:2" => Some(props),
+            _ => None,
+        });
+        let props = button.expect("button create present");
+        assert_eq!(props.get("onClick.0"), Some(&json!("@actions.e1:play")));
+        assert_eq!(props.get("bind"), Some(&json!("e1:query")));
+        // First batch flips loading → connected: the loading slot hides.
+        assert!(out
+            .iter()
+            .any(|p| matches!(p, Patch::Detach { id } if id.as_ref() == "a9:52")));
+
+        // A follow-up batch emits no further slot patches.
+        let out2 = process_embed_patches(
+            &module.inner,
+            "e1:",
+            &[Patch::SetProp {
+                id: "2".into(),
+                name: "0".into(),
+                value: json!("Play now"),
+            }],
+        );
+        assert_eq!(out2.len(), 1);
+        let inner = module.inner.lock().unwrap();
+        let embed = inner.embeds.get("e1:").unwrap();
+        assert_eq!(embed.app_root_ids, vec!["e1:1".to_string()]);
+        assert_eq!(embed.status, EmbedStatus::Connected);
+    }
+
+    #[test]
+    fn embed_reconnect_replaces_the_old_root() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        let first = vec![create_with("1", "Column", &[]), insert("root", "1")];
+        forward(
+            &module.inner,
+            &process_embed_patches(&module.inner, "e1:", &first),
+        );
+
+        // Fresh session after a reconnect: new ids, new root.
+        let second = vec![create_with("7", "Column", &[]), insert("root", "7")];
+        let out = process_embed_patches(&module.inner, "e1:", &second);
+        assert!(
+            matches!(&out[0], Patch::Remove { id, .. } if id.as_ref() == "e1:1"),
+            "expected the stale root removed first, got {out:?}",
+        );
+        let inner = module.inner.lock().unwrap();
+        assert_eq!(
+            inner.embeds.get("e1:").unwrap().app_root_ids,
+            vec!["e1:7".to_string()],
+        );
+    }
+
+    #[test]
+    fn remove_of_the_route_subtree_tears_the_embed_down() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        assert_eq!(module.inner.lock().unwrap().embeds.len(), 1);
+
+        // The launcher's router evicts the cached /app route: a Remove
+        // of the route Column ("50" → "a9:50"), an ancestor of the host.
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &[Patch::Remove {
+                id: "50".into(),
+                transition: false,
+            }],
+        );
+        assert!(module.inner.lock().unwrap().embeds.is_empty());
+    }
+
+    #[test]
+    fn detach_of_the_route_subtree_keeps_the_embed_warm() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+
+        // Router-cache navigation away: Detach, not Remove.
+        ingest_tab_batch(&module, "tab-1", &[Patch::Detach { id: "50".into() }]);
+        assert_eq!(
+            module.inner.lock().unwrap().embeds.len(),
+            1,
+            "a cached route must keep its embed connected",
+        );
+    }
+
+    #[test]
+    fn close_tab_tears_down_embeds_transitively() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        {
+            let mut inner = module.inner.lock().unwrap();
+            inner.embeds.insert(
+                "e1:".into(),
+                Embed::new("e1:".into(), "a9:51".into(), "a9:".into(), "ws://x".into()),
+            );
+            // Nested embed hosted inside e1's subtree.
+            inner.embeds.insert(
+                "e2:".into(),
+                Embed::new("e2:".into(), "e1:4".into(), "e1:".into(), "ws://y".into()),
+            );
+            // An embed owned by a DIFFERENT tab must survive.
+            inner.embeds.insert(
+                "e3:".into(),
+                Embed::new("e3:".into(), "a7:2".into(), "a7:".into(), "ws://z".into()),
+            );
+        }
+        module.close_tab_silent("tab-1");
+        let inner = module.inner.lock().unwrap();
+        assert!(!inner.embeds.contains_key("e1:"));
+        assert!(!inner.embeds.contains_key("e2:"));
+        assert!(inner.embeds.contains_key("e3:"));
+    }
+
+    #[test]
+    fn hypenapp_recreate_replaces_the_stale_embed() {
+        // A tab server restart re-sends its tree with the SAME node
+        // ids. The HypenApp re-Create must replace the old embed (one
+        // worker, one registration) and reclaim its grafted roots and
+        // detached nodes rather than stacking a duplicate.
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        // Give the first embed a grafted root.
+        forward(
+            &module.inner,
+            &process_embed_patches(
+                &module.inner,
+                "e1:",
+                &[create_with("1", "Column", &[]), insert("root", "1")],
+            ),
+        );
+
+        let out = ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        let inner = module.inner.lock().unwrap();
+        assert_eq!(inner.embeds.len(), 1, "old embed must be replaced");
+        assert!(inner.embeds.contains_key("e2:"));
+        assert!(!inner.embeds.contains_key("e1:"));
+        // The stale embed's grafted root is removed from the tree.
+        assert!(
+            out.iter()
+                .any(|p| matches!(p, Patch::Remove { id, .. } if id.as_ref() == "e1:1")),
+            "expected the stale embed root removed, got {out:?}",
+        );
+    }
+
+    #[test]
+    fn teardown_removes_the_detached_slot_subtrees() {
+        // While loading, the error slot child is Detached — it sits in
+        // no children list, so the route subtree's Remove can't reach
+        // it. Teardown must Remove it explicitly or it leaks.
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        let out = ingest_tab_batch(
+            &module,
+            "tab-1",
+            &[Patch::Remove {
+                id: "50".into(),
+                transition: false,
+            }],
+        );
+        assert!(module.inner.lock().unwrap().embeds.is_empty());
+        assert!(
+            out.iter()
+                .any(|p| matches!(p, Patch::Remove { id, .. } if id.as_ref() == "a9:53")),
+            "expected the detached error slot removed, got {out:?}",
+        );
+    }
+
+    #[test]
+    fn remove_above_a_detached_route_still_tears_the_embed_down() {
+        // Router-cache a route (Detach severs the parent link in the
+        // Tree), then Remove an ANCESTOR of the detach point — the
+        // detach-parent bridge must carry the walk across the gap.
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        let mut batch = vec![create_with("40", "Column", &[]), insert("root", "40")];
+        batch.extend(vec![
+            create_with("50", "Column", &[]),
+            insert("40", "50"),
+            create_with("51", "HypenApp", &[("0", json!("ws://127.0.0.1:1/nope"))]),
+            insert("50", "51"),
+        ]);
+        ingest_tab_batch(&module, "tab-1", &batch);
+        assert_eq!(module.inner.lock().unwrap().embeds.len(), 1);
+
+        // Cache the route: its parent link in the Tree is now gone.
+        ingest_tab_batch(&module, "tab-1", &[Patch::Detach { id: "50".into() }]);
+        // Remove the ancestor above the detach point.
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &[Patch::Remove {
+                id: "40".into(),
+                transition: false,
+            }],
+        );
+        assert!(
+            module.inner.lock().unwrap().embeds.is_empty(),
+            "the embed inside the cached route must be torn down",
+        );
+    }
+
+    #[test]
+    fn embed_reconnect_with_same_ids_still_replaces_the_root() {
+        // A fresh session's engine restarts NodeId allocation, so the
+        // re-sent tree's root collides with the old one. Replacement
+        // must still be detected (Create of a root while old roots
+        // exist), or old-session leftovers linger under the host.
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        let first = vec![create_with("1", "Column", &[]), insert("root", "1")];
+        forward(
+            &module.inner,
+            &process_embed_patches(&module.inner, "e1:", &first),
+        );
+
+        let again = vec![create_with("1", "Column", &[]), insert("root", "1")];
+        let out = process_embed_patches(&module.inner, "e1:", &again);
+        assert!(
+            matches!(&out[0], Patch::Remove { id, .. } if id.as_ref() == "e1:1"),
+            "expected the old-session root removed first, got {out:?}",
+        );
+        let inner = module.inner.lock().unwrap();
+        assert_eq!(
+            inner.embeds.get("e1:").unwrap().app_root_ids,
+            vec!["e1:1".to_string()],
+        );
+    }
+
+    #[test]
+    fn embed_marked_actions_are_swallowed_not_sent_to_the_tab() {
+        // With the embed registered but its worker gone, a marked
+        // action must be swallowed (routing matched) rather than
+        // falling through to the active tab's remote; an unmarked
+        // action must fall through to normal routing.
+        let (module, _captured) = fresh_browser_with_capture();
+        {
+            let mut inner = module.inner.lock().unwrap();
+            inner.embeds.insert(
+                "e1:".into(),
+                Embed::new("e1:".into(), "a9:51".into(), "a9:".into(), "ws://x".into()),
+            );
+        }
+        assert!(module.try_dispatch_embed("e1:play", &None));
+        assert!(module.try_dispatch_embed(
+            "__hypen_bind",
+            &Some(json!({"path": "e1:query", "value": "x"})),
+        ));
+        assert!(!module.try_dispatch_embed("play", &None));
+        assert!(!module.try_dispatch_embed("e4:play", &None));
+        assert!(!module.try_dispatch_embed(
+            "__hypen_bind",
+            &Some(json!({"path": "query", "value": "x"})),
+        ));
     }
 }

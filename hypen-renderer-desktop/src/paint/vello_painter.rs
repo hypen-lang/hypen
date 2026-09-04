@@ -673,6 +673,25 @@ impl VelloPainter {
             if let Some(c) = pb.color {
                 fill_rect(&mut self.scene, item.rect, c, radius);
             }
+            // A colour-only (or gradient-only) `background` shorthand
+            // must not swallow a separate `backgroundImage` url — that
+            // image painted via the legacy branch before the layered
+            // path existed. When the stack carries its own url layer,
+            // both reads saw the same shorthand and the stack wins.
+            let has_image_layer = pb
+                .layers
+                .iter()
+                .any(|l| matches!(l, crate::style::BackgroundLayer::Image(_)));
+            if !has_image_layer {
+                if let Some(src) = item.background_image.as_deref() {
+                    self.draw_image(
+                        item.rect,
+                        Some(src),
+                        crate::layout::ObjectFit::Cover,
+                        radius,
+                    );
+                }
+            }
             for layer in &pb.layers {
                 match layer {
                     crate::style::BackgroundLayer::Image(src) => {

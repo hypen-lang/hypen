@@ -2181,12 +2181,20 @@ fn parse_radial_prelude(s: &str) -> Option<(bool, RadialExtent, (f32, f32))> {
         let mut x: Option<f32> = None;
         let mut y: Option<f32> = None;
         let mut i = 0;
+        // Keyword + percent only pair up in the 3-/4-value syntax
+        // (`at right 20% bottom 10%` — the percent is an offset FROM
+        // that edge). In the 2-value form each token stands alone:
+        // `at left 30%` is x = left edge, y = 30%, so pairing there
+        // would steal the y percent for the x axis.
+        let pair_offsets = toks.len() >= 3;
         while i < toks.len() {
-            // CSS 4-value syntax pairs an edge keyword with an offset
-            // FROM that edge (`right 20%` → x = 1 − 0.2); a keyword
-            // alone is the edge itself; a bare percent fills the next
-            // positional axis (x, then y).
-            let offset = toks.get(i + 1).copied().and_then(pct);
+            // A keyword alone is the edge itself; a bare percent fills
+            // the next positional axis (x, then y).
+            let offset = if pair_offsets {
+                toks.get(i + 1).copied().and_then(pct)
+            } else {
+                None
+            };
             let step = if offset.is_some() { 2 } else { 1 };
             match toks[i] {
                 "left" => {
@@ -2354,18 +2362,53 @@ pub fn prop_background_layers(node: &Node) -> Option<ParsedBackground> {
         }
     }
     if let Some(raw) = prop_str(node, "backgroundImage") {
-        let resolved = substitute_tw_gradient_vars(node, raw);
-        if let Some(parsed) = parse_background_value(&resolved) {
-            let radial = parsed
-                .layers
-                .iter()
-                .any(|l| matches!(l, BackgroundLayer::Radial(_)));
-            if radial || parsed.layers.len() >= 2 {
-                return Some(parsed);
+        // Only values the legacy single-linear path can't express are
+        // worth the full layered parse: a radial gradient, or a layer
+        // list (a depth-0 comma outside any gradient's stop list —
+        // sniffed cheaply on the RAW string, whose `var(--tw-…)` holes
+        // contain no top-level commas). Without this gate, every
+        // Tailwind `bg-gradient-to-*` node paid var substitution and a
+        // layered parse per relayout only to discard the result and be
+        // re-parsed by `prop_linear_gradient`.
+        if raw.contains("radial-gradient") || has_top_level_comma(raw) {
+            let resolved = substitute_tw_gradient_vars(node, raw);
+            if let Some(parsed) = parse_background_value(&resolved) {
+                let radial = parsed
+                    .layers
+                    .iter()
+                    .any(|l| matches!(l, BackgroundLayer::Radial(_)));
+                if radial || parsed.layers.len() >= 2 {
+                    return Some(parsed);
+                }
             }
         }
     }
     None
+}
+
+/// `true` when `s` has a comma outside every paren/quote nesting —
+/// i.e. it is a CSS layer LIST, not a single function value whose
+/// arguments merely contain commas.
+fn has_top_level_comma(s: &str) -> bool {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for ch in s.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                }
+            }
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                ',' if depth == 0 => return true,
+                _ => {}
+            },
+        }
+    }
+    false
 }
 
 /// Read `name` (with viewport-aware tw breakpoint resolution) as a
@@ -2856,6 +2899,12 @@ mod tests {
         let g =
             parse_radial_gradient("radial-gradient(at center 30%, #fff, #000)").expect("parses");
         assert!((g.center.0 - 0.5).abs() < 1e-6);
+        assert!((g.center.1 - 0.3).abs() < 1e-6);
+        // 2-value form: each token stands alone — `left` is the x edge
+        // and the percent belongs to the Y axis, NOT an offset from the
+        // left edge (that pairing is 3-/4-value syntax only).
+        let g = parse_radial_gradient("radial-gradient(at left 30%, #fff, #000)").expect("parses");
+        assert!((g.center.0 - 0.0).abs() < 1e-6);
         assert!((g.center.1 - 0.3).abs() < 1e-6);
     }
 

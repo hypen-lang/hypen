@@ -25,6 +25,7 @@
 
 pub mod browser;
 pub mod devlog;
+pub mod embed;
 pub mod shell;
 pub mod storage;
 
