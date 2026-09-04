@@ -12,7 +12,7 @@
 
 import type { FontStyle, Point, Rectangle, VirtualNode } from "./types.js";
 import { measureText } from "./text.js";
-import { createFontString, cssLengthToPx } from "./utils.js";
+import { createFontString, cssLengthToPx, cssLineHeightToPx } from "./utils.js";
 
 /** Selection highlight color shared by static text and input painting. */
 export const SELECTION_HIGHLIGHT_COLOR = "rgba(59, 130, 246, 0.35)";
@@ -53,7 +53,7 @@ export function nodeFontStyle(props: Record<string, any>): FontStyle {
     fontSize,
     fontWeight: props.fontWeight || "normal",
     fontFamily: props.fontFamily || "system-ui, sans-serif",
-    lineHeight: cssLengthToPx(props.lineHeight) ?? fontSize * 1.2,
+    lineHeight: cssLineHeightToPx(props.lineHeight, fontSize) ?? fontSize * 1.2,
   };
 }
 

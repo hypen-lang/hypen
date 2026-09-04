@@ -162,7 +162,10 @@ const STATE_RANK: Record<string, number> = {
 // from BREAKPOINT_ORDER.length so adding breakpoints can't silently break it.
 const STATE_WEIGHT = BREAKPOINT_ORDER.length + 1;
 
-function variantRank(breakpoint: string | null, state: string | null): number {
+export function variantPrecedenceRank(
+  breakpoint: string | null,
+  state: string | null,
+): number {
   const bpTier = breakpoint ? BREAKPOINT_ORDER.indexOf(breakpoint) + 1 : 0; // 0..len
   const stateTier = state ? STATE_RANK[state] ?? 0 : 0; // 0..4
   // State tier dominates; breakpoint tier breaks ties within a state tier.
@@ -225,7 +228,7 @@ export function resolveVariantProps(
 
     if (!variantApplies(parsed, width, states)) continue;
 
-    const rank = variantRank(parsed.breakpoint, parsed.state);
+    const rank = variantPrecedenceRank(parsed.breakpoint, parsed.state);
     const existing = winners.get(parsed.base);
     if (!existing || rank >= existing.rank) {
       winners.set(parsed.base, { value: props[key], rank });

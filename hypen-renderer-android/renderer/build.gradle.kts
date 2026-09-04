@@ -80,8 +80,12 @@ dependencies {
     // Image Loading
     implementation(libs.coil.compose)
 
-    // Media3 (ExoPlayer) for Video
+    // Media3 (ExoPlayer) for Video. The HLS module must be on the classpath
+    // for `.m3u8` sources to play — DefaultMediaSourceFactory discovers it
+    // reflectively at runtime (capability matrix in
+    // hypen-web/docs/components/video.md claims Android HLS support).
     implementation(libs.media3.exoplayer)
+    implementation(libs.media3.exoplayer.hls)
     implementation(libs.media3.ui)
 
     // Unit Testing

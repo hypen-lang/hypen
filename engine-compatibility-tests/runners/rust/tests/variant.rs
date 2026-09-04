@@ -65,8 +65,10 @@ fn collect_fixtures(root: &Path) -> Vec<PathBuf> {
 fn sorted_object(value: &Value) -> Value {
     match value {
         Value::Object(m) => {
-            let sorted: BTreeMap<_, _> =
-                m.iter().map(|(k, v)| (k.clone(), sorted_object(v))).collect();
+            let sorted: BTreeMap<_, _> = m
+                .iter()
+                .map(|(k, v)| (k.clone(), sorted_object(v)))
+                .collect();
             Value::Object(sorted.into_iter().collect())
         }
         Value::Array(a) => Value::Array(a.iter().map(sorted_object).collect()),

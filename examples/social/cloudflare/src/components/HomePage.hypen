@@ -23,13 +23,16 @@ module HomePage {
             }
             .tw("flex-row shrink-0")
         }
-        .tw("py-3 px-4 flex-row items-center border-b border-gray-200")
+        .tw("py-3 px-4 flex-row items-center")
 
         Stories()
 
-        ForEach(items: @state.posts, key: "id") {
+        Grid(@state.posts, key: "id") {
             Post()
         }
+        .gridColumns({default: 1, md: 2, xl: 3})
+        .gap({default: 0, md: 20})
+        .tw("w-full md:px-5 md:pb-5")
     }
     .scrollable(true)
     .tw("flex-1 w-full")

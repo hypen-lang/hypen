@@ -71,7 +71,9 @@ fun Modifier.applyHypenSemantics(block: Map<String, Any?>?): Modifier {
 internal fun effectiveLabel(block: Map<String, Any?>): String? {
     val name = block["name"] as? String ?: return null
     if (block["nameExplicit"] == true) return name
-    if (block["role"] == "img") return name
+    // Media names (Image alt, Video title) have no visible text TalkBack
+    // could derive them from, so the engine-derived name is applied.
+    if (block["role"] == "img" || block["role"] == "video") return name
     return null
 }
 

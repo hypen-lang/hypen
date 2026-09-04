@@ -22,7 +22,7 @@ Column {
 
   Row {
     Column {
-      Image(src: "https://picsum.photos/100/100?1")
+      Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/blur.png?platform=__HYPEN_GALLERY_PLATFORM__&example=blur&generation=__HYPEN_GALLERY_GENERATION__")
         .width(80)
         .height(80)
         .cornerRadius(8)
@@ -35,7 +35,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Image(src: "https://picsum.photos/100/100?1")
+      Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/blur.png?platform=__HYPEN_GALLERY_PLATFORM__&example=blur&generation=__HYPEN_GALLERY_GENERATION__")
         .width(80)
         .height(80)
         .cornerRadius(8)
@@ -48,7 +48,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Image(src: "https://picsum.photos/100/100?1")
+      Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/blur.png?platform=__HYPEN_GALLERY_PLATFORM__&example=blur&generation=__HYPEN_GALLERY_GENERATION__")
         .width(80)
         .height(80)
         .cornerRadius(8)
@@ -61,7 +61,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Image(src: "https://picsum.photos/100/100?1")
+      Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/blur.png?platform=__HYPEN_GALLERY_PLATFORM__&example=blur&generation=__HYPEN_GALLERY_GENERATION__")
         .width(80)
         .height(80)
         .cornerRadius(8)
@@ -73,7 +73,7 @@ Column {
     }
     .horizontalAlignment("center")
   }
-  .gap(16)
+  .gap(8)
   .marginBottom(24)
 
   Text("Blur on text/content")

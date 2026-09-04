@@ -40,7 +40,11 @@ import { advancedLayoutHandlers } from "./advanced-layout.js";
 import { backgroundHandlers } from "./background.js";
 import { displayHandlers } from "./display.js";
 import { transitionHandlers } from "./transition.js";
-import { BREAKPOINTS as VARIANT_BREAKPOINTS, parseVariantKey } from "../../variants.js";
+import {
+  BREAKPOINTS as VARIANT_BREAKPOINTS,
+  parseVariantKey,
+  variantPrecedenceRank,
+} from "../../variants.js";
 import { ariaHandlers } from "./aria.js";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 
@@ -68,6 +72,8 @@ let variantStyleElement: HTMLStyleElement | null = null;
  * against (tests swap `document`; a host page may drop the style element).
  */
 const insertedRules = new Set<string>();
+/** Precedence rank parallel to `variantStyleSheet.cssRules`. */
+const insertedRuleRanks: number[] = [];
 
 /**
  * Get or create the variant stylesheet
@@ -86,6 +92,7 @@ function getVariantStyleSheet(): CSSStyleSheet {
     variantStyleElement = style;
     variantStyleSheet = style.sheet as CSSStyleSheet;
     insertedRules.clear();
+    insertedRuleRanks.length = 0;
   }
   return variantStyleSheet!;
 }
@@ -169,6 +176,19 @@ export class ApplicatorRegistry {
   private variantMeta: WeakMap<HTMLElement, VariantMeta> = new WeakMap();
   /** Detached element used to observe what a handler writes. See `lower()`. */
   private probe: HTMLElement | null = null;
+
+
+  /**
+   * Whether a registered applicator owns this prop name.
+   *
+   * A few names are backed BOTH by a component handler (they write an element
+   * attribute) and by an applicator (they carry layout bookkeeping) — `size`
+   * on Avatar/Spinner/Icon is the case that bit us. Clearing such a prop has
+   * to run both sides, so the RemoveProp path asks this before deciding.
+   */
+  hasHandler(name: string): boolean {
+    return this.handlers.has(name);
+  }
 
   constructor() {
     this.registerDefaults();
@@ -496,10 +516,11 @@ export class ApplicatorRegistry {
    * Insert the rule for `decls` (deduplicated) and swap the class that carries
    * it onto the element.
    *
-   * Unqualified (default) rules are inserted at the FRONT of the sheet: a
-   * `@media` variant rule has the same specificity as the default's rule, so
-   * source order is what makes the variant win. State variants carry a
-   * pseudo-class and outrank both on specificity alone.
+   * Rules are kept in canonical precedence order, independent of patch
+   * arrival. Media-query classes all have equal specificity, so merely
+   * appending them lets a late-arriving `@md` rule override an earlier `@xl`
+   * rule even on an xl viewport. The same issue applies when hover/focus/
+   * active states overlap.
    */
   private emitRule(
     element: HTMLElement,
@@ -527,7 +548,13 @@ export class ApplicatorRegistry {
     if (!insertedRules.has(rule)) {
       const sheet = getVariantStyleSheet();
       try {
-        sheet.insertRule(rule, front ? 0 : sheet.cssRules.length);
+        const rank = front ? 0 : variantPrecedenceRank(breakpoint, state);
+        const firstHigher = insertedRuleRanks.findIndex(
+          (existingRank) => existingRank > rank,
+        );
+        const index = firstHigher === -1 ? sheet.cssRules.length : firstHigher;
+        sheet.insertRule(rule, index);
+        insertedRuleRanks.splice(index, 0, rank);
         insertedRules.add(rule);
       } catch (error) {
         log.warn(`Could not insert variant rule for "${base}": ${rule}`, error);

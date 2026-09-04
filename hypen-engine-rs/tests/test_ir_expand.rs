@@ -635,8 +635,9 @@ fn test_shared_element_timing_defaults_and_named_overrides() {
     );
 
     // Named overrides
-    let element =
-        parse_to_element(r#"Image(src: "x.png").sharedElement("hero", curve: easeOut, duration: 500)"#);
+    let element = parse_to_element(
+        r#"Image(src: "x.png").sharedElement("hero", curve: easeOut, duration: 500)"#,
+    );
     assert_eq!(
         anim_spec(&element, "shared"),
         json!({"duration": 500, "curve": "easeOut"})
@@ -795,7 +796,10 @@ fn test_states_pose_lowering_with_base_defaults() {
     // No junk props from the intercepted applicator or its block.
     assert!(!element.props.contains_key("states.0"));
     assert!(!element.props.contains_key("onState.0"));
-    assert!(element.ir_children.is_empty(), "onState never becomes a child");
+    assert!(
+        element.ir_children.is_empty(),
+        "onState never becomes a child"
+    );
 }
 
 #[test]
@@ -932,7 +936,10 @@ fn test_states_tw_inside_pose() {
 
     let (_, cases, default) = state_switch(&element, "boxShadow.0");
     assert!(cases.get("collapsed").is_none());
-    assert!(cases.get("expanded").is_some(), "shadow-lg expands per-state");
+    assert!(
+        cases.get("expanded").is_some(),
+        "shadow-lg expands per-state"
+    );
     assert_eq!(default, None);
 }
 
@@ -1189,7 +1196,10 @@ fn test_scrub_happy_path_all_three_props() {
         &json!({"curve": "spring", "duration": 300})
     );
     // Dotted state path string, module-scope semantics identical to .bind.
-    assert_eq!(static_prop(&element, "__anim.scrubBind"), &json!("sheetPhase"));
+    assert_eq!(
+        static_prop(&element, "__anim.scrubBind"),
+        &json!("sheetPhase")
+    );
 
     // Materialized pose endpoints: [fromValue, toValue] per overridden key.
     assert_eq!(
@@ -1198,7 +1208,13 @@ fn test_scrub_happy_path_all_three_props() {
     );
 
     // The applicators are stripped — never scrub.<idx>/settle.<idx> props.
-    for key in ["scrub.0", "scrub.from", "settle.0", "settle.curve", "settle.bind"] {
+    for key in [
+        "scrub.0",
+        "scrub.from",
+        "settle.0",
+        "settle.curve",
+        "settle.bind",
+    ] {
         assert!(!element.props.contains_key(key), "leaked '{key}'");
     }
 }
@@ -1228,7 +1244,10 @@ fn test_scrub_defaults_filled() {
         static_prop(&element, "__anim.scrubSettle"),
         &json!({"curve": "spring", "duration": 300})
     );
-    assert_eq!(static_prop(&element, "__anim.scrubBind"), &json!("sheetPhase"));
+    assert_eq!(
+        static_prop(&element, "__anim.scrubBind"),
+        &json!("sheetPhase")
+    );
 }
 
 #[test]
@@ -1266,7 +1285,10 @@ fn test_scrub_of_with_gesture_source_warned_and_dropped() {
     );
 
     let spec = static_prop(&element, "__anim.scrub");
-    assert!(spec.get("of").is_none(), "of must be dropped with gesture: {spec}");
+    assert!(
+        spec.get("of").is_none(),
+        "of must be dropped with gesture: {spec}"
+    );
     assert_eq!(spec["source"], json!("gesture"));
 }
 
@@ -1301,7 +1323,10 @@ fn test_scrub_unknown_pose_label_omits_all() {
         // The states machinery is untouched by the degradation.
         assert!(element.props.contains_key("__anim.states"));
         assert!(
-            matches!(element.props.get("translateY.0"), Some(Value::StateSwitch { .. })),
+            matches!(
+                element.props.get("translateY.0"),
+                Some(Value::StateSwitch { .. })
+            ),
             "pose switch must survive scrub degradation"
         );
     }
@@ -1350,16 +1375,14 @@ fn test_scrub_missing_over_omits_all() {
 #[test]
 fn test_scrub_bad_over_shapes_omit_all() {
     for over in [
-        "over: 400",             // not a list
-        "over: [0]",             // one element
-        "over: [0, 100, 200]",   // three elements
-        r#"over: ["a", "b"]"#,   // non-numbers
-        "over: [100, 100]",      // equal endpoints — zero-length range
+        "over: 400",           // not a list
+        "over: [0]",           // one element
+        "over: [0, 100, 200]", // three elements
+        r#"over: ["a", "b"]"#, // non-numbers
+        "over: [100, 100]",    // equal endpoints — zero-length range
     ] {
         let element = parse_scrub_element(
-            &format!(
-                ".scrub(from: closed, to: open, {over})\n.settle(bind: @state.sheetPhase)"
-            ),
+            &format!(".scrub(from: closed, to: open, {over})\n.settle(bind: @state.sheetPhase)"),
             SHEET_STATES,
         );
         assert_no_scrub_props(&element);
@@ -1411,7 +1434,10 @@ fn test_scrub_poses_fall_back_to_static_base_and_skip_one_ended_keys() {
     // The one-ended key's pose switch itself is untouched — it still flips,
     // it just snaps under scrub.
     assert!(
-        matches!(element.props.get("color.0"), Some(Value::StateSwitch { .. })),
+        matches!(
+            element.props.get("color.0"),
+            Some(Value::StateSwitch { .. })
+        ),
         "color.0 pose switch must survive"
     );
 }
@@ -1539,4 +1565,42 @@ fn test_scrub_excluded_inside_states_pose() {
     let (_, cases, _) = state_switch(&element, "translateY.0");
     assert_eq!(cases.get("closed"), Some(&json!(400.0)));
     assert_eq!(cases.get("open"), Some(&json!(0.0)));
+}
+
+// ============================================================================
+// Video v2: playback bind + Scrubber primitive
+// ============================================================================
+
+#[test]
+fn test_video_bind_lowers_to_playback_prop() {
+    // .bind on Video targets the playback struct, not the form "value"
+    // channel — hypen-docs/content/docs/guide/components.mdx §Playback control.
+    let element = parse_to_element(r#"Video(src: "a.mp4").bind(@state.playback)"#);
+
+    assert_eq!(element.element_type, "Video");
+    match element.props.get("playback").unwrap() {
+        Value::Binding(b) => assert_eq!(b.full_path(), "playback"),
+        other => panic!("Expected Binding for playback prop, got {:?}", other),
+    }
+    match element.props.get("bind").unwrap() {
+        Value::Static(v) => assert_eq!(v, &json!("playback")),
+        other => panic!("Expected Static bind path, got {:?}", other),
+    }
+    assert!(
+        !element.props.contains_key("value"),
+        "Video bind must not lower to the form 'value' channel"
+    );
+}
+
+#[test]
+fn test_scrubber_is_a_primitive_with_slot_prop() {
+    // Scrubber parses as a primitive (not an unknown component) and the
+    // .slot marker lowers to the slot.0 prop renderers key on.
+    let element = parse_to_element(r#"Scrubber().slot("controls")"#);
+
+    assert_eq!(element.element_type, "Scrubber");
+    match element.props.get("slot.0").unwrap() {
+        Value::Static(v) => assert_eq!(v, &json!("controls")),
+        other => panic!("Expected Static slot name, got {:?}", other),
+    }
 }

@@ -12,8 +12,42 @@ use common::*;
 use hypen_engine::ir::{Element, IRNode, Props, Value};
 use hypen_engine::lifecycle::{Module, ModuleInstance};
 use hypen_engine::reactive::{Binding, DependencyGraph, Scheduler};
-use hypen_engine::reconcile::{reconcile_ir, InstanceTree, Patch};
-use hypen_engine::render::render_dirty_nodes_with_deps;
+use hypen_engine::reconcile::{InstanceTree, Patch};
+
+thread_local! {
+    // One expander per test thread (libtest runs each test on its own
+    // thread): registrations persist across a test's successive batches,
+    // exactly like a boundary's session-lifetime expander.
+    static EXPANDER: std::cell::RefCell<hypen_engine::TemplateExpander> =
+        std::cell::RefCell::new(hypen_engine::TemplateExpander::new());
+}
+
+/// [`hypen_engine::reconcile::reconcile_ir`], lowered: the golden
+/// assertions pin the pre-template Create/Insert wire, so every batch
+/// goes through the expander the way every plain-patch boundary does.
+fn reconcile_ir(
+    tree: &mut InstanceTree,
+    node: &IRNode,
+    parent_id: Option<hypen_engine::ir::NodeId>,
+    state: &serde_json::Value,
+    dependencies: &mut DependencyGraph,
+) -> Vec<Patch> {
+    let patches = hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
+    EXPANDER.with(|e| e.borrow_mut().expand(patches))
+}
+
+/// [`hypen_engine::render::render_dirty_nodes_with_deps`], lowered through
+/// the same per-thread expander (list rebuilds emit Instantiate here too).
+fn render_dirty_nodes_with_deps(
+    scheduler: &mut Scheduler,
+    tree: &mut InstanceTree,
+    module: Option<&ModuleInstance>,
+    dependencies: &mut DependencyGraph,
+) -> Vec<Patch> {
+    let patches =
+        hypen_engine::render::render_dirty_nodes_with_deps(scheduler, tree, module, dependencies);
+    EXPANDER.with(|e| e.borrow_mut().expand(patches))
+}
 use indexmap::indexmap;
 use serde_json::json;
 use std::time::Instant;

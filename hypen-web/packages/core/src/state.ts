@@ -186,6 +186,57 @@ export function createObservableState<T extends object>(
   let batchDepth = 0;
   let pendingChange: StateChange | null = null;
 
+  /**
+   * Write the live value at each changed path into `lastSnapshot`,
+   * cloning only those subtrees. Paths come from `diffState`, so every
+   * parent container is guaranteed to exist in the snapshot: the diff
+   * only reports a granular child path when both sides have the same
+   * container there (container replacements arrive as one path for the
+   * container itself). A path whose live value is gone (deleted key)
+   * is deleted from the snapshot too — leaving a `null` behind would
+   * make the next diff re-report the deletion forever.
+   */
+  function updateSnapshotAtPaths(paths: StatePath[]): void {
+    const prefixLen = pathPrefix ? pathPrefix.length + 1 : 0;
+    for (const fullPath of paths) {
+      const segments = fullPath.slice(prefixLen).split(".");
+      const last = segments.pop()!;
+
+      // Walk both trees to the parent container (raw target, not the
+      // proxy — this is bookkeeping, not an observable read).
+      let src: any = initialState;
+      let dst: any = lastSnapshot;
+      let broken = false;
+      for (const seg of segments) {
+        src = src?.[seg];
+        dst = dst?.[seg];
+        if (src === null || typeof src !== "object" || dst === null || typeof dst !== "object") {
+          broken = true;
+          break;
+        }
+      }
+      if (broken || dst === null || typeof dst !== "object") {
+        // Structural surprise (shouldn't happen per the diff contract) —
+        // fall back to a full clone for correctness.
+        lastSnapshot = deepClone(state);
+        return;
+      }
+
+      const liveValue = src?.[last];
+      if (liveValue === undefined && !(src !== null && typeof src === "object" && last in src)) {
+        if (Array.isArray(dst) && Array.isArray(src)) {
+          // Index beyond the live array's new length: truncate rather
+          // than delete, which would leave a hole and a stale length.
+          dst.length = src.length;
+        } else {
+          delete dst[last];
+        }
+      } else {
+        dst[last] = deepClone(liveValue);
+      }
+    }
+  }
+
   function notifyChange() {
     if (batchDepth > 0) return;
 
@@ -193,8 +244,13 @@ export function createObservableState<T extends object>(
     const change = diffState(lastSnapshot, state, pathPrefix);
 
     if (change.paths.length > 0) {
-      // Update snapshot
-      lastSnapshot = deepClone(state);
+      // Bring the snapshot up to date at exactly the paths the diff
+      // reported, instead of re-cloning the entire state tree. Unchanged
+      // subtrees are value-equal by the diff's own contract (and already
+      // decoupled from live state by the previous clone), so this is
+      // O(changed values), not O(state) — the difference between ~0ms and
+      // a full deep clone of a 1,000-row list on every mutation batch.
+      updateSnapshotAtPaths(change.paths);
 
       // Merge with pending changes if any
       if (pendingChange) {

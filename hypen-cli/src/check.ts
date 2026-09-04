@@ -119,6 +119,7 @@ export const EXPECTED_A11Y_RULES: readonly string[] = [
   "non-portable-aria",
   "unknown-live-token",
   "unknown-ignore-rule",
+  "video-missing-label",
 ];
 
 /** Result of {@link detectRuleDrift}. */

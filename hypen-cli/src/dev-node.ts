@@ -64,11 +64,18 @@ function getDefaultHtmlTemplate(entry: string): string {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- viewport-fit=cover lets the page extend under notches/rounded corners so
+       env(safe-area-inset-*) reports real values for the SafeArea component. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Hypen App</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
     body { font-family: system-ui, -apple-system, sans-serif; }
+    /* Fullscreen by default: the app fills the viewport, and the root
+       component stretches to it (grows past it when content is taller). */
+    #app { width: 100vw; min-height: 100vh; display: flex; flex-direction: column; }
+    #app > * { flex: 1; }
   </style>
 </head>
 <body>
@@ -80,15 +87,33 @@ function getDefaultHtmlTemplate(entry: string): string {
 }
 
 /**
+ * Locate `@hypen-space/web-engine`'s bundled `wasm-browser/` directory in
+ * the project's dependency tree, so the dev server can serve the WASM
+ * engine locally instead of the browser fetching it from the unpkg CDN
+ * (version-matched, works offline / behind proxies).
+ */
+function findWasmBrowserDir(): string | null {
+  const base = resolve(process.cwd(), "node_modules/@hypen-space/web-engine/wasm-browser");
+  if (existsSync(join(base, "hypen_engine.js"))) return base;
+  return null;
+}
+
+/**
  * Generate the main entry file
  */
 function generateMainEntry(
   entry: string,
   componentsPath: string,
-  debug: boolean
+  debug: boolean,
+  localWasm: boolean
 ): string {
   // Normalize to POSIX separators for valid ESM import specifiers
   const posixPath = componentsPath.replace(/\\+/g, "/");
+  const wasmConfig = localWasm
+    ? `,
+    jsUrl: "/__hypen__/wasm/hypen_engine.js",
+    wasmUrl: "/__hypen__/wasm/hypen_engine_bg.wasm"`
+    : "";
   return `/**
  * Auto-generated Hypen entry point
  */
@@ -99,7 +124,7 @@ const app = await renderWithComponents(
   components,
   ${JSON.stringify(entry)},
   "#app",
-  { debug: ${debug} }
+  { debug: ${debug}${wasmConfig} }
 );
 
 // Hot reload support
@@ -189,10 +214,17 @@ export async function dev(options: DevOptions): Promise<{
     return componentsPath;
   };
 
+  // Serve the WASM engine from the project's own web-engine install when
+  // present — the CDN default is only a fallback for exotic setups.
+  const wasmDir = findWasmBrowserDir();
+  if (wasmDir) {
+    log("Serving WASM locally from:", wasmDir);
+  }
+
   // Generate main entry
   const generateMain = (componentsPath: string) => {
     log("Generating main entry...");
-    const code = generateMainEntry(entry, componentsPath, debug);
+    const code = generateMainEntry(entry, componentsPath, debug, wasmDir !== null);
     const mainPath = join(resolvedOutDir, "main.ts");
     writeFileSync(mainPath, code);
     log("Generated:", mainPath);
@@ -253,6 +285,25 @@ export async function dev(options: DevOptions): Promise<{
         res.writeHead(200, { "Content-Type": "text/html" });
         res.end(html);
         return;
+      }
+
+      // Serve the WASM engine files locally (version-matched with the
+      // project's web-engine install; no CDN round-trip).
+      if (wasmDir && pathname.startsWith("/__hypen__/wasm/")) {
+        const fileName = pathname.replace("/__hypen__/wasm/", "");
+        if (fileName === "hypen_engine.js" || fileName === "hypen_engine_bg.wasm") {
+          try {
+            const data = readFileSync(join(wasmDir, fileName));
+            const contentType = fileName.endsWith(".wasm")
+              ? "application/wasm"
+              : "application/javascript";
+            res.writeHead(200, { "Content-Type": contentType });
+            res.end(data);
+            return;
+          } catch {
+            // fall through to 404
+          }
+        }
       }
 
       // Serve generated files
@@ -334,9 +385,16 @@ export async function dev(options: DevOptions): Promise<{
   await new Promise<void>((resolve, reject) => {
     server.on("error", (err: NodeJS.ErrnoException) => {
       if (err.code === "EADDRINUSE") {
-        console.error(`\n  Error: Port ${port} is already in use.`);
-        console.error(`  Try a different port: hypen dev --port ${port + 1}\n`);
-        process.exit(1);
+        // Reject rather than process.exit: `dev()` is public API, so the
+        // decision to terminate belongs to the caller (the CLI catches
+        // and exits; embedders can recover).
+        reject(
+          new Error(
+            `Port ${port} is already in use.\n` +
+              `  Try a different port: hypen dev --port ${port + 1}`
+          )
+        );
+        return;
       }
       reject(err);
     });
@@ -403,7 +461,7 @@ export async function build(options: BuildOptions): Promise<void> {
   writeFileSync(componentsPath, code);
 
   // Generate main entry
-  const mainCode = generateMainEntry(entry, componentsPath, false);
+  const mainCode = generateMainEntry(entry, componentsPath, false, false);
   const mainPath = join(tempDir, "main.ts");
   writeFileSync(mainPath, mainCode);
 

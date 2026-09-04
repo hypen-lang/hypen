@@ -1,5 +1,13 @@
 module Story {
-    Column {
+    // Stack overlays the header chrome on top of the full-bleed image; the
+    // Stack's default top-start alignment pins the header to the top edge.
+    Stack {
+        // Destination half of the story hero flight (see StoryItem.hypen).
+        Image(src: "@{state.story.imageUrl}")
+            .tw("w-full h-full")
+            .objectFit("cover")
+            .sharedElement("story-@{state.story.id}", curve: spring, duration: 380)
+
         Row {
             Image(src: "@{state.story.user.avatarUrl}")
                 .tw("size-8 rounded-full")
@@ -14,16 +22,10 @@ module Story {
             .onClick(@router.push, to: "/")
             .tw("bg-transparent p-2")
         }
-        .tw("py-3 px-4 items-center absolute top-0 left-0 right-0 z-10")
+        .tw("py-3 px-4 items-center w-full")
         // The chrome arrives just after the hero lands, so the two motions read
         // as one sequence rather than a pile-up.
         .enter(slide, fade, from: top, duration: 260, delay: 160)
-
-        // Destination half of the story hero flight (see StoryItem.hypen).
-        Image(src: "@{state.story.imageUrl}")
-            .tw("w-full flex-1")
-            .objectFit("cover")
-            .sharedElement("story-@{state.story.id}", curve: spring, duration: 380)
     }
-    .tw("flex-1 w-full bg-black relative")
+    .tw("flex-1 w-full bg-black")
 }

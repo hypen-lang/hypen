@@ -121,6 +121,11 @@ pub enum A11yRule {
     /// at the directive's own location during located resolution (directives
     /// live only in raw source); bare directives are unaffected.
     UnknownIgnoreRule,
+    /// A `Video` has no accessible label. Its content is a media stream —
+    /// nothing derivable — so without a `title`/`label`/`alt` prop (or an
+    /// explicit `.label(...)`) the player has no accessible name. Same class
+    /// as [`ImageMissingAlt`](Self::ImageMissingAlt).
+    VideoMissingLabel,
 }
 
 /// Every rule the pass can emit, in declaration order. This is the single
@@ -142,6 +147,7 @@ pub const ALL_RULES: &[A11yRule] = &[
     A11yRule::NonPortableAria,
     A11yRule::UnknownLiveToken,
     A11yRule::UnknownIgnoreRule,
+    A11yRule::VideoMissingLabel,
 ];
 
 impl A11yRule {
@@ -259,8 +265,7 @@ fn collect_ids(node: &IRNode, scope: &mut IdScope, out: &mut Vec<A11yDiagnostic>
         IRNode::Router {
             routes, fallback, ..
         } => {
-            let mut groups: Vec<&[IRNode]> =
-                routes.iter().map(|r| r.children.as_slice()).collect();
+            let mut groups: Vec<&[IRNode]> = routes.iter().map(|r| r.children.as_slice()).collect();
             if let Some(fallback) = fallback {
                 groups.push(fallback.as_slice());
             }
@@ -515,9 +520,7 @@ fn unknown_ignore_rule_findings(
 /// entry point for hosts that want printable locations without holding a
 /// [`LineIndex`] themselves. Returns the parse error message on a syntax
 /// error.
-pub fn check_accessibility_source_located(
-    source: &str,
-) -> Result<Vec<LocatedDiagnostic>, String> {
+pub fn check_accessibility_source_located(source: &str) -> Result<Vec<LocatedDiagnostic>, String> {
     Ok(locate_diagnostics(
         check_accessibility_source(source)?,
         source,
@@ -534,17 +537,10 @@ fn is_interactive(role: Option<Role>) -> bool {
 /// with `expand::wire_form_labels` plus the self-labeling toggles
 /// (Checkbox/Switch), whose label still has to exist.
 fn is_form_control(role: Option<Role>) -> bool {
-    role.is_some_and(|r| {
-        r.needs_external_label() || matches!(r, Role::Checkbox | Role::Switch)
-    })
+    role.is_some_and(|r| r.needs_external_label() || matches!(r, Role::Checkbox | Role::Switch))
 }
 
-fn walk(
-    node: &IRNode,
-    within_interactive: bool,
-    scope: &IdScope,
-    out: &mut Vec<A11yDiagnostic>,
-) {
+fn walk(node: &IRNode, within_interactive: bool, scope: &IdScope, out: &mut Vec<A11yDiagnostic>) {
     match node {
         IRNode::Element(element) => check_element(element, within_interactive, scope, out),
         // Control-flow containers contribute no semantics themselves; recurse
@@ -586,12 +582,7 @@ fn walk(
 }
 
 /// Push a finding, stamping it with the element's source spans.
-fn push_finding(
-    out: &mut Vec<A11yDiagnostic>,
-    element: &Element,
-    rule: A11yRule,
-    message: String,
-) {
+fn push_finding(out: &mut Vec<A11yDiagnostic>, element: &Element, rule: A11yRule, message: String) {
     out.push(A11yDiagnostic {
         rule,
         element_type: element.element_type.clone(),
@@ -620,6 +611,16 @@ fn check_element(
                 element,
                 A11yRule::ImageMissingAlt,
                 format!("{ty} has no alt text — add `alt: \"…\"` describing the image"),
+            );
+        } else if matches!(role, Some(Role::Video)) {
+            push_finding(
+                out,
+                element,
+                A11yRule::VideoMissingLabel,
+                format!(
+                    "{ty} has no accessible label — add `title: \"…\"` (or `.label(\"…\")`) \
+                     describing the video"
+                ),
             );
         } else {
             push_finding(
@@ -868,6 +869,7 @@ mod tests {
             A11yRule::NonPortableAria,
             A11yRule::UnknownLiveToken,
             A11yRule::UnknownIgnoreRule,
+            A11yRule::VideoMissingLabel,
         ];
         for rule in every {
             match rule {
@@ -883,7 +885,8 @@ mod tests {
                 | A11yRule::TablistWiringSkipped
                 | A11yRule::NonPortableAria
                 | A11yRule::UnknownLiveToken
-                | A11yRule::UnknownIgnoreRule => {}
+                | A11yRule::UnknownIgnoreRule
+                | A11yRule::VideoMissingLabel => {}
             }
             assert!(
                 ALL_RULES.contains(&rule),
@@ -918,6 +921,7 @@ mod tests {
                 "non-portable-aria",
                 "unknown-live-token",
                 "unknown-ignore-rule",
+                "video-missing-label",
             ]
         );
     }

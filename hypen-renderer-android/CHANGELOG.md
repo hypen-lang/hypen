@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Video v2 (`hypen-docs/content/docs/guide/components.mdx` §"Playback control & composition
+  slots"): a contract player state (idle/loading/playing/paused/ended/error)
+  derived from the ExoPlayer callbacks — a rebuffer re-enters `loading`
+  without emitting `onPause`, `error` is sticky until the source list
+  changes. `.bind(@state.playback)` two-way binds `{playing, position,
+  duration, state}`: reports go out per key on the `__hypen_bind` channel
+  with position throttled to 250 ms while playing (transitions immediate),
+  inbound writes play/pause (a `true` write in `ended` restarts from 0) and
+  seek behind the 1 s epsilon + last-reported echo guards. `startPosition`
+  seeks once on the first READY. Children tagged `.slot("controls" |
+  "loading" | "error" | "poster")` overlay the surface full-bleed and are
+  shown/hidden strictly per the normative visibility table, never
+  mounted/unmounted, so slot state survives transitions; a present slot
+  replaces the built-in for that concern (`controls` also forces
+  `useController = false`). New `Scrubber` component: wired to the enclosing
+  player renderer-side, previews drags locally and commits on release via
+  the bind or its `onSeek` action, with `progressBarRangeInfo` /
+  `stateDescription` / `setProgress` for TalkBack; inert outside a Video.
+  `muted` and `loop` are now re-applied live rather than at player creation.
 - Animation stage 1 (#159): the daily-driver half of the shipped `__anim.*`
   protocol. `.transition` glides the 27 whitelisted props by interpolating
   the presented value back onto the element, so every prop animates through

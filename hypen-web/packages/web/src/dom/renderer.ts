@@ -4,7 +4,8 @@
  * Renders Hypen patches to the DOM
  */
 
-import type { Patch } from "@hypen-space/core/types";
+import type { Patch, TemplateSkeletonNode } from "@hypen-space/core/types";
+import { TemplateExpander } from "@hypen-space/core/patch-expand";
 import type { HypenModuleInstance } from "@hypen-space/core/app";
 import type { HypenRouter } from "@hypen-space/core/router";
 import type { HypenGlobalContext } from "@hypen-space/core/context";
@@ -45,7 +46,30 @@ function compileTextTemplate(template: string): TemplateSegment[] {
 }
 
 /** Element types that treat the "action" prop as an onClick handler */
+/**
+ * Update an element's text in place. When the element's sole child is
+ * already a text node, write `nodeValue` — a characterData mutation that
+ * reuses the node, matching what React does. `textContent = ...` would
+ * tear the text node down and create a fresh one, turning every text
+ * update into a childList remove + add (double the DOM churn a text
+ * change needs). Anything else (empty element, element children) falls
+ * back to `textContent`.
+ */
+function setElementText(element: HTMLElement, text: string): void {
+  // Loose null check: fake-dom (tests) reports missing children as
+  // `undefined` where the DOM spec says `null`.
+  const first = element.firstChild;
+  if (first != null && first.nodeType === 3 /* TEXT_NODE */ && first.nextSibling == null) {
+    if (first.nodeValue !== text) {
+      first.nodeValue = text;
+    }
+    return;
+  }
+  element.textContent = text;
+}
+
 const ACTIONABLE_TYPES = new Set(["button", "link", "card"]);
+const HORIZONTAL_DEMAND_PROP = /^(?:width|size|fillMaxWidth|fillMaxSize|horizontalAlignment|horizontalAlign|justifyContent|alignSelf|weight|flex|flexGrow|orientation)(?:\.|$)/;
 
 /**
  * Per-component-type props that map to HTML element attributes (not CSS).
@@ -55,20 +79,85 @@ const ACTIONABLE_TYPES = new Set(["button", "link", "card"]);
  * for `Image.src` updates that depend on async-loaded state (the social
  * `Your story` avatar that fills in once `state.currentUser` arrives).
  */
+/**
+ * Expand each name to the bare spelling and the `.0` applicator spelling.
+ *
+ * The engine lowers every applicator to `<name>.0` (`ir/expand.rs`) while a
+ * constructor argument stays bare, so `Slider(value: x)` and
+ * `Slider().value(x)` arrive under different keys for the same prop. Listing
+ * only one spelling silently drops the other.
+ */
+const bothSpellings = (names: string[]): Set<string> =>
+  new Set(names.flatMap((name) => [name, `${name}.0`]));
+
 const COMPONENT_HTML_ATTRS: Record<string, Set<string>> = {
-  image: new Set(["src", "alt", "url", "0", "srcset"]),
-  input: new Set(["type", "placeholder", "value", "disabled", "readonly", "name", "checked"]),
-  textarea: new Set(["placeholder", "value", "rows", "cols", "disabled", "readonly", "name"]),
-  select: new Set(["name", "multiple", "disabled", "value"]),
-  checkbox: new Set(["checked", "disabled", "name"]),
-  radio: new Set(["checked", "disabled", "name", "value"]),
-  link: new Set(["href", "target", "rel"]),
+  image: bothSpellings(["src", "alt", "url", "0", "srcset"]),
+  input: bothSpellings(["type", "placeholder", "value", "disabled", "readonly", "name", "checked"]),
+  textarea: bothSpellings(["placeholder", "value", "rows", "cols", "disabled", "readonly", "name"]),
+  select: bothSpellings(["name", "multiple", "disabled", "value", "options"]),
+  checkbox: bothSpellings(["checked", "disabled", "name"]),
+  switch: bothSpellings(["checked", "on", "value", "disabled", "name"]),
+  radio: bothSpellings(["checked", "disabled", "name", "value"]),
+  link: bothSpellings(["href", "target", "rel"]),
+  // Player transport and source are element attributes, not CSS. Without this
+  // an `Audio(src: @state.track)` that resolves after first paint stays silent.
+  audio: bothSpellings(["0", "src", "source", "controls", "autoplay", "loop", "muted"]),
+  slider: bothSpellings(["value", "min", "max", "step", "disabled"]),
+  progressbar: bothSpellings(["value", "max", "color", "height"]),
+  spinner: bothSpellings(["size", "color", "animated"]),
+  avatar: bothSpellings(["0", "src", "source", "initials", "size"]),
+  badge: bothSpellings(["0", "text", "theme"]),
+  // `level` picks the tag at create; a later change routes here so the
+  // handler can express it as aria-level. `__icon*` are engine-injected SVG
+  // payloads that the generic applicator path drops (it strips `__` keys).
+  heading: bothSpellings(["0", "text", "level"]),
+  icon: bothSpellings(["0", "name", "size", "color", "__iconPaths", "__iconViewBox"]),
+  divider: bothSpellings([
+    "orientation", "color", "backgroundColor", "height", "thickness",
+  ]),
   // Route URL changes to the handler so it reconnects the embedded app
   // instead of the generic text branch overwriting the subtree.
   hypenapp: new Set(["0", "url"]),
+  // Video contract (hypen-docs/content/docs/guide/components.mdx): every contract prop — media
+  // sources, playback flags, headers, and the media event actions — must
+  // reach videoHandler.applyProps on SetProp (the CSS fallback would
+  // silently no-op them). Props can arrive as "controls" or "controls.0",
+  // so both spellings are listed.
+  video: bothSpellings([
+    "0",
+      "src",
+      "source",
+      "poster",
+      "playlist",
+      "startIndex",
+      "controls",
+      "autoplay",
+      "loop",
+      "muted",
+      "preload",
+      "headers",
+      // v2: playback bind (`playback` struct + `bind` path), the one-way
+      // `playing` controlled prop, and the create-time seek. The bind
+      // channel MUST route to the handler — the generic bind applicator
+      // only knows form controls.
+      "playback",
+      "playing",
+      "bind",
+      "startPosition",
+      "onPlay",
+      "onPause",
+      "onEnded",
+      "onTrackChange",
+      "onError",
+  ]),
+  // Scrubber (Video v2): its bind path, seek action and value/duration
+  // overrides are handler state, not CSS.
+  scrubber: bothSpellings([
+    "0", "bind", "value", "position", "duration", "disabled", "onSeek",
+  ]),
 };
 
-import { ComponentRegistry } from "./components/index.js";
+import { ComponentRegistry, aliasApplicatorSpellings } from "./components/index.js";
 import { ApplicatorRegistry } from "./applicators/index.js";
 import { DomAnimator } from "./anim.js";
 import { DomScrubber } from "./scrub.js";
@@ -91,6 +180,10 @@ import { RerenderTracker, type DebugConfig, defaultDebugConfig } from "./debug.j
 import { setEngine, disposeHypenElement } from "./element-data.js";
 import { ensureA11yStyles } from "./a11y-styles.js";
 import { ensureAnimStyles } from "./anim-styles.js";
+import type { SafeAreaInsetOverrides } from "../safe-area.js";
+import { createSafeAreaHandler } from "./components/safearea.js";
+import { createImageHandler } from "./components/image.js";
+import { reconcileColumnWidthDemandFrom } from "./cross-axis-width.js";
 
 // Interface for the engine that renderer needs
 interface IEngine {
@@ -107,11 +200,39 @@ export interface DOMRendererOptions {
    * renderer for focus on every navigation.
    */
   routeFocus?: "auto" | "off";
+
+  /**
+   * Per-edge override for the insets the `SafeArea` component pads by.
+   * Each edge is optional and merges over the browser's own
+   * `env(safe-area-inset-*)` value, so `{ bottom: 0 }` zeroes only the
+   * bottom edge. Values are CSS px numbers or any CSS length string —
+   * the escape hatch for embedders (native shells, kiosk frames) whose
+   * real unsafe regions the browser cannot report.
+   */
+  safeAreaInsets?: SafeAreaInsetOverrides;
+
+  /**
+   * Base URL for relative image sources. Nested `HypenApp` renderers set this
+   * to the child app's HTTP origin so `/poster/x` does not accidentally load
+   * from the shell that happens to host the embed.
+   */
+  assetBaseUrl?: string;
 }
 
 export class DOMRenderer {
   private container: HTMLElement;
   private nodes: Map<string, HTMLElement> = new Map();
+
+  /** Registered template prototypes + per-node deferred event props. */
+  private templateProtos: Map<
+    string,
+    {
+      proto: HTMLElement;
+      deferred: Array<Array<[string, any]>>;
+      /** Per-node static props, for seeding each clone's handlerProps. */
+      statics: Array<Record<string, any>>;
+    }
+  > = new Map();
   private rootId: string | null = null;
   private components: ComponentRegistry;
   private applicators: ApplicatorRegistry;
@@ -139,7 +260,29 @@ export class DOMRenderer {
   private canvasNodeParent = new Map<string, string>();
   private canvasElements = new Map<string, HTMLCanvasElement>();
   /** Props stashed at create-time so we can forward them to CanvasRenderer */
-  private pendingCreateProps = new Map<string, { elementType: string; props: Record<string, any> }>();
+  /**
+   * Last known complete prop set for nodes whose type has a
+   * COMPONENT_HTML_ATTRS entry, so a SetProp can hand `applyProps` the whole
+   * set rather than a single key.
+   *
+   * Handlers are written against the create-time contract "these are all my
+   * props" and several derive one output from several inputs: ProgressBar
+   * computes width from value AND max, Icon picks its SVG-vs-placeholder
+   * branch on __iconPaths, Avatar picks image-vs-initials on src. Passing a
+   * lone changed key made those handlers recompute from missing inputs and
+   * blank the element -- ProgressBar snapping to 0% on a colour change, Icon
+   * replacing its SVG with "?". Only allowlisted types are tracked, and the
+   * entry dies with the node.
+   */
+  private handlerProps = new Map<string, Record<string, any>>();
+  /**
+   * Lowers canvas-targeted `instantiate` patches into plain create/insert
+   * runs before routing — canvas subtrees can't exploit DOM cloning. Fed
+   * every `registerTemplate` (the engine sends each template once per
+   * session, and a template registered before any canvas subtree exists
+   * may be instantiated inside one later).
+   */
+  private canvasExpander = new TemplateExpander();
 
   /**
    * Focus-restore memory for the Router subtree cache, keyed by detached
@@ -222,6 +365,16 @@ export class DOMRenderer {
       container.style.color = "#000000";
     }
 
+    // Embedder-supplied safe-area insets: re-register SafeArea with a
+    // handler bound to them (the default registration uses the browser's
+    // own `env(safe-area-inset-*)` values).
+    if (options?.safeAreaInsets) {
+      this.components.register("safearea", createSafeAreaHandler(options.safeAreaInsets));
+    }
+    if (options?.assetBaseUrl) {
+      this.components.register("image", createImageHandler(options.assetBaseUrl));
+    }
+
     // Register canvas component and applicators
     this.components.register("canvas", canvasHandler);
     for (const [name, handler] of Object.entries(canvasApplicators)) {
@@ -245,6 +398,12 @@ export class DOMRenderer {
    * the DOMRenderer or the owning CanvasRenderer.
    */
   applyPatches(patches: Patch[]): void {
+    // Newer engine artifacts deliver the batch as a JSON string; older
+    // core wrappers pass it through unparsed. Accept both so a renderer
+    // never silently drops a batch on a core/engine version skew.
+    if (typeof patches === "string") {
+      patches = JSON.parse(patches) as Patch[];
+    }
     // Transaction-scoped animation stamp (Option D): honored ONLY as the
     // batch's FIRST patch — the engine's wire contract emits the prelude at
     // index 0, and a `batchAnimation` anywhere else is not a stamp for this
@@ -261,6 +420,13 @@ export class DOMRenderer {
     let domPatches = patches;
 
     if (this.canvasRenderers.size > 0 || this.canvasSubtreeMap.size > 0) {
+      // Canvas-targeted instantiates lowered in phase 1 (canvas can't
+      // exploit DOM cloning), consumed by the routing in phase 2.
+      let canvasInstantiates: Map<
+        Patch,
+        { rootId: string; expanded: Patch[] }
+      > | null = null;
+
       // Phase 1: scan inserts to discover new canvas-subtree members
       for (const patch of patches) {
         if (patch.type === "insert" || patch.type === "move") {
@@ -275,6 +441,32 @@ export class DOMRenderer {
           if (canvasRootId) {
             this.registerCanvasMember(childId, parentId, canvasRootId);
           }
+        } else if (patch.type === "registerTemplate") {
+          // Skeleton must be known before a same-batch canvas-targeted
+          // instantiate below is lowered. `onRegisterTemplate` registers
+          // again on the DOM pass (idempotent) — that call covers the
+          // no-canvas fast path that skips these phases entirely.
+          this.canvasExpander.register(patch.templateId!, patch.root);
+        } else if (patch.type === "instantiate" && patch.parentId) {
+          const canvasRootId =
+            this.canvasRenderers.has(patch.parentId) ? patch.parentId
+            : this.canvasSubtreeMap.get(patch.parentId);
+          if (canvasRootId) {
+            // Lower to the plain create/insert run and register the
+            // instance's nodes as subtree members so later patches
+            // (setProp/remove — routed by id) and same-batch inserts
+            // under them resolve to this canvas.
+            const expanded = this.canvasExpander.expand([patch]);
+            for (const p of expanded) {
+              if (p.type === "insert" && p.id && p.parentId) {
+                this.registerCanvasMember(p.id, p.parentId, canvasRootId);
+              }
+            }
+            (canvasInstantiates ??= new Map()).set(patch, {
+              rootId: canvasRootId,
+              expanded,
+            });
+          }
         }
       }
 
@@ -283,11 +475,18 @@ export class DOMRenderer {
       domPatches = [];
 
       for (const patch of patches) {
-        const canvasRootId = this.getCanvasRouteTarget(patch);
+        const lowered = canvasInstantiates?.get(patch);
+        const canvasRootId = lowered
+          ? lowered.rootId
+          : this.getCanvasRouteTarget(patch);
         if (canvasRootId) {
           let batch = canvasBatches.get(canvasRootId);
           if (!batch) { batch = []; canvasBatches.set(canvasRootId, batch); }
-          batch.push(patch);
+          if (lowered) {
+            batch.push(...lowered.expanded);
+          } else {
+            batch.push(patch);
+          }
           if (patch.type === "remove" && patch.id) {
             // Removed canvas nodes never come back (engine node ids are
             // never reused), so drop their routing entries now.
@@ -439,7 +638,10 @@ export class DOMRenderer {
         return this.canvasSubtreeMap.get(id);
       }
       default: {
-        // setProp, removeProp, setText, remove, detach — route by node id
+        // setProp, removeProp, setText, remove, detach — route by node id.
+        // registerTemplate (no id) always stays DOM-side; canvas-targeted
+        // instantiate (no id, routes by parentId) is lowered to plain
+        // patches before routing ever consults this method.
         if (!id) return undefined;
         return this.canvasSubtreeMap.get(id);
       }
@@ -513,7 +715,7 @@ export class DOMRenderer {
       const element = binding.element;
       if (element.textContent !== interpolated) {
         this.debugTracker.trackRerender(id, element, "interpolate");
-        element.textContent = interpolated;
+        setElementText(element, interpolated);
       }
     }
   }
@@ -611,7 +813,167 @@ export class DOMRenderer {
         // batch's first patch is a valid stamp, so a mid-array occurrence
         // is deliberately ignored here.
         break;
+      case "registerTemplate":
+        this.onRegisterTemplate(patch.templateId!, patch.root!);
+        break;
+      case "instantiate":
+        this.onInstantiate(patch);
+        break;
     }
+  }
+
+  /**
+   * Register a reusable element prototype (the engine always emits
+   * `registerTemplate`/`instantiate` for plannable list rows — this
+   * renderer is the consumer that exploits them via DOM cloning). The
+   * prototype is built ONCE with all static props applied; event-flavored
+   * props (`on*` applicators, `action`) are recorded per node instead of
+   * applied, because DOM event listeners do not survive `cloneNode` —
+   * each instance re-applies them.
+   */
+  private onRegisterTemplate(templateId: string, root: TemplateSkeletonNode): void {
+    // Keep the canvas-lowering expander in sync even on the no-canvas
+    // fast path — a canvas subtree created later may instantiate this
+    // template (idempotent with the phase-1 registration).
+    this.canvasExpander.register(templateId, root);
+    const deferred: Array<Array<[string, any]>> = [];
+    // Per-node static props, kept so `onInstantiate` can seed each clone's
+    // handlerProps cache. Without it a templated list row starts with an
+    // empty set and the first SetProp recomputes from handler defaults.
+    const statics: Array<Record<string, any>> = [];
+    const build = (node: TemplateSkeletonNode): HTMLElement => {
+      const index = deferred.length;
+      const mine: Array<[string, any]> = [];
+      deferred.push(mine);
+
+      const staticProps: Record<string, any> = {};
+      for (const [key, value] of Object.entries(node.props ?? {})) {
+        const dot = key.indexOf(".");
+        const base = dot !== -1 ? key.slice(0, dot) : key;
+        if (/^on[A-Z]/.test(base) || base === "action") {
+          mine.push([key, value]);
+        } else {
+          staticProps[key] = value;
+        }
+      }
+
+      let element = this.components.createElement(node.elementType, staticProps);
+      if (!element) {
+        const fallback = document.createElement("div");
+        fallback.style.display = "contents";
+        element = fallback;
+      }
+      element.dataset.hypenType = node.elementType.toLowerCase();
+      // `.slot("name")` marker, same as `onCreate`: slot-aware containers
+      // (HypenApp, Video) identify their slotted children at the DOM level,
+      // and the marker has to be on the prototype to survive into clones.
+      const slotName = staticProps["slot.0"] ?? staticProps.slot;
+      if (typeof slotName === "string" && slotName) {
+        element.dataset.hypenSlot = slotName;
+      }
+      statics[index] = staticProps;
+      this.applicators.applyAll(element, staticProps);
+
+      for (const child of node.children ?? []) {
+        const childElement = build(child);
+        element.appendChild(childElement);
+        reconcileColumnWidthDemandFrom(childElement);
+      }
+      // Prototype subtrees are assembled without normal insert patches.
+      // Reconcile bottom-up here so the generated demand markers and
+      // automatic Column stretch survive cloneNode(true) on instantiate.
+      reconcileColumnWidthDemandFrom(element);
+      return element;
+    };
+
+    this.templateProtos.set(templateId, { proto: build(root), deferred, statics });
+  }
+
+  /**
+   * Materialize one template instance: `cloneNode(true)` the prototype
+   * (styles, static text, attributes all survive the clone), assign the
+   * engine's ids to the clone's elements in depth-first order, then apply
+   * per-node semantics, the deferred event props, and the dynamic-prop
+   * subs — each through the same `onSetProp` path a plain patch would
+   * take — and insert the finished subtree once.
+   */
+  private onInstantiate(patch: Patch): void {
+    const entry = this.templateProtos.get(patch.templateId!);
+    const ids = patch.nodes ?? [];
+    if (!entry || ids.length === 0) {
+      log.warn(`instantiate for unknown template "${patch.templateId}"`);
+      return;
+    }
+
+    const clone = entry.proto.cloneNode(true) as HTMLElement;
+    // Collect the clone's template elements in the same depth-first order
+    // the engine assigned ids in. Only elements stamped with hypenType
+    // count — a component's internal wrapper elements are skipped, though
+    // the walk still descends through them.
+    const elements: HTMLElement[] = [];
+    const collect = (el: HTMLElement): void => {
+      if (el.dataset?.hypenType) {
+        elements.push(el);
+      }
+      const kids = el.children as unknown as ArrayLike<HTMLElement> | undefined;
+      if (kids?.length) {
+        for (const child of Array.from(kids)) collect(child);
+      }
+    };
+    collect(clone);
+    if (elements.length !== ids.length) {
+      log.warn(
+        `instantiate node count mismatch for "${patch.templateId}": ` +
+          `${elements.length} elements vs ${ids.length} ids`,
+      );
+      return;
+    }
+
+    for (let i = 0; i < elements.length; i++) {
+      const element = elements[i];
+      element.dataset.hypenId = ids[i];
+      setEngine(element, this.engine);
+      this.nodes.set(ids[i], element);
+      // Seed the prop cache from the prototype's static props, exactly as
+      // onCreate does from a Create patch. A clone that skipped this had an
+      // empty set, so the first SetProp on it recomputed every other prop
+      // from the handler's defaults -- ProgressBar losing its `max`, Icon
+      // losing its resolved paths.
+      const cloneType = element.dataset.hypenType;
+      if (cloneType && COMPONENT_HTML_ATTRS[cloneType]) {
+        this.handlerProps.set(
+          ids[i],
+          aliasApplicatorSpellings({ ...(entry.statics?.[i] ?? {}) }),
+        );
+      }
+    }
+    // Per-node passes AFTER all ids are registered, so handlers that look
+    // up related nodes resolve.
+    //
+    // Adoption first: a clone carries the prototype's DOM but none of its
+    // JS-side state (WeakMap entries, listeners, media wiring), and the
+    // passes below — deferred event props, `subs` — assume a live component.
+    // Parents adopt before children (depth-first collect order), so a
+    // Scrubber finds its enclosing Video already wired.
+    for (const element of elements) {
+      this.components.adopt(element);
+    }
+    for (const [index, semantics] of patch.nodeSemantics ?? []) {
+      applySemantics(elements[index], semantics);
+    }
+    for (let i = 0; i < elements.length; i++) {
+      for (const [key, value] of entry.deferred[i] ?? []) {
+        this.onSetProp(ids[i], key, value);
+      }
+      if (elements[i].dataset.hypenType === "text") {
+        this.syncTextBinding(ids[i], elements[i]);
+      }
+    }
+    for (const [index, prop, value] of patch.subs ?? []) {
+      this.onSetProp(ids[index], prop, value);
+    }
+
+    this.onInsert(patch.parentId!, ids[0], patch.beforeId);
   }
 
   /**
@@ -731,8 +1093,25 @@ export class DOMRenderer {
       makeKeyboardActivatable(element, propsObj.action);
     }
 
+    // Seed the prop cache for types whose handler needs the full set on a
+    // later SetProp (see `handlerProps`).
+    if (COMPONENT_HTML_ATTRS[elementType.toLowerCase()]) {
+      // Aliased, not raw: handlers read the bare spelling, and a node built
+      // purely from applicators (`Image().src("a.png")` → `{"src.0": …}`)
+      // would otherwise cache a set in which every bare read is undefined —
+      // so the next merge-and-reapply would look like "src was removed".
+      this.handlerProps.set(id, aliasApplicatorSpellings({ ...propsObj }));
+    }
+
     this.nodes.set(id, element);
-    this.syncTextBinding(id, element);
+    // Only Text elements can ever register a binding (`syncTextBinding`
+    // requires dataset.hypenType === "text"), and its first act is a
+    // DOMStringMap read — a real attribute access. Skipping the call for
+    // the other 16-of-17 elements in a typical row removes tens of
+    // thousands of dataset reads from a large first render.
+    if (elementType.toLowerCase() === "text") {
+      this.syncTextBinding(id, element);
+    }
     this.debugTracker.trackRerender(id, element, `create:${elementType}`);
 
     // Canvas component: create a CanvasRenderer for its subtree
@@ -806,6 +1185,18 @@ export class DOMRenderer {
       return;
     }
 
+    // SafeArea's `edges` selects which edges carry inset padding, so a
+    // change has to go back through the handler. The generic applicator
+    // path would only emit a bogus `edges` CSS declaration — and canvas
+    // re-derives the same thing from props on its next layout pass.
+    if (
+      (name === "edges" || name === "edges.0") &&
+      element.dataset.hypenType === "safearea"
+    ) {
+      this.components.get("safearea")?.applyProps?.(element, { edges: value });
+      return;
+    }
+
     if (name === "0" || name === "text") {
       const elementType = element.dataset.hypenType;
 
@@ -822,33 +1213,37 @@ export class DOMRenderer {
       // Without this an `Image` whose URL arrived in a later SetProp
       // patch ended up with `<img>Your story</img>`-style text contents
       // and an empty `src`.
-      if (elementType && COMPONENT_HTML_ATTRS[elementType]?.has(name)) {
-        const handler = this.components.get(elementType);
-        if (handler?.applyProps) {
-          handler.applyProps(element, { [name]: value });
-          return;
-        }
-      }
+      // Same merged path as any other allowlisted prop. Passing the lone key
+      // here left the cache holding the OLD `0`, so the next SetProp on any
+      // other key re-applied it and visibly reverted the content.
+      if (this.applyPropThroughHandler(id, element, name, value)) return;
 
       const nextText = String(value);
-      element.textContent = nextText;
+      setElementText(element, nextText);
 
       // Preserve the original template when it contains state interpolation.
       // Engine patches may send interpolated strings; if we overwrite the template,
       // future state updates won't be able to re-interpolate.
       const currentTemplate = element.dataset.textTemplate;
       const nextLooksLikeTemplate = nextText.includes("@{");
-      const currentLooksLikeTemplate = typeof currentTemplate === "string" && currentTemplate.includes("@{");
 
+      // A dataset assignment is a real DOM attribute mutation, so writes
+      // are limited to the cases where the stored value's MEANING changes.
+      // The marker's only reader is `syncTextBinding`, which acts solely on
+      // values containing `@{` — so a plain value going stale is unread
+      // noise, and rewriting it turned every plain text update into
+      // text + attribute churn (2 DOM mutations where React does 1).
       if (nextLooksLikeTemplate) {
-        element.dataset.textTemplate = nextText;
+        if (currentTemplate !== nextText) {
+          element.dataset.textTemplate = nextText;
+        }
       } else if (currentTemplate === undefined) {
         // No template stored yet; treat this as the template.
         element.dataset.textTemplate = nextText;
-      } else if (!currentLooksLikeTemplate) {
-        // If current template isn't a template, keep it in sync.
-        element.dataset.textTemplate = nextText;
       }
+      // else: keep the stored value as-is. A stored template must survive
+      // interpolated (plain) output or future state updates can't
+      // re-interpolate; a stored plain value going stale changes nothing.
       this.syncTextBinding(id, element);
       log.debug(`Updated text content: "${value}"`);
       return;
@@ -868,16 +1263,13 @@ export class DOMRenderer {
     // `state.currentUser`, which loads after the first paint — was
     // routed to the CSS fallback (`el.style.src`, a no-op) and the
     // image stayed blank forever.
-    const elementType = element.dataset.hypenType;
-    if (elementType && COMPONENT_HTML_ATTRS[elementType]?.has(name)) {
-      const handler = this.components.get(elementType);
-      if (handler?.applyProps) {
-        handler.applyProps(element, { [name]: value });
-        return;
-      }
-    }
+    if (this.applyPropThroughHandler(id, element, name, value)) return;
 
     this.applicators.apply(element, name, value);
+
+    if (HORIZONTAL_DEMAND_PROP.test(name)) {
+      reconcileColumnWidthDemandFrom(element);
+    }
 
     // Forward canvas dimension changes to its CanvasRenderer
     if ((name === "width" || name === "height") && this.canvasRenderers.has(id)) {
@@ -889,6 +1281,90 @@ export class DOMRenderer {
   /**
    * Remove a property from an element
    */
+  /**
+   * Props whose live value belongs to the USER, not to the last patch.
+   *
+   * Handing a handler the full cached set means it re-asserts every prop in
+   * it, including ones the user has since changed by typing or clicking. The
+   * cache holds the create-time value, so an unrelated SetProp would revert
+   * the edit — `Input(value: "a")` typed to "hello" snapped back to "a" on
+   * the next `disabled` patch. Reading these back off the DOM first keeps the
+   * element the source of truth for them until a patch actually changes them.
+   */
+  private static readonly LIVE_DOM_PROPS: Record<string, Array<[prop: string, domField: string]>> = {
+    input: [["value", "value"], ["checked", "checked"]],
+    textarea: [["value", "value"]],
+    select: [["value", "value"]],
+    checkbox: [["checked", "checked"]],
+    // Switch accepts three spellings for the same state (`checked ?? on ??
+    // value` in switch.ts); every one the node was created with has to track
+    // the live toggle, or `Switch(on: true)` snaps back on at the next patch.
+    switch: [["checked", "checked"], ["on", "checked"], ["value", "checked"]],
+    radio: [["checked", "checked"]],
+  };
+
+  /** Refresh user-owned props in `merged` from the DOM, except `changing`. */
+  private syncLiveProps(
+    elementType: string,
+    element: HTMLElement,
+    merged: Record<string, any>,
+    changing: string,
+  ): void {
+    const live = DOMRenderer.LIVE_DOM_PROPS[elementType];
+    if (!live) return;
+
+    // Checkbox and Switch wrap their input; Input/Select/TextArea are it.
+    const field =
+      (element.querySelector?.("input,select,textarea") as HTMLInputElement | null) ??
+      (element as HTMLInputElement);
+
+    for (const [prop, domField] of live) {
+      // The prop being patched must take the engine's value, not the DOM's.
+      if (prop === changing) continue;
+      if (!(prop in merged)) continue;
+      const current = (field as any)?.[domField];
+      if (current !== undefined) merged[prop] = current;
+    }
+  }
+
+  /**
+   * Route an allowlisted prop to its component handler with the node's full
+   * prop set. Returns false when the prop is not handler-backed, so the
+   * caller falls through to the applicator.
+   */
+  private applyPropThroughHandler(
+    id: string,
+    element: HTMLElement,
+    name: string,
+    value: any,
+  ): boolean {
+    const elementType = element.dataset.hypenType;
+    if (!elementType || !COMPONENT_HTML_ATTRS[elementType]?.has(name)) return false;
+
+    const handler = this.components.get(elementType);
+    if (!handler?.applyProps) return false;
+
+    // Handlers read the bare spelling; `.0` is the applicator wire form for
+    // the same prop. `"0"` (positional) is left alone — it does not end in
+    // `.0`.
+    const bare = name.endsWith(".0") ? name.slice(0, -2) : name;
+
+    // Merge into the node's known props rather than passing the lone changed
+    // key: handlers derive output from several inputs at once and recompute
+    // from defaults for anything missing.
+    const merged = this.handlerProps.get(id) ?? {};
+    this.syncLiveProps(elementType, element, merged, bare);
+    merged[bare] = value;
+    merged[name] = value;
+    this.handlerProps.set(id, merged);
+    handler.applyProps(element, merged);
+
+    if (HORIZONTAL_DEMAND_PROP.test(name)) {
+      reconcileColumnWidthDemandFrom(element);
+    }
+    return true;
+  }
+
   private onRemoveProp(id: string, name: string): void {
     const element = this.nodes.get(id);
     if (!element) return;
@@ -907,7 +1383,44 @@ export class DOMRenderer {
       return;
     }
 
+    // Mirror of the SetProp routing: an attribute-backed prop can only be
+    // cleared by its handler, since the applicator fallback no-ops on an
+    // element attribute (`Input.disabled` could be set but never unset).
+    // The handler gets the node's remaining props with the removed key
+    // present and `undefined`: dropping the key instead would let a handler
+    // guarding `props.x !== undefined` skip the removal and leave the
+    // attribute it last wrote in place.
+    const elementType = element.dataset.hypenType;
+    if (elementType && COMPONENT_HTML_ATTRS[elementType]?.has(name)) {
+      const handler = this.components.get(elementType);
+      if (handler?.applyProps) {
+        const bare = name.endsWith(".0") ? name.slice(0, -2) : name;
+        const merged = this.handlerProps.get(id) ?? {};
+        // Both spellings go together: SetProp writes them as a pair.
+        delete merged[bare];
+        delete merged[name];
+        this.handlerProps.set(id, merged);
+        handler.applyProps(element, { ...merged, [bare]: undefined, [name]: undefined });
+        // A handful of names are backed by BOTH a handler and an applicator:
+        // `size` writes an attribute AND records a width source that layout
+        // reads back. Returning here would clear the attribute but strand the
+        // applicator's bookkeeping, and the reconcile below would then act on
+        // the stale marker — turning a removal into a bogus width demand.
+        if (this.applicators.hasHandler(bare)) {
+          this.applicators.apply(element, bare, undefined);
+        }
+        // Unconditional, as the divider case this generalises always was: an
+        // attribute reset can change intrinsic width demand under names
+        // `HORIZONTAL_DEMAND_PROP` does not list (Divider's `thickness`).
+        reconcileColumnWidthDemandFrom(element);
+        return;
+      }
+    }
+
     this.applicators.apply(element, name, undefined);
+    if (HORIZONTAL_DEMAND_PROP.test(name)) {
+      reconcileColumnWidthDemandFrom(element);
+    }
   }
 
   /**
@@ -918,7 +1431,7 @@ export class DOMRenderer {
     if (!element) return;
 
     this.debugTracker.trackRerender(id, element, "setText");
-    element.textContent = text;
+    setElementText(element, text);
   }
 
   /**
@@ -961,9 +1474,11 @@ export class DOMRenderer {
 
     if (previousParent instanceof HTMLElement && previousParent !== parent) {
       this.components.notifyChildrenChanged(previousParent);
+      reconcileColumnWidthDemandFrom(previousParent);
     }
     if (parent instanceof HTMLElement) {
       this.components.notifyChildrenChanged(parent);
+      reconcileColumnWidthDemandFrom(child);
     }
 
     // Dialog entering the document (insert or cached re-attach): queue mount
@@ -1051,6 +1566,7 @@ export class DOMRenderer {
     }
     if (previousParent instanceof HTMLElement) {
       this.components.notifyChildrenChanged(previousParent);
+      reconcileColumnWidthDemandFrom(previousParent);
     }
 
     // Any open dialog inside the detached subtree just left the document:
@@ -1152,6 +1668,7 @@ export class DOMRenderer {
     }
     if (previousParent instanceof HTMLElement) {
       this.components.notifyChildrenChanged(previousParent);
+      reconcileColumnWidthDemandFrom(previousParent);
     }
 
     // Restore-to-trigger for any open dialog in the removed subtree, before
@@ -1160,6 +1677,7 @@ export class DOMRenderer {
     this.restoreDialogsWithin(element);
 
     this.nodes.delete(id);
+    this.handlerProps.delete(id);
     this.textBindings.delete(id);
     this.dialogIds.delete(id);
     this.animator.forget(id);
@@ -1190,15 +1708,40 @@ export class DOMRenderer {
     // Leaf roots have nothing to sweep (`children`, not `firstChild` —
     // fake-dom only models element children).
     if (!root.children?.length) return;
-    for (const [descId, desc] of this.nodes) {
-      if (desc === root) continue;
-      let node: unknown = (desc as { parentNode?: unknown }).parentNode ?? null;
-      while (node && node !== root) {
-        node = (node as { parentNode?: unknown }).parentNode ?? null;
+    // Walk *down* the removed subtree. The previous implementation scanned
+    // every tracked node in the renderer and walked each one's parentNode
+    // chain looking for `root`, which is O(removes × total nodes): tearing
+    // down a 1,000-row list touched ~17M entries. Descending costs
+    // O(subtree) and reaches exactly the same set, since every element this
+    // renderer tracks carries `dataset.hypenId` and children/parentNode are
+    // consistent in both real DOM and fake-dom.
+    //
+    // Indexed reads over the live HTMLCollection, deliberately: an earlier
+    // version materialized `Array.from(children)` per visited node, which
+    // made this sweep the hottest frame of a full-list clear (~34k array
+    // allocations for 1,000 rows). The collections aren't mutated during
+    // the walk, so index access is stable.
+    const pushKids = (stack: HTMLElement[], el: HTMLElement): void => {
+      const kids = el.children as unknown as ArrayLike<HTMLElement> | undefined;
+      if (!kids) return;
+      for (let i = kids.length - 1; i >= 0; i--) {
+        stack.push(kids[i]!);
       }
-      if (node !== root) continue;
+    };
+
+    const stack: HTMLElement[] = [];
+    pushKids(stack, root);
+    while (stack.length > 0) {
+      const desc = stack.pop()!;
+      pushKids(stack, desc);
+      const descId = (desc as { dataset?: Record<string, string | undefined> })
+        .dataset?.hypenId;
+      // Only forget the id if it still maps to *this* element: a recycled id
+      // pointing elsewhere must not be swept out from under its live node.
+      if (descId === undefined || this.nodes.get(descId) !== desc) continue;
       disposeHypenElement(desc);
       this.nodes.delete(descId);
+      this.handlerProps.delete(descId);
       this.textBindings.delete(descId);
       this.dialogIds.delete(descId);
       this.animator.forget(descId);

@@ -30,6 +30,7 @@ pub const DEFAULT_PRIMITIVES: &[&str] = &[
     "Select",
     "Switch",
     "Slider",
+    "Scrubber",
     "Spinner",
     "Badge",
     "Avatar",
@@ -38,6 +39,7 @@ pub const DEFAULT_PRIMITIVES: &[&str] = &[
     "Audio",
     "Paragraph",
     "Icon",
+    "SafeArea",
 ];
 
 /// Result from component resolution

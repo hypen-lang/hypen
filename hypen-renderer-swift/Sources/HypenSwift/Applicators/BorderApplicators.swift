@@ -20,6 +20,13 @@ public struct BorderApplicator: ApplicatorHandler {
                 modifier.cornerRadius = radius
                 modifier.explicitlySetProperties.insert("cornerRadius")
             }
+
+            // A compound border owns its style just like the CSS shorthand.
+            // Omitting `style` therefore resets an inherited/variant style to
+            // solid, while a separate `borderStyle` applicator is applied
+            // afterwards by ApplicatorRegistry and retains longhand priority.
+            modifier.borderStyle = canonicalBorderStyle(dict["style"])
+            modifier.explicitlySetProperties.insert("borderStyle")
         } else if let width = parseCGFloat(value) {
             modifier.borderWidth = width
             modifier.explicitlySetProperties.insert("borderWidth")
@@ -44,6 +51,42 @@ public struct BorderWidthApplicator: ApplicatorHandler {
             if modifier.borderColor == nil {
                 modifier.borderColor = .primary
             }
+        }
+    }
+}
+
+// MARK: - Per-side Border Width Applicators
+
+/// `borderTopWidth` / `borderRightWidth` / `borderBottomWidth` /
+/// `borderLeftWidth` — what Tailwind's `border-t` / `border-b` / `border-x`
+/// lower to. Sets the matching per-side width on the modifier; the colour
+/// comes from `borderColor` (defaulting to `.primary` like the uniform width).
+public struct BorderSideWidthApplicator: ApplicatorHandler {
+    public enum Side: Sendable { case top, right, bottom, left }
+
+    public let name: String
+    private let side: Side
+
+    public init(_ side: Side) {
+        self.side = side
+        switch side {
+        case .top: name = "bordertopwidth"
+        case .right: name = "borderrightwidth"
+        case .bottom: name = "borderbottomwidth"
+        case .left: name = "borderleftwidth"
+        }
+    }
+
+    public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        guard let width = parseCGFloat(value) else { return }
+        switch side {
+        case .top: modifier.borderTopWidth = width
+        case .right: modifier.borderRightWidth = width
+        case .bottom: modifier.borderBottomWidth = width
+        case .left: modifier.borderLeftWidth = width
+        }
+        if modifier.borderColor == nil {
+            modifier.borderColor = .primary
         }
     }
 }
@@ -103,9 +146,26 @@ public struct BorderStyleApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         if let style = value as? String {
-            modifier.borderStyle = style.lowercased()
+            modifier.borderStyle = canonicalBorderStyle(style)
             modifier.explicitlySetProperties.insert("borderStyle")
         }
+    }
+}
+
+/// Normalize the border styles supported by the native renderer.
+///
+/// Unknown or empty styles render as solid today, so storing that effective
+/// value keeps variant merging and render behavior in agreement.
+func canonicalBorderStyle(_ value: Any?) -> String {
+    guard let rawStyle = value as? String else { return "solid" }
+
+    switch rawStyle.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "dashed": return "dashed"
+    case "dotted": return "dotted"
+    case "double": return "double"
+    case "none": return "none"
+    case "solid": return "solid"
+    default: return "solid"
     }
 }
 

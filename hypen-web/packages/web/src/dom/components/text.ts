@@ -20,8 +20,10 @@ export const textHandler: ComponentHandler = {
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    // Text content from first positional arg or "text" prop
-    const text = props["0"] || props.text;
+    // Text content from first positional arg or "text" prop. `??` (not
+    // `||`): falsy-but-valid values like the number 0 must still render —
+    // `Text("@{state.count}")` at count 0 was showing nothing.
+    const text = props["0"] ?? props.text;
     if (text !== undefined) {
       // Store the original text template for state interpolation
       el.dataset.textTemplate = String(text);

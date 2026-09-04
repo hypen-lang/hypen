@@ -3,6 +3,8 @@ package space.hypen.renderer.components
 import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -11,6 +13,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
@@ -67,10 +70,15 @@ class ListComponent : ComponentHandler {
         renderChildren: @Composable () -> Unit,
     ) {
         val renderer = LocalComposeRenderer.current
+        val listModifier = if (LocalParentAllowsHorizontalExpansion.current) {
+            modifier.fillMaxWidth()
+        } else {
+            modifier
+        }
 
         if (renderer == null) {
             Log.w(TAG, "No renderer available for List component, falling back to regular render")
-            Box(modifier = modifier) {
+            Box(modifier = listModifier) {
                 renderChildren()
             }
             return
@@ -79,6 +87,7 @@ class ListComponent : ComponentHandler {
         // Flatten control-flow wrappers (__ForEach, __Conditional) to get actual items
         val rawChildren = renderer.getChildren(element.id)
         val children = flattenControlFlowChildren(rawChildren, renderer)
+        val hasDynamicItems = rawChildren.any { it.elementType in CONTROL_FLOW_TYPES }
 
         // Direction - prop or positional arg
         val direction = element.getStringProp("direction.0")
@@ -87,9 +96,9 @@ class ListComponent : ComponentHandler {
         val isHorizontal = direction.lowercase() == "horizontal"
 
         if (isHorizontal) {
-            renderHorizontalList(element, modifier, children, renderer)
+            renderHorizontalList(element, listModifier, children, renderer)
         } else {
-            renderVerticalList(element, modifier, children, renderer)
+            renderVerticalList(element, listModifier, children, renderer, hasDynamicItems)
         }
     }
 
@@ -99,6 +108,7 @@ class ListComponent : ComponentHandler {
         modifier: Modifier,
         children: List<HypenElement>,
         renderer: space.hypen.renderer.render.ComposeRenderer,
+        hasDynamicItems: Boolean,
     ) {
         val verticalStr = element.getStringProp("verticalAlignment.0")
             ?: element.getStringProp("justifyContent.0")
@@ -121,17 +131,42 @@ class ListComponent : ComponentHandler {
             else -> Alignment.Start
         }
 
-        LazyColumn(
-            modifier = modifier,
-            verticalArrangement = verticalArrangement,
-            horizontalAlignment = horizontalAlignment,
-        ) {
-            items(
-                items = children,
-                key = { child -> child.id }
-            ) { child ->
-                key(child.id) {
-                    ListItemRenderer(element = child, renderer = renderer)
+        val gap = element.getFloatProp("gap.0") ?: element.getFloatProp("gap") ?: 0f
+        val layout = resolveListLayout(element, hasDynamicItems)
+
+        if (layout.scrollsVertically) {
+            LazyColumn(
+                modifier = modifier,
+                verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
+                    Arrangement.spacedBy(gap.dp)
+                } else {
+                    verticalArrangement
+                },
+                horizontalAlignment = horizontalAlignment,
+            ) {
+                items(
+                    items = children,
+                    key = { child -> child.id }
+                ) { child ->
+                    key(child.id) {
+                        ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+                    }
+                }
+            }
+        } else {
+            Column(
+                modifier = modifier,
+                verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
+                    Arrangement.spacedBy(gap.dp)
+                } else {
+                    verticalArrangement
+                },
+                horizontalAlignment = horizontalAlignment,
+            ) {
+                children.forEach { child ->
+                    key(child.id) {
+                        ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+                    }
                 }
             }
         }
@@ -186,6 +221,29 @@ class ListComponent : ComponentHandler {
     }
 }
 
+internal data class ListLayout(
+    val fillsFiniteWidth: Boolean = true,
+    val scrollsVertically: Boolean,
+)
+
+internal fun resolveListLayout(element: HypenElement, hasDynamicItems: Boolean = false): ListLayout {
+    val props = element.props
+    val overflow = listOf(
+        "overflowY.0", "overflow-y.0", "overflowY", "overflow-y", "overflow.0", "overflow",
+    ).firstNotNullOfOrNull { props[it]?.toString()?.lowercase() }
+    val explicitlyScrollable = element.getBoolProp("scrollable.0") == true ||
+        element.getStringProp("scrollable.0")?.lowercase() in setOf("true", "vertical", "both", "auto", "scroll")
+    val hasFiniteHeight = listOf("height.0", "height", "maxHeight.0", "maxHeight", "size.0", "size")
+        .any { props[it] != null } ||
+        element.getBoolProp("fillMaxHeight.0") == true ||
+        element.getBoolProp("fillMaxSize.0") == true
+    val clipsOverflow = overflow in setOf("hidden", "clip")
+    val scrolls = !clipsOverflow && (
+        hasDynamicItems || explicitlyScrollable || hasFiniteHeight || overflow in setOf("auto", "scroll")
+    )
+    return ListLayout(scrollsVertically = scrolls)
+}
+
 /**
  * Renders one list item through the FULL element pipeline.
  *
@@ -211,12 +269,32 @@ class ListComponent : ComponentHandler {
 private fun ListItemRenderer(
     element: HypenElement,
     renderer: space.hypen.renderer.render.ComposeRenderer,
+    fillsWidth: Boolean = false,
 ) {
-    CompositionLocalProvider(
-        LocalRowScope provides null,
-        LocalColumnScope provides null,
-        LocalStretchCrossAxis provides false,
-    ) {
-        RenderHypenElement(element = element, renderer = renderer)
+    val content: @Composable () -> Unit = {
+        CompositionLocalProvider(
+            LocalRowScope provides null,
+            LocalColumnScope provides null,
+            LocalStretchCrossAxis provides false,
+            LocalParentAllowsHorizontalExpansion provides fillsWidth,
+        ) {
+            RenderHypenElement(element = element, renderer = renderer)
+        }
+    }
+
+    if (fillsWidth) {
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            propagateMinConstraints = element.stretchesToListWidth(),
+        ) {
+            content()
+        }
+    } else {
+        content()
     }
 }
+
+private fun HypenElement.stretchesToListWidth(): Boolean =
+    listOf("width", "size", "maxWidth").none { name ->
+        props["$name.0"] != null || props[name] != null
+    }

@@ -173,21 +173,24 @@ impl EngineCore {
         animation: Option<serde_json::Value>,
     ) -> bool {
         let scope = Self::canon_scope(scope);
+
+        // Derive the changed paths *before* handing the patch to the module —
+        // `from_json` only needs a borrow, so doing it first lets the patch be
+        // moved into the merge instead of deep-cloned. For a wholesale list
+        // update that payload is the entire array.
+        let change = StateChange::from_json(&patch);
+
+        // `update_state` reports whether it actually wrote anything, comparing
+        // at the leaves the patch touches. Never snapshot the state Arc around
+        // this call: a live second reference makes `Arc::make_mut` deep-clone
+        // the whole tree on every update.
         let changed = match scope.as_deref() {
             Some(name) => match self.modules.get_mut(name) {
-                Some(module) => {
-                    let old = module.get_state_shared();
-                    module.update_state(patch.clone());
-                    *module.get_state() != *old
-                }
+                Some(module) => module.update_state(patch),
                 None => return false,
             },
             None => match &mut self.module {
-                Some(module) => {
-                    let old = module.get_state_shared();
-                    module.update_state(patch.clone());
-                    *module.get_state() != *old
-                }
+                Some(module) => module.update_state(patch),
                 None => return false,
             },
         };
@@ -198,7 +201,6 @@ impl EngineCore {
 
         self.stamp_pending_animation(animation);
 
-        let change = StateChange::from_json(&patch);
         self.schedule_dirty_for_paths(scope.as_deref(), change.paths());
         true
     }
@@ -216,21 +218,15 @@ impl EngineCore {
         animation: Option<serde_json::Value>,
     ) -> bool {
         let scope = Self::canon_scope(scope);
+        // See `update_state`: the mutation reports change at the written
+        // leaves, so there is no state snapshot and no whole-tree compare.
         let changed = match scope.as_deref() {
             Some(name) => match self.modules.get_mut(name) {
-                Some(module) => {
-                    let old = module.get_state_shared();
-                    module.update_state_sparse(paths, values);
-                    *module.get_state() != *old
-                }
+                Some(module) => module.update_state_sparse(paths, values),
                 None => return false,
             },
             None => match &mut self.module {
-                Some(module) => {
-                    let old = module.get_state_shared();
-                    module.update_state_sparse(paths, values);
-                    *module.get_state() != *old
-                }
+                Some(module) => module.update_state_sparse(paths, values),
                 None => return false,
             },
         };
@@ -256,31 +252,32 @@ impl EngineCore {
     }
 
     /// Mark every node bound to one of `paths` (under `scope`) as dirty.
+    ///
+    /// Each path is recorded with its marking (`mark_dirty_for_path`) so the
+    /// renderer can narrow iterable re-reconciliation to touched indices.
     fn schedule_dirty_for_paths<'p>(
         &mut self,
         scope: Option<&str>,
         paths: impl IntoIterator<Item = &'p str>,
     ) {
-        let mut affected_nodes = indexmap::IndexSet::new();
         for path in paths {
             let key = match scope {
                 Some(name) => format!("mod:{}:{}", name, path),
                 None => path.to_string(),
             };
-            affected_nodes.extend(self.dependencies.get_affected_nodes(&key));
+            let affected = self.dependencies.get_affected_nodes(&key);
+            self.scheduler
+                .mark_dirty_for_path(&key, affected.iter().copied());
         }
-        self.scheduler
-            .mark_many_dirty(affected_nodes.iter().copied());
     }
 
     /// Schedule dirty nodes from a `StateChange` (primary module paths).
     pub fn schedule_from_state_change(&mut self, change: &StateChange) {
-        let mut affected_nodes = indexmap::IndexSet::new();
         for path in change.paths() {
-            affected_nodes.extend(self.dependencies.get_affected_nodes(path));
+            let affected = self.dependencies.get_affected_nodes(path);
+            self.scheduler
+                .mark_dirty_for_path(path, affected.iter().copied());
         }
-        self.scheduler
-            .mark_many_dirty(affected_nodes.iter().copied());
     }
 
     // ── Data Source Context ────────────────────────────────────────────
@@ -439,16 +436,21 @@ impl EngineCore {
     /// Filter out Remove patches for elements that were Created in the same
     /// batch. This happens when a conditional re-reconciles module-scoped
     /// children whose stored template doesn't carry module_scope.
+    ///
+    /// An `Instantiate` creates every id in its `nodes` list, so those ids
+    /// count as created too — the filter must behave identically whether a
+    /// boundary expands template patches before or after it runs.
     pub fn filter_spurious_removes(patches: &mut Vec<Patch>) {
-        let created_ids: std::collections::HashSet<String> = patches
+        // `Arc<str>` keys: collecting clones the patches' refcounted ids
+        // instead of reallocating each string.
+        let created_ids: std::collections::HashSet<std::sync::Arc<str>> = patches
             .iter()
-            .filter_map(|p| {
-                if let Patch::Create { id, .. } = p {
-                    Some(id.clone())
-                } else {
-                    None
-                }
+            .flat_map(|p| match p {
+                Patch::Create { id, .. } => std::slice::from_ref(id),
+                Patch::Instantiate { nodes, .. } => nodes.as_slice(),
+                _ => &[],
             })
+            .cloned()
             .collect();
         if !created_ids.is_empty() {
             patches.retain(|p| {
@@ -548,17 +550,17 @@ mod tests {
     fn filter_spurious_removes_drops_flagged_remove_for_created_id() {
         let mut patches = vec![
             Patch::Create {
-                id: "7".to_string(),
+                id: "7".into(),
                 element_type: "Row".to_string(),
                 props: Arc::new(IndexMap::new()),
                 semantics: None,
             },
             Patch::Remove {
-                id: "7".to_string(),
+                id: "7".into(),
                 transition: true,
             },
             Patch::Remove {
-                id: "9".to_string(),
+                id: "9".into(),
                 transition: true,
             },
         ];
@@ -568,9 +570,9 @@ mod tests {
         // The created-in-batch Remove is dropped — its exit flag goes with
         // the pair. The unrelated flagged Remove survives intact.
         assert_eq!(patches.len(), 2);
-        assert!(matches!(&patches[0], Patch::Create { id, .. } if id == "7"));
+        assert!(matches!(&patches[0], Patch::Create { id, .. } if id.as_ref() == "7"));
         assert!(
-            matches!(&patches[1], Patch::Remove { id, transition: true } if id == "9"),
+            matches!(&patches[1], Patch::Remove { id, transition: true } if id.as_ref() == "9"),
             "unrelated flagged Remove must keep its transition flag: {:?}",
             patches[1]
         );
@@ -585,13 +587,13 @@ mod tests {
         let mut patches = vec![
             Patch::batch_animation(spec.clone()),
             Patch::Create {
-                id: "7".to_string(),
+                id: "7".into(),
                 element_type: "Row".to_string(),
                 props: Arc::new(IndexMap::new()),
                 semantics: None,
             },
             Patch::Remove {
-                id: "7".to_string(),
+                id: "7".into(),
                 transition: false,
             },
         ];
@@ -604,6 +606,42 @@ mod tests {
             "BatchAnimation must survive the filter as the first patch: {:?}",
             patches[0]
         );
-        assert!(matches!(&patches[1], Patch::Create { id, .. } if id == "7"));
+        assert!(matches!(&patches[1], Patch::Create { id, .. } if id.as_ref() == "7"));
+    }
+
+    #[test]
+    fn filter_spurious_removes_counts_instantiate_nodes_as_created() {
+        // Ids minted inside an Instantiate are creations: a same-batch
+        // Remove targeting one of them is exactly as spurious as one
+        // targeting a plain Create, on boundaries that expand after the
+        // filter (js, native) no less than ones that expand before (wasi).
+        let mut patches = vec![
+            Patch::Instantiate {
+                template_id: "t0.0".to_string(),
+                parent_id: "3".into(),
+                before_id: None,
+                nodes: vec!["10".into(), "11".into()],
+                subs: vec![],
+                semantics: vec![],
+            },
+            Patch::Remove {
+                id: "11".into(),
+                transition: false,
+            },
+            Patch::Remove {
+                id: "9".into(),
+                transition: false,
+            },
+        ];
+
+        EngineCore::filter_spurious_removes(&mut patches);
+
+        assert_eq!(patches.len(), 2);
+        assert!(matches!(&patches[0], Patch::Instantiate { .. }));
+        assert!(
+            matches!(&patches[1], Patch::Remove { id, .. } if id.as_ref() == "9"),
+            "only the instantiated-in-batch Remove is dropped: {:?}",
+            patches[1]
+        );
     }
 }

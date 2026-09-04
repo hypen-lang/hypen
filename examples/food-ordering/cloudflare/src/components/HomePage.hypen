@@ -1,5 +1,6 @@
 Column {
     Column {
+    Column {
         Row {
             Column {
                 Text("Crave Cart")
@@ -18,23 +19,6 @@ Column {
             .tw("flex-1 min-w-0 items-start")
 
             Row {
-                Button {
-                    Row {
-                        Icon(@resources.search)
-                            .size(17)
-                            .color("#6B7280")
-                        Text("Search")
-                            .tw("text-sm font-semibold ml-2")
-                            .color("#374151")
-                    }
-                    .tw("items-center")
-                }
-                .display({default: "none", md: "flex"})
-                .tw("bg-gray-100 border-0 rounded-full px-5 py-3 mr-3")
-                .opacity({ default: 1, active: 0.7 })
-                .transition(150, easeOut)
-                .onClick(@router.push, to: "/search")
-
                 Button {
                     Image(src: "@{state.currentUser.avatarUrl}")
                         .tw("w-9 h-9 md:w-11 md:h-11 rounded-full bg-gray-100")
@@ -59,16 +43,13 @@ Column {
             }
             .tw("items-center")
         }
-        .display({default: "flex", md: "none"})
         .tw("bg-gray-100 rounded-full border-0 px-4 py-3 mt-3.5 w-full")
         .opacity({ default: 1, active: 0.7 })
         .transition(150, easeOut)
         .onClick(@router.push, to: "/search")
     }
     .tw("px-5 md:px-10 pt-4 md:pt-7 pb-3 md:pb-5")
-    .maxWidth(1240)
-    .width("100%")
-    .alignSelf("center")
+    .fillMaxWidth(true)
 
     Button {
         Row {
@@ -102,9 +83,7 @@ Column {
     .transition(160, easeOut)
     .enter(fade, duration: 320)
     .onClick(@router.push, to: "/search")
-    .maxWidth(1240)
-    .width("calc(100% - 40px)")
-    .alignSelf("center")
+    .alignSelf("stretch")
 
     Column {
         Row {
@@ -116,9 +95,7 @@ Column {
         .scrollable("horizontal")
     }
     .tw("pt-2")
-    .maxWidth(1240)
-    .width("100%")
-    .alignSelf("center")
+    .fillMaxWidth(true)
 
     Row {
         Text("Popular near you")
@@ -129,21 +106,17 @@ Column {
             .color("#EA580C")
     }
     .tw("px-5 md:px-10 pt-3 pb-3.5 items-center")
-    .maxWidth(1240)
-    .width("100%")
-    .alignSelf("center")
+    .fillMaxWidth(true)
 
-    Column {
-        ForEach(items: @state.restaurants, key: "id") {
-            RestaurantCard()
-        }
+    Grid(@state.restaurants, key: "id") {
+        RestaurantCard()
     }
-    .display("grid")
-    .gridTemplateColumns("repeat(auto-fit, minmax(260px, 1fr))")
+    .gridColumns({default: 1, sm: 2, md: 3, lg: 4, xl: 5})
     .gap(18)
     .tw("px-5 md:px-10 pb-8 md:pb-12 w-full")
-    .maxWidth(1240)
-    .width("100%")
+    .fillMaxWidth(true)
+    }
+    .tw("w-full xl:w-3/5")
     .alignSelf("center")
 }
 .scrollable(true)

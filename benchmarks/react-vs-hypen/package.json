@@ -1,0 +1,24 @@
+{
+  "name": "hypen-bench-react-vs-hypen",
+  "private": true,
+  "type": "module",
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "prepare:wasm": "bun scripts/prepare.ts",
+    "build": "bun run prepare:wasm && bun run build:react && bun run build:hypen",
+    "build:react": "cd apps/react && bunx vite build",
+    "build:hypen": "cd apps/hypen && bunx vite build",
+    "dev:react": "cd apps/react && bunx vite",
+    "dev:hypen": "cd apps/hypen && bunx vite",
+    "bench": "bun run build && bun bench/run.ts",
+    "bench:only": "bun bench/run.ts",
+    "parity": "bun bench/parity.ts",
+    "validate": "bun bench/validate.ts",
+    "build:profile": "cd apps/hypen && BENCH_PROFILE=1 bunx vite build && cd ../react && BENCH_PROFILE=1 bunx vite build",
+    "profile": "bun run build:profile && bun bench/profile.ts hypen create-1k",
+    "report": "bun bench/report.ts"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.50.0"
+  }
+}

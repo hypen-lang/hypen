@@ -3,9 +3,14 @@ use crate::ir::{NodeId, Semantics};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slotmap::Key;
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Serde shim so `ResolvedProps` (`Arc<IndexMap<...>>`) serializes exactly
-/// as its inner map does, without pulling in serde's global `rc` feature.
+/// as its inner map does. Predates the crate enabling serde's `rc` feature
+/// (for the `Arc<str>` id fields), whose `Arc<T>` impls are equivalent;
+/// kept explicit so the wire contract doesn't hinge on a feature flag.
 /// Wire format is indistinguishable from a bare `IndexMap<String, Value>`.
 mod resolved_props_serde {
     use super::ResolvedProps;
@@ -34,12 +39,34 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
+/// Cap on the per-thread id-string cache in [`node_id_str`]. When the map
+/// grows past this it is cleared wholesale: ids are cheap to re-format, so
+/// occasionally re-paying the formatting cost for live ids beats tracking
+/// LRU order per lookup — and unbounded growth across a long session (ids
+/// are never reused once their slot version bumps) is not acceptable.
+const ID_STR_CACHE_CAP: usize = 262_144;
+
+thread_local! {
+    /// Memoized formatted id per `NodeId` FFI value, shared into patches by
+    /// refcount. A node's id is mentioned in many patches over its lifetime
+    /// (Create, Insert as child, Insert as parent of each child, SetProp,
+    /// Move, Remove, Instantiate nodes lists...) — formatting it once and
+    /// Arc-cloning thereafter removes a heap allocation per mention.
+    ///
+    /// Thread-local rather than global: WASM (the hot deployment target) is
+    /// single-threaded so this IS the one cache; on native each thread just
+    /// keeps its own copy, which is merely less shared, still correct.
+    static ID_STR_CACHE: RefCell<HashMap<u64, Arc<str>>> = RefCell::new(HashMap::new());
+}
+
 /// Stable, compact serialization for NodeId.
 ///
 /// Returns a decimal string derived directly from the slotmap key's FFI
 /// representation (`KeyData::as_ffi()`), which packs the slot's index and
 /// version into a `u64`. The result is deterministic per `NodeId` without
-/// any shared state — no mutex, no global map, no atomic counter.
+/// any cross-thread shared state — no mutex, no atomic counter; formatted
+/// strings are memoized per thread (see [`ID_STR_CACHE`]) and shared by
+/// refcount.
 ///
 /// # Stability
 ///
@@ -47,9 +74,20 @@ fn is_false(value: &bool) -> bool {
 /// treat node ID strings in patches as opaque identifiers. The encoding
 /// is stable within a process run but may change between engine versions.
 #[doc(hidden)]
-#[inline]
-pub fn node_id_str(id: NodeId) -> String {
-    id.data().as_ffi().to_string()
+pub fn node_id_str(id: NodeId) -> Arc<str> {
+    let ffi = id.data().as_ffi();
+    ID_STR_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(s) = cache.get(&ffi) {
+            return Arc::clone(s);
+        }
+        if cache.len() >= ID_STR_CACHE_CAP {
+            cache.clear();
+        }
+        let s: Arc<str> = Arc::from(ffi.to_string());
+        cache.insert(ffi, Arc::clone(&s));
+        s
+    })
 }
 
 /// Platform-agnostic patch operations for updating the UI.
@@ -96,8 +134,11 @@ pub enum Patch {
     /// inner map directly without exposing the Arc.
     #[serde(rename_all = "camelCase")]
     Create {
-        /// Opaque node identifier
-        id: String,
+        /// Opaque node identifier. `Arc<str>` so the memoized formatted id
+        /// (see [`node_id_str`]) is shared by refcount instead of reallocated
+        /// per mention; serde (with the `rc` feature) serializes it exactly
+        /// as a plain string, so the wire format is unchanged.
+        id: Arc<str>,
         /// Element type name (e.g. `"Text"`, `"Column"`, `"Button"`)
         element_type: String,
         /// Initial properties. Key `"0"` is the positional text content.
@@ -124,7 +165,7 @@ pub enum Patch {
     /// everything. Static-only trees never produce this patch.
     #[serde(rename_all = "camelCase")]
     SetSemantics {
-        id: String,
+        id: Arc<str>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         semantics: Option<Semantics>,
     },
@@ -132,7 +173,7 @@ pub enum Patch {
     /// Update a single property on an existing node.
     #[serde(rename_all = "camelCase")]
     SetProp {
-        id: String,
+        id: Arc<str>,
         /// Property name (e.g. `"color"`, `"fontSize"`)
         name: String,
         /// New value
@@ -142,7 +183,7 @@ pub enum Patch {
     /// Remove a property from an existing node (revert to default).
     #[serde(rename_all = "camelCase")]
     RemoveProp {
-        id: String,
+        id: Arc<str>,
         /// Property name to remove
         name: String,
     },
@@ -156,7 +197,7 @@ pub enum Patch {
     /// forward compatibility; removing it would break the wire format.
     #[serde(rename_all = "camelCase")]
     SetText {
-        id: String,
+        id: Arc<str>,
         /// New text content
         text: String,
     },
@@ -167,18 +208,18 @@ pub enum Patch {
     #[serde(rename_all = "camelCase")]
     Insert {
         /// Parent node ID, or `"root"` for the root container
-        parent_id: String,
-        id: String,
+        parent_id: Arc<str>,
+        id: Arc<str>,
         /// Insert before this sibling, or `null` to append
-        before_id: Option<String>,
+        before_id: Option<Arc<str>>,
     },
 
     /// Move an already-inserted node to a new position within its parent.
     #[serde(rename_all = "camelCase")]
     Move {
-        parent_id: String,
-        id: String,
-        before_id: Option<String>,
+        parent_id: Arc<str>,
+        id: Arc<str>,
+        before_id: Option<Arc<str>>,
     },
 
     /// Remove a node from the tree and deallocate it.
@@ -202,7 +243,7 @@ pub enum Patch {
     /// see an unchanged wire format and snap — graceful degradation.
     #[serde(rename_all = "camelCase")]
     Remove {
-        id: String,
+        id: Arc<str>,
         #[serde(default, skip_serializing_if = "is_false")]
         transition: bool,
     },
@@ -220,7 +261,7 @@ pub enum Patch {
     /// skips both the engine's keyed-diff work and the renderer's
     /// element-creation work.
     #[serde(rename_all = "camelCase")]
-    Detach { id: String },
+    Detach { id: Arc<str> },
 
     /// Reattach a previously-`Detach`ed subtree to a parent.
     ///
@@ -230,10 +271,63 @@ pub enum Patch {
     #[serde(rename_all = "camelCase")]
     Attach {
         /// Parent node ID, or `"root"` for the root container
-        parent_id: String,
-        id: String,
+        parent_id: Arc<str>,
+        id: Arc<str>,
         /// Insert before this sibling, or `null` to append
-        before_id: Option<String>,
+        before_id: Option<Arc<str>>,
+    },
+
+    /// Register a reusable element template with the consumer.
+    ///
+    /// Emitted at most once per (template content) per session, always —
+    /// template patches are the one wire format, with no capability
+    /// negotiation. Consumers that can't exploit template cloning lower
+    /// the stream back to plain `Create`+`Insert` runs via
+    /// `portable::TemplateExpander` (the UniFFI, WASI, and remote-
+    /// streaming boundaries do this internally). `root` is a plain JSON
+    /// tree: `{elementType, props, children: [...]}` containing
+    /// only statically-resolvable props; every dynamic (item- or
+    /// state-bound) prop arrives per instance via `Instantiate.subs`.
+    #[serde(rename_all = "camelCase")]
+    RegisterTemplate {
+        /// Opaque template identifier, referenced by `Instantiate`.
+        template_id: String,
+        /// Static skeleton tree (see above).
+        root: Value,
+    },
+
+    /// Instantiate a registered template as one new subtree.
+    ///
+    /// Replaces the run of `Create`+`Insert` patches a template-shaped
+    /// subtree would otherwise emit. `nodes` assigns an id to every element
+    /// of the template in depth-first order (the renderer clones its
+    /// prototype and walks the clone in the same order); `subs` carries
+    /// `[nodeIndex, prop, value]` triples for every dynamic prop, applied
+    /// exactly as a `SetProp` would be; `semantics` carries
+    /// `[nodeIndex, block]` pairs for nodes with accessibility semantics.
+    /// The subtree is inserted under `parent_id` before `before_id`
+    /// (append when null) — one patch, one insertion.
+    #[serde(rename_all = "camelCase")]
+    Instantiate {
+        /// Which registered template to clone.
+        template_id: String,
+        /// Parent to insert the instance under (`"root"` allowed).
+        parent_id: Arc<str>,
+        /// Insert-before anchor; `None` = append.
+        before_id: Option<Arc<str>>,
+        /// Per-element node ids, depth-first over the template.
+        nodes: Vec<Arc<str>>,
+        /// Dynamic prop substitutions: `[nodeIndex, propName, value]`.
+        subs: Vec<(usize, String, Value)>,
+        /// Accessibility semantics per node index, when present. Serialized
+        /// as `nodeSemantics` so the name can't collide with the singular
+        /// `semantics` block other patch kinds carry.
+        #[serde(
+            rename = "nodeSemantics",
+            skip_serializing_if = "Vec::is_empty",
+            default
+        )]
+        semantics: Vec<(usize, Semantics)>,
     },
 
     /// Batch-scoped animation prelude (Option D cheap subset — transaction-
@@ -324,7 +418,7 @@ impl Patch {
     /// Insert a root node into the "root" container
     pub fn insert_root(id: NodeId) -> Self {
         Self::Insert {
-            parent_id: "root".to_string(),
+            parent_id: "root".into(),
             id: node_id_str(id),
             before_id: None,
         }
@@ -388,7 +482,7 @@ impl Patch {
     /// attach has to bypass the container's own (never-created) NodeId.
     pub fn attach_root(id: NodeId, before_id: Option<NodeId>) -> Self {
         Self::Attach {
-            parent_id: "root".to_string(),
+            parent_id: "root".into(),
             id: node_id_str(id),
             before_id: before_id.map(node_id_str),
         }

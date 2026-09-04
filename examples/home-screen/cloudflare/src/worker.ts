@@ -18,7 +18,7 @@ import wasmModule from "hypen-engine/hypen_engine_bg.wasm";
 // @ts-ignore - The web-target glue exports initSync(module) and WasmEngine.
 import * as wasm from "hypen-engine";
 // @ts-ignore - Wrangler's Text rule imports the prebuilt generic client as a string.
-import genericClientJs from "../node_modules/@hypen-space/cf/dist/client/generic.js";
+import genericClientJs from "../../../../hypen-web/packages/cf/dist/client/generic.js";
 import launcher, { resources } from "./launcher";
 import { GEO_HEADER, captureGeo, geoHeaderValue } from "./geo";
 

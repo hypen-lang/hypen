@@ -7,6 +7,7 @@
 
 // Import directly from the DOM renderer to avoid pulling in WASM engine
 import { DOMRenderer } from "../packages/web/src/dom/renderer.ts";
+import { CanvasRenderer } from "../packages/web/src/canvas/renderer.ts";
 
 // ============================================================================
 // MAIN
@@ -14,6 +15,7 @@ import { DOMRenderer } from "../packages/web/src/dom/renderer.ts";
 
 const params = new URLSearchParams(window.location.search);
 let componentName = params.get("name") || params.get("component");
+const rendererName = params.get("renderer")?.toLowerCase() === "canvas" ? "canvas" : "web";
 
 if (!componentName && window.location.hash) {
   componentName = window.location.hash.slice(1);
@@ -22,6 +24,12 @@ if (!componentName && window.location.hash) {
 const loadingEl = document.getElementById("loading")!;
 const errorEl = document.getElementById("error")!;
 const appContainer = document.getElementById("app")!;
+const canvasContainer = document.getElementById("canvas-app") as HTMLCanvasElement;
+
+if (rendererName === "canvas") {
+  appContainer.classList.remove("active");
+  canvasContainer.classList.add("active");
+}
 
 function showError(message: string) {
   loadingEl.classList.add("hidden");
@@ -37,7 +45,7 @@ if (!componentName) {
 // WebSocket URL
 const wsHost = params.get("host") || "localhost";
 const wsPort = params.get("port") || "6555";
-const wsUrl = `ws://${wsHost}:${wsPort}/${componentName}`;
+const wsUrl = `ws://${wsHost}:${wsPort}/${componentName}?platform=${rendererName}`;
 
 console.log(`[Gallery] Connecting to: ${wsUrl}`);
 
@@ -58,7 +66,23 @@ const remoteEngine = {
 };
 
 // Create the real DOMRenderer
-const renderer = new DOMRenderer(appContainer, remoteEngine);
+const renderer = rendererName === "canvas"
+  ? new CanvasRenderer(canvasContainer, remoteEngine, {
+      devicePixelRatio: 1,
+      backgroundColor: "#ffffff",
+      enableAccessibility: false,
+    })
+  : new DOMRenderer(appContainer, remoteEngine);
+
+// Test-only diagnostic seam used by the gallery screenshot audit. This bundle
+// is not shipped by the runtime packages.
+(window as typeof window & { __hypenGalleryRenderer?: typeof renderer })
+  .__hypenGalleryRenderer = renderer;
+
+if (renderer instanceof CanvasRenderer) {
+  (window as typeof window & { __hypenFreezeCanvasForScreenshot?: () => void })
+    .__hypenFreezeCanvasForScreenshot = () => renderer.freezeForCapture();
+}
 
 let reconnectAttempts = 0;
 const maxReconnectAttempts = 3;
@@ -82,7 +106,7 @@ function connect() {
         if (message.patches) {
           renderer.applyPatches(message.patches);
         }
-        if (message.state) {
+        if (message.state && "updateState" in renderer) {
           renderer.updateState(message.state);
         }
         document.title = `Hypen Gallery - ${message.module || componentName}`;
@@ -91,7 +115,7 @@ function connect() {
           renderer.applyPatches(message.patches);
         }
       } else if (message.type === "stateUpdate") {
-        if (message.state) {
+        if (message.state && "updateState" in renderer) {
           renderer.updateState(message.state);
         }
       }

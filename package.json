@@ -5,5 +5,12 @@
   "dependencies": {
     "puppeteer": "^24.36.1",
     "sharp": "^0.34.5"
+  },
+  "scripts": {
+    "bench": "scripts/bench.sh",
+    "bench:quick": "scripts/bench.sh --quick",
+    "bench:parity": "scripts/bench.sh --parity",
+    "bench:profile": "scripts/bench.sh --profile",
+    "bench:report": "scripts/bench.sh --report"
   }
 }

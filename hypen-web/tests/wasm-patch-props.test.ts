@@ -35,8 +35,10 @@ describeFn("WASM Engine Patch Props (integration)", () => {
   beforeEach(() => {
     engine = new WasmEngine();
     patches = [];
-    engine.setRenderCallback((p: any[]) => {
-      patches.push(...p);
+    // Raw boundary contract: the engine hands the batch over as one JSON
+    // string (the SDK's engine-base parses it before consumers see it).
+    engine.setRenderCallback((p: any[] | string) => {
+      patches.push(...(typeof p === "string" ? JSON.parse(p) : p));
     });
   });
 

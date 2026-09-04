@@ -28,7 +28,7 @@ fn create(id: &str, element_type: &str, entries: Vec<(&str, Value)>) -> Patch {
         map.insert(k.to_string(), v);
     }
     Patch::Create {
-        id: id.to_string(),
+        id: id.into(),
         element_type: element_type.to_string(),
         props: Arc::new(map),
         semantics: None,
@@ -37,15 +37,15 @@ fn create(id: &str, element_type: &str, entries: Vec<(&str, Value)>) -> Patch {
 
 fn insert(parent: &str, id: &str) -> Patch {
     Patch::Insert {
-        parent_id: parent.to_string(),
-        id: id.to_string(),
+        parent_id: parent.into(),
+        id: id.into(),
         before_id: None,
     }
 }
 
 fn set_prop(id: &str, name: &str, value: Value) -> Patch {
     Patch::SetProp {
-        id: id.to_string(),
+        id: id.into(),
         name: name.to_string(),
         value,
     }
@@ -81,7 +81,10 @@ fn gesture_props(over: [i64; 2]) -> Vec<(&'static str, Value)> {
                 "axis": "y", "over": over, "rubberBand": 0.4,
             }),
         ),
-        ("__anim.scrubSettle", json!({ "curve": "linear", "duration": 100 })),
+        (
+            "__anim.scrubSettle",
+            json!({ "curve": "linear", "duration": 100 }),
+        ),
         ("__anim.scrubBind", json!("sheetPhase")),
         (
             "__anim.scrubPoses",
@@ -133,12 +136,18 @@ fn drag_writes_interpolated_pose_props_for_every_scrubbed_key() {
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(300.0));
     assert!(about(prop_f64(&tree, "sheet", "opacity.0").unwrap(), 0.625));
     // Core RGBA interpolation, desktop `#rrggbbaa` format: #000→#fff @0.25.
-    assert_eq!(prop_str(&tree, "sheet", "backgroundColor.0").as_deref(), Some("#404040ff"));
+    assert_eq!(
+        prop_str(&tree, "sheet", "backgroundColor.0").as_deref(),
+        Some("#404040ff")
+    );
 
     s.pointer_move(&mut tree, 0.0, 300.0); // p 0.5
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(200.0));
     assert!(about(prop_f64(&tree, "sheet", "opacity.0").unwrap(), 0.75));
-    assert_eq!(prop_str(&tree, "sheet", "backgroundColor.0").as_deref(), Some("#808080ff"));
+    assert_eq!(
+        prop_str(&tree, "sheet", "backgroundColor.0").as_deref(),
+        Some("#808080ff")
+    );
 }
 
 #[test]
@@ -201,7 +210,10 @@ fn slow_release_below_the_midpoint_settles_to_from_and_writes_its_label() {
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(400.0));
     assert_eq!(
         s.take_binds(),
-        vec![ScrubBind { path: "sheetPhase".into(), value: "closed".into() }]
+        vec![ScrubBind {
+            path: "sheetPhase".into(),
+            value: "closed".into()
+        }]
     );
 }
 
@@ -225,7 +237,10 @@ fn fast_flick_at_p_0_3_projects_to_the_far_endpoint() {
     assert_eq!(prop_f64(&tree, "sheet", "opacity.0"), Some(1.0));
     assert_eq!(
         s.take_binds(),
-        vec![ScrubBind { path: "sheetPhase".into(), value: "open".into() }]
+        vec![ScrubBind {
+            path: "sheetPhase".into(),
+            value: "open".into()
+        }]
     );
 }
 
@@ -243,7 +258,10 @@ fn projected_progress_of_exactly_0_5_settles_to_the_to_pose() {
     s.tick(&mut tree);
     assert_eq!(
         s.take_binds(),
-        vec![ScrubBind { path: "sheetPhase".into(), value: "open".into() }]
+        vec![ScrubBind {
+            path: "sheetPhase".into(),
+            value: "open".into()
+        }]
     );
 }
 
@@ -262,7 +280,10 @@ fn drag_hold_release_discards_the_stale_burst_and_settles_nearest() {
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(400.0));
     assert_eq!(
         s.take_binds(),
-        vec![ScrubBind { path: "sheetPhase".into(), value: "closed".into() }]
+        vec![ScrubBind {
+            path: "sheetPhase".into(),
+            value: "closed".into()
+        }]
     );
 }
 
@@ -316,7 +337,11 @@ fn any_states_label_during_awaiting_cleanup_cleans_up() {
     feed(
         &mut s,
         &mut tree,
-        &[set_prop("sheet", "__anim.states", json!({ "label": "peek" }))],
+        &[set_prop(
+            "sheet",
+            "__anim.states",
+            json!({ "label": "peek" }),
+        )],
     );
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(400.0)); // restored base
     assert!(!tree.get("sheet").unwrap().props.contains_key("opacity.0"));
@@ -392,14 +417,20 @@ fn a_scrub_active_node_is_excluded_from_transaction_application() {
     feed_animator(
         &mut animator,
         &mut tree,
-        &[set_prop("sheet", "__anim.transition", json!({ "duration": 200, "curve": "linear" }))],
+        &[set_prop(
+            "sheet",
+            "__anim.transition",
+            json!({ "duration": 200, "curve": "linear" }),
+        )],
     );
     animator.set_scrub_active(scrubber.owned_ids());
     feed_animator(
         &mut animator,
         &mut tree,
         &[
-            Patch::BatchAnimation { spec: json!({ "curve": "linear", "duration": 120 }) },
+            Patch::BatchAnimation {
+                spec: json!({ "curve": "linear", "duration": 120 }),
+            },
             set_prop("sheet", "width.0", json!(300)),
         ],
     );
@@ -425,7 +456,11 @@ fn a_second_drag_after_a_settle_anchors_at_the_settled_pose() {
     feed(
         &mut s,
         &mut tree,
-        &[set_prop("sheet", "__anim.states", json!({ "label": "open" }))],
+        &[set_prop(
+            "sheet",
+            "__anim.states",
+            json!({ "label": "open" }),
+        )],
     );
     assert!(!s.owns_node("sheet"));
 
@@ -440,7 +475,10 @@ fn a_second_drag_after_a_settle_anchors_at_the_settled_pose() {
     s.tick(&mut tree);
     assert_eq!(
         s.take_binds(),
-        vec![ScrubBind { path: "sheetPhase".into(), value: "open".into() }]
+        vec![ScrubBind {
+            path: "sheetPhase".into(),
+            value: "open".into()
+        }]
     );
 }
 
@@ -485,7 +523,10 @@ fn an_over_range_not_starting_at_zero_does_not_jump_at_drag_start() {
     let (mut s, mut tree) = mount_sheet(gesture_props([100, 500]));
     s.pointer_down_on("sheet", 0.0, 0.0);
     s.pointer_move(&mut tree, 0.0, 10.0); // travel 10 → p 10/400
-    assert!(about(prop_f64(&tree, "sheet", "translateY.0").unwrap(), 390.0));
+    assert!(about(
+        prop_f64(&tree, "sheet", "translateY.0").unwrap(),
+        390.0
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -531,21 +572,21 @@ fn gesture_target_finds_the_scrub_node_by_bounds_through_the_real_layout() {
         &mut s,
         &mut tree,
         &[
-            create("root0", "Column", vec![("width.0", json!(400)), ("height.0", json!(600))]),
-            insert(ROOT_ID, "root0"),
             create(
-                "sheet",
+                "root0",
                 "Column",
-                {
-                    let mut p = gesture_props([0, 400]);
-                    // Give the node explicit bounds and a resting base pose so
-                    // its rect sits under the press point.
-                    p[0] = ("translateY.0", json!(0));
-                    p.push(("width.0", json!(200)));
-                    p.push(("height.0", json!(120)));
-                    p
-                },
+                vec![("width.0", json!(400)), ("height.0", json!(600))],
             ),
+            insert(ROOT_ID, "root0"),
+            create("sheet", "Column", {
+                let mut p = gesture_props([0, 400]);
+                // Give the node explicit bounds and a resting base pose so
+                // its rect sits under the press point.
+                p[0] = ("translateY.0", json!(0));
+                p.push(("width.0", json!(200)));
+                p.push(("height.0", json!(120)));
+                p
+            }),
             insert("root0", "sheet"),
         ],
     );
@@ -588,7 +629,14 @@ fn a_remove_mid_drag_cancels_everything() {
     s.pointer_move(&mut tree, 0.0, 100.0);
     assert!(s.owns_node("sheet"));
 
-    feed(&mut s, &mut tree, &[Patch::Remove { id: "sheet".into(), transition: false }]);
+    feed(
+        &mut s,
+        &mut tree,
+        &[Patch::Remove {
+            id: "sheet".into(),
+            transition: false,
+        }],
+    );
     assert!(!s.owns_node("sheet"));
     // Fully forgotten: a stray move is inert (no panic, no write).
     s.pointer_move(&mut tree, 0.0, 300.0);
@@ -612,13 +660,20 @@ fn removing_the_scrub_channel_mid_drag_runs_the_full_cleanup() {
     let (mut s, mut tree) = mount_sheet(gesture_props([0, 400]));
     s.pointer_down_on("sheet", 0.0, 0.0);
     s.pointer_move(&mut tree, 0.0, 200.0); // p 0.5
-    feed(&mut s, &mut tree, &[set_prop("sheet", "translateY.0", json!(77))]); // deferred
+    feed(
+        &mut s,
+        &mut tree,
+        &[set_prop("sheet", "translateY.0", json!(77))],
+    ); // deferred
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(200.0));
 
     feed(
         &mut s,
         &mut tree,
-        &[Patch::RemoveProp { id: "sheet".into(), name: "__anim.scrub".into() }],
+        &[Patch::RemoveProp {
+            id: "sheet".into(),
+            name: "__anim.scrub".into(),
+        }],
     );
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(77.0)); // deferred flushed
     assert!(!tree.get("sheet").unwrap().props.contains_key("opacity.0"));
@@ -653,7 +708,10 @@ fn focus_loss_mid_drag_settles_and_frees_the_grab_for_new_gestures() {
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(0.0)); // settled to `to`
     assert_eq!(
         s.take_binds(),
-        vec![ScrubBind { path: "sheetPhase".into(), value: "open".into() }]
+        vec![ScrubBind {
+            path: "sheetPhase".into(),
+            value: "open".into()
+        }]
     );
 
     // The grab is freed: a brand-new gesture can start (a stranded
@@ -663,7 +721,11 @@ fn focus_loss_mid_drag_settles_and_frees_the_grab_for_new_gestures() {
     feed(
         &mut s,
         &mut tree,
-        &[set_prop("sheet", "__anim.states", json!({ "label": "open" }))],
+        &[set_prop(
+            "sheet",
+            "__anim.states",
+            json!({ "label": "open" }),
+        )],
     );
     assert!(!s.owns_node("sheet"));
     assert!(s.pointer_down_on("sheet", 0.0, 400.0));
@@ -707,7 +769,10 @@ fn reduced_motion_drags_live_but_settles_instantly_and_writes() {
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(0.0));
     assert_eq!(
         s.take_binds(),
-        vec![ScrubBind { path: "sheetPhase".into(), value: "open".into() }]
+        vec![ScrubBind {
+            path: "sheetPhase".into(),
+            value: "open".into()
+        }]
     );
 }
 
@@ -736,7 +801,10 @@ fn motion_essential_release_settle_animates_under_reduced_motion() {
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(0.0));
     assert_eq!(
         s.take_binds(),
-        vec![ScrubBind { path: "sheetPhase".into(), value: "open".into() }]
+        vec![ScrubBind {
+            path: "sheetPhase".into(),
+            value: "open".into()
+        }]
     );
 }
 
@@ -753,9 +821,9 @@ fn a_static_non_scrubbed_transform_prop_survives_the_drag() {
 
     s.pointer_down_on("sheet", 0.0, 0.0);
     s.pointer_move(&mut tree, 0.0, 100.0); // p 0.25
-    // The scrub only owns translateY; the static rotation is a separate prop,
-    // untouched (desktop composes transforms from real props, so no explicit
-    // base-composition bookkeeping is needed).
+                                           // The scrub only owns translateY; the static rotation is a separate prop,
+                                           // untouched (desktop composes transforms from real props, so no explicit
+                                           // base-composition bookkeeping is needed).
     assert_eq!(prop_f64(&tree, "sheet", "translateY.0"), Some(300.0));
     assert_eq!(prop_f64(&tree, "sheet", "rotate.0"), Some(45.0));
 }
@@ -770,12 +838,18 @@ fn scroll_header_props(of: Option<&str>) -> Vec<(&'static str, Value)> {
         "axis": "y", "over": [0, 120], "rubberBand": 0.4,
     });
     if let Some(of) = of {
-        scrub.as_object_mut().unwrap().insert("of".into(), json!(of));
+        scrub
+            .as_object_mut()
+            .unwrap()
+            .insert("of".into(), json!(of));
     }
     vec![
         ("height.0", json!(120)),
         ("__anim.scrub", scrub),
-        ("__anim.scrubSettle", json!({ "curve": "linear", "duration": 100 })),
+        (
+            "__anim.scrubSettle",
+            json!({ "curve": "linear", "duration": 100 }),
+        ),
         ("__anim.scrubBind", json!("headerMode")),
         ("__anim.scrubPoses", json!({ "height.0": [120, 48] })),
         ("__anim.states", json!({ "label": "expanded" })),
@@ -783,7 +857,9 @@ fn scroll_header_props(of: Option<&str>) -> Vec<(&'static str, Value)> {
 }
 
 /// Build a scrollable-container scene: root → scroller(scrollable) → header.
-fn mount_scroll_scene(header_props: Vec<(&'static str, Value)>) -> (DesktopScrubber, Tree, LayoutPass) {
+fn mount_scroll_scene(
+    header_props: Vec<(&'static str, Value)>,
+) -> (DesktopScrubber, Tree, LayoutPass) {
     let mut s = new_scrubber();
     let mut tree = Tree::new();
     feed(
@@ -828,7 +904,10 @@ fn scroll_offset_maps_through_over_and_writes_only_after_resting_at_endpoint() {
     s.tick(&mut tree);
     assert_eq!(
         s.take_binds(),
-        vec![ScrubBind { path: "headerMode".into(), value: "collapsed".into() }]
+        vec![ScrubBind {
+            path: "headerMode".into(),
+            value: "collapsed".into()
+        }]
     );
 }
 
@@ -858,9 +937,26 @@ fn of_matches_the_ancestor_whose_id_prop_equals_the_string() {
         &mut s,
         &mut tree,
         &[
-            create("outer", "Column", vec![("id", json!("lister")), ("scrollable.0", json!(true)), ("width.0", json!(300)), ("height.0", json!(200))]),
+            create(
+                "outer",
+                "Column",
+                vec![
+                    ("id", json!("lister")),
+                    ("scrollable.0", json!(true)),
+                    ("width.0", json!(300)),
+                    ("height.0", json!(200)),
+                ],
+            ),
             insert(ROOT_ID, "outer"),
-            create("inner", "Column", vec![("scrollable.0", json!(true)), ("width.0", json!(300)), ("height.0", json!(150))]),
+            create(
+                "inner",
+                "Column",
+                vec![
+                    ("scrollable.0", json!(true)),
+                    ("width.0", json!(300)),
+                    ("height.0", json!(150)),
+                ],
+            ),
             insert("outer", "inner"),
             create("header", "Column", scroll_header_props(Some("lister"))),
             insert("inner", "header"),
@@ -887,7 +983,11 @@ fn scroll_quiescence_flushes_deferred_and_releases_ownership() {
     assert_eq!(prop_f64(&tree, "header", "height.0"), Some(84.0));
 
     // Engine write to a scrubbed key while input is live → deferred.
-    feed(&mut s, &mut tree, &[set_prop("header", "height.0", json!(100))]);
+    feed(
+        &mut s,
+        &mut tree,
+        &[set_prop("header", "height.0", json!(100))],
+    );
     assert_eq!(prop_f64(&tree, "header", "height.0"), Some(84.0));
     assert!(s.owns_node("header"));
 
@@ -910,7 +1010,15 @@ fn a_detached_route_stops_scrubbing_via_the_persistent_scroller() {
         &mut s,
         &mut tree,
         &[
-            create("scroller", "Column", vec![("scrollable.0", json!(true)), ("width.0", json!(300)), ("height.0", json!(200))]),
+            create(
+                "scroller",
+                "Column",
+                vec![
+                    ("scrollable.0", json!(true)),
+                    ("width.0", json!(300)),
+                    ("height.0", json!(200)),
+                ],
+            ),
             insert(ROOT_ID, "scroller"),
             create("route", "Column", vec![]),
             insert("scroller", "route"),

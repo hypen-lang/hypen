@@ -139,6 +139,13 @@ export type {
 export { setPortableImpl, portable } from "./portable.js";
 export type { PortableImpl } from "./portable.js";
 
+// Template-patch expander: lowers `registerTemplate`/`instantiate` back
+// into plain `create`+`insert` runs for consumers that can't exploit
+// template cloning. TS mirror of the canonical Rust implementation in
+// `hypen-engine-rs/src/portable/patch_expand.rs` — a real class, not a
+// DI slot, because it must run where no WASM exists.
+export { TemplateExpander } from "./patch-expand.js";
+
 // ============================================================================
 // RENDERER ABSTRACTION
 // ============================================================================

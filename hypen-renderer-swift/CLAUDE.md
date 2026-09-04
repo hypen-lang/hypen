@@ -41,7 +41,11 @@ hypen-renderer-swift/
     │   ├── RouterComponents.swift      # Router, Route, Link (router-aware)
     │   ├── FormComponents.swift        # Input, Checkbox, Slider, etc.
     │   ├── UIComponents.swift          # Card, Spinner, Badge, Avatar
-    │   └── MediaComponents.swift       # Audio, Video (AVFoundation/AVKit)
+    │   ├── MediaComponents.swift       # Audio, Video (AVFoundation/AVKit)
+    │   ├── VideoPlayback.swift         # Video v2 pure logic (state machine,
+    │   │                               #   queue/completed, bind throttle +
+    │   │                               #   epsilon, slot table, scrubber math)
+    │   └── ScrubberComponent.swift     # Scrubber (Video `controls` slot chrome)
     └── Applicators/
         ├── SpacingApplicators.swift      # padding, margin
         ├── SizeApplicators.swift         # width, height, fill*, aspectRatio

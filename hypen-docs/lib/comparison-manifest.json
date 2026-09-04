@@ -1,0 +1,344 @@
+{
+  "sections": [
+    {
+      "title": "Components",
+      "items": [
+        {
+          "name": "Column",
+          "deeplink": "column",
+          "image": "/comparison/column_all_platforms.png"
+        },
+        {
+          "name": "Row",
+          "deeplink": "row",
+          "image": "/comparison/row_all_platforms.png"
+        },
+        {
+          "name": "Text",
+          "deeplink": "text",
+          "image": "/comparison/text_all_platforms.png"
+        },
+        {
+          "name": "Button",
+          "deeplink": "button",
+          "image": "/comparison/button_all_platforms.png"
+        },
+        {
+          "name": "Image",
+          "deeplink": "image",
+          "image": "/comparison/image_all_platforms.png"
+        },
+        {
+          "name": "Container",
+          "deeplink": "container",
+          "image": "/comparison/container_all_platforms.png"
+        },
+        {
+          "name": "Center",
+          "deeplink": "center",
+          "image": "/comparison/center_all_platforms.png"
+        },
+        {
+          "name": "List",
+          "deeplink": "list",
+          "image": "/comparison/list_all_platforms.png"
+        },
+        {
+          "name": "Input",
+          "deeplink": "input",
+          "image": "/comparison/input_all_platforms.png"
+        },
+        {
+          "name": "Link",
+          "deeplink": "link",
+          "image": "/comparison/link_all_platforms.png"
+        },
+        {
+          "name": "TextArea",
+          "deeplink": "textarea",
+          "image": "/comparison/textarea_all_platforms.png"
+        },
+        {
+          "name": "Checkbox",
+          "deeplink": "checkbox",
+          "image": "/comparison/checkbox_all_platforms.png"
+        },
+        {
+          "name": "Select",
+          "deeplink": "select",
+          "image": "/comparison/select_all_platforms.png"
+        },
+        {
+          "name": "Spacer",
+          "deeplink": "spacer",
+          "image": "/comparison/spacer_all_platforms.png"
+        },
+        {
+          "name": "Stack",
+          "deeplink": "stack",
+          "image": "/comparison/stack_all_platforms.png"
+        },
+        {
+          "name": "Divider",
+          "deeplink": "divider",
+          "image": "/comparison/divider_all_platforms.png"
+        },
+        {
+          "name": "Grid",
+          "deeplink": "grid",
+          "image": "/comparison/grid_all_platforms.png"
+        },
+        {
+          "name": "Card",
+          "deeplink": "card",
+          "image": "/comparison/card_all_platforms.png"
+        },
+        {
+          "name": "Heading",
+          "deeplink": "heading",
+          "image": "/comparison/heading_all_platforms.png"
+        },
+        {
+          "name": "Switch",
+          "deeplink": "switch",
+          "image": "/comparison/switch_all_platforms.png"
+        },
+        {
+          "name": "Slider",
+          "deeplink": "slider",
+          "image": "/comparison/slider_all_platforms.png"
+        },
+        {
+          "name": "Spinner",
+          "deeplink": "spinner",
+          "image": "/comparison/spinner_all_platforms.png"
+        },
+        {
+          "name": "Badge",
+          "deeplink": "badge",
+          "image": "/comparison/badge_all_platforms.png"
+        },
+        {
+          "name": "Avatar",
+          "deeplink": "avatar",
+          "image": "/comparison/avatar_all_platforms.png"
+        },
+        {
+          "name": "ProgressBar",
+          "deeplink": "progressbar",
+          "image": "/comparison/progressbar_all_platforms.png"
+        },
+        {
+          "name": "Video",
+          "deeplink": "video",
+          "image": "/comparison/video_all_platforms.png"
+        },
+        {
+          "name": "Audio",
+          "deeplink": "audio",
+          "image": "/comparison/audio_all_platforms.png"
+        },
+        {
+          "name": "Paragraph",
+          "deeplink": "paragraph",
+          "image": "/comparison/paragraph_all_platforms.png"
+        },
+        {
+          "name": "Counter",
+          "deeplink": "counter",
+          "image": "/comparison/counter_all_platforms.png"
+        },
+        {
+          "name": "Calculator",
+          "deeplink": "calculator",
+          "image": "/comparison/calculator_all_platforms.png"
+        },
+        {
+          "name": "Onboarding",
+          "deeplink": "onboarding",
+          "image": "/comparison/onboarding_all_platforms.png"
+        },
+        {
+          "name": "Todo",
+          "deeplink": "todo",
+          "image": "/comparison/todo_all_platforms.png"
+        }
+      ]
+    },
+    {
+      "title": "Applicators",
+      "items": [
+        {
+          "name": "padding",
+          "deeplink": "padding",
+          "image": "/comparison/padding_all_platforms.png"
+        },
+        {
+          "name": "margin",
+          "deeplink": "margin",
+          "image": "/comparison/margin_all_platforms.png"
+        },
+        {
+          "name": "color",
+          "deeplink": "color",
+          "image": "/comparison/color_all_platforms.png"
+        },
+        {
+          "name": "backgroundColor",
+          "deeplink": "backgroundColor",
+          "image": "/comparison/backgroundColor_all_platforms.png"
+        },
+        {
+          "name": "opacity",
+          "deeplink": "opacity",
+          "image": "/comparison/opacity_all_platforms.png"
+        },
+        {
+          "name": "width",
+          "deeplink": "width",
+          "image": "/comparison/width_all_platforms.png"
+        },
+        {
+          "name": "height",
+          "deeplink": "height",
+          "image": "/comparison/height_all_platforms.png"
+        },
+        {
+          "name": "size",
+          "deeplink": "size",
+          "image": "/comparison/size_all_platforms.png"
+        },
+        {
+          "name": "fillMaxSize",
+          "deeplink": "fillMaxSize",
+          "image": "/comparison/fillMaxSize_all_platforms.png"
+        },
+        {
+          "name": "border",
+          "deeplink": "border",
+          "image": "/comparison/border_all_platforms.png"
+        },
+        {
+          "name": "borderRadius",
+          "deeplink": "borderRadius",
+          "image": "/comparison/borderRadius_all_platforms.png"
+        },
+        {
+          "name": "cornerRadius",
+          "deeplink": "cornerRadius",
+          "image": "/comparison/cornerRadius_all_platforms.png"
+        },
+        {
+          "name": "fontSize",
+          "deeplink": "fontSize",
+          "image": "/comparison/fontSize_all_platforms.png"
+        },
+        {
+          "name": "fontWeight",
+          "deeplink": "fontWeight",
+          "image": "/comparison/fontWeight_all_platforms.png"
+        },
+        {
+          "name": "fontFamily",
+          "deeplink": "fontFamily",
+          "image": "/comparison/fontFamily_all_platforms.png"
+        },
+        {
+          "name": "textAlign",
+          "deeplink": "textAlign",
+          "image": "/comparison/textAlign_all_platforms.png"
+        },
+        {
+          "name": "lineHeight",
+          "deeplink": "lineHeight",
+          "image": "/comparison/lineHeight_all_platforms.png"
+        },
+        {
+          "name": "gap",
+          "deeplink": "gap",
+          "image": "/comparison/gap_all_platforms.png"
+        },
+        {
+          "name": "weight",
+          "deeplink": "weight",
+          "image": "/comparison/weight_all_platforms.png"
+        },
+        {
+          "name": "flex",
+          "deeplink": "flex",
+          "image": "/comparison/flex_all_platforms.png"
+        },
+        {
+          "name": "justifyContent",
+          "deeplink": "justifyContent",
+          "image": "/comparison/justifyContent_all_platforms.png"
+        },
+        {
+          "name": "alignItems",
+          "deeplink": "alignItems",
+          "image": "/comparison/alignItems_all_platforms.png"
+        },
+        {
+          "name": "shadow",
+          "deeplink": "shadow",
+          "image": "/comparison/shadow_all_platforms.png"
+        },
+        {
+          "name": "elevation",
+          "deeplink": "elevation",
+          "image": "/comparison/elevation_all_platforms.png"
+        },
+        {
+          "name": "blur",
+          "deeplink": "blur",
+          "image": "/comparison/blur_all_platforms.png"
+        },
+        {
+          "name": "transform",
+          "deeplink": "transform",
+          "image": "/comparison/transform_all_platforms.png"
+        },
+        {
+          "name": "rotate",
+          "deeplink": "rotate",
+          "image": "/comparison/rotate_all_platforms.png"
+        },
+        {
+          "name": "scale",
+          "deeplink": "scale",
+          "image": "/comparison/scale_all_platforms.png"
+        },
+        {
+          "name": "transition",
+          "deeplink": "transition",
+          "image": "/comparison/transition_all_platforms.png"
+        },
+        {
+          "name": "overflow",
+          "deeplink": "overflow",
+          "image": "/comparison/overflow_all_platforms.png"
+        },
+        {
+          "name": "zIndex",
+          "deeplink": "zIndex",
+          "image": "/comparison/zIndex_all_platforms.png"
+        },
+        {
+          "name": "gridColumns",
+          "deeplink": "gridColumns",
+          "image": "/comparison/gridColumns_all_platforms.png"
+        },
+        {
+          "name": "linearGradient",
+          "deeplink": "linearGradient",
+          "image": "/comparison/linearGradient_all_platforms.png"
+        },
+        {
+          "name": "maxLines",
+          "deeplink": "maxLines",
+          "image": "/comparison/maxLines_all_platforms.png"
+        }
+      ]
+    }
+  ]
+}

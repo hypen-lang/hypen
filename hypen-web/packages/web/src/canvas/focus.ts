@@ -21,6 +21,7 @@
 import type { VirtualNode } from "./types.js";
 import type { AccessibilityLayer } from "./accessibility.js";
 import { dispatchNodeEvent, type DispatchEngine } from "./dispatch.js";
+import { isToggleControl, activateToggle, handleControlKey } from "./controls.js";
 
 /**
  * Is this node inside an exit-animating subtree? Engine-side those ids are
@@ -49,6 +50,12 @@ export interface FocusManagerHooks {
    * canvas focus.
    */
   isAuxFocusTarget?(element: unknown): boolean;
+  /**
+   * Repaint after the mirror operated a control (an AT activation on a
+   * checkbox, an arrow key on a slider). Those change node state without
+   * going through the pointer path, so nothing else would schedule a frame.
+   */
+  requestRedraw?(): void;
 }
 
 export class FocusManager {
@@ -209,6 +216,12 @@ export class FocusManager {
     // Exiting subtrees are engine-dead: activation must not dispatch (the
     // pointer path is already pruned by hit-testing; this is the AT twin).
     if (inExitingSubtree(node)) return;
+    // An assistive-technology activation on a checkbox/switch/radio has to
+    // change its state, exactly as a pointer press does — the mirror element
+    // is the only thing AT can reach.
+    if (isToggleControl(node) && activateToggle(this.engine, node)) {
+      this.hooks.requestRedraw?.();
+    }
     dispatchNodeEvent(this.engine, node, "click", {});
   }
 
@@ -216,6 +229,12 @@ export class FocusManager {
     const node = this.resolveNode(e.target);
     if (!node) return;
     if (inExitingSubtree(node)) return;
+    // Space/Enter on a toggle, arrows on a slider. Consumed keys still
+    // dispatch onKeyDown below: an author who wired both gets both.
+    if (type === "keydown" && handleControlKey(this.engine, node, e.key)) {
+      e.preventDefault();
+      this.hooks.requestRedraw?.();
+    }
     dispatchNodeEvent(this.engine, node, type, {
       key: e.key,
       code: e.code,

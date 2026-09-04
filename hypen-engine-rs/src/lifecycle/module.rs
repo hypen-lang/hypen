@@ -186,33 +186,44 @@ impl ModuleInstance {
         }
     }
 
-    /// Update state from a patch
+    /// Update state from a patch. Returns `true` when the merge actually
+    /// altered the state tree.
     ///
     /// Uses Arc::make_mut for copy-on-write semantics: if this is the only
-    /// reference, mutates in place; otherwise clones first.
-    pub fn update_state(&mut self, patch: serde_json::Value) {
+    /// reference, mutates in place; otherwise clones first. Callers must not
+    /// hold a second `Arc` (e.g. a `get_state_shared()` snapshot) across this
+    /// call — that forces a deep clone of the whole tree on every update.
+    /// Change detection is done at the written leaves instead, so no snapshot
+    /// is needed.
+    pub fn update_state(&mut self, patch: serde_json::Value) -> bool {
         // Arc::make_mut provides copy-on-write: clones only if shared
         let state = Arc::make_mut(&mut self.state);
-        merge_json(state, patch);
+        merge_json(state, patch)
     }
 
-    /// Update state from sparse path-value pairs
+    /// Update state from sparse path-value pairs. Returns `true` when at
+    /// least one path actually wrote a different value.
     /// This is more efficient than sending the full state when only a few paths changed
     ///
-    /// Uses Arc::make_mut for copy-on-write semantics.
-    pub fn update_state_sparse(&mut self, paths: &[String], values: &serde_json::Value) {
+    /// Uses Arc::make_mut for copy-on-write semantics (see [`update_state`]
+    /// for the no-snapshot requirement).
+    pub fn update_state_sparse(&mut self, paths: &[String], values: &serde_json::Value) -> bool {
         // values is expected to be an object mapping paths to their new values
-        if let serde_json::Value::Object(map) = values {
-            // Only get mutable access if we have paths to update
-            if paths.iter().any(|p| map.contains_key(p)) {
-                let state = Arc::make_mut(&mut self.state);
-                for path in paths {
-                    if let Some(new_value) = map.get(path) {
-                        set_value_at_path(state, path, new_value.clone());
-                    }
-                }
+        let serde_json::Value::Object(map) = values else {
+            return false;
+        };
+        // Only get mutable access if we have paths to update
+        if !paths.iter().any(|p| map.contains_key(p)) {
+            return false;
+        }
+        let state = Arc::make_mut(&mut self.state);
+        let mut changed = false;
+        for path in paths {
+            if let Some(new_value) = map.get(path) {
+                changed |= set_value_at_path(state, path, new_value);
             }
         }
+        changed
     }
 
     /// Get a reference to the current state
@@ -232,36 +243,58 @@ impl ModuleInstance {
     }
 }
 
-/// Deep merge two JSON values
-fn merge_json(target: &mut serde_json::Value, source: serde_json::Value) {
+/// Deep merge two JSON values.
+///
+/// Returns `true` when the merge actually changed `target`. Detection is done
+/// at the leaves the patch actually writes, so the cost is bounded by the
+/// patch size rather than by the size of the whole state tree — no snapshot
+/// or whole-tree comparison is required.
+fn merge_json(target: &mut serde_json::Value, source: serde_json::Value) -> bool {
     use serde_json::Value;
 
     match (target, source) {
         (Value::Object(target_map), Value::Object(source_map)) => {
+            let mut changed = false;
             for (key, value) in source_map {
                 if let Some(target_value) = target_map.get_mut(&key) {
-                    merge_json(target_value, value);
+                    changed |= merge_json(target_value, value);
                 } else {
                     target_map.insert(key, value);
+                    changed = true;
                 }
             }
+            changed
         }
         (target, source) => {
-            *target = source;
+            if *target == source {
+                false
+            } else {
+                *target = source;
+                true
+            }
         }
     }
 }
 
 /// Set a value at a dot-separated path (e.g., "user.profile.name")
-/// Creates intermediate objects if they don't exist
-fn set_value_at_path(target: &mut serde_json::Value, path: &str, value: serde_json::Value) {
+/// Creates intermediate objects if they don't exist.
+///
+/// Returns `true` when the write actually changed something — either the
+/// final leaf differed from `value`, or an intermediate segment had to be
+/// auto-vivified / an array grown.
+fn set_value_at_path(
+    target: &mut serde_json::Value,
+    path: &str,
+    value: &serde_json::Value,
+) -> bool {
     use serde_json::Value;
 
     let parts: Vec<&str> = path.split('.').collect();
     if parts.is_empty() {
-        return;
+        return false;
     }
 
+    let mut changed = false;
     let mut current = target;
 
     // Navigate to the parent of the final key
@@ -272,6 +305,7 @@ fn set_value_at_path(target: &mut serde_json::Value, path: &str, value: serde_js
                 // Extend array if needed
                 while arr.len() <= index {
                     arr.push(Value::Null);
+                    changed = true;
                 }
                 current = &mut arr[index];
                 continue;
@@ -281,11 +315,13 @@ fn set_value_at_path(target: &mut serde_json::Value, path: &str, value: serde_js
         // Otherwise treat as object key
         if !current.is_object() {
             *current = Value::Object(serde_json::Map::new());
+            changed = true;
         }
 
         if let Value::Object(map) = current {
             if !map.contains_key(*part) {
                 map.insert(part.to_string(), Value::Object(serde_json::Map::new()));
+                changed = true;
             }
             current = map.get_mut(*part).unwrap();
         }
@@ -299,20 +335,38 @@ fn set_value_at_path(target: &mut serde_json::Value, path: &str, value: serde_js
         if let Value::Array(arr) = current {
             while arr.len() <= index {
                 arr.push(Value::Null);
+                changed = true;
             }
-            arr[index] = value;
-            return;
+            if arr[index] != *value {
+                arr[index] = value.clone();
+                changed = true;
+            }
+            return changed;
         }
     }
 
     // Set as object property
     if !current.is_object() {
         *current = Value::Object(serde_json::Map::new());
+        changed = true;
     }
 
     if let Value::Object(map) = current {
-        map.insert(final_key.to_string(), value);
+        match map.get_mut(final_key) {
+            Some(slot) => {
+                if *slot != *value {
+                    *slot = value.clone();
+                    changed = true;
+                }
+            }
+            None => {
+                map.insert(final_key.to_string(), value.clone());
+                changed = true;
+            }
+        }
     }
+
+    changed
 }
 
 #[cfg(test)]
@@ -495,7 +549,7 @@ mod tests {
             "count": 0
         });
 
-        set_value_at_path(&mut state, "count", json!(42));
+        set_value_at_path(&mut state, "count", &json!(42));
         assert_eq!(state["count"], 42);
     }
 
@@ -510,7 +564,7 @@ mod tests {
             }
         });
 
-        set_value_at_path(&mut state, "user.profile.bio", json!("Engineer"));
+        set_value_at_path(&mut state, "user.profile.bio", &json!("Engineer"));
         assert_eq!(state["user"]["profile"]["bio"], "Engineer");
         // Other values should be unchanged
         assert_eq!(state["user"]["name"], "Alice");
@@ -520,7 +574,7 @@ mod tests {
     fn test_set_value_at_path_creates_intermediate() {
         let mut state = json!({});
 
-        set_value_at_path(&mut state, "user.profile.name", json!("Bob"));
+        set_value_at_path(&mut state, "user.profile.name", &json!("Bob"));
         assert_eq!(state["user"]["profile"]["name"], "Bob");
     }
 
@@ -530,7 +584,7 @@ mod tests {
             "items": ["a", "b", "c"]
         });
 
-        set_value_at_path(&mut state, "items.1", json!("modified"));
+        set_value_at_path(&mut state, "items.1", &json!("modified"));
         assert_eq!(state["items"][1], "modified");
         assert_eq!(state["items"][0], "a");
         assert_eq!(state["items"][2], "c");
@@ -611,7 +665,7 @@ mod tests {
     fn test_set_value_at_path_empty_path() {
         let mut state = json!({"count": 0});
         // Empty path should do nothing
-        set_value_at_path(&mut state, "", json!(42));
+        set_value_at_path(&mut state, "", &json!(42));
         assert_eq!(state["count"], 0);
     }
 
@@ -624,7 +678,7 @@ mod tests {
             }
         });
 
-        set_value_at_path(&mut state, "user.email", json!(null));
+        set_value_at_path(&mut state, "user.email", &json!(null));
         assert_eq!(state["user"]["email"], serde_json::Value::Null);
         assert_eq!(state["user"]["name"], "Alice"); // Unchanged
     }
@@ -636,15 +690,15 @@ mod tests {
         });
 
         // Change string to object
-        set_value_at_path(&mut state, "data", json!({"nested": true}));
+        set_value_at_path(&mut state, "data", &json!({"nested": true}));
         assert_eq!(state["data"]["nested"], true);
 
         // Change object to array
-        set_value_at_path(&mut state, "data", json!([1, 2, 3]));
+        set_value_at_path(&mut state, "data", &json!([1, 2, 3]));
         assert_eq!(state["data"][0], 1);
 
         // Change array to number
-        set_value_at_path(&mut state, "data", json!(42));
+        set_value_at_path(&mut state, "data", &json!(42));
         assert_eq!(state["data"], 42);
     }
 
@@ -653,7 +707,7 @@ mod tests {
         let mut state = json!({});
 
         // Create deeply nested path (6 levels deep)
-        set_value_at_path(&mut state, "a.b.c.d.e.f", json!("deep value"));
+        set_value_at_path(&mut state, "a.b.c.d.e.f", &json!("deep value"));
         assert_eq!(state["a"]["b"]["c"]["d"]["e"]["f"], "deep value");
     }
 
@@ -667,12 +721,12 @@ mod tests {
         });
 
         // Update nested object within array
-        set_value_at_path(&mut state, "users.1.name", json!("Robert"));
+        set_value_at_path(&mut state, "users.1.name", &json!("Robert"));
         assert_eq!(state["users"][1]["name"], "Robert");
         assert_eq!(state["users"][0]["name"], "Alice"); // Unchanged
 
         // Update nested array within array element
-        set_value_at_path(&mut state, "users.0.tags.0", json!("superadmin"));
+        set_value_at_path(&mut state, "users.0.tags.0", &json!("superadmin"));
         assert_eq!(state["users"][0]["tags"][0], "superadmin");
     }
 
@@ -683,7 +737,7 @@ mod tests {
         });
 
         // Setting index 5 should extend array with nulls
-        set_value_at_path(&mut state, "items.5", json!("extended"));
+        set_value_at_path(&mut state, "items.5", &json!("extended"));
         assert_eq!(state["items"].as_array().unwrap().len(), 6);
         assert_eq!(state["items"][5], "extended");
         assert_eq!(state["items"][2], serde_json::Value::Null);
@@ -699,7 +753,7 @@ mod tests {
 
         // Trying to set a nested path where parent is a primitive
         // Should convert primitive to object
-        set_value_at_path(&mut state, "config.nested.value", json!("test"));
+        set_value_at_path(&mut state, "config.nested.value", &json!("test"));
         assert_eq!(state["config"]["nested"]["value"], "test");
     }
 
@@ -712,8 +766,8 @@ mod tests {
             }
         });
 
-        set_value_at_path(&mut state, "flags.enabled", json!(false));
-        set_value_at_path(&mut state, "flags.visible", json!(true));
+        set_value_at_path(&mut state, "flags.enabled", &json!(false));
+        set_value_at_path(&mut state, "flags.visible", &json!(true));
         assert_eq!(state["flags"]["enabled"], false);
         assert_eq!(state["flags"]["visible"], true);
     }
@@ -727,8 +781,8 @@ mod tests {
             }
         });
 
-        set_value_at_path(&mut state, "coordinates.lat", json!(37.7749));
-        set_value_at_path(&mut state, "coordinates.lng", json!(-122.4194));
+        set_value_at_path(&mut state, "coordinates.lat", &json!(37.7749));
+        set_value_at_path(&mut state, "coordinates.lng", &json!(-122.4194));
 
         // Use approximate comparison for floats
         let lat = state["coordinates"]["lat"].as_f64().unwrap();

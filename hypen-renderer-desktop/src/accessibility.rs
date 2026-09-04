@@ -172,6 +172,7 @@ fn ak_role(role: hypen_engine::ir::Role) -> Role {
         SemRole::Tabpanel => Role::TabPanel,
         SemRole::OptionItem => Role::ListBoxOption,
         SemRole::Combobox => Role::ComboBox,
+        SemRole::Video => Role::Video,
     }
 }
 
@@ -187,7 +188,7 @@ fn build_node_for(
             node.set_label(content.clone());
             node
         }
-        ItemKind::Button => {
+        ItemKind::Button | ItemKind::Card => {
             let mut node = Node::new(Role::Button);
             // The accessible label is the first Text descendant —
             // works for `Button("@actions.X") { Text("Save") }` etc.
@@ -202,7 +203,7 @@ fn build_node_for(
             node.add_action(Action::Click);
             node
         }
-        ItemKind::Container => Node::new(Role::GenericContainer),
+        ItemKind::Container | ItemKind::Audio { .. } => Node::new(Role::GenericContainer),
         ItemKind::Image { src, .. } => {
             let mut node = Node::new(Role::Image);
             // Without a real `alt` prop the best we can do is the
@@ -227,6 +228,54 @@ fn build_node_for(
             // through the engine (Phase 16+).
             Node::new(Role::Image)
         }
+        ItemKind::Scrubber { video_id, preview } => {
+            // Video v2 timeline. Exposed as a slider whose numeric value
+            // is the ELAPSED SECONDS and whose max is the duration, so
+            // assistive tech announces "0:37 of 2:15"-shaped positions
+            // rather than an abstract percentage. The engine's
+            // `SemRole::Slider` maps to the same AccessKit role, so an
+            // authored `.role("slider")` on a wrapper stays consistent.
+            let mut node = Node::new(Role::Slider);
+            let (position, duration) = crate::video_v2::position_duration(video_id.as_deref());
+            let fraction = crate::video_v2::scrubber_fraction(video_id.as_deref(), *preview);
+            let value = if duration > 0.0 {
+                (fraction as f64) * duration
+            } else {
+                position
+            };
+            node.set_numeric_value(value);
+            node.set_min_numeric_value(0.0);
+            node.set_max_numeric_value(duration);
+            node.set_numeric_value_step(crate::video_v2::SCRUBBER_KEY_STEP_S);
+            node.set_label("Seek".to_string());
+            node
+        }
+        ItemKind::Video {
+            src, poster, state, ..
+        } => {
+            // Media surface. Same label heuristic as Image — the file
+            // name tail of the stream URL (or poster, failing that) so
+            // screen readers say something more useful than "video".
+            // When a click is wired (`onPlay` / `.onClick`), expose the
+            // standard Click action so Enter / VoiceOver activate it.
+            let mut node = Node::new(Role::Video);
+            if let Some(s) = src.as_deref().or(poster.as_deref()) {
+                let label = s
+                    .rsplit('/')
+                    .next()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or(s)
+                    .to_string();
+                node.set_label(label);
+            }
+            if item.action.is_some() {
+                node.add_action(Action::Click);
+            }
+            // Video v2: surface the player state so assistive tech can
+            // distinguish "loading" from "paused" without polling.
+            node.set_description(state.as_str().to_string());
+            node
+        }
         ItemKind::Input {
             value, placeholder, ..
         } => {
@@ -238,6 +287,47 @@ fn build_node_for(
             if let Some(p) = placeholder {
                 node.set_label(p.clone());
             }
+            node
+        }
+        ItemKind::Checkbox { checked } => {
+            let mut node = Node::new(Role::CheckBox);
+            node.set_toggled((*checked).into());
+            node.add_action(Action::Click);
+            node
+        }
+        ItemKind::Switch { checked } => {
+            let mut node = Node::new(Role::Switch);
+            node.set_toggled((*checked).into());
+            node.add_action(Action::Click);
+            node
+        }
+        ItemKind::Slider { fraction, disabled } => {
+            let mut node = Node::new(Role::Slider);
+            node.set_numeric_value(*fraction as f64);
+            node.set_min_numeric_value(0.0);
+            node.set_max_numeric_value(1.0);
+            if !disabled {
+                node.add_action(Action::Increment);
+                node.add_action(Action::Decrement);
+            }
+            node
+        }
+        ItemKind::ProgressBar { fraction } => {
+            let mut node = Node::new(Role::ProgressIndicator);
+            node.set_numeric_value(*fraction as f64);
+            node.set_min_numeric_value(0.0);
+            node.set_max_numeric_value(1.0);
+            node
+        }
+        ItemKind::Spinner { .. } => Node::new(Role::ProgressIndicator),
+        ItemKind::Select { value, placeholder } => {
+            let mut node = Node::new(Role::ComboBox);
+            node.set_value(if value.is_empty() {
+                placeholder.clone()
+            } else {
+                value.clone()
+            });
+            node.add_action(Action::Click);
             node
         }
     };
@@ -420,9 +510,17 @@ mod tests {
         // the published AccessKit tree must not contain them, or a
         // screen reader could focus and Click-activate a corpse.
         let pass = build_pass(|t| {
-            t.apply(&create("keep", "Button", &[("action", json!("@actions.a"))]));
+            t.apply(&create(
+                "keep",
+                "Button",
+                &[("action", json!("@actions.a"))],
+            ));
             t.apply(&insert(ROOT_ID, "keep"));
-            t.apply(&create("dying", "Button", &[("action", json!("@actions.b"))]));
+            t.apply(&create(
+                "dying",
+                "Button",
+                &[("action", json!("@actions.b"))],
+            ));
             t.apply(&insert(ROOT_ID, "dying"));
         });
         assert!(pass.item_by_id("dying").is_some(), "still painted mid-exit");
@@ -579,7 +677,11 @@ mod tests {
             .find(|(id, _)| *id == ak_node_id("btn"))
             .map(|(_, n)| n)
             .expect("button node");
-        assert_eq!(btn.label(), Some("Submit"), "AccessKit must see the re-emitted name");
+        assert_eq!(
+            btn.label(),
+            Some("Submit"),
+            "AccessKit must see the re-emitted name"
+        );
 
         // Clearing (semantics: None) drops the engine block; the layout
         // heuristics take over again rather than announcing a stale name.

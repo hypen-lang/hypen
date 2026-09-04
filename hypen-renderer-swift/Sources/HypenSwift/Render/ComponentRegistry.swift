@@ -84,8 +84,8 @@ extension ComponentRegistry {
         registry.register(SpacerComponent())
         registry.register(StackComponent())
         registry.register(ListComponent())
-        registry.register(ScrollViewComponent())
         registry.register(GridComponent())
+        registry.register(SafeAreaComponent())
 
         // Content components
         registry.register(TextComponent())
@@ -93,6 +93,11 @@ extension ComponentRegistry {
         registry.register(ParagraphComponent())
         registry.register(ImageComponent())
         registry.register(DividerComponent())
+
+        // Accessibility components
+        // Without a handler this falls through to the container fallback in
+        // HypenElementView, which renders screen-reader-only content visibly.
+        registry.register(VisuallyHiddenComponent())
 
         // Interactive components
         registry.register(ButtonComponent())
@@ -120,6 +125,9 @@ extension ComponentRegistry {
         // Media components
         registry.register(AudioComponent())
         registry.register(VideoComponent())
+        // Video v2 chrome: a timeline for the `controls` slot (inert
+        // outside a Video).
+        registry.register(ScrubberComponent())
 
         // Icon component (renders server-resolved SVG path data)
         registry.register(IconComponent())

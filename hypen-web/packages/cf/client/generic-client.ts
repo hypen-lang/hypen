@@ -22,7 +22,11 @@ import { CanvasRenderer } from "@hypen-space/web/canvas";
 
 function wsUrl(): string {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  return `${proto}://${location.host}/ws`;
+  const routeId =
+    typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `${proto}://${location.host}/ws?sessionId=${encodeURIComponent(`web-${routeId}`)}`;
 }
 
 const renderer = document.body.dataset.hypenRenderer === "canvas" ? "canvas" : "dom";

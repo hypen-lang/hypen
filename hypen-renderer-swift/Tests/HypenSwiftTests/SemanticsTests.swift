@@ -121,6 +121,22 @@ import Testing
     #expect(SemanticsLabelModifier(semantics: img).effectiveLabel == "A cat")
 }
 
+@Test func testVideoRoleNameReachesVoiceOver() {
+    // A Video's accessible name (its `title`, serialized by the engine as
+    // the Hypen-neutral role token "video") has no visible text VoiceOver
+    // could derive it from — like an image's alt, it must be applied.
+    let video = HypenSemantics.from(dictionary: [
+        "role": "video", "name": "Intro",
+    ])!
+    #expect(SemanticsLabelModifier(semantics: video).effectiveLabel == "Intro")
+
+    // An explicit `.label(...)` still wins over the derived title.
+    let labelled = HypenSemantics.from(dictionary: [
+        "role": "video", "name": "Trailer, muted", "nameExplicit": true,
+    ])!
+    #expect(SemanticsLabelModifier(semantics: labelled).effectiveLabel == "Trailer, muted")
+}
+
 @Test func testStateDescriptionPrecedence() {
     let checked = HypenSemantics.from(dictionary: ["role": "checkbox", "checked": true])!
     #expect(SemanticsValueModifier(semantics: checked).stateDescription == "checked")

@@ -112,6 +112,29 @@ fn state_rank(state: &str) -> u32 {
     }
 }
 
+/// Sort rank for a value-map variant key, ascending in the same precedence
+/// order renderers resolve in: `default` < breakpoints (ascending min-width)
+/// < `disabled` < `hover` < `focus` < `active`. Unknown tokens sort last.
+///
+/// The engine emits the props of a value-map applicator
+/// (`.padding({default: 8, md: 16})`) in this order, because the parser hands
+/// the map over as a `HashMap` whose iteration order is arbitrary. Renderers
+/// that resolve variants by *source* order — the DOM appends one CSS rule per
+/// variant and lets the cascade pick the last match among equal-specificity
+/// rules — would otherwise pick a different winner from run to run.
+pub fn variant_token_rank(tok: &str) -> u32 {
+    if tok == DEFAULT_KEY {
+        return 0;
+    }
+    if let Some(idx) = BREAKPOINTS.iter().position(|(name, _)| *name == tok) {
+        return 1 + idx as u32;
+    }
+    if is_state(tok) {
+        return 1 + BREAKPOINTS.len() as u32 + state_rank(tok);
+    }
+    u32::MAX
+}
+
 /// A parsed prop key, split into its base, optional variant markers, and
 /// optional arg suffix.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,7 +467,11 @@ mod tests {
 
     #[test]
     fn pick_hover_overrides_breakpoint() {
-        let keys = ["backgroundColor.0", "backgroundColor@md.0", "backgroundColor:hover.0"];
+        let keys = [
+            "backgroundColor.0",
+            "backgroundColor@md.0",
+            "backgroundColor:hover.0",
+        ];
         // md active and hover active: hover (a state) outranks breakpoint.
         assert_eq!(
             pick_variant_base("backgroundColor", &keys, 1000.0, &["hover"]),

@@ -147,7 +147,7 @@ fn test_insert_root_patch() {
             id,
             before_id,
         } => {
-            assert_eq!(parent_id, "root");
+            assert_eq!(parent_id.as_ref(), "root");
             assert!(!id.is_empty());
             assert_eq!(before_id, None);
         }
@@ -317,7 +317,7 @@ fn test_deserialize_patch() {
     // THEN: Correct patch variant; absent `transition` defaults to false
     match patch {
         Patch::Remove { id, transition } => {
-            assert_eq!(id, "42");
+            assert_eq!(id.as_ref(), "42");
             assert!(!transition);
         }
         _ => panic!("Expected Remove patch"),
@@ -398,7 +398,7 @@ fn test_deserialize_remove_prop_patch() {
     // THEN: Correct patch variant
     match patch {
         Patch::RemoveProp { id, name } => {
-            assert_eq!(id, "99");
+            assert_eq!(id.as_ref(), "99");
             assert_eq!(name, "color");
         }
         _ => panic!("Expected RemoveProp patch"),
@@ -534,7 +534,7 @@ fn test_node_id_str_stable_and_unique() {
     }
 
     // Distinct NodeIds → distinct strings.
-    let seen: HashSet<String> = ids.iter().copied().map(node_id_str).collect();
+    let seen: HashSet<std::sync::Arc<str>> = ids.iter().copied().map(node_id_str).collect();
     assert_eq!(
         seen.len(),
         ids.len(),

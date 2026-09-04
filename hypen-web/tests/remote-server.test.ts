@@ -361,3 +361,48 @@ describe("RemoteServer compression", () => {
     expect(initMsg.patches.length).toBeGreaterThan(0);
   });
 });
+
+describe("RemoteServer default web client", () => {
+  let server: RemoteServer | null = null;
+  const PORT = 19881;
+
+  afterEach(async () => {
+    server?.stop();
+    server = null;
+    await wait(50);
+  });
+
+  test("serves an HTML shell and client bundle at / by default", async () => {
+    server = new RemoteServer()
+      .module("Counter", createCounterModule())
+      .ui(UI);
+    await server.listen(PORT);
+
+    const page = await fetch(`http://localhost:${PORT}/`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    const html = await page.text();
+    expect(html).toContain('<div id="app">');
+    expect(html).toContain("/__hypen__/client.js");
+
+    const bundle = await fetch(`http://localhost:${PORT}/__hypen__/client.js`);
+    expect(bundle.status).toBe(200);
+    expect(bundle.headers.get("content-type")).toContain("javascript");
+    const js = await bundle.text();
+    expect(js.length).toBeGreaterThan(1000);
+  });
+
+  test("webClient: false keeps the plain-text HTTP responses", async () => {
+    // Own port: reusing PORT can ride a kept-alive connection into the
+    // previous test's still-draining server and read its HTML instead.
+    const port = PORT + 1;
+    server = new RemoteServer()
+      .module("Counter", createCounterModule())
+      .ui(UI)
+      .config({ webClient: false });
+    await server.listen(port);
+
+    const page = await fetch(`http://localhost:${port}/`);
+    expect(await page.text()).toBe("Hypen Remote Server");
+  });
+});

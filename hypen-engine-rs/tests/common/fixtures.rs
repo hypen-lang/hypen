@@ -295,15 +295,20 @@ pub fn keyed_list(items: &[&str]) -> Vec<Element> {
 
 /// Creates a patch capture callback
 /// Returns (captured_patches, callback_function)
+///
+/// Captured batches are lowered through a [`TemplateExpander`] the way
+/// every plain-patch boundary does, so tests written against the
+/// pre-template `Create`/`Insert` wire keep asserting that shape. Tests
+/// that pin the collapsed (`RegisterTemplate`/`Instantiate`) wire itself
+/// use their own raw callback instead.
 #[allow(clippy::type_complexity)]
 pub fn patch_capture() -> (Arc<Mutex<Vec<Patch>>>, impl Fn(&[Patch])) {
     let patches = Arc::new(Mutex::new(Vec::new()));
     let patches_clone = patches.clone();
+    let expander = Mutex::new(hypen_engine::TemplateExpander::new());
     let callback = move |new_patches: &[Patch]| {
-        patches_clone
-            .lock()
-            .unwrap()
-            .extend(new_patches.iter().cloned());
+        let lowered = expander.lock().unwrap().expand(new_patches.to_vec());
+        patches_clone.lock().unwrap().extend(lowered);
     };
     (patches, callback)
 }

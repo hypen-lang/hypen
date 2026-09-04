@@ -44,10 +44,11 @@ Column {
     .padding(20)
     .cornerRadius(12)
     .shadow({x: 0, y: 2, blur: 8, color: "rgba(0,0,0,0.1)"})
+    .fillMaxWidth(true)
 
     Card {
       Column {
-        Image(src: "https://picsum.photos/300/150")
+        Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/card.png?platform=__HYPEN_GALLERY_PLATFORM__&example=card&generation=__HYPEN_GALLERY_GENERATION__")
           .fillMaxWidth(true)
           .height(150)
           .cornerRadius(8)
@@ -65,6 +66,7 @@ Column {
     .cornerRadius(12)
     .backgroundColor("#fff")
     .border({width: 1, color: "#e5e7eb"})
+    .fillMaxWidth(true)
 
     Card {
       Row {
@@ -96,6 +98,7 @@ Column {
     .cornerRadius(12)
     .backgroundColor("#f0f9ff")
     .border({width: 1, color: "#bfdbfe"})
+    .fillMaxWidth(true)
   }
   .gap(16)
   .fillMaxWidth(true)

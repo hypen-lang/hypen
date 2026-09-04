@@ -2,7 +2,7 @@
  * Input Component
  */
 
-import type { ComponentHandler } from "./index.js";
+import { hasProp, toBool, type ComponentHandler } from "./index.js";
 
 export const inputHandler: ComponentHandler = {
   create(): HTMLElement {
@@ -29,12 +29,33 @@ export const inputHandler: ComponentHandler = {
       input.type = String(props.type);
     }
 
-    if (props.placeholder !== undefined) {
-      input.placeholder = String(props.placeholder);
+    if (hasProp(props, "placeholder")) {
+      input.placeholder = props.placeholder === undefined ? "" : String(props.placeholder);
     }
 
     if (props.value !== undefined) {
       input.value = String(props.value);
+    }
+
+    // These reach the handler through COMPONENT_HTML_ATTRS, and that lookup
+    // returns early — so anything listed there and not implemented here is
+    // swallowed entirely rather than falling through to the applicator.
+    // `hasProp` rather than `!== undefined`: a RemoveProp arrives as the key
+    // present and undefined, and must clear the attribute, not skip it.
+    if (hasProp(props, "disabled")) {
+      input.disabled = toBool(props.disabled);
+    }
+
+    if (hasProp(props, "readonly")) {
+      input.readOnly = toBool(props.readonly);
+    }
+
+    if (props.name !== undefined) {
+      input.name = String(props.name);
+    }
+
+    if (hasProp(props, "checked")) {
+      input.checked = toBool(props.checked);
     }
   },
 };

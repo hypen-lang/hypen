@@ -135,6 +135,29 @@ fn format_value_for_replacement(val: &serde_json::Value, quote_strings: bool) ->
 // Element-level item binding replacement
 // ---------------------------------------------------------------------------
 
+/// Cached `("@{name.", "@{name}")` textual-marker pair for the last item
+/// name seen. The substitution hot loop probes every string prop of every
+/// row for these markers; building them with `format!` per probe was two
+/// heap allocations per prop per row (~20k per 1,000-row update). The name
+/// is `"item"` for virtually every pass, so a 1-entry cache hits ~always.
+/// WASM is single-threaded; on native, thread-locals keep this sound.
+pub(crate) fn with_item_markers<R>(item_name: &str, f: impl FnOnce(&str, &str) -> R) -> R {
+    use std::cell::RefCell;
+    thread_local! {
+        static MARKERS: RefCell<(String, String, String)> =
+            const { RefCell::new((String::new(), String::new(), String::new())) };
+    }
+    MARKERS.with(|cell| {
+        let mut m = cell.borrow_mut();
+        if m.0 != item_name {
+            m.0 = item_name.to_string();
+            m.1 = format!("@{{{}.", item_name);
+            m.2 = format!("@{{{}}}", item_name);
+        }
+        f(&m.1, &m.2)
+    })
+}
+
 /// Replace item bindings (Value::Binding with is_item() or TemplateString with item bindings) with actual item values
 /// OPTIMIZED: Uses single-pass replacement instead of O(n²) repeated scans
 /// This is a convenience wrapper that uses "item" as the default item name.
@@ -349,7 +372,11 @@ fn replace_props_item_bindings(props: &Props, item: &serde_json::Value, item_nam
 /// Replace item bindings in a Value
 /// Uses optimized single-pass replacement to avoid O(n²) string operations.
 /// `item_name` allows custom iteration variable names (e.g., "todo", "user" instead of "item").
-fn replace_value_item_bindings(value: &Value, item: &serde_json::Value, item_name: &str) -> Value {
+pub(crate) fn replace_value_item_bindings(
+    value: &Value,
+    item: &serde_json::Value,
+    item_name: &str,
+) -> Value {
     match value {
         Value::Binding(binding) => {
             if binding.is_item() {
@@ -372,8 +399,7 @@ fn replace_value_item_bindings(value: &Value, item: &serde_json::Value, item_nam
         }
         // Handle static strings containing @{item.xxx} pattern (legacy/fallback)
         Value::Static(serde_json::Value::String(s))
-            if s.contains(&format!("@{{{}.", item_name))
-                || s.contains(&format!("@{{{}}}", item_name)) =>
+            if with_item_markers(item_name, |dot, bare| s.contains(dot) || s.contains(bare)) =>
         {
             replace_static_item_bindings_with_name(s, item, item_name)
         }
@@ -398,8 +424,9 @@ fn replace_template_string_item_bindings(
     // bindings — so the template carries no parsed item bindings for them.
     // They are only detectable textually, and only here at substitution time
     // where the iteration variable's name is known.
-    let has_named_refs = template.contains(&format!("@{{{}.", item_name))
-        || template.contains(&format!("@{{{}}}", item_name));
+    let has_named_refs = with_item_markers(item_name, |dot, bare| {
+        template.contains(dot) || template.contains(bare)
+    });
 
     if !has_item_bindings && !has_named_refs {
         return original.clone();

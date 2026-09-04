@@ -260,6 +260,41 @@ class HypenElement(
         name: String,
         default: Boolean,
     ): Boolean = getBoolProp(name) ?: default
+
+    /**
+     * Gets a list-of-strings property (e.g. `playlist: ["a.mp4", "b.mp4"]`).
+     *
+     * Looks up both the bare name and the `.0` wire-suffix variant
+     * (`playlist` / `playlist.0`). JSON arrays arrive from the parser as
+     * `List<Any?>`; non-string entries are stringified (numbers, etc.) and
+     * nulls are dropped. Returns null when the prop is absent or is not a
+     * list, so callers can distinguish "not set" from "set but empty".
+     */
+    fun getStringListProp(name: String): List<String>? {
+        val value = props[name] ?: props["$name.0"] ?: return null
+        return (value as? List<*>)?.mapNotNull { it?.toString() }
+    }
+
+    /**
+     * Gets a map-of-strings property (e.g. `headers: {"Authorization": "..."}`).
+     *
+     * Looks up both the bare name and the `.0` wire-suffix variant
+     * (`headers` / `headers.0`). JSON objects arrive from the parser as
+     * `Map<Any?, Any?>`; entries with null keys or null values are dropped
+     * and non-string values are stringified. Returns null when the prop is
+     * absent or is not a map.
+     */
+    fun getStringMapProp(name: String): Map<String, String>? {
+        val value = props[name] ?: props["$name.0"] ?: return null
+        val map = value as? Map<*, *> ?: return null
+        val result = LinkedHashMap<String, String>(map.size)
+        for ((k, v) in map) {
+            val key = k?.toString() ?: continue
+            val str = v?.toString() ?: continue
+            result[key] = str
+        }
+        return result
+    }
 }
 
 /**

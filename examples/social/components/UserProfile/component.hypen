@@ -73,9 +73,9 @@ module UserProfile {
                 .width(120)
                 .height(120)
                 .objectFit("cover")
-                .tw("p-px")
+                .tw("p-px md:rounded-lg select-none transition-transform duration-500 ease-out md:active:scale-110 md:active:z-10")
         }
-        .tw("flex-1")
+        .tw("flex-1 md:px-2")
     }
     .tw("flex-1 bg-white")
 }

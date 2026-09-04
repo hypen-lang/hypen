@@ -1,0 +1,64 @@
+name: Swift Renderer CI
+
+# Compile-verifies the Swift packages on every change — the renderer's
+# AVKit/SwiftUI code only compiles against Apple SDKs, so Linux-side
+# development (and Linux agents) cannot catch Swift build breaks. The
+# publish workflow builds too, but only when a release is cut; this
+# catches regressions at PR time.
+on:
+  push:
+    branches: [main, develop]
+    paths:
+      - "hypen-renderer-swift/**"
+      - "hypen-server-swift/**"
+      - ".github/workflows/swift-renderer-ci.yml"
+  pull_request:
+    paths:
+      - "hypen-renderer-swift/**"
+      - "hypen-server-swift/**"
+      - "hypen-engine-rs/**"
+      - ".github/workflows/swift-renderer-ci.yml"
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    name: Build + Test
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: hypen-renderer-swift
+            name: HypenSwift
+          - package: hypen-server-swift
+            name: HypenServer
+            # The server package's hypen_engineFFI systemLibrary declares
+            # `link "hypen_engine"`, and the committed xcframework ships
+            # HEADERS ONLY — the native library must be built from the
+            # engine first (same recipe integration.yml's Swift Server SDK
+            # job uses; without it the XCTest link dies with
+            # `ld: library 'hypen_engine' not found`).
+            needs_engine: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ matrix.needs_engine }}
+
+      - name: Build engine with UniFFI
+        if: ${{ matrix.needs_engine }}
+        run: cargo build --release --features uniffi
+        working-directory: hypen-engine-rs
+
+      - name: Build ${{ matrix.name }}
+        run: swift build
+        working-directory: ${{ matrix.package }}
+        env:
+          LIBRARY_PATH: ${{ github.workspace }}/target/release
+
+      - name: Test ${{ matrix.name }}
+        run: swift test
+        working-directory: ${{ matrix.package }}
+        env:
+          LIBRARY_PATH: ${{ github.workspace }}/target/release
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/target/release

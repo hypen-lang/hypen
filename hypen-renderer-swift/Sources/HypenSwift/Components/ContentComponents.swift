@@ -33,16 +33,23 @@ public struct TextComponent: ComponentHandler {
         // Build text view with styling
         var textView = Text(text)
 
-        // Font with family, size, and weight
-        let fontSize = modifier.fontSize ?? context.element.getCGFloatProp("fontSize.0") ?? 17
-        let weight = modifier.fontWeight ?? parseFontWeight(context.element.getStringProp("fontWeight.0")) ?? .regular
+        // Font with family, size, and weight. A completely unstyled Text must
+        // keep the inherited SwiftUI font so component containers such as a
+        // raw Badge can supply their typography contract. With no ancestor
+        // font this is still SwiftUI's 17pt body default.
+        let explicitFontSize = modifier.fontSize ?? context.element.getCGFloatProp("fontSize.0")
+        let explicitWeight = modifier.fontWeight ?? parseFontWeight(context.element.getStringProp("fontWeight.0"))
         let fontFamily = modifier.fontFamily ?? context.element.getStringProp("fontFamily.0")
 
         if let family = fontFamily {
+            let fontSize = explicitFontSize ?? 17
+            let weight = explicitWeight ?? .regular
             // Use GoogleFontsLoader for custom fonts
             let font = GoogleFontsLoader.shared.font(name: family, size: fontSize, weight: weight)
             textView = textView.font(font)
-        } else {
+        } else if explicitFontSize != nil || explicitWeight != nil {
+            let fontSize = explicitFontSize ?? 17
+            let weight = explicitWeight ?? .regular
             // Use system font
             textView = textView.font(.system(size: fontSize, weight: weight))
         }
@@ -289,7 +296,41 @@ public struct ImageComponent: ComponentHandler {
             || modifier.aspectRatio != nil
 
         return AnyView(
-            Group {
+            GridAwareImageContent(
+                src: src,
+                alt: alt,
+                contentMode: contentMode,
+                hasExplicitSize: hasExplicitSize,
+                modifier: modifier
+            )
+        )
+    }
+
+    private func parseContentMode(_ value: String?) -> ContentMode {
+        switch value?.lowercased() {
+        // Support both web/android naming (cover/contain) and iOS naming (fill/fit)
+        case "fill", "cover", "crop": return .fill
+        case "fit", "contain": return .fit
+        default: return .fit
+        }
+    }
+}
+
+private struct GridAwareImageContent: View {
+    @Environment(\.parentStretchesBareGridImage) private var parentStretchesBareGridImage
+
+    let src: String?
+    let alt: String
+    let contentMode: ContentMode
+    let hasExplicitSize: Bool
+    let modifier: HypenModifier
+
+    private var shouldResize: Bool {
+        hasExplicitSize || parentStretchesBareGridImage
+    }
+
+    var body: some View {
+        Group {
                 if let src = src {
                     if src.hasPrefix("http://") || src.hasPrefix("https://") {
                         // Route HTTP(S) images through HypenImageCache —
@@ -308,7 +349,7 @@ public struct ImageComponent: ComponentHandler {
                                 )
                             },
                             transform: { image in
-                                if hasExplicitSize {
+                                if shouldResize {
                                     return AnyView(
                                         image
                                             .resizable()
@@ -320,7 +361,7 @@ public struct ImageComponent: ComponentHandler {
                             }
                         )
                     } else if let systemName = src.hasPrefix("system:") ? String(src.dropFirst(7)) : nil {
-                        if hasExplicitSize {
+                        if shouldResize {
                             Image(systemName: systemName)
                                 .resizable()
                                 .aspectRatio(contentMode: contentMode)
@@ -328,7 +369,7 @@ public struct ImageComponent: ComponentHandler {
                             Image(systemName: systemName)
                         }
                     } else {
-                        if hasExplicitSize {
+                        if shouldResize {
                             Image(src)
                                 .resizable()
                                 .aspectRatio(contentMode: contentMode)
@@ -337,22 +378,14 @@ public struct ImageComponent: ComponentHandler {
                         }
                     }
                 } else {
-                    Image(systemName: "photo")
-                        .foregroundColor(.gray)
+                    // No source (yet): reserve the box but paint nothing, like
+                    // web's `<img>` without `src` and Android's empty Box — a
+                    // bound `src` that fills in later must not flash a glyph.
+                    Color.clear
                 }
-            }
-            .accessibilityLabel(alt)
-            .hypenModifier(modifier)
-        )
-    }
-
-    private func parseContentMode(_ value: String?) -> ContentMode {
-        switch value?.lowercased() {
-        // Support both web/android naming (cover/contain) and iOS naming (fill/fit)
-        case "fill", "cover", "crop": return .fill
-        case "fit", "contain": return .fit
-        default: return .fit
         }
+        .accessibilityLabel(alt)
+        .hypenModifier(modifier)
     }
 }
 
@@ -368,14 +401,62 @@ public struct DividerComponent: ComponentHandler {
         modifier: HypenModifier,
         children: @escaping () -> AnyView
     ) -> AnyView {
-        let color = ColorParser.parse(context.element.props["color.0"])
-        let thickness = context.element.getCGFloatProp("thickness.0") ?? 1
+        let style = resolveDividerStyle(element: context.element, modifier: modifier)
 
         return AnyView(
             Rectangle()
-                .fill(color ?? Color.gray.opacity(0.3))
-                .frame(height: thickness)
+                .fill(style.color)
+                .frame(height: style.thickness)
                 .hypenModifier(modifier)
         )
     }
+}
+
+enum DividerColorSource: Equatable {
+    case foreground
+    case background
+    case prop
+    case canonicalDefault
+}
+
+struct DividerStyleResolution {
+    let color: Color
+    let thickness: CGFloat
+    let colorSource: DividerColorSource
+}
+
+func resolveDividerStyle(element: HypenElement, modifier: HypenModifier) -> DividerStyleResolution {
+    let propColor = ColorParser.parse(element.props["color.0"])
+        ?? ColorParser.parse(element.props["color"])
+        ?? ColorParser.parse(element.props["backgroundColor.0"])
+        ?? ColorParser.parse(element.props["backgroundColor"])
+
+    let color: Color
+    let colorSource: DividerColorSource
+    if let foreground = modifier.foregroundColor {
+        color = foreground
+        colorSource = .foreground
+    } else if let background = modifier.backgroundColor {
+        color = background
+        colorSource = .background
+    } else if let propColor {
+        color = propColor
+        colorSource = .prop
+    } else {
+        color = Color(red: 224 / 255, green: 224 / 255, blue: 224 / 255)
+        colorSource = .canonicalDefault
+    }
+
+    let thickness = modifier.height
+        ?? element.getCGFloatProp("height.0")
+        ?? element.getCGFloatProp("height")
+        ?? element.getCGFloatProp("thickness.0")
+        ?? element.getCGFloatProp("thickness")
+        ?? 1
+
+    return DividerStyleResolution(
+        color: color,
+        thickness: max(0, thickness),
+        colorSource: colorSource
+    )
 }

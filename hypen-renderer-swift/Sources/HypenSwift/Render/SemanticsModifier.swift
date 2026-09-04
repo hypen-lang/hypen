@@ -9,7 +9,7 @@ import SwiftUI
 /// |--------------------|--------------------------------------------------|
 /// | `hidden`           | `.accessibilityHidden(true)` (nothing else applies) |
 /// | `name` (explicit)  | `.accessibilityLabel` — an author `.label(...)` overrides visible content |
-/// | `name` (img role)  | `.accessibilityLabel` — image alt has no visible text to derive from |
+/// | `name` (img/video role) | `.accessibilityLabel` — image alt / video title has no visible text to derive from |
 /// | `description`      | `.accessibilityHint`                             |
 /// | `role`             | traits: button/link/heading/img/search/dialog→isModal |
 /// | `level`            | `.accessibilityHeading(.h1…h6)`                  |
@@ -47,13 +47,13 @@ struct SemanticsLabelModifier: ViewModifier {
     let semantics: HypenSemantics
 
     /// An explicit author `.label(...)` always overrides; an image's name
-    /// (alt text) is applied too, since there is no visible text VoiceOver
-    /// could derive it from. Derived names on text-bearing controls are left
-    /// to the visible content.
+    /// (alt text) and a video's name (its `title`) are applied too, since
+    /// neither has visible text VoiceOver could derive it from. Derived
+    /// names on text-bearing controls are left to the visible content.
     var effectiveLabel: String? {
         guard let name = semantics.name else { return nil }
         if semantics.nameExplicit == true { return name }
-        if semantics.role == "img" { return name }
+        if semantics.role == "img" || semantics.role == "video" { return name }
         return nil
     }
 

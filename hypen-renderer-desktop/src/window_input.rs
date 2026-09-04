@@ -6,6 +6,39 @@
 
 use super::*;
 
+/// Resolve editing state directly from the renderer Tree, with the newest
+/// unacknowledged local value taking precedence. Keyboard delivery must not
+/// depend on a LayoutPass: a second key can legally arrive before the first
+/// key's requested redraw.
+pub(crate) fn controlled_input_state(
+    tree: &Tree,
+    optimistic: &HashMap<String, OptimisticInputEdit>,
+    id: &str,
+) -> Option<(String, String)> {
+    let node = tree.get(id)?;
+    if !node.element_type.eq_ignore_ascii_case("Input") {
+        return None;
+    }
+    let bind_path = node
+        .props
+        .get("bind")
+        .or_else(|| node.props.get("bind.0"))?
+        .as_str()?
+        .to_string();
+    let value = optimistic
+        .get(id)
+        .map(|edit| edit.value.clone())
+        .or_else(|| {
+            node.props
+                .get("value")
+                .or_else(|| node.props.get("value.0"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    Some((value, bind_path))
+}
+
 impl App {
     /// Find the focused Input (if any) and return `(node_id, value, bind_path)`.
     pub(super) fn focused_input(&self) -> Option<(String, String, String)> {
@@ -18,14 +51,8 @@ impl App {
         if self.exit_excluded(&id) {
             return None;
         }
-        let layout = self.layout.as_ref()?;
-        let item = layout.item_by_id(&id)?;
-        match &item.kind {
-            ItemKind::Input {
-                value, bind_path, ..
-            } => bind_path.as_ref().map(|p| (id, value.clone(), p.clone())),
-            _ => None,
-        }
+        let (value, bind_path) = controlled_input_state(&self.tree, &self.optimistic_inputs, &id)?;
+        Some((id, value, bind_path))
     }
 
     /// Look up an Input's `(value, font_size, rect)` by node id. Used
@@ -120,6 +147,10 @@ impl App {
         }
         self.input_selections.insert(id.clone(), new_sel);
         if new_value != value {
+            self.optimistic_inputs
+                .entry(id.clone())
+                .or_default()
+                .push(new_value.clone());
             // Optimistic local update: stamp the Input's `value` prop
             // directly into the Tree before dispatching to the engine.
             // The engine will eventually echo back a SetProp patch with
@@ -132,13 +163,27 @@ impl App {
             // place), which is the same pattern every web framework
             // uses for controlled inputs.
             let patch = hypen_engine::Patch::SetProp {
-                id: id.clone(),
+                id: id.as_str().into(),
                 name: "value".to_string(),
                 value: serde_json::Value::String(new_value.clone()),
             };
             self.tree.apply(&patch);
-            self.tree_generation = self.tree_generation.wrapping_add(1);
-            self.layout = None;
+            // `value` is paint/a11y state, not geometry. Refresh the cached
+            // item in place so another keyboard event arriving before the
+            // redraw can still resolve the focused Input. Invalidating the
+            // whole layout here made burst typing drop every event that landed
+            // between the first key and its paint.
+            let scale = self
+                .window
+                .as_ref()
+                .map(|window| window.scale_factor() as f32)
+                .unwrap_or(1.0);
+            let viewport = self.logical_viewport();
+            if let Some(layout) = self.layout.as_mut() {
+                let affected = HashSet::from([id.clone()]);
+                layout.refresh_paint_only(&self.tree, &affected, viewport, scale);
+                self.layout_generation = self.layout_generation.wrapping_add(1);
+            }
             // Same reason as `flush_patches`: the focused Input's
             // cached scene fragment now has the wrong text and needs
             // re-encoding. Bulk-clear; the next paint rebuilds only
@@ -311,17 +356,43 @@ impl App {
     }
 
     pub(super) fn dispatch_focused(&mut self) -> bool {
+        // A focused `.videoIntent(...)` control performs its intent on
+        // Enter / Space — keyboard parity with the pointer path (and the
+        // reason such a node is focusable with no `.onClick` at all).
+        let intent = self
+            .focused
+            .clone()
+            .filter(|id| !self.exit_excluded(id))
+            .and_then(|id| self.layout.as_ref()?.item_by_id(&id)?.video_intent);
+        let intent_handled = match intent {
+            Some(i) => {
+                self.perform_video_intent(i);
+                true
+            }
+            None => false,
+        };
         let resolved = self.layout.as_ref().and_then(|layout| {
             focused_dispatch(layout, self.focused.as_deref(), &|id| {
                 self.exit_excluded(id)
             })
         });
         if let Some((action, payload)) = resolved {
+            // Same rule as the click path: a derived `onPlay` is the
+            // built-in's own event and must not fire when a
+            // presentation-only intent consumed the activation.
+            let derived_play = payload
+                .as_ref()
+                .and_then(|p| p.get("type"))
+                .and_then(|v| v.as_str())
+                == Some("play");
+            if intent_handled && derived_play {
+                return true;
+            }
             log::debug!("dispatch (kbd): {action} payload={payload:?}");
             self.module.dispatch_action(&action, payload);
             true
         } else {
-            false
+            intent_handled
         }
     }
 
@@ -372,6 +443,28 @@ impl App {
             return true;
         }
 
+        // Video v2: Left / Right on a focused `Scrubber` seek by ±5 s
+        // with an immediate commit (no preview phase) — the keyboard
+        // analogue of a native range input's arrow step. Checked before
+        // the editing-focused arrow handling below; the two are mutually
+        // exclusive (a Scrubber is never a text input).
+        if !editing_focused {
+            let step = match ev.logical_key.as_ref() {
+                Key::Named(NamedKey::ArrowLeft) => {
+                    Some(-crate::window::window_video::SCRUB_KEY_STEP)
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    Some(crate::window::window_video::SCRUB_KEY_STEP)
+                }
+                _ => None,
+            };
+            if let Some(step) = step {
+                if self.video_scrub_key(step) {
+                    return true;
+                }
+            }
+        }
+
         match ev.logical_key.as_ref() {
             Key::Named(NamedKey::Tab) => {
                 let layout = match self.layout.as_ref() {
@@ -383,18 +476,20 @@ impl App {
                 // so focus walks past them exactly like hit-testing
                 // walks past them.
                 let next = if shift {
-                    layout.focus_prev_excluding(self.focused.as_deref(), &|id| {
-                        self.exit_excluded(id)
-                    })
+                    layout
+                        .focus_prev_excluding(self.focused.as_deref(), &|id| self.exit_excluded(id))
                 } else {
-                    layout.focus_next_excluding(self.focused.as_deref(), &|id| {
-                        self.exit_excluded(id)
-                    })
+                    layout
+                        .focus_next_excluding(self.focused.as_deref(), &|id| self.exit_excluded(id))
                 };
                 if next != self.focused {
                     self.focused = next;
                     // Keyboard-driven focus shows the ring (`:focus-visible`).
                     self.focus_visible = true;
+                    // Focus may land on an item outside the visible window
+                    // (culling only emits viewport ± buffer); bring it into
+                    // view so Tab never selects something invisible.
+                    self.scroll_focused_into_view();
                     return true;
                 }
                 false
@@ -505,14 +600,23 @@ impl App {
                 self.damage.add_region(r);
             }
         }
+        // Resolve the dispatch inside the layout borrow, act on it
+        // after the borrow ends — the video playback toggle (feature
+        // `video`) needs `&mut self`.
+        let mut resolved: Option<(Option<String>, Option<serde_json::Value>)> = None;
+        #[cfg(feature = "video")]
+        let mut video_target: Option<String> = None;
+        // Renderer-local `.videoIntent(...)` on the released item (only
+        // set for a node inside a Video subtree — layout resolves that).
+        let mut intent: Option<crate::video_v2::VideoIntent> = None;
         if let Some(layout) = self.layout.as_ref() {
             // Exit-animating subtrees are excluded: their ids are
             // engine-side dead, so a click during the exit playback
             // must not dispatch (mirrors the DOM renderer's
             // exiting-subtree event drop).
-            if let Some(item) = layout.hit_excluding(px, py, &|id| {
-                self.animator.is_exit_excluded(&self.tree, id)
-            }) {
+            if let Some(item) =
+                layout.hit_excluding(px, py, &|id| self.animator.is_exit_excluded(&self.tree, id))
+            {
                 // A click only fires when the press AND release land on
                 // the same actionable. `unwrap_or(false)` rejects the
                 // case where nothing was pressed (e.g. press landed on
@@ -525,11 +629,55 @@ impl App {
                     .map(|id| id == item.node_id)
                     .unwrap_or(false);
                 if same_target {
-                    if let Some(action) = item.action.clone() {
-                        let payload = item.action_payload.clone();
-                        log::debug!("dispatch action: {action} payload={payload:?}");
-                        self.module.dispatch_action(&action, payload);
+                    resolved = Some((item.action.clone(), item.action_payload.clone()));
+                    intent = item.video_intent;
+                    #[cfg(feature = "video")]
+                    if matches!(item.kind, crate::layout::ItemKind::Video { .. }) {
+                        video_target = Some(item.node_id.clone());
                     }
+                }
+            }
+        }
+        if let Some((action, payload)) = resolved {
+            // Renderer-local intent first: fullscreen is performed HERE,
+            // with no dispatch and no module round trip. It is
+            // presentation only, so it also stands in for the built-in
+            // tap-to-toggle on that tap — a fullscreen button must not
+            // pause the player on the way out.
+            let intent_handled = match intent {
+                Some(i) => {
+                    self.perform_video_intent(i);
+                    true
+                }
+                None => false,
+            };
+            // Feature `video`: a click on a Video surface toggles
+            // playback and dispatches the contract play/pause events
+            // itself (`App::handle_video_click`). A *derived* `onPlay`
+            // item action (payload `type == "play"`, resolved by
+            // `resolve_video_play_action`) must then not double-fire;
+            // an explicit `.onClick` still dispatches alongside the
+            // toggle.
+            #[cfg(feature = "video")]
+            let toggled = match video_target.as_deref() {
+                Some(id) if !intent_handled => self.handle_video_click(id),
+                _ => false,
+            };
+            #[cfg(not(feature = "video"))]
+            let toggled = false;
+            // The derived `onPlay` action is the built-in's own event:
+            // whichever built-in consumed the tap (playback toggle, or a
+            // presentation-only intent that replaced it) suppresses it.
+            let suppress = (toggled || intent_handled)
+                && payload
+                    .as_ref()
+                    .and_then(|p| p.get("type"))
+                    .and_then(|v| v.as_str())
+                    == Some("play");
+            if !suppress {
+                if let Some(action) = action {
+                    log::debug!("dispatch action: {action} payload={payload:?}");
+                    self.module.dispatch_action(&action, payload);
                 }
             }
         }

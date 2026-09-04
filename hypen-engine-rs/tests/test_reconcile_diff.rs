@@ -11,6 +11,28 @@ use hypen_engine::reactive::{Binding, DependencyGraph};
 use hypen_engine::reconcile::{diff::*, InstanceTree, Patch};
 use serde_json::json;
 
+thread_local! {
+    // One expander per test thread (libtest runs each test on its own
+    // thread): registrations persist across a test's successive batches,
+    // exactly like a boundary's session-lifetime expander.
+    static EXPANDER: std::cell::RefCell<hypen_engine::TemplateExpander> =
+        std::cell::RefCell::new(hypen_engine::TemplateExpander::new());
+}
+
+/// Shadows [`hypen_engine::reconcile::diff::reconcile_ir`] (glob import):
+/// reconcile, then lower template patches the way every plain-patch
+/// boundary does — these tests assert the pre-template Create/Insert wire.
+fn reconcile_ir(
+    tree: &mut InstanceTree,
+    node: &IRNode,
+    parent_id: Option<hypen_engine::ir::NodeId>,
+    state: &serde_json::Value,
+    dependencies: &mut DependencyGraph,
+) -> Vec<Patch> {
+    let patches = hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
+    EXPANDER.with(|e| e.borrow_mut().expand(patches))
+}
+
 // ============================================================================
 // A. Initial Tree Creation (6 tests)
 // ============================================================================
@@ -39,7 +61,7 @@ fn test_create_tree_single_text_node() {
     // Verify root insert patch exists
     let root_insert = patches
         .iter()
-        .any(|p| matches!(p, Patch::Insert { parent_id, .. } if parent_id == "root"));
+        .any(|p| matches!(p, Patch::Insert { parent_id, .. } if parent_id.as_ref() == "root"));
     assert!(root_insert, "Expected Insert patch into 'root' container");
 }
 
@@ -1233,10 +1255,13 @@ fn test_reconcile_node_element_type_changed_with_subtree() {
         &mut dependencies,
     );
 
-    // THEN: Should remove all 3 old nodes (Column + 2 Text) and create 1 new Button
-    assert!(
-        count_removes(&patches) >= 3,
-        "Should remove Column and both Text children"
+    // THEN: One Remove for the old subtree ROOT (Column) — descendants are
+    // swept by the renderer, so they get no Removes of their own — plus one
+    // Create for the new Button.
+    assert_eq!(
+        count_removes(&patches),
+        1,
+        "Removing the old subtree is a single root Remove, got {patches:?}"
     );
     assert!(count_creates(&patches) >= 1, "Should create new Button");
 
@@ -1996,7 +2021,7 @@ fn exiting_row(children: Vec<Element>) -> Element {
 
 fn expect_remove(patch: &Patch) -> (&str, bool) {
     match patch {
-        Patch::Remove { id, transition } => (id.as_str(), *transition),
+        Patch::Remove { id, transition } => (id.as_ref(), *transition),
         other => panic!("Expected Remove patch, got {:?}", other),
     }
 }
@@ -2042,11 +2067,11 @@ fn test_remove_exit_root_flagged_and_emitted_first() {
     assert_eq!(patches.len(), 2, "got {:?}", patches);
     assert_eq!(
         expect_remove(&patches[0]),
-        (node_id_str(row_id).as_str(), true)
+        (node_id_str(row_id).as_ref(), true)
     );
     assert_eq!(
         expect_remove(&patches[1]),
-        (node_id_str(inner_id).as_str(), false)
+        (node_id_str(inner_id).as_ref(), false)
     );
 }
 
@@ -2094,16 +2119,20 @@ fn test_remove_parent_without_exit_wins_over_exiting_child() {
         &mut dependencies,
     );
 
-    // THEN: Parent-remove-wins — post-order, every Remove plain (the child's
-    // exit spec is never consulted because it isn't the removal root).
-    assert_eq!(patches.len(), 2, "got {:?}", patches);
+    // THEN: Parent-remove-wins — a single plain Remove for the removal root.
+    // The child's exit spec is never consulted because it isn't the removal
+    // root, so nothing on the wire is flagged and the child gets no Remove of
+    // its own (the renderer sweeps the subtree).
+    assert_eq!(patches.len(), 1, "got {:?}", patches);
     assert_eq!(
         expect_remove(&patches[0]),
-        (node_id_str(inner_id).as_str(), false)
+        (node_id_str(row_id).as_ref(), false)
     );
-    assert_eq!(
-        expect_remove(&patches[1]),
-        (node_id_str(row_id).as_str(), false)
+    assert!(
+        !patches
+            .iter()
+            .any(|p| matches!(p, Patch::Remove { id, .. } if id.as_ref() == node_id_str(inner_id).as_ref())),
+        "the exiting descendant must not surface its own Remove: {patches:?}"
     );
 }
 
@@ -2141,21 +2170,24 @@ fn test_remove_non_animated_ordering_and_wire_format_unchanged() {
         &mut dependencies,
     );
 
-    // THEN: Exactly today's post-order (children before parent), and the
-    // serialized wire format carries no `transition` field at all.
-    assert_eq!(patches.len(), 3, "got {:?}", patches);
+    // THEN: Exactly ONE Remove — the subtree root — and the serialized wire
+    // format carries no `transition` field at all. Descendants are the
+    // renderer's to sweep (same contract the keyed list teardown has always
+    // used), so `a` and `b` never appear on the wire.
+    assert_eq!(patches.len(), 1, "got {:?}", patches);
     assert_eq!(
         expect_remove(&patches[0]),
-        (node_id_str(a_id).as_str(), false)
+        (node_id_str(row_id).as_ref(), false)
     );
-    assert_eq!(
-        expect_remove(&patches[1]),
-        (node_id_str(b_id).as_str(), false)
-    );
-    assert_eq!(
-        expect_remove(&patches[2]),
-        (node_id_str(row_id).as_str(), false)
-    );
+    for descendant in [a_id, b_id] {
+        let id = node_id_str(descendant);
+        assert!(
+            !patches
+                .iter()
+                .any(|p| matches!(p, Patch::Remove { id: pid, .. } if pid == &id)),
+            "descendant {id} must not get a Remove of its own: {patches:?}"
+        );
+    }
     let wire = serde_json::to_string(&patches).unwrap();
     assert!(
         !wire.contains("transition"),
@@ -2196,11 +2228,11 @@ fn test_replace_subtree_flags_exiting_root() {
     // THEN: The old subtree's removal leads with the flagged root
     assert_eq!(
         expect_remove(&patches[0]),
-        (node_id_str(row_id).as_str(), true)
+        (node_id_str(row_id).as_ref(), true)
     );
     assert_eq!(
         expect_remove(&patches[1]),
-        (node_id_str(inner_id).as_str(), false)
+        (node_id_str(inner_id).as_ref(), false)
     );
     assert!(count_creates(&patches) >= 1, "replacement Column created");
 }
@@ -2240,7 +2272,7 @@ fn test_foreach_removal_flags_exiting_item_root() {
     let removes: Vec<(&str, bool)> = patches
         .iter()
         .filter_map(|p| match p {
-            Patch::Remove { id, transition } => Some((id.as_str(), *transition)),
+            Patch::Remove { id, transition } => Some((id.as_ref(), *transition)),
             _ => None,
         })
         .collect();
@@ -2311,7 +2343,7 @@ fn test_keyed_removal_flags_exiting_item_root() {
     let removes: Vec<(&str, bool)> = patches
         .iter()
         .filter_map(|p| match p {
-            Patch::Remove { id, transition } => Some((id.as_str(), *transition)),
+            Patch::Remove { id, transition } => Some((id.as_ref(), *transition)),
             _ => None,
         })
         .collect();
@@ -2417,11 +2449,11 @@ fn test_foreach_add_one_item_creates_only_the_new_row() {
     let insert_parents: Vec<&str> = patches
         .iter()
         .filter_map(|p| match p {
-            Patch::Insert { parent_id, .. } => Some(parent_id.as_str()),
+            Patch::Insert { parent_id, .. } => Some(parent_id.as_ref()),
             _ => None,
         })
         .collect();
-    assert_eq!(insert_parents, vec![node_id_str(root_id)]);
+    assert_eq!(insert_parents, vec![node_id_str(root_id).as_ref()]);
     assert_ne!(node_id_str(foreach_id), node_id_str(root_id));
 }
 
@@ -2469,7 +2501,7 @@ fn test_foreach_insert_in_middle_moves_the_new_row_into_place() {
         }) => {
             assert_eq!(parent_id, &node_id_str(root_id), "Move targets the Column");
             assert_eq!(id, &node_id_str(after[1]));
-            assert_eq!(before_id.as_deref(), Some(node_id_str(before[1]).as_str()));
+            assert_eq!(before_id.as_deref(), Some(node_id_str(before[1]).as_ref()));
         }
         other => panic!("expected a Move patch, got {:?}", other),
     }
@@ -2571,7 +2603,7 @@ fn test_foreach_full_reversal_moves_land_in_the_right_order() {
 
     // Replay the Move patches against the renderer's view of the child list
     // and check the result equals the desired order.
-    let mut rendered: Vec<String> = before.iter().map(|&id| node_id_str(id)).collect();
+    let mut rendered: Vec<std::sync::Arc<str>> = before.iter().map(|&id| node_id_str(id)).collect();
     for patch in &patches {
         if let Patch::Move {
             parent_id,
@@ -2593,7 +2625,7 @@ fn test_foreach_full_reversal_moves_land_in_the_right_order() {
             }
         }
     }
-    let expected: Vec<String> = vec![before[2], before[1], before[0]]
+    let expected: Vec<std::sync::Arc<str>> = vec![before[2], before[1], before[0]]
         .into_iter()
         .map(node_id_str)
         .collect();

@@ -100,10 +100,18 @@ The `.bind()` applicator provides two-way data binding for form elements. It map
 - **Checkbox**: Binds `checked` (Boolean)
 - **Switch**: Binds `on` (Boolean)
 - **Select**: Binds `value` (String)
+- **Video / Scrubber**: Binds a playback struct (`{ playing, position, duration, state }`) — see the [Video component](/docs/guide/components#video)
 
 ```hypen
 Input(placeholder: "Name").bind(@state.name)
 Checkbox {}.bind(@state.agreed)
 Switch {}.bind(@state.darkMode)
 Select {}.bind(@state.country)
+Video(src: "@{state.url}").bind(@state.playback)
 ```
+
+## Media
+
+| Applicator | Description | Example |
+|------------|-------------|---------|
+| videoIntent | Renderer-local video control (no module round trip). `"fullscreen"` toggles fullscreen on the enclosing Video's container from inside the user gesture. Inert outside a Video; composes with `.onClick`. | `.videoIntent("fullscreen")` |

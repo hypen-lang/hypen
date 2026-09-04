@@ -141,6 +141,13 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
             if let str = value as? String {
                 return str
             }
+            // A JSON `null` decodes to `NSNull`; stringifying it yields the
+            // literal "<null>", which e.g. made `Image(src: null)` try to load
+            // an asset named "<null>" instead of rendering empty until the
+            // real URL arrived in a follow-up SetProp.
+            if value is NSNull {
+                return nil
+            }
             return String(describing: value)
         }
         return nil
@@ -237,6 +244,54 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     public func getCGFloatProp(_ name: String) -> CGFloat? {
         if let double = getDoubleProp(name) {
             return CGFloat(double)
+        }
+        return nil
+    }
+
+    /// List-of-strings prop (e.g. `playlist: ["url1", "url2"]`).
+    ///
+    /// Pass the base name: the plain key is tried first, then the engine's
+    /// positional `"<name>.0"` form. Accepts `[String]` and `[Any]` values
+    /// (JSON deserialization yields `[Any]`); non-string entries are
+    /// stringified, `NSNull` entries are dropped. Returns nil when the prop
+    /// is absent or not a list.
+    public func getStringListProp(_ name: String) -> [String]? {
+        guard let value = props[name] ?? props["\(name).0"] else { return nil }
+        if let list = value as? [String] {
+            return list
+        }
+        if let list = value as? [Any] {
+            return list.compactMap { entry -> String? in
+                if entry is NSNull { return nil }
+                if let str = entry as? String { return str }
+                return String(describing: entry)
+            }
+        }
+        return nil
+    }
+
+    /// String-to-string map prop (e.g. `headers: {"Authorization": "Bearer x"}`).
+    ///
+    /// Same key fallback as `getStringListProp` (plain, then `"<name>.0"`).
+    /// Accepts `[String: String]` and `[String: Any]` values; non-string
+    /// entries are stringified, `NSNull` entries are dropped. Returns nil
+    /// when the prop is absent or not a map.
+    public func getStringMapProp(_ name: String) -> [String: String]? {
+        guard let value = props[name] ?? props["\(name).0"] else { return nil }
+        if let map = value as? [String: String] {
+            return map
+        }
+        if let map = value as? [String: Any] {
+            var result: [String: String] = [:]
+            for (key, entry) in map {
+                if entry is NSNull { continue }
+                if let str = entry as? String {
+                    result[key] = str
+                } else {
+                    result[key] = String(describing: entry)
+                }
+            }
+            return result
         }
         return nil
     }

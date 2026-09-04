@@ -7,18 +7,39 @@
 //! (reserved by the engine) are stubbed and will land in a later phase.
 
 use hypen_engine::Patch;
+use rustc_hash::FxRandomState;
 use serde_json::Value;
 use std::collections::HashMap;
 
 /// The synthetic parent ID used by the engine for top-level nodes.
 pub const ROOT_ID: &str = "root";
 
+/// A node's resolved props, keyed by applicator / CSS property name.
+///
+/// Not the default hasher. `style::node_style_with` probes dozens of
+/// applicator names against a node that carries a handful, and each probe
+/// tries up to three spellings (`padding`, `padding.0`, `padding-left`),
+/// so the overwhelming majority of lookups are misses whose entire cost
+/// is the hash. Callgrind put SipHash at ~42% of the instructions retired
+/// in a style build, ahead of every piece of actual layout work.
+///
+/// [`FxRandomState`] rather than the deterministic `FxBuildHasher`,
+/// because the usual excuse for dropping SipHash does not apply here:
+/// these keys are not all authored locally. `remote.rs` applies `Patch`
+/// streams from a RemoteServer, and their prop keys land in this map
+/// unvalidated and with no cap on how many. Against an unseeded
+/// multiplicative hash those are offline-constructible — 20k colliding
+/// 8-byte keys took under a second to generate and turned a 1.9 ms
+/// insert into 46 ms, on the event-loop thread. Seeding per process
+/// removes the precomputation and keeps the win.
+pub type PropMap = HashMap<String, Value, FxRandomState>;
+
 /// A flat node in the renderer tree.
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: String,
     pub element_type: String,
-    pub props: HashMap<String, Value>,
+    pub props: PropMap,
     /// Engine-derived accessibility semantics (role, name, hidden, …), carried
     /// from the Create patch so the AccessKit translation can use the engine's
     /// accessible name/role instead of layout heuristics.
@@ -26,6 +47,20 @@ pub struct Node {
 }
 
 impl Node {
+    /// True when any prop key carries a variant marker (`@bp` / `:state`,
+    /// e.g. `padding@md.0`, `backgroundColor:hover.0`). Conservative — a
+    /// `@` / `:` with an unrecognised token also returns `true`, which
+    /// only costs the caller the slow path, never correctness. This is
+    /// the style resolver's fast-path gate: the overwhelmingly common
+    /// plainly-styled node answers `false` with a byte scan and skips
+    /// the per-lookup key parsing in `style::pick_base` entirely.
+    #[inline]
+    pub fn has_variant_prop_keys(&self) -> bool {
+        self.props
+            .keys()
+            .any(|k| k.as_bytes().iter().any(|&b| b == b'@' || b == b':'))
+    }
+
     /// Convenience: positional text content lives at prop key `"0"`.
     /// Returns the value as a string for any JSON scalar — strings
     /// pass through verbatim, numbers / booleans get stringified.
@@ -75,6 +110,43 @@ pub struct Tree {
     /// re-Attaching or Removing (a looping / buggy server) can't grow
     /// the node arena without bound.
     detached: Vec<String>,
+    /// Live count of prop keys starting with `opacity` across every
+    /// node (detached subtrees included, matching the scan these
+    /// counters replace). Maintained by every prop mutation path so
+    /// the layout pass's opacity post-pass gate is O(1) instead of a
+    /// full per-frame prop scan — which measured ~1.4 ms/frame on an
+    /// 11k-node tree.
+    opacity_keys: usize,
+    /// Same, for the transform prop vocabulary (`translateX` /
+    /// `translateY` / `scale` / `rotate`).
+    transform_keys: usize,
+    /// `Some` while a raw-write bracket is open (see
+    /// [`Tree::begin_raw_write_log`]); collects `(id, key)` for every
+    /// `set_prop_raw` / `remove_prop_raw` inside it. `None` — the
+    /// steady state — makes logging a single branch.
+    raw_write_log: Option<Vec<(String, String)>>,
+    /// A STRUCTURAL mutation (`Tree::apply`) happened while the
+    /// bracket was open. Today the only tick-reachable `apply` is an
+    /// exit finalize, which the classifier already rejects through
+    /// `TickOutcome::finalized` — this flag exists so a future
+    /// `tree.apply` added inside the tick can never silently escape
+    /// the paint-only classification and leave a stale render.
+    raw_structural_seen: bool,
+}
+
+/// Which paint-gate counters a prop key belongs to:
+/// `(opacity, transform)`. Prefix-based, so variant-decorated keys
+/// (`opacity@md.0`, `scale:hover.0`) count too — identical to the
+/// full scans this replaces.
+#[inline]
+fn paint_gate_class(key: &str) -> (bool, bool) {
+    (
+        key.starts_with("opacity"),
+        key.starts_with("translateX")
+            || key.starts_with("translateY")
+            || key.starts_with("scale")
+            || key.starts_with("rotate"),
+    )
 }
 
 impl Tree {
@@ -86,7 +158,57 @@ impl Tree {
             children,
             parent_by_child: HashMap::new(),
             detached: Vec::new(),
+            opacity_keys: 0,
+            transform_keys: 0,
+            raw_write_log: None,
+            raw_structural_seen: false,
         }
+    }
+
+    /// O(1): does any node carry an `opacity*` prop key? Gates the
+    /// layout pass's effective-opacity post-pass.
+    pub fn has_opacity_props(&self) -> bool {
+        self.opacity_keys > 0
+    }
+
+    /// O(1): does any node carry a transform prop key? Gates the
+    /// layout pass's transform post-pass.
+    pub fn has_transform_props(&self) -> bool {
+        self.transform_keys > 0
+    }
+
+    #[inline]
+    fn count_key_added(&mut self, key: &str) {
+        let (o, t) = paint_gate_class(key);
+        if o {
+            self.opacity_keys += 1;
+        }
+        if t {
+            self.transform_keys += 1;
+        }
+    }
+
+    #[inline]
+    fn count_key_removed(&mut self, key: &str) {
+        let (o, t) = paint_gate_class(key);
+        if o {
+            self.opacity_keys = self.opacity_keys.saturating_sub(1);
+        }
+        if t {
+            self.transform_keys = self.transform_keys.saturating_sub(1);
+        }
+    }
+
+    fn count_node_removed(&mut self, node: &Node) {
+        let mut o = 0usize;
+        let mut t = 0usize;
+        for key in node.props.keys() {
+            let (is_o, is_t) = paint_gate_class(key);
+            o += is_o as usize;
+            t += is_t as usize;
+        }
+        self.opacity_keys = self.opacity_keys.saturating_sub(o);
+        self.transform_keys = self.transform_keys.saturating_sub(t);
     }
 
     /// O(1) parent lookup. Returns `None` for the synthetic root,
@@ -120,16 +242,56 @@ impl Tree {
     /// entries layout, paint, and hit-testing read (design constraint
     /// #5: never a paint-only presentation layer).
     pub(crate) fn set_prop_raw(&mut self, id: &str, name: &str, value: Value) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.props.insert(name.to_string(), value);
+        self.log_raw_write(id, name);
+        let added = match self.nodes.get_mut(id) {
+            Some(node) => node.props.insert(name.to_string(), value).is_none(),
+            None => false,
+        };
+        if added {
+            self.count_key_added(name);
         }
     }
 
     /// Remove a prop directly (animator settle restoring an
     /// originally-absent prop). See [`Tree::set_prop_raw`].
     pub(crate) fn remove_prop_raw(&mut self, id: &str, name: &str) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.props.remove(name);
+        self.log_raw_write(id, name);
+        let removed = match self.nodes.get_mut(id) {
+            Some(node) => node.props.remove(name).is_some(),
+            None => false,
+        };
+        if removed {
+            self.count_key_removed(name);
+        }
+    }
+
+    /// Start recording every `set_prop_raw` / `remove_prop_raw`
+    /// `(id, key)` pair. The animation-frame driver brackets the
+    /// animator tick with this so it learns EXACTLY which nodes the
+    /// tick wrote — at the tree level, not by auditing the animator's
+    /// many write sites — and can classify the frame paint-only.
+    /// Logging is off outside the bracket, so raw writes elsewhere
+    /// (scrub ticks, tests) cost nothing and can't leak into a stale
+    /// log.
+    pub(crate) fn begin_raw_write_log(&mut self) {
+        self.raw_write_log = Some(Vec::new());
+        self.raw_structural_seen = false;
+    }
+
+    /// Stop recording. Returns the writes since
+    /// [`Tree::begin_raw_write_log`] in write order (duplicates
+    /// preserved), and whether any STRUCTURAL mutation (`Tree::apply`)
+    /// happened inside the bracket — a structural bracket must never
+    /// classify paint-only, whatever the prop writes look like.
+    pub(crate) fn end_raw_write_log(&mut self) -> (Vec<(String, String)>, bool) {
+        let structural = std::mem::take(&mut self.raw_structural_seen);
+        (self.raw_write_log.take().unwrap_or_default(), structural)
+    }
+
+    #[inline]
+    fn log_raw_write(&mut self, id: &str, name: &str) {
+        if let Some(log) = self.raw_write_log.as_mut() {
+            log.push((id.to_string(), name.to_string()));
         }
     }
 
@@ -149,6 +311,12 @@ impl Tree {
     /// directly (tests, headless tools) therefore snaps, which is the
     /// protocol's sanctioned degradation.
     pub fn apply(&mut self, patch: &Patch) {
+        // Inside a raw-write bracket (the animation tick), a
+        // structural apply must poison the paint-only classification
+        // — see `raw_structural_seen`.
+        if self.raw_write_log.is_some() {
+            self.raw_structural_seen = true;
+        }
         match patch {
             Patch::Create {
                 id,
@@ -156,26 +324,38 @@ impl Tree {
                 props,
                 semantics,
             } => {
-                let mut prop_map = HashMap::with_capacity(props.len());
+                let mut prop_map =
+                    PropMap::with_capacity_and_hasher(props.len(), FxRandomState::default());
                 for (k, v) in props.iter() {
+                    self.count_key_added(k);
                     prop_map.insert(k.clone(), v.clone());
                 }
-                self.nodes.insert(
-                    id.clone(),
+                let replaced = self.nodes.insert(
+                    id.to_string(),
                     Node {
-                        id: id.clone(),
+                        id: id.to_string(),
                         element_type: element_type.clone(),
                         props: prop_map,
                         semantics: semantics.clone(),
                     },
                 );
-                self.children.entry(id.clone()).or_default();
+                // A host re-Creating an existing id replaces the node —
+                // its old props leave the tree with it.
+                if let Some(old) = replaced {
+                    self.count_node_removed(&old);
+                }
+                self.children.entry(id.to_string()).or_default();
             }
             Patch::SetProp { id, name, value } => {
-                if let Some(node) = self.nodes.get_mut(id) {
-                    node.props.insert(name.clone(), value.clone());
-                } else {
-                    log::warn!("SetProp on unknown node {id}");
+                let added = match self.nodes.get_mut(id.as_ref()) {
+                    Some(node) => node.props.insert(name.clone(), value.clone()).is_none(),
+                    None => {
+                        log::warn!("SetProp on unknown node {id}");
+                        false
+                    }
+                };
+                if added {
+                    self.count_key_added(name);
                 }
             }
             Patch::SetSemantics { id, semantics } => {
@@ -184,22 +364,27 @@ impl Tree {
                 // node_id→Semantics side-map from `Node.semantics`, so the
                 // AccessKit tree picks the change up on the following push —
                 // no per-field diffing here by design (see the Patch docs).
-                if let Some(node) = self.nodes.get_mut(id) {
+                if let Some(node) = self.nodes.get_mut(id.as_ref()) {
                     node.semantics = semantics.clone();
                 } else {
                     log::warn!("SetSemantics on unknown node {id}");
                 }
             }
             Patch::RemoveProp { id, name } => {
-                if let Some(node) = self.nodes.get_mut(id) {
-                    node.props.remove(name);
+                let removed = match self.nodes.get_mut(id.as_ref()) {
+                    Some(node) => node.props.remove(name).is_some(),
+                    None => false,
+                };
+                if removed {
+                    self.count_key_removed(name);
                 }
             }
             Patch::SetText { id, text } => {
                 // Reserved by the engine — currently unreachable in production.
                 // Emulate by writing prop "0" so renderer behaviour stays
-                // consistent if a host emits it.
-                if let Some(node) = self.nodes.get_mut(id) {
+                // consistent if a host emits it. (`"0"` is in neither
+                // paint-gate class, so no counter update is needed.)
+                if let Some(node) = self.nodes.get_mut(id.as_ref()) {
                     node.props.insert("0".into(), Value::String(text.clone()));
                 }
             }
@@ -210,14 +395,15 @@ impl Tree {
             } => {
                 // Detach from any prior parent in case the host
                 // re-inserts without an explicit Move (defensive).
-                if let Some(prev_parent) = self.parent_by_child.get(id).cloned() {
+                if let Some(prev_parent) = self.parent_by_child.get(id.as_ref()).cloned() {
                     if let Some(siblings) = self.children.get_mut(&prev_parent) {
-                        siblings.retain(|c| c != id);
+                        siblings.retain(|c| c.as_str() != id.as_ref());
                     }
                 }
-                let siblings = self.children.entry(parent_id.clone()).or_default();
-                Self::insert_at(siblings, id.clone(), before_id.as_deref());
-                self.parent_by_child.insert(id.clone(), parent_id.clone());
+                let siblings = self.children.entry(parent_id.to_string()).or_default();
+                Self::insert_at(siblings, id.to_string(), before_id.as_deref());
+                self.parent_by_child
+                    .insert(id.to_string(), parent_id.to_string());
                 self.clear_detached(id);
             }
             Patch::Move {
@@ -227,22 +413,23 @@ impl Tree {
             } => {
                 // Unlink from old parent (O(1) parent lookup, then
                 // O(n_siblings) retain on just that one parent).
-                if let Some(prev_parent) = self.parent_by_child.get(id).cloned() {
+                if let Some(prev_parent) = self.parent_by_child.get(id.as_ref()).cloned() {
                     if let Some(siblings) = self.children.get_mut(&prev_parent) {
-                        siblings.retain(|c| c != id);
+                        siblings.retain(|c| c.as_str() != id.as_ref());
                     }
                 }
-                let siblings = self.children.entry(parent_id.clone()).or_default();
-                Self::insert_at(siblings, id.clone(), before_id.as_deref());
-                self.parent_by_child.insert(id.clone(), parent_id.clone());
+                let siblings = self.children.entry(parent_id.to_string()).or_default();
+                Self::insert_at(siblings, id.to_string(), before_id.as_deref());
+                self.parent_by_child
+                    .insert(id.to_string(), parent_id.to_string());
                 self.clear_detached(id);
             }
             Patch::Remove { id, .. } => {
                 // O(1) parent lookup replaces the previous full
                 // children-map scan to find the affected list.
-                if let Some(prev_parent) = self.parent_by_child.remove(id) {
+                if let Some(prev_parent) = self.parent_by_child.remove(id.as_ref()) {
                     if let Some(siblings) = self.children.get_mut(&prev_parent) {
-                        siblings.retain(|c| c != id);
+                        siblings.retain(|c| c.as_str() != id.as_ref());
                     }
                 }
                 self.clear_detached(id);
@@ -252,9 +439,9 @@ impl Tree {
                 // Unlink from parent without dropping the node — the
                 // engine's Router subtree cache reattaches later via
                 // Attach.
-                if let Some(prev_parent) = self.parent_by_child.remove(id) {
+                if let Some(prev_parent) = self.parent_by_child.remove(id.as_ref()) {
                     if let Some(siblings) = self.children.get_mut(&prev_parent) {
-                        siblings.retain(|c| c != id);
+                        siblings.retain(|c| c.as_str() != id.as_ref());
                     }
                 }
                 self.note_detached(id);
@@ -264,9 +451,19 @@ impl Tree {
                 id,
                 before_id,
             } => {
-                let siblings = self.children.entry(parent_id.clone()).or_default();
-                Self::insert_at(siblings, id.clone(), before_id.as_deref());
-                self.parent_by_child.insert(id.clone(), parent_id.clone());
+                // Defensive unlink, mirroring Insert/Move: a healthy
+                // Attach targets a detached root (already out of every
+                // children list), but a buggy host attaching a live
+                // node must not leave it duplicated in its old parent.
+                if let Some(prev_parent) = self.parent_by_child.get(id.as_ref()).cloned() {
+                    if let Some(siblings) = self.children.get_mut(&prev_parent) {
+                        siblings.retain(|c| c.as_str() != id.as_ref());
+                    }
+                }
+                let siblings = self.children.entry(parent_id.to_string()).or_default();
+                Self::insert_at(siblings, id.to_string(), before_id.as_deref());
+                self.parent_by_child
+                    .insert(id.to_string(), parent_id.to_string());
                 self.clear_detached(id);
             }
             // Batch-scoped animation prelude: batch metadata, not a node
@@ -275,11 +472,29 @@ impl Tree {
             // scoped interpolation, Option D); if one reaches this raw
             // path (direct `apply` callers) it is structurally inert.
             Patch::BatchAnimation { .. } => {}
+            // Template patches are lowered into plain Create+Insert runs
+            // by the `TemplateExpander` in `flush_patches` before any
+            // batch reaches the tree. One arriving here means the
+            // expander passed it through (unknown template id / malformed
+            // skeleton) — warn and skip, matching the expander's
+            // never-panic degradation.
+            Patch::RegisterTemplate { .. } | Patch::Instantiate { .. } => {
+                log::warn!("unexpanded template patch reached Tree::apply; skipping");
+            }
         }
     }
 
+    /// Insert `id` into `siblings` before `before_id` (append when the
+    /// anchor is absent). Callers must have unlinked `id` from its
+    /// previous parent first (all patch handlers do, via the O(1)
+    /// `parent_by_child` index) — the old per-call `retain` dedupe here
+    /// made inserting N children under one parent O(N²), which showed
+    /// up on every initial render of a long list.
     fn insert_at(siblings: &mut Vec<String>, id: String, before_id: Option<&str>) {
-        siblings.retain(|c| c != &id);
+        debug_assert!(
+            !siblings.contains(&id),
+            "insert_at caller must unlink first"
+        );
         match before_id {
             Some(before) => match siblings.iter().position(|c| c == before) {
                 Some(idx) => siblings.insert(idx, id),
@@ -296,7 +511,9 @@ impl Tree {
                 self.remove_subtree(child);
             }
         }
-        self.nodes.remove(id);
+        if let Some(node) = self.nodes.remove(id) {
+            self.count_node_removed(&node);
+        }
     }
 
     /// Like [`Tree::remove_subtree`] but records every removed node id
@@ -309,8 +526,27 @@ impl Tree {
                 self.remove_subtree_collecting(child, out);
             }
         }
-        self.nodes.remove(id);
+        if let Some(node) = self.nodes.remove(id) {
+            self.count_node_removed(&node);
+        }
         out.push(id.to_string());
+    }
+
+    /// Every node id inside a currently detached subtree (the Router
+    /// keep-alive cache). `Detach` only unlinks the root from its
+    /// parent — the subtree's own `children` edges stay intact, so a
+    /// walk from each detached root covers it fully. Used by the
+    /// window to suspend media playback in cached-off-screen routes.
+    pub fn detached_node_ids(&self) -> std::collections::HashSet<String> {
+        let mut ids = std::collections::HashSet::new();
+        let mut stack: Vec<&str> = self.detached.iter().map(String::as_str).collect();
+        while let Some(id) = stack.pop() {
+            if !ids.insert(id.to_string()) {
+                continue;
+            }
+            stack.extend(self.children_of(id).iter().map(String::as_str));
+        }
+        ids
     }
 
     /// Record `id` as a detached subtree root (most-recent last).
@@ -385,7 +621,7 @@ mod tests {
 
     fn create(id: &str, element_type: &str, entries: &[(&str, Value)]) -> Patch {
         Patch::Create {
-            id: id.to_string(),
+            id: id.into(),
             element_type: element_type.to_string(),
             props: props(entries),
             semantics: None,
@@ -394,17 +630,17 @@ mod tests {
 
     fn insert(parent_id: &str, id: &str, before_id: Option<&str>) -> Patch {
         Patch::Insert {
-            parent_id: parent_id.to_string(),
-            id: id.to_string(),
-            before_id: before_id.map(|s| s.to_string()),
+            parent_id: parent_id.into(),
+            id: id.into(),
+            before_id: before_id.map(Into::into),
         }
     }
 
     fn move_patch(parent_id: &str, id: &str, before_id: Option<&str>) -> Patch {
         Patch::Move {
-            parent_id: parent_id.to_string(),
-            id: id.to_string(),
-            before_id: before_id.map(|s| s.to_string()),
+            parent_id: parent_id.into(),
+            id: id.into(),
+            before_id: before_id.map(Into::into),
         }
     }
 
@@ -604,6 +840,34 @@ mod tests {
     }
 
     #[test]
+    fn detached_node_ids_covers_whole_subtrees_and_clears_on_attach() {
+        let mut tree = Tree::new();
+        tree.apply(&create("route", "Column", &[]));
+        tree.apply(&insert(ROOT_ID, "route", None));
+        tree.apply(&create("vid", "Video", &[]));
+        tree.apply(&insert("route", "vid", None));
+        tree.apply(&create("other", "Text", &[]));
+        tree.apply(&insert(ROOT_ID, "other", None));
+        assert!(tree.detached_node_ids().is_empty());
+
+        tree.apply(&Patch::Detach { id: "route".into() });
+        let detached = tree.detached_node_ids();
+        assert!(detached.contains("route"), "detached root included");
+        assert!(
+            detached.contains("vid"),
+            "descendants of the detached root included"
+        );
+        assert!(!detached.contains("other"), "live siblings excluded");
+
+        tree.apply(&Patch::Attach {
+            parent_id: ROOT_ID.into(),
+            id: "route".into(),
+            before_id: None,
+        });
+        assert!(tree.detached_node_ids().is_empty(), "attach clears the set");
+    }
+
+    #[test]
     fn node_text_content_returns_prop_zero_string() {
         let mut tree = Tree::new();
         tree.apply(&create("a", "Text", &[("0", json!("hello world"))]));
@@ -703,6 +967,59 @@ mod tests {
     }
 
     #[test]
+    fn paint_gate_counters_track_every_mutation_path() {
+        let mut tree = Tree::new();
+        assert!(!tree.has_opacity_props() && !tree.has_transform_props());
+
+        // Create with a gate prop counts; variant decorations count too.
+        tree.apply(&create("a", "Container", &[("opacity", json!(0.5))]));
+        tree.apply(&create("b", "Container", &[("translateX@md.0", json!(4))]));
+        assert!(tree.has_opacity_props() && tree.has_transform_props());
+
+        // SetProp adds only on a NEW key; overwrites don't double-count.
+        tree.apply(&Patch::SetProp {
+            id: "a".into(),
+            name: "scale".into(),
+            value: json!(1.2),
+        });
+        tree.apply(&Patch::SetProp {
+            id: "a".into(),
+            name: "scale".into(),
+            value: json!(1.4),
+        });
+        // RemoveProp decrements; a second remove of the same key doesn't.
+        tree.apply(&Patch::RemoveProp {
+            id: "a".into(),
+            name: "scale".into(),
+        });
+        tree.apply(&Patch::RemoveProp {
+            id: "a".into(),
+            name: "scale".into(),
+        });
+        assert!(tree.has_transform_props(), "b's translateX still live");
+
+        // Raw animator writes and removals balance.
+        tree.set_prop_raw("a", "rotate", json!(45.0));
+        tree.remove_prop_raw("a", "rotate");
+        tree.remove_prop_raw("a", "rotate");
+
+        // Re-Create replacing a node forgets its old props.
+        tree.apply(&create("a", "Container", &[]));
+        assert!(!tree.has_opacity_props(), "replaced node's opacity gone");
+
+        // Subtree teardown forgets descendants' props.
+        tree.apply(&insert(ROOT_ID, "b", None));
+        tree.apply(&Patch::Remove {
+            id: "b".into(),
+            transition: false,
+        });
+        assert!(
+            !tree.has_transform_props(),
+            "removed subtree's transform gone"
+        );
+    }
+
+    #[test]
     fn evict_detached_over_tears_down_oldest_subtrees() {
         let mut tree = Tree::new();
         tree.apply(&create("col", "Column", &[]));
@@ -716,7 +1033,9 @@ mod tests {
             tree.apply(&insert("col", &p, None));
             tree.apply(&create(&c, "Text", &[("0", json!("x"))]));
             tree.apply(&insert(&p, &c, None));
-            tree.apply(&Patch::Detach { id: p.clone() });
+            tree.apply(&Patch::Detach {
+                id: p.as_str().into(),
+            });
         }
         assert_eq!(tree.detached_len(), 5);
 

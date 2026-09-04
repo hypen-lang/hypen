@@ -1,6 +1,7 @@
 package space.hypen.renderer.components
 
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.Box
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
@@ -30,9 +31,14 @@ class ParagraphComponent : ComponentHandler {
             ?: element.textContent
             ?: ""
 
-        // If no direct text, render children instead (supports Paragraph { Text("...") } syntax)
+        // If no direct text, retain the Paragraph's own layout modifier around
+        // its children. Returning the children bare discarded Row weight and
+        // width allocation, so a Paragraph { Text(...) } inside a weighted Row
+        // collapsed to the Text's intrinsic width (the drop-cap example).
         if (text.isEmpty()) {
-            renderChildren()
+            Box(modifier = modifier) {
+                renderChildren()
+            }
             return
         }
 

@@ -14,6 +14,7 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
@@ -41,10 +42,12 @@ class GridComponent : ComponentHandler {
         renderChildren: @Composable () -> Unit,
     ) {
         val renderer = LocalComposeRenderer.current
+        val fillsFiniteWidth = LocalParentAllowsHorizontalExpansion.current
+        val gridModifier = if (fillsFiniteWidth) modifier.fillMaxWidth() else modifier
 
         if (renderer == null) {
             Log.w(TAG, "No renderer available for Grid component, falling back to regular render")
-            Box(modifier = modifier) {
+            Box(modifier = gridModifier) {
                 renderChildren()
             }
             return
@@ -53,39 +56,10 @@ class GridComponent : ComponentHandler {
         // Get children from renderer
         val children = renderer.getChildren(element.id)
 
-        val props = element.props
-
-        // Get column count - supports both "columns" (legacy) and "gridColumns" (unified API)
-        val columns = (props["gridColumns"] ?: props["gridColumns.0"] ?: props["columns"])?.let { col ->
-            when (col) {
-                is Number -> col.toInt()
-                is String -> col.toIntOrNull() ?: 2
-                else -> 2
-            }
-        } ?: 2
-
-        // Get gap from props (unified API)
-        val gap = (props["gap"] ?: props["gap.0"])?.let { g ->
-            when (g) {
-                is Number -> g.toFloat().dp
-                else -> 0.dp
-            }
-        } ?: 0.dp
-
-        // Get row gap and column gap separately if specified
-        val rowGap = (props["rowGap"] ?: props["rowGap.0"])?.let { rg ->
-            when (rg) {
-                is Number -> rg.toFloat().dp
-                else -> gap
-            }
-        } ?: gap
-
-        val columnGap = (props["columnGap"] ?: props["columnGap.0"])?.let { cg ->
-            when (cg) {
-                is Number -> cg.toFloat().dp
-                else -> gap
-            }
-        } ?: gap
+        val style = resolveGridStyle(element)
+        val columns = style.columns
+        val rowGap = style.rowGap.dp
+        val columnGap = style.columnGap.dp
 
         // A Grid declared with `.scrollable(true)` owns its own scrolling
         // viewport, so `LazyVerticalGrid` is safe (and desirable — it
@@ -104,7 +78,7 @@ class GridComponent : ComponentHandler {
 
         if (!scrollable) {
             Column(
-                modifier = modifier,
+                modifier = gridModifier,
                 verticalArrangement = Arrangement.spacedBy(rowGap),
             ) {
                 // Rows are packed by SPAN, not by count: a `gridColumn:
@@ -159,7 +133,7 @@ class GridComponent : ComponentHandler {
 
         LazyVerticalGrid(
             columns = GridCells.Fixed(columns),
-            modifier = modifier,
+            modifier = gridModifier,
             horizontalArrangement = Arrangement.spacedBy(columnGap),
             verticalArrangement = Arrangement.spacedBy(rowGap),
         ) {
@@ -180,6 +154,36 @@ class GridComponent : ComponentHandler {
     companion object {
         private const val TAG = "GridComponent"
     }
+}
+
+internal data class GridStyle(
+    val columns: Int,
+    val rowGap: Float,
+    val columnGap: Float,
+)
+
+internal fun resolveGridStyle(element: HypenElement): GridStyle {
+    val props = element.props
+    val columns = (props["gridColumns.0"] ?: props["gridColumns"] ?: props["columns.0"] ?: props["columns"])
+        .asGridInt()
+        ?.coerceAtLeast(1)
+        ?: 2
+    val gap = (props["gap.0"] ?: props["gap"]).asGridFloat() ?: 0f
+    val rowGap = (props["rowGap.0"] ?: props["rowGap"]).asGridFloat() ?: gap
+    val columnGap = (props["columnGap.0"] ?: props["columnGap"]).asGridFloat() ?: gap
+    return GridStyle(columns, rowGap, columnGap)
+}
+
+private fun Any?.asGridInt(): Int? = when (this) {
+    is Number -> toInt()
+    is String -> trim().toIntOrNull()
+    else -> null
+}
+
+private fun Any?.asGridFloat(): Float? = when (this) {
+    is Number -> toFloat()
+    is String -> trim().removeSuffix("px").toFloatOrNull()
+    else -> null
 }
 
 /**
@@ -273,7 +277,10 @@ private fun GridItemRenderer(
         LocalRowScope provides null,
         LocalColumnScope provides null,
         LocalStretchCrossAxis provides false,
+        LocalGridStretchesBareImage provides true,
     ) {
         RenderHypenElement(element = element, renderer = renderer)
     }
 }
+
+internal val LocalGridStretchesBareImage = staticCompositionLocalOf { false }

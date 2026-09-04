@@ -5,6 +5,11 @@
   "compatibility_date": "2025-05-01",
   "compatibility_flags": ["nodejs_compat"],
 
+  "alias": {
+    "@hypen-space/core": "../../../hypen-web/packages/core/src/index.ts",
+    "@hypen-space/cf": "../../../hypen-web/packages/cf/src/index.ts"
+  },
+
   "rules": [
     { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
     { "type": "Text", "globs": ["**/*.hypen", "**/*.svg", "**/dist/client/*.js"], "fallthrough": true }

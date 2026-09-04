@@ -359,6 +359,7 @@ describe("detectRuleDrift", () => {
     expect(EXPECTED_A11Y_RULES).toContain("dangling-reference");
     expect(EXPECTED_A11Y_RULES).toContain("unknown-live-token");
     expect(EXPECTED_A11Y_RULES).toContain("unknown-ignore-rule");
+    expect(EXPECTED_A11Y_RULES).toContain("video-missing-label");
   });
 });
 

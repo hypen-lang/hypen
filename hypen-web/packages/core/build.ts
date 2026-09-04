@@ -41,6 +41,7 @@ const entrypoints = [
   "./src/retry.ts",
   "./src/engine-base.ts",
   "./src/portable.ts",
+  "./src/patch-expand.ts",
 ];
 
 // Build all entrypoints with browser target (platform-agnostic)

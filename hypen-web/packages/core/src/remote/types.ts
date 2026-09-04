@@ -150,4 +150,14 @@ export interface RemoteServerConfig {
    * or packet capture.
    */
   compression?: boolean;
+  /**
+   * Serve the default browser client over plain HTTP (default: `true`).
+   *
+   * With it on, opening `http://host:port/` in a browser loads a small
+   * page that connects back over WebSocket and renders the app with the
+   * DOM renderer — so `hypen dev` gives you a working client out of the
+   * box. Set to `false` to keep the pre-existing plain-text HTTP
+   * responses (the WebSocket endpoint is unaffected either way).
+   */
+  webClient?: boolean;
 }

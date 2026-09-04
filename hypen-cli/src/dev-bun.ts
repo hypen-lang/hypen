@@ -53,13 +53,17 @@ export interface DevOptions {
   debug?: boolean;
 
   /**
-   * Custom HTML template path
+   * @deprecated No effect under Bun: the dev server streams patches to the
+   * built-in web client instead of bundling a browser SPA, so there is no
+   * HTML template to swap. Passing it logs a warning. (Still honored by the
+   * Node fallback dev server.)
    */
   htmlTemplate?: string;
 
   /**
-   * Output directory for generated files
-   * Default: ".hypen"
+   * @deprecated No effect under Bun: the dev server no longer generates
+   * `.hypen/` files (use `hypen generate` for that). Passing it logs a
+   * warning. (Still honored by the Node fallback dev server.)
    */
   outDir?: string;
 
@@ -118,11 +122,18 @@ function getDefaultHtmlTemplate(entry: string): string {
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <!-- viewport-fit=cover lets the page extend under notches/rounded corners so
+       env(safe-area-inset-*) reports real values for the SafeArea component. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Hypen App</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
     body { font-family: system-ui, -apple-system, sans-serif; }
+    /* Fullscreen by default: the app fills the viewport, and the root
+       component stretches to it (grows past it when content is taller). */
+    #app { width: 100vw; min-height: 100vh; display: flex; flex-direction: column; }
+    #app > * { flex: 1; }
   </style>
 </head>
 <body>
@@ -134,7 +145,9 @@ function getDefaultHtmlTemplate(entry: string): string {
 }
 
 /**
- * Generate the main entry file
+ * Generate the main entry file (production `build()` only — the dev
+ * server no longer bundles a browser SPA; it streams patches from a
+ * RemoteServer instead).
  */
 function generateMainEntry(
   entry: string,
@@ -166,7 +179,44 @@ export default app;
 }
 
 /**
- * Start a development server
+ * Error thrown by `dev()` for expected failure modes, so programmatic
+ * callers can catch and handle them. The CLI catches it, prints the
+ * message, and exits — `dev()` itself never kills the host process.
+ */
+export class DevServerError extends Error {
+  constructor(
+    message: string,
+    readonly code: "ENTRY_NOT_FOUND" | "PORT_IN_USE"
+  ) {
+    super(message);
+    this.name = "DevServerError";
+  }
+}
+
+/**
+ * Start a development server.
+ *
+ * Runs the project through a `RemoteServer`: components are discovered from
+ * the filesystem, the engine renders server-side, and the browser gets the
+ * default web client (served at `/`) which receives streamed patches over
+ * WebSocket — the same architecture `hypen test`, `hypen run`, and Studio
+ * previews use, so every surface behaves identically. Native clients can
+ * dial the same port (`ws://localhost:<port>`) directly.
+ *
+ * Every connection gets its own session (engine + module instance), but
+ * `.syncActions()` replays each dispatched action onto every other
+ * session's engine — so two browser tabs (or a tab + a native runner on
+ * the same port) mirror each other. That differs from the old browser-SPA
+ * dev server, where tabs were fully independent. Deliberate for now:
+ * remove the `.syncActions()` call below to get per-tab isolation.
+ *
+ * File changes hot-reload by briefly disconnecting every client: each one
+ * auto-reconnects (~0.5s), resumes its session against the freshly loaded
+ * templates and module code, and gets its saved primary-module state back.
+ * Nested (route) module state resets on reload.
+ *
+ * @throws {DevServerError} when the entry component can't be found or the
+ * port is taken.
  */
 export async function dev(options: DevOptions): Promise<{
   url: string;
@@ -178,8 +228,6 @@ export async function dev(options: DevOptions): Promise<{
     port = 3000,
     hot = true,
     debug = false,
-    htmlTemplate,
-    outDir = ".hypen",
     onStart,
     onComponentsChange,
     a11y,
@@ -189,39 +237,64 @@ export async function dev(options: DevOptions): Promise<{
     ? (...args: unknown[]) => console.log("[hypen:dev]", ...args)
     : () => {};
 
-  const resolvedComponentsDir = resolve(componentsDir);
-  const resolvedOutDir = resolve(outDir);
-
-  // Ensure output directory exists
-  if (!existsSync(resolvedOutDir)) {
-    mkdirSync(resolvedOutDir, { recursive: true });
+  if (options.htmlTemplate !== undefined) {
+    console.warn(
+      "  Warning: `htmlTemplate` has no effect under Bun — the dev server serves the built-in web client."
+    );
+  }
+  if (options.outDir !== undefined) {
+    console.warn(
+      "  Warning: `outDir` has no effect under Bun — the dev server no longer generates files (use `hypen generate`)."
+    );
   }
 
+  const resolvedComponentsDir = resolve(componentsDir);
   log("Components directory:", resolvedComponentsDir);
-  log("Output directory:", resolvedOutDir);
 
-  // Generate initial components
-  const generateComponents = async () => {
-    log("Generating components...");
-    const code = await generateComponentsCode(resolvedComponentsDir, { outputDir: resolvedOutDir, debug });
-    const componentsPath = join(resolvedOutDir, "components.generated.ts");
-    writeFileSync(componentsPath, code);
-    log("Generated:", componentsPath);
-    return componentsPath;
-  };
+  const { RemoteServer } = await import("@hypen-space/server/remote");
+  const { discoverComponents, loadDiscoveredComponents } = await import(
+    "@hypen-space/server"
+  );
+  const { configureLogger } = await import("@hypen-space/core");
 
-  // Generate main entry
-  const generateMain = (componentsPath: string) => {
-    log("Generating main entry...");
-    const code = generateMainEntry(entry, componentsPath, debug);
-    const mainPath = join(resolvedOutDir, "main.ts");
-    writeFileSync(mainPath, code);
-    log("Generated:", mainPath);
-    return mainPath;
-  };
+  const discovered = await discoverComponents(resolvedComponentsDir);
+  const loaded = await loadDiscoveredComponents(discovered);
+  const entryComponent = loaded.get(entry);
+
+  if (!entryComponent) {
+    throw new DevServerError(
+      `Entry component "${entry}" not found in ${resolvedComponentsDir}\n` +
+        `  Available components: ${Array.from(loaded.keys()).join(", ") || "(none)"}`,
+      "ENTRY_NOT_FOUND"
+    );
+  }
+
+  // Keep framework logs quiet unless --debug — the banner below is the UX.
+  configureLogger({ level: debug ? "debug" : "error" });
+
+  const remoteServer = new RemoteServer()
+    .module(entry, entryComponent.module)
+    .source(resolvedComponentsDir)
+    // Mirror actions across all connected clients (tabs + native runners
+    // preview the same scene, like `hypen test`). See the doc comment
+    // above for the per-tab-isolation alternative.
+    .syncActions();
+
+  try {
+    await remoteServer.listen(port);
+  } catch (err: any) {
+    if (err?.code === "EADDRINUSE" || err?.message?.includes("address already in use")) {
+      throw new DevServerError(
+        `Port ${port} is already in use.\n` +
+          `  Try a different port: hypen dev --port ${port + 1}`,
+        "PORT_IN_USE"
+      );
+    }
+    throw err;
+  }
 
   // Opt-in accessibility pass over the .hypen sources; runs after the
-  // initial generation and after every rebuild. Never throws.
+  // initial build and after every rebuild. Never throws.
   const runA11y = a11y
     ? createDevA11yChecker({
         componentsDir: resolvedComponentsDir,
@@ -230,168 +303,38 @@ export async function dev(options: DevOptions): Promise<{
       })
     : null;
 
-  // Initial generation
-  const componentsPath = await generateComponents();
-  const mainPath = generateMain(componentsPath);
-
-  // Bundle the entry point so bare specifiers like @hypen-space/web-engine
-  // are resolved into a single browser-ready JS file.
-  const bundleOutDir = join(resolvedOutDir, "bundle");
-  let bundledMainPath = "";
-
-  const buildBundle = async () => {
-    log("Bundling entry point...");
-    try {
-      const result = await Bun.build({
-        entrypoints: [mainPath],
-        outdir: bundleOutDir,
-        target: "browser",
-        format: "esm",
-        sourcemap: "inline",
-      });
-      if (!result.success) {
-        console.error("Bundle failed:");
-        for (const msg of result.logs) console.error(msg);
-        bundledMainPath = ""; // Clear stale path on failure
-      } else {
-        bundledMainPath = result.outputs[0]?.path ?? "";
-        log("Bundled:", bundledMainPath);
-      }
-    } catch (err) {
-      console.error("Bundle error:", err);
-      bundledMainPath = ""; // Clear stale path on exception
-    }
-  };
-
-  await buildBundle();
-
-  // Watch for changes
+  // Watch for changes and hot-reload all connected clients.
   let watcher: { stop: () => void } | null = null;
-
   if (hot) {
+    let isInitialScan = true;
     watcher = watchComponents(resolvedComponentsDir, {
       debug,
       onChange: async (components) => {
-        log("Components changed, regenerating...");
-        await generateComponents();
-        generateMain(componentsPath);
-        await buildBundle();
+        if (isInitialScan) {
+          isInitialScan = false;
+          return;
+        }
+        log("Components changed, reloading clients...");
+        try {
+          const clients = remoteServer.getClientCount();
+          await remoteServer.reload();
+          console.log(
+            `  ${yellow("Reloaded")} ${dim(`(${clients} client(s) reconnecting)`)}`
+          );
+        } catch (e: any) {
+          console.error(`  Hot reload failed: ${e?.message ?? e}`);
+        }
         await runA11y?.();
         onComponentsChange?.(components);
       },
     });
   }
 
-  // Get HTML template
-  const html = htmlTemplate
-    ? readFileSync(htmlTemplate, "utf-8")
-    : getDefaultHtmlTemplate(entry);
-
-  // Create Bun server
-  let server: ReturnType<typeof Bun.serve>;
-  try {
-    server = Bun.serve({
-    port,
-    async fetch(req) {
-      const url = new URL(req.url);
-      const pathname = url.pathname;
-
-      log("Request:", pathname);
-
-      // Serve HTML for root
-      if (pathname === "/" || pathname === "/index.html") {
-        return new Response(html, {
-          headers: { "Content-Type": "text/html" },
-        });
-      }
-
-      // Serve bundled main.js
-      if (pathname === "/__hypen__/main.js") {
-        if (bundledMainPath) {
-          try {
-            const js = readFileSync(bundledMainPath, "utf-8");
-            return new Response(js, {
-              headers: { "Content-Type": "application/javascript" },
-            });
-          } catch {
-            // File doesn't exist or read error — fall through to 404
-          }
-        }
-      }
-
-      // Serve other generated files
-      if (pathname.startsWith("/__hypen__/")) {
-        const fileName = pathname.replace("/__hypen__/", "");
-        const filePath = join(resolvedOutDir, fileName.replace(/\.js$/, ".ts"));
-
-        // Prevent path traversal: ensure resolved path stays within output dir
-        const resolvedFile = resolve(filePath);
-        const rel = relative(resolvedOutDir, resolvedFile);
-        if (rel && !rel.startsWith('..') && !isAbsolute(rel)) {
-          try {
-            const transpiler = new Bun.Transpiler({ loader: "ts" });
-            const code = readFileSync(resolvedFile, "utf-8");
-            const js = transpiler.transformSync(code);
-
-            return new Response(js, {
-              headers: { "Content-Type": "application/javascript" },
-            });
-          } catch {
-            // File doesn't exist — fall through to 404
-          }
-        }
-      }
-
-      // Serve static files from project
-      if (pathname.endsWith(".ts") || pathname.endsWith(".js")) {
-        // Normalize pathname to prevent path traversal (e.g., /../../../etc/passwd)
-        const safePath = normalize(pathname).replace(/^(\.\.[/\\])+/, "");
-
-        const possiblePaths = [
-          resolve(resolvedComponentsDir, safePath.replace(/^[/\\]/, "")),
-          resolve(process.cwd(), safePath.replace(/^[/\\]/, "")),
-        ];
-
-        for (const filePath of possiblePaths) {
-          // Ensure the resolved path stays within the allowed directories
-          const relToComponents = relative(resolvedComponentsDir, filePath);
-          const relToCwd = relative(resolve(process.cwd()), filePath);
-          const inComponents = relToComponents && !relToComponents.startsWith('..') && !isAbsolute(relToComponents);
-          const inCwd = relToCwd && !relToCwd.startsWith('..') && !isAbsolute(relToCwd);
-          if (!inComponents && !inCwd) {
-            continue;
-          }
-          try {
-            const transpiler = new Bun.Transpiler({ loader: "ts" });
-            const code = readFileSync(filePath, "utf-8");
-            const js = transpiler.transformSync(code);
-
-            return new Response(js, {
-              headers: { "Content-Type": "application/javascript" },
-            });
-          } catch {
-            // File doesn't exist — try next path
-          }
-        }
-      }
-
-      // 404
-      return new Response("Not Found", { status: 404 });
-    },
-  });
-  } catch (err: any) {
-    if (err?.code === "EADDRINUSE" || err?.message?.includes("address already in use")) {
-      console.error(`\n  Error: Port ${port} is already in use.`);
-      console.error(`  Try a different port: hypen dev --port ${port + 1}\n`);
-      process.exit(1);
-    }
-    throw err;
-  }
-
   const serverUrl = `http://localhost:${port}`;
 
   console.log(`\n  ${boldPink("Hypen Dev Server")}\n`);
   console.log(`  ${dim("Local:")}      ${yellow(serverUrl)}`);
+  console.log(`  ${dim("Remote:")}     ${yellow(`ws://localhost:${port}`)}`);
   console.log(`  ${dim("Entry:")}      ${entry}`);
   console.log(`  ${dim("Components:")} ${resolvedComponentsDir}\n`);
 
@@ -405,7 +348,7 @@ export async function dev(options: DevOptions): Promise<{
     url: serverUrl,
     stop: () => {
       watcher?.stop();
-      server.stop();
+      remoteServer.stop();
     },
   };
 }

@@ -72,12 +72,12 @@ Column {
     .marginBottom(8)
 
   Grid {
-    Image(src: "https://picsum.photos/100/100?1").cornerRadius(8)
-    Image(src: "https://picsum.photos/100/100?2").cornerRadius(8)
-    Image(src: "https://picsum.photos/100/100?3").cornerRadius(8)
-    Image(src: "https://picsum.photos/100/100?4").cornerRadius(8)
-    Image(src: "https://picsum.photos/100/100?5").cornerRadius(8)
-    Image(src: "https://picsum.photos/100/100?6").cornerRadius(8)
+    Image(src: "/fixtures/grid-1.png").cornerRadius(8)
+    Image(src: "/fixtures/grid-2.png").cornerRadius(8)
+    Image(src: "/fixtures/grid-3.png").cornerRadius(8)
+    Image(src: "/fixtures/grid-4.png").cornerRadius(8)
+    Image(src: "/fixtures/grid-5.png").cornerRadius(8)
+    Image(src: "/fixtures/grid-6.png").cornerRadius(8)
   }
   .gridColumns(3)
   .gap(4)

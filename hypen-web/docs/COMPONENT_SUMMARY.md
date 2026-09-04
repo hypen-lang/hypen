@@ -2,9 +2,9 @@
 
 This document summarizes all components and applicators that have been implemented in the Hypen framework.
 
-## Implemented Components (33 total)
+## Implemented Components (34 total)
 
-### Layout (9)
+### Layout (10)
 - ✅ **Column** - Vertical flex container
 - ✅ **Row** - Horizontal flex container
 - ✅ **Container** / **Box** - Generic container
@@ -14,6 +14,7 @@ This document summarizes all components and applicators that have been implement
 - ✅ **Spacer** - Flexible space
 - ✅ **Divider** - Visual separator
 - ✅ **List** - List container
+- ✅ **SafeArea** - Container padded by device safe-area insets, optional `edges` filter ([props](./components/layout.md#safearea))
 
 ### Text (3)
 - ✅ **Text** - Basic text display
@@ -31,7 +32,7 @@ This document summarizes all components and applicators that have been implement
 
 ### Media (4)
 - ✅ **Image** - Image display
-- ✅ **Video** - Video player
+- ✅ **Video** - Video player: single `src` or `playlist` auto-advance, `poster`, auth `headers`, playback events ([docs](../../hypen-docs/content/docs/guide/components.mdx), [props](./components/media.md#video))
 - ✅ **Audio** - Audio player
 - ✅ **Icon** - SVG icon (driven by `@resources.xxx`)
 

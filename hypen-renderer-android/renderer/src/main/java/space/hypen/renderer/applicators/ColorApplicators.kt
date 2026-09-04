@@ -334,6 +334,13 @@ class BackgroundColorApplicator : ApplicatorHandler {
 
 /**
  * Applicator for foregroundColor (text color on non-text elements).
+ *
+ * Inherited content colour is a CompositionLocal in Compose and a Modifier
+ * cannot provide one, so nothing can be contributed to the chain here. The
+ * container components resolve the prop instead and provide
+ * `LocalContentColor` around their children — see `hypenContentColor` in
+ * components/ContentColor.kt. This stays registered so the applicator name
+ * remains a recognised one; it deliberately contributes no modifier.
  */
 class ForegroundColorApplicator : ApplicatorHandler {
     override val name: String = "foregroundColor"
@@ -342,11 +349,7 @@ class ForegroundColorApplicator : ApplicatorHandler {
         modifier: Modifier,
         value: Any?,
         context: ApplicatorContext,
-    ): Modifier {
-        // In Compose, foreground color for non-text elements is handled
-        // at the component level via LocalContentColor. Store for component access.
-        return modifier
-    }
+    ): Modifier = modifier
 }
 
 /**

@@ -26,7 +26,10 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { HypenDurableObject, type HypenDurableObjectConfig } from "../packages/cf/src/durable-object";
 import { durableObjectStore } from "../packages/cf/src/durable-object-store";
-import { global as globalStrategy } from "../packages/cf/src/strategies";
+import {
+  global as globalStrategy,
+  session as sessionStrategy,
+} from "../packages/cf/src/strategies";
 import { Engine } from "../packages/server/src/engine";
 import { app } from "../packages/core/src/app";
 import type { BaseEngine } from "../packages/core/src/engine-base";
@@ -49,11 +52,14 @@ function createSharedStorage() {
 
 function createMockWebSocket() {
   const sent: string[] = [];
+  let attachment: unknown;
   return {
     sent,
     send: (s: string) => sent.push(s),
     close: () => {},
     readyState: 1,
+    serializeAttachment: (value: unknown) => { attachment = structuredClone(value); },
+    deserializeAttachment: () => structuredClone(attachment),
   };
 }
 
@@ -104,6 +110,112 @@ beforeEach(() => {
 });
 
 describe("HypenDurableObject hibernation", () => {
+  test(
+    "a session-persisted detail route survives hibernation when its first action updates a Grid item",
+    async () => {
+      interface FoodState {
+        location: string;
+        cartCount: number;
+        menuItems: Array<{ id: string; cartQuantity: number }>;
+      }
+
+      const module = app
+        .defineState<FoodState>({
+          location: "/",
+          cartCount: 0,
+          menuItems: [{ id: "m101", cartQuantity: 0 }],
+        })
+        .onAction<{ itemId: string }>("addToCart", ({ state, action }) => {
+          const item = state.menuItems.find((entry) => entry.id === action.payload?.itemId);
+          if (!item) return;
+          item.cartQuantity += 1;
+          state.cartCount += 1;
+        })
+        .persist(durableObjectStore(sessionStrategy<FoodState>()))
+        .build();
+
+      const template = `module App {
+        Router {
+          Route(path: "/") { Text("HOME") }
+          Route(path: "/restaurant/:id") {
+            Column {
+              Text("DETAIL")
+              Grid(@state.menuItems, key: "id") {
+                Text("quantity:@{item.cartQuantity}")
+              }
+            }
+          }
+        }
+      }`;
+      const config = { module, template, moduleName: "App" };
+      const storage = createSharedStorage();
+      const ws = createMockWebSocket();
+
+      // First incarnation: enter the restaurant route and allow the
+      // session-scoped persistence debounce to commit that location.
+      const ctxA = createCtx(storage);
+      ctxA.acceptWebSocket(ws as unknown as WebSocket);
+      const a = new TestDO(ctxA as any, {}, config);
+      await a.webSocketMessage(
+        ws as unknown as WebSocket,
+        JSON.stringify({ type: "hello", props: {} }),
+      );
+      await a.webSocketMessage(
+        ws as unknown as WebSocket,
+        JSON.stringify({
+          type: "dispatchAction",
+          action: "router.push",
+          payload: { to: "/restaurant/r1" },
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 120));
+
+      // Simulate eviction while the accepted socket stays alive. The very
+      // first post-wake message is Add, matching the Food app failure.
+      void a;
+      ws.sent.length = 0;
+      const ctxB = createCtx(storage);
+      ctxB.acceptWebSocket(ws as unknown as WebSocket);
+      const b = new TestDO(ctxB as any, {}, config);
+      await b.webSocketMessage(
+        ws as unknown as WebSocket,
+        JSON.stringify({
+          type: "dispatchAction",
+          action: "addToCart",
+          payload: { itemId: "m101" },
+        }),
+      );
+      await new Promise((r) => setTimeout(r, 120));
+
+      const out = frames(ws);
+      const ack = out.find((message) => message.type === "sessionAck");
+      const initial = out.find((message) => message.type === "initialTree");
+      expect(ack).toMatchObject({ isNew: false, isRestored: true });
+      expect(initial?.state).toMatchObject({
+        location: "/restaurant/r1",
+        cartCount: 0,
+      });
+
+      const initialText = (initial?.patches ?? [])
+        .filter((patch: any) => patch.type === "create")
+        .flatMap((patch: any) => Object.values(patch.props ?? {}));
+      expect(initialText).toContain("DETAIL");
+      expect(initialText).not.toContain("HOME");
+
+      // The action runs after the restored detail tree is installed and the
+      // persisted snapshot proves it did not reset the route while updating
+      // the Grid-bound item.
+      const persisted = [...storage._data.values()].find(
+        (value: any) => value?.cartCount === 1,
+      ) as FoodState | undefined;
+      expect(persisted).toMatchObject({
+        location: "/restaurant/r1",
+        cartCount: 1,
+        menuItems: [{ id: "m101", cartQuantity: 1 }],
+      });
+    },
+  );
+
   test(
     "a non-hello first message after wake synthesises hello and emits sessionAck + initialTree before the action runs",
     async () => {

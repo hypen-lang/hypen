@@ -1,4 +1,4 @@
 {
   "title": "Platforms",
-  "pages": ["web", "android", "ios", "rust"]
+  "pages": ["index", "web", "desktop", "android", "ios", "rust"]
 }

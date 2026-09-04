@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "fs";
 import { join } from "path";
 
 // Import actual implementations from source
-import { dev as bunDev, build as bunBuild } from "../src/dev-bun";
+import { dev as bunDev, build as bunBuild, DevServerError } from "../src/dev-bun";
 import { dev as nodeDev, build as nodeBuild } from "../src/dev-node";
 
 // We can't directly import private functions, so we test via the public API
@@ -23,36 +23,25 @@ describe("Dev Server Utilities", () => {
     }
   });
 
-  describe("HTML template generation", () => {
-    test("dev server generates valid HTML with app div and script tag", async () => {
+  describe("dev server (RemoteServer-backed)", () => {
+    test("dev server comes up and answers /health", async () => {
       // Create a minimal component structure
       const componentDir = join(testDir, "components", "App");
       mkdirSync(componentDir, { recursive: true });
       writeFileSync(join(componentDir, "component.ts"), "export default {}");
       writeFileSync(join(componentDir, "component.hypen"), "Text('App')");
 
-      // Start dev server briefly to check generated files
-      const outDir = join(testDir, ".hypen");
+      const port = 19890;
       const result = await bunDev({
         components: join(testDir, "components"),
         entry: "App",
-        port: 0, // Use any available port
-        outDir,
+        port,
         hot: false,
       });
 
-      // Check that the main entry was generated
-      const mainPath = join(outDir, "main.ts");
-      expect(existsSync(mainPath)).toBe(true);
-
-      const mainContent = readFileSync(mainPath, "utf-8");
-      expect(mainContent).toContain("renderWithComponents");
-      expect(mainContent).toContain('"App"');
-      expect(mainContent).toContain("#app");
-
-      // Check that components file was generated
-      const componentsPath = join(outDir, "components.generated.ts");
-      expect(existsSync(componentsPath)).toBe(true);
+      expect(result.url).toBe(`http://localhost:${port}`);
+      const health = await fetch(`http://localhost:${port}/health`);
+      expect(health.ok).toBe(true);
 
       result.stop();
     });
@@ -129,26 +118,138 @@ describe("Dev Server Utilities", () => {
       expect(code).toContain("template");
     });
 
-    test("generates main entry file via dev server", async () => {
+    test("dev server serves an HTML page at /", async () => {
       const componentDir = join(testDir, "components", "App");
       mkdirSync(componentDir, { recursive: true });
       writeFileSync(join(componentDir, "component.ts"), "export default {}");
       writeFileSync(join(componentDir, "component.hypen"), "Text('App')");
 
-      const outDir = join(testDir, ".hypen");
+      const port = 19891;
       const result = await bunDev({
         components: join(testDir, "components"),
         entry: "App",
-        port: 0,
-        outDir,
+        port,
         hot: false,
       });
 
-      const mainPath = join(outDir, "main.ts");
-      expect(existsSync(mainPath)).toBe(true);
-      expect(readFileSync(mainPath, "utf-8")).toContain("renderWithComponents");
+      const page = await fetch(`http://localhost:${port}/`);
+      expect(page.status).toBe(200);
 
       result.stop();
     });
+  });
+});
+
+describe("dev server API behavior", () => {
+  // In-tree so fixture imports of @hypen-space/core resolve.
+  const apiTestDir = join(import.meta.dir, `.tmp-dev-api-${process.pid}`);
+
+  beforeEach(() => {
+    mkdirSync(apiTestDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    rmSync(apiTestDir, { recursive: true, force: true });
+  });
+
+  function writeCounterApp(): string {
+    const dir = join(apiTestDir, "components", "App");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, "component.ts"),
+      `import { app } from "@hypen-space/core";
+export default app
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => {
+    state.count += 1;
+  })
+  .build();
+`
+    );
+    writeFileSync(join(dir, "component.hypen"), `module App { Text("@{state.count}") }`);
+    return join(apiTestDir, "components");
+  }
+
+  test("throws DevServerError instead of exiting when the entry is missing", async () => {
+    mkdirSync(join(apiTestDir, "components"), { recursive: true });
+    const err = await bunDev({
+      components: join(apiTestDir, "components"),
+      entry: "App",
+      port: 19893,
+      hot: false,
+    }).catch((e) => e);
+    expect(err).toBeInstanceOf(DevServerError);
+    expect(err.code).toBe("ENTRY_NOT_FOUND");
+    expect(err.message).toContain('Entry component "App" not found');
+  });
+
+  test("warns on deprecated htmlTemplate/outDir but still starts", async () => {
+    const components = writeCounterApp();
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (...args: unknown[]) => warnings.push(args.join(" "));
+
+    let result: { url: string; stop: () => void } | null = null;
+    try {
+      result = await bunDev({
+        components,
+        entry: "App",
+        port: 19894,
+        hot: false,
+        htmlTemplate: "custom.html",
+        outDir: ".out",
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(warnings.some((w) => w.includes("htmlTemplate"))).toBe(true);
+    expect(warnings.some((w) => w.includes("outDir"))).toBe(true);
+    const health = await fetch("http://localhost:19894/health");
+    expect(health.ok).toBe(true);
+    result!.stop();
+  });
+
+  // Pins the CURRENT (deliberate-for-now) behavior: `dev()` enables
+  // `.syncActions()`, so an action from one client is replayed on every
+  // other client's engine — tabs and native runners mirror the same
+  // scene. Flip these assertions if dev ever moves to per-tab isolation.
+  test("clients mirror actions (syncActions is on)", async () => {
+    const components = writeCounterApp();
+    const port = 19895;
+    const result = await bunDev({ components, entry: "App", port, hot: false });
+
+    function connect(): Promise<{ messages: any[]; ws: WebSocket }> {
+      return new Promise((res, rej) => {
+        const messages: any[] = [];
+        const ws = new WebSocket(`ws://localhost:${port}`);
+        const timer = setTimeout(() => rej(new Error("connect timeout")), 5000);
+        ws.onopen = () => ws.send(JSON.stringify({ type: "hello" }));
+        ws.onmessage = (e) => {
+          const m = JSON.parse(e.data as string);
+          messages.push(m);
+          if (m.type === "initialTree") {
+            clearTimeout(timer);
+            res({ messages, ws });
+          }
+        };
+        ws.onerror = rej;
+      });
+    }
+
+    const a = await connect();
+    const b = await connect();
+
+    a.ws.send(JSON.stringify({ type: "dispatchAction", module: "App", action: "increment" }));
+    await new Promise((r) => setTimeout(r, 400));
+
+    // A's own engine re-rendered, and the action was replayed on B's.
+    expect(a.messages.some((m) => m.type === "patch")).toBe(true);
+    expect(b.messages.some((m) => m.type === "patch")).toBe(true);
+
+    a.ws.close();
+    b.ws.close();
+    await new Promise((r) => setTimeout(r, 50));
+    result.stop();
   });
 });

@@ -15,13 +15,13 @@
 
 use crate::layout::{ItemKind, LayoutPass, Rect as LayoutRect, TextAlign};
 use crate::style::{
-    Rgba, BORDER_SIDES_ALL, BORDER_SIDE_BOTTOM, BORDER_SIDE_LEFT, BORDER_SIDE_RIGHT,
-    BORDER_SIDE_TOP,
+    BorderLineStyle, Rgba, BORDER_SIDES_ALL, BORDER_SIDE_BOTTOM, BORDER_SIDE_LEFT,
+    BORDER_SIDE_RIGHT, BORDER_SIDE_TOP,
 };
 use crate::text::TextEngine;
 use crate::window::Selection;
 use std::collections::HashMap;
-use vello::kurbo::{Affine, BezPath, Rect as KRect, RoundedRect, Stroke};
+use vello::kurbo::{Affine, BezPath, Cap, Rect as KRect, RoundedRect, Stroke};
 use vello::peniko::{Brush, Color, Fill};
 use vello::Scene;
 
@@ -64,6 +64,26 @@ struct CachedSubtree {
     /// `append` call so the clip stays fixed in viewport space
     /// while items inside translate with scroll.
     clip_to: Option<LayoutRect>,
+    /// Radius of `clip_to` in physical pixels. Stored with the cached
+    /// fragment because changing a clipping ancestor's radius changes the
+    /// pixels even when the descendant scene itself is unchanged.
+    clip_radius: f32,
+    /// Renderer node ids of every item encoded into this fragment.
+    /// Backs [`VelloPainter::invalidate_subtrees_containing`]: a
+    /// paint-only patch batch drops exactly the entries whose id set
+    /// intersects the affected nodes instead of the whole cache.
+    item_ids: Vec<String>,
+    /// The first item's cumulative transform at encode time. The
+    /// splice-on-hit is a pure y-translate, which is only valid when
+    /// the CURRENT transform is that translate's conjugation of this
+    /// one — true for page scroll (everything shifts) and for
+    /// container scroll under translate-only ancestry, false the
+    /// moment a non-shifting ancestor (the scrolled container itself
+    /// included) carries `scale`/`rotate`, where content really moves
+    /// `s·dy`, not `dy`. The hit branch checks the conjugation and
+    /// misses (re-encodes) when it doesn't hold — self-validating,
+    /// instead of guessing from tree shape.
+    transform: crate::layout::Affine2,
 }
 
 pub struct VelloPainter {
@@ -125,15 +145,20 @@ pub struct VelloPainter {
     /// full source (previously the cap also had to absorb
     /// `(src, w, h, fit, radius)` duplicates which no longer exist).
     image_cache: indexmap::IndexMap<String, vello::peniko::ImageData>,
+    /// Preformatted once-per-second native metrics label. Feature-gated so
+    /// production painters retain no field, branch, or paint work.
+    #[cfg(feature = "dev-overlay")]
+    dev_overlay: Option<(String, f32)>,
 }
 
 const IMAGE_CACHE_CAP: usize = 128;
 /// Subtree-scene cache cap. Each entry holds one encoded Vello
 /// fragment per subtree — for a 30-post feed, that's ~30 entries; the
 /// cap leaves headroom for nav between routes (Search grid cells +
-/// Profile thumbnails + feed posts all keep their entries while LRU
-/// trims the least-recently-painted). FIFO `shift_remove_index(0)`
-/// eviction.
+/// Profile thumbnails + feed posts all keep their entries). FIFO
+/// `shift_remove_index(0)` eviction — not LRU, since nothing here
+/// re-inserts on a hit, which also makes insertion order the closest
+/// available proxy for recency.
 const SUBTREE_CACHE_CAP: usize = 256;
 
 impl VelloPainter {
@@ -146,6 +171,8 @@ impl VelloPainter {
             subtree_cache: indexmap::IndexMap::new(),
             last_viewport: None,
             last_image_load_gen: 0,
+            #[cfg(feature = "dev-overlay")]
+            dev_overlay: None,
             #[cfg(test)]
             subtree_cache_hits: 0,
             #[cfg(test)]
@@ -169,6 +196,24 @@ impl VelloPainter {
         }
     }
 
+    /// Scoped alternative to [`VelloPainter::invalidate_subtree_cache`]
+    /// for batches that only rewrote paint props (no structural patch,
+    /// no layout-affecting prop): drop exactly the cached fragments
+    /// that encoded one of the `affected` nodes and keep the rest.
+    /// The caller is responsible for the safety precondition — every
+    /// retained fragment's items must be geometrically identical after
+    /// the batch (see `paint_only_affected_ids` in `window.rs`), which
+    /// holds because paint-only props feed neither Taffy styles nor
+    /// item rects. `affected` must already include descendants of the
+    /// patched nodes (opacity / transforms inherit downward).
+    pub fn invalidate_subtrees_containing(&mut self, affected: &std::collections::HashSet<String>) {
+        if affected.is_empty() {
+            return;
+        }
+        self.subtree_cache
+            .retain(|_, entry| !entry.item_ids.iter().any(|id| affected.contains(id)));
+    }
+
     #[cfg(test)]
     pub(crate) fn subtree_cache_hits(&self) -> u64 {
         self.subtree_cache_hits
@@ -190,6 +235,20 @@ impl VelloPainter {
 
     pub fn interaction_mut(&mut self) -> &mut InteractionState {
         &mut self.interaction
+    }
+
+    #[cfg(feature = "dev-overlay")]
+    pub(crate) fn set_dev_overlay(&mut self, label: &str, top: f32) {
+        match self.dev_overlay.as_mut() {
+            Some((current, current_top)) => {
+                if current != label {
+                    current.clear();
+                    current.push_str(label);
+                }
+                *current_top = top;
+            }
+            None => self.dev_overlay = Some((label.into(), top)),
+        }
     }
 
     /// Reset and rebuild the scene from the given layout. Returns a
@@ -297,7 +356,49 @@ impl VelloPainter {
                 ),
             );
         }
+        #[cfg(feature = "dev-overlay")]
+        self.draw_dev_overlay(viewport, scale_factor);
         &self.scene
+    }
+
+    /// Paint after every Hypen item and scrollbar, making this a true native
+    /// overlay that cannot be reordered, clipped, or scrolled by app content.
+    #[cfg(feature = "dev-overlay")]
+    fn draw_dev_overlay(&mut self, viewport: (u32, u32), scale_factor: f32) {
+        let Some((label, top)) = self.dev_overlay.clone() else {
+            return;
+        };
+        let font_size = 11.0 * scale_factor;
+        let line_height = 14.0 * scale_factor;
+        let pad_x = 7.0 * scale_factor;
+        let pad_y = 3.0 * scale_factor;
+        let right = 8.0 * scale_factor;
+        let (text_w, _) =
+            self.text
+                .measure_weighted_line_height(&label, font_size, None, 600, line_height);
+        let rect = LayoutRect {
+            x: (viewport.0 as f32 - text_w - pad_x * 2.0 - right).max(0.0),
+            y: top * scale_factor,
+            w: text_w + pad_x * 2.0,
+            h: line_height + pad_y * 2.0,
+        };
+        fill_rect(
+            &mut self.scene,
+            rect,
+            Rgba(0x12, 0x14, 0x18, 0xe6),
+            6.0 * scale_factor,
+        );
+        self.text.draw_text_into_scene_line_height(
+            &mut self.scene,
+            &label,
+            rect.x + pad_x,
+            rect.y + pad_y,
+            font_size,
+            Rgba(0xf8, 0xfa, 0xfc, 0xff),
+            None,
+            600,
+            line_height,
+        );
     }
 
     /// Drop cached image tiles when memory pressure or a scene reset
@@ -319,12 +420,13 @@ impl VelloPainter {
     /// Paint a contiguous slice of items that share one `subtree_root`,
     /// going through the scene cache where possible.
     ///
-    /// **Cache key.** `(root_id, sorted ids of items with non-default
-    /// interaction state)`. Anything else that changes appearance
-    /// (props, layout) bumps `tree_generation`, which `App::redraw`
-    /// follows with `painter.invalidate_subtree_cache()`. So inside a
-    /// single tree generation, hover / press / focus transitions are
-    /// the only deltas the key needs to encode — the rest is implicit.
+    /// **Cache key.** `(root_id, item ids in order, per-item
+    /// interaction state)`. Membership is in the key because the cull
+    /// can emit a subtree partially (a card taller than the cull
+    /// buffer) — a fragment encoded from a partial slice must miss
+    /// once the culled descendants scroll back in. Anything else that
+    /// changes appearance (props, layout) bumps `tree_generation`,
+    /// which `App::redraw` follows with an invalidation.
     ///
     /// **Translation.** Cached fragments store the `rect.y` of their
     /// first item at encode time. On hit, `current_origin_y -
@@ -359,8 +461,53 @@ impl VelloPainter {
             return;
         }
 
+        // Vello applies Scene::append's transform to encoded path/glyph
+        // transforms, but replaying mixed image fragments has proven unsafe in
+        // the live renderer: bitmap and card geometry can separate during a
+        // retained scroll. Keep bitmap-bearing items on the direct path while
+        // still caching the vector/text runs around them. This preserves paint
+        // order (surface -> image -> labels) and avoids the old all-or-nothing
+        // fallback that re-encoded the entire card on every wheel frame.
+        let mut vector_start = 0;
+        for (index, item) in items.iter().enumerate() {
+            if !item_has_bitmap(item) {
+                continue;
+            }
+            if vector_start < index {
+                self.paint_cached_subtree_fragment(
+                    &items[vector_start..index],
+                    root_id,
+                    scale_factor,
+                );
+            }
+            let pushed = push_outer_clip(&mut self.scene, item.clip_to, item.clip_radius);
+            self.draw_item_no_outer_clip(item, scale_factor, item.clip_to, item.clip_radius);
+            if pushed {
+                self.scene.pop_layer();
+            }
+            vector_start = index + 1;
+        }
+        if vector_start < items.len() {
+            self.paint_cached_subtree_fragment(&items[vector_start..], root_id, scale_factor);
+        }
+    }
+
+    /// Cache/replay a bitmap-free contiguous run from one scroll subtree.
+    /// Membership is already part of the key, so multiple runs from the same
+    /// root cannot alias one another.
+    fn paint_cached_subtree_fragment(
+        &mut self,
+        items: &[crate::layout::LayoutItem],
+        root_id: &str,
+        scale_factor: f32,
+    ) {
+        if items.is_empty() {
+            return;
+        }
+
         let key = subtree_cache_key(root_id, items, &self.interaction);
         let outer_clip = items[0].clip_to;
+        let outer_clip_radius = items[0].clip_radius;
         let current_origin_y = items[0].rect.y;
 
         // Cache lookup. `self.subtree_cache` and `self.scene` are
@@ -372,11 +519,25 @@ impl VelloPainter {
         // and break the disjointness). We inline the push/append/
         // pop here instead.
         if let Some(cached) = self.subtree_cache.get(&key) {
-            if cached.clip_to == outer_clip {
-                let dy = current_origin_y - cached.origin_y;
+            let dy = current_origin_y - cached.origin_y;
+            // Splice validity: the y-translate replay is exact iff the
+            // first item's current cumulative transform is the cached
+            // one conjugated by that translate (see
+            // `CachedSubtree::transform`). Non-shifting transformed
+            // ancestry — a scaled scrolled container, a rotated
+            // wrapper — fails this and re-encodes instead of
+            // mispainting. Identity (the overwhelming case) passes
+            // trivially: conjugating identity is identity.
+            let splice_valid = items[0]
+                .transform
+                .approx_eq(&cached.transform.conjugate_translate(0.0, dy), 1e-3);
+            if cached.clip_to == outer_clip
+                && cached.clip_radius == outer_clip_radius
+                && splice_valid
+            {
                 // Split-borrow: `cached.scene` reads `self.subtree_cache`,
                 // `self.scene` is the disjoint mut target.
-                let pushed = push_outer_clip(&mut self.scene, outer_clip);
+                let pushed = push_outer_clip(&mut self.scene, outer_clip, outer_clip_radius);
                 self.scene
                     .append(&cached.scene, Some(Affine::translate((0.0, dy as f64))));
                 if pushed {
@@ -398,11 +559,14 @@ impl VelloPainter {
         // parameter — swap, draw, swap back.
         let prev_scene = std::mem::replace(&mut self.scene, Scene::new());
         for item in items {
-            self.draw_item_no_outer_clip(item, scale_factor, outer_clip);
+            self.draw_item_no_outer_clip(item, scale_factor, outer_clip, outer_clip_radius);
         }
         let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
 
-        if self.subtree_cache.len() >= SUBTREE_CACHE_CAP {
+        // A same-key miss (splice-invalid re-encode of an existing
+        // entry) replaces in place — evicting first would drop an
+        // innocent oldest entry and net `len = CAP − 1`.
+        if !self.subtree_cache.contains_key(&key) && self.subtree_cache.len() >= SUBTREE_CACHE_CAP {
             self.subtree_cache.shift_remove_index(0);
         }
         self.subtree_cache.insert(
@@ -411,12 +575,15 @@ impl VelloPainter {
                 scene: sub_scene,
                 origin_y: current_origin_y,
                 clip_to: outer_clip,
+                clip_radius: outer_clip_radius,
+                item_ids: items.iter().map(|it| it.node_id.clone()).collect(),
+                transform: items[0].transform,
             },
         );
         // Append the just-cached scene at identity translation. Same
         // disjoint-field split-borrow as the hit branch.
         let cached = &self.subtree_cache[&key];
-        let pushed = push_outer_clip(&mut self.scene, outer_clip);
+        let pushed = push_outer_clip(&mut self.scene, outer_clip, outer_clip_radius);
         self.scene.append(&cached.scene, None);
         if pushed {
             self.scene.pop_layer();
@@ -435,22 +602,44 @@ impl VelloPainter {
         item: &crate::layout::LayoutItem,
         scale_factor: f32,
         outer_clip: Option<LayoutRect>,
+        outer_clip_radius: f32,
     ) {
-        // Temporarily clear the per-item clip if it matches the outer
-        // clip we already pushed at the subtree level — `draw_item`
-        // would re-push it otherwise. For items whose clip_to differs
+        // Skip the per-item clip if it matches the outer clip we
+        // already pushed at the subtree level — `draw_item` would
+        // re-push it otherwise. For items whose clip_to differs
         // (rare; normally everything in a subtree shares the same
-        // scrollable ancestor), leave it alone.
-        if item.clip_to == outer_clip {
-            let mut item_no_clip = item.clone();
-            item_no_clip.clip_to = None;
-            self.draw_item(&item_no_clip, scale_factor);
+        // scrollable ancestor), leave it alone. The clip is threaded
+        // as a parameter so no per-item `LayoutItem` clone is needed.
+        if item.clip_to == outer_clip && item.clip_radius == outer_clip_radius {
+            self.draw_item_with(item, scale_factor, None, 0.0, item.transform);
         } else {
             self.draw_item(item, scale_factor);
         }
     }
 
     fn draw_item(&mut self, item: &crate::layout::LayoutItem, scale_factor: f32) {
+        self.draw_item_with(
+            item,
+            scale_factor,
+            item.clip_to,
+            item.clip_radius,
+            item.transform,
+        );
+    }
+
+    /// `draw_item` body with the outer clip and transform threaded as
+    /// parameters instead of read off the item. Lets the subtree-cache
+    /// encode path and the transform recursion suppress either without
+    /// cloning the whole `LayoutItem` (Strings, icon paths, variant
+    /// vecs) per drawn item per frame.
+    fn draw_item_with(
+        &mut self,
+        item: &crate::layout::LayoutItem,
+        scale_factor: f32,
+        clip_to: Option<LayoutRect>,
+        clip_radius: f32,
+        transform: crate::layout::Affine2,
+    ) {
         // Per-item transform (static `translateX` / `translateY` /
         // `scale` / `rotate` props and animator-driven writes alike —
         // one resolution path, composed in the layout transform
@@ -465,17 +654,19 @@ impl VelloPainter {
         // the ancestor's own (untransformed) space. Hit-testing reads
         // the same cumulative affine (`LayoutItem::hit_contains`), so
         // pixels and hit targets move identically by construction.
-        if !item.transform.is_identity() {
-            let outer_clip = item.clip_to;
-            let mut inner = item.clone();
-            inner.clip_to = None;
-            inner.transform = crate::layout::Affine2::IDENTITY;
+        if !transform.is_identity() {
             let prev_scene = std::mem::replace(&mut self.scene, Scene::new());
-            self.draw_item(&inner, scale_factor);
+            self.draw_item_with(
+                item,
+                scale_factor,
+                None,
+                0.0,
+                crate::layout::Affine2::IDENTITY,
+            );
             let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
-            let pushed = push_outer_clip(&mut self.scene, outer_clip);
+            let pushed = push_outer_clip(&mut self.scene, clip_to, clip_radius);
             self.scene
-                .append(&sub_scene, Some(affine2_to_kurbo(item.transform)));
+                .append(&sub_scene, Some(affine2_to_kurbo(transform)));
             if pushed {
                 self.scene.pop_layer();
             }
@@ -490,14 +681,9 @@ impl VelloPainter {
         // push/pop pair per clipped item; Vello composes nested
         // clips cleanly when the per-Text-truncate path below also
         // pushes its own.
-        let outer_clip_active = item.clip_to.is_some();
-        if let Some(clip) = item.clip_to {
-            let r = vello::kurbo::Rect::new(
-                clip.x as f64,
-                clip.y as f64,
-                (clip.x + clip.w) as f64,
-                (clip.y + clip.h) as f64,
-            );
+        let outer_clip_active = clip_to.is_some();
+        if let Some(clip) = clip_to {
+            let r = rounded_rect_path(clip, clip_radius);
             self.scene.push_layer(
                 vello::peniko::Fill::NonZero,
                 vello::peniko::BlendMode::default(),
@@ -569,7 +755,7 @@ impl VelloPainter {
         // buttons with an opaque fill get lightened/darkened, while transparent
         // ones (icon buttons like a toolbar's home/reload) get a subtle neutral
         // overlay so hover/press still read as something (restored from main).
-        if matches!(item.kind, ItemKind::Button) {
+        if matches!(item.kind, ItemKind::Button | ItemKind::Card) {
             const HOVER_FILL: Rgba = Rgba(100, 116, 139, 28);
             const PRESS_FILL: Rgba = Rgba(100, 116, 139, 48);
             let has_fill = background.is_some_and(|b| b.3 > 0);
@@ -594,16 +780,113 @@ impl VelloPainter {
         }
 
         let radius = item.border.radius * scale_factor;
+        if let Some(shadow_style) = item.shadow {
+            let spread = shadow_style.spread * scale_factor;
+            let shadow = KRect::new(
+                (item.rect.x + shadow_style.x * scale_factor - spread) as f64,
+                (item.rect.y + shadow_style.y * scale_factor - spread) as f64,
+                (item.rect.x + item.rect.w + shadow_style.x * scale_factor + spread) as f64,
+                (item.rect.y + item.rect.h + shadow_style.y * scale_factor + spread) as f64,
+            );
+            self.scene.draw_blurred_rounded_rect(
+                Affine::IDENTITY,
+                shadow,
+                color_to_peniko(shadow_style.color),
+                (radius + spread).max(0.0) as f64,
+                (shadow_style.blur * scale_factor) as f64,
+            );
+        } else if matches!(item.kind, ItemKind::Card) {
+            let shadow = KRect::new(
+                item.rect.x as f64,
+                (item.rect.y + 2.0 * scale_factor) as f64,
+                (item.rect.x + item.rect.w) as f64,
+                (item.rect.y + item.rect.h + 2.0 * scale_factor) as f64,
+            );
+            self.scene.draw_blurred_rounded_rect(
+                Affine::IDENTITY,
+                shadow,
+                Color::from_rgba8(0, 0, 0, 26),
+                radius as f64,
+                (2.0 * scale_factor) as f64,
+            );
+        }
         // CSS layer order for a `background` value: colour at the bottom,
         // then the image, then the gradient on top. The wallpaper is exactly
         // that stack — a darkening `linear-gradient(...)` over a photo.
-        if let Some(src) = item.background_image.as_deref() {
+        if let Some(pb) = item.background_layers.as_ref() {
+            // Fully layered stack (radial gradients, multi-layer
+            // `background` shorthand). The shorthand's own colour layer
+            // paints above the `backgroundColor` fill, below every
+            // image/gradient layer; the layers themselves are stored
+            // bottom-first, so painting in order stacks them like CSS.
+            if let Some(bg) = background {
+                fill_rect(&mut self.scene, item.rect, bg, radius);
+            }
+            if let Some(c) = pb.color {
+                fill_rect(&mut self.scene, item.rect, c, radius);
+            }
+            // A colour-only (or gradient-only) `background` shorthand
+            // must not swallow a separate `backgroundImage` url — that
+            // image painted via the legacy branch before the layered
+            // path existed. When the stack carries its own url layer,
+            // both reads saw the same shorthand and the stack wins.
+            let has_image_layer = pb
+                .layers
+                .iter()
+                .any(|l| matches!(l, crate::style::BackgroundLayer::Image(_)));
+            if !has_image_layer {
+                if let Some(src) = item.background_image.as_deref() {
+                    self.draw_image(
+                        item.rect,
+                        Some(src),
+                        crate::layout::ObjectFit::Cover,
+                        radius,
+                    );
+                }
+            }
+            for layer in &pb.layers {
+                match layer {
+                    crate::style::BackgroundLayer::Image(src) => {
+                        self.draw_image(
+                            item.rect,
+                            Some(src),
+                            crate::layout::ObjectFit::Cover,
+                            radius,
+                        );
+                    }
+                    crate::style::BackgroundLayer::Linear(grad) => {
+                        fill_gradient_rect(&mut self.scene, item.rect, grad, radius);
+                    }
+                    crate::style::BackgroundLayer::Radial(grad) => {
+                        fill_radial_gradient_rect(
+                            &mut self.scene,
+                            item.rect,
+                            grad,
+                            radius,
+                            scale_factor,
+                        );
+                    }
+                }
+            }
+            // A `.linearGradient()` applicator or Tailwind
+            // `bg-gradient-to-*` arrives in a DIFFERENT prop than the
+            // `background` shorthand that built this stack; it painted
+            // on top before the layered path existed, so it still must.
+            if let Some(grad) = item.background_gradient.as_ref() {
+                fill_gradient_rect(&mut self.scene, item.rect, grad, radius);
+            }
+        } else if let Some(src) = item.background_image.as_deref() {
             if let Some(bg) = background {
                 fill_rect(&mut self.scene, item.rect, bg, radius);
             }
             // `center / cover` is what the shorthand asks for and what
             // `ObjectFit::Cover` does: fill the box, crop the overflow.
-            self.draw_image(item.rect, Some(src), crate::layout::ObjectFit::Cover, radius);
+            self.draw_image(
+                item.rect,
+                Some(src),
+                crate::layout::ObjectFit::Cover,
+                radius,
+            );
             if let Some(grad) = item.background_gradient.as_ref() {
                 fill_gradient_rect(&mut self.scene, item.rect, grad, radius);
             }
@@ -631,23 +914,25 @@ impl VelloPainter {
                     item.border.sides,
                 );
             } else {
-                stroke_rect(
+                stroke_rect_styled(
                     &mut self.scene,
                     item.rect,
                     border_color,
                     radius,
                     item.border.width * scale_factor,
+                    item.border.style,
                 );
             }
         }
 
         match &item.kind {
-            ItemKind::Container | ItemKind::Button => {
+            ItemKind::Container | ItemKind::Button | ItemKind::Card => {
                 // Background + border already drawn above.
             }
             ItemKind::Text {
                 content,
                 font_size,
+                line_height,
                 color,
                 align,
                 max_lines,
@@ -660,7 +945,7 @@ impl VelloPainter {
                 // clip — Taffy already gave the rect enough height for
                 // every line, so glyph descenders don't overflow in
                 // practice and the extra layer just costs encoding.
-                let needs_clip = matches!(*max_lines, Some(1));
+                let needs_clip = max_lines.is_some();
                 if needs_clip {
                     let clip = vello::kurbo::Rect::new(
                         item.rect.x as f64,
@@ -680,6 +965,7 @@ impl VelloPainter {
                     item,
                     content,
                     *font_size * scale_factor,
+                    *line_height * scale_factor,
                     fg_override.unwrap_or(*color),
                     *align,
                     item.font_weight,
@@ -695,6 +981,7 @@ impl VelloPainter {
                 placeholder,
                 font_size,
                 color,
+                padding,
                 ..
             } => {
                 self.draw_input(
@@ -705,17 +992,361 @@ impl VelloPainter {
                     fg_override.unwrap_or(*color),
                     item.font_weight,
                     scale_factor,
+                    *padding,
+                );
+            }
+            ItemKind::Audio { controls } => {
+                if *controls {
+                    fill_rect(
+                        &mut self.scene,
+                        item.rect,
+                        Rgba(0xf3, 0xf4, 0xf6, 0xff),
+                        item.rect.h * 0.5,
+                    );
+                    let center_y = item.rect.y + item.rect.h * 0.5;
+                    let button_radius = (item.rect.h * 0.28).min(15.0 * scale_factor);
+                    let button_x = item.rect.x + 18.0 * scale_factor;
+                    let button = vello::kurbo::Circle::new(
+                        (button_x as f64, center_y as f64),
+                        button_radius as f64,
+                    );
+                    self.scene.fill(
+                        Fill::NonZero,
+                        Affine::IDENTITY,
+                        color_to_peniko(Rgba(0x47, 0x55, 0x69, 0xff)),
+                        None,
+                        &button,
+                    );
+                    let mut play = BezPath::new();
+                    play.move_to((button_x - 3.0 * scale_factor, center_y - 5.0 * scale_factor));
+                    play.line_to((button_x + 5.0 * scale_factor, center_y));
+                    play.line_to((button_x - 3.0 * scale_factor, center_y + 5.0 * scale_factor));
+                    play.close_path();
+                    self.scene
+                        .fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &play);
+
+                    let time_w = 68.0 * scale_factor;
+                    let track_x = item.rect.x + 42.0 * scale_factor;
+                    let track_w = (item.rect.w - 42.0 * scale_factor - time_w).max(0.0);
+                    fill_rect(
+                        &mut self.scene,
+                        LayoutRect {
+                            x: track_x,
+                            y: center_y - scale_factor,
+                            w: track_w,
+                            h: 2.0 * scale_factor,
+                        },
+                        Rgba(0xd1, 0xd5, 0xdb, 0xff),
+                        scale_factor,
+                    );
+                    self.text.draw_text_into_scene(
+                        &mut self.scene,
+                        "0:00 / 0:01",
+                        item.rect.x + item.rect.w - time_w + 4.0 * scale_factor,
+                        center_y - 7.0 * scale_factor,
+                        12.0 * scale_factor,
+                        Rgba(0x64, 0x74, 0x8b, 0xff),
+                        Some((time_w - 8.0 * scale_factor).max(0.0)),
+                        400,
+                    );
+                }
+            }
+            ItemKind::Checkbox { checked } => {
+                let blue = Rgba(0x3b, 0x82, 0xf6, 0xff);
+                fill_rect(
+                    &mut self.scene,
+                    item.rect,
+                    if *checked {
+                        blue
+                    } else {
+                        Rgba(0xff, 0xff, 0xff, 0xff)
+                    },
+                    3.0 * scale_factor,
+                );
+                stroke_rect(
+                    &mut self.scene,
+                    item.rect,
+                    if *checked {
+                        blue
+                    } else {
+                        Rgba(0x9c, 0xa3, 0xaf, 0xff)
+                    },
+                    3.0 * scale_factor,
+                    1.0 * scale_factor,
+                );
+                if *checked {
+                    let mut check = BezPath::new();
+                    check.move_to((
+                        item.rect.x + item.rect.w * 0.22,
+                        item.rect.y + item.rect.h * 0.52,
+                    ));
+                    check.line_to((
+                        item.rect.x + item.rect.w * 0.43,
+                        item.rect.y + item.rect.h * 0.72,
+                    ));
+                    check.line_to((
+                        item.rect.x + item.rect.w * 0.80,
+                        item.rect.y + item.rect.h * 0.28,
+                    ));
+                    self.scene.stroke(
+                        &Stroke::new((2.0 * scale_factor) as f64),
+                        Affine::IDENTITY,
+                        &Brush::Solid(Color::WHITE),
+                        None,
+                        &check,
+                    );
+                }
+            }
+            ItemKind::Switch { checked } => {
+                let track = if *checked {
+                    Rgba(0x22, 0xc5, 0x5e, 0xff)
+                } else {
+                    Rgba(0xd1, 0xd5, 0xdb, 0xff)
+                };
+                fill_rect(&mut self.scene, item.rect, track, item.rect.h * 0.5);
+                let knob_radius = item.rect.h * 0.38;
+                let knob_x = if *checked {
+                    item.rect.x + item.rect.w - item.rect.h * 0.5
+                } else {
+                    item.rect.x + item.rect.h * 0.5
+                };
+                let knob = vello::kurbo::Circle::new(
+                    (knob_x as f64, (item.rect.y + item.rect.h * 0.5) as f64),
+                    knob_radius as f64,
+                );
+                self.scene
+                    .fill(Fill::NonZero, Affine::IDENTITY, Color::WHITE, None, &knob);
+            }
+            ItemKind::Slider { fraction, disabled } => {
+                let track_h = 4.0 * scale_factor;
+                let track = LayoutRect {
+                    x: item.rect.x,
+                    y: item.rect.y + (item.rect.h - track_h) * 0.5,
+                    w: item.rect.w,
+                    h: track_h,
+                };
+                fill_rect(
+                    &mut self.scene,
+                    track,
+                    Rgba(0xe5, 0xe7, 0xeb, 0xff),
+                    track_h * 0.5,
+                );
+                let active = if *disabled {
+                    Rgba(0x93, 0xc5, 0xfd, 0xff)
+                } else {
+                    Rgba(0x3b, 0x82, 0xf6, 0xff)
+                };
+                fill_rect(
+                    &mut self.scene,
+                    LayoutRect {
+                        w: track.w * *fraction,
+                        ..track
+                    },
+                    active,
+                    track_h * 0.5,
+                );
+                let thumb = vello::kurbo::Circle::new(
+                    (
+                        (track.x + track.w * *fraction) as f64,
+                        (item.rect.y + item.rect.h * 0.5) as f64,
+                    ),
+                    (6.0 * scale_factor) as f64,
+                );
+                self.scene.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    color_to_peniko(active),
+                    None,
+                    &thumb,
+                );
+            }
+            ItemKind::ProgressBar { fraction } => {
+                fill_rect(
+                    &mut self.scene,
+                    item.rect,
+                    Rgba(0xe5, 0xe7, 0xeb, 0xff),
+                    item.rect.h * 0.5,
+                );
+                fill_rect(
+                    &mut self.scene,
+                    LayoutRect {
+                        w: item.rect.w * *fraction,
+                        ..item.rect
+                    },
+                    Rgba(0x21, 0x96, 0xf3, 0xff),
+                    item.rect.h * 0.5,
+                );
+            }
+            ItemKind::Spinner { color } => {
+                let circle = vello::kurbo::Circle::new(
+                    (
+                        (item.rect.x + item.rect.w * 0.5) as f64,
+                        (item.rect.y + item.rect.h * 0.5) as f64,
+                    ),
+                    (item.rect.w.min(item.rect.h) * 0.38) as f64,
+                );
+                self.scene.stroke(
+                    &Stroke::new((3.0 * scale_factor) as f64),
+                    Affine::IDENTITY,
+                    color_to_peniko(Rgba(color.0, color.1, color.2, 0x55)),
+                    None,
+                    &circle,
+                );
+                let marker = vello::kurbo::Circle::new(
+                    (
+                        (item.rect.x + item.rect.w * 0.5) as f64,
+                        (item.rect.y + item.rect.h * 0.12) as f64,
+                    ),
+                    (1.8 * scale_factor) as f64,
+                );
+                self.scene.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    color_to_peniko(*color),
+                    None,
+                    &marker,
+                );
+            }
+            ItemKind::Select { value, placeholder } => {
+                fill_rect(
+                    &mut self.scene,
+                    item.rect,
+                    Rgba(0xff, 0xff, 0xff, 0xff),
+                    4.0 * scale_factor,
+                );
+                stroke_rect(
+                    &mut self.scene,
+                    item.rect,
+                    Rgba(0x9c, 0xa3, 0xaf, 0xff),
+                    4.0 * scale_factor,
+                    scale_factor,
+                );
+                let label = if value.is_empty() { placeholder } else { value };
+                self.text.draw_text_into_scene(
+                    &mut self.scene,
+                    label,
+                    item.rect.x + 10.0 * scale_factor,
+                    item.rect.y + (item.rect.h - 16.0 * scale_factor) * 0.5,
+                    16.0 * scale_factor,
+                    Rgba(0x37, 0x41, 0x51, 0xff),
+                    Some((item.rect.w - 30.0 * scale_factor).max(0.0)),
+                    400,
+                );
+                let mut caret = BezPath::new();
+                caret.move_to((
+                    item.rect.x + item.rect.w - 16.0 * scale_factor,
+                    item.rect.y + item.rect.h * 0.42,
+                ));
+                caret.line_to((
+                    item.rect.x + item.rect.w - 10.0 * scale_factor,
+                    item.rect.y + item.rect.h * 0.42,
+                ));
+                caret.line_to((
+                    item.rect.x + item.rect.w - 13.0 * scale_factor,
+                    item.rect.y + item.rect.h * 0.58,
+                ));
+                caret.close_path();
+                self.scene.fill(
+                    Fill::NonZero,
+                    Affine::IDENTITY,
+                    color_to_peniko(Rgba(0x4b, 0x55, 0x63, 0xff)),
+                    None,
+                    &caret,
                 );
             }
             ItemKind::Image { src, fit } => {
                 self.draw_image(item.rect, src.as_deref(), *fit, radius);
+            }
+            ItemKind::Video {
+                poster,
+                state,
+                slots,
+                ..
+            } => {
+                // Video v2: a present slot REPLACES the built-in for its
+                // concern — `poster` suppresses the poster-prop bitmap,
+                // `controls` suppresses native chrome (the play glyph),
+                // `loading` / `error` replace the glyph in their state.
+                // The slot subtrees themselves are ordinary items
+                // emitted right after this one, so they composite on
+                // top of whatever is drawn here.
+                let glyph = slots.draws_builtin_glyph(*state);
+                // Feature `video`: a live decoded frame wins over the
+                // poster — objectFit contain, letterboxed on black per
+                // the contract, with the play affordance overlaid only
+                // while paused / ended.
+                #[cfg(feature = "video")]
+                let live_frame_drawn = {
+                    if let Some(frame) = crate::media::current_frame(&item.node_id) {
+                        fill_rect(
+                            &mut self.scene,
+                            item.rect,
+                            crate::paint::image::VIDEO_LETTERBOX_RGBA,
+                            radius,
+                        );
+                        self.draw_video_frame(item.rect, &frame, radius);
+                        if glyph && crate::media::is_paused(&item.node_id) {
+                            draw_play_glyph(&mut self.scene, item.rect, scale_factor);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                };
+                #[cfg(not(feature = "video"))]
+                let live_frame_drawn = false;
+                if !live_frame_drawn {
+                    // No inline decode (feature off) or no frame yet:
+                    // poster frame (cover) or dark placeholder, then
+                    // the play affordance on top.
+                    let poster_ready = !slots.poster
+                        && poster
+                            .as_deref()
+                            .map(|p| {
+                                crate::paint::image::ensure_loaded_public(p);
+                                crate::paint::image::loaded_source(p).is_some()
+                            })
+                            .unwrap_or(false);
+                    if poster_ready {
+                        self.draw_image(
+                            item.rect,
+                            poster.as_deref(),
+                            crate::layout::ObjectFit::Cover,
+                            radius,
+                        );
+                    } else {
+                        fill_rect(
+                            &mut self.scene,
+                            item.rect,
+                            crate::paint::image::VIDEO_PLACEHOLDER_RGBA,
+                            radius,
+                        );
+                    }
+                    if glyph {
+                        draw_play_glyph(&mut self.scene, item.rect, scale_factor);
+                    }
+                }
+            }
+            ItemKind::Scrubber { video_id, preview } => {
+                // Progress is read LIVE here (registry / drag preview),
+                // not baked into the item: playback advances the thumb
+                // through the frame-driven repaints the decoder already
+                // triggers, with no layout pass per frame.
+                let fraction = crate::video_v2::scrubber_fraction(video_id.as_deref(), *preview);
+                draw_scrubber(&mut self.scene, item.rect, fraction, scale_factor);
             }
             ItemKind::Icon {
                 paths,
                 view_box,
                 tint,
             } => {
-                draw_icon(&mut self.scene, item.rect, paths, *view_box, fg_override.or(*tint));
+                draw_icon(
+                    &mut self.scene,
+                    item.rect,
+                    paths,
+                    *view_box,
+                    fg_override.or(*tint),
+                );
             }
         }
 
@@ -742,6 +1373,7 @@ impl VelloPainter {
         item: &crate::layout::LayoutItem,
         content: &str,
         scaled_size: f32,
+        scaled_line_height: f32,
         color: Rgba,
         align: TextAlign,
         weight: u16,
@@ -765,23 +1397,69 @@ impl VelloPainter {
         } else {
             Some(content_w)
         };
-        let (line_w, _) = self
-            .text
-            .measure_weighted(content, scaled_size, wrap, weight);
+        let mut painted = content.to_string();
+        if let Some(limit) = max_lines {
+            let max_height = scaled_line_height * limit as f32;
+            let (original_width, original_height) = self.text.measure_weighted_line_height(
+                content,
+                scaled_size,
+                wrap,
+                weight,
+                scaled_line_height,
+            );
+            if original_height > max_height + 0.5 || (limit == 1 && original_width > content_w) {
+                let chars: Vec<char> = content.chars().collect();
+                let mut low = 0usize;
+                let mut high = chars.len();
+                while low < high {
+                    let mid = (low + high + 1) / 2;
+                    let candidate =
+                        format!("{}…", chars[..mid].iter().collect::<String>().trim_end());
+                    let (candidate_width, candidate_height) =
+                        self.text.measure_weighted_line_height(
+                            &candidate,
+                            scaled_size,
+                            if limit == 1 { None } else { Some(content_w) },
+                            weight,
+                            scaled_line_height,
+                        );
+                    if candidate_height <= max_height + 0.5
+                        && (limit != 1 || candidate_width <= content_w)
+                    {
+                        low = mid;
+                    } else {
+                        high = mid - 1;
+                    }
+                }
+                painted = format!("{}…", chars[..low].iter().collect::<String>().trim_end());
+            }
+        }
+        // Alignment needs the glyph run's intrinsic width. The wrapped
+        // measurement reports the full constraint width, which made center
+        // and end offsets resolve to zero even for a short single line.
+        let (intrinsic_w, _) = self.text.measure_weighted_line_height(
+            &painted,
+            scaled_size,
+            None,
+            weight,
+            scaled_line_height,
+        );
+        let line_w = intrinsic_w.min(content_w);
         let dx = match align {
             TextAlign::Start => 0.0,
             TextAlign::Center => ((content_w - line_w).max(0.0)) * 0.5,
             TextAlign::End => (content_w - line_w).max(0.0),
         };
-        self.text.draw_text_into_scene(
+        self.text.draw_text_into_scene_line_height(
             &mut self.scene,
-            content,
+            &painted,
             content_x + dx,
             content_y,
             scaled_size,
             color,
             wrap,
             weight,
+            scaled_line_height,
         );
     }
 
@@ -794,12 +1472,12 @@ impl VelloPainter {
         color: Rgba,
         weight: u16,
         scale_factor: f32,
+        padding: (f32, f32, f32, f32),
     ) {
-        let pad_x = 12.0 * scale_factor;
-        let pad_y = 8.0 * scale_factor;
-        let inner_w = (item.rect.w - 2.0 * pad_x).max(0.0);
-        let text_x = item.rect.x + pad_x;
-        let text_y = item.rect.y + pad_y;
+        let (pad_left, pad_top, pad_right, _) = padding;
+        let inner_w = (item.rect.w - pad_left - pad_right).max(0.0);
+        let text_x = item.rect.x + pad_left;
+        let text_y = item.rect.y + pad_top;
 
         // An Input is single-line: draw the value/placeholder with NO
         // wrap and clip overflow to the field. Previously this passed
@@ -961,10 +1639,14 @@ impl VelloPainter {
         if !self.image_cache.contains_key(src) {
             // Load source via the existing async cache (HTTP / local
             // file decode runs on the worker). Returns Arc<Pixmap>.
-            let pm = {
+            // Probe the decoded hot tier first: asking the source cache to
+            // "ensure" an already-decoded image needlessly acquires its
+            // mutex and, for test/preseeded sources, can even enqueue a fake
+            // load that invalidates the scene cache on completion.
+            let pm = crate::paint::image::loaded_source(src).or_else(|| {
                 crate::paint::image::ensure_loaded_public(src);
                 crate::paint::image::loaded_source(src)
-            };
+            });
             let Some(pm) = pm else {
                 return;
             };
@@ -998,8 +1680,57 @@ impl VelloPainter {
         let dy = rect.y as f64 + ((rect.h - img.height as f32 * sy) * 0.5) as f64;
         let transform = Affine::translate((dx, dy)).pre_scale_non_uniform(sx as f64, sy as f64);
 
+        // `object-fit: cover` intentionally scales the source past one axis
+        // of the destination. An HTML `<img>` still clips those pixels to its
+        // own content box; Desktop previously did so only when `radius > 0`,
+        // allowing a square-cornered/responsive Grid image to paint over the
+        // card text below after a wide-window resize.
+        let clip_shape = rounded_rect_path(rect, radius.max(0.0));
+        self.scene.push_layer(
+            vello::peniko::Fill::NonZero,
+            vello::peniko::BlendMode::default(),
+            1.0,
+            Affine::IDENTITY,
+            &clip_shape,
+        );
+        self.scene.draw_image(img, transform);
+        self.scene.pop_layer();
+    }
+
+    /// Feature `video`: composite the latest decoded RGBA playback
+    /// frame into `rect` with objectFit contain (the caller fills the
+    /// letterbox black first). A fresh `ImageData` per frame is fine
+    /// for v1 — the frame's bytes are shared via `Arc`, so the CPU
+    /// cost is a pointer bump and Vello uploads the texture per frame
+    /// either way.
+    #[cfg(feature = "video")]
+    fn draw_video_frame(
+        &mut self,
+        rect: LayoutRect,
+        frame: &crate::media::VideoFrame,
+        radius: f32,
+    ) {
+        use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+        if frame.width == 0 || frame.height == 0 || rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        let img = ImageData {
+            data: Blob::new(frame.data.clone()),
+            format: ImageFormat::Rgba8,
+            // Video frames are opaque, so the bytes are identical
+            // under both alpha interpretations; premultiplied matches
+            // the painter's other images.
+            alpha_type: ImageAlphaType::AlphaPremultiplied,
+            width: frame.width,
+            height: frame.height,
+        };
+        let sx = rect.w / frame.width as f32;
+        let sy = rect.h / frame.height as f32;
+        let s = sx.min(sy) as f64;
+        let dx = rect.x as f64 + (rect.w as f64 - frame.width as f64 * s) * 0.5;
+        let dy = rect.y as f64 + (rect.h as f64 - frame.height as f64 * s) * 0.5;
+        let transform = Affine::translate((dx, dy)).pre_scale(s);
         if radius > 0.0 {
-            // Clip to a rounded rect, draw the image, pop the clip.
             let clip_shape = rounded_rect_path(rect, radius);
             self.scene.push_layer(
                 vello::peniko::Fill::NonZero,
@@ -1008,10 +1739,10 @@ impl VelloPainter {
                 Affine::IDENTITY,
                 &clip_shape,
             );
-            self.scene.draw_image(img, transform);
+            self.scene.draw_image(&img, transform);
             self.scene.pop_layer();
         } else {
-            self.scene.draw_image(img, transform);
+            self.scene.draw_image(&img, transform);
         }
     }
 }
@@ -1078,6 +1809,83 @@ fn fill_gradient_rect(
     }
 }
 
+/// Paint a rounded (or square) rect filled with a radial gradient.
+/// The ending shape may be an ellipse (`radial-gradient(85% 60% at …)`),
+/// which Vello's circular `new_radial` can't express directly — so the
+/// gradient is built on a unit circle at the origin and stretched into
+/// place with a brush transform (translate to the centre, scale by the
+/// per-axis radii).
+fn fill_radial_gradient_rect(
+    scene: &mut Scene,
+    rect: LayoutRect,
+    grad: &crate::style::RadialGradient,
+    radius: f32,
+    scale: f32,
+) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || grad.stops.is_empty() {
+        return;
+    }
+    let cx = rect.x + grad.center.0 * rect.w;
+    let cy = rect.y + grad.center.1 * rect.h;
+    let (rx, ry) = grad.resolve_radii(rect.w, rect.h, scale);
+    if rx <= 0.0 || ry <= 0.0 {
+        // CSS's degenerate case (e.g. `closest-side` with the centre on
+        // a box edge): the ending shape is treated as vanishingly
+        // small, so every point sits past the last stop — a flat fill
+        // of the last stop's colour, not an invisible element.
+        if let Some(last) = grad.stops.last() {
+            fill_rect(scene, rect, last.color, radius);
+        }
+        return;
+    }
+    let mut gradient = vello::peniko::Gradient::new_radial(vello::kurbo::Point::new(0.0, 0.0), 1.0);
+    let stops = grad.resolved_offsets();
+    let color_stops: Vec<vello::peniko::ColorStop> = stops
+        .into_iter()
+        .map(|(off, c)| vello::peniko::ColorStop {
+            offset: off,
+            color: vello::peniko::color::DynamicColor::from_alpha_color(
+                vello::peniko::Color::from_rgba8(c.0, c.1, c.2, c.3),
+            ),
+        })
+        .collect();
+    gradient.stops = vello::peniko::ColorStops(color_stops.into());
+    let brush = Brush::Gradient(gradient);
+    let brush_transform =
+        Affine::translate((cx as f64, cy as f64)) * Affine::scale_non_uniform(rx as f64, ry as f64);
+    if radius > 0.0 {
+        let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
+        let kr = RoundedRect::new(
+            rect.x as f64,
+            rect.y as f64,
+            (rect.x + rect.w) as f64,
+            (rect.y + rect.h) as f64,
+            r as f64,
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &brush,
+            Some(brush_transform),
+            &kr,
+        );
+    } else {
+        let kr = KRect::new(
+            rect.x as f64,
+            rect.y as f64,
+            (rect.x + rect.w) as f64,
+            (rect.y + rect.h) as f64,
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &brush,
+            Some(brush_transform),
+            &kr,
+        );
+    }
+}
+
 fn fill_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32) {
     if rect.w <= 0.0 || rect.h <= 0.0 || color.3 == 0 {
         return;
@@ -1105,11 +1913,31 @@ fn fill_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32) {
 }
 
 fn stroke_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32, width: f32) {
+    stroke_rect_styled(scene, rect, color, radius, width, BorderLineStyle::Solid);
+}
+
+fn stroke_rect_styled(
+    scene: &mut Scene,
+    rect: LayoutRect,
+    color: Rgba,
+    radius: f32,
+    width: f32,
+    line_style: BorderLineStyle,
+) {
     if width <= 0.0 || color.3 == 0 {
         return;
     }
     let brush = Brush::Solid(color_to_peniko(color));
-    let stroke = Stroke::new(width as f64);
+    let width64 = width as f64;
+    let stroke = match line_style {
+        BorderLineStyle::Solid => Stroke::new(width64),
+        BorderLineStyle::Dashed => {
+            Stroke::new(width64).with_dashes(0.0, [width64 * 3.0, width64 * 2.0])
+        }
+        BorderLineStyle::Dotted => Stroke::new(width64)
+            .with_caps(Cap::Round)
+            .with_dashes(0.0, [width64 * 0.1, width64 * 2.0]),
+    };
     if radius > 0.0 {
         let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
         let kr = RoundedRect::new(
@@ -1329,12 +2157,17 @@ fn subtree_cache_key(
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     root_id.hash(&mut h);
-    // Include only ids whose interaction state diverges from the
-    // default (no hover, no press, not focused). Idle scrolling
-    // through a feed of identical-default Posts thus produces the
-    // same key for every frame — maximum cache reuse.
+    // Membership matters, not just the root: `emit_items` culls per
+    // NODE, so a subtree whose root is on screen can be emitted with
+    // some of its own descendants culled (a card taller than the cull
+    // buffer). A fragment encoded from that partial slice must MISS
+    // once the missing descendants scroll back in — without the ids in
+    // the key it replayed the truncated encoding forever and the
+    // returning descendants never painted.
+    items.len().hash(&mut h);
     for item in items {
         let id = item.node_id.as_str();
+        id.hash(&mut h);
         let mut state: u8 = 0;
         if interaction.hovered.contains(id) {
             state |= 0b001;
@@ -1345,25 +2178,28 @@ fn subtree_cache_key(
         if interaction.focused.as_deref() == Some(id) {
             state |= 0b100;
         }
-        if state != 0 {
-            id.hash(&mut h);
-            state.hash(&mut h);
-        }
+        state.hash(&mut h);
     }
     h.finish()
+}
+
+fn item_has_bitmap(item: &crate::layout::LayoutItem) -> bool {
+    matches!(item.kind, ItemKind::Image { .. })
+        || item.background_image.is_some()
+        || item.background_layers.as_ref().is_some_and(|layers| {
+            layers
+                .layers
+                .iter()
+                .any(|layer| matches!(layer, crate::style::BackgroundLayer::Image(_)))
+        })
 }
 
 /// Push an outer-clip layer (the scrollable ancestor's rect) onto
 /// `scene`. Returns `true` if a layer was pushed and the caller must
 /// `pop_layer()` to balance. `Option::None` → no clip → no-op.
-fn push_outer_clip(scene: &mut Scene, outer_clip: Option<LayoutRect>) -> bool {
+fn push_outer_clip(scene: &mut Scene, outer_clip: Option<LayoutRect>, clip_radius: f32) -> bool {
     let Some(clip) = outer_clip else { return false };
-    let r = vello::kurbo::Rect::new(
-        clip.x as f64,
-        clip.y as f64,
-        (clip.x + clip.w) as f64,
-        (clip.y + clip.h) as f64,
-    );
+    let r = rounded_rect_path(clip, clip_radius);
     scene.push_layer(
         vello::peniko::Fill::NonZero,
         vello::peniko::BlendMode::default(),
@@ -1372,6 +2208,97 @@ fn push_outer_clip(scene: &mut Scene, outer_clip: Option<LayoutRect>) -> bool {
         &r,
     );
     true
+}
+
+/// Video v2 `Scrubber`: track + elapsed progress + thumb. Geometry is
+/// shared with the CPU painter via
+/// [`crate::paint::image::scrubber_geometry`], which is also what the
+/// window's pointer→fraction mapping is written against.
+fn draw_scrubber(scene: &mut Scene, rect: LayoutRect, fraction: f32, scale: f32) {
+    let Some(g) = crate::paint::image::scrubber_geometry(rect, fraction, scale) else {
+        return;
+    };
+    fill_rect(
+        scene,
+        g.track,
+        crate::paint::image::SCRUBBER_TRACK_RGBA,
+        g.radius,
+    );
+    if g.progress.w > 0.0 {
+        fill_rect(
+            scene,
+            g.progress,
+            crate::paint::image::SCRUBBER_PROGRESS_RGBA,
+            g.radius,
+        );
+    }
+    let thumb = vello::kurbo::Circle::new((g.thumb_cx as f64, g.thumb_cy as f64), g.thumb_r as f64);
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(color_to_peniko(crate::paint::image::SCRUBBER_THUMB_RGBA)),
+        None,
+        &thumb,
+    );
+}
+
+/// Centered play affordance for a Video surface: translucent scrim
+/// circle + white rounded triangle. Geometry is shared with the CPU
+/// painter via [`crate::paint::image::play_glyph_geometry`] so both
+/// backends draw the identical glyph.
+fn draw_play_glyph(scene: &mut Scene, rect: LayoutRect, scale: f32) {
+    let Some(glyph) = crate::paint::image::play_glyph_geometry(rect, scale) else {
+        return;
+    };
+    let circle = vello::kurbo::Circle::new((glyph.cx as f64, glyph.cy as f64), glyph.radius as f64);
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(color_to_peniko(crate::paint::image::PLAY_GLYPH_CIRCLE_RGBA)),
+        None,
+        &circle,
+    );
+    // Rounded triangle: each corner replaced by a quad through the
+    // vertex, mirroring `image::rounded_polygon_path`.
+    let pts = glyph.triangle;
+    let corner = glyph.corner;
+    let towards = |from: (f32, f32), to: (f32, f32)| -> (f64, f64) {
+        let dx = to.0 - from.0;
+        let dy = to.1 - from.1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= f32::EPSILON {
+            return (from.0 as f64, from.1 as f64);
+        }
+        let d = corner.min(len * 0.5);
+        (
+            (from.0 + dx / len * d) as f64,
+            (from.1 + dy / len * d) as f64,
+        )
+    };
+    let mut path = BezPath::new();
+    for i in 0..3 {
+        let p = pts[i];
+        let prev = pts[(i + 2) % 3];
+        let next = pts[(i + 1) % 3];
+        let a = towards(p, prev);
+        let b = towards(p, next);
+        if i == 0 {
+            path.move_to(a);
+        } else {
+            path.line_to(a);
+        }
+        path.quad_to((p.0 as f64, p.1 as f64), b);
+    }
+    path.close_path();
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(color_to_peniko(
+            crate::paint::image::PLAY_GLYPH_TRIANGLE_RGBA,
+        )),
+        None,
+        &path,
+    );
 }
 
 fn rounded_rect_path(rect: LayoutRect, radius: f32) -> RoundedRect {
@@ -1610,14 +2537,18 @@ mod tests {
             action_payload: None,
             hover_action: None,
             hover_payload: None,
+            video_intent: None,
             background: Some(Rgba(0xff, 0, 0, 0xff)),
             hover: crate::layout::HoverStyle::default(),
+            shadow: None,
             border: Border::default(),
             scrollable: None,
             font_weight: 400,
             clip_to: None,
+            clip_radius: 0.0,
             subtree_root: None,
             background_gradient: None,
+            background_layers: None,
             background_image: None,
             state_variants: crate::style::StateVariants::default(),
             opacity: 1.0,
@@ -1648,6 +2579,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         // Build is the side effect we're testing — just verify it
         // doesn't panic and produces a non-empty scene for visible
@@ -1655,6 +2587,115 @@ mod tests {
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         // A non-empty scene encodes at least one fill command.
         assert!(scene.encoding().path_tags.len() > 0);
+    }
+
+    #[cfg(feature = "dev-overlay")]
+    #[test]
+    fn development_metrics_paint_after_the_app_scene() {
+        let layout = LayoutPass {
+            items: vec![item("content", 20.0, 20.0, 80.0, 40.0)],
+            content_size: (120.0, 80.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+        let mut plain = VelloPainter::new();
+        let plain_paths = plain
+            .build_scene(&layout, (400, 200), 1.0, 0.0)
+            .encoding()
+            .n_paths;
+
+        let mut with_hud = VelloPainter::new();
+        with_hud.set_dev_overlay("RAM 192 MB  CPU 8.0%  FRAME 8.3 ms  120 FPS", 6.0);
+        let hud_paths = with_hud
+            .build_scene(&layout, (400, 200), 1.0, 0.0)
+            .encoding()
+            .n_paths;
+
+        assert!(
+            hud_paths > plain_paths,
+            "the native HUD must append its surface and glyph paths after app content"
+        );
+    }
+
+    #[test]
+    fn card_encodes_a_shadow_behind_its_surface() {
+        let encoded_paths = |kind| {
+            let mut painter = VelloPainter::new();
+            let mut surface = item("surface", 20.0, 20.0, 120.0, 60.0);
+            surface.kind = kind;
+            surface.border.radius = 8.0;
+            let layout = LayoutPass {
+                items: vec![surface],
+                content_size: (160.0, 100.0),
+                by_node_id: std::collections::HashMap::new(),
+                actionable_ids: vec![],
+                focusable_ids: vec![],
+                scrollable_ids: vec![],
+                hoverable_ids: vec![],
+                a11y: std::collections::HashMap::new(),
+                a11y_hash: 0,
+            };
+            painter
+                .build_scene(&layout, (160, 100), 1.0, 0.0)
+                .encoding()
+                .n_paths
+        };
+
+        let plain = encoded_paths(ItemKind::Container);
+        let card = encoded_paths(ItemKind::Card);
+        assert!(card > plain, "Card should add a blurred shadow path");
+    }
+
+    #[test]
+    fn arbitrary_angle_gradient_encodes_full_rect_axis_and_all_stops() {
+        let mut scene = Scene::new();
+        let rect = LayoutRect {
+            x: 10.0,
+            y: 20.0,
+            w: 200.0,
+            h: 100.0,
+        };
+        let gradient = crate::style::LinearGradient {
+            direction: crate::style::GradientDirection::Angle(45.0),
+            stops: vec![
+                crate::style::GradientStop {
+                    color: Rgba(0xff, 0, 0, 0xff),
+                    offset: Some(0.0),
+                },
+                crate::style::GradientStop {
+                    color: Rgba(0, 0xff, 0, 0xff),
+                    offset: Some(0.5),
+                },
+                crate::style::GradientStop {
+                    color: Rgba(0, 0, 0xff, 0xff),
+                    offset: Some(1.0),
+                },
+            ],
+        };
+
+        fill_gradient_rect(&mut scene, rect, &gradient, 8.0);
+        let encoding = scene.encoding();
+        assert_eq!(encoding.n_paths, 1, "gradient should fill one rounded rect");
+        assert_eq!(encoding.resources.color_stops.len(), 3);
+        assert_eq!(encoding.draw_data.len(), 5);
+
+        let decoded: Vec<f32> = encoding.draw_data[1..]
+            .iter()
+            .copied()
+            .map(f32::from_bits)
+            .collect();
+        let ((sx, sy), (ex, ey)) = gradient.direction.axis(rect.x, rect.y, rect.w, rect.h);
+        for (actual, expected) in decoded.into_iter().zip([sx, sy, ex, ey]) {
+            assert!(
+                (actual - expected).abs() < 1e-4,
+                "encoded gradient coordinate {actual} != expected {expected}",
+            );
+        }
     }
 
     /// Layout helper for subtree-cache tests: one scrollable parent
@@ -1682,6 +2723,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         }
     }
 
@@ -1698,6 +2740,22 @@ mod tests {
         painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(painter.subtree_cache_misses(), 3);
         assert_eq!(painter.subtree_cache_hits(), 3);
+    }
+
+    #[test]
+    fn subtree_cache_reencodes_when_rounded_clip_changes() {
+        let mut painter = VelloPainter::new();
+        let mut layout = three_post_layout();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 3);
+
+        for item in &mut layout.items {
+            item.clip_radius = 16.0;
+        }
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+
+        assert_eq!(painter.subtree_cache_hits(), 0);
+        assert_eq!(painter.subtree_cache_misses(), 6);
     }
 
     #[test]
@@ -1732,6 +2790,272 @@ mod tests {
     }
 
     #[test]
+    fn invalidate_subtrees_containing_drops_only_affected_entries() {
+        let mut painter = VelloPainter::new();
+        let layout = three_post_layout();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // Affect post_b only: its entry drops, the other two stay and
+        // hit on the next build while post_b takes a fresh miss.
+        let mut affected = std::collections::HashSet::new();
+        affected.insert("post_b".to_string());
+        painter.invalidate_subtrees_containing(&affected);
+        assert_eq!(painter.subtree_cache_len(), 2);
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_hits(), 2);
+        assert_eq!(painter.subtree_cache_misses(), 4);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // Empty affected set is a no-op.
+        painter.invalidate_subtrees_containing(&std::collections::HashSet::new());
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // An id unknown to every entry drops nothing.
+        let mut unknown = std::collections::HashSet::new();
+        unknown.insert("ghost".to_string());
+        painter.invalidate_subtrees_containing(&unknown);
+        assert_eq!(painter.subtree_cache_len(), 3);
+    }
+
+    #[test]
+    fn subtree_cache_misses_when_membership_changes() {
+        // Regression for the partial-subtree replay bug: `emit_items`
+        // culls per node, so a subtree can be emitted with some of its
+        // descendants culled (a card taller than the cull buffer). A
+        // fragment encoded from that partial slice must MISS — not
+        // replay translated — once the missing descendants scroll back
+        // in, or they never paint again while the cache survives.
+        let mut painter = VelloPainter::new();
+        let clip = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 600.0,
+        };
+        let with_clip = |mut it: LayoutItem| {
+            it.clip_to = Some(clip);
+            it
+        };
+        let root = with_clip(item_in("post", "post", 0.0, 0.0, 400.0, 800.0));
+        let top = with_clip(item_in("post_top", "post", 0.0, 0.0, 400.0, 600.0));
+        let bot = with_clip(item_in("post_bot", "post", 0.0, 600.0, 400.0, 100.0));
+        let pass_for = |items: Vec<LayoutItem>| LayoutPass {
+            items,
+            content_size: (400.0, 800.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+
+        // Frame 1: the subtree is emitted partially (bot culled).
+        let partial = pass_for(vec![root.clone(), top.clone()]);
+        painter.build_scene(&partial, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 1);
+        // Same membership again: cache hit, as before.
+        painter.build_scene(&partial, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_hits(), 1);
+
+        // Frame 3: the culled descendant is back — membership changed,
+        // so the truncated fragment must NOT replay.
+        let full = pass_for(vec![root, top, bot]);
+        painter.build_scene(&full, (800, 600), 1.0, 0.0);
+        assert_eq!(
+            painter.subtree_cache_hits(),
+            1,
+            "partial fragment must not be replayed for the full subtree"
+        );
+        assert_eq!(painter.subtree_cache_misses(), 2);
+    }
+
+    /// Splice validity (adversarial-review finding): replaying a
+    /// cached fragment with a raw y-translate is only correct when the
+    /// item's cumulative transform is that translate's conjugation of
+    /// the encode-time one. Container scroll under a scaled container
+    /// violates that — content really moves `s·dy` — so the hit
+    /// branch must MISS and re-encode, not mispaint.
+    #[test]
+    fn subtree_cache_misses_when_shift_is_not_a_transform_conjugation() {
+        let clip = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 600.0,
+        };
+        // A fragment whose item carries a scale whose ORIGIN does not
+        // move with the item (a scaled scrolled container above it):
+        // simulate by keeping the transform fixed while the rect
+        // shifts — exactly what `shift_container_scroll`'s exact
+        // recompute produces when the scale lives on the (unmoving)
+        // container.
+        let fixed_scale = crate::layout::Affine2([1.5, 0.0, 0.0, 1.5, -40.0, -40.0]);
+        let mut a = item_in("row", "row", 0.0, 200.0, 400.0, 100.0);
+        a.clip_to = Some(clip);
+        a.transform = fixed_scale;
+        let pass_for = |it: LayoutItem| LayoutPass {
+            items: vec![it],
+            content_size: (400.0, 1000.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+        let mut painter = VelloPainter::new();
+        painter.build_scene(&pass_for(a.clone()), (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 1);
+
+        // Rect shifted by container scroll; transform UNCHANGED (its
+        // origin didn't move). The y-translate splice would paint the
+        // row 100px off (correct motion is 150px under scale 1.5) —
+        // the conjugation check must reject the hit.
+        let mut shifted = a.clone();
+        shifted.rect.y -= 100.0;
+        painter.build_scene(&pass_for(shifted), (800, 600), 1.0, 0.0);
+        assert_eq!(
+            painter.subtree_cache_hits(),
+            0,
+            "non-conjugate shift must not replay the cached fragment"
+        );
+        assert_eq!(painter.subtree_cache_misses(), 2);
+
+        // Positive control — the page-scroll analogue: rect shifted
+        // AND transform conjugated by the same translate (everything
+        // moved together). That splice is exact and must HIT.
+        let mut b = item_in("row2", "row2", 0.0, 200.0, 400.0, 100.0);
+        b.clip_to = Some(clip);
+        b.transform = fixed_scale;
+        let mut painter2 = VelloPainter::new();
+        painter2.build_scene(&pass_for(b.clone()), (800, 600), 1.0, 0.0);
+        let mut b_shifted = b.clone();
+        b_shifted.rect.y -= 100.0;
+        b_shifted.transform = b.transform.conjugate_translate(0.0, -100.0);
+        painter2.build_scene(&pass_for(b_shifted), (800, 600), 1.0, 0.0);
+        assert_eq!(
+            painter2.subtree_cache_hits(),
+            1,
+            "a true conjugate shift keeps the fast splice"
+        );
+    }
+
+    #[test]
+    fn scrolled_image_subtree_draws_bitmap_directly_at_its_current_rect() {
+        use std::sync::Arc;
+
+        let src = "test://scrolled-food-card";
+        let mut pixels = tiny_skia::Pixmap::new(10, 10).expect("image fixture");
+        pixels.fill(tiny_skia::Color::from_rgba8(0xff, 0x80, 0x00, 0xff));
+        crate::paint::image::test_seed_decoded(src, Arc::new(pixels));
+
+        let mut image = item_in("photo", "card", 0.0, 200.0, 10.0, 10.0);
+        image.kind = ItemKind::Image {
+            src: Some(src.to_string()),
+            fit: crate::layout::ObjectFit::Fill,
+        };
+        let pass_for = |item: LayoutItem| LayoutPass {
+            items: vec![item],
+            content_size: (300.0, 800.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+
+        let mut painter = VelloPainter::new();
+        let first_at_original_y = painter
+            .build_scene(&pass_for(image.clone()), (800, 600), 1.0, 0.0)
+            .encoding()
+            .transforms
+            .iter()
+            .any(|transform| (transform.translation[1] - 200.0).abs() < 0.01);
+        assert!(first_at_original_y);
+
+        image.rect.y -= 100.0;
+        let shifted_scene = painter
+            .build_scene(&pass_for(image), (800, 600), 1.0, 0.0)
+            .encoding();
+        let shifted_to_new_y = shifted_scene
+            .transforms
+            .iter()
+            .any(|transform| (transform.translation[1] - 100.0).abs() < 0.01);
+
+        assert_eq!(painter.subtree_cache_hits(), 0);
+        assert_eq!(painter.subtree_cache_misses(), 0);
+        assert_eq!(painter.subtree_cache_len(), 0);
+        assert!(
+            shifted_to_new_y,
+            "the bitmap must be encoded directly at the scrolled card rect"
+        );
+    }
+
+    #[test]
+    fn mixed_image_card_caches_vector_runs_without_caching_the_bitmap() {
+        use std::sync::Arc;
+
+        let src = "test://mixed-food-card";
+        let mut pixels = tiny_skia::Pixmap::new(10, 10).expect("image fixture");
+        pixels.fill(tiny_skia::Color::from_rgba8(0xff, 0x80, 0x00, 0xff));
+        crate::paint::image::test_seed_decoded(src, Arc::new(pixels));
+
+        let make_pass = |offset: f32| {
+            let mut surface = item_in("card", "card", 0.0, 100.0 - offset, 200.0, 180.0);
+            surface.clip_to = Some(LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                w: 300.0,
+                h: 400.0,
+            });
+            let mut image = item_in("photo", "card", 0.0, 100.0 - offset, 200.0, 100.0);
+            image.kind = ItemKind::Image {
+                src: Some(src.to_string()),
+                fit: crate::layout::ObjectFit::Fill,
+            };
+            image.clip_to = surface.clip_to;
+            let mut caption = item_in("caption", "card", 8.0, 208.0 - offset, 120.0, 20.0);
+            caption.clip_to = surface.clip_to;
+            LayoutPass {
+                items: vec![surface, image, caption],
+                content_size: (300.0, 800.0),
+                by_node_id: std::collections::HashMap::new(),
+                actionable_ids: vec![],
+                focusable_ids: vec![],
+                scrollable_ids: vec![],
+                hoverable_ids: vec![],
+                a11y: std::collections::HashMap::new(),
+                a11y_hash: 0,
+            }
+        };
+
+        let mut painter = VelloPainter::new();
+        painter.build_scene(&make_pass(0.0), (300, 400), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 2);
+        assert_eq!(painter.subtree_cache_hits(), 0);
+
+        let shifted_has_bitmap_transform = painter
+            .build_scene(&make_pass(40.0), (300, 400), 1.0, 0.0)
+            .encoding()
+            .transforms
+            .iter()
+            .any(|transform| (transform.translation[1] - 60.0).abs() < 0.01);
+
+        assert_eq!(painter.subtree_cache_hits(), 2);
+        assert_eq!(painter.subtree_cache_misses(), 2);
+        assert!(
+            shifted_has_bitmap_transform,
+            "the image stays direct while the surrounding vector runs hit cache"
+        );
+    }
+
+    #[test]
     fn subtree_cache_clears_on_viewport_change() {
         let mut painter = VelloPainter::new();
         let layout = three_post_layout();
@@ -1759,10 +3083,15 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(scene.encoding().path_tags.len(), 0);
-        let _ = ScrollMeta { content_h: 0.0 }; // keep symbol referenced
+        let _ = ScrollMeta {
+            content_h: 0.0,
+            baked_offset: 0.0,
+            emitted_offset: 0.0,
+        }; // keep symbol referenced
     }
 
     #[test]
@@ -1799,6 +3128,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 200.0);
         // At least one path encoded (the on-screen item) — and the
@@ -1900,6 +3230,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert!(!scene.encoding().path_tags.is_empty(), "content encoded");
@@ -1935,6 +3266,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         // cos 90° = 0, sin 90° = 1 → matrix [0, 1, -1, 0].
@@ -1969,8 +3301,12 @@ mod tests {
                 scrollable_ids: vec![],
                 hoverable_ids: vec![],
                 a11y: std::collections::HashMap::new(),
+                a11y_hash: 0,
             };
-            painter.build_scene(&layout, (800, 600), 1.0, 0.0).encoding().n_paths
+            painter
+                .build_scene(&layout, (800, 600), 1.0, 0.0)
+                .encoding()
+                .n_paths
         };
         let plain = count_paths(Affine2::IDENTITY);
         let moved = count_paths(Affine2::translate(30.0, 30.0));
@@ -1992,6 +3328,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert!(
@@ -2052,5 +3389,11 @@ mod tests {
              got {} entries (cache key is leaking rect size again)",
             painter.image_cache_len(),
         );
+        assert_eq!(
+            painter.scene.encoding().n_clips,
+            4,
+            "each Image draw must encode a balanced clip pair, including radius=0",
+        );
+        assert_eq!(painter.scene.encoding().n_open_clips, 0);
     }
 }

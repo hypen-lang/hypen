@@ -15,12 +15,30 @@
  */
 import { useEffect, useRef, useState } from "react";
 import { Engine } from "@hypen-space/web-engine";
+import { localWasmInitOptions } from "@/lib/wasm-urls";
 import { app, HypenModuleInstance } from "@hypen-space/core";
 import { DOMRenderer } from "@hypen-space/web/dom";
 import { CanvasRenderer } from "@hypen-space/web/canvas";
 import { RemoteEngine } from "@hypen-space/core/remote/client";
 
 type RendererKind = "dom" | "canvas";
+
+/**
+ * Transpile a `.ts` module through the studio server's Bun.Transpiler
+ * (`/api/transpile`) — no CDN-hosted typescript needed in the browser.
+ */
+async function transpileTs(code: string): Promise<string> {
+  const res = await fetch("/api/transpile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    throw new Error(`Transpile failed: ${data.error ?? res.status}`);
+  }
+  return data.code as string;
+}
 
 function stripImports(source: string): string {
   return source.replace(/import\s+(?:\{[^}]+\}|\w+)\s+from\s+["'][^"']+["']\s*/g, "").trim();
@@ -112,9 +130,10 @@ export function PreviewFrame() {
       dispatchAction: (name: string, payload?: unknown) => remote.dispatchAction(name, payload),
     } as any; // DOMRenderer / CanvasRenderer only need dispatchAction from the engine
 
-    const rendererInstance: any = rendererKind === "canvas"
+    const makeRenderer = (): any => rendererKind === "canvas"
       ? new CanvasRenderer(target as HTMLCanvasElement, adapter)
       : new DOMRenderer(target as HTMLDivElement, adapter);
+    let rendererInstance: any = makeRenderer();
 
     remote
       .onPatches((patches) => {
@@ -127,6 +146,11 @@ export function PreviewFrame() {
       })
       .onSessionEstablished(() => {
         remote.subscribeState();
+        // Each (re)established session streams a full initial tree —
+        // reset the renderer so a hot-reload reconnect doesn't append a
+        // duplicate tree under the old one.
+        if (target instanceof HTMLDivElement) target.innerHTML = "";
+        rendererInstance = makeRenderer();
         // Clear any error left over from a previous failed connect attempt —
         // otherwise the overlay sticks after a successful reconnect.
         setError(null);
@@ -168,7 +192,8 @@ export function PreviewFrame() {
         const moduleContent = await fetchFile(modulePath);
 
         engine = new Engine();
-        await engine.init();
+        // Prefer the studio-served project WASM over the CDN default.
+        await engine.init((await localWasmInitOptions()) ?? {});
         if (disposed) return;
 
         const target = mountTarget(hostRef.current!, rendererKind);
@@ -183,10 +208,7 @@ export function PreviewFrame() {
         });
 
         if (moduleContent) {
-          const ts = await import("https://esm.sh/typescript@5.3.3");
-          const jsCode = ts.transpileModule(moduleContent, {
-            compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
-          }).outputText;
+          const jsCode = await transpileTs(moduleContent);
           const moduleCode = jsCode
             .replace(/import\s+.*?from\s+['"].*?['"];?\s*/g, "")
             .replace(/export default/, "return");

@@ -61,11 +61,11 @@ Column {
     }
     .tw("px-4 pt-2 pb-2 items-center")
 
-    Column {
-        ForEach(items: @state.restaurants, key: "id") {
-            RestaurantCard()
-        }
+    Grid(@state.restaurants, key: "id") {
+        RestaurantCard()
     }
+    .gridColumns({default: 1, sm: 2, md: 3, lg: 4, xl: 5})
+    .gap(18)
     .tw("px-4 pb-4 w-full")
 }
 .scrollable(true)

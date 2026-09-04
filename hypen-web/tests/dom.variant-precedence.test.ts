@@ -214,6 +214,46 @@ describe("arrival order does not matter", () => {
     expect(md).toBeGreaterThanOrEqual(0);
     expect(base).toBeLessThan(md);
   });
+
+  test("higher breakpoints win regardless of the order their patches arrive", () => {
+    const registry = new ApplicatorRegistry();
+    const element = makeElement();
+
+    registry.applyAll(element, {
+      "gridColumns@md.0": "repeat(2, 1fr)",
+      "gridColumns@xl.0": "repeat(3, 1fr)",
+      "gridColumns.0": "repeat(1, 1fr)",
+    });
+
+    const base = ruleIndex("repeat(1, 1fr)");
+    const md = ruleIndex("min-width: 768px");
+    const xl = ruleIndex("min-width: 1280px");
+    expect(base).toBeGreaterThanOrEqual(0);
+    expect(md).toBeGreaterThanOrEqual(0);
+    expect(xl).toBeGreaterThanOrEqual(0);
+    expect(base).toBeLessThan(md);
+    expect(md).toBeLessThan(xl);
+  });
+
+  test("overlapping interaction states follow the shared precedence order", () => {
+    const registry = new ApplicatorRegistry();
+    const element = makeElement();
+
+    registry.applyAll(element, {
+      "opacity:active.0": 0.4,
+      "opacity:hover.0": 0.8,
+      "opacity:focus.0": 0.6,
+      "opacity.0": 1,
+    });
+
+    const base = ruleIndex("opacity: 1");
+    const hover = ruleIndex(":hover");
+    const focus = ruleIndex(":focus");
+    const active = ruleIndex(":active");
+    expect(base).toBeLessThan(hover);
+    expect(hover).toBeLessThan(focus);
+    expect(focus).toBeLessThan(active);
+  });
 });
 
 describe("no variants: the handler path is untouched", () => {
@@ -236,9 +276,8 @@ describe("no variants: the handler path is untouched", () => {
   });
 
   test("a handler's non-CSS side effects survive the class conversion", () => {
-    // `.weight()` writes `data-hypen-flex`, which a component stylesheet keys
-    // off via `:has(> [data-hypen-flex])`. It must not be lost when the prop
-    // moves to a rule.
+    // `.weight()` writes the durable `data-hypen-flex` marker consumed by
+    // Row width-demand reconciliation. It must survive variant lowering.
     const registry = new ApplicatorRegistry();
     const plain = makeElement();
     const varied = makeElement();

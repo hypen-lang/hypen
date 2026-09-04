@@ -49,7 +49,9 @@ final class SessionTests: XCTestCase {
     }
 
     func testConnectionTracking() {
-        let manager = SessionManager()
+        // Tracking two live connections needs allowMultiple — under the
+        // default kickOld policy the engine kicks the first connection.
+        let manager = SessionManager(config: SessionConfig(concurrent: .allowMultiple))
         let session = manager.createSession()
 
         let obj1 = NSObject()

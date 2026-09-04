@@ -8,13 +8,13 @@
     "start": "node dist/main.js"
   },
   "dependencies": {
-    "@hypen-space/core": "^0.6.2",
-    "@hypen-space/server": "^0.6.2",
-    "@hypen-space/web": "^0.6.2",
-    "@hypen-space/web-engine": "^0.6.2"
+    "@hypen-space/core": "^0.6.4",
+    "@hypen-space/server": "^0.6.4",
+    "@hypen-space/web": "^0.6.4",
+    "@hypen-space/web-engine": "^0.6.4"
   },
   "devDependencies": {
-    "@hypen-space/cli": "^0.6.2",
+    "@hypen-space/cli": "^0.6.4",
     "esbuild": "^0.20.0",
     "typescript": "^5.0.0"
   }

@@ -779,7 +779,13 @@ fn parse_color_value(value: &Value) -> Option<RgbaF> {
 /// (spring may overshoot: clamp the interpolation RESULT, not `t`).
 fn format_color(c: RgbaF) -> String {
     let q = |v: f64| (v.round().clamp(0.0, 255.0)) as u8;
-    format!("#{:02x}{:02x}{:02x}{:02x}", q(c[0]), q(c[1]), q(c[2]), q(c[3]))
+    format!(
+        "#{:02x}{:02x}{:02x}{:02x}",
+        q(c[0]),
+        q(c[1]),
+        q(c[2]),
+        q(c[3])
+    )
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -914,12 +920,20 @@ fn slide_axis(direction: Option<&str>, rtl: bool) -> (&'static str, f64) {
         "bottom" => ("translateY", SLIDE_OFFSET_PX),
         "trailing" => (
             "translateX",
-            if rtl { -SLIDE_OFFSET_PX } else { SLIDE_OFFSET_PX },
+            if rtl {
+                -SLIDE_OFFSET_PX
+            } else {
+                SLIDE_OFFSET_PX
+            },
         ),
         // "leading" and the defensive default.
         _ => (
             "translateX",
-            if rtl { SLIDE_OFFSET_PX } else { -SLIDE_OFFSET_PX },
+            if rtl {
+                SLIDE_OFFSET_PX
+            } else {
+                -SLIDE_OFFSET_PX
+            },
         ),
     }
 }
@@ -997,6 +1011,14 @@ pub struct IngestOutcome {
     /// state, exactly like [`TickOutcome::restyle`]. Without it Taffy
     /// keeps the mid-flight geometry until an unrelated restyle.
     pub restyle: Vec<String>,
+    /// End-of-batch work FINALIZED at least one in-flight exit — a
+    /// subtree left the tree even though the input batch may have
+    /// carried no structural patch at all (e.g. a paint-classified
+    /// `RemoveProp` of `__anim.motion` lifting the essential
+    /// exemption). The window's paint-only classifier must treat the
+    /// batch as structural: the finalized removals appear only in
+    /// `forwarded`, never in the input patches it inspects.
+    pub finalized_any: bool,
 }
 
 /// A naturally-settled animation's `.onAnimationComplete` dispatch,
@@ -1223,7 +1245,10 @@ impl DesktopAnimator {
             return; // no completion action wired — nothing to dispatch
         };
         if let Value::Object(ref mut obj) = payload {
-            obj.insert("animation".to_string(), Value::String(animation.to_string()));
+            obj.insert(
+                "animation".to_string(),
+                Value::String(animation.to_string()),
+            );
             if let Some(s) = state {
                 obj.insert("state".to_string(), Value::String(s.to_string()));
             }
@@ -1350,10 +1375,10 @@ impl DesktopAnimator {
                     // Defensive: a Create for an id that is still
                     // exit-animating finalizes the old subtree first so
                     // the corpse can't shadow the new node.
-                    if self.exits.contains_key(id) {
+                    if self.exits.contains_key(id.as_ref()) {
                         // Supersede: a new node replaces the exiting one.
                         // Interruption, not a settle — fires no completion.
-                        forwarded.extend(self.finalize_exit(id.clone(), tree, false));
+                        forwarded.extend(self.finalize_exit(id.to_string(), tree, false));
                     }
                     tree.apply(patch);
                     forwarded.push(patch.clone());
@@ -1391,12 +1416,12 @@ impl DesktopAnimator {
                     // Enter is queued only for same-batch creations, so
                     // a cached Router `Attach` (a different patch type
                     // altogether) never enter-animates.
-                    if self.created_this_batch.contains(id) {
-                        self.pending_enters.push(id.clone());
+                    if self.created_this_batch.contains(id.as_ref()) {
+                        self.pending_enters.push(id.to_string());
                     }
                 }
                 Patch::Remove { id, transition } => {
-                    if let Some(record) = self.exits.get_mut(id) {
+                    if let Some(record) = self.exits.get_mut(id.as_ref()) {
                         // Duplicate remove for an already-exiting id
                         // (defensive): fold into the pending teardown.
                         record.patches.push(patch.clone());
@@ -1417,7 +1442,7 @@ impl DesktopAnimator {
                     // incoming shared-element candidates for this batch.
                     tree.apply(patch);
                     forwarded.push(patch.clone());
-                    self.attached_roots_this_batch.push(id.clone());
+                    self.attached_roots_this_batch.push(id.to_string());
                 }
                 _ => {
                     // Move / Detach / SetText / SetSemantics: structural
@@ -1432,10 +1457,12 @@ impl DesktopAnimator {
         // reached the tree just now, after everything above — append
         // in that order so the caller's Taffy mirror replays exactly
         // what the tree saw.
+        let finalized_any = !flushed.finalized.is_empty();
         forwarded.append(&mut flushed.finalized);
         IngestOutcome {
             forwarded,
             restyle: flushed.restyle,
+            finalized_any,
         }
     }
 
@@ -1528,8 +1555,7 @@ impl DesktopAnimator {
                 let parsed = value.and_then(parse_animate);
                 self.specs_mut(id).animate = parsed.clone();
                 self.finished_ambients.remove(id); // a new spec may replay
-                self.pending_ambient_restarts
-                    .push((id.to_string(), parsed));
+                self.pending_ambient_restarts.push((id.to_string(), parsed));
             }
             "__anim.motion" => {
                 let essential = value.map(parse_motion_essential).unwrap_or(false);
@@ -1643,9 +1669,7 @@ impl DesktopAnimator {
         base: &str,
         previous: Option<Value>,
     ) {
-        let current = tree
-            .get(id)
-            .and_then(|n| n.props.get(write_key).cloned());
+        let current = tree.get(id).and_then(|n| n.props.get(write_key).cloned());
         // An engine write is the new ground truth for any playback that
         // owns this prop: refresh restore/originals so a later settle
         // lands the engine's value, never a stale snapshot. When the
@@ -2094,20 +2118,21 @@ impl DesktopAnimator {
         for patch in patches {
             match patch {
                 Patch::Move { id, .. } => {
-                    if self.specs.get(id).and_then(|s| s.layout.as_ref()).is_none() {
+                    let layout_spec = self.specs.get(id.as_ref()).and_then(|s| s.layout.as_ref());
+                    if layout_spec.is_none() {
                         continue;
                     }
-                    if self.exits.contains_key(id) {
+                    if self.exits.contains_key(id.as_ref()) {
                         continue; // exit wins over FLIP
                     }
-                    if self.scrub_active.contains(id) {
+                    if self.scrub_active.contains(id.as_ref()) {
                         continue; // scrub wins over FLIP (Option G precedence)
                     }
-                    if self.pending_flips.contains_key(id) {
+                    if self.pending_flips.contains_key(id.as_ref()) {
                         continue;
                     }
                     if let Some(first) = first_rect(id) {
-                        self.pending_flips.insert(id.clone(), first);
+                        self.pending_flips.insert(id.to_string(), first);
                     }
                 }
                 // #146 sibling-shift: a removed node's same-parent
@@ -2212,10 +2237,7 @@ impl DesktopAnimator {
     /// post-teardown layout. No-op when nothing was recorded. Mirrors the
     /// DOM playing `collectRemovalSiblingFlips` at finalizeExit
     /// (anim.ts:1707).
-    pub fn queue_removal_sibling_flips(
-        &mut self,
-        first_rect: impl Fn(&str) -> Option<(f32, f32)>,
-    ) {
+    pub fn queue_removal_sibling_flips(&mut self, first_rect: impl Fn(&str) -> Option<(f32, f32)>) {
         if self.removal_flip_candidates.is_empty() {
             return;
         }
@@ -2438,7 +2460,7 @@ impl DesktopAnimator {
         let mut has_incoming = false;
         for patch in patches {
             match patch {
-                Patch::Detach { id } => detach_roots.push(id.clone()),
+                Patch::Detach { id } => detach_roots.push(id.to_string()),
                 Patch::Attach { .. } | Patch::Insert { .. } => has_incoming = true,
                 _ => {}
             }
@@ -2639,7 +2661,8 @@ impl DesktopAnimator {
             self.suspend_conflicting_ambient(&play.id, &touched);
             *self.enter_groups.entry(play.id.clone()).or_insert(0) += targets.len();
             // The group's natural settle fires `{ animation: "sharedElement" }`.
-            self.group_completion.insert(play.id.clone(), "sharedElement");
+            self.group_completion
+                .insert(play.id.clone(), "sharedElement");
             for (base, write_key, from, to, restore) in targets {
                 tree.set_prop_raw(&play.id, &write_key, Value::from(from));
                 self.set_anim(
@@ -2770,9 +2793,7 @@ impl DesktopAnimator {
 
     fn suspend_conflicting_ambient(&mut self, id: &str, touched: &[String]) {
         if let Some(ambient) = self.ambients.get_mut(id) {
-            if !ambient.suspended
-                && ambient.props.iter().any(|p| touched.iter().any(|t| t == p))
-            {
+            if !ambient.suspended && ambient.props.iter().any(|p| touched.iter().any(|t| t == p)) {
                 ambient.suspended = true;
             }
         }
@@ -3166,11 +3187,7 @@ impl DesktopAnimator {
     /// its FINAL value right now — the sanctioned snap. Transitions land
     /// their targets, enter playbacks restore, ambients stop and
     /// restore, exits finalize, pending enters are dropped.
-    fn snap_subset(
-        &mut self,
-        tree: &mut Tree,
-        should_snap: impl Fn(&str) -> bool,
-    ) -> TickOutcome {
+    fn snap_subset(&mut self, tree: &mut Tree, should_snap: impl Fn(&str) -> bool) -> TickOutcome {
         let mut out = TickOutcome::default();
         let keys: Vec<(String, String)> = self
             .anims
@@ -3490,7 +3507,10 @@ impl ScrubEntry {
 
     /// All four channels present and valid — the scrub is armable.
     fn complete(&self) -> bool {
-        self.spec.is_some() && self.settle.is_some() && self.bind.is_some() && !self.plans.is_empty()
+        self.spec.is_some()
+            && self.settle.is_some()
+            && self.bind.is_some()
+            && !self.plans.is_empty()
     }
 
     /// Does an active drag/settle/held window (or an engaged scroll source
@@ -3525,8 +3545,16 @@ fn scrub_rubber_band(raw: f64, rubber_band: f64) -> f64 {
 
 fn parse_scrub_source(value: &Value) -> Option<ScrubSourceSpec> {
     let obj = value.as_object()?;
-    let from = obj.get("from")?.as_str().filter(|s| !s.is_empty())?.to_string();
-    let to = obj.get("to")?.as_str().filter(|s| !s.is_empty())?.to_string();
+    let from = obj
+        .get("from")?
+        .as_str()
+        .filter(|s| !s.is_empty())?
+        .to_string();
+    let to = obj
+        .get("to")?
+        .as_str()
+        .filter(|s| !s.is_empty())?
+        .to_string();
     let source = match obj.get("source")?.as_str()? {
         "gesture" => ScrubSource::Gesture,
         "scroll" => ScrubSource::Scroll,
@@ -3573,7 +3601,10 @@ fn parse_scrub_source(value: &Value) -> Option<ScrubSourceSpec> {
 
 fn parse_scrub_settle(value: &Value) -> Option<ScrubSettle> {
     let obj = value.as_object()?;
-    let duration = obj.get("duration")?.as_f64().filter(|f| f.is_finite() && *f >= 0.0)?;
+    let duration = obj
+        .get("duration")?
+        .as_f64()
+        .filter(|f| f.is_finite() && *f >= 0.0)?;
     let curve = obj.get("curve")?.as_str()?;
     Some(ScrubSettle {
         ease: curve_easing(curve),
@@ -3841,7 +3872,14 @@ impl DesktopScrubber {
                         kept.push(patch);
                     } else if name == "__anim.states" {
                         let label = parse_states_label(value);
-                        self.note_states_label(id, label.as_deref(), tree, now, cleanup_ms, rest_ms);
+                        self.note_states_label(
+                            id,
+                            label.as_deref(),
+                            tree,
+                            now,
+                            cleanup_ms,
+                            rest_ms,
+                        );
                         kept.push(patch);
                     } else if is_scrub_channel(name) {
                         self.set_scrub_channel(id, name, Some(value), tree);
@@ -3886,7 +3924,10 @@ impl DesktopScrubber {
         if !has_scrub {
             return;
         }
-        let entry = self.entries.entry(id.to_string()).or_insert_with(ScrubEntry::new);
+        let entry = self
+            .entries
+            .entry(id.to_string())
+            .or_insert_with(ScrubEntry::new);
         if let Some(v) = props.get("__anim.scrub") {
             entry.spec = parse_scrub_source(v);
         }
@@ -3908,7 +3949,10 @@ impl DesktopScrubber {
     }
 
     fn set_scrub_channel(&mut self, id: &str, name: &str, value: Option<&Value>, tree: &mut Tree) {
-        let entry = self.entries.entry(id.to_string()).or_insert_with(ScrubEntry::new);
+        let entry = self
+            .entries
+            .entry(id.to_string())
+            .or_insert_with(ScrubEntry::new);
         match name {
             "__anim.scrub" => entry.spec = value.and_then(parse_scrub_source),
             "__anim.scrubSettle" => entry.settle = value.and_then(parse_scrub_settle),
@@ -3999,7 +4043,10 @@ impl DesktopScrubber {
         let ids: Vec<String> = self
             .entries
             .keys()
-            .filter(|id| id.as_str() == root || is_at_or_under(tree, id, std::slice::from_ref(&root.to_string())))
+            .filter(|id| {
+                id.as_str() == root
+                    || is_at_or_under(tree, id, std::slice::from_ref(&root.to_string()))
+            })
             .cloned()
             .collect();
         for id in ids {
@@ -4018,7 +4065,10 @@ impl DesktopScrubber {
         let ids: Vec<String> = self
             .entries
             .keys()
-            .filter(|id| id.as_str() == root || is_at_or_under(tree, id, std::slice::from_ref(&root.to_string())))
+            .filter(|id| {
+                id.as_str() == root
+                    || is_at_or_under(tree, id, std::slice::from_ref(&root.to_string()))
+            })
             .cloned()
             .collect();
         for id in ids {
@@ -4053,12 +4103,7 @@ impl DesktopScrubber {
     /// the DOM's pointerdown bubbles to the element; here the press is inside
     /// the element's box. A below-slop release is a total no-op, so the
     /// child's click survives. Returns `true` when a drag opened.
-    pub fn pointer_down(
-        &mut self,
-        layout: &crate::layout::LayoutPass,
-        x: f64,
-        y: f64,
-    ) -> bool {
+    pub fn pointer_down(&mut self, layout: &crate::layout::LayoutPass, x: f64, y: f64) -> bool {
         if self.active_pointer.is_some() {
             return false; // one cursor, one drag
         }
@@ -4066,7 +4111,10 @@ impl DesktopScrubber {
         let Some(target) = self.gesture_target(layout, x, y) else {
             return false;
         };
-        let entry = self.entries.get_mut(&target).expect("gesture_target checked");
+        let entry = self
+            .entries
+            .get_mut(&target)
+            .expect("gesture_target checked");
         let axis = entry.spec.as_ref().expect("complete").axis;
         let start_pos = if axis == ScrubAxis::X { x } else { y };
         entry.drag = Some(ScrubDrag {
@@ -4099,7 +4147,8 @@ impl DesktopScrubber {
         let (Some(spec), Some(drag)) = (entry.spec.as_ref(), entry.drag.as_ref()) else {
             return false;
         };
-        let (over0, over1, rubber_band, axis) = (spec.over.0, spec.over.1, spec.rubber_band, spec.axis);
+        let (over0, over1, rubber_band, axis) =
+            (spec.over.0, spec.over.1, spec.rubber_band, spec.axis);
         let coord = if axis == ScrubAxis::X { x } else { y };
         let travel = coord - drag.start_pos;
         if !drag.claimed {
@@ -4111,7 +4160,11 @@ impl DesktopScrubber {
         if entry.phase != ScrubPhase::Dragging {
             return false;
         }
-        let p_at_grab = entry.drag.as_ref().map(|d| d.p_at_grab).unwrap_or(entry.progress);
+        let p_at_grab = entry
+            .drag
+            .as_ref()
+            .map(|d| d.p_at_grab)
+            .unwrap_or(entry.progress);
         let raw = p_at_grab + travel / (over1 - over0);
         let p = scrub_rubber_band(raw, rubber_band);
         scrub_apply_progress(entry, &id, tree, p);
@@ -4223,8 +4276,7 @@ impl DesktopScrubber {
         let Some(entry) = self.entries.get_mut(id) else {
             return false;
         };
-        if !entry.complete()
-            || entry.spec.as_ref().map(|s| s.source) != Some(ScrubSource::Gesture)
+        if !entry.complete() || entry.spec.as_ref().map(|s| s.source) != Some(ScrubSource::Gesture)
         {
             return false;
         }
@@ -4322,7 +4374,11 @@ impl DesktopScrubber {
                 }
                 Some(ep) => {
                     let spec = entry.spec.as_ref().unwrap();
-                    let label = if ep == 1 { spec.to.clone() } else { spec.from.clone() };
+                    let label = if ep == 1 {
+                        spec.to.clone()
+                    } else {
+                        spec.from.clone()
+                    };
                     let already = entry.last_scroll_write.as_deref() == Some(label.as_str());
                     let running = entry.rest_endpoint == Some(ep) && entry.rest_deadline.is_some();
                     if !already && !running {
@@ -4355,7 +4411,11 @@ impl DesktopScrubber {
             match entry.phase {
                 ScrubPhase::Settling => {
                     let duration = entry.settle.as_ref().map(|s| s.duration).unwrap_or(0.0);
-                    let ease = entry.settle.as_ref().map(|s| s.ease).unwrap_or(Easing::Linear);
+                    let ease = entry
+                        .settle
+                        .as_ref()
+                        .map(|s| s.ease)
+                        .unwrap_or(Easing::Linear);
                     let t = if duration > 0.0 {
                         ((now - entry.settle_start) / duration).clamp(0.0, 1.0)
                     } else {
@@ -4388,7 +4448,11 @@ impl DesktopScrubber {
                     entry.rest_deadline = None;
                     let ep = entry.rest_endpoint.take();
                     if let Some(spec) = entry.spec.as_ref() {
-                        let label = if ep == Some(1) { spec.to.clone() } else { spec.from.clone() };
+                        let label = if ep == Some(1) {
+                            spec.to.clone()
+                        } else {
+                            spec.from.clone()
+                        };
                         entry.last_scroll_write = Some(label.clone());
                         if let Some(b) = scrub_arrive(entry, label, now, cleanup_ms) {
                             binds.push(b);
@@ -4493,7 +4557,10 @@ fn resolve_scroll_container(
     }
     let mut current = tree.parent_of(id);
     while let Some(cur) = current {
-        if layout.item_by_id(cur).is_some_and(|it| it.scrollable.is_some()) {
+        if layout
+            .item_by_id(cur)
+            .is_some_and(|it| it.scrollable.is_some())
+        {
             return Some(cur.to_string());
         }
         current = tree.parent_of(cur);

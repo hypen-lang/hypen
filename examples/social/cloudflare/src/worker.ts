@@ -33,6 +33,7 @@ import {
   profileModule,
   userProfileModule,
   commentsModule,
+  conversationModule,
   storyModule,
 } from "./module";
 
@@ -43,6 +44,7 @@ void messagesModule;
 void profileModule;
 void userProfileModule;
 void commentsModule;
+void conversationModule;
 void storyModule;
 
 // Per-storage, not per-module: `onStorage` fires once per Durable Object

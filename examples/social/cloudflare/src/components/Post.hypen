@@ -29,10 +29,14 @@ Column {
     }
     .tw("py-2.5 px-4 flex-row items-center")
 
-    Image(src: "@{item.imageUrl}")
-        .width("100%")
-        .aspectRatio("1")
-        .objectFit("cover")
+    Column {
+        Image(src: "@{item.imageUrl}")
+            .width("100%")
+            .aspectRatio("1")
+            .borderRadius(24)
+            .objectFit("cover")
+    }
+    .tw("px-5")
 
     Row {
         Row {
@@ -121,4 +125,4 @@ Column {
         .onClick(@router.push, to: "/comments/@{item.id}")
     }
 }
-.tw("bg-white border-b border-gray-100 mb-2")
+.tw("w-full bg-white border-b border-gray-100 mb-2")

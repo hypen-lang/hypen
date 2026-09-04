@@ -24,9 +24,14 @@ class ButtonComponent : ComponentHandler {
         modifier: Modifier,
         renderChildren: @Composable () -> Unit,
     ) {
-        // Parse horizontal alignment (cross axis for content inside button)
+        // Parse horizontal alignment (cross axis for content inside button).
+        // The CSS spellings a .tw() class expands to are accepted too, so
+        // `tw("justify-center items-end")` reaches the same contentAlignment
+        // instead of being dropped.
         val horizontalStr = element.getStringProp("horizontalAlignment.0")
+            ?: element.getStringProp("justifyContent.0")
         val verticalStr = element.getStringProp("verticalAlignment.0")
+            ?: element.getStringProp("alignItems.0")
 
         val contentAlignment = parseAlignment(horizontalStr, verticalStr)
 
@@ -36,7 +41,16 @@ class ButtonComponent : ComponentHandler {
         val actionValue = if (actionProp != null) ActionValue.parse(actionProp) else null
         val dispatcher = LocalActionDispatcher.current
 
+        // A live `.videoIntent(...)` handles this button's tap: its clickable
+        // is applied innermost by the render pipeline and dispatches this
+        // action itself, so both the intent and the action happen. Adding a
+        // second clickable here would sit inside that one, swallow the tap
+        // and leave the intent dead. Inert intents (outside a Video) change
+        // nothing. See VideoFullscreen.kt.
+        val videoIntentOwnsTap = isVideoIntentActive(element)
+
         val effectiveModifier = if (actionValue != null && dispatcher != null &&
+            !videoIntentOwnsTap &&
             element.props["onClick.0"] == null && element.props["onPress.0"] == null
         ) {
             modifier.clickable {
@@ -50,7 +64,7 @@ class ButtonComponent : ComponentHandler {
             modifier = effectiveModifier,
             contentAlignment = contentAlignment,
         ) {
-            renderChildren()
+            ProvideHypenContentColor(element, renderChildren)
         }
     }
 

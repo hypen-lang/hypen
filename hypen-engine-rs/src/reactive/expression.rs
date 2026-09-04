@@ -535,8 +535,7 @@ mod tests {
         // (JS-style), not "3.0". Non-integral floats keep their fraction.
         let state = json!({"tasks": [1, 2, 3], "count": 5, "ratio": 2.5});
         let evaluator = build_evaluator(&state, None, None);
-        let result =
-            evaluate_template_string("@{state.tasks.length} tasks", &evaluator).unwrap();
+        let result = evaluate_template_string("@{state.tasks.length} tasks", &evaluator).unwrap();
         assert_eq!(result, "3 tasks");
         let result = evaluate_template_string("next: @{state.count + 1}", &evaluator).unwrap();
         assert_eq!(result, "next: 6");

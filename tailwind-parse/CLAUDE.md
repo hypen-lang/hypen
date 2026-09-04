@@ -18,7 +18,7 @@ tailwind-parse/src/
 ├── typography.rs     # text-*, font-*, leading-* utilities
 ├── borders.rs        # border-*, rounded-* utilities
 ├── backgrounds.rs    # bg-* utilities
-├── layout.rs         # flex, grid, display, position utilities
+├── layout.rs         # flex, grid, display utilities (no positioning — see below)
 ├── transforms.rs     # rotate, scale, translate utilities
 ├── tables.rs         # Table-related utilities
 ├── effects.rs        # opacity, shadow, blur utilities
@@ -42,3 +42,13 @@ Text("Hello").tw("p-4 text-blue-500 rounded-xl bg-white")
 ```
 
 The parser maps each class to CSS properties that get merged into the element's style.
+
+## Hard errors
+
+`parse_classes` returns `Result<TailwindOutput, TailwindError>`. Unknown classes are
+dropped silently, but CSS positioning is rejected outright — Hypen has no positioning
+model on native renderers: `static`/`fixed`/`absolute`/`relative`/`sticky`, the inset
+utilities (`top-*`, `right-*`, `bottom-*`, `left-*`, `inset-*`, `start-*`, `end-*`) and
+`sr-only`. The check lives in `parser::forbidden_utility_reason`; the engine turns the
+error into an `__Error` element and the LSP (`hypen-lsp/src/tailwind.ts`) mirrors the
+rule as a squiggle. Keep both in sync.

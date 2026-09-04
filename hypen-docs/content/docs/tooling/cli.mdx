@@ -28,10 +28,11 @@ hypen init my-app
 ```
 
 This creates a new directory with:
-- Project structure with `src/components/`
+- Project structure with `src/components/` (or `src/modules/` for the server-based layout)
 - TypeScript configuration
 - A `hypen.json` configuration file
-- A starter component with state and actions
+- Starter components (Router + Home + Counter) with state and actions
+- Run scripts: `dev`, `studio`, `test`, `build`
 
 ### `hypen dev`
 
@@ -45,11 +46,30 @@ hypen dev
 Options:
 - `--port <number>`, `-p` - Port to run on (default: `3000`)
 - `--debug`, `-d` - Enable debug mode
+- `--a11y` - Print accessibility findings on every rebuild
 
-The dev server:
-- Watches for file changes
-- Hot reloads components
-- Shows compilation errors in the browser
+One port serves every kind of client:
+
+- **Web client** at `http://localhost:3000` — open it in a browser and your
+  app is running. No setup, no separate client build.
+- **Remote endpoint** at `ws://localhost:3000` — the same port speaks the
+  Hypen remote protocol, so native runners, Studio, and Test Mode can all
+  connect to it directly.
+
+<img src="/tooling/web-client-home.png" alt="The built-in web client serving a freshly scaffolded app" />
+
+The engine renders server-side and streams minimal patches to every
+connected client. When you save a file, the CLI reloads all connected
+clients: each one reconnects within about half a second and resumes its
+session against the freshly loaded templates and module code. Primary
+module state (like the current route) is preserved across reloads; nested
+route-module state resets.
+
+By default all connected clients mirror one scene — an action dispatched in
+one browser tab (or on a connected device) is replayed to every other
+client, which makes multi-device development seamless.
+
+<img src="/tooling/web-client-counter.png" alt="The scaffold's counter screen in the web client" />
 
 ### `hypen build`
 
@@ -120,11 +140,53 @@ Open [Hypen Studio](/docs/tooling/studio), a full in-browser IDE for developing 
 hypen studio
 ```
 
+<img src="/tooling/studio.png" alt="Hypen Studio with the live preview connected to a running app" />
+
+For server-based projects, Studio starts your entry script for you (or
+reuses an already-running dev server on the configured port) and connects
+the preview to it — one command, no second terminal.
+
 Options:
 - `--port <number>`, `-p` - Port to run on (default: `5173`)
 - `--open` - Open browser automatically (default: `true`)
 
 Studio requires the Bun runtime. See the [Studio documentation](/docs/tooling/studio) for the full feature reference.
+
+### `hypen test`
+
+Open Studio directly in **Test Mode** — a multi-surface preview board with
+live web cells (DOM and Canvas) plus Android and iOS device mirrors.
+
+```bash
+hypen test
+```
+
+<img src="/tooling/test-mode.png" alt="Test Mode with a live web cell rendering the app" />
+
+Inside a project, `hypen test` boots (or reuses) the dev server itself and
+opens with the previews already connected. Cells are fully interactive, and
+actions are mirrored across every surface — tap a button in the web cell
+and a connected device updates too. Outside a project it opens in
+connect-only mode: paste any `ws://` dev-server URL to attach.
+
+Options:
+- `--port <number>`, `-p` - Dev server port (default: `3000`)
+- `--open` - Open browser automatically (default: `true`)
+
+### `hypen check`
+
+Run the engine's accessibility conformance pass over your `.hypen` sources.
+
+```bash
+hypen check                                  # all project components
+hypen check src/components/App.hypen         # specific files or dirs
+```
+
+Findings print per file. Suppress a finding with a trailing
+`// hypen-a11y-ignore [rule-id]` comment, or project-wide via `hypen.json`:
+`"a11y": { "ignoreRules": ["rule-id"] }`. Exit codes: `0` clean, `1`
+findings, `2` couldn't check. Use `hypen dev --a11y` to get the same
+findings on every rebuild during development.
 
 ## Project Structure
 

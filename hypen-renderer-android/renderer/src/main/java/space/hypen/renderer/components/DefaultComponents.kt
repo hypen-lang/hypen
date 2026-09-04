@@ -17,6 +17,7 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     register(SpacerComponent())
     register(StackComponent())
     register(GridComponent())
+    register(SafeAreaComponent())
 
     // Content components
     register(TextComponent())
@@ -28,6 +29,9 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     register(AudioComponent())
     register(DividerComponent())
 
+    // Screen-reader-only wrapper: paints nothing, occupies no space
+    register(VisuallyHiddenComponent())
+
     // Form components
     register(InputComponent())
     register(TextAreaComponent())
@@ -35,6 +39,9 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     register(SelectComponent())
     register(SliderComponent())
     register(SwitchComponent())
+
+    // Media timeline for a Video `controls` slot (inert outside a Video)
+    register(ScrubberComponent())
 
     // UI components
     register(CardComponent())

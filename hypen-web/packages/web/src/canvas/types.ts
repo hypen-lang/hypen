@@ -5,6 +5,7 @@
  */
 
 import type { Semantics } from "@hypen-space/core/types";
+import type { SafeAreaInsets } from "../safe-area.js";
 
 export interface VirtualNode {
   id: string;
@@ -106,11 +107,18 @@ export interface FontStyle {
   fontSize: number;
   fontWeight: string | number;
   lineHeight?: number;
+  /**
+   * Extra tracking in px applied after every glyph (CSS `letter-spacing`,
+   * Tailwind `tracking-*`). Canvas 2D has no native letter-spacing on every
+   * engine, so measurement approximates it as `chars × spacing` — enough to
+   * keep a widely-tracked heading from being under-measured and clipped.
+   */
+  letterSpacing?: number;
 }
 
 export interface TextStyle extends FontStyle {
   color: string;
-  textAlign: "left" | "center" | "right";
+  textAlign: "left" | "center" | "right" | "justify";
   verticalAlign: "top" | "middle" | "bottom";
 }
 
@@ -134,6 +142,14 @@ export interface CanvasRendererOptions {
   // sessions start from mirror focus.
   enableAccessibility?: boolean;
   enableHitTesting?: boolean;
+
+  /**
+   * Per-edge override for the insets the `SafeArea` component pads by, in
+   * CSS px. Each edge is optional and merges over the value probed from
+   * `env(safe-area-inset-*)` (0 outside a browser), so `{ bottom: 0 }`
+   * zeroes only the bottom edge.
+   */
+  safeAreaInsets?: Partial<SafeAreaInsets>;
 
   // Performance
   enableDirtyRects?: boolean;
@@ -183,7 +199,6 @@ export interface ScrollState {
 export interface DirtyRect extends Rectangle {
   frameId: number;
 }
-
 
 
 

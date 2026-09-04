@@ -56,13 +56,16 @@ export interface DevOptions {
   debug?: boolean;
 
   /**
-   * Custom HTML template path
+   * @deprecated Only honored by the Node fallback dev server (browser-SPA
+   * flow). Under Bun the dev server streams patches to the built-in web
+   * client and this logs a warning instead.
    */
   htmlTemplate?: string;
 
   /**
-   * Output directory for generated files
-   * Default: ".hypen"
+   * @deprecated Only honored by the Node fallback dev server (browser-SPA
+   * flow). Under Bun the dev server generates no files and this logs a
+   * warning instead (use `hypen generate` for codegen).
    */
   outDir?: string;
 

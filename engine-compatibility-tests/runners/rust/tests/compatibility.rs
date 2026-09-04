@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use hypen_engine::{Engine, IRNode, Module, ModuleInstance, Patch};
+use hypen_engine::{Engine, IRNode, Module, ModuleInstance, Patch, TemplateExpander};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -433,11 +433,16 @@ fn run_fixture(tc: &TestCase) {
         engine.set_module(engine_module);
     }
 
-    // Collect patches via callback
+    // Collect patches via callback. The raw stream carries template-shaped
+    // list rows as RegisterTemplate/Instantiate; fixtures assert the plain
+    // Create+Insert wire, so lower each batch through a session-lifetime
+    // expander before serializing.
     let collected_patches: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(vec![]));
     let patches_ref = collected_patches.clone();
+    let expander = Mutex::new(TemplateExpander::new());
     engine.set_render_callback(move |patches| {
-        let jsons: Vec<Value> = patches.iter().map(|p| patch_to_json(p)).collect();
+        let expanded = expander.lock().unwrap().expand(patches.to_vec());
+        let jsons: Vec<Value> = expanded.iter().map(patch_to_json).collect();
         patches_ref.lock().unwrap().extend(jsons);
     });
 
@@ -496,10 +501,9 @@ fn run_fixture(tc: &TestCase) {
                     // Re-render with replacement source — reconciled against
                     // the existing tree, exercising subtree replacement /
                     // teardown paths.
-                    let source = step
-                        .source
-                        .as_deref()
-                        .unwrap_or_else(|| panic!("[{}] renderSource step needs `source`", tc.name));
+                    let source = step.source.as_deref().unwrap_or_else(|| {
+                        panic!("[{}] renderSource step needs `source`", tc.name)
+                    });
                     let ir_node = parse_source_to_ir(&tc.name, source);
                     engine.render_ir_node(&ir_node);
                 }

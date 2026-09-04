@@ -681,14 +681,21 @@ impl WasmEngine {
     /// Emit patches to the callback.
     /// Filters spurious removes, indexes newly created node IDs, and
     /// serializes patches to JS via the render callback.
+    ///
+    /// The batch crosses the boundary as ONE JSON string, `JSON.parse`d by
+    /// the SDK's `engine-base` shim before any consumer sees it. Building
+    /// the equivalent object graph with `serde_wasm_bindgen` costs a
+    /// wasm→JS call and a `TextDecoder` pass per string field — tens of
+    /// thousands of them for a large first render — where a single string
+    /// hand-off plus the browser's native JSON parser is one decode. The
+    /// JSON itself is byte-compatible with what the old path produced.
     fn emit_patches(&mut self, mut patches: Vec<Patch>) {
         EngineCore::filter_spurious_removes(&mut patches);
         self.node_id_index.index_creates(&patches, &self.core);
 
         if let Some(ref callback) = self.patch_callback {
-            let serializer = serde_wasm_bindgen::Serializer::json_compatible();
-            if let Ok(patches_js) = serde::Serialize::serialize(&patches, &serializer) {
-                let _ = callback.call1(&JsValue::NULL, &patches_js);
+            if let Ok(json) = serde_json::to_string(&patches) {
+                let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(&json));
             }
         }
     }
@@ -744,7 +751,10 @@ impl WasmEngine {
         let animation = convert_animation(animation)?;
 
         let normalized = scope.as_deref().filter(|s| !s.is_empty());
-        if self.core.update_state_sparse(normalized, &paths, &values, animation) {
+        if self
+            .core
+            .update_state_sparse(normalized, &paths, &values, animation)
+        {
             self.render_dirty();
         }
         Ok(())

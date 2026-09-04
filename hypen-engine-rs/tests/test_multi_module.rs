@@ -663,8 +663,12 @@ fn test_conditional_module_with_array_state() {
     // Capture patches
     let patches = Arc::new(Mutex::new(Vec::new()));
     let capture = patches.clone();
+    // Lower template patches the way every plain-patch boundary does, so
+    // assertions see the pre-template Create/Insert wire.
+    let expander = Mutex::new(hypen_engine::TemplateExpander::new());
     engine.set_render_callback(move |p| {
-        capture.lock().unwrap().extend_from_slice(p);
+        let lowered = expander.lock().unwrap().expand(p.to_vec());
+        capture.lock().unwrap().extend(lowered);
     });
 
     // Initial render (feed view - Search not shown)
@@ -761,8 +765,12 @@ fn test_double_state_update_doesnt_null_module_state() {
 
     let patches = Arc::new(Mutex::new(Vec::new()));
     let capture = patches.clone();
+    // Lower template patches the way every plain-patch boundary does, so
+    // assertions see the pre-template Create/Insert wire.
+    let expander = Mutex::new(hypen_engine::TemplateExpander::new());
     engine.set_render_callback(move |p| {
-        capture.lock().unwrap().extend_from_slice(p);
+        let lowered = expander.lock().unwrap().expand(p.to_vec());
+        capture.lock().unwrap().extend(lowered);
     });
 
     // Initial render (feed)
@@ -910,8 +918,12 @@ fn test_no_create_then_remove_for_module_grid() {
     // Capture ALL patches across ALL render passes
     let all_patches = Arc::new(Mutex::new(Vec::new()));
     let capture = all_patches.clone();
+    // Lower template patches the way every plain-patch boundary does, so
+    // assertions see the pre-template Create/Insert wire.
+    let expander = Mutex::new(hypen_engine::TemplateExpander::new());
     engine.set_render_callback(move |p| {
-        capture.lock().unwrap().extend_from_slice(p);
+        let lowered = expander.lock().unwrap().expand(p.to_vec());
+        capture.lock().unwrap().extend(lowered);
     });
 
     // Initial render (feed view — Search not shown)
@@ -940,8 +952,8 @@ fn test_no_create_then_remove_for_module_grid() {
     let patches = all_patches.lock().unwrap().clone();
 
     // Find creates and removes
-    let mut created_ids: Vec<String> = Vec::new();
-    let mut removed_ids: Vec<String> = Vec::new();
+    let mut created_ids: Vec<std::sync::Arc<str>> = Vec::new();
+    let mut removed_ids: Vec<std::sync::Arc<str>> = Vec::new();
 
     for p in &patches {
         match p {
@@ -962,11 +974,11 @@ fn test_no_create_then_remove_for_module_grid() {
 
     // The critical assertion: NO removes should target just-created IDs
     let created_set: std::collections::HashSet<&str> =
-        created_ids.iter().map(|s| s.as_str()).collect();
+        created_ids.iter().map(|s| s.as_ref()).collect();
     let removes_of_created: Vec<&str> = removed_ids
         .iter()
-        .filter(|id| created_set.contains(id.as_str()))
-        .map(|s| s.as_str())
+        .filter(|id| created_set.contains(id.as_ref()))
+        .map(|s| s.as_ref())
         .collect();
 
     let image_creates: Vec<&Patch> = patches
@@ -1082,8 +1094,12 @@ fn test_preregistered_component_module_grid() {
     // Capture patches
     let all_patches = Arc::new(Mutex::new(Vec::new()));
     let capture = all_patches.clone();
+    // Lower template patches the way every plain-patch boundary does, so
+    // assertions see the pre-template Create/Insert wire.
+    let expander = Mutex::new(hypen_engine::TemplateExpander::new());
     engine.set_render_callback(move |p| {
-        capture.lock().unwrap().extend_from_slice(p);
+        let lowered = expander.lock().unwrap().expand(p.to_vec());
+        capture.lock().unwrap().extend(lowered);
     });
 
     // Initial render
@@ -1107,7 +1123,7 @@ fn test_preregistered_component_module_grid() {
     engine.update_state(None, json!({"currentView": "search"}));
 
     let patches = all_patches.lock().unwrap().clone();
-    let created_ids: std::collections::HashSet<String> = patches
+    let created_ids: std::collections::HashSet<std::sync::Arc<str>> = patches
         .iter()
         .filter_map(|p| {
             if let Patch::Create { id, .. } = p {
@@ -1121,7 +1137,7 @@ fn test_preregistered_component_module_grid() {
         .iter()
         .filter_map(|p| {
             if let Patch::Remove { id, .. } = p {
-                Some(id.as_str())
+                Some(id.as_ref())
             } else {
                 None
             }
@@ -1214,8 +1230,12 @@ fn test_double_render_via_notify_state_change() {
 
     let all_patches = Arc::new(Mutex::new(Vec::new()));
     let capture = all_patches.clone();
+    // Lower template patches the way every plain-patch boundary does, so
+    // assertions see the pre-template Create/Insert wire.
+    let expander = Mutex::new(hypen_engine::TemplateExpander::new());
     engine.set_render_callback(move |p| {
-        capture.lock().unwrap().extend_from_slice(p);
+        let lowered = expander.lock().unwrap().expand(p.to_vec());
+        capture.lock().unwrap().extend(lowered);
     });
 
     // Initial render
@@ -1239,7 +1259,7 @@ fn test_double_render_via_notify_state_change() {
     engine.notify_state_change(&change);
 
     let patches = all_patches.lock().unwrap().clone();
-    let created_ids: std::collections::HashSet<String> = patches
+    let created_ids: std::collections::HashSet<std::sync::Arc<str>> = patches
         .iter()
         .filter_map(|p| {
             if let Patch::Create { id, .. } = p {
@@ -1253,7 +1273,7 @@ fn test_double_render_via_notify_state_change() {
         .iter()
         .filter_map(|p| {
             if let Patch::Remove { id, .. } = p {
-                Some(id.as_str())
+                Some(id.as_ref())
             } else {
                 None
             }
@@ -1306,8 +1326,12 @@ fn test_notify_state_change_survives_module_replacement() {
 
     let patches_log = Arc::new(Mutex::new(Vec::new()));
     let capture = patches_log.clone();
+    // Lower template patches the way every plain-patch boundary does, so
+    // assertions see the pre-template Create/Insert wire.
+    let expander = Mutex::new(hypen_engine::TemplateExpander::new());
     engine.set_render_callback(move |p| {
-        capture.lock().unwrap().extend_from_slice(p);
+        let lowered = expander.lock().unwrap().expand(p.to_vec());
+        capture.lock().unwrap().extend(lowered);
     });
 
     let source = r#"Column { Text("@{state.label}") }"#;

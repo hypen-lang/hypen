@@ -457,10 +457,7 @@ pub(crate) fn lower_anim_applicator(
         spec.insert("props".to_string(), serde_json::json!(props));
     }
 
-    Some((
-        format!("__anim.{channel}"),
-        serde_json::Value::Object(spec),
-    ))
+    Some((format!("__anim.{channel}"), serde_json::Value::Object(spec)))
 }
 
 /// Per-preset defaults for `.animate(<preset>)`: (duration ms, repeat, curve).
@@ -595,10 +592,7 @@ fn lower_animate(applicator: &ApplicatorSpecification) -> Option<(String, serde_
         spec.insert("delay".to_string(), json_ms(d));
     }
 
-    Some((
-        format!("__anim.{channel}"),
-        serde_json::Value::Object(spec),
-    ))
+    Some((format!("__anim.{channel}"), serde_json::Value::Object(spec)))
 }
 
 /// Lower `.motion(essential)` into `("__anim.motion", {"essential": true})`.
@@ -680,7 +674,10 @@ fn lower_motion(applicator: &ApplicatorSpecification) -> Option<(String, serde_j
 
     let mut spec = serde_json::Map::new();
     spec.insert("essential".to_string(), serde_json::json!(true));
-    Some((ANIM_MOTION_PROP.to_string(), serde_json::Value::Object(spec)))
+    Some((
+        ANIM_MOTION_PROP.to_string(),
+        serde_json::Value::Object(spec),
+    ))
 }
 
 /// Parse a `repeat:` argument — the token `loop` or a positive integer count.
@@ -1309,7 +1306,9 @@ pub(crate) fn collect_scrub(applicator: &ApplicatorSpecification) -> Result<Scru
     }
 
     let Some(from) = from else {
-        return Err("from: is required and must name a .states pose label (token or string)".into());
+        return Err(
+            "from: is required and must name a .states pose label (token or string)".into(),
+        );
     };
     let Some(to) = to else {
         return Err("to: is required and must name a .states pose label (token or string)".into());
@@ -1839,7 +1838,10 @@ mod tests {
                 ]),
             )],
         );
-        assert_eq!(spec["props"], json!(["paddingHorizontal", "marginVertical"]));
+        assert_eq!(
+            spec["props"],
+            json!(["paddingHorizontal", "marginVertical"])
+        );
     }
 
     #[test]
@@ -1947,12 +1949,16 @@ mod tests {
     fn animate_binding_preset_omits_channel() {
         assert!(lower_anim_applicator(&applicator(
             "animate",
-            vec![positional(ParserValue::Reference("state.preset".to_string()))],
+            vec![positional(ParserValue::Reference(
+                "state.preset".to_string()
+            ))],
         ))
         .is_none());
         assert!(lower_anim_applicator(&applicator(
             "animate",
-            vec![positional(ParserValue::String("@{state.preset}".to_string()))],
+            vec![positional(ParserValue::String(
+                "@{state.preset}".to_string()
+            ))],
         ))
         .is_none());
     }
@@ -2068,12 +2074,16 @@ mod tests {
     fn motion_binding_token_omits_channel() {
         assert!(lower_anim_applicator(&applicator(
             "motion",
-            vec![positional(ParserValue::Reference("state.essential".to_string()))],
+            vec![positional(ParserValue::Reference(
+                "state.essential".to_string()
+            ))],
         ))
         .is_none());
         assert!(lower_anim_applicator(&applicator(
             "motion",
-            vec![positional(ParserValue::String("@{state.essential}".to_string()))],
+            vec![positional(ParserValue::String(
+                "@{state.essential}".to_string()
+            ))],
         ))
         .is_none());
     }
@@ -2102,8 +2112,10 @@ mod tests {
 
     #[test]
     fn shared_element_defaults_and_raw_key() {
-        let (key, spec) =
-            shared(vec![positional(ParserValue::String("hero-cover".to_string()))]).unwrap();
+        let (key, spec) = shared(vec![positional(ParserValue::String(
+            "hero-cover".to_string(),
+        ))])
+        .unwrap();
         assert_eq!(key, ParserValue::String("hero-cover".to_string()));
         assert_eq!(spec, json!({"duration": 350, "curve": "spring"}));
     }
@@ -2117,8 +2129,10 @@ mod tests {
         assert_eq!(key, ParserValue::String(raw));
 
         // Pure reference keys are bindings — also allowed.
-        let (key, _) =
-            shared(vec![positional(ParserValue::Reference("state.heroKey".to_string()))]).unwrap();
+        let (key, _) = shared(vec![positional(ParserValue::Reference(
+            "state.heroKey".to_string(),
+        ))])
+        .unwrap();
         assert_eq!(key, ParserValue::Reference("state.heroKey".to_string()));
     }
 

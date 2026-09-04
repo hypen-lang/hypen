@@ -53,6 +53,8 @@ export function buildTsPackageJson(projectName: string): string {
       type: "module",
       scripts: {
         dev: "hypen dev",
+        studio: "hypen studio",
+        test: "hypen test",
         build: "hypen build",
         start: "node dist/main.js",
       },
@@ -608,7 +610,8 @@ const server = await new RemoteServer()
   .config({ port })
   .listen();
 
-console.log(\`Server running at \${server.url}\`);
+console.log(\`Web client:    http://localhost:\${port}\`);
+console.log(\`Remote server: \${server.url}\`);
 `;
   write(projectDir, "src/app.ts", appEntry);
 }

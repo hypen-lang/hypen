@@ -337,6 +337,21 @@ class TransformApplicator : ApplicatorHandler {
         value: Any?,
         context: ApplicatorContext,
     ): Modifier {
+        if (value is String) {
+            fun number(name: String): Float? = Regex("$name\\(([-+]?\\d*\\.?\\d+)(?:deg|px)?\\)", RegexOption.IGNORE_CASE)
+                .find(value)?.groupValues?.get(1)?.toFloatOrNull()
+            val rotate = number("rotate") ?: 0f
+            val scale = number("scale") ?: 1f
+            val translateX = number("translateX") ?: 0f
+            val translateY = number("translateY") ?: 0f
+            return modifier.graphicsLayer(
+                rotationZ = rotate,
+                scaleX = scale,
+                scaleY = scale,
+                translationX = translateX,
+                translationY = translateY,
+            )
+        }
         if (value !is Map<*, *>) return modifier
 
         val rotationZ = (value["rotate"] as? Number)?.toFloat() ?: 0f

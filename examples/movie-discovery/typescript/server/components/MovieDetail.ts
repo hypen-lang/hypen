@@ -129,6 +129,7 @@ export default app
               .color("@{state.movie.saved ? '#052E16' : '#0F172A'}")
           }
           .tw("mt-6 h-14 rounded-2xl border-0 items-center justify-center")
+          .width("100%")
           .backgroundColor("@{state.movie.saved ? '#22C55E' : '#FACC15'}")
           .boxShadow("@{state.movie.saved ? '0 18px 38px rgba(34, 197, 94, 0.24)' : '0 18px 38px rgba(250, 204, 21, 0.22)'}")
           .onClick(@actions.toggleSaved)

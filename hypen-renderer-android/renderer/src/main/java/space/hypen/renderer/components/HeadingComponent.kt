@@ -2,6 +2,7 @@ package space.hypen.renderer.components
 
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.Text
+import androidx.compose.material3.ProvideTextStyle
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -47,17 +48,15 @@ class HeadingComponent : ComponentHandler {
 
         // Apply text styling via applicators (allows overriding defaults)
         val textStyle = textApplicatorRegistry.applyAll(element.props)
+        val composeTextStyle = androidx.compose.ui.text.TextStyle(
+            fontFeatureSettings = textStyle.fontFeatureSettings,
+            fontFamily = textStyle.fontFamily,
+        )
 
         // If text is provided as prop, render it directly; otherwise render children
         // This supports both: Heading("text") and Heading { Text("text") }
         if (text != null && text.isNotEmpty()) {
             val styledText = textStyle.applyTransform(text)
-
-            // Build Compose TextStyle for fontFeatureSettings and fontFamily
-            val composeTextStyle = androidx.compose.ui.text.TextStyle(
-                fontFeatureSettings = textStyle.fontFeatureSettings,
-                fontFamily = textStyle.fontFamily,
-            )
 
             // For textAlign to work, Text needs to fill available width
             val textModifier = if (textStyle.textAlign != null && textStyle.textAlign != TextAlign.Start) {
@@ -82,9 +81,22 @@ class HeadingComponent : ComponentHandler {
                 style = composeTextStyle,
             )
         } else {
-            // Render children - the Heading acts as a styled container
-            // Children inherit heading-level styling via CompositionLocal or should handle their own styling
-            renderChildren()
+            // Child Text nodes receive the same heading defaults as direct text.
+            // Explicit child typography still overrides this inherited style.
+            ProvideTextStyle(
+                value = composeTextStyle.copy(
+                    fontSize = if (textStyle.fontSize != TextUnit.Unspecified) textStyle.fontSize else defaultFontSize,
+                    fontWeight = textStyle.fontWeight ?: defaultFontWeight,
+                    fontStyle = textStyle.fontStyle,
+                    color = textStyle.color,
+                    letterSpacing = textStyle.letterSpacing,
+                    lineHeight = textStyle.lineHeight,
+                    textAlign = textStyle.textAlign ?: TextAlign.Unspecified,
+                    textDecoration = textStyle.textDecoration,
+                )
+            ) {
+                renderChildren()
+            }
         }
     }
 }

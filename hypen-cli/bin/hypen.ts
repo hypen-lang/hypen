@@ -81,7 +81,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
                     findings are counted in the report, never in the exit code
     ${pink("studio")}          Open Hypen Studio IDE
     ${pink("test")}            Open Studio Test Mode (live previews + device mirrors)
-    ${pink("run")} <platform>  Install and launch on device (android|ios)
+    ${pink("run")} <platform>  Install and launch on device (android|ios|desktop)
 
   ${boldYellow("Options:")}
     -h, --help      Show this help message
@@ -101,6 +101,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${dim("$")} hypen studio --port 5173
     ${dim("$")} hypen test
     ${dim("$")} hypen run android
+    ${dim("$")} hypen run desktop
     ${dim("$")} hypen run android --url ws://localhost:3000
     ${dim("$")} hypen run ios --studio
 `;
@@ -293,16 +294,24 @@ async function initProject(name?: string) {
   // Kotlin resolves space.hypen:hypen-kotlin (latest.release) from Maven
   // Central on the first `./gradlew build`/`run`; nothing to install here.
 
-  const nextCommand =
-    language === "typescript" ? "hypen dev"
-    : language === "go" ? "go run ."
-    : "./gradlew run";
+  if (language === "typescript") {
+    console.log(`
+  ${boldPink("Done!")} To get started:
 
-  console.log(`
+    ${name ? `${dim("$")} cd ${name}\n    ` : ""}${dim("$")} hypen dev     ${dim("# dev server + web client at http://localhost:3000")}
+
+  ${boldYellow("Also try:")}
+    ${dim("$")} hypen studio  ${dim("# Hypen Studio IDE (starts the dev server for you)")}
+    ${dim("$")} hypen test    ${dim("# Test Mode: live web + device previews")}
+`);
+  } else {
+    const nextCommand = language === "go" ? "go run ." : "./gradlew run";
+    console.log(`
   ${boldPink("Done!")} To get started:
 
     ${name ? `${dim("$")} cd ${name}\n    ` : ""}${dim("$")} ${nextCommand}
 `);
+  }
 }
 
 /**
@@ -382,8 +391,9 @@ async function runServerEntry(config: Config, options: { port?: number }) {
 
   const port = options.port || config.port || 3000;
   console.log(`\n  ${boldPink("Hypen Dev Server")} ${dim("(server-based)")}\n`);
-  console.log(`  ${dim("Entry:")} ${yellow(config.entry)}`);
-  console.log(`  ${dim("Port:")}  ${yellow(String(port))}\n`);
+  console.log(`  ${dim("Entry:")}  ${yellow(config.entry)}`);
+  console.log(`  ${dim("Local:")}  ${yellow(`http://localhost:${port}`)}`);
+  console.log(`  ${dim("Remote:")} ${yellow(`ws://localhost:${port}`)}\n`);
 
   const proc = Bun.spawn({
     cmd: ["bun", "--hot", entryPath],
@@ -403,6 +413,94 @@ async function runServerEntry(config: Config, options: { port?: number }) {
   process.exit(code ?? 0);
 }
 
+/**
+ * Is a HYPEN RemoteServer (not just anything with a `/health` route —
+ * that path is far too common to identify one) already listening on the
+ * port? Checked via `/stats`, whose JSON shape the RemoteServer controls.
+ */
+async function isHypenServer(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(`http://localhost:${port}/stats`, {
+      signal: AbortSignal.timeout(1000),
+    });
+    if (!res.ok) return false;
+    const stats = await res.json();
+    return typeof stats === "object" && stats !== null && "activeSessions" in stats;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Start a server-based project's entry script in the background for
+ * `hypen test` / `hypen studio`, so the user doesn't need a second terminal
+ * running `hypen dev`. If a Hypen server is already listening on the port
+ * (e.g. the user DID start `hypen dev` themselves), reuse it instead of
+ * spawning a competing process.
+ *
+ * Returns the ws:// URL to connect to plus a `stop()` for the spawned child
+ * (no-op when an existing server was reused), or `null` when the entry
+ * couldn't be started.
+ */
+async function startServerEntryInBackground(
+  config: Config,
+  port: number
+): Promise<{ wsUrl: string; stop: () => void } | null> {
+  const entryPath = resolve(config.entry);
+  if (!existsSync(entryPath)) {
+    console.error(`  Entry script not found: ${config.entry}`);
+    return null;
+  }
+  if (!isBun) {
+    console.error(
+      "  Server-based projects require the Bun runtime. Install from https://bun.sh"
+    );
+    return null;
+  }
+
+  // A Hypen server already running (user has `hypen dev` open elsewhere)?
+  // Reuse it. Note: this can only tell "a Hypen server", not "THIS
+  // project's server" — starting studio for project B while project A's
+  // dev server holds the port connects to A.
+  if (await isHypenServer(port)) {
+    console.log(`  ${dim("Reusing running dev server on port")} ${yellow(String(port))}`);
+    return { wsUrl: `ws://localhost:${port}`, stop: () => {} };
+  }
+
+  console.log(`  ${dim("Starting dev server:")} ${yellow(config.entry)} ${dim(`(port ${port})`)}`);
+  const proc = Bun.spawn({
+    cmd: ["bun", "--hot", entryPath],
+    env: { ...process.env, PORT: String(port) },
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+
+  const stop = () => {
+    try { proc.kill(); } catch { /* already dead */ }
+  };
+
+  // Wait for OUR server with the stronger probe: if a foreign process
+  // grabbed the port first, the entry script dies on EADDRINUSE and a
+  // bare `/health` poll would happily report the foreign server as ours.
+  const deadline = Date.now() + 15_000;
+  let healthy = false;
+  while (Date.now() < deadline) {
+    if (await isHypenServer(port)) {
+      healthy = true;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  if (!healthy) {
+    stop();
+    console.error(
+      `  Dev server did not come up on port ${port} within 15s — check the entry script for errors.`
+    );
+    return null;
+  }
+  return { wsUrl: `ws://localhost:${port}`, stop };
+}
+
 async function devServer(options: { port?: number; debug?: boolean; a11y?: boolean }) {
   await ensureProjectDeps();
   const config = await loadConfig();
@@ -414,18 +512,26 @@ async function devServer(options: { port?: number; debug?: boolean; a11y?: boole
 
   const { dev, isDevA11yEnabled } = await import("../src/dev.js");
 
-  await dev({
-    components: config.components,
-    entry: config.entry,
-    port: options.port || config.port || 3000,
-    debug: options.debug || false,
-    hot: true,
-    // `--a11y` OR hypen.json `"a11y": { "dev": true }` enables findings on
-    // rebuilds; default is fully silent.
-    a11y: isDevA11yEnabled(options.a11y, config.a11y)
-      ? { ignoreRules: config.a11y?.ignoreRules }
-      : undefined,
-  });
+  try {
+    await dev({
+      components: config.components,
+      entry: config.entry,
+      port: options.port || config.port || 3000,
+      debug: options.debug || false,
+      hot: true,
+      // `--a11y` OR hypen.json `"a11y": { "dev": true }` enables findings on
+      // rebuilds; default is fully silent.
+      a11y: isDevA11yEnabled(options.a11y, config.a11y)
+        ? { ignoreRules: config.a11y?.ignoreRules }
+        : undefined,
+    });
+  } catch (err: any) {
+    // `dev()` throws (DevServerError for expected cases) instead of
+    // exiting — terminating the process is the CLI's call, not the
+    // library's.
+    console.error(`\n  Error: ${err?.message ?? err}\n`);
+    process.exit(1);
+  }
 }
 
 /**
@@ -650,13 +756,37 @@ async function startStudio(options: { port?: number; open?: boolean; session?: s
   const config = await loadConfig();
   const projectDirName = options.session ? `hypen-${options.session}` : null;
 
+  // Server-based projects: start (or reuse) the entry script so Studio's
+  // preview can connect immediately — no second terminal with `hypen dev`.
+  let remoteUrl: string | undefined;
+  let stopServerEntry: (() => void) | null = null;
+  if (!options.session && isScriptEntry(config.entry) && existsSync(resolve(config.entry))) {
+    const started = await startServerEntryInBackground(config, config.port || 3000);
+    if (started) {
+      remoteUrl = started.wsUrl;
+      stopServerEntry = started.stop;
+    }
+  }
+  if (stopServerEntry) {
+    // 'exit' alone misses default-handled signals (`kill <pid>` would
+    // orphan the spawned dev server); the studio's own SIGINT/SIGTERM
+    // handlers call process.exit, which then fires 'exit' — so hooking
+    // all three keeps the child reaped on every shutdown path.
+    process.on("exit", stopServerEntry);
+    process.on("SIGINT", stopServerEntry);
+    process.on("SIGTERM", stopServerEntry);
+  }
+
   await studio({
     components: config.components,
     entry: config.entry,
     port: options.port || 5173,
     open: options.open ?? true,
     session: sessionData,
+    remoteUrl,
   });
+
+  stopServerEntry?.();
 
   if (projectDirName) {
     console.log(`\n  ${pink("Your project is at:")} ${projectDirName}/`);
@@ -693,14 +823,21 @@ async function testMode(options: { port?: number; open?: boolean }) {
     const requestedPort = options.port || config.port || 3000;
 
     // Server-based projects manage their own RemoteServer inside the entry
-    // script — detected by a file-extension entry. Don't try to spin up a
-    // competing one; just open Studio and let the user point Test Mode at
-    // their running `hypen dev`.
+    // script — detected by a file-extension entry. Start (or reuse) that
+    // script ourselves so Test Mode comes up connected without the user
+    // running `hypen dev` in a second terminal.
     const isServerBased = isScriptEntry(config.entry);
     if (isServerBased) {
-      console.log(
-        `  ${dim("Server-based project — start it separately with")} ${yellow("hypen dev")} ${dim("and reconnect from the toolbar.")}`
-      );
+      const started = await startServerEntryInBackground(config, requestedPort);
+      if (started) {
+        remoteWsUrl = started.wsUrl;
+        stopRemoteServer = started.stop;
+        console.log(`  ${dim("Server:")}     ${yellow(remoteWsUrl)}`);
+      } else {
+        console.log(
+          `  ${dim("Could not start the dev server — Studio will open in connect-only mode.")}`
+        );
+      }
     } else {
     try {
       const { RemoteServer } = await import("@hypen-space/server/remote");
@@ -811,7 +948,7 @@ async function testMode(options: { port?: number; open?: boolean }) {
 }
 
 /**
- * Handle run command: hypen run android|ios
+ * Handle run command: hypen run android|ios|desktop
  *
  * Starts the dev server, installs/launches the runner app on the device,
  * and keeps the server running until the user presses Ctrl+C.
@@ -820,11 +957,11 @@ async function handleRun(
   platform: string | undefined,
   options: { port?: number; url?: string; studio?: boolean; clean?: boolean }
 ) {
-  const { runAndroid, runIOS, cleanRunners, RUN_HELP } = await import("../src/run.js");
+  const { runAndroid, runIOS, runDesktop, cleanRunners, RUN_HELP } = await import("../src/run.js");
   const config = await loadConfig();
   const port = options.port || config.port || 3000;
 
-  if (!platform || (platform !== "android" && platform !== "ios")) {
+  if (!platform || (platform !== "android" && platform !== "ios" && platform !== "desktop")) {
     if (platform) {
       console.error(`\n  Unknown platform: ${platform}\n`);
     }
@@ -834,13 +971,15 @@ async function handleRun(
 
   // Clean cached runners if --clean flag is set
   if (options.clean) {
-    cleanRunners(platform as "android" | "ios");
+    cleanRunners(platform as "android" | "ios" | "desktop");
   }
 
   // --url mode: skip built-in server, just install and launch the runner
   // pointing at an existing server
   if (options.url) {
-    console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow(platform === "android" ? "Android" : "iOS")}\n`);
+    const platformLabel =
+      platform === "android" ? "Android" : platform === "ios" ? "iOS" : "Desktop";
+    console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow(platformLabel)}\n`);
     console.log(`  ${dim("Connecting to:")} ${yellow(options.url)}\n`);
 
     switch (platform) {
@@ -849,6 +988,9 @@ async function handleRun(
         break;
       case "ios":
         await runIOS(port, options.url);
+        break;
+      case "desktop":
+        await runDesktop(port, options.url);
         break;
     }
 
@@ -939,6 +1081,11 @@ async function handleRun(
     case "ios":
       console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow("iOS")}\n`);
       await runIOS(actualPort);
+      break;
+
+    case "desktop":
+      console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow("Desktop")}\n`);
+      await runDesktop(actualPort);
       break;
   }
 

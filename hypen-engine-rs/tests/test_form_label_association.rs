@@ -74,7 +74,10 @@ fn text_label_wires_to_the_following_input_under_a_parent_id() {
     let input = semantics_of(&patches, "Input").expect("Input carries semantics");
     assert_eq!(input.role, Some(Role::Textbox));
     assert_eq!(input.name.as_deref(), Some("Name"));
-    assert_eq!(input.name_explicit, None, "auto-wired name must stay non-explicit");
+    assert_eq!(
+        input.name_explicit, None,
+        "auto-wired name must stay non-explicit"
+    );
     assert_eq!(input.labelledby.as_deref(), Some("signup-label-0"));
 
     // The Text became the reference anchor.
@@ -117,7 +120,10 @@ fn slider_and_textarea_wire_like_input() {
         Some("Volume")
     );
     assert_eq!(
-        semantics_of(&patches, "TextArea").unwrap().labelledby.as_deref(),
+        semantics_of(&patches, "TextArea")
+            .unwrap()
+            .labelledby
+            .as_deref(),
         Some("prefs-label-1")
     );
 }
@@ -138,7 +144,10 @@ fn author_label_wins_over_auto_association() {
     let input = semantics_of(&patches, "Input").unwrap();
     assert_eq!(input.name.as_deref(), Some("Full legal name"));
     assert_eq!(input.name_explicit, Some(true));
-    assert_eq!(input.labelledby, None, "explicit label must suppress wiring");
+    assert_eq!(
+        input.labelledby, None,
+        "explicit label must suppress wiring"
+    );
 
     // The would-be label Text stays untouched: no minted id.
     assert_eq!(semantics_of(&patches, "Text"), None);
@@ -155,7 +164,10 @@ fn author_labelledby_wins_over_auto_association() {
     );
     let input = semantics_of(&patches, "Input").unwrap();
     assert_eq!(input.labelledby.as_deref(), Some("custom-label"));
-    assert_eq!(input.name, None, "author labelledby must not grow a derived name");
+    assert_eq!(
+        input.name, None,
+        "author labelledby must not grow a derived name"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +186,11 @@ fn no_parent_id_and_no_text_id_means_no_wiring() {
     let input = semantics_of(&patches, "Input").unwrap();
     assert_eq!(input.name, None);
     assert_eq!(input.labelledby, None);
-    assert_eq!(semantics_of(&patches, "Text"), None, "no id minted for the Text");
+    assert_eq!(
+        semantics_of(&patches, "Text"),
+        None,
+        "no id minted for the Text"
+    );
 }
 
 #[test]
@@ -262,7 +278,11 @@ fn checkbox_and_switch_are_never_auto_wired() {
     let checkbox = semantics_of(&patches, "Checkbox").unwrap();
     assert_eq!(checkbox.labelledby, None);
     assert_eq!(checkbox.name, None);
-    assert_eq!(checkbox.name_missing, Some(true), "a bare Checkbox stays flagged");
+    assert_eq!(
+        checkbox.name_missing,
+        Some(true),
+        "a bare Checkbox stays flagged"
+    );
     assert_eq!(semantics_of(&patches, "Text"), None);
 }
 
@@ -285,7 +305,11 @@ fn instructional_prose_does_not_wire_and_the_rule_fires() {
     let input = semantics_of(&patches, "Input").unwrap();
     assert_eq!(input.name, None);
     assert_eq!(input.labelledby, None);
-    assert_eq!(semantics_of(&patches, "Text"), None, "no id minted for the prose");
+    assert_eq!(
+        semantics_of(&patches, "Text"),
+        None,
+        "no id minted for the prose"
+    );
 
     assert!(rules(src).contains(&A11yRule::FormControlMissingLabel));
 }
@@ -417,7 +441,9 @@ fn bound_invalid_resolves_at_reconcile_and_re_emits_on_change() {
     // Same value again → fixed point, no re-emit.
     let patches = reconcile_ir(&mut tree, &ir, None, &json!({"hasError": true}), &mut deps);
     assert!(
-        !patches.iter().any(|p| matches!(p, Patch::SetSemantics { .. })),
+        !patches
+            .iter()
+            .any(|p| matches!(p, Patch::SetSemantics { .. })),
         "got {patches:?}"
     );
 }

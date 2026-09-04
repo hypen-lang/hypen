@@ -11,13 +11,10 @@ function initDatabase(): Database {
   const schema = readFileSync(resolve(dataDir, "schema.sql"), "utf-8");
   db.exec(schema);
 
-  // Seed if empty
-  const count = db.query("SELECT COUNT(*) as n FROM users").get() as any;
-  if (count.n === 0) {
-    const seed = readFileSync(resolve(dataDir, "seed.sql"), "utf-8");
-    db.exec(seed);
-    console.log("Database seeded");
-  }
+  // Idempotent inserts let the demo data act as a small migration too: an
+  // existing local database gains newly added people, stories, and DMs.
+  const seed = readFileSync(resolve(dataDir, "seed.sql"), "utf-8");
+  db.exec(seed);
 
   return db;
 }

@@ -6,23 +6,32 @@ Button {
                 .objectFit("cover")
                 .tw("rounded-t-2xl bg-gray-100")
 
-            Row {
-                Icon(@resources.star)
-                    .size(11)
-                    .color("#F59E0B")
-                Text("@{item.rating}")
-                    .tw("text-xs font-bold ml-1")
-                    .color("#111827")
-            }
-            .tw("absolute bottom-2 left-2 bg-white rounded-full px-2 py-1 items-center shadow-sm")
-
-            If(condition: "@{!item.isOpen}") {
-                Column {
-                    Text("Closed")
-                        .tw("text-[10px] font-bold text-white px-2 py-0.5 bg-gray-900/80 rounded-full")
+            // Overlays on the hero image. A Stack has one content alignment for
+            // all children, so the two badges share a full-size Column that
+            // pushes "Closed" to the top and the rating to the bottom.
+            Column {
+                If(condition: "@{!item.isOpen}") {
+                    Row {
+                        Text("Closed")
+                            .tw("text-[10px] font-bold text-white px-2 py-0.5 bg-gray-900/80 rounded-full")
+                    }
                 }
-                .tw("absolute top-2 left-2")
+
+                Spacer()
+
+                Row {
+                    Row {
+                        Icon(@resources.star)
+                            .size(11)
+                            .color("#F59E0B")
+                        Text("@{item.rating}")
+                            .tw("text-xs font-bold ml-1")
+                            .color("#111827")
+                    }
+                    .tw("bg-white rounded-full px-2 py-1 items-center shadow-sm")
+                }
             }
+            .tw("w-full h-full p-2 items-start justify-between")
         }
 
         Column {

@@ -25,22 +25,32 @@ pub mod accessibility;
 pub mod anim;
 pub mod app;
 pub(crate) mod damage;
+#[cfg(feature = "dev-overlay")]
+pub(crate) mod dev_overlay;
 pub mod gpu;
 pub(crate) mod ime;
 pub mod layout;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
+#[cfg(feature = "video")]
+pub mod media;
 pub mod module;
 pub mod paint;
 pub mod painter;
+#[cfg(test)]
+mod perf_bench;
 pub mod remote;
 pub mod style;
 pub mod text;
 pub(crate) mod text_nav;
 pub mod tree;
+/// Video v2 — player states, the `playback` bind struct, and composition
+/// slots. Mirrors `hypen-web/packages/core/src/types.ts`.
+pub mod video_v2;
 pub mod window;
 
 pub use app::DesktopApp;
+pub use layout::{window_controls_platform_insets, SafeAreaInsets, WINDOW_CONTROLS_BAR_HEIGHT};
 pub use module::HypenModule;
 pub use painter::{PaintTarget, Painter};
 pub use remote::{ConnectionStatus, RemoteModule};

@@ -849,10 +849,7 @@ fn test_states_end_to_end_pose_flip() {
     // way the parser's fold path represents it (states component →
     // to_applicator, block children preserved).
     let mut engine = Engine::new();
-    let module = ModuleInstance::new(
-        Module::new("TestModule"),
-        json!({"cardState": "collapsed"}),
-    );
+    let module = ModuleInstance::new(Module::new("TestModule"), json!({"cardState": "collapsed"}));
     engine.set_module(module);
     let (patches, callback) = patch_capture();
     engine.set_render_callback(callback);
@@ -927,8 +924,14 @@ fn test_states_end_to_end_pose_flip() {
                 _ => None,
             })
             .collect();
-        assert!(set_props.contains(&("cornerRadius.0", &json!(16.0))), "{set_props:?}");
-        assert!(set_props.contains(&("width.0", &json!(240.0))), "{set_props:?}");
+        assert!(
+            set_props.contains(&("cornerRadius.0", &json!(16.0))),
+            "{set_props:?}"
+        );
+        assert!(
+            set_props.contains(&("width.0", &json!(240.0))),
+            "{set_props:?}"
+        );
         assert!(
             set_props.contains(&("__anim.states", &json!({"label": "expanded"}))),
             "{set_props:?}"
@@ -961,8 +964,14 @@ fn test_states_end_to_end_pose_flip() {
             _ => None,
         })
         .collect();
-    assert!(set_props.contains(&("cornerRadius.0", &json!(4.0))), "{set_props:?}");
-    assert!(set_props.contains(&("width.0", &json!(100.0))), "{set_props:?}");
+    assert!(
+        set_props.contains(&("cornerRadius.0", &json!(4.0))),
+        "{set_props:?}"
+    );
+    assert!(
+        set_props.contains(&("width.0", &json!(100.0))),
+        "{set_props:?}"
+    );
     assert!(
         set_props.contains(&("__anim.states", &json!(null))),
         "{set_props:?}"
@@ -976,10 +985,7 @@ fn test_states_block_parses_inline_from_source() {
     // no AST-assembly workaround (parse "states(...)" as a component, then
     // to_applicator) is needed — this pins the parser -> engine handoff.
     let mut engine = Engine::new();
-    let module = ModuleInstance::new(
-        Module::new("TestModule"),
-        json!({"cardState": "collapsed"}),
-    );
+    let module = ModuleInstance::new(Module::new("TestModule"), json!({"cardState": "collapsed"}));
     engine.set_module(module);
     let (patches, callback) = patch_capture();
     engine.set_render_callback(callback);
@@ -1043,7 +1049,10 @@ fn test_states_block_parses_inline_from_source() {
             _ => None,
         })
         .collect();
-    assert!(set_props.contains(&("width.0", &json!(240.0))), "{set_props:?}");
+    assert!(
+        set_props.contains(&("width.0", &json!(240.0))),
+        "{set_props:?}"
+    );
     assert!(
         set_props.contains(&("__anim.states", &json!({"label": "expanded"}))),
         "{set_props:?}"
@@ -1059,10 +1068,7 @@ fn test_scrub_end_to_end_create_props_and_state_flip() {
     // the Create patch alongside the untouched states machinery, and an
     // ordinary state flip must keep working exactly as without scrub.
     let mut engine = Engine::new();
-    let module = ModuleInstance::new(
-        Module::new("TestModule"),
-        json!({"sheetPhase": "closed"}),
-    );
+    let module = ModuleInstance::new(Module::new("TestModule"), json!({"sheetPhase": "closed"}));
     engine.set_module(module);
     let (patches, callback) = patch_capture();
     engine.set_render_callback(callback);
@@ -1132,7 +1138,13 @@ fn test_scrub_end_to_end_create_props_and_state_flip() {
         );
 
         // Stripped applicators never leak as generic props.
-        for key in ["scrub.0", "scrub.from", "settle.0", "settle.curve", "settle.bind"] {
+        for key in [
+            "scrub.0",
+            "scrub.from",
+            "settle.0",
+            "settle.curve",
+            "settle.bind",
+        ] {
             assert!(create.get(key).is_none(), "leaked '{key}' on the wire");
         }
     }
@@ -1153,7 +1165,10 @@ fn test_scrub_end_to_end_create_props_and_state_flip() {
             _ => None,
         })
         .collect();
-    assert!(set_props.contains(&("translateY.0", &json!(0.0))), "{set_props:?}");
+    assert!(
+        set_props.contains(&("translateY.0", &json!(0.0))),
+        "{set_props:?}"
+    );
     assert!(
         set_props.contains(&("__anim.states", &json!({"label": "open"}))),
         "{set_props:?}"
@@ -1172,7 +1187,11 @@ fn test_non_states_applicator_block_children_dropped_with_warning() {
     let source = r#"Card().theme(dark) { Text("hi") }"#;
     let component = hypen_parser::parse_component(source).expect("applicator block parses");
     assert_eq!(component.name, "Card");
-    assert_eq!(component.children.len(), 0, "block belongs to the applicator");
+    assert_eq!(
+        component.children.len(),
+        0,
+        "block belongs to the applicator"
+    );
     assert_eq!(component.applicators.len(), 1);
     assert_eq!(component.applicators[0].children.len(), 1);
 
@@ -1249,4 +1268,3 @@ fn test_shared_element_template_key_resolves_and_reresolves() {
         *captured
     );
 }
-

@@ -33,7 +33,12 @@ fn expand(source: &str) -> Element {
 fn setup(
     source: &str,
     state: &serde_json::Value,
-) -> (InstanceTree, DependencyGraph, hypen_engine::IRNode, Vec<Patch>) {
+) -> (
+    InstanceTree,
+    DependencyGraph,
+    hypen_engine::IRNode,
+    Vec<Patch>,
+) {
     let component = parse_component(source).unwrap();
     let ir = ast_to_ir_node(&component);
     let mut tree = InstanceTree::new();
@@ -124,7 +129,10 @@ fn spinner_busy_status_is_unchanged_by_live_vocabulary() {
     // Spinner keeps its auto-derived status+busy; no live token is invented.
     let el = expand("Spinner {}");
     let s = el.semantics.unwrap();
-    assert_eq!(serde_json::to_string(&s).unwrap(), r#"{"role":"status","busy":true}"#);
+    assert_eq!(
+        serde_json::to_string(&s).unwrap(),
+        r#"{"role":"status","busy":true}"#
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +154,13 @@ fn list_role_container_derives_listitem_on_direct_roleless_children() {
             c.as_element()
                 .and_then(|e| e.semantics.as_ref())
                 .and_then(|s| s.role)
-                .map(|r| serde_json::to_value(r).unwrap().as_str().unwrap().to_string())
+                .map(|r| {
+                    serde_json::to_value(r)
+                        .unwrap()
+                        .as_str()
+                        .unwrap()
+                        .to_string()
+                })
         })
         .collect();
     assert_eq!(
@@ -246,7 +260,10 @@ fn mixed_static_and_templated_children_resolve_a_name_at_create() {
     // Content-derived, not an author override: DOM keeps the visible text.
     assert_eq!(s.name_explicit, None);
     assert_eq!(s.name_missing, None);
-    assert!(set_semantics(&initial).is_empty(), "no SetSemantics at create");
+    assert!(
+        set_semantics(&initial).is_empty(),
+        "no SetSemantics at create"
+    );
 }
 
 #[test]
@@ -275,8 +292,7 @@ fn child_template_change_re_emits_set_semantics_with_the_new_name() {
 fn purely_templated_child_resolves_and_re_emits() {
     // The flagship finding-K case: Button { Text("@{state.x}") }.
     let state = json!({"x": "Search"});
-    let (mut tree, mut deps, ir, initial) =
-        setup(r#"Button { Text("@{state.x}") }"#, &state);
+    let (mut tree, mut deps, ir, initial) = setup(r#"Button { Text("@{state.x}") }"#, &state);
     let s = create_semantics(&initial, "Button").unwrap();
     assert_eq!(s.name.as_deref(), Some("Search"));
 
@@ -305,7 +321,9 @@ fn pure_static_children_are_unchanged_by_hoisting() {
         .iter()
         .find_map(|p| match p {
             Patch::Create {
-                element_type, props, ..
+                element_type,
+                props,
+                ..
             } if element_type == "Button" => Some(props.clone()),
             _ => None,
         })
@@ -315,7 +333,9 @@ fn pure_static_children_are_unchanged_by_hoisting() {
     // …and a state change re-emits nothing (resolution is a fixed point).
     let patches = update(&mut tree, &mut deps, &ir, &json!({"n": 4}));
     assert!(
-        !patches.iter().any(|p| matches!(p, Patch::SetSemantics { .. })),
+        !patches
+            .iter()
+            .any(|p| matches!(p, Patch::SetSemantics { .. })),
         "static tree must not re-emit, got {patches:?}"
     );
 }
@@ -345,9 +365,7 @@ fn synthetic_prop_stays_off_the_wire_at_create() {
 
     // Engine-side the carrier survives on the node — it must keep feeding
     // dependency-driven re-resolution after the Create was stripped.
-    let kept = tree
-        .iter()
-        .any(|(_, n)| n.props.contains_key("__a11yName"));
+    let kept = tree.iter().any(|(_, n)| n.props.contains_key("__a11yName"));
     assert!(kept, "carrier prop must stay on the InstanceNode");
 }
 

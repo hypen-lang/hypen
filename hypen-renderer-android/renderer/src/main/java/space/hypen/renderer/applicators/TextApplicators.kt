@@ -117,6 +117,15 @@ class TextApplicatorRegistry {
             }
         }
 
+        // `foregroundColor` is an alias of `color`, and both write the same
+        // builder field. Handlers are applied in the props' iteration order,
+        // not registration order, so a node setting both would otherwise get
+        // a result that depends on key order. Drop the alias so the canonical
+        // name always wins — matching DOM and Canvas.
+        if (grouped.containsKey("color")) {
+            grouped.remove("foregroundColor")
+        }
+
         for ((name, value) in grouped) {
             getHandler(name)?.apply(builder, value)
         }
@@ -131,6 +140,10 @@ class TextApplicatorRegistry {
             registry.register(FontWeightApplicator())
             registry.register(FontStyleApplicator())
             registry.register(FontFamilyApplicator())
+            // Precedence when a node sets both is enforced in applyAll, not
+            // by registration order -- handlers run in the props' iteration
+            // order.
+            registry.register(ForegroundColorTextApplicator())
             registry.register(ColorApplicator())
             registry.register(LetterSpacingApplicator())
             registry.register(LineHeightApplicator())
@@ -254,6 +267,28 @@ class FontFamilyApplicator : TextApplicatorHandler {
 
 class ColorApplicator : TextApplicatorHandler {
     override val name = "color"
+
+    override fun apply(builder: TextStyleBuilder, value: Any?) {
+        val color = space.hypen.renderer.applicators.ColorParser.parse(value)
+        if (color != null) {
+            builder.color = color
+        }
+    }
+}
+
+/**
+ * `foregroundColor` on a text element is the same thing as `color`.
+ *
+ * The modifier-level ForegroundColorApplicator provides LocalContentColor to
+ * a container's DESCENDANTS, which is right for a Box or a Card but leaves
+ * `Text("x").foregroundColor(red)` doing nothing at all: TextComponent reads
+ * textStyle.color first, and only this registry writes that. DOM, Canvas and
+ * Swift all honour the spelling directly on the text node, so Android has to
+ * as well. `color` still wins when a node sets both; applyAll drops this
+ * alias in that case.
+ */
+class ForegroundColorTextApplicator : TextApplicatorHandler {
+    override val name = "foregroundColor"
 
     override fun apply(builder: TextStyleBuilder, value: Any?) {
         val color = space.hypen.renderer.applicators.ColorParser.parse(value)

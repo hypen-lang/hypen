@@ -33,8 +33,13 @@ fn css_to_camel_case(name: &str) -> String {
 /// Returns a Vec of (prop_name, value) pairs with `.0` suffix,
 /// consistent with regular applicator props.
 /// CSS hyphenated names are converted to camelCase.
-fn expand_tailwind_classes(classes: &str) -> Vec<(String, Value)> {
-    let output = hypen_tailwind_parse::parse_classes(classes);
+///
+/// Positioning classes (`absolute`, `relative`, `top-0`, …) are a hard error
+/// from the Tailwind crate — Hypen has no CSS positioning model — and are
+/// surfaced as `Err(message)` so the caller can fail the element loudly.
+fn expand_tailwind_classes(classes: &str) -> Result<Vec<(String, Value)>, String> {
+    let output = hypen_tailwind_parse::parse_classes(classes)
+        .map_err(|e| format!(".tw(\"{classes}\"): {e}"))?;
     let mut props = Vec::new();
 
     // Add base properties (no variant)
@@ -59,7 +64,7 @@ fn expand_tailwind_classes(classes: &str) -> Vec<(String, Value)> {
         }
     }
 
-    props
+    Ok(props)
 }
 
 /// Extract all @{state.xxx} and @{item.xxx} bindings from a template string
@@ -161,11 +166,18 @@ fn insert_applicator_prop(props: &mut Props, name: &str, idx_key: &str, value: V
     props.insert(format!("{name}.{idx_key}"), value);
 }
 
+/// Lower applicators into `props`.
+///
+/// Returns `Some(message)` when an applicator is a hard error (currently only
+/// `.tw(...)` containing CSS positioning classes). The message has already
+/// been logged; element-level callers turn it into an `__Error` node so the
+/// mistake is impossible to miss instead of silently rendering a broken layout.
 fn process_applicators(
     applicators: &[hypen_parser::ApplicatorSpecification],
     props: &mut Props,
     element_type: &str,
-) {
+) -> Option<String> {
+    let mut hard_error: Option<String> = None;
     // `.states { onState(...) }` is collected here but applied only AFTER
     // every other applicator has merged into props: pose lowering captures
     // the node's *final* base value per overridden key as the switch default,
@@ -222,8 +234,19 @@ fn process_applicators(
                         }
                     }
                 };
-                for (prop_key, prop_value) in expand_tailwind_classes(&class_string) {
-                    props.insert(prop_key, prop_value);
+                match expand_tailwind_classes(&class_string) {
+                    Ok(expanded) => {
+                        for (prop_key, prop_value) in expanded {
+                            props.insert(prop_key, prop_value);
+                        }
+                    }
+                    Err(message) => {
+                        crate::log_warn!(
+                            crate::logger::LogScope::Engine,
+                            "{element_type}: {message}"
+                        );
+                        hard_error.get_or_insert(format!("{element_type}: {message}"));
+                    }
                 }
             }
             continue;
@@ -248,6 +271,10 @@ fn process_applicators(
                         let prop_name = match element_type {
                             "Checkbox" | "checkbox" => "checked",
                             "Switch" | "switch" => "on",
+                            // Video binds the playback struct ({playing,
+                            // position, duration, state}), not a scalar —
+                            // see hypen-docs/content/docs/guide/components.mdx §Playback control.
+                            "Video" | "video" => "playback",
                             _ => "value",
                         };
                         props.insert(prop_name.to_string(), Value::Binding(binding));
@@ -346,7 +373,18 @@ fn process_applicators(
                         .keys()
                         .all(|k| crate::portable::variant::is_variant_token(k))
                 {
-                    for (variant, value) in map {
+                    // Emit in canonical precedence order (default, then
+                    // breakpoints ascending, then states). The parser's map is
+                    // a `HashMap`, so its iteration order is arbitrary — and
+                    // the DOM renderer appends one equal-specificity CSS rule
+                    // per variant and lets the cascade pick the LAST match, so
+                    // an arbitrary order would hand `sm` the win over `lg` on a
+                    // wide window, differently on each run.
+                    let mut entries: Vec<_> = map.iter().collect();
+                    entries.sort_by_key(|(variant, _)| {
+                        crate::portable::variant::variant_token_rank(variant)
+                    });
+                    for (variant, value) in entries {
                         let prop_key = if variant == crate::portable::variant::DEFAULT_KEY {
                             format!("{}.0", applicator.name)
                         } else if crate::portable::variant::is_breakpoint(variant) {
@@ -403,6 +441,8 @@ fn process_applicators(
     // states phase so the pose-label cross-validation sees the collected
     // labels (via the "__anim.states" switch the states phase inserts).
     apply_scrub_applicators(&scrub_applicators, &settle_applicators, props);
+
+    hard_error
 }
 
 /// Apply the node's `.scrub`/`.settle` pair (Option G) to its final props.
@@ -595,7 +635,9 @@ fn apply_states_applicator(
         }
 
         let mut pose_props = Props::new();
-        process_applicators(&allowed, &mut pose_props, element_type);
+        // Pose bodies can't host `.tw` positioning either, but the outer
+        // element already turns that into an `__Error`; just drop the return.
+        let _ = process_applicators(&allowed, &mut pose_props, element_type);
 
         let mut static_props = indexmap::IndexMap::new();
         for (key, value) in &pose_props {
@@ -734,7 +776,13 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
         "When" => convert_when(component),
         "If" => convert_if(component),
         "Router" => convert_router(component),
-        "List" | "Grid" => convert_list(component),
+        // List and Grid have a dual role: with an iterable binding they are
+        // keyed iteration containers, while without one they are ordinary
+        // layout wrappers with static children. Only take the iterable path
+        // when an actual binding is present; otherwise fall through to the
+        // regular Element lowering below so static gallery/application markup
+        // keeps its type, props, applicators, and children.
+        "List" | "Grid" if iterable_source_binding(component).is_some() => convert_list(component),
         _ => {
             // Regular element - convert children to IRNodes recursively
             let mut element = Element::new(&component.name);
@@ -769,12 +817,15 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
                 element.props.insert(key, value);
             }
 
-            // Convert applicators to props
-            process_applicators(
+            // Convert applicators to props. A hard applicator error (e.g.
+            // `.tw("absolute")`) replaces the element with an `__Error` node.
+            if let Some(message) = process_applicators(
                 &component.applicators,
                 &mut element.props,
                 &element.element_type,
-            );
+            ) {
+                return error_element(message);
+            }
 
             // Optional key from first positional string argument
             if let Some(hypen_parser::Argument::Positioned {
@@ -1256,6 +1307,17 @@ fn parser_to_binding(value: &ParserValue) -> Option<Binding> {
     }
 }
 
+/// Return the array binding that makes a List/Grid an iterable container.
+///
+/// List and Grid also support static children, so the mere component name is
+/// not enough to select the ForEach lowering path.
+fn iterable_source_binding(component: &ComponentSpecification) -> Option<Binding> {
+    let args = &component.arguments.arguments;
+    find_named_arg(args, &["items", "in"])
+        .or_else(|| first_positional_arg(args))
+        .and_then(parser_to_binding)
+}
+
 /// Build an `__Error` element with `message` set to `msg`.
 fn error_element(msg: impl Into<String>) -> IRNode {
     let mut err = Element::new("__Error");
@@ -1291,7 +1353,9 @@ fn convert_foreach(component: &ComponentSpecification) -> IRNode {
         }
     }
 
-    process_applicators(&component.applicators, &mut props, "ForEach");
+    if let Some(message) = process_applicators(&component.applicators, &mut props, "ForEach") {
+        return error_element(message);
+    }
     let template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
 
     let Some(source) = source else {
@@ -1321,9 +1385,7 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
     let element_type = &component.name;
     let args = &component.arguments.arguments;
 
-    let source = find_named_arg(args, &["items", "in"])
-        .or_else(|| first_positional_arg(args))
-        .and_then(parser_to_binding);
+    let source = iterable_source_binding(component);
 
     let item_name = find_named_arg(args, &["as"])
         .and_then(parser_string_unquoted)
@@ -1351,7 +1413,11 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
     // Build the ForEach IR node for iteration
     let template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
     let mut foreach_props = Props::new();
-    process_applicators(&component.applicators, &mut foreach_props, element_type);
+    if let Some(message) =
+        process_applicators(&component.applicators, &mut foreach_props, element_type)
+    {
+        return error_element(message);
+    }
 
     let foreach_ir = IRNode::ForEach {
         source,
@@ -1721,6 +1787,39 @@ pub(crate) fn propagate_module_scope_ir_node(node: &mut IRNode, scope: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tw_positioning_classes_lower_to_error_element() {
+        let component =
+            hypen_parser::parse_component(r#"Column { Text("x") }.tw("p-4 absolute top-0")"#)
+                .expect("parse");
+        let node = super::ast_to_ir_node(&component);
+        let super::IRNode::Element(el) = node else {
+            panic!("expected element");
+        };
+        assert_eq!(el.element_type, "__Error");
+        let msg = el
+            .props
+            .get("message")
+            .and_then(|v| match v {
+                super::Value::Static(serde_json::Value::String(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("message prop");
+        assert!(msg.contains("absolute"), "{msg}");
+        assert!(msg.contains("Stack"), "{msg}");
+    }
+
+    #[test]
+    fn tw_without_positioning_still_lowers_normally() {
+        let component =
+            hypen_parser::parse_component(r#"Column { Text("x") }.tw("p-4 z-10")"#).expect("parse");
+        let super::IRNode::Element(el) = super::ast_to_ir_node(&component) else {
+            panic!("expected element");
+        };
+        assert_eq!(el.element_type, "Column");
+        assert!(el.props.contains_key("zIndex.0"));
+    }
+
     use super::*;
     use hypen_parser::parse_component;
 
@@ -1789,6 +1888,108 @@ mod tests {
         assert_eq!(element.ir_children.len(), 2);
         assert!(matches!(&element.ir_children[0], IRNode::Element(e) if e.element_type == "Text"));
         assert!(matches!(&element.ir_children[1], IRNode::Element(e) if e.element_type == "Text"));
+    }
+
+    #[test]
+    fn test_static_list_lowers_to_element_with_props_and_children() {
+        let element = parse_to_element(
+            r##"
+                List(direction: "horizontal") {
+                    Text("First")
+                    Text("Second")
+                }
+                .gap(7)
+                .backgroundColor("#f0f0f0")
+            "##,
+        );
+
+        assert_eq!(element.element_type, "List");
+        assert!(matches!(
+            element.props.get("direction"),
+            Some(Value::Static(value)) if value == "horizontal"
+        ));
+        assert!(matches!(
+            element.props.get("gap.0"),
+            Some(Value::Static(value)) if value.as_f64() == Some(7.0)
+        ));
+        assert!(matches!(
+            element.props.get("backgroundColor.0"),
+            Some(Value::Static(value)) if value == "#f0f0f0"
+        ));
+        assert_eq!(element.ir_children.len(), 2);
+        assert!(matches!(&element.ir_children[0], IRNode::Element(e) if e.element_type == "Text"));
+        assert!(matches!(&element.ir_children[1], IRNode::Element(e) if e.element_type == "Text"));
+    }
+
+    #[test]
+    fn test_static_grid_lowers_to_element_with_props_and_children() {
+        let element = parse_to_element(
+            r#"
+                Grid(columns: 3) {
+                    Text("A")
+                    Column { Text("B") }
+                }
+                .gridColumns(2)
+                .gap(8)
+            "#,
+        );
+
+        assert_eq!(element.element_type, "Grid");
+        assert!(matches!(
+            element.props.get("columns"),
+            Some(Value::Static(value)) if value.as_f64() == Some(3.0)
+        ));
+        assert!(matches!(
+            element.props.get("gridColumns.0"),
+            Some(Value::Static(value)) if value.as_f64() == Some(2.0)
+        ));
+        assert!(matches!(
+            element.props.get("gap.0"),
+            Some(Value::Static(value)) if value.as_f64() == Some(8.0)
+        ));
+        assert_eq!(element.ir_children.len(), 2);
+        assert!(matches!(&element.ir_children[0], IRNode::Element(e) if e.element_type == "Text"));
+        assert!(
+            matches!(&element.ir_children[1], IRNode::Element(e) if e.element_type == "Column")
+        );
+    }
+
+    #[test]
+    fn test_bound_list_keeps_foreach_wrapper_lowering() {
+        let element = parse_to_element(
+            r#"
+                List(@state.items, key: "id") {
+                    Text("@{item.name}")
+                }
+                .gap(4)
+            "#,
+        );
+
+        assert_eq!(element.element_type, "List");
+        assert!(matches!(
+            element.props.get("gap.0"),
+            Some(Value::Static(value)) if value.as_f64() == Some(4.0)
+        ));
+        assert_eq!(element.ir_children.len(), 1);
+
+        match &element.ir_children[0] {
+            IRNode::ForEach {
+                source,
+                item_name,
+                key_path,
+                template,
+                props,
+                ..
+            } => {
+                assert_eq!(source.full_path(), "items");
+                assert_eq!(item_name, "item");
+                assert_eq!(key_path.as_deref(), Some("id"));
+                assert_eq!(template.len(), 1);
+                assert!(matches!(&template[0], IRNode::Element(e) if e.element_type == "Text"));
+                assert!(props.contains_key("gap.0"));
+            }
+            other => panic!("Expected bound List child to remain ForEach, got {other:?}"),
+        }
     }
 
     #[test]
@@ -2104,6 +2305,35 @@ mod tests {
         } else {
             panic!("expected static padding@md.0");
         }
+    }
+
+    #[test]
+    fn test_value_map_variant_props_are_ordered_by_precedence() {
+        // The parser hands the map over as a HashMap, so emit order has to be
+        // imposed by the engine: default, breakpoints ascending, then states.
+        // The DOM renderer appends one equal-specificity rule per variant and
+        // lets the cascade pick the last match, so an arbitrary order would
+        // let `sm` beat `lg` on a wide window — differently on each run.
+        let input = r#"Box {}.background({xl: "e", default: "a", hover: "f", md: "c", sm: "b", lg: "d"})"#;
+        let element = parse_to_element(input);
+
+        let order: Vec<&str> = element
+            .props
+            .keys()
+            .map(|k| k.as_str())
+            .filter(|k| k.starts_with("background"))
+            .collect();
+        assert_eq!(
+            order,
+            vec![
+                "background.0",
+                "background@sm.0",
+                "background@md.0",
+                "background@lg.0",
+                "background@xl.0",
+                "background:hover.0",
+            ],
+        );
     }
 
     #[test]

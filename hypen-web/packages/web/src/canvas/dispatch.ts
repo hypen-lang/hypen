@@ -31,6 +31,35 @@ const CANVAS_EVENT_PROP_NAMES: Record<string, string[]> = {
   keyup: ["onKeyUp", "onkeyup", "keyup"],
 };
 
+/** A Link's destination, under the spellings the renderer marks clickable. */
+export function linkDestination(node: VirtualNode): string | null {
+  if (typeof node.type !== "string" || node.type.toLowerCase() !== "link") return null;
+  const p = node.props;
+  const raw = p.href ?? p["href.0"] ?? p.to ?? p["to.0"] ?? p["0"];
+  return typeof raw === "string" && raw ? raw : null;
+}
+
+const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
+
+/**
+ * Navigate for a Link that carries a destination but no click handler.
+ * In-app paths go through the router action the module-backed form sends
+ * (`router.push`, read by ManagedRouter as `to`); a URL with a scheme
+ * leaves the app the way an anchor would.
+ */
+function activateBareLink(engine: DispatchEngine, node: VirtualNode): void {
+  const to = linkDestination(node);
+  if (!to) return;
+  if (HAS_SCHEME.test(to)) {
+    if (typeof window === "undefined") return;
+    const target = node.props.target ?? node.props["target.0"];
+    if (target === "_blank") window.open(to, "_blank", "noopener");
+    else window.location.assign(to);
+    return;
+  }
+  engine.dispatchAction("router.push", { type: "click", nodeId: node.id, to });
+}
+
 /**
  * Dispatch an event on a node to the engine action its props declare.
  *
@@ -67,7 +96,12 @@ export function dispatchNodeEvent(
   }
 
   const resolved = resolveEventAction(spec);
-  if (!resolved) return;
+  if (!resolved) {
+    // A bare `Link("/next")` has no handler prop; on the DOM the `<a href>`
+    // navigates by itself. Give the canvas the same default.
+    if (eventType === "click") activateBareLink(engine, node);
+    return;
+  }
 
   const payload: Record<string, any> = {
     type: eventType,

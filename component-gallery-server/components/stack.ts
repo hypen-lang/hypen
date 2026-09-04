@@ -46,7 +46,7 @@ Column {
     .marginBottom(8)
 
   Stack {
-    Image(src: "https://picsum.photos/300/200")
+    Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/image-300x200.png?platform=__HYPEN_GALLERY_PLATFORM__&example=stack&generation=__HYPEN_GALLERY_GENERATION__")
       .width(300)
       .height(200)
       .cornerRadius(12)
@@ -65,6 +65,7 @@ Column {
   }
   .width(300)
   .height(200)
+  .alignment("center")
   .cornerRadius(12)
   .overflow("hidden")
   .marginBottom(24)

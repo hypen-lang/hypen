@@ -1,0 +1,14 @@
+{
+  "counts": {
+    "react": 899,
+    "hypen": 899,
+    "expectedRows": 850
+  },
+  "screenshots": {
+    "react": "f6aa803930d63fe3",
+    "hypen": "f6aa803930d63fe3",
+    "identical": true
+  },
+  "identical": true,
+  "mismatches": []
+}

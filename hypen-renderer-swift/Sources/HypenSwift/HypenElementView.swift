@@ -143,6 +143,11 @@ struct HypenElementContentView: View {
                     }
                 )
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
+                // Renderer-local video intents (`.videoIntent("fullscreen")`).
+                // Recognized simultaneously with the element's own action tap
+                // above, so a node can carry both; a no-op everywhere else.
+                // See Components/VideoIntents.swift.
+                .videoIntentTap(VideoIntent.from(element))
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
             } else {
@@ -153,6 +158,11 @@ struct HypenElementContentView: View {
                     children: { AnyView(renderChildren(element)) }
                 )
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
+                // Renderer-local video intents (`.videoIntent("fullscreen")`).
+                // Recognized simultaneously with the element's own action tap
+                // above, so a node can carry both; a no-op everywhere else.
+                // See Components/VideoIntents.swift.
+                .videoIntentTap(VideoIntent.from(element))
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
             }
@@ -170,6 +180,11 @@ struct HypenElementContentView: View {
                     }
                 )
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
+                // Renderer-local video intents (`.videoIntent("fullscreen")`).
+                // Recognized simultaneously with the element's own action tap
+                // above, so a node can carry both; a no-op everywhere else.
+                // See Components/VideoIntents.swift.
+                .videoIntentTap(VideoIntent.from(element))
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
             } else {
@@ -178,6 +193,11 @@ struct HypenElementContentView: View {
                 }
                 .hypenModifier(applicatorResult.baseModifier)
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
+                // Renderer-local video intents (`.videoIntent("fullscreen")`).
+                // Recognized simultaneously with the element's own action tap
+                // above, so a node can carry both; a no-op everywhere else.
+                // See Components/VideoIntents.swift.
+                .videoIntentTap(VideoIntent.from(element))
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
             }
@@ -352,11 +372,10 @@ extension View {
     func applyWeightExpansion(modifier: HypenModifier, allowsHorizontal: Bool, allowsVertical: Bool, parentHeight: CGFloat? = nil, parentWidth: CGFloat? = nil, proportionalWidth: CGFloat? = nil) -> some View {
         // Proportional width from Row's flex distribution takes precedence
         // This handles flex(1), flex(2), etc. proportional distribution
-        let effectiveWidth: CGFloat? = proportionalWidth ?? {
-            // Calculate percentage width when parent has explicit width
-            guard modifier.fillMaxWidth, let parentWidth = parentWidth else { return nil }
-            return parentWidth * modifier.fillMaxWidthFraction
-        }()
+        // Percentage width is established inside `hypenModifier`, before
+        // padding/background/border. Applying it again here would wrap an
+        // already-painted view and is what made 25/50/75% appear as 100%.
+        let effectiveWidth: CGFloat? = proportionalWidth
 
         // Calculate percentage height when parent has explicit height
         let calculatedHeight: CGFloat? = {
@@ -374,7 +393,10 @@ extension View {
         // icon grid sit flush left instead of centred under its parent's
         // `items-center`. `FillExpansionModifier` (HypenModifier.swift) has
         // always applied this rule; this expansion simply didn't honour it.
-        let shouldExpandHorizontal = effectiveWidth == nil && allowsHorizontal && modifier.maxWidth == nil && (
+        let shouldExpandHorizontal = effectiveWidth == nil
+            && !modifier.hasFractionalFillWidth
+            && allowsHorizontal
+            && modifier.maxWidth == nil && (
             (modifier.weight != nil && modifier.weight! > 0) ||
             (modifier.flexGrow != nil && modifier.flexGrow! > 0) ||
             modifier.fillMaxWidth
@@ -404,27 +426,15 @@ extension View {
                 self.applyProportionalWidth(width, preventShrink: preventShrink)
             }
         } else if shouldExpandHorizontal {
-            if modifier.fillMaxWidth && modifier.fillMaxWidthFraction < 1.0 {
-                // Fractional fillMaxWidth without explicit parent width
-                if let height = calculatedHeight {
-                    self.applyFillMaxWidthFraction(modifier.fillMaxWidthFraction, parentWidth: parentWidth)
-                        .applyPercentageHeight(height, backgroundColor: modifier.backgroundColor, cornerRadius: modifier.cornerRadius)
-                } else if shouldExpandVertical {
-                    self.applyFillMaxWidthFraction(modifier.fillMaxWidthFraction, parentWidth: parentWidth)
-                        .frame(maxHeight: .infinity, alignment: .topLeading)
-                } else {
-                    self.applyFillMaxWidthFraction(modifier.fillMaxWidthFraction, parentWidth: parentWidth)
-                }
+            // Fractional width has already been established before visual
+            // styles, so only true full-width/weight expansion reaches here.
+            if let height = calculatedHeight {
+                self.frame(maxWidth: .infinity, alignment: .topLeading)
+                    .applyPercentageHeight(height, backgroundColor: modifier.backgroundColor, cornerRadius: modifier.cornerRadius)
+            } else if shouldExpandVertical {
+                self.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             } else {
-                // Full width or weight expansion
-                if let height = calculatedHeight {
-                    self.frame(maxWidth: .infinity, alignment: .topLeading)
-                        .applyPercentageHeight(height, backgroundColor: modifier.backgroundColor, cornerRadius: modifier.cornerRadius)
-                } else if shouldExpandVertical {
-                    self.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-                } else {
-                    self.frame(maxWidth: .infinity, alignment: .topLeading)
-                }
+                self.frame(maxWidth: .infinity, alignment: .topLeading)
             }
         } else {
             // No horizontal expansion
@@ -506,22 +516,6 @@ extension View {
             )
     }
 
-    /// Apply fillMaxWidth with a fraction (e.g., 0.5 for 50% of parent width)
-    @ViewBuilder
-    func applyFillMaxWidthFraction(_ fraction: CGFloat, parentWidth: CGFloat? = nil) -> some View {
-        if let parentWidth = parentWidth {
-            // Use explicit parent width if available
-            self.frame(width: parentWidth * fraction)
-        } else if #available(iOS 17.0, macOS 14.0, tvOS 17.0, watchOS 10.0, *) {
-            self.containerRelativeFrame(.horizontal) { length, _ in length * fraction }
-        } else {
-            // Fallback for older iOS
-            GeometryReader { geometry in
-                self.frame(width: fraction * geometry.size.width)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-            }
-        }
-    }
 }
 
 // MARK: - onChange Compatibility
@@ -593,6 +587,33 @@ private struct ParentExplicitWidthKey: EnvironmentKey {
     static let defaultValue: CGFloat? = nil
 }
 
+/// True when an immediate parent Layout assigns the child's exact horizontal
+/// proposal (Row percentages/flex). The child should paint that proposal and
+/// must not independently resolve percentages against a root container.
+private struct ParentControlsHorizontalSizingKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+/// The immediate parent assigns a cross-axis track and ordinary auto-width
+/// children should paint the full proposal. Explicit width/max-width still
+/// opt out. Used by Grid tracks and vertical List rows.
+private struct ParentStretchesHorizontalSizingKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+/// Grid tracks stretch bare images to the track width. A dedicated signal
+/// avoids changing the intrinsic image behavior of List and other containers.
+private struct ParentStretchesBareGridImageKey: EnvironmentKey {
+    static let defaultValue: Bool = false
+}
+
+/// Alignment authored on the immediate child occupying a Grid/List track.
+/// The track owns the finite width proposal, so it carries this alongside the
+/// stretch signal instead of relying on a nested container to rediscover it.
+private struct ParentTrackAlignmentKey: EnvironmentKey {
+    static let defaultValue: Alignment? = nil
+}
+
 /// Environment key for proportional width calculated from flex/weight in Row.
 /// When set, the child should use this exact width instead of expanding to infinity.
 private struct ProportionalWidthKey: EnvironmentKey {
@@ -652,6 +673,26 @@ extension EnvironmentValues {
     var parentExplicitWidth: CGFloat? {
         get { self[ParentExplicitWidthKey.self] }
         set { self[ParentExplicitWidthKey.self] = newValue }
+    }
+
+    var parentControlsHorizontalSizing: Bool {
+        get { self[ParentControlsHorizontalSizingKey.self] }
+        set { self[ParentControlsHorizontalSizingKey.self] = newValue }
+    }
+
+    var parentStretchesHorizontalSizing: Bool {
+        get { self[ParentStretchesHorizontalSizingKey.self] }
+        set { self[ParentStretchesHorizontalSizingKey.self] = newValue }
+    }
+
+    var parentStretchesBareGridImage: Bool {
+        get { self[ParentStretchesBareGridImageKey.self] }
+        set { self[ParentStretchesBareGridImageKey.self] = newValue }
+    }
+
+    var parentTrackAlignment: Alignment? {
+        get { self[ParentTrackAlignmentKey.self] }
+        set { self[ParentTrackAlignmentKey.self] = newValue }
     }
 
     /// Proportional width calculated from flex/weight in parent Row

@@ -11,12 +11,12 @@ module Search {
         Grid(@state.explorePosts, key: "id") {
             Image(src: "@{item.imageUrl}")
                 .objectFit("cover")
-                .tw("aspect-square w-full")
+                .tw("aspect-square w-full md:rounded-lg select-none transition-transform duration-500 ease-out md:active:scale-110 md:active:z-10")
         }
         .gridColumns(3)
         .gap(4)
         .scrollable(true)
-        .tw("flex-1")
+        .tw("flex-1 md:p-2")
     }
     .tw("flex-1 w-full bg-white")
 }

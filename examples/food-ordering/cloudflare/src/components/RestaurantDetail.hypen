@@ -1,29 +1,35 @@
 Column {
     Column {
+    Column {
         Stack {
             Image(src: "@{state.restaurant.imageUrl}")
                 .tw("w-full h-56 md:h-80 rounded-b-[28px] md:rounded-[32px]")
                 .objectFit("cover")
 
-            Button {
-                Icon(@resources.arrow-left)
-                    .size(22)
-                    .color("#111827")
-            }
-            .tw("absolute top-4 left-4 w-10 h-10 rounded-full bg-white items-center justify-center shadow")
-            .opacity({ default: 1, active: 0.6 })
-            .transition(150, easeOut)
-            .onClick(@router.push, to: "/")
+            SafeArea(edges: ["top", "left", "right"]) {
+                Row {
+                    Button {
+                        Icon(@resources.arrow-left)
+                            .size(22)
+                            .color("#111827")
+                    }
+                    .tw("w-10 h-10 rounded-full bg-white items-center justify-center shadow")
+                    .opacity({ default: 1, active: 0.6 })
+                    .transition(150, easeOut)
+                    .onClick(@router.push, to: "/")
 
-            Button {
-                Icon(@resources.heart)
-                    .size(22)
-                    .color("@{state.isFavorite ? '#ef4444' : '#111827'}")
+                    Button {
+                        Icon(@resources.heart)
+                            .size(22)
+                            .color("@{state.isFavorite ? '#ef4444' : '#111827'}")
+                    }
+                    .tw("w-10 h-10 rounded-full bg-white items-center justify-center shadow")
+                    .opacity({ default: 1, active: 0.6 })
+                    .transition(150, easeOut)
+                    .onClick(@actions.toggleFavorite)
+                }
+                .tw("w-full px-4 pt-4 items-center justify-between")
             }
-            .tw("absolute top-4 right-4 w-10 h-10 rounded-full bg-white items-center justify-center shadow")
-            .opacity({ default: 1, active: 0.6 })
-            .transition(150, easeOut)
-            .onClick(@actions.toggleFavorite)
         }
 
         Column {
@@ -57,7 +63,7 @@ Column {
             }
             .tw("mt-4 items-center flex-wrap")
         }
-        .tw("px-4 md:px-8 py-5 md:py-7 bg-white border-b border-gray-100")
+        .tw("w-full px-4 md:px-8 py-5 md:py-7 bg-white border-b border-gray-100")
         .enter(fade, duration: 300)
     }
     .maxWidth(1180)
@@ -68,43 +74,49 @@ Column {
         Text("Menu")
             .tw("text-xl md:text-2xl font-bold px-4 md:px-8 pt-5 pb-4")
 
-        Column {
-            ForEach(items: @state.menuItems, key: "id") {
-                MenuItem()
-            }
+        Grid(@state.menuItems, key: "id") {
+            MenuItem()
         }
-        .display("grid")
-        .gridTemplateColumns("repeat(auto-fit, minmax(260px, 1fr))")
+        .gridColumns({default: 1, md: 2})
+        .fillMaxWidth(true)
         .gap(18)
-        .tw("px-4 md:px-8 pb-28 md:pb-8")
+        .tw("w-full px-4 md:px-8 pb-28 md:pb-8")
     }
     .maxWidth(1180)
     .width("100%")
     .alignSelf("center")
 
+    }
+    .scrollable(true)
+    .tw("flex-1 w-full min-h-0 bg-stone-50")
+
     If(condition: "@{state.cartCount > 0}") {
-        Button {
-            Row {
-                Column {
-                    Text("@{state.cartCount} item@{state.cartCount > 1 ? 's' : ''} in cart")
-                        .tw("text-xs text-white opacity-90")
-                    Text("View cart")
+        Row {
+            Button {
+                Row {
+                    Column {
+                        Text("@{state.cartCount} item@{state.cartCount > 1 ? 's' : ''} in cart")
+                            .tw("text-xs text-white opacity-90")
+                        Text("View cart")
+                            .tw("text-base font-bold text-white")
+                    }
+                    .tw("flex-1")
+
+                    Text("$@{state.cartSubtotal}")
                         .tw("text-base font-bold text-white")
                 }
-                .tw("flex-1")
-
-                Text("$@{state.cartSubtotal}")
-                    .tw("text-base font-bold text-white")
+                .tw("items-center")
             }
-            .tw("items-center")
+            .tw("py-3 px-5 bg-orange-500 rounded-full shadow-xl")
+            .width("100%")
+            .maxWidth(384)
+            .opacity({ default: 1, active: 0.8 })
+            .transition(160, easeOut)
+            .enter(slide, fade, from: bottom, duration: 280)
+            .exit(fade, duration: 160)
+            .onClick(@router.push, to: "/cart")
         }
-        .tw("fixed left-4 right-4 bottom-4 md:left-auto md:right-8 md:bottom-8 md:w-96 py-3 px-5 bg-orange-500 rounded-full shadow-xl")
-        .opacity({ default: 1, active: 0.8 })
-        .transition(160, easeOut)
-        .enter(slide, fade, from: bottom, duration: 280)
-        .exit(fade, duration: 160)
-        .onClick(@router.push, to: "/cart")
+        .tw("w-full shrink-0 px-4 pb-4 md:px-8 md:pb-8 justify-end bg-stone-50")
     }
 }
-.scrollable(true)
-.tw("flex-1 bg-stone-50")
+.tw("flex-1 w-full h-full min-h-0 bg-stone-50")

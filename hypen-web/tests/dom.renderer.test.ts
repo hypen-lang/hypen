@@ -3,6 +3,7 @@ import { DOMRenderer } from "../packages/web/src/dom/renderer";
 import type { Patch } from "../packages/core/src/types";
 import type { IEngine as Engine } from "../packages/core/src/app";
 import { ensureFakeDomGlobals, FakeElement } from "./fake-dom";
+import { remoteAssetBaseUrl } from "../packages/web/src/dom/components/hypenapp";
 
 ensureFakeDomGlobals();
 
@@ -116,6 +117,39 @@ describe("DOMRenderer patch handling", () => {
 
     const inputEl = renderer.getNode("input") as FakeElement;
     expect(inputEl.value).toBe("typed");
+  });
+
+  test("embedded renderers resolve relative images against the child app", () => {
+    const container = document.createElement("div");
+    const renderer = new DOMRenderer(
+      container,
+      new StubEngine() as unknown as Engine,
+      undefined,
+      { assetBaseUrl: "https://child.example/" },
+    );
+
+    renderer.applyPatches([
+      {
+        type: "create",
+        id: "poster",
+        elementType: "Image",
+        props: { src: "/poster/bunny" },
+      } as Patch,
+    ]);
+    const image = renderer.getNode("poster") as FakeElement;
+    expect(image.src).toBe("https://child.example/poster/bunny");
+
+    renderer.applyPatches([
+      { type: "setProp", id: "poster", name: "src", value: "thumb.jpg" } as Patch,
+    ]);
+    expect(image.src).toBe("https://child.example/thumb.jpg");
+  });
+
+  test("HypenApp converts its WebSocket endpoint to a child asset origin", () => {
+    expect(remoteAssetBaseUrl("wss://movies.example/ws?session=1")).toBe(
+      "https://movies.example/",
+    );
+    expect(remoteAssetBaseUrl("ws://localhost:3177/ws")).toBe("http://localhost:3177/");
   });
 
   test("insert respects before_id ordering", () => {
@@ -591,5 +625,28 @@ describe("DOMRenderer patch field name robustness", () => {
       (globalThis as any).MutationObserver = previousMutationObserver;
       (globalThis as any).WebSocket = previousWebSocket;
     }
+  });
+});
+
+describe("DOMRenderer falsy text values", () => {
+  const makeRenderer = () => {
+    const container = document.createElement("div");
+    const renderer = new DOMRenderer(container, new StubEngine() as unknown as Engine);
+    return { container, renderer };
+  };
+
+  // Regression: `props["0"] || props.text` dropped falsy-but-valid values,
+  // so `Text("@{state.count}")` rendered nothing at count 0.
+  test("Text renders the number 0", () => {
+    const { renderer } = makeRenderer();
+
+    renderer.applyPatches([
+      { type: "create", id: "root-1", elementType: "Column", props: {} } as Patch,
+      { type: "create", id: "text", elementType: "Text", props: { "0": 0 } } as Patch,
+      { type: "insert", parentId: "root-1", id: "text" } as Patch,
+    ]);
+
+    const textNode = renderer.getNode("text") as FakeElement;
+    expect(textNode.textContent).toBe("0");
   });
 });

@@ -5,6 +5,36 @@
 import type { ApplicatorHandler } from "./types.js";
 import { toCssLength } from "./size.js";
 
+type BorderWidthProperty =
+  | "borderWidth"
+  | "borderTopWidth"
+  | "borderRightWidth"
+  | "borderBottomWidth"
+  | "borderLeftWidth";
+
+type BorderStyleProperty =
+  | "borderStyle"
+  | "borderTopStyle"
+  | "borderRightStyle"
+  | "borderBottomStyle"
+  | "borderLeftStyle";
+
+function applyVisibleBorderWidth(
+  el: HTMLElement,
+  value: any,
+  widthProperty: BorderWidthProperty,
+  styleProperty: BorderStyleProperty,
+): void {
+  el.style[widthProperty] = toCssLength(value);
+
+  // A CSS width without a style has a used width of zero. Hypen's border
+  // width applicators represent a visible border, so default both uniform
+  // and directional widths to solid unless a visible style is already set.
+  if (!el.style[styleProperty] || el.style[styleProperty] === "none") {
+    el.style[styleProperty] = "solid";
+  }
+}
+
 export const borderHandlers: Record<string, ApplicatorHandler> = {
   // Compound border applicator - can take width, color, style, radius
   border: (el, value) => {
@@ -44,16 +74,23 @@ export const borderHandlers: Record<string, ApplicatorHandler> = {
   },
 
   borderWidth: (el, value) => {
-    el.style.borderWidth = toCssLength(value);
-    // CSS `border-style` default is `none`, so a width-only border draws
-    // nothing. The Hypen DSL writes `.borderWidth(2).borderColor(...)`
-    // expecting a visible stroke (the social Stories ring + the Profile
-    // page Edit button). Override `none` too — the Button component
-    // resets `border: none` at create time, so the inherited
-    // border-style is "none" by the time this applicator lands.
-    if (!el.style.borderStyle || el.style.borderStyle === "none") {
-      el.style.borderStyle = "solid";
-    }
+    applyVisibleBorderWidth(el, value, "borderWidth", "borderStyle");
+  },
+
+  borderTopWidth: (el, value) => {
+    applyVisibleBorderWidth(el, value, "borderTopWidth", "borderTopStyle");
+  },
+
+  borderRightWidth: (el, value) => {
+    applyVisibleBorderWidth(el, value, "borderRightWidth", "borderRightStyle");
+  },
+
+  borderBottomWidth: (el, value) => {
+    applyVisibleBorderWidth(el, value, "borderBottomWidth", "borderBottomStyle");
+  },
+
+  borderLeftWidth: (el, value) => {
+    applyVisibleBorderWidth(el, value, "borderLeftWidth", "borderLeftStyle");
   },
 
   borderStyle: (el, value) => {

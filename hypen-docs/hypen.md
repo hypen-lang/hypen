@@ -103,6 +103,7 @@ Text(@spacetime.messages)               // Data source reference
 | `List { }` | Virtualized scrollable list |
 | `Spacer()` | Flexible space |
 | `Divider()` | Separator line |
+| `SafeArea { }` | Vertical stack padded by device safe-area insets; optional `edges: ["top", ...]` (default: all four) |
 
 ### Content
 | Component | Description |
@@ -139,7 +140,7 @@ Text(@spacetime.messages)               // Data source reference
 ### Media
 | Component | Description |
 |-----------|-------------|
-| `Video(src: "url")` | Video player (Web, iOS, Android) |
+| `Video(src: "url")` | Video player (Web, iOS, Android). Also takes `playlist: [urls]` (auto-advance), `startIndex`, `poster`, `controls`, `autoplay`, `loop`, `muted`, `preload`, `headers`, `title`, and event actions `onPlay`/`onPause`/`onEnded`/`onTrackChange`/`onError` |
 | `Audio(src: "url")` | Audio player (Web, iOS, Android) |
 
 ## Control Flow
@@ -494,7 +495,7 @@ remote.NewRemoteServer().WithDefinition(counter).Listen(3000)
 |---------|-----|---------|-----|
 | All layout/content/input components | Yes | Yes | Yes |
 | Icon (SVG resources) | Yes | Yes | Yes |
-| Video, Audio | Yes | Yes | Yes |
+| Video (src/playlist/poster/events), Audio | Yes | Yes | Yes |
 | ForEach, If, When | Yes | Yes | Yes |
 | List (virtualized) | Yes (scroll) | LazyColumn | LazyVStack |
 | Grid | Yes (CSS Grid) | LazyGrid | LazyVGrid |

@@ -13,6 +13,7 @@
 //! functions, binding resolution) is exported for integration testing but
 //! may change between minor versions.
 
+pub mod binding_map;
 pub mod conditionals;
 pub mod diff;
 pub mod item_bindings;

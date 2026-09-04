@@ -50,7 +50,7 @@ const MAX_TEXT_METRICS_CACHE_SIZE = 4096;
  * Get cache key for text metrics
  */
 function getCacheKey(text: string, fontStyle: FontStyle, maxWidth?: number): string {
-  return `${text}|${fontStyle.fontSize}|${fontStyle.fontWeight}|${fontStyle.fontFamily}|${maxWidth || "auto"}`;
+  return `${text}|${fontStyle.fontSize}|${fontStyle.fontWeight}|${fontStyle.fontFamily}|${fontStyle.lineHeight ?? "normal"}|${maxWidth || "auto"}|${fontStyle.letterSpacing || 0}`;
 }
 
 /**
@@ -192,6 +192,16 @@ export function measureText(
     ctx.restore();
   }
 
+  // Tracking (`letter-spacing`) widens every line by one spacing per glyph.
+  // Measured widths above come from the untracked font, so add it back —
+  // otherwise a `tracking-[0.2em]` heading is under-measured and its box
+  // clips the text (HYPEFLIX lost its trailing glyphs).
+  const tracking = fontStyle.letterSpacing || 0;
+  if (tracking !== 0 && lines.length > 0) {
+    const longest = lines.reduce((max, line) => Math.max(max, line.length), 0);
+    width += tracking * longest;
+  }
+
   const result: TextMetrics = {
     width,
     height: lines.length * lineHeight,
@@ -251,7 +261,19 @@ export function renderText(
       const lineWidth = ctx.measureText(line).width;
       lineX = x + width - lineWidth;
     }
-
+    if (style.textAlign === "justify" && i < metrics.lines.length - 1) {
+      const words = line.trim().split(/\s+/);
+      if (words.length > 1) {
+        const wordsWidth = words.reduce((sum, word) => sum + ctx.measureText(word).width, 0);
+        const gap = Math.max(0, (width - wordsWidth) / (words.length - 1));
+        let wordX = x;
+        for (const word of words) {
+          ctx.fillText(word, wordX, lineY);
+          wordX += ctx.measureText(word).width + gap;
+        }
+        continue;
+      }
+    }
     ctx.fillText(line, lineX, lineY);
   }
 
@@ -279,8 +301,6 @@ export async function loadFont(fontFamily: string, fontWeight: string | number =
     log.warn(`Failed to load font: ${font}`, error);
   }
 }
-
-
 
 
 

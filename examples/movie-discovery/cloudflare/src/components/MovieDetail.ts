@@ -146,6 +146,9 @@ export default app
               .color("@{state.movie.saved ? '#052E16' : '#0B0B10'}")
           }
           .tw("mt-6 h-12 rounded-2xl border-0 items-center justify-center")
+          // This is the full CTA, not the icon-sized bookmark above. Declare
+          // its width explicitly; unsized Buttons are content-width.
+          .width("100%")
           .backgroundColor("@{state.movie.saved ? '#34D399' : '#F5C518'}")
           .opacity({ default: 1, active: 0.75 })
           .transition(280, easeOut)

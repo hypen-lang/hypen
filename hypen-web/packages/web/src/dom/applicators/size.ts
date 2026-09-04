@@ -12,6 +12,11 @@
  */
 
 import type { ApplicatorHandler } from "./types.js";
+import {
+  recordWidthSource,
+  releaseAutomaticStretchOwnership,
+  widthKindForCssValue,
+} from "../cross-axis-width.js";
 
 /**
  * Parse a size value and return CSS-compatible string.
@@ -111,7 +116,12 @@ export function toCssLength(value: any): string {
 export const sizeHandlers: Record<string, ApplicatorHandler> = {
   width: (el, value) => {
     const size = parseSizeValue(value);
-    if (size) el.style.width = size;
+    if (size) {
+      el.style.width = size;
+      recordWidthSource(el, "width", widthKindForCssValue(size));
+    } else {
+      recordWidthSource(el, "width", null);
+    }
   },
 
   height: (el, value) => {
@@ -145,7 +155,12 @@ export const sizeHandlers: Record<string, ApplicatorHandler> = {
       const obj = value as Record<string, any>;
       if (obj.width !== undefined) {
         const w = parseSizeValue(obj.width);
-        if (w) el.style.width = w;
+        if (w) {
+          el.style.width = w;
+          recordWidthSource(el, "size", widthKindForCssValue(w));
+        } else {
+          recordWidthSource(el, "size", null);
+        }
       }
       if (obj.height !== undefined) {
         const h = parseSizeValue(obj.height);
@@ -156,15 +171,23 @@ export const sizeHandlers: Record<string, ApplicatorHandler> = {
       if (size) {
         el.style.width = size;
         el.style.height = size;
+        recordWidthSource(el, "size", widthKindForCssValue(size));
+      } else {
+        recordWidthSource(el, "size", null);
       }
     }
   },
 
   // Fill max width - stretch to fill parent width
-  // Note: This only stretches within parent's current width.
-  // For full-width behavior, parent Columns also need fillMaxWidth(true).
+  // Unsized ancestor Columns automatically carry this explicit width demand
+  // to the nearest finite containing block (see cross-axis-width.ts).
   fillMaxWidth: (el, value) => {
-    if (value === false) return;
+    if (value === false || value === null || value === undefined) {
+      recordWidthSource(el, "fillMaxWidth", null);
+      return;
+    }
+    recordWidthSource(el, "fillMaxWidth", "relative");
+    releaseAutomaticStretchOwnership(el);
     const fraction = typeof value === "number" ? value : 1;
     if (fraction === 1) {
       // Use align-self stretch to fill cross-axis in flex containers
@@ -189,7 +212,12 @@ export const sizeHandlers: Record<string, ApplicatorHandler> = {
 
   // Fill max size - shorthand for width: 100% and height: 100%
   fillMaxSize: (el, value) => {
-    if (value === false) return;
+    if (value === false || value === null || value === undefined) {
+      recordWidthSource(el, "fillMaxSize", null);
+      return;
+    }
+    recordWidthSource(el, "fillMaxSize", "relative");
+    releaseAutomaticStretchOwnership(el);
     // Value can be a fraction (0-1) or boolean
     const fraction = typeof value === "number" ? value : 1;
     el.style.width = `${fraction * 100}%`;

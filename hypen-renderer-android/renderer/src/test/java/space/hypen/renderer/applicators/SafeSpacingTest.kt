@@ -1,6 +1,7 @@
 package space.hypen.renderer.applicators
 
 import androidx.compose.ui.Modifier
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Test
 
@@ -13,8 +14,9 @@ import org.junit.Test
  * the Tailwind parser for `-m-4` / `-mt-2` — killed the whole Compose
  * composition with an uncaught exception.
  *
- * These call the applicators the way the renderer does; the assertion that
- * matters is simply that nothing throws.
+ * Applicator tests retain the crash regression coverage. Geometry tests below
+ * exercise the signed margin-box calculation that controls parent measurement
+ * and subsequent sibling placement.
  */
 class SafeSpacingTest {
 
@@ -65,5 +67,83 @@ class SafeSpacingTest {
     fun `ordinary positive spacing still applies`() {
         assertNotNull(MarginApplicator().apply(Modifier, 16, context()))
         assertNotNull(PaddingApplicator().apply(Modifier, 16, context()))
+    }
+
+    @Test
+    fun `negative start margins overlap avatar siblings and reduce row width`() {
+        val margins = listOf(0, -12, -12, -12)
+        var cursor = 0
+        val childPositions = margins.map { startMargin ->
+            val geometry = marginAxisGeometry(
+                contentSize = 40,
+                before = startMargin,
+                after = 0,
+                minSize = 0,
+                maxSize = Int.MAX_VALUE,
+            )
+            val childPosition = cursor + geometry.childOffset
+            cursor += geometry.outerSize
+            childPosition
+        }
+
+        assertEquals(listOf(0, 28, 56, 84), childPositions)
+        assertEquals(124, cursor)
+        assertEquals(124, childPositions.maxOf { it + 40 })
+    }
+
+    @Test
+    fun `negative end margin advances the next sibling toward this child`() {
+        val geometry = marginAxisGeometry(
+            contentSize = 40,
+            before = 0,
+            after = -12,
+            minSize = 0,
+            maxSize = Int.MAX_VALUE,
+        )
+
+        assertEquals(0, geometry.childOffset)
+        assertEquals(28, geometry.outerSize)
+    }
+
+    @Test
+    fun `negative vertical margins shift content and shrink measured height`() {
+        val geometry = marginAxisGeometry(
+            contentSize = 40,
+            before = -8,
+            after = -4,
+            minSize = 0,
+            maxSize = Int.MAX_VALUE,
+        )
+
+        assertEquals(-8, geometry.childOffset)
+        assertEquals(28, geometry.outerSize)
+    }
+
+    @Test
+    fun `signed margin box respects parent constraints`() {
+        assertEquals(
+            MarginAxisGeometry(childOffset = -12, outerSize = 30),
+            marginAxisGeometry(
+                // The child's minimum becomes 42 after offsetting the
+                // parent's 30px minimum by the -12px signed margin.
+                contentSize = 42,
+                before = -12,
+                after = 0,
+                minSize = 30,
+                maxSize = 100,
+            ),
+        )
+        assertEquals(
+            MarginAxisGeometry(childOffset = 12, outerSize = 50),
+            marginAxisGeometry(
+                // The child's maximum becomes 34 after reserving the 16px
+                // positive margins from the parent's 50px maximum.
+                contentSize = 34,
+                before = 12,
+                after = 4,
+                minSize = 0,
+                maxSize = 50,
+            ),
+        )
     }
 }

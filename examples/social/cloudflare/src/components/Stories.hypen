@@ -1,20 +1,32 @@
 Row {
     Column {
+        // Avatar with a "+" badge pinned to its bottom-right corner. The ring
+        // (padding + border + rounded-full) lives on an inner wrapper; the outer
+        // Stack carries no corner radius, so native renderers — which clip
+        // children to the corner radius — don't slice the badge where it
+        // overlaps the ring. The Stack's end/end alignment puts the badge in
+        // the corner; the ringed avatar defines the Stack's size.
         Stack {
-            Image(src: "@{state.currentUser.avatarUrl}")
-                .tw("w-14 h-14 rounded-full")
+            Column {
+                Image(src: "@{state.currentUser.avatarUrl}")
+                    .tw("w-14 h-14 rounded-full")
+            }
+            .tw("p-0.5 rounded-full")
+            .borderWidth(2)
+            .borderColor("#0095f6")
+
             Column {
                 Icon(@resources.plus)
-                    .size(14)
+                    .size(10)
                     .color("#ffffff")
             }
-            .tw("w-5 h-5 rounded-full bg-blue-500 items-center justify-center")
-            .marginTop(36)
-            .marginLeft(36)
+            .tw("w-5 h-5 rounded-full bg-blue-500 border-2 border-white items-center justify-center")
         }
+        .horizontalAlignment("end")
+        .verticalAlignment("end")
 
         Text("Your story")
-            .tw("text-xs text-gray-500 mt-1")
+            .tw("text-xs text-gray-800 mt-1 w-full text-center truncate")
     }
     .tw("items-center py-1 px-1 w-20 shrink-0")
 
@@ -22,5 +34,5 @@ Row {
         StoryItem()
     }
 }
-.tw("flex-row pl-3 pr-1 py-2 border-b border-gray-200")
+.tw("flex-row pl-3 pr-1 py-2")
 .scrollable("horizontal")

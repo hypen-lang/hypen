@@ -20,6 +20,7 @@ Bun.serve({
     "/": index,
     "/gallery": index,
     "/gallery.html": index,
+    "/health": Response.json({ service: "hypen-web-gallery", status: "ok" }),
   },
 
   development: {

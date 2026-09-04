@@ -49,6 +49,7 @@ import type {
 } from "./types.js";
 import { SessionManager } from "./session.js";
 import type { Patch } from "../types.js";
+import { TemplateExpander } from "../patch-expand.js";
 import { frameworkLoggers } from "../logger.js";
 import { BaseEngine } from "../engine-base.js";
 
@@ -141,6 +142,13 @@ export interface RemoteSessionOptions {
    * escape hatch when it needs it.
    */
   socketHandle?: unknown;
+  /**
+   * Server-authenticated session id recovered from a transport-owned channel
+   * (for example a Cloudflare hibernatable WebSocket attachment). When the
+   * in-memory SessionManager has been evicted, this id may be re-adopted.
+   * Never populate this from an untrusted client hello payload.
+   */
+  recoverySessionId?: string;
 }
 
 let nextSessionCounter = 1;
@@ -155,9 +163,20 @@ export class RemoteSession {
   private readonly host: SessionHost;
   private readonly transport: SessionTransport;
   private readonly socketHandle: unknown;
+  private readonly recoverySessionId: string | undefined;
 
   readonly engine: BaseEngine;
   private _moduleInstance: HypenModuleInstance<any> | null = null;
+
+  /**
+   * Session-lifetime template lowering: remote clients of any version
+   * receive plain patches only, so every batch captured from the engine
+   * is expanded before it is sent. ONE expander spans both capture
+   * points (initial-tree and streaming) — a `registerTemplate` consumed
+   * while building the initial tree must satisfy `instantiate`s arriving
+   * in later streamed batches.
+   */
+  private readonly templateExpander = new TemplateExpander();
 
   private _sessionId: string | null = null;
   private _helloReceived = false;
@@ -200,6 +219,7 @@ export class RemoteSession {
     this.id = options.clientId ?? `client_${nextSessionCounter++}`;
     this.connectedAt = new Date();
     this.socketHandle = options.socketHandle;
+    this.recoverySessionId = options.recoverySessionId;
 
     this.ready = new Promise<void>((resolve) => {
       this._resolveReady = resolve;
@@ -357,6 +377,18 @@ export class RemoteSession {
   }
 
   /**
+   * Close the transport WITHOUT expiring the session, so the client's
+   * auto-reconnect resumes it (same session id → suspended state restored)
+   * against freshly loaded code. Used by hot reload: re-rendering into a
+   * live session leaves stale router-cached subtrees and broken reactive
+   * wiring, so the reliable reload is a fast reconnect. Close code 1012 =
+   * "service restart".
+   */
+  disconnectForReload(): void {
+    this.transport.close(1012, "Hot reload");
+  }
+
+  /**
    * Notify the client their session is gone and close the transport.
    */
   expireAndClose(reason: "ttl" | "kicked" | "manual"): void {
@@ -461,13 +493,22 @@ export class RemoteSession {
   private setupComponentResolver(): void {
     this.engine.setComponentResolver((componentName, _contextPath) => {
       const comp = this.host.discoveredComponents.get(componentName);
-      if (!comp) return null;
-      return { source: comp.template, path: componentName };
+      if (comp) return { source: comp.template, path: componentName };
+      // Server-based apps register modules programmatically with inline
+      // `.ui()` templates and never populate `discoveredComponents`, so
+      // fall back to the HypenApp registry. Without this, a template
+      // referencing `Home()` renders an opaque Create the renderer drops.
+      const registered = this.host.app?.get(componentName);
+      if (registered?.template) {
+        return { source: registered.template, path: componentName };
+      }
+      return null;
     });
   }
 
   private registerNestedModules(): void {
     const primary = this.host.moduleName;
+    const registered: string[] = [];
 
     if (this.host.app) {
       for (const [name, def] of this.host.app.components) {
@@ -486,9 +527,10 @@ export class RemoteSession {
           stateKeys,
           snapshot
         );
-        log.info(
+        log.debug(
           `Registered nested module "${name}" (${def.actions?.length ?? 0} actions, ${stateKeys.length} state keys)`
         );
+        registered.push(name);
       }
     }
 
@@ -526,7 +568,20 @@ export class RemoteSession {
           ? JSON.parse(JSON.stringify(def.initialState))
           : {};
       this.engine.registerModule(name, def.actions ?? [], stateKeys, snapshot);
-      log.info(`Registered nested module "${name}" from discovery`);
+      log.debug(`Registered nested module "${name}" from discovery`);
+      registered.push(name);
+    }
+
+    // One line per session instead of one per module, and only the
+    // modules an app author actually wrote — framework builtins
+    // (`__Router`, `__Route`, `__Link`, ...) self-register in the shared
+    // app registry on import and are pure noise at info level; the
+    // per-module lines above remain available under debug logging.
+    const visible = registered.filter((name) => !name.startsWith("__"));
+    if (visible.length > 0) {
+      log.info(
+        `Registered ${visible.length} nested module${visible.length === 1 ? "" : "s"}: ${visible.join(", ")}`
+      );
     }
   }
 
@@ -569,6 +624,13 @@ export class RemoteSession {
           if (!allowed) return;
           session = activeSession;
           isNew = false;
+        } else if (requestedSessionId === this.recoverySessionId) {
+          // A hibernated host has lost its in-memory SessionManager, but the
+          // transport still carries the server-issued id. Re-adopt that id so
+          // session-keyed module persistence resolves the same storage key.
+          session = sm.recoverSession(requestedSessionId, props);
+          isNew = false;
+          isRestored = true;
         } else {
           session = sm.createSession(props);
         }
@@ -594,7 +656,10 @@ export class RemoteSession {
     if (!this._moduleInstance) {
       this._moduleInstance = new HypenModuleInstance(
         this.engine,
-        this.host.module
+        this.host.module,
+        undefined,
+        undefined,
+        session.id
       );
     }
 
@@ -616,7 +681,11 @@ export class RemoteSession {
     // patches from other batches — the initial tree never animates anyway.
     const initialPatches: Patch[] = [];
     this.engine.setRenderCallback((patches) => {
-      initialPatches.push(...patches.filter((p) => p.type !== "batchAnimation"));
+      initialPatches.push(
+        ...this.templateExpander
+          .expand(patches)
+          .filter((p) => p.type !== "batchAnimation")
+      );
     });
 
     try {
@@ -703,6 +772,16 @@ export class RemoteSession {
     for (const [name, comp] of this.host.discoveredComponents) {
       if (comp.template) runDiscover(comp.template, `${this.id} / ${name}`);
     }
+    // Server-based apps carry child templates in the HypenApp registry
+    // (`.module("Name").ui(...)`) instead of `discoveredComponents` —
+    // scan those too so their nested Router blocks mount.
+    if (this.host.app) {
+      for (const [name, def] of this.host.app.components) {
+        if (name === this.host.moduleName) continue;
+        if (this.host.discoveredComponents.has(name)) continue;
+        if (def.template) runDiscover(def.template, `${this.id} / ${name}`);
+      }
+    }
     if (discovered.length === 0) return;
 
     const primaryScope = this.host.moduleName.toLowerCase();
@@ -767,16 +846,56 @@ export class RemoteSession {
     // synchronous notify path (Rust rejects re-entrant WASM state
     // proxy calls).
     if (locationKey) {
+      // Persistence is loaded before auto-wiring. Seed the windowless router
+      // from that restored location before any subscribers are attached;
+      // otherwise its default `/` is immediately mirrored back into state
+      // and a hibernation wake silently replaces the restored detail route
+      // with Home before the triggering action runs.
+      const restoredLocation = (
+        primary?.getState() as Record<string, unknown> | undefined
+      )?.[locationKey];
+      if (typeof restoredLocation === "string" && restoredLocation) {
+        router.replace(restoredLocation);
+      }
+
       router.onNavigate((rs) => {
         const path = rs.currentPath;
         queueMicrotask(() => {
           try {
+            const state = this._moduleInstance?.getState() as
+              | Record<string, unknown>
+              | undefined;
+            // Skip when already in sync — this mirror and the state →
+            // router one below would otherwise ping-pong.
+            if (state?.[locationKey] === path) return;
             this._moduleInstance?.updateState({ [locationKey]: path });
           } catch (err) {
             log.error(`Auto-router: state.${locationKey} sync failed:`, err);
           }
         });
       });
+
+      // Mirror the other direction too: templates commonly navigate by
+      // mutating `state.location` from a module action (the scaffold's
+      // `@actions.navigate`). The engine's Router IR follows that state
+      // directly, but module mount/unmount and per-route action handlers
+      // follow the HypenRouter — without this push, navigating via a state
+      // mutation renders the new route while its module (and thus its
+      // actions) never activates.
+      if (primary) {
+        primary.onStateChange(() => {
+          try {
+            const loc = (primary.getState() as Record<string, unknown>)?.[
+              locationKey
+            ];
+            if (typeof loc === "string" && loc && loc !== router.getCurrentPath()) {
+              router.push(loc);
+            }
+          } catch (err) {
+            log.error(`Auto-router: ${locationKey} → router sync failed:`, err);
+          }
+        });
+      }
     }
 
     // `start()` installs the `@router.push`/`@router.back`/... action handlers
@@ -813,6 +932,9 @@ export class RemoteSession {
   private setupStreamingRenderCallback(): void {
     this.engine.setRenderCallback((patches) => {
       if (this._destroyed) return;
+      // Lower template patches ONCE, before the message object is built —
+      // the same patchMessage fans out to allow-multiple peers below.
+      patches = this.templateExpander.expand(patches);
       this._revision++;
       log.info(
         `Streaming ${patches.length} patches to ${this.id} (rev ${this._revision})`
@@ -887,7 +1009,18 @@ export class RemoteSession {
     savedState: unknown
   ): Promise<void> {
     const handler = this.host.module.handlers.onReconnect;
-    if (!handler) return;
+    if (!handler) {
+      // No handler: restore the suspended state automatically — resuming a
+      // session and then discarding the state it was suspended with would
+      // make resume a no-op. Defining `onReconnect` takes over the
+      // decision (call `restore()` yourself, or don't).
+      if (savedState !== null && typeof savedState === "object") {
+        this._moduleInstance?.updateState(
+          savedState as Record<string, unknown>
+        );
+      }
+      return;
+    }
 
     const restore = (state: unknown) => {
       if (state === null || typeof state !== "object") {

@@ -4,6 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material3.LocalContentColor
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
@@ -14,6 +15,7 @@ import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.routing.RouteMatch
 import space.hypen.renderer.routing.RouterController
@@ -159,7 +161,9 @@ class LinkComponent : ComponentHandler {
             }
 
         Box(modifier = clickableModifier) {
-            renderChildren()
+            CompositionLocalProvider(LocalContentColor provides Color(0xFF0000EE)) {
+                renderChildren()
+            }
         }
     }
 }

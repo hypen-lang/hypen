@@ -6,6 +6,7 @@
 
 import type { Renderer } from "@hypen-space/core/renderer";
 import type { Patch } from "@hypen-space/core/types";
+import { TemplateExpander } from "@hypen-space/core/patch-expand";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 
 const log = frameworkLoggers.canvas;
@@ -21,8 +22,16 @@ import type {
   LayoutFunction,
 } from "./types.js";
 import { computeLayout, initTaffyLayout } from "./layout.js";
+import { FORM_CONTROL_TYPES } from "./controls.js";
 import { clearTextCache } from "./text.js";
-import { paintNode, registerPainter, clearCharAdvanceCache } from "./paint.js";
+import {
+  paintNode,
+  registerPainter,
+  clearCharAdvanceCache,
+  setVideoActionDispatcher,
+  releaseVideo,
+  pauseVideoSubtree,
+} from "./paint.js";
 import { CanvasEventManager } from "./events.js";
 import { AccessibilityLayer } from "./accessibility.js";
 import { FocusManager } from "./focus.js";
@@ -41,6 +50,7 @@ import {
 import { applyVariants, invalidateVariantCache, deriveNodeComputed } from "./variants.js";
 import { CanvasAnimator } from "./anim.js";
 import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
+import { setSafeAreaInsetOverrides } from "../safe-area.js";
 
 const DEFAULT_OPTIONS: CanvasRendererOptions = {
   devicePixelRatio: typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
@@ -63,17 +73,26 @@ export class CanvasRenderer implements Renderer {
   private ctx: CanvasRenderingContext2D;
   private engine: IEngine;
   private options: CanvasRendererOptions;
-  
+
   private rootNode: VirtualNode | null = null;
   private nodes = new Map<string, VirtualNode>();
-  
+
+  /**
+   * Lowers `registerTemplate`/`instantiate` into the plain create/insert
+   * runs they replace — canvas has no cloneable retained tree, so
+   * templates hold no advantage here. Session-lifetime state, deliberately
+   * NOT reset in `clear()`: template ids are content-derived
+   * (`t{hash}.{idx}`), so registered skeletons stay valid across clears.
+   */
+  private templateExpander = new TemplateExpander();
+
   private eventManager: CanvasEventManager;
   private scrollManager: ScrollManager;
   private selectionManager: SelectionManager;
   private accessibilityLayer: AccessibilityLayer;
   private focusManager: FocusManager;
   private textEditor: TextEditController;
-  
+
   private dirtyTracker: DirtyRectTracker;
 
   /**
@@ -85,6 +104,7 @@ export class CanvasRenderer implements Renderer {
 
   private rafId: number | null = null;
   private needsRedraw = false;
+  private captureFrozen = false;
 
   // Whether the next frame must re-run layout. Patches, resize, font loads,
   // and image decodes set it; pure paint frames (scroll, hover, caret blink,
@@ -157,6 +177,11 @@ export class CanvasRenderer implements Renderer {
       dispatchAction: (name, payload) => this.engine.dispatchAction(name, payload),
     });
 
+    // Video playback events (onPlay/onPause/onEnded/onTrackChange/onError)
+    // dispatch through the same engine channel as pointer/keyboard events.
+    // Late-bound module hook, same pattern as the selection/edit hooks.
+    setVideoActionDispatcher((name, payload) => this.engine.dispatchAction(name, payload));
+
     // Initialize subsystems
     this.eventManager = new CanvasEventManager(canvas, engine);
     this.scrollManager = new ScrollManager(canvas, () => this.scheduleRedraw());
@@ -193,6 +218,7 @@ export class CanvasRenderer implements Renderer {
     this.focusManager = new FocusManager(this.accessibilityLayer, engine, {
       getNode: (id) => this.nodes.get(id),
       isAuxFocusTarget: (el) => this.textEditor.isProxyElement(el),
+      requestRedraw: () => this.scheduleRedraw(),
       onFocusChange: (next) => {
         if (next && isEditableNode(next)) {
           const el = this.accessibilityLayer.getElement(next.id);
@@ -283,6 +309,18 @@ export class CanvasRenderer implements Renderer {
    * Apply patches from engine
    */
   applyPatches(patches: Patch[]): void {
+    // Newer engine artifacts deliver the batch as a JSON string; older
+    // core wrappers pass it through unparsed. Accept both so a renderer
+    // never silently drops a batch on a core/engine version skew.
+    if (typeof patches === "string") {
+      patches = JSON.parse(patches) as Patch[];
+    }
+    // Lower template patches first. Expansion preserves order, and only
+    // `registerTemplate` is ever consumed — a leading `batchAnimation`
+    // stamp (always emitted at index 0) keeps its position for the
+    // first-patch check below.
+    patches = this.templateExpander.expand(patches);
+
     const hadRoot = this.rootNode !== null;
 
     // Transaction-scoped animation stamp (Option D): honored ONLY as the
@@ -424,11 +462,26 @@ export class CanvasRenderer implements Renderer {
       opacity: parseFloat(rawProps.opacity) || 1,
       clickable:
         lowerType === "button" ||
+        // Form controls are operated by pointer (toggle, or drag for a
+        // slider), so they need the pointer cursor and the hit-test lift
+        // even when the author wired no `onClick`.
+        FORM_CONTROL_TYPES.has(lowerType) ||
+        // A Link carrying a destination is inherently activatable, the way
+        // `<a href>` is on the DOM. The module-backed Link wires its own
+        // `onClick` and was already covered by the clause below; this only
+        // adds the bare primitive form, so it gets the pointer cursor and a
+        // hit-test target rather than reading as inert decoration.
+        (lowerType === "link" &&
+          (rawProps["0"] != null || rawProps.to != null || rawProps.href != null)) ||
         rawProps.onClick != null ||
         rawProps.onclick != null ||
         rawProps.action != null,
       hoverable: true,
-      focusable: lowerType === "input" || lowerType === "textarea" || lowerType === "button",
+      focusable:
+        lowerType === "input" ||
+        lowerType === "textarea" ||
+        lowerType === "button" ||
+        FORM_CONTROL_TYPES.has(lowerType),
       focused: false,
       hovered: false,
     };
@@ -701,6 +754,12 @@ export class CanvasRenderer implements Renderer {
     // focus state follows.
     this.textEditor.endIfWithin(node);
     this.focusManager.clearIfWithin(node);
+    this.eventManager.clearIfWithin(node);
+
+    // Off-screen (cached-route) videos must stop playing audio, but their
+    // offscreen elements stay alive so re-attach resumes from the same
+    // position — matching the Router cache's keep-alive semantics.
+    pauseVideoSubtree(node);
 
     // Mirror keeps the element (and subtree ids) alive for re-attach.
     this.accessibilityLayer.detachNode(id);
@@ -750,6 +809,7 @@ export class CanvasRenderer implements Renderer {
       // AT activation can no longer reach it during the exit window.
       this.textEditor.endIfWithin(node);
       this.focusManager.clearIfWithin(node);
+    this.eventManager.clearIfWithin(node);
       this.accessibilityLayer.markExiting(id);
       return;
     }
@@ -773,6 +833,7 @@ export class CanvasRenderer implements Renderer {
     // End any edit session inside the removed subtree; focus state follows.
     this.textEditor.endIfWithin(node);
     this.focusManager.clearIfWithin(node);
+    this.eventManager.clearIfWithin(node);
 
     // Drop the mirror element and its subtree's id mappings.
     this.accessibilityLayer.removeNode(node);
@@ -798,14 +859,35 @@ export class CanvasRenderer implements Renderer {
     this.selectionManager.setRootNode(null);
     }
 
-    // Remove from nodes map
+    // Remove from nodes map — including every descendant. The engine emits
+    // ONE Remove for a removed subtree's root (keyed teardown always did;
+    // non-animated subtree removal now does too), so descendant bookkeeping
+    // must be swept here or the id→node entries leak for the renderer's
+    // lifetime. Mirrors the DOM renderer's sweepDetachedDescendants.
     this.nodes.delete(id);
+    // Release the offscreen media element behind a removed Video node
+    // (pause + drop src + revoke blob URLs) — see paint.ts videoCache.
+    releaseVideo(id);
+    const stack: VirtualNode[] = [...node.children];
+    while (stack.length > 0) {
+      const desc = stack.pop()!;
+      for (let i = desc.children.length - 1; i >= 0; i--) {
+        stack.push(desc.children[i]!);
+      }
+      // Guard against recycled ids mapping to a different live node.
+      if (this.nodes.get(desc.id) === desc) {
+        this.animator.forget(desc.id);
+        this.nodes.delete(desc.id);
+        releaseVideo(desc.id);
+      }
+    }
   }
 
   /**
    * Schedule redraw
    */
   private scheduleRedraw(): void {
+    if (this.captureFrozen) return;
     if (this.rafId !== null) return;
 
     // Use requestAnimationFrame if available (browser), otherwise render immediately (tests)
@@ -917,6 +999,11 @@ export class CanvasRenderer implements Renderer {
     if (!variantsChanged && !this.layoutDirty) return;
 
     this.refreshComputedProps(this.rootNode);
+
+    // Publish this renderer's SafeArea inset overrides for the layout pass
+    // (module-level, same per-frame stamping as `setCssViewport`), so two
+    // canvases with different overrides each lay out against their own.
+    setSafeAreaInsetOverrides(this.options.safeAreaInsets);
 
     computeLayout(
       this.ctx,
@@ -1042,11 +1129,28 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * Paint one final deterministic frame and suspend asynchronous redraws.
+   * `clear()` resumes normal rendering for the next gallery item.
+   */
+  freezeForCapture(): void {
+    this.captureFrozen = true;
+    if (this.rafId !== null && typeof cancelAnimationFrame !== "undefined") {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    this.animator.snapAll();
+    this.layoutDirty = true;
+    this.render();
+  }
+
+  /**
    * Clear renderer
    */
   clear(): void {
+    this.captureFrozen = false;
     this.animator.reset();
     this.textEditor.endEditing();
+    this.releaseAllVideos();
     this.rootNode = null;
     this.nodes.clear();
     this.eventManager.setRootNode(null);
@@ -1080,7 +1184,21 @@ export class CanvasRenderer implements Renderer {
   /**
    * Destroy renderer
    */
+  /**
+   * Release the offscreen video elements behind THIS renderer's nodes.
+   * Scoped to `this.nodes` (not `clearVideoCache`) because the paint-level
+   * video cache is module-global and another renderer instance may own
+   * entries in it.
+   */
+  private releaseAllVideos(): void {
+    for (const id of this.nodes.keys()) {
+      releaseVideo(id);
+    }
+  }
+
   destroy(): void {
+    this.releaseAllVideos();
+    setVideoActionDispatcher(null);
     this.animator.destroy();
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);
@@ -1098,4 +1216,3 @@ export class CanvasRenderer implements Renderer {
     this.accessibilityLayer.destroy();
   }
 }
-

@@ -297,9 +297,19 @@ export default app
         .tw("px-4 py-2 items-center")
 
         Box {
-          Box {}
-            .tw("absolute left-2 right-2 border-t-2 border-dashed border-amber-400 opacity-70")
-            .bottom("@{state.goalLineHeight}")
+          // Stack overlays the goal line on the bars: a full-size Column
+          // pinned to the bottom holds the dashed rule above a spacer whose
+          // height is the goal percentage, so the line sits at goal height
+          // without any CSS positioning.
+          Stack {
+          Column {
+            Box {}
+              .tw("w-full border-t-2 border-dashed border-amber-400 opacity-70")
+            Box {}
+              .tw("w-full")
+              .height("@{state.goalLineHeight}")
+          }
+          .tw("w-full h-full justify-end px-2")
 
           List(@state.bars) {
             Column {
@@ -328,9 +338,11 @@ export default app
             }
             .tw("flex-1 h-full items-center")
           }
-          .tw("flex flex-row h-full items-stretch")
+          .tw("flex flex-row w-full h-full items-stretch")
+          }
+          .tw("w-full h-full")
         }
-        .tw("mx-4 h-56 md:h-72 bg-white border border-gray-100 rounded-2xl p-3 md:p-4 relative")
+        .tw("mx-4 h-56 md:h-72 bg-white border border-gray-100 rounded-2xl p-3 md:p-4")
         .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
 
         // ----- Nutrition % section -----

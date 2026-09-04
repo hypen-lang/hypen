@@ -81,6 +81,16 @@ public struct ActionValue: @unchecked Sendable {
     }
 }
 
+extension ActionValue: Equatable {
+    /// Payloads are JSON-shaped (`[String: Any]` of strings, numbers, bools,
+    /// arrays and nested objects — they come off the wire or out of props),
+    /// so bridged `NSDictionary` equality is well-defined and deep.
+    public static func == (lhs: ActionValue, rhs: ActionValue) -> Bool {
+        lhs.actionName == rhs.actionName
+            && (lhs.payload as NSDictionary).isEqual(to: rhs.payload)
+    }
+}
+
 extension ActionValue: CustomDebugStringConvertible {
     public var debugDescription: String {
         if payload.isEmpty {

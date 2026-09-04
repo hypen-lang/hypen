@@ -57,6 +57,37 @@ fn image_missing_alt_fires_without_alt_only() {
 }
 
 #[test]
+fn video_missing_label_fires_without_a_label_only() {
+    // Bad: a video with no title/label — its content is a stream, nothing
+    // derivable.
+    assert!(has(
+        r#"Video(src: "/a.mp4", controls: true)"#,
+        A11yRule::VideoMissingLabel
+    ));
+    // Good: a `title` prop is the label.
+    assert!(!has(
+        r#"Video(src: "/a.mp4", title: "Big Buck Bunny")"#,
+        A11yRule::VideoMissingLabel
+    ));
+    // Good: an explicit .label() supplies the name.
+    assert!(!has(
+        r#"Video(src: "/a.mp4").label("Product demo")"#,
+        A11yRule::VideoMissingLabel
+    ));
+    // Good: decorative background video marked .hidden() is out of the tree.
+    assert!(!has(
+        r#"Video(src: "/bg.mp4").hidden()"#,
+        A11yRule::VideoMissingLabel
+    ));
+    // A Video never fires the image or interactive-name rules.
+    assert!(!has(r#"Video(src: "/a.mp4")"#, A11yRule::ImageMissingAlt));
+    assert!(!has(
+        r#"Video(src: "/a.mp4")"#,
+        A11yRule::MissingAccessibleName
+    ));
+}
+
+#[test]
 fn heading_missing_level_fires_without_level_only() {
     assert!(has(r#"Heading("Title")"#, A11yRule::HeadingMissingLevel));
     // Good: level specified.
@@ -84,7 +115,10 @@ fn nested_interactive_fires_only_when_actually_nested() {
 fn form_control_missing_label_fires_on_unlabeled_input_only() {
     // Bad: an Input with no label has no accessible name (form controls get
     // their name from a label, not content).
-    assert!(has(r#"Input(placeholder: "Name")"#, A11yRule::FormControlMissingLabel));
+    assert!(has(
+        r#"Input(placeholder: "Name")"#,
+        A11yRule::FormControlMissingLabel
+    ));
     // Good: an explicit .label() supplies the name.
     assert!(!has(
         r#"Input(placeholder: "Email").label("Email")"#,
@@ -96,7 +130,10 @@ fn form_control_missing_label_fires_on_unlabeled_input_only() {
         A11yRule::FormControlMissingLabel
     ));
     // A Button is not a form control → unaffected by this rule.
-    assert!(!has(r#"Button { Icon("trash") }"#, A11yRule::FormControlMissingLabel));
+    assert!(!has(
+        r#"Button { Icon("trash") }"#,
+        A11yRule::FormControlMissingLabel
+    ));
     assert!(!has(r#"Button("Save")"#, A11yRule::FormControlMissingLabel));
 }
 
@@ -194,7 +231,9 @@ fn source_entry_point_parses_and_checks() {
     assert_eq!(diags[0].element_type, "Button");
 
     // A clean source yields nothing.
-    assert!(check_accessibility_source(r#"Button("Save")"#).unwrap().is_empty());
+    assert!(check_accessibility_source(r#"Button("Save")"#)
+        .unwrap()
+        .is_empty());
 
     // A syntax error surfaces as Err, not a panic.
     assert!(check_accessibility_source("Button(((").is_err());
@@ -206,7 +245,10 @@ fn diagnostics_serialize_to_camel_case_json() {
 
     let diags = check_accessibility_source(r#"Image(src: "/a.png")"#).unwrap();
     let json = serde_json::to_string(&diags[0]).unwrap();
-    assert!(json.contains(r#""rule":"image-missing-alt""#), "got: {json}");
+    assert!(
+        json.contains(r#""rule":"image-missing-alt""#),
+        "got: {json}"
+    );
     assert!(json.contains(r#""elementType":"Image""#), "got: {json}");
 }
 
@@ -254,8 +296,14 @@ fn located_diagnostics_serialize_flattened() {
     let located = check_accessibility_source_located(r#"Image(src: "/a.png")"#).unwrap();
     let json = serde_json::to_string(&located[0]).unwrap();
     // Flattened: rule/message/span at the top level alongside line/col.
-    assert!(json.contains(r#""rule":"image-missing-alt""#), "got: {json}");
-    assert!(json.contains(r#""span":{"start":0,"end":5}"#), "got: {json}");
+    assert!(
+        json.contains(r#""rule":"image-missing-alt""#),
+        "got: {json}"
+    );
+    assert!(
+        json.contains(r#""span":{"start":0,"end":5}"#),
+        "got: {json}"
+    );
     assert!(json.contains(r#""line":1"#), "got: {json}");
     assert!(json.contains(r#""col":1"#), "got: {json}");
 }
@@ -279,7 +327,11 @@ fn dangling_reference_fires_only_when_target_id_is_missing() {
         .iter()
         .find(|d| d.rule == A11yRule::DanglingReference)
         .expect("dangling .controls should be flagged");
-    assert!(finding.message.contains("pannel"), "got: {}", finding.message);
+    assert!(
+        finding.message.contains("pannel"),
+        "got: {}",
+        finding.message
+    );
     // The span points at the referring element's name token.
     let span = finding.span.expect("finding carries a span");
     assert_eq!(&dangling[span.start..span.end], "Button");
@@ -342,7 +394,10 @@ fn findings_inside_control_flow_are_still_reported() {
 
 /// Expand a source and collect (element_type, semantics) for every element.
 fn wired_semantics(src: &str) -> Vec<(String, hypen_engine::ir::Semantics)> {
-    fn walk_elements(node: &hypen_engine::IRNode, out: &mut Vec<(String, hypen_engine::ir::Semantics)>) {
+    fn walk_elements(
+        node: &hypen_engine::IRNode,
+        out: &mut Vec<(String, hypen_engine::ir::Semantics)>,
+    ) {
         if let hypen_engine::IRNode::Element(e) = node {
             if let Some(s) = &e.semantics {
                 out.push((e.element_type.clone(), s.clone()));
@@ -390,7 +445,10 @@ fn tabs_with_an_id_get_their_tab_panel_graph_wired() {
     assert_eq!(panels[1].1.labelledby.as_deref(), Some("settings-tab-1"));
 
     // And the wired graph is self-consistent: zero dangling references.
-    assert!(!has(src, A11yRule::DanglingReference), "wired graph must resolve");
+    assert!(
+        !has(src, A11yRule::DanglingReference),
+        "wired graph must resolve"
+    );
 
     // Mixed children restructure: the tablist role moves to a synthetic
     // tab-only inner element (ARIA allows only tabs inside a tablist); the
@@ -427,7 +485,8 @@ fn tabs_with_an_id_get_their_tab_panel_graph_wired() {
 fn tabs_mixed_children_restructure_into_tab_only_tablist() {
     use hypen_engine::ir::Role;
 
-    let root = expand_root(r#"Tabs { Tab("Profile") TabPanel { Text("Profile settings") } }.id("s")"#);
+    let root =
+        expand_root(r#"Tabs { Tab("Profile") TabPanel { Text("Profile settings") } }.id("s")"#);
 
     // Outer: plain group container — author id kept, tablist role gone.
     assert_eq!(root.element_type, "Tabs");
@@ -467,7 +526,10 @@ fn tabs_restructure_without_an_id_fixes_the_shape_but_mints_nothing() {
     use hypen_engine::ir::Role;
 
     let root = expand_root(r#"Tabs { Tab("A") TabPanel { Text("a") } }"#);
-    assert!(root.semantics.is_none(), "role cleared, nothing else derived");
+    assert!(
+        root.semantics.is_none(),
+        "role cleared, nothing else derived"
+    );
     let inner = root.ir_children[0].as_element().unwrap();
     assert_eq!(
         inner.semantics.as_ref().and_then(|s| s.role),
@@ -539,15 +601,20 @@ fn tabs_restructure_defaults_the_outer_to_column_and_mirrors_gap_onto_the_strip(
     // spaced tab from tab pre-restructure — must be COPIED onto the strip:
     // present on both, so tabs stay spaced and the outer gap separates
     // strip from panels.
-    let root =
-        expand_root(r#"Tabs { Tab("A") TabPanel { Text("a") } }.gap(8).id("s")"#);
+    let root = expand_root(r#"Tabs { Tab("A") TabPanel { Text("a") } }.gap(8).id("s")"#);
     assert_eq!(
         static_prop(&root, "flexDirection.0"),
         Some(&serde_json::json!("column"))
     );
-    assert_eq!(static_prop(&root, "gap.0").and_then(|v| v.as_f64()), Some(8.0));
+    assert_eq!(
+        static_prop(&root, "gap.0").and_then(|v| v.as_f64()),
+        Some(8.0)
+    );
     let inner = root.ir_children[0].as_element().unwrap();
-    assert_eq!(static_prop(inner, "gap.0").and_then(|v| v.as_f64()), Some(8.0));
+    assert_eq!(
+        static_prop(inner, "gap.0").and_then(|v| v.as_f64()),
+        Some(8.0)
+    );
 }
 
 #[test]
@@ -555,9 +622,8 @@ fn tabs_restructure_respects_an_author_flex_direction() {
     // Author overrides always win — both the applicator form
     // ("flexDirection.0") and a named-arg form ("flexDirection") suppress
     // the column default.
-    let root = expand_root(
-        r#"Tabs { Tab("A") TabPanel { Text("a") } }.flexDirection("row").id("s")"#,
-    );
+    let root =
+        expand_root(r#"Tabs { Tab("A") TabPanel { Text("a") } }.flexDirection("row").id("s")"#);
     assert_eq!(
         static_prop(&root, "flexDirection.0"),
         Some(&serde_json::json!("row"))
@@ -590,7 +656,10 @@ fn all_tabs_shape_gets_no_layout_defaults() {
     // exactly as the author wrote them.
     let root = expand_root(r#"Tabs { Tab("A") Tab("B") }.gap(8).id("s")"#);
     assert_eq!(static_prop(&root, "flexDirection.0"), None);
-    assert_eq!(static_prop(&root, "gap.0").and_then(|v| v.as_f64()), Some(8.0));
+    assert_eq!(
+        static_prop(&root, "gap.0").and_then(|v| v.as_f64()),
+        Some(8.0)
+    );
 }
 
 #[test]
@@ -674,7 +743,9 @@ fn dangling_labelledby_reports_the_dangle_not_the_missing_label() {
         "got: {diags:?}"
     );
     assert!(
-        !diags.iter().any(|d| d.rule == A11yRule::FormControlMissingLabel),
+        !diags
+            .iter()
+            .any(|d| d.rule == A11yRule::FormControlMissingLabel),
         "got: {diags:?}"
     );
 }
@@ -750,7 +821,11 @@ fn duplicate_static_ids_fire_on_the_second_declaration() {
     assert_eq!(dupes[0].element_type, "Row");
     let span = dupes[0].span.expect("finding carries a span");
     assert_eq!(&src[span.start..span.end], "Row");
-    assert!(dupes[0].message.contains("panel"), "got: {}", dupes[0].message);
+    assert!(
+        dupes[0].message.contains("panel"),
+        "got: {}",
+        dupes[0].message
+    );
 }
 
 #[test]
@@ -811,8 +886,16 @@ fn tablist_wiring_skipped_fires_on_nonzero_pair_mismatch() {
         .find(|d| d.rule == A11yRule::TablistWiringSkipped)
         .expect("mismatched tablist should be flagged");
     assert_eq!(finding.element_type, "Tabs");
-    assert!(finding.message.contains("2 tab"), "got: {}", finding.message);
-    assert!(finding.message.contains("1 panel"), "got: {}", finding.message);
+    assert!(
+        finding.message.contains("2 tab"),
+        "got: {}",
+        finding.message
+    );
+    assert!(
+        finding.message.contains("1 panel"),
+        "got: {}",
+        finding.message
+    );
 }
 
 #[test]
@@ -899,7 +982,8 @@ fn scoped_directive_accepts_a_comma_separated_rule_list() {
 fn trailing_directive_does_not_bleed_into_the_next_line() {
     // The previous-line form requires a comment-only line: a directive
     // trailing element A must not also suppress element B below it.
-    let src = "Column {\n    Button { Icon(\"x\") } // hypen-a11y-ignore\n    Image(src: \"/a.png\")\n}";
+    let src =
+        "Column {\n    Button { Icon(\"x\") } // hypen-a11y-ignore\n    Image(src: \"/a.png\")\n}";
     let located = locate(src);
     assert_eq!(located.len(), 2, "got: {located:?}");
     let button = located
@@ -952,14 +1036,21 @@ fn non_portable_aria_flags_the_escape_hatch() {
         .iter()
         .find(|d| d.rule == A11yRule::NonPortableAria)
         .expect(".aria() should be flagged as web-only");
-    assert!(finding.message.contains("web-only"), "got: {}", finding.message);
+    assert!(
+        finding.message.contains("web-only"),
+        "got: {}",
+        finding.message
+    );
     // The single-argument form survives as the same aria.0 prop.
     assert!(has(
         r#"Column { Text("x") }.aria("busy")"#,
         A11yRule::NonPortableAria
     ));
     // No .aria() → silent.
-    assert!(!has(r#"Column { Text("Saving") }"#, A11yRule::NonPortableAria));
+    assert!(!has(
+        r#"Column { Text("Saving") }"#,
+        A11yRule::NonPortableAria
+    ));
 }
 
 #[test]
@@ -1010,7 +1101,8 @@ fn directive_after_a_blank_line_does_not_suppress() {
     // The comment-only previous-line form requires the directive directly
     // above the element — a blank line breaks the association, so a
     // directive orphaned by edits can't latch onto a drifting element.
-    let src = "Column {\n    // hypen-a11y-ignore image-missing-alt\n\n    Image(src: \"/a.png\")\n}";
+    let src =
+        "Column {\n    // hypen-a11y-ignore image-missing-alt\n\n    Image(src: \"/a.png\")\n}";
     let located = locate(src);
     assert_eq!(located.len(), 1, "got: {located:?}");
     assert_eq!(located[0].diagnostic.rule, A11yRule::ImageMissingAlt);
@@ -1044,7 +1136,10 @@ fn typoed_rule_id_in_a_directive_fires_unknown_ignore_rule_at_the_directive() {
         unknown.diagnostic.message
     );
     // The span covers exactly the offending id.
-    let span = unknown.diagnostic.span.expect("directive finding has a span");
+    let span = unknown
+        .diagnostic
+        .span
+        .expect("directive finding has a span");
     assert_eq!(&src[span.start..span.end], "image-missing-altt");
     // The typo'd directive suppressed nothing: the element finding still fires.
     let image = located
@@ -1081,7 +1176,8 @@ fn known_rule_ids_in_a_directive_never_fire_unknown_ignore_rule() {
 fn unknown_ignore_rule_findings_are_themselves_suppressible_by_listing_the_rule() {
     // Escape hatch: an id from a newer engine can be kept by explicitly
     // acknowledging it with `unknown-ignore-rule` in the same directive.
-    let src = "Column {\n    Text(\"x\") // hypen-a11y-ignore some-future-rule, unknown-ignore-rule\n}";
+    let src =
+        "Column {\n    Text(\"x\") // hypen-a11y-ignore some-future-rule, unknown-ignore-rule\n}";
     let located = locate(src);
     let unknown = located
         .iter()

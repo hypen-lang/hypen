@@ -22,6 +22,7 @@ describe("EXPECTED_A11Y_RULES", () => {
       "non-portable-aria",
       "unknown-live-token",
       "unknown-ignore-rule",
+      "video-missing-label",
     ]);
   });
 });

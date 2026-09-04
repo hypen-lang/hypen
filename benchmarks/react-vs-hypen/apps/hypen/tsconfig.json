@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": {
+      "@hypen-space/core": ["../../../../hypen-web/packages/core/src/index.ts"],
+      "@hypen-space/web-engine": ["../../../../hypen-web/packages/web-engine/src/index.ts"]
+    }
+  },
+  "include": ["src", "vite.config.ts", "../../shared"]
+}

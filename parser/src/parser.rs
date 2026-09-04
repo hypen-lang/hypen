@@ -124,10 +124,14 @@ fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, cha
         // known prefixes (state, item, actions, resources) vs data source providers.
 
         // List: [item1, item2, item3]
+        // The separator is padded so a trailing comma followed by
+        // whitespace/newlines/comments still closes — element padding only
+        // runs when an element is actually parsed, so "[1, 2,\n]" otherwise
+        // left the '\n' unconsumed and failed on ']'.
         let list = value
             .clone()
             .padded_with_comments()
-            .separated_by(just(','))
+            .separated_by(just(',').padded_with_comments())
             .allow_trailing()
             .collect()
             .delimited_by(just('['), just(']').labelled("closing bracket ']'"))
@@ -142,7 +146,7 @@ fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, cha
             .then(value.clone().padded_with_comments().labelled("map value"));
 
         let map = map_entry
-            .separated_by(just(','))
+            .separated_by(just(',').padded_with_comments())
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just('{'), just('}').labelled("closing brace '}'"))
@@ -214,7 +218,11 @@ pub fn component_parser<'a>(
         let args_with_parens = arg
             .clone()
             .padded_with_comments()
-            .separated_by(just(',').labelled("',' between arguments"))
+            .separated_by(
+                just(',')
+                    .labelled("',' between arguments")
+                    .padded_with_comments(),
+            )
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(
@@ -254,7 +262,11 @@ pub fn component_parser<'a>(
         let arg_parser = arg
             .clone()
             .padded_with_comments()
-            .separated_by(just(',').labelled("',' between arguments"))
+            .separated_by(
+                just(',')
+                    .labelled("',' between arguments")
+                    .padded_with_comments(),
+            )
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just('('), just(')').labelled("closing parenthesis ')'"))
@@ -361,55 +373,57 @@ pub fn component_parser<'a>(
             .then(args)
             .then(children_block)
             .then(applicators)
-            .map(|((((decl, (name, name_range)), (args, args_end)), children), applicators)| {
-                // Full-expression span, assembled from the pieces' unpadded
-                // end offsets (the raw combinator span would include trailing
-                // whitespace/comments consumed by padding, bleeding the range
-                // toward the next sibling's token).
-                let (children, children_end) = match children {
-                    Some((children, end)) => (Some(children), Some(end)),
-                    None => (None, None),
-                };
-                let expr_start = decl
-                    .as_ref()
-                    .map(|(_, start)| *start)
-                    .unwrap_or(name_range.start);
-                let expr_end = applicators
-                    .last()
-                    .map(|(_, end)| *end)
-                    .or(children_end)
-                    .or(args_end)
-                    .unwrap_or(name_range.end);
-                let decl_type = decl.map(|(decl_type, _)| decl_type);
-                let applicators: Vec<ApplicatorSpecification> =
-                    applicators.into_iter().map(|(spec, _)| spec).collect();
+            .map(
+                |((((decl, (name, name_range)), (args, args_end)), children), applicators)| {
+                    // Full-expression span, assembled from the pieces' unpadded
+                    // end offsets (the raw combinator span would include trailing
+                    // whitespace/comments consumed by padding, bleeding the range
+                    // toward the next sibling's token).
+                    let (children, children_end) = match children {
+                        Some((children, end)) => (Some(children), Some(end)),
+                        None => (None, None),
+                    };
+                    let expr_start = decl
+                        .as_ref()
+                        .map(|(_, start)| *start)
+                        .unwrap_or(name_range.start);
+                    let expr_end = applicators
+                        .last()
+                        .map(|(_, end)| *end)
+                        .or(children_end)
+                        .or(args_end)
+                        .unwrap_or(name_range.end);
+                    let decl_type = decl.map(|(decl_type, _)| decl_type);
+                    let applicators: Vec<ApplicatorSpecification> =
+                        applicators.into_iter().map(|(spec, _)| spec).collect();
 
-                // Fold applicators into the component hierarchy
-                let base_component = ComponentSpecification::new(
-                    id_gen::NodeId::next().to_string(),
-                    name.clone(),
-                    args, // args is already an ArgumentList, not Option
-                    vec![],
-                    fold_applicators(children.unwrap_or_default()),
-                    MetaData {
-                        internal_id: String::new(),
-                        name_range,
-                        block_range: None,
-                        expr_range: expr_start..expr_end,
-                    },
-                )
-                .with_declaration_type(decl_type.unwrap_or(DeclarationType::Component));
+                    // Fold applicators into the component hierarchy
+                    let base_component = ComponentSpecification::new(
+                        id_gen::NodeId::next().to_string(),
+                        name.clone(),
+                        args, // args is already an ArgumentList, not Option
+                        vec![],
+                        fold_applicators(children.unwrap_or_default()),
+                        MetaData {
+                            internal_id: String::new(),
+                            name_range,
+                            block_range: None,
+                            expr_range: expr_start..expr_end,
+                        },
+                    )
+                    .with_declaration_type(decl_type.unwrap_or(DeclarationType::Component));
 
-                // If there are applicators, add them to the component
-                if applicators.is_empty() {
-                    base_component
-                } else {
-                    ComponentSpecification {
-                        applicators,
-                        ..base_component
+                    // If there are applicators, add them to the component
+                    if applicators.is_empty() {
+                        base_component
+                    } else {
+                        ComponentSpecification {
+                            applicators,
+                            ..base_component
+                        }
                     }
-                }
-            })
+                },
+            )
             .labelled("component")
     })
 }
