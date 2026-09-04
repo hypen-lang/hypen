@@ -943,7 +943,7 @@ mod paint_variant_tests {
     fn tree_with_variant_box() -> Tree {
         let mut tree = Tree::new();
         tree.apply(&Patch::Create {
-            id: "box".to_string(),
+            id: "box".into(),
             element_type: "Container".to_string(),
             props: props(&[
                 ("width", json!(100)),
@@ -955,8 +955,8 @@ mod paint_variant_tests {
             semantics: None,
         });
         tree.apply(&Patch::Insert {
-            parent_id: ROOT_ID.to_string(),
-            id: "box".to_string(),
+            parent_id: ROOT_ID.into(),
+            id: "box".into(),
             before_id: None,
         });
         tree

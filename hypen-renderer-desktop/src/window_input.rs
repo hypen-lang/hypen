@@ -132,7 +132,7 @@ impl App {
             // place), which is the same pattern every web framework
             // uses for controlled inputs.
             let patch = hypen_engine::Patch::SetProp {
-                id: id.clone(),
+                id: id.as_str().into(),
                 name: "value".to_string(),
                 value: serde_json::Value::String(new_value.clone()),
             };

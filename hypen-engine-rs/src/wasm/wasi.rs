@@ -71,6 +71,11 @@ struct WasiEngine {
     /// by the next `hypen_update_state` / `hypen_update_state_sparse` so
     /// host action handlers don't need to plumb the scope through themselves.
     active_action_scope: Option<String>,
+    /// WASI hosts can't exploit template cloning, so template patches are
+    /// lowered back to plain `Create`+`Insert` runs before crossing the
+    /// C FFI. Session-lifetime state: skeletons registered by earlier
+    /// batches expand later `Instantiate`s.
+    template_expander: crate::portable::TemplateExpander,
 }
 
 impl WasiEngine {
@@ -79,12 +84,16 @@ impl WasiEngine {
             core: EngineCore::new(),
             node_id_index: NodeIdIndex::new(),
             active_action_scope: None,
+            template_expander: crate::portable::TemplateExpander::new(),
         }
     }
 
-    /// Filter spurious removes, index newly created node IDs for `render_into`,
-    /// then write the patches to `PATCH_BUFFER` for the host to read.
-    fn emit_patches(&mut self, mut patches: Vec<Patch>) {
+    /// Lower template patches, filter spurious removes, index newly created
+    /// node IDs for `render_into`, then write the patches to `PATCH_BUFFER`
+    /// for the host to read. Expansion runs FIRST so the remove filter and
+    /// the node-id index see the `Create`s a template instance carries.
+    fn emit_patches(&mut self, patches: Vec<Patch>) {
+        let mut patches = self.template_expander.expand(patches);
         EngineCore::filter_spurious_removes(&mut patches);
         self.node_id_index.index_creates(&patches, &self.core);
         emit_patches_internal(&patches);

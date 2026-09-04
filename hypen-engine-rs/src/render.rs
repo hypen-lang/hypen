@@ -8,8 +8,8 @@ use crate::{
     lifecycle::ModuleInstance,
     reactive::{DependencyGraph, Scheduler},
     reconcile::{
-        diff::is_engine_internal_prop, emit_semantics_delta, evaluate_binding,
-        reconcile_ir_node_impl, InstanceTree, Patch, ReconcileCtx,
+        diff::is_engine_internal_prop, emit_semantics_delta, reconcile_ir_node_impl, InstanceTree,
+        Patch, ReconcileCtx,
     },
 };
 
@@ -71,6 +71,11 @@ pub fn render_dirty_nodes_full(
     }
 
     let dirty_nodes = scheduler.take_dirty();
+    // The state paths that produced this batch, when every marking carried
+    // one. They let iterable re-renders touch only the item indices the
+    // change named ("rows.500.selected" → row 500) instead of running a
+    // keyed pass over every child. `None` → full passes everywhere.
+    let changed_paths = scheduler.take_changed_paths();
     let state = module
         .map(|m| m.get_state())
         .unwrap_or(&serde_json::Value::Null);
@@ -78,24 +83,47 @@ pub fn render_dirty_nodes_full(
     // Store old props before updating, then update and generate patches for changed props only
     let mut patches = Vec::new();
     for node_id in dirty_nodes {
-        // Check if this is a List node (has array binding in raw_props AND element_template)
-        // The element_template is set for List elements that need to re-render children
-        let is_list_node = tree
-            .get(node_id)
-            .map(|n| {
+        // One tree lookup answers all three questions about this node:
+        //   * is it a List node (array binding in raw_props AND an
+        //     element_template — set for List elements that re-render
+        //     their children)?
+        //   * is it a control-flow node (ForEach/Conditional) with an IR
+        //     template?
+        //   * is it a ForEach?
+        let (is_list_node, is_control_flow, is_foreach) = match tree.get(node_id) {
+            Some(n) => (
                 n.raw_props
                     .get("0")
                     .map(|v| matches!(v, Value::Binding(_)))
                     .unwrap_or(false)
-                    && n.element_template.is_some()
-            })
-            .unwrap_or(false);
+                    && n.element_template.is_some(),
+                n.ir_node_template.is_some(),
+                n.is_foreach(),
+            ),
+            None => (false, false, false),
+        };
 
-        // Check if this is a control flow node (ForEach or Conditional) with an IR template
-        let is_control_flow = tree
-            .get(node_id)
-            .map(|n| n.ir_node_template.is_some())
-            .unwrap_or(false);
+        // Narrow pass first: when the batch's changed paths name specific
+        // item indices of this iterable, reconcile only those children.
+        // Falls through to the full pass whenever the hint doesn't hold
+        // (wholesale array replacement, growth/shrink, identity changes,
+        // unknown provenance).
+        if is_list_node || is_foreach {
+            if let Some(cp) = changed_paths.as_deref() {
+                if render_dirty_iterable_partial(
+                    node_id,
+                    tree,
+                    state,
+                    &mut patches,
+                    dependencies,
+                    data_sources,
+                    modules,
+                    cp,
+                ) {
+                    continue;
+                }
+            }
+        }
 
         if is_list_node {
             // For List nodes, we need to re-reconcile the entire list
@@ -182,6 +210,258 @@ pub fn render_dirty_nodes_full(
     patches
 }
 
+/// Try to re-render a dirty iterable (List element or ForEach container) by
+/// touching ONLY the item indices named in the batch's changed paths.
+///
+/// Returns `true` when the narrow pass fully handled the node; `false` means
+/// the caller must run the full keyed pass. The hint applies exactly when
+/// every relevant changed path is strictly *inside* an item
+/// (`<array>.<index>.<field...>`) and each named item still carries the same
+/// reconciliation key — i.e. an in-place item edit. Everything else is a
+/// structural change in disguise and bails out:
+///
+/// - a path equal to (or a parent of) the array path — wholesale replacement;
+/// - a non-numeric segment after the array path (`rows.length`);
+/// - an index at/past the current length, or a child-count mismatch — growth
+///   or shrink;
+/// - a key mismatch at a named index — reorder/swap, which must go through
+///   the keyed pass to produce `Move` patches instead of content rewrites.
+///
+/// The narrow pass is the memo bail-out inverted: instead of paying O(rows)
+/// to *discover* which children changed, the changed paths say so up front,
+/// so cost is O(touched rows) and `select-row` stops walking 1,000 children
+/// to update one.
+#[allow(clippy::too_many_arguments)]
+fn render_dirty_iterable_partial(
+    node_id: NodeId,
+    tree: &mut InstanceTree,
+    state: &serde_json::Value,
+    patches: &mut Vec<Patch>,
+    dependencies: &mut DependencyGraph,
+    data_sources: Option<&indexmap::IndexMap<String, serde_json::Value>>,
+    modules: Option<&indexmap::IndexMap<String, ModuleInstance>>,
+    changed_paths: &[String],
+) -> bool {
+    use crate::reconcile::item_bindings::replace_ir_node_item_bindings;
+    use crate::reconcile::keyed::{
+        generate_item_key, item_fingerprint, iterable_child_key, stamp_iter_memo,
+        templates_fingerprint,
+    };
+    use crate::reconcile::resolve::evaluate_binding_ref;
+    use crate::ir::IRNode;
+
+    // ── Extract the iterable's shape from the node ──────────────────────
+    // Both flavors reduce to: a source binding, an item name, an optional
+    // key path, and the per-item template list.
+    enum Templates {
+        List(std::sync::Arc<crate::ir::Element>),
+        ForEach(std::sync::Arc<IRNode>),
+    }
+
+    let (binding, templates_src, item_name, key_path, module_scope) = {
+        let Some(node) = tree.get(node_id) else {
+            return true; // removed earlier in this batch — nothing to render
+        };
+        if let Some(template) = &node.element_template {
+            // List element: array binding in raw prop "0", key in `key.0`.
+            let Some(Value::Binding(b)) = node.raw_props.get("0") else {
+                return false;
+            };
+            let key_path = template.props.get("key.0").and_then(|v| match v {
+                Value::Static(serde_json::Value::String(s)) => Some(s.clone()),
+                _ => None,
+            });
+            (
+                b.clone(),
+                Templates::List(template.clone()),
+                "item".to_string(),
+                key_path,
+                node.module_scope.clone(),
+            )
+        } else if let Some(ir) = &node.ir_node_template {
+            let IRNode::ForEach {
+                source,
+                item_name,
+                key_path,
+                ..
+            } = &**ir
+            else {
+                return false;
+            };
+            (
+                source.clone(),
+                Templates::ForEach(ir.clone()),
+                item_name.clone(),
+                key_path.clone(),
+                node.module_scope.clone(),
+            )
+        } else {
+            return false;
+        }
+    };
+
+    // Item-sourced iterables (nested ForEach) resolve against the enclosing
+    // item, which the dirty batch's state paths say nothing about.
+    if !binding.is_state() {
+        return false;
+    }
+
+    // ── Scan the changed paths for index hints ──────────────────────────
+    // Dependency keys are scope-prefixed (`mod:{name}:{path}`), so the
+    // comparison base must be too.
+    let joined = binding.path.join(".");
+    let base = match module_scope.as_deref() {
+        Some(scope) => format!("mod:{}:{}", scope, joined),
+        None => joined,
+    };
+
+    let mut indices = std::collections::BTreeSet::new();
+    for p in changed_paths {
+        // A parent of the array path changed → the array itself may be a
+        // different value → wholesale.
+        if base.strip_prefix(p.as_str()).is_some_and(|r| r.starts_with('.')) {
+            return false;
+        }
+        let Some(rest) = p.strip_prefix(base.as_str()) else {
+            continue;
+        };
+        if rest.is_empty() {
+            return false; // the array itself was replaced
+        }
+        let Some(rest) = rest.strip_prefix('.') else {
+            continue; // shares a name prefix, different path ("rowsTotal")
+        };
+        let index_segment = rest.split('.').next().unwrap_or(rest);
+        let Ok(index) = index_segment.parse::<usize>() else {
+            return false; // "rows.length" and friends → wholesale
+        };
+        indices.insert(index);
+    }
+    if indices.is_empty() {
+        // Dirty for reasons the hint can't express — run the full pass.
+        return false;
+    }
+
+    // ── Validate the hint against the live tree ─────────────────────────
+    let effective_state = module_scope
+        .as_deref()
+        .and_then(|scope| modules.and_then(|m| m.get(scope)))
+        .map(|m| m.get_state())
+        .unwrap_or(state);
+
+    let Some(serde_json::Value::Array(items)) = evaluate_binding_ref(&binding, effective_state)
+    else {
+        return false;
+    };
+
+    let templates: &[IRNode] = match &templates_src {
+        Templates::List(element) => &element.ir_children,
+        Templates::ForEach(ir) => match &**ir {
+            IRNode::ForEach { template, .. } => template.as_slice(),
+            _ => return false,
+        },
+    };
+    let template_count = templates.len();
+    if template_count == 0 {
+        return false;
+    }
+
+    let children: Vec<NodeId> = tree
+        .get(node_id)
+        .map(|n| n.children.iter().copied().collect())
+        .unwrap_or_default();
+    if children.len() != items.len() * template_count {
+        return false; // growth/shrink slipped past the path check
+    }
+
+    let multi_template = template_count > 1;
+    let mut item_keys: Vec<(usize, String)> = Vec::with_capacity(indices.len());
+    for &index in &indices {
+        if index >= items.len() {
+            return false;
+        }
+        let item_key = generate_item_key(&items[index], key_path.as_deref(), &item_name, index);
+        for template_idx in 0..template_count {
+            let child_id = children[index * template_count + template_idx];
+            let expected = iterable_child_key(&item_key, template_idx, multi_template);
+            let matches = tree
+                .get(child_id)
+                .and_then(|n| n.key.as_deref())
+                .is_some_and(|k| k == expected);
+            if !matches {
+                return false; // identity change (swap/reorder) → keyed pass
+            }
+        }
+        item_keys.push((index, item_key));
+    }
+
+    // ── Reconcile exactly the touched children ──────────────────────────
+    // The templates here are always the container node's own stored Arc,
+    // so the cached fingerprint is safe (see fingerprint_for_container).
+    let templates_hash = match tree.get(node_id).and_then(|n| n.iter_fp_cache) {
+        Some(hash) => hash,
+        None => {
+            let hash = templates_fingerprint(templates);
+            if let Some(node) = tree.get_mut(node_id) {
+                node.iter_fp_cache = Some(hash);
+            }
+            hash
+        }
+    };
+    let mut ctx = ReconcileCtx {
+        tree,
+        state,
+        patches,
+        dependencies,
+        data_sources,
+        modules,
+    };
+    // Compiled binding maps narrow the per-row work further: only the
+    // item-dependent props are resolved and diffed, no substituted subtree.
+    let compiled = crate::reconcile::binding_map::compiled_for(
+        &mut ctx,
+        node_id,
+        templates,
+        &item_name,
+        templates_hash,
+    );
+
+    for (index, item_key) in item_keys {
+        let item = &items[index];
+        let item_hash = item_fingerprint(item);
+        for (template_idx, template) in templates.iter().enumerate() {
+            let child_id = children[index * template_count + template_idx];
+            let memo = ctx.tree.get(child_id).and_then(|n| n.iter_memo);
+            let memo_hit = memo
+                .is_some_and(|m| m.templates_hash == templates_hash && m.item_hash == item_hash);
+            if memo_hit {
+                continue;
+            }
+            // Compiled apply is sound only when the child last rendered
+            // under this exact template (see keyed.rs) — otherwise static
+            // props may have changed and only the full reconcile sees them.
+            let same_template = memo.is_some_and(|m| m.templates_hash == templates_hash);
+            let fast = same_template
+                && compiled
+                    .as_deref()
+                    .and_then(|c| c.get(template_idx))
+                    .is_some_and(|ct| {
+                        crate::reconcile::binding_map::apply_compiled_row(
+                            &mut ctx, child_id, ct, item, &item_name,
+                        )
+                    });
+            if !fast {
+                let substituted =
+                    replace_ir_node_item_bindings(template, item, index, &item_name, &item_key);
+                reconcile_ir_node_impl(&mut ctx, child_id, &substituted);
+            }
+            stamp_iter_memo(&mut ctx, child_id, item_hash, templates_hash);
+        }
+    }
+
+    true
+}
+
 /// Render a dirty List node by re-reconciling its children using the
 /// shared keyed-iterable reconciliation pipeline.
 fn render_dirty_list(
@@ -220,12 +500,16 @@ fn render_dirty_list(
         (binding, template, key_path)
     };
 
-    let array = evaluate_binding(&array_binding, state).unwrap_or(serde_json::Value::Array(vec![]));
-
-    let items = match &array {
-        serde_json::Value::Array(items) => items.clone(),
-        _ => return,
-    };
+    // Borrow the items straight out of state — `state` and `tree` are
+    // disjoint borrows, so the keyed pass can read the array in place.
+    // The old `evaluate_binding(..).clone()` chain deep-copied the whole
+    // array (twice) on every dirty list render.
+    let items: &[serde_json::Value] =
+        match crate::reconcile::resolve::evaluate_binding_ref(&array_binding, state) {
+            Some(serde_json::Value::Array(items)) => items,
+            Some(_) => return,
+            None => &[],
+        };
 
     let mut ctx = ReconcileCtx {
         tree,
@@ -239,10 +523,12 @@ fn render_dirty_list(
     reconcile_iterable_children(
         &mut ctx,
         node_id,
-        &items,
+        items,
         "item",
         key_path_owned.as_deref(),
         &element_template.ir_children,
+        // The template list is this node's own stored Arc — cacheable.
+        true,
     );
 }
 

@@ -129,6 +129,12 @@
       "bun": "./src/portable.ts",
       "import": "./dist/portable.js",
       "default": "./dist/portable.js"
+    },
+    "./patch-expand": {
+      "types": "./dist/patch-expand.d.ts",
+      "bun": "./src/patch-expand.ts",
+      "import": "./dist/patch-expand.js",
+      "default": "./dist/patch-expand.js"
     }
   },
   "files": [

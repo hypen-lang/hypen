@@ -161,18 +161,18 @@ impl Tree {
                     prop_map.insert(k.clone(), v.clone());
                 }
                 self.nodes.insert(
-                    id.clone(),
+                    id.to_string(),
                     Node {
-                        id: id.clone(),
+                        id: id.to_string(),
                         element_type: element_type.clone(),
                         props: prop_map,
                         semantics: semantics.clone(),
                     },
                 );
-                self.children.entry(id.clone()).or_default();
+                self.children.entry(id.to_string()).or_default();
             }
             Patch::SetProp { id, name, value } => {
-                if let Some(node) = self.nodes.get_mut(id) {
+                if let Some(node) = self.nodes.get_mut(id.as_ref()) {
                     node.props.insert(name.clone(), value.clone());
                 } else {
                     log::warn!("SetProp on unknown node {id}");
@@ -184,14 +184,14 @@ impl Tree {
                 // node_id→Semantics side-map from `Node.semantics`, so the
                 // AccessKit tree picks the change up on the following push —
                 // no per-field diffing here by design (see the Patch docs).
-                if let Some(node) = self.nodes.get_mut(id) {
+                if let Some(node) = self.nodes.get_mut(id.as_ref()) {
                     node.semantics = semantics.clone();
                 } else {
                     log::warn!("SetSemantics on unknown node {id}");
                 }
             }
             Patch::RemoveProp { id, name } => {
-                if let Some(node) = self.nodes.get_mut(id) {
+                if let Some(node) = self.nodes.get_mut(id.as_ref()) {
                     node.props.remove(name);
                 }
             }
@@ -199,7 +199,7 @@ impl Tree {
                 // Reserved by the engine — currently unreachable in production.
                 // Emulate by writing prop "0" so renderer behaviour stays
                 // consistent if a host emits it.
-                if let Some(node) = self.nodes.get_mut(id) {
+                if let Some(node) = self.nodes.get_mut(id.as_ref()) {
                     node.props.insert("0".into(), Value::String(text.clone()));
                 }
             }
@@ -210,14 +210,15 @@ impl Tree {
             } => {
                 // Detach from any prior parent in case the host
                 // re-inserts without an explicit Move (defensive).
-                if let Some(prev_parent) = self.parent_by_child.get(id).cloned() {
+                if let Some(prev_parent) = self.parent_by_child.get(id.as_ref()).cloned() {
                     if let Some(siblings) = self.children.get_mut(&prev_parent) {
-                        siblings.retain(|c| c != id);
+                        siblings.retain(|c| c.as_str() != id.as_ref());
                     }
                 }
-                let siblings = self.children.entry(parent_id.clone()).or_default();
-                Self::insert_at(siblings, id.clone(), before_id.as_deref());
-                self.parent_by_child.insert(id.clone(), parent_id.clone());
+                let siblings = self.children.entry(parent_id.to_string()).or_default();
+                Self::insert_at(siblings, id.to_string(), before_id.as_deref());
+                self.parent_by_child
+                    .insert(id.to_string(), parent_id.to_string());
                 self.clear_detached(id);
             }
             Patch::Move {
@@ -227,22 +228,23 @@ impl Tree {
             } => {
                 // Unlink from old parent (O(1) parent lookup, then
                 // O(n_siblings) retain on just that one parent).
-                if let Some(prev_parent) = self.parent_by_child.get(id).cloned() {
+                if let Some(prev_parent) = self.parent_by_child.get(id.as_ref()).cloned() {
                     if let Some(siblings) = self.children.get_mut(&prev_parent) {
-                        siblings.retain(|c| c != id);
+                        siblings.retain(|c| c.as_str() != id.as_ref());
                     }
                 }
-                let siblings = self.children.entry(parent_id.clone()).or_default();
-                Self::insert_at(siblings, id.clone(), before_id.as_deref());
-                self.parent_by_child.insert(id.clone(), parent_id.clone());
+                let siblings = self.children.entry(parent_id.to_string()).or_default();
+                Self::insert_at(siblings, id.to_string(), before_id.as_deref());
+                self.parent_by_child
+                    .insert(id.to_string(), parent_id.to_string());
                 self.clear_detached(id);
             }
             Patch::Remove { id, .. } => {
                 // O(1) parent lookup replaces the previous full
                 // children-map scan to find the affected list.
-                if let Some(prev_parent) = self.parent_by_child.remove(id) {
+                if let Some(prev_parent) = self.parent_by_child.remove(id.as_ref()) {
                     if let Some(siblings) = self.children.get_mut(&prev_parent) {
-                        siblings.retain(|c| c != id);
+                        siblings.retain(|c| c.as_str() != id.as_ref());
                     }
                 }
                 self.clear_detached(id);
@@ -252,9 +254,9 @@ impl Tree {
                 // Unlink from parent without dropping the node — the
                 // engine's Router subtree cache reattaches later via
                 // Attach.
-                if let Some(prev_parent) = self.parent_by_child.remove(id) {
+                if let Some(prev_parent) = self.parent_by_child.remove(id.as_ref()) {
                     if let Some(siblings) = self.children.get_mut(&prev_parent) {
-                        siblings.retain(|c| c != id);
+                        siblings.retain(|c| c.as_str() != id.as_ref());
                     }
                 }
                 self.note_detached(id);
@@ -264,9 +266,10 @@ impl Tree {
                 id,
                 before_id,
             } => {
-                let siblings = self.children.entry(parent_id.clone()).or_default();
-                Self::insert_at(siblings, id.clone(), before_id.as_deref());
-                self.parent_by_child.insert(id.clone(), parent_id.clone());
+                let siblings = self.children.entry(parent_id.to_string()).or_default();
+                Self::insert_at(siblings, id.to_string(), before_id.as_deref());
+                self.parent_by_child
+                    .insert(id.to_string(), parent_id.to_string());
                 self.clear_detached(id);
             }
             // Batch-scoped animation prelude: batch metadata, not a node
@@ -275,6 +278,15 @@ impl Tree {
             // scoped interpolation, Option D); if one reaches this raw
             // path (direct `apply` callers) it is structurally inert.
             Patch::BatchAnimation { .. } => {}
+            // Template patches are lowered into plain Create+Insert runs
+            // by the `TemplateExpander` in `flush_patches` before any
+            // batch reaches the tree. One arriving here means the
+            // expander passed it through (unknown template id / malformed
+            // skeleton) — warn and skip, matching the expander's
+            // never-panic degradation.
+            Patch::RegisterTemplate { .. } | Patch::Instantiate { .. } => {
+                log::warn!("unexpanded template patch reached Tree::apply; skipping");
+            }
         }
     }
 
@@ -385,7 +397,7 @@ mod tests {
 
     fn create(id: &str, element_type: &str, entries: &[(&str, Value)]) -> Patch {
         Patch::Create {
-            id: id.to_string(),
+            id: id.into(),
             element_type: element_type.to_string(),
             props: props(entries),
             semantics: None,
@@ -394,17 +406,17 @@ mod tests {
 
     fn insert(parent_id: &str, id: &str, before_id: Option<&str>) -> Patch {
         Patch::Insert {
-            parent_id: parent_id.to_string(),
-            id: id.to_string(),
-            before_id: before_id.map(|s| s.to_string()),
+            parent_id: parent_id.into(),
+            id: id.into(),
+            before_id: before_id.map(Into::into),
         }
     }
 
     fn move_patch(parent_id: &str, id: &str, before_id: Option<&str>) -> Patch {
         Patch::Move {
-            parent_id: parent_id.to_string(),
-            id: id.to_string(),
-            before_id: before_id.map(|s| s.to_string()),
+            parent_id: parent_id.into(),
+            id: id.into(),
+            before_id: before_id.map(Into::into),
         }
     }
 
@@ -716,7 +728,9 @@ mod tests {
             tree.apply(&insert("col", &p, None));
             tree.apply(&create(&c, "Text", &[("0", json!("x"))]));
             tree.apply(&insert(&p, &c, None));
-            tree.apply(&Patch::Detach { id: p.clone() });
+            tree.apply(&Patch::Detach {
+                id: p.as_str().into(),
+            });
         }
         assert_eq!(tree.detached_len(), 5);
 

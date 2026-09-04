@@ -14,6 +14,7 @@
 
 import { Engine } from "../hypen-web/packages/server/src/engine.ts";
 import { HypenModuleInstance } from "../hypen-web/packages/core/src/app.ts";
+import { TemplateExpander } from "../hypen-web/packages/core/src/patch-expand.ts";
 import type { ServerWebSocket } from "bun";
 
 // Import component examples
@@ -315,8 +316,15 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
 
         clients.set(ws, clientData);
 
+        // Native gallery clients (Android/iOS, screenshot tests) predate
+        // the template patch kinds, so lower registerTemplate/instantiate
+        // back to plain create+insert before anything hits the wire.
+        // One expander per client: skeletons registered by earlier
+        // batches expand later instantiates.
+        const templateExpander = new TemplateExpander();
+
         // Set up render callback for streaming patches
-        engine.setRenderCallback((patches) => {
+        const streamPatches = (patches: any[]) => {
           const data = clients.get(ws);
           if (!data) return;
 
@@ -324,33 +332,22 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
           const message = {
             type: "patch",
             module: data.example.name,
-            patches,
+            patches: templateExpander.expand(patches),
             revision: data.revision,
           };
           ws.send(JSON.stringify(message));
-        });
+        };
+        engine.setRenderCallback(streamPatches);
 
         // Render initial tree
         const initialPatches: any[] = [];
         engine.setRenderCallback((patches) => {
-          initialPatches.push(...patches);
+          initialPatches.push(...templateExpander.expand(patches));
         });
         engine.renderSource(example.ui);
 
         // Restore streaming callback
-        engine.setRenderCallback((patches) => {
-          const data = clients.get(ws);
-          if (!data) return;
-
-          data.revision++;
-          const message = {
-            type: "patch",
-            module: data.example.name,
-            patches,
-            revision: data.revision,
-          };
-          ws.send(JSON.stringify(message));
-        });
+        engine.setRenderCallback(streamPatches);
 
         // Send initial tree
         const initialMessage = {

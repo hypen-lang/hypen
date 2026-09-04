@@ -6,9 +6,32 @@
 
 use hypen_engine::ir::{ast_to_ir_node, Element, IRNode, Props, RouterRoute, Value};
 use hypen_engine::reactive::{Binding, DependencyGraph};
-use hypen_engine::reconcile::{reconcile_ir, InstanceTree, Patch};
+use hypen_engine::reconcile::{InstanceTree, Patch};
 use hypen_parser::parse_component;
 use serde_json::json;
+
+thread_local! {
+    // One expander per test thread (libtest runs each test on its own
+    // thread): registrations persist across a test's successive batches
+    // (navigations), exactly like a boundary's session-lifetime expander.
+    static EXPANDER: std::cell::RefCell<hypen_engine::TemplateExpander> =
+        std::cell::RefCell::new(hypen_engine::TemplateExpander::new());
+}
+
+/// [`hypen_engine::reconcile::reconcile_ir`], lowered: these tests assert
+/// the pre-template Create/Insert wire, so every batch goes through the
+/// expander the way every plain-patch boundary does.
+fn reconcile_ir(
+    tree: &mut InstanceTree,
+    node: &IRNode,
+    parent_id: Option<hypen_engine::ir::NodeId>,
+    state: &serde_json::Value,
+    dependencies: &mut DependencyGraph,
+) -> Vec<Patch> {
+    let patches =
+        hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
+    EXPANDER.with(|e| e.borrow_mut().expand(patches))
+}
 
 // ----------------------------------------------------------------------------
 // AST → IR
@@ -715,7 +738,8 @@ fn test_router_at_root_inserts_children_under_root_not_router_node() {
 
     let parent = home_insert.expect("expected an Insert patch for HomeView");
     assert_eq!(
-        parent, "root",
+        parent.as_ref(),
+        "root",
         "Router-at-root: HomeView must Insert under \"root\", not under \
          the __Router control-flow NodeId. Got parent = {:?}. \
          Full patches: {:#?}",
@@ -773,7 +797,8 @@ fn test_router_at_root_nav_attaches_children_under_root_not_router_node() {
 
     let parent = search_insert_parent.expect("expected an Insert patch for SearchView");
     assert_eq!(
-        parent, "root",
+        parent.as_ref(),
+        "root",
         "Router-at-root nav: SearchView Insert must target \"root\", not \
          the __Router NodeId. Got parent = {:?}. Full patches: {:#?}",
         parent, nav_patches,
@@ -783,7 +808,7 @@ fn test_router_at_root_nav_attaches_children_under_root_not_router_node() {
     // Attach patch. That Attach's parent_id must also be "root".
     let back_patches = reconcile(&mut tree, &ir, None, &json!({"location": "/"}), &mut deps);
 
-    let attach_parents: Vec<String> = back_patches
+    let attach_parents: Vec<std::sync::Arc<str>> = back_patches
         .iter()
         .filter_map(|p| match p {
             Patch::Attach { parent_id, .. } => Some(parent_id.clone()),
@@ -796,7 +821,8 @@ fn test_router_at_root_nav_attaches_children_under_root_not_router_node() {
     );
     for p in &attach_parents {
         assert_eq!(
-            p, "root",
+            p.as_ref(),
+            "root",
             "Router-at-root nav-back: cached Attach must target \"root\". \
              Got parent = {:?}. Full patches: {:#?}",
             p, back_patches,
@@ -853,7 +879,8 @@ fn test_nested_router_inserts_children_under_wrapping_element_not_root() {
         })
         .expect("expected Column Insert");
     assert_eq!(
-        column_insert_parent, "root",
+        column_insert_parent.as_ref(),
+        "root",
         "Column is the IR root → inserts under \"root\""
     );
 
@@ -950,7 +977,7 @@ fn test_nested_router_nav_routes_children_under_wrapping_element() {
 
     // Nav back to / — cached Attach must target Column.
     let back = reconcile(&mut tree, &ir, None, &json!({"location": "/"}), &mut deps);
-    let attach_parents: Vec<String> = back
+    let attach_parents: Vec<std::sync::Arc<str>> = back
         .iter()
         .filter_map(|p| match p {
             Patch::Attach { parent_id, .. } => Some(parent_id.clone()),
@@ -960,7 +987,8 @@ fn test_nested_router_nav_routes_children_under_wrapping_element() {
     assert!(!attach_parents.is_empty(), "expected Attach on nav-back");
     for p in &attach_parents {
         assert_eq!(
-            *p, column_id,
+            p.as_ref(),
+            column_id.as_ref(),
             "Nested Router nav-back: cached Attach must target Column, \
              not \"root\". Got parent = {:?}. Patches: {:#?}",
             p, back,
@@ -978,7 +1006,9 @@ fn test_nested_router_nav_routes_children_under_wrapping_element() {
 
 #[test]
 fn test_router_route_with_list_element_emits_items_on_nav() {
-    use hypen_engine::reconcile::reconcile_ir as reconcile;
+    // The file-local lowering wrapper — row creation on nav arrives as an
+    // Instantiate and must be expanded back to Creates for this assertion.
+    let reconcile = reconcile_ir;
 
     let mut tree = InstanceTree::new();
     let mut deps = DependencyGraph::new();

@@ -435,21 +435,27 @@ export class Hypen {
   }
 
   /**
-   * Get merged state from all module instances
+   * Get merged state from all module instances.
+   *
+   * Reads the LIVE observable state rather than `getState()` snapshots:
+   * every consumer (renderer text interpolation, `engine.renderInto`
+   * serialization) only reads values, and a snapshot is a full deep clone
+   * of every module's state — this runs on EVERY state change, so with a
+   * 1,000-row list that was a 1,000-row clone per keystroke. Top-level
+   * entries still land in a fresh object; nested values are the live
+   * proxies, which interpolation reads straight through.
    */
   private getMergedState(): Record<string, any> {
     const merged: Record<string, any> = {};
 
     // Include main module state
     if (this.moduleInstance) {
-      const mainState = this.moduleInstance.getState();
-      Object.assign(merged, mainState);
+      Object.assign(merged, this.moduleInstance.getLiveState());
     }
 
     // Include all nested component states
-    for (const [name, instance] of this.moduleInstances.entries()) {
-      const nestedState = instance.getState();
-      Object.assign(merged, nestedState);
+    for (const [, instance] of this.moduleInstances.entries()) {
+      Object.assign(merged, instance.getLiveState());
     }
 
     return merged;

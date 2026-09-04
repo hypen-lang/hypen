@@ -81,6 +81,12 @@ struct Tab {
     /// linked into the visible tree. Flipped by `attach_tab` /
     /// `detach_tab`.
     attached: bool,
+    /// Lowers `RegisterTemplate`/`Instantiate` from the tab's server
+    /// into the plain `Create`+`Insert` runs the id-rewriting and the
+    /// desktop renderer consume. Remote servers should expand before
+    /// streaming, but a raw host may not — one expander per tab
+    /// (per session) makes the merged stream template-free either way.
+    expander: hypen_engine::TemplateExpander,
 }
 
 pub struct BrowserModule {
@@ -319,6 +325,7 @@ impl BrowserModule {
             // the viewport — no Detach needed for incoming root
             // inserts.
             attached: true,
+            expander: hypen_engine::TemplateExpander::new(),
         };
 
         log::info!("hypen-browser: opening {url} in {tab_id}");
@@ -478,7 +485,7 @@ impl BrowserModule {
             .app_root_ids
             .iter()
             .map(|id| Patch::Remove {
-                id: id.clone(),
+                id: id.as_str().into(),
                 transition: false,
             })
             .collect();
@@ -538,7 +545,9 @@ impl BrowserModule {
             tab.attached = false;
             tab.app_root_ids
                 .iter()
-                .map(|id| Patch::Detach { id: id.clone() })
+                .map(|id| Patch::Detach {
+                    id: id.as_str().into(),
+                })
                 .collect()
         };
         if !patches.is_empty() {
@@ -572,8 +581,8 @@ impl BrowserModule {
             tab.app_root_ids
                 .iter()
                 .map(|id| Patch::Attach {
-                    parent_id: viewport.clone(),
-                    id: id.clone(),
+                    parent_id: viewport.as_str().into(),
+                    id: id.as_str().into(),
                     before_id: None,
                 })
                 .collect()
@@ -733,6 +742,8 @@ fn summarize_patches(patches: &[Patch]) -> String {
             Patch::Attach { .. } => "Attach",
             Patch::SetSemantics { .. } => "SetSemantics",
             Patch::BatchAnimation { .. } => "BatchAnimation",
+            Patch::RegisterTemplate { .. } => "RegisterTemplate",
+            Patch::Instantiate { .. } => "Instantiate",
         };
         *counts.entry(kind).or_default() += 1;
     }
@@ -827,12 +838,12 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
         log::trace!("hypen-browser: process_shell_patches inner locked");
         for patch in patches {
             if let Patch::Insert { parent_id, id, .. } = patch {
-                if parent_id == ROOT_ID && g.shell_root_id.is_none() {
-                    g.shell_root_id = Some(id.clone());
+                if parent_id.as_ref() == ROOT_ID && g.shell_root_id.is_none() {
+                    g.shell_root_id = Some(id.to_string());
                 } else if !g.seen_first_root_child {
                     if let Some(root) = g.shell_root_id.as_deref() {
-                        if parent_id == root {
-                            let viewport = id.clone();
+                        if parent_id.as_ref() == root {
+                            let viewport = id.to_string();
                             g.viewport_id = Some(viewport.clone());
                             g.seen_first_root_child = true;
                             // Drain every tab's queued patches into
@@ -858,12 +869,13 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
                                     &mut local_roots,
                                 );
                                 if let Some(t) = g.tabs.get_mut(&tid) {
-                                    t.app_root_ids.extend(local_roots.iter().cloned());
+                                    t.app_root_ids
+                                        .extend(local_roots.iter().map(|r| r.to_string()));
                                     // Filter out roots that were
                                     // Removed in the same drain.
                                     for p in &rewritten {
                                         if let Patch::Remove { id, .. } = p {
-                                            t.app_root_ids.retain(|tr| tr != id);
+                                            t.app_root_ids.retain(|tr| tr.as_str() != id.as_ref());
                                         }
                                     }
                                 }
@@ -899,6 +911,12 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
 /// known (worker fired after a close, for instance).
 fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch]) -> Vec<Patch> {
     let mut g = inner.lock().expect("inner poisoned");
+    // Lower template patches first so everything downstream — the
+    // pre-viewport buffer included — carries the plain wire.
+    let patches: Vec<Patch> = match g.tabs.get_mut(tab_id) {
+        Some(t) => t.expander.expand(patches.to_vec()),
+        None => return Vec::new(),
+    };
     let (prefix, attached) = match g.tabs.get(tab_id) {
         Some(t) => (t.id_prefix.clone(), t.attached),
         None => return Vec::new(),
@@ -909,22 +927,24 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
             // Shell hasn't rendered yet; buffer per-tab so we can
             // replay once we learn the viewport id.
             if let Some(tab) = g.tabs.get_mut(tab_id) {
-                tab.queued.extend_from_slice(patches);
+                tab.queued.extend_from_slice(&patches);
             }
             return Vec::new();
         }
     };
-    let mut new_roots: Vec<String> = Vec::new();
-    let mut rewritten = rewrite_tab_batch(patches.to_vec(), &prefix, &viewport, &mut new_roots);
+    let mut new_roots: Vec<Arc<str>> = Vec::new();
+    let mut rewritten = rewrite_tab_batch(patches, &prefix, &viewport, &mut new_roots);
     if let Some(tab) = g.tabs.get_mut(tab_id) {
         // Track new root ids so future Detach / Attach / Remove
         // patches know which ids to operate on.
-        tab.app_root_ids.extend(new_roots.iter().cloned());
+        tab.app_root_ids
+            .extend(new_roots.iter().map(|r| r.to_string()));
         // Filter out any roots that were just removed by the same
         // batch.
         for p in &rewritten {
             if let Patch::Remove { id, .. } = p {
-                tab.app_root_ids.retain(|tracked| tracked != id);
+                tab.app_root_ids
+                    .retain(|tracked| tracked.as_str() != id.as_ref());
                 // Also drop the matching pending new_root if the
                 // worker emitted Create + Insert + Remove all in the
                 // same batch (rare but possible).
@@ -950,7 +970,7 @@ fn rewrite_tab_batch(
     patches: Vec<Patch>,
     prefix: &str,
     viewport: &str,
-    new_roots: &mut Vec<String>,
+    new_roots: &mut Vec<Arc<str>>,
 ) -> Vec<Patch> {
     let mut out = Vec::with_capacity(patches.len());
     for patch in patches {
@@ -959,7 +979,12 @@ fn rewrite_tab_batch(
     out
 }
 
-fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec<String>) -> Patch {
+fn rewrite_patch(
+    patch: Patch,
+    prefix: &str,
+    viewport: &str,
+    new_roots: &mut Vec<Arc<str>>,
+) -> Patch {
     match patch {
         Patch::Create {
             id,
@@ -1044,23 +1069,56 @@ fn rewrite_patch(patch: Patch, prefix: &str, viewport: &str, new_roots: &mut Vec
         // namespacing rewrite has nothing to touch — pass it through
         // untouched at the head of its batch.
         p @ Patch::BatchAnimation { .. } => p,
+        // Template patches are lowered by the per-tab `TemplateExpander`
+        // before the rewrite, so these arms only see the expander's
+        // degraded pass-throughs (unknown template id / malformed
+        // skeleton). Rewrite their ids anyway so the merged stream stays
+        // consistently namespaced; the renderer skips what it can't
+        // expand.
+        p @ Patch::RegisterTemplate { .. } => p,
+        Patch::Instantiate {
+            template_id,
+            parent_id,
+            before_id,
+            nodes,
+            subs,
+            semantics,
+        } => {
+            let (parent, is_root_insert) = rewrite_parent(&parent_id, prefix, viewport);
+            let nodes: Vec<Arc<str>> = nodes.iter().map(|n| prefix_id(prefix, n)).collect();
+            if is_root_insert {
+                if let Some(root) = nodes.first() {
+                    if !new_roots.contains(root) {
+                        new_roots.push(root.clone());
+                    }
+                }
+            }
+            Patch::Instantiate {
+                template_id,
+                parent_id: parent,
+                before_id: before_id.map(|b| prefix_id(prefix, &b)),
+                nodes,
+                subs,
+                semantics,
+            }
+        }
     }
 }
 
 /// Returns `(rewritten_parent_id, is_root_level_under_viewport)`.
-fn rewrite_parent(parent_id: &str, prefix: &str, viewport: &str) -> (String, bool) {
+fn rewrite_parent(parent_id: &str, prefix: &str, viewport: &str) -> (Arc<str>, bool) {
     if parent_id == ROOT_ID {
-        (viewport.to_string(), true)
+        (viewport.into(), true)
     } else {
         (prefix_id(prefix, parent_id), false)
     }
 }
 
-fn prefix_id(prefix: &str, id: &str) -> String {
+fn prefix_id(prefix: &str, id: &str) -> Arc<str> {
     let mut s = String::with_capacity(prefix.len() + id.len());
     s.push_str(prefix);
     s.push_str(id);
-    s
+    s.into()
 }
 
 /// Translate a `ConnectionStatus` into the `(status, message)` pair
@@ -1288,6 +1346,7 @@ mod tests {
                     app_root_ids: vec!["a99:1".into(), "a99:2".into()],
                     queued: Vec::new(),
                     attached: true,
+                    expander: hypen_engine::TemplateExpander::new(),
                 },
             );
             inner.active_tab_id = Some(tab_id.into());
@@ -1300,7 +1359,7 @@ mod tests {
         let removes: Vec<&str> = after[before..]
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id, .. } => Some(id.as_str()),
+                Patch::Remove { id, .. } => Some(id.as_ref()),
                 _ => None,
             })
             .collect();
@@ -1334,6 +1393,7 @@ mod tests {
                         app_root_ids: vec![format!("a{n}:1")],
                         queued: Vec::new(),
                         attached: n == 3,
+                        expander: hypen_engine::TemplateExpander::new(),
                     },
                 );
             }
@@ -1349,7 +1409,7 @@ mod tests {
         let removes: Vec<&str> = after[before..]
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id, .. } => Some(id.as_str()),
+                Patch::Remove { id, .. } => Some(id.as_ref()),
                 _ => None,
             })
             .collect();
@@ -1428,6 +1488,7 @@ mod tests {
                 app_root_ids: roots.iter().map(|s| (*s).to_string()).collect(),
                 queued: Vec::new(),
                 attached,
+                expander: hypen_engine::TemplateExpander::new(),
             },
         );
     }
@@ -1457,14 +1518,14 @@ mod tests {
         let detaches: Vec<&str> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Detach { id } => Some(id.as_str()),
+                Patch::Detach { id } => Some(id.as_ref()),
                 _ => None,
             })
             .collect();
         let attaches: Vec<(&str, &str)> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Attach { parent_id, id, .. } => Some((parent_id.as_str(), id.as_str())),
+                Patch::Attach { parent_id, id, .. } => Some((parent_id.as_ref(), id.as_ref())),
                 _ => None,
             })
             .collect();
@@ -1477,7 +1538,7 @@ mod tests {
             .iter()
             .filter_map(|p| match p {
                 Patch::Remove { id, .. } if id.starts_with("a1:") || id.starts_with("a2:") => {
-                    Some(id.as_str())
+                    Some(id.as_ref())
                 }
                 _ => None,
             })
@@ -1561,18 +1622,18 @@ mod tests {
         // Expect: Create(a7:1), Insert(parent=viewport, id=a7:1), Detach(a7:1).
         assert_eq!(out.len(), 3, "got {out:?}");
         match &out[0] {
-            Patch::Create { id, .. } => assert_eq!(id, "a7:1"),
+            Patch::Create { id, .. } => assert_eq!(id.as_ref(), "a7:1"),
             _ => panic!("expected Create, got {:?}", out[0]),
         }
         match &out[1] {
             Patch::Insert { parent_id, id, .. } => {
-                assert_eq!(parent_id, &viewport);
-                assert_eq!(id, "a7:1");
+                assert_eq!(parent_id.as_ref(), viewport);
+                assert_eq!(id.as_ref(), "a7:1");
             }
             _ => panic!("expected Insert, got {:?}", out[1]),
         }
         match &out[2] {
-            Patch::Detach { id } => assert_eq!(id, "a7:1"),
+            Patch::Detach { id } => assert_eq!(id.as_ref(), "a7:1"),
             _ => panic!(
                 "expected trailing Detach for background tab; got {:?}",
                 out[2]
@@ -1632,14 +1693,16 @@ mod tests {
         let removed: Vec<&str> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Remove { id, .. } => Some(id.as_str()),
+                Patch::Remove { id, .. } => Some(id.as_ref()),
                 _ => None,
             })
             .collect();
         let attached_under_viewport: Vec<&str> = new_patches
             .iter()
             .filter_map(|p| match p {
-                Patch::Attach { parent_id, id, .. } if *parent_id == viewport => Some(id.as_str()),
+                Patch::Attach { parent_id, id, .. } if parent_id.as_ref() == viewport => {
+                    Some(id.as_ref())
+                }
                 _ => None,
             })
             .collect();
@@ -1675,7 +1738,7 @@ mod tests {
         let detaches: Vec<&str> = after[before..]
             .iter()
             .filter_map(|p| match p {
-                Patch::Detach { id } => Some(id.as_str()),
+                Patch::Detach { id } => Some(id.as_ref()),
                 _ => None,
             })
             .collect();

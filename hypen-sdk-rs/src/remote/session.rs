@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use hypen_engine::{Engine, Patch};
+use hypen_engine::{Engine, Patch, TemplateExpander};
 use serde_json::Value;
 
 use crate::context::GlobalContext;
@@ -215,6 +215,11 @@ struct SessionInner {
     revision: u64,
     state_subscribed: bool,
     rendered: bool,
+    /// Remote clients are version-unknown peers: they must always see the
+    /// plain `Create`+`Insert` wire, never `RegisterTemplate`/`Instantiate`.
+    /// Session-lifetime state: skeletons registered by earlier batches
+    /// expand later `Instantiate`s.
+    template_expander: TemplateExpander,
 }
 
 impl RemoteSession {
@@ -393,6 +398,7 @@ impl RemoteSession {
                 revision: 0,
                 state_subscribed: false,
                 rendered: false,
+                template_expander: TemplateExpander::new(),
             }),
             state,
             primary_handler,
@@ -714,11 +720,14 @@ impl RemoteSession {
             messages.push(json);
         }
 
-        // 2. Render the UI (first time only) and capture patches
+        // 2. Render the UI (first time only) and capture patches. Lower
+        // template patches before they cross the wire — remote clients of
+        // any version must see plain patches.
         let patches = if !inner.rendered {
             inner.rendered = true;
             let ui = inner.ui_source.clone();
-            render_and_capture(&mut inner.engine, &ui)
+            let raw = render_and_capture(&mut inner.engine, &ui);
+            inner.template_expander.expand(raw)
         } else {
             vec![]
         };
@@ -822,6 +831,9 @@ impl RemoteSession {
                 }
             }
         });
+        // Lower template patches before they cross the wire — remote
+        // clients of any version must see plain patches.
+        let patches = inner.template_expander.expand(patches);
 
         inner.revision += 1;
 

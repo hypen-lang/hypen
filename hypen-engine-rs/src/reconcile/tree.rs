@@ -121,6 +121,53 @@ pub struct InstanceNode {
     /// against this to decide whether a [`Patch::SetSemantics`] is due —
     /// static blocks never compare unequal, so static trees emit nothing.
     pub last_semantics: Option<Semantics>,
+
+    /// Iterable-child memo: the `(item value, templates fingerprint)` this
+    /// child was last reconciled against, stamped by keyed reconciliation
+    /// (`reconcile_iterable_children_full`). A later reconcile whose key
+    /// matches AND whose memo compares equal skips template substitution and
+    /// the whole subtree walk for this child — the per-item equivalent of
+    /// React's `memo` bail-out. `None` for nodes that aren't iterable
+    /// children. Boxed so the common case costs one pointer.
+    ///
+    /// State (`@{state.*}`) bindings inside the subtree stay live despite the
+    /// skip: they are registered per-node in the `DependencyGraph`, so a
+    /// state change dirties those nodes directly and the regular dirty-node
+    /// path refreshes them without the list's involvement.
+    pub iter_memo: Option<IterMemo>,
+
+    /// Compiled binding-map cache for iterable CONTAINERS (List/ForEach
+    /// nodes), keyed by the same templates fingerprint as the memo. See
+    /// [`binding_map`](super::binding_map). `None` on non-container nodes;
+    /// a cache whose `compiled` is `None` records "not compilable" so the
+    /// compile walk isn't retried every pass.
+    pub iter_compiled: Option<Box<super::binding_map::CompiledCache>>,
+
+    /// Cached templates fingerprint for iterable CONTAINERS whose template
+    /// list is the node's own stored `Arc` (List `element_template`,
+    /// ForEach `ir_node_template`) — those are set once at node creation
+    /// and never mutated in place, so the hash never goes stale. Passes
+    /// whose templates arrive externally substituted (nested ForEach) must
+    /// NOT read this; they recompute (see
+    /// `keyed::fingerprint_for_container`'s `stable` flag).
+    pub iter_fp_cache: Option<u64>,
+}
+
+/// See [`InstanceNode::iter_memo`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct IterMemo {
+    /// Content hash of the item this child last rendered (see
+    /// `keyed::item_fingerprint`). A hash instead of a deep clone: stamping
+    /// a memo cost a full item copy per changed row, and the equality probe
+    /// walked both values — hashing the incoming item once per row does the
+    /// same job allocation-free. The 64-bit collision risk (a wrongly
+    /// skipped row) is on the order of 2^-64 per comparison.
+    pub item_hash: u64,
+    /// Fingerprint of the substitution templates in effect (hash of their
+    /// serialized form). Templates embed outer-loop substitutions for nested
+    /// ForEach, so an outer item change changes the fingerprint and defeats
+    /// the memo even when this child's own item is unchanged.
+    pub templates_hash: u64,
 }
 
 impl InstanceNode {
@@ -150,6 +197,9 @@ impl InstanceNode {
             module_scope: element.module_scope.clone(),
             semantics: element.semantics.clone(),
             last_semantics: None,
+            iter_memo: None,
+            iter_compiled: None,
+            iter_fp_cache: None,
         }
     }
 
@@ -176,6 +226,9 @@ impl InstanceNode {
             module_scope: None,
             semantics: None,
             last_semantics: None,
+            iter_memo: None,
+            iter_compiled: None,
+            iter_fp_cache: None,
         }
     }
 
@@ -216,6 +269,13 @@ pub struct InstanceTree {
 
     /// Root node ID
     root: Option<NodeId>,
+
+    /// Template ids already sent this session — each `RegisterTemplate`
+    /// goes out exactly once; every later plannable row references it via
+    /// `Instantiate`. Boundaries whose consumers can't clone templates
+    /// lower the stream back to plain patches with
+    /// `portable::TemplateExpander`.
+    pub registered_templates: std::collections::HashSet<String>,
 }
 
 impl InstanceTree {
@@ -223,6 +283,7 @@ impl InstanceTree {
         Self {
             nodes: SlotMap::with_key(),
             root: None,
+            registered_templates: std::collections::HashSet::new(),
         }
     }
 
@@ -230,9 +291,22 @@ impl InstanceTree {
     pub fn clear(&mut self) {
         self.nodes.clear();
         self.root = None;
+        // A cleared tree usually precedes a fresh render to the SAME
+        // consumer, whose registered templates survive — keep the set so
+        // templates aren't re-sent.
     }
 
     /// Create a new node and return its ID
+    /// Insert a fully pre-built node, letting the builder see its assigned
+    /// id. The prototype-clone creation path constructs `InstanceNode`s
+    /// directly (no `Element` resolution) — see `binding_map`.
+    pub(crate) fn insert_node_with(
+        &mut self,
+        build: impl FnOnce(NodeId) -> InstanceNode,
+    ) -> NodeId {
+        self.nodes.insert_with_key(build)
+    }
+
     pub fn create_node(&mut self, element: &Element, state: &serde_json::Value) -> NodeId {
         self.nodes
             .insert_with_key(|id| InstanceNode::new(id, element, state))

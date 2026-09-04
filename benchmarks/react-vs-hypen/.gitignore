@@ -1,0 +1,11 @@
+node_modules/
+dist/
+dist-profile/
+run.log
+
+# Copied from hypen-web/packages/web-engine/wasm-browser by scripts/prepare.ts
+apps/hypen/public/wasm/
+results/smoke-*.png
+
+# Regenerable CPU-profile dumps (bench/profile.ts, bench/profile-tree.ts)
+results/profile-*.json

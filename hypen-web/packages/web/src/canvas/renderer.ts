@@ -6,6 +6,7 @@
 
 import type { Renderer } from "@hypen-space/core/renderer";
 import type { Patch } from "@hypen-space/core/types";
+import { TemplateExpander } from "@hypen-space/core/patch-expand";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 
 const log = frameworkLoggers.canvas;
@@ -66,6 +67,15 @@ export class CanvasRenderer implements Renderer {
   
   private rootNode: VirtualNode | null = null;
   private nodes = new Map<string, VirtualNode>();
+
+  /**
+   * Lowers `registerTemplate`/`instantiate` into the plain create/insert
+   * runs they replace — canvas has no cloneable retained tree, so
+   * templates hold no advantage here. Session-lifetime state, deliberately
+   * NOT reset in `clear()`: template ids are content-derived
+   * (`t{hash}.{idx}`), so registered skeletons stay valid across clears.
+   */
+  private templateExpander = new TemplateExpander();
   
   private eventManager: CanvasEventManager;
   private scrollManager: ScrollManager;
@@ -283,6 +293,12 @@ export class CanvasRenderer implements Renderer {
    * Apply patches from engine
    */
   applyPatches(patches: Patch[]): void {
+    // Lower template patches first. Expansion preserves order, and only
+    // `registerTemplate` is ever consumed — a leading `batchAnimation`
+    // stamp (always emitted at index 0) keeps its position for the
+    // first-patch check below.
+    patches = this.templateExpander.expand(patches);
+
     const hadRoot = this.rootNode !== null;
 
     // Transaction-scoped animation stamp (Option D): honored ONLY as the
@@ -798,8 +814,24 @@ export class CanvasRenderer implements Renderer {
     this.selectionManager.setRootNode(null);
     }
 
-    // Remove from nodes map
+    // Remove from nodes map — including every descendant. The engine emits
+    // ONE Remove for a removed subtree's root (keyed teardown always did;
+    // non-animated subtree removal now does too), so descendant bookkeeping
+    // must be swept here or the id→node entries leak for the renderer's
+    // lifetime. Mirrors the DOM renderer's sweepDetachedDescendants.
     this.nodes.delete(id);
+    const stack: VirtualNode[] = [...node.children];
+    while (stack.length > 0) {
+      const desc = stack.pop()!;
+      for (let i = desc.children.length - 1; i >= 0; i--) {
+        stack.push(desc.children[i]!);
+      }
+      // Guard against recycled ids mapping to a different live node.
+      if (this.nodes.get(desc.id) === desc) {
+        this.animator.forget(desc.id);
+        this.nodes.delete(desc.id);
+      }
+    }
   }
 
   /**

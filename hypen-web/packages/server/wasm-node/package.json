@@ -23,7 +23,5 @@
     "engine",
     "wasm",
     "hypen"
-  ],
-  "type": "commonjs",
-  "sideEffects": false
+  ]
 }

@@ -30,7 +30,9 @@ export type Patch = {
     | "detach"
     | "attach"
     | "setSemantics"
-    | "batchAnimation";
+    | "batchAnimation"
+    | "registerTemplate"
+    | "instantiate";
   id?: string;
   elementType?: string;
   props?: Record<string, any>;
@@ -75,6 +77,38 @@ export type Patch = {
    * rest of the batch is wire-identical to an unstamped one.
    */
   spec?: any;
+  /**
+   * Template instantiation — permanent wire citizens: the engine ALWAYS
+   * emits these two kinds when an iterable row is plannable as a
+   * template. Consumers either exploit them (the DOM renderer clones a
+   * prototype element per instance) or lower them back into the plain
+   * `create`+`insert` run they replace via `TemplateExpander`
+   * (`@hypen-space/core/patch-expand` — Canvas renderer, remote
+   * streaming boundaries).
+   *
+   * `registerTemplate` carries `templateId` + `root` — a static skeleton
+   * tree `{elementType, props, children}` sent once per template.
+   * `instantiate` carries `templateId`, `parentId`/`beforeId`, `nodes`
+   * (per-element ids, depth-first over the template) and `subs`
+   * (`[nodeIndex, prop, value]` triples for every dynamic prop), plus
+   * optional `semantics` (`[nodeIndex, block]` pairs).
+   */
+  templateId?: string;
+  root?: TemplateSkeletonNode;
+  nodes?: string[];
+  subs?: Array<[number, string, any]>;
+  /**
+   * On `instantiate`: per-node accessibility semantics. (On `create` /
+   * `setSemantics` the single-node `semantics` field above is used.)
+   */
+  nodeSemantics?: Array<[number, Semantics]>;
+};
+
+/** Static skeleton node of a registered template (see `registerTemplate`). */
+export type TemplateSkeletonNode = {
+  elementType: string;
+  props: Record<string, any>;
+  children: TemplateSkeletonNode[];
 };
 
 /**

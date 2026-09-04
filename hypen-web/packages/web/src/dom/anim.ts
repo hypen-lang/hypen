@@ -787,6 +787,19 @@ export class DomAnimator {
    * real sibling FLIP for those runs at exit finalize (see finalizeExit).
    */
   prepareMoves(patches: readonly MovePatchLike[], getNode: (id: string) => HTMLElement | undefined): void {
+    // The remove branch below snapshots every sibling of every removed node,
+    // which is O(removes × siblings) — quadratic when a long list is torn
+    // down. It can only ever produce a flip for a node carrying a `.layout`
+    // spec, so when the app registers none (the common case) the whole
+    // sibling sweep is dead work. Establish that once per batch.
+    let anyLayoutSpec = false;
+    for (const spec of this.specs.values()) {
+      if (spec?.layout) {
+        anyLayoutSpec = true;
+        break;
+      }
+    }
+
     for (const patch of patches) {
       if (!patch.id) continue;
       if (patch.type === "move") {
@@ -798,6 +811,7 @@ export class DomAnimator {
           this.pendingFlips.set(patch.id, { element, first });
         }
       } else if (patch.type === "remove") {
+        if (!anyLayoutSpec) continue;
         const removed = getNode(patch.id);
         if (!removed || isDisconnected(removed)) continue;
         for (const [id, flip] of this.collectRemovalSiblingFlips(removed)) {

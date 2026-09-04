@@ -697,7 +697,7 @@ impl TaffyState {
                     // Taffy node — a full Style + NodeContext — orphaned
                     // in `self.tree` for the process lifetime. Over a
                     // long idle session that is an unbounded leak.
-                    if let Some(old) = self.node_map.remove(id) {
+                    if let Some(old) = self.node_map.remove(id.as_ref()) {
                         if let Some(parent) = self.tree.parent(old) {
                             let mut siblings: Vec<NodeId> =
                                 self.tree.children(parent).unwrap_or_default();
@@ -712,8 +712,8 @@ impl TaffyState {
                     let ctx = node_context(node, scale, viewport);
                     let taffy_id = self.tree.new_leaf_with_context(style, ctx).ok();
                     if let Some(tid) = taffy_id {
-                        self.node_map.insert(id.clone(), tid);
-                        self.renderer_for_taffy.insert(tid, id.clone());
+                        self.node_map.insert(id.to_string(), tid);
+                        self.renderer_for_taffy.insert(tid, id.to_string());
                         return true;
                     }
                     return false;
@@ -721,7 +721,7 @@ impl TaffyState {
                 true
             }
             Patch::SetProp { id, name, .. } | Patch::RemoveProp { id, name } => {
-                let Some(&tid) = self.node_map.get(id) else {
+                let Some(&tid) = self.node_map.get(id.as_ref()) else {
                     return true;
                 };
                 // Appearance-only props (color / backgroundColor /
@@ -756,7 +756,7 @@ impl TaffyState {
             Patch::SetText { id, .. } => {
                 // SetText is reserved + always layout-affecting on
                 // Text nodes (changes measured width/height).
-                let Some(&tid) = self.node_map.get(id) else {
+                let Some(&tid) = self.node_map.get(id.as_ref()) else {
                     return true;
                 };
                 if let Some(node) = tree.get(id) {
@@ -788,7 +788,7 @@ impl TaffyState {
                 id,
                 before_id,
             } => {
-                if let Some(&child) = self.node_map.get(id) {
+                if let Some(&child) = self.node_map.get(id.as_ref()) {
                     if let Some(old_parent) = self.tree.parent(child) {
                         let mut old: Vec<NodeId> =
                             self.tree.children(old_parent).unwrap_or_default();
@@ -800,7 +800,7 @@ impl TaffyState {
                 true
             }
             Patch::Remove { id, .. } => {
-                if let Some(tid) = self.node_map.remove(id) {
+                if let Some(tid) = self.node_map.remove(id.as_ref()) {
                     if let Some(parent) = self.tree.parent(tid) {
                         let mut children: Vec<NodeId> =
                             self.tree.children(parent).unwrap_or_default();
@@ -813,7 +813,7 @@ impl TaffyState {
                 true
             }
             Patch::Detach { id } => {
-                if let Some(&tid) = self.node_map.get(id) {
+                if let Some(&tid) = self.node_map.get(id.as_ref()) {
                     if let Some(parent) = self.tree.parent(tid) {
                         let mut children: Vec<NodeId> =
                             self.tree.children(parent).unwrap_or_default();
@@ -828,6 +828,12 @@ impl TaffyState {
             // stamps yet — ignoring it snaps, which is the protocol's
             // sanctioned degradation.
             Patch::BatchAnimation { .. } => false,
+            // Template patches are lowered by the `TemplateExpander` in
+            // `flush_patches` before any batch reaches the Taffy mirror.
+            // One arriving here means the expander passed it through
+            // (unknown template id / malformed skeleton) — report it as
+            // unhandled so the caller falls back to a bulk rebuild.
+            Patch::RegisterTemplate { .. } | Patch::Instantiate { .. } => false,
         }
     }
 

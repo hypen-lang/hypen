@@ -128,11 +128,17 @@ export abstract class BaseEngine {
 
   /**
    * Set the render callback that receives patches.
+   *
+   * The WASM engine hands the batch over as a single JSON string (one
+   * boundary crossing + native `JSON.parse`, instead of a per-field
+   * `TextDecoder` pass while materializing thousands of JS objects).
+   * Parse it here so every consumer keeps receiving a `Patch[]`. An
+   * array payload (older engine artifacts) passes through unchanged.
    */
   setRenderCallback(callback: RenderCallback): void {
     const engine = this.ensureInitialized();
-    engine.setRenderCallback((patches: Patch[]) => {
-      callback(patches);
+    engine.setRenderCallback((patches: Patch[] | string) => {
+      callback(typeof patches === "string" ? JSON.parse(patches) : patches);
     });
   }
 

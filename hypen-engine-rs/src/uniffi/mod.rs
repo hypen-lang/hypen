@@ -284,6 +284,10 @@ impl Patch {
     /// conversion is infallible and call sites use a plain `map`. Keep it
     /// that way: a silent drop here is invisible to Kotlin/Swift hosts and
     /// to any browser client they relay to.
+    ///
+    /// The engine's `Arc<str>` ids are copied into owned `String`s here —
+    /// UniFFI records can't carry refcounted strings, so this boundary is
+    /// the one place the memoized ids are re-allocated.
     fn from_internal(p: InternalPatch) -> Self {
         match p {
             // The batch-animation prelude. UniFFI has no arbitrary-JSON
@@ -294,6 +298,20 @@ impl Patch {
             // Contract: honored ONLY at batch index 0. Renderers that don't
             // understand it ignore it and snap; the rest of the batch is
             // wire-identical to an unstamped one.
+            // Template-instantiation patches never reach this conversion:
+            // every batch is lowered through `EngineState`'s
+            // `TemplateExpander` (see `lower_patches`) BEFORE flattening to
+            // the FFI record — and `lower_patches` drops (with a warning)
+            // any template patch the expander passed through on its
+            // degraded paths — so mobile hosts always see the plain
+            // `Create`+`Insert` wire. If this ever fires, a new
+            // patch-producing entry point bypassed `lower_patches`; route
+            // it through there rather than extending `PatchType`.
+            InternalPatch::RegisterTemplate { .. } | InternalPatch::Instantiate { .. } => {
+                unreachable!(
+                    "template patches are expanded by lower_patches before FFI conversion"
+                )
+            }
             InternalPatch::BatchAnimation { spec } => Patch {
                 patch_type: PatchType::BatchAnimation,
                 id: String::new(),
@@ -315,7 +333,7 @@ impl Patch {
                 semantics,
             } => Patch {
                 patch_type: PatchType::Create,
-                id,
+                id: id.to_string(),
                 element_type: Some(element_type),
                 props_json: Some(serde_json::to_string(&*props).unwrap_or_default()),
                 name: None,
@@ -331,7 +349,7 @@ impl Patch {
             },
             InternalPatch::SetSemantics { id, semantics } => Patch {
                 patch_type: PatchType::SetSemantics,
-                id,
+                id: id.to_string(),
                 element_type: None,
                 props_json: None,
                 name: None,
@@ -347,7 +365,7 @@ impl Patch {
             },
             InternalPatch::SetProp { id, name, value } => Patch {
                 patch_type: PatchType::SetProp,
-                id,
+                id: id.to_string(),
                 element_type: None,
                 props_json: None,
                 name: Some(name),
@@ -361,7 +379,7 @@ impl Patch {
             },
             InternalPatch::RemoveProp { id, name } => Patch {
                 patch_type: PatchType::RemoveProp,
-                id,
+                id: id.to_string(),
                 element_type: None,
                 props_json: None,
                 name: Some(name),
@@ -375,7 +393,7 @@ impl Patch {
             },
             InternalPatch::SetText { id, text } => Patch {
                 patch_type: PatchType::SetText,
-                id,
+                id: id.to_string(),
                 element_type: None,
                 props_json: None,
                 name: None,
@@ -393,14 +411,14 @@ impl Patch {
                 before_id,
             } => Patch {
                 patch_type: PatchType::Insert,
-                id,
+                id: id.to_string(),
                 element_type: None,
                 props_json: None,
                 name: None,
                 value_json: None,
                 text: None,
-                parent_id: Some(parent_id),
-                before_id,
+                parent_id: Some(parent_id.to_string()),
+                before_id: before_id.map(|b| b.to_string()),
                 semantics_json: None,
                 transition: false,
                 spec_json: None,
@@ -411,14 +429,14 @@ impl Patch {
                 before_id,
             } => Patch {
                 patch_type: PatchType::Move,
-                id,
+                id: id.to_string(),
                 element_type: None,
                 props_json: None,
                 name: None,
                 value_json: None,
                 text: None,
-                parent_id: Some(parent_id),
-                before_id,
+                parent_id: Some(parent_id.to_string()),
+                before_id: before_id.map(|b| b.to_string()),
                 semantics_json: None,
                 transition: false,
                 spec_json: None,
@@ -432,7 +450,7 @@ impl Patch {
             // skip-if-false JSON) or that client snaps.
             InternalPatch::Remove { id, transition } => Patch {
                 patch_type: PatchType::Remove,
-                id,
+                id: id.to_string(),
                 element_type: None,
                 props_json: None,
                 name: None,
@@ -453,7 +471,7 @@ impl Patch {
             // the Router reconciliation that emits these.
             InternalPatch::Detach { id } => Patch {
                 patch_type: PatchType::Detach,
-                id,
+                id: id.to_string(),
                 element_type: None,
                 props_json: None,
                 name: None,
@@ -471,14 +489,14 @@ impl Patch {
                 before_id,
             } => Patch {
                 patch_type: PatchType::Attach,
-                id,
+                id: id.to_string(),
                 element_type: None,
                 props_json: None,
                 name: None,
                 value_json: None,
                 text: None,
-                parent_id: Some(parent_id),
-                before_id,
+                parent_id: Some(parent_id.to_string()),
+                before_id: before_id.map(|b| b.to_string()),
                 semantics_json: None,
                 transition: false,
                 spec_json: None,
@@ -569,6 +587,43 @@ struct EngineState {
     pending_actions: Vec<Action>,
     /// Imports from the last rendered document, drained by `get_pending_imports`.
     pending_imports: Vec<ImportInfo>,
+    /// Mobile hosts can't exploit template cloning, so template patches are
+    /// lowered back to plain `Create`+`Insert` runs before flattening to
+    /// the FFI record. Session-lifetime state: skeletons registered by
+    /// earlier batches expand later `Instantiate`s.
+    template_expander: crate::portable::TemplateExpander,
+}
+
+impl EngineState {
+    /// Lower template patches and flatten the batch to the FFI record.
+    /// Every patch-returning entry point funnels through here so no path
+    /// can leak `RegisterTemplate`/`Instantiate` across the FFI.
+    fn lower_patches(&mut self, patches: Vec<InternalPatch>) -> Vec<Patch> {
+        self.template_expander
+            .expand(patches)
+            .into_iter()
+            .filter(|p| {
+                // The expander passes template patches through on its
+                // degraded paths (unknown template id, malformed skeleton)
+                // instead of panicking. Mobile hosts have no PatchType for
+                // them, so drop the stragglers here — with a warning —
+                // rather than letting `from_internal`'s unreachable! turn
+                // graceful degradation into a cross-FFI panic.
+                let is_template = matches!(
+                    p,
+                    InternalPatch::RegisterTemplate { .. } | InternalPatch::Instantiate { .. }
+                );
+                if is_template {
+                    crate::log_warn!(
+                        crate::logger::LogScope::Engine,
+                        "dropping unexpanded template patch at the uniffi boundary"
+                    );
+                }
+                !is_template
+            })
+            .map(Patch::from_internal)
+            .collect()
+    }
 }
 
 /// The main Hypen engine interface
@@ -587,6 +642,7 @@ impl HypenEngine {
                 core: EngineCore::new(),
                 pending_actions: Vec::new(),
                 pending_imports: Vec::new(),
+                template_expander: crate::portable::TemplateExpander::new(),
             }),
         }))
     }
@@ -656,7 +712,7 @@ impl HypenEngine {
         let ir_node = ast_to_ir_node(component);
         let patches = state.core.render_ir_node(&ir_node);
 
-        Ok(patches.into_iter().map(Patch::from_internal).collect())
+        Ok(state.lower_patches(patches))
     }
 
     /// Update engine state with a JSON patch and re-render affected nodes.
@@ -692,7 +748,7 @@ impl HypenEngine {
         }
 
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from_internal).collect())
+        Ok(state.lower_patches(patches))
     }
 
     /// Apply a sparse state update with explicit dotted path → value pairs.
@@ -739,7 +795,7 @@ impl HypenEngine {
         }
 
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from_internal).collect())
+        Ok(state.lower_patches(patches))
     }
 
     /// Set module configuration
@@ -794,7 +850,7 @@ impl HypenEngine {
 
         state.core.set_context(&name, data);
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from_internal).collect())
+        Ok(state.lower_patches(patches))
     }
 
     /// Remove a data source context and re-render bound nodes.
@@ -809,7 +865,7 @@ impl HypenEngine {
 
         state.core.remove_context(&name);
         let patches = state.core.render_dirty();
-        Ok(patches.into_iter().map(Patch::from_internal).collect())
+        Ok(state.lower_patches(patches))
     }
 
     /// Look up which named module owns an action.

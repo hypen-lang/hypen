@@ -331,7 +331,7 @@ fn wprops(entries: &[(&str, serde_json::Value)]) -> Arc<IndexMap<String, serde_j
 
 fn wcreate(id: &str, et: &str, entries: &[(&str, serde_json::Value)]) -> Patch {
     Patch::Create {
-        id: id.to_string(),
+        id: id.into(),
         element_type: et.to_string(),
         props: wprops(entries),
         semantics: None,
@@ -340,15 +340,15 @@ fn wcreate(id: &str, et: &str, entries: &[(&str, serde_json::Value)]) -> Patch {
 
 fn winsert(parent: &str, id: &str) -> Patch {
     Patch::Insert {
-        parent_id: parent.to_string(),
-        id: id.to_string(),
+        parent_id: parent.into(),
+        id: id.into(),
         before_id: None,
     }
 }
 
 fn wset(id: &str, name: &str, value: serde_json::Value) -> Patch {
     Patch::SetProp {
-        id: id.to_string(),
+        id: id.into(),
         name: name.to_string(),
         value,
     }
@@ -738,9 +738,9 @@ fn focus_clears_when_its_subtree_begins_exiting() {
 
 fn wmove(parent: &str, id: &str, before: Option<&str>) -> Patch {
     Patch::Move {
-        parent_id: parent.to_string(),
-        id: id.to_string(),
-        before_id: before.map(str::to_string),
+        parent_id: parent.into(),
+        id: id.into(),
+        before_id: before.map(Into::into),
     }
 }
 

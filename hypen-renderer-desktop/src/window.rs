@@ -220,6 +220,13 @@ pub struct App {
     initial_size: (u32, u32),
     queue: Arc<PatchQueue>,
     module: Arc<dyn HypenModule>,
+    /// Lowers `RegisterTemplate`/`Instantiate` back into the plain
+    /// `Create`+`Insert` runs the rest of the renderer consumes. The
+    /// desktop renderer can't exploit template cloning, so every drained
+    /// batch is expanded in `flush_patches` before ingestion. Session-
+    /// lifetime state: skeletons registered by earlier batches expand
+    /// later `Instantiate`s.
+    template_expander: hypen_engine::TemplateExpander,
     /// EventLoopProxy used to construct the AccessKit adapter on
     /// `resumed`.
     proxy: EventLoopProxy<AppEvent>,
@@ -416,6 +423,7 @@ impl App {
             initial_size,
             queue,
             module,
+            template_expander: hypen_engine::TemplateExpander::new(),
             proxy,
             window: None,
             gpu: None,
@@ -498,7 +506,9 @@ impl App {
             .map(|w| w.scale_factor() as f32)
             .unwrap_or(1.0);
         let viewport = self.logical_viewport();
-        let mut patches = self.queue.drain();
+        // Lower template patches first: everything downstream (scrubber,
+        // animator, Tree, Taffy mirror) consumes the plain wire.
+        let mut patches = self.template_expander.expand(self.queue.drain());
         let n = patches.len();
         if n == 0 {
             // Overdue-exit backbone: even a patch-less flush (occluded

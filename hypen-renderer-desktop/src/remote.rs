@@ -511,8 +511,8 @@ mod tests {
 
         let got = received.lock().unwrap();
         assert_eq!(got.len(), 2, "pending patches should drain on wiring");
-        assert!(matches!(got[0], Patch::Create { ref id, .. } if id == "root_a"));
-        assert!(matches!(got[1], Patch::Create { ref id, .. } if id == "a_text"));
+        assert!(matches!(got[0], Patch::Create { ref id, .. } if id.as_ref() == "root_a"));
+        assert!(matches!(got[1], Patch::Create { ref id, .. } if id.as_ref() == "a_text"));
     }
 
     // ---------------------------------------------------------------
@@ -589,7 +589,7 @@ mod tests {
         handle_incoming(&initial_tree, &inner, &mut session_id);
         let got = received.lock().unwrap();
         assert_eq!(got.len(), 1);
-        assert!(matches!(got[0], Patch::Create { ref id, .. } if id == "1"));
+        assert!(matches!(got[0], Patch::Create { ref id, .. } if id.as_ref() == "1"));
     }
 
     #[test]

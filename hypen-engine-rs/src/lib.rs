@@ -81,7 +81,7 @@ pub use lifecycle::{Module, ModuleInstance};
 pub use portable::{
     build_url, decode_uri_component, diff_paths, encode_uri_component, match_path, parse_query,
     path_delete, path_get, path_has, path_set, session_step, DiffEntry, RouteMatch, SessionEffect,
-    SessionEvent, SessionPolicy, SessionState,
+    SessionEvent, SessionPolicy, SessionState, TemplateExpander,
 };
 pub use reconcile::Patch;
 pub use state::StateChange;

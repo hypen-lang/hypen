@@ -23,7 +23,7 @@ fn props(entries: &[(&str, Value)]) -> Arc<IndexMap<String, Value>> {
 
 fn create(id: &str, element_type: &str, entries: &[(&str, Value)]) -> Patch {
     Patch::Create {
-        id: id.to_string(),
+        id: id.into(),
         element_type: element_type.to_string(),
         props: props(entries),
         semantics: None,
@@ -32,15 +32,15 @@ fn create(id: &str, element_type: &str, entries: &[(&str, Value)]) -> Patch {
 
 fn insert(parent: &str, id: &str) -> Patch {
     Patch::Insert {
-        parent_id: parent.to_string(),
-        id: id.to_string(),
+        parent_id: parent.into(),
+        id: id.into(),
         before_id: None,
     }
 }
 
 fn set_prop(id: &str, name: &str, value: Value) -> Patch {
     Patch::SetProp {
-        id: id.to_string(),
+        id: id.into(),
         name: name.to_string(),
         value,
     }
@@ -48,7 +48,7 @@ fn set_prop(id: &str, name: &str, value: Value) -> Patch {
 
 fn remove(id: &str, transition: bool) -> Patch {
     Patch::Remove {
-        id: id.to_string(),
+        id: id.into(),
         transition,
     }
 }
@@ -1438,7 +1438,7 @@ fn essential_snap_at_flush_forwards_finalized_exit_removals() {
     assert!(
         out.forwarded
             .iter()
-            .any(|p| matches!(p, Patch::Remove { id, .. } if id == "card")),
+            .any(|p| matches!(p, Patch::Remove { id, .. } if id.as_ref() == "card")),
         "withheld removal must surface for Taffy: {:?}",
         out.forwarded
     );
@@ -1476,8 +1476,8 @@ fn layout_items_carry_inherited_opacity() {
 
 fn move_patch(parent: &str, id: &str) -> Patch {
     Patch::Move {
-        parent_id: parent.to_string(),
-        id: id.to_string(),
+        parent_id: parent.into(),
+        id: id.into(),
         before_id: None,
     }
 }
@@ -1815,7 +1815,7 @@ fn removal_does_not_flip_non_layout_siblings() {
 // ---------------------------------------------------------------
 
 fn detach(id: &str) -> Patch {
-    Patch::Detach { id: id.to_string() }
+    Patch::Detach { id: id.into() }
 }
 
 /// A keyed shared-element node. `spec` adds the `__anim.shared` timing

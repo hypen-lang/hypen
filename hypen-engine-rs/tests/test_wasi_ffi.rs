@@ -50,13 +50,13 @@ fn test_string_buffer_pattern() {
     // Test the string buffer pattern used for patches
     let patches = vec![
         Patch::Create {
-            id: "root".to_string(),
+            id: "root".into(),
             element_type: "Column".to_string(),
             props: std::sync::Arc::new(indexmap::IndexMap::new()),
             semantics: None,
         },
         Patch::Create {
-            id: "text1".to_string(),
+            id: "text1".into(),
             element_type: "Text".to_string(),
             props: std::sync::Arc::new({
                 let mut map = indexmap::IndexMap::new();
@@ -66,8 +66,8 @@ fn test_string_buffer_pattern() {
             semantics: None,
         },
         Patch::Insert {
-            parent_id: "root".to_string(),
-            id: "text1".to_string(),
+            parent_id: "root".into(),
+            id: "text1".into(),
             before_id: None,
         },
     ];
@@ -316,7 +316,7 @@ fn test_patch_serialization_all_types() {
     // Note: Event attachment/detachment is handled at the renderer level, not via patches
     let patches = vec![
         Patch::Create {
-            id: "node1".to_string(),
+            id: "node1".into(),
             element_type: "Text".to_string(),
             props: std::sync::Arc::new({
                 let mut map = indexmap::IndexMap::new();
@@ -326,26 +326,26 @@ fn test_patch_serialization_all_types() {
             semantics: None,
         },
         Patch::SetProp {
-            id: "node1".to_string(),
+            id: "node1".into(),
             name: "color".to_string(),
             value: json!("red"),
         },
         Patch::SetText {
-            id: "node1".to_string(),
+            id: "node1".into(),
             text: "Updated text".to_string(),
         },
         Patch::Insert {
-            parent_id: "root".to_string(),
-            id: "node1".to_string(),
+            parent_id: "root".into(),
+            id: "node1".into(),
             before_id: None,
         },
         Patch::Move {
-            parent_id: "root".to_string(),
-            id: "node1".to_string(),
-            before_id: Some("node2".to_string()),
+            parent_id: "root".into(),
+            id: "node1".into(),
+            before_id: Some("node2".into()),
         },
         Patch::Remove {
-            id: "node1".to_string(),
+            id: "node1".into(),
             transition: false,
         },
     ];

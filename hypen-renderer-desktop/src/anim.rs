@@ -1350,10 +1350,10 @@ impl DesktopAnimator {
                     // Defensive: a Create for an id that is still
                     // exit-animating finalizes the old subtree first so
                     // the corpse can't shadow the new node.
-                    if self.exits.contains_key(id) {
+                    if self.exits.contains_key(id.as_ref()) {
                         // Supersede: a new node replaces the exiting one.
                         // Interruption, not a settle — fires no completion.
-                        forwarded.extend(self.finalize_exit(id.clone(), tree, false));
+                        forwarded.extend(self.finalize_exit(id.to_string(), tree, false));
                     }
                     tree.apply(patch);
                     forwarded.push(patch.clone());
@@ -1391,12 +1391,12 @@ impl DesktopAnimator {
                     // Enter is queued only for same-batch creations, so
                     // a cached Router `Attach` (a different patch type
                     // altogether) never enter-animates.
-                    if self.created_this_batch.contains(id) {
-                        self.pending_enters.push(id.clone());
+                    if self.created_this_batch.contains(id.as_ref()) {
+                        self.pending_enters.push(id.to_string());
                     }
                 }
                 Patch::Remove { id, transition } => {
-                    if let Some(record) = self.exits.get_mut(id) {
+                    if let Some(record) = self.exits.get_mut(id.as_ref()) {
                         // Duplicate remove for an already-exiting id
                         // (defensive): fold into the pending teardown.
                         record.patches.push(patch.clone());
@@ -1417,7 +1417,7 @@ impl DesktopAnimator {
                     // incoming shared-element candidates for this batch.
                     tree.apply(patch);
                     forwarded.push(patch.clone());
-                    self.attached_roots_this_batch.push(id.clone());
+                    self.attached_roots_this_batch.push(id.to_string());
                 }
                 _ => {
                     // Move / Detach / SetText / SetSemantics: structural
@@ -2094,20 +2094,21 @@ impl DesktopAnimator {
         for patch in patches {
             match patch {
                 Patch::Move { id, .. } => {
-                    if self.specs.get(id).and_then(|s| s.layout.as_ref()).is_none() {
+                    let layout_spec = self.specs.get(id.as_ref()).and_then(|s| s.layout.as_ref());
+                    if layout_spec.is_none() {
                         continue;
                     }
-                    if self.exits.contains_key(id) {
+                    if self.exits.contains_key(id.as_ref()) {
                         continue; // exit wins over FLIP
                     }
-                    if self.scrub_active.contains(id) {
+                    if self.scrub_active.contains(id.as_ref()) {
                         continue; // scrub wins over FLIP (Option G precedence)
                     }
-                    if self.pending_flips.contains_key(id) {
+                    if self.pending_flips.contains_key(id.as_ref()) {
                         continue;
                     }
                     if let Some(first) = first_rect(id) {
-                        self.pending_flips.insert(id.clone(), first);
+                        self.pending_flips.insert(id.to_string(), first);
                     }
                 }
                 // #146 sibling-shift: a removed node's same-parent
@@ -2438,7 +2439,7 @@ impl DesktopAnimator {
         let mut has_incoming = false;
         for patch in patches {
             match patch {
-                Patch::Detach { id } => detach_roots.push(id.clone()),
+                Patch::Detach { id } => detach_roots.push(id.to_string()),
                 Patch::Attach { .. } | Patch::Insert { .. } => has_incoming = true,
                 _ => {}
             }

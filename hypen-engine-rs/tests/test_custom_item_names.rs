@@ -12,13 +12,16 @@ use hypen_engine::reconcile::{reconcile_ir, InstanceTree, Patch};
 use hypen_parser::parse_component;
 use serde_json::json;
 
-/// Parse, expand, and reconcile `source` against `state`; return the patches.
+/// Parse, expand, and reconcile `source` against `state`; return the
+/// patches, lowered through [`TemplateExpander`] so row creation is
+/// visible as plain `Create`s (list rows travel as `Instantiate`).
 fn render(source: &str, state: &serde_json::Value) -> Vec<Patch> {
     let component = parse_component(source).unwrap();
     let ir = ast_to_ir_node(&component);
     let mut tree = InstanceTree::new();
     let mut deps = DependencyGraph::new();
-    reconcile_ir(&mut tree, &ir, None, state, &mut deps)
+    let patches = reconcile_ir(&mut tree, &ir, None, state, &mut deps);
+    hypen_engine::TemplateExpander::new().expand(patches)
 }
 
 /// The resolved positional (`"0"`) prop of every created Text node, in order.

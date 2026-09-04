@@ -1570,7 +1570,7 @@ fn test_conditional_reconciliation_tab_switch_reuses_structure() {
         .iter()
         .filter(|p| {
             if let Patch::Remove { id, .. } = p {
-                *id == column_id_str
+                id.as_ref() == column_id_str
             } else {
                 false
             }

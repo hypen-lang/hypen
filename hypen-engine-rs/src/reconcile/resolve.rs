@@ -33,6 +33,21 @@ pub fn evaluate_binding(binding: &Binding, state: &serde_json::Value) -> Option<
     evaluate_binding_path(binding, state)
 }
 
+/// Borrowing variant of [`evaluate_binding`]: navigate to the bound value
+/// without cloning it. The hot list-update path iterates the bound array
+/// directly out of state — cloning a 1,000-row array per re-render, only to
+/// drop it after the pass, was pure allocator churn.
+pub fn evaluate_binding_ref<'a>(
+    binding: &Binding,
+    state: &'a serde_json::Value,
+) -> Option<&'a serde_json::Value> {
+    let mut current = state;
+    for segment in &binding.path {
+        current = current.get(segment)?;
+    }
+    Some(current)
+}
+
 /// Evaluate an item binding against the item object (delegates to [`evaluate_binding_path`]).
 pub fn evaluate_item_binding(
     binding: &Binding,
@@ -76,7 +91,33 @@ pub fn resolve_props_full(
     let mut evaluator: Option<exprimo::Evaluator> = None;
 
     for (key, value) in props {
-        let resolved_value = match value {
+        match resolve_single_value(value, state, item, data_sources, &mut evaluator) {
+            Some(v) => {
+                resolved.insert(key.clone(), v);
+            }
+            None => continue,
+        }
+    }
+
+    Arc::new(resolved)
+}
+
+/// Resolve ONE raw prop value against state/item/data-source context.
+///
+/// `None` means the prop is ABSENT (a `.states` switch with no matching case
+/// and no default) — callers must omit the key entirely. This is the single
+/// source of truth for value resolution: [`resolve_props_full`] loops over
+/// it, and the compiled binding-map fast path
+/// ([`binding_map`](super::binding_map)) resolves individual changed fields
+/// through it so the two paths can never drift.
+pub(crate) fn resolve_single_value(
+    value: &Value,
+    state: &serde_json::Value,
+    item: Option<&serde_json::Value>,
+    data_sources: Option<&IndexMap<String, serde_json::Value>>,
+    evaluator: &mut Option<exprimo::Evaluator>,
+) -> Option<serde_json::Value> {
+    let resolved_value = match value {
             Value::Static(v) => v.clone(),
             Value::Binding(binding) => {
                 if binding.is_item() {
@@ -145,14 +186,11 @@ pub fn resolve_props_full(
                 // JSON, so the variant never reaches the wire.
                 match resolve_state_switch(path, cases, default.as_ref(), state) {
                     Some(v) => v,
-                    None => continue,
+                    None => return None,
                 }
             }
         };
-        resolved.insert(key.clone(), resolved_value);
-    }
-
-    Arc::new(resolved)
+    Some(resolved_value)
 }
 
 /// Resolve a [`Value::StateSwitch`]: read the state at `path`, stringify a

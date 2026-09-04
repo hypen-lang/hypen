@@ -28,7 +28,7 @@ fn create(id: &str, element_type: &str, entries: Vec<(&str, Value)>) -> Patch {
         map.insert(k.to_string(), v);
     }
     Patch::Create {
-        id: id.to_string(),
+        id: id.into(),
         element_type: element_type.to_string(),
         props: Arc::new(map),
         semantics: None,
@@ -37,15 +37,15 @@ fn create(id: &str, element_type: &str, entries: Vec<(&str, Value)>) -> Patch {
 
 fn insert(parent: &str, id: &str) -> Patch {
     Patch::Insert {
-        parent_id: parent.to_string(),
-        id: id.to_string(),
+        parent_id: parent.into(),
+        id: id.into(),
         before_id: None,
     }
 }
 
 fn set_prop(id: &str, name: &str, value: Value) -> Patch {
     Patch::SetProp {
-        id: id.to_string(),
+        id: id.into(),
         name: name.to_string(),
         value,
     }

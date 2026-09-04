@@ -14,7 +14,9 @@ readme = "README.md"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-serde = { workspace = true }
+# `rc` supplies the transparent Serialize/Deserialize impls for the
+# `Arc<str>` id fields on `Patch` — wire format identical to plain strings.
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 indexmap = { version = "2.0", features = ["serde"] }
 slotmap = "1.0"

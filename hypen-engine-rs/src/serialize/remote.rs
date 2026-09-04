@@ -1,3 +1,4 @@
+use crate::portable::TemplateExpander;
 use crate::reconcile::Patch;
 use serde::{Deserialize, Serialize};
 
@@ -115,6 +116,20 @@ impl InitialTree {
         }
     }
 
+    /// Like [`new`](Self::new), but lowers `RegisterTemplate`/`Instantiate`
+    /// through the session's [`TemplateExpander`] first. Remote clients of
+    /// any version must receive plain `Create`+`Insert` runs — the
+    /// streaming server owns one expander per session and builds every
+    /// outgoing message through it.
+    pub fn new_expanded(
+        module: String,
+        state: serde_json::Value,
+        patches: Vec<Patch>,
+        expander: &mut TemplateExpander,
+    ) -> Self {
+        Self::new(module, state, expander.expand(patches))
+    }
+
     pub fn with_hash(mut self, hash: String) -> Self {
         self.hash = Some(hash);
         self
@@ -149,6 +164,20 @@ impl PatchStream {
             revision,
             hash: None,
         }
+    }
+
+    /// Like [`new`](Self::new), but lowers `RegisterTemplate`/`Instantiate`
+    /// through the session's [`TemplateExpander`] first. See
+    /// [`InitialTree::new_expanded`] — the same expander instance must
+    /// build both message kinds so skeletons registered by the initial
+    /// tree expand later incremental streams.
+    pub fn new_expanded(
+        module: String,
+        patches: Vec<Patch>,
+        revision: u64,
+        expander: &mut TemplateExpander,
+    ) -> Self {
+        Self::new(module, expander.expand(patches), revision)
     }
 
     pub fn with_hash(mut self, hash: String) -> Self {

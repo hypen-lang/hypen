@@ -11,21 +11,26 @@
 //! live behind `#[cfg(target_arch = "wasm32")]`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::{
     engine_core::EngineCore,
     ir::{IRNode, NodeId},
     reconcile::{
-        create_ir_node_tree_impl, node_id_str, reconcile_ir_node_impl, Patch, ReconcileCtx,
+        create_ir_node_tree_impl, reconcile_ir_node_impl, Patch, ReconcileCtx,
     },
 };
 
 /// Maps compact node-ID strings (as emitted in patches) back to their
 /// SlotMap keys so `render_into(parent_id, ...)` can resolve the host's
 /// opaque identifier to a concrete tree node in O(1).
+///
+/// Keyed by `Arc<str>` so indexing a patch's id is a refcount bump of the
+/// memoized string, not a fresh `String`; `&str` lookups still work via
+/// `Borrow<str>`.
 #[derive(Default)]
 pub(crate) struct NodeIdIndex {
-    map: HashMap<String, NodeId>,
+    map: HashMap<Arc<str>, NodeId>,
 }
 
 impl NodeIdIndex {
@@ -44,14 +49,35 @@ impl NodeIdIndex {
     /// mutate the tree again.
     pub fn index_creates(&mut self, patches: &[Patch], core: &EngineCore) {
         for patch in patches {
-            if let Patch::Create { id, .. } = patch {
-                if !self.map.contains_key(id) {
-                    for (node_id, _) in core.tree.iter() {
-                        if node_id_str(node_id) == *id {
-                            self.map.insert(id.clone(), node_id);
-                            break;
-                        }
+            // Template instantiation creates nodes too — every id in
+            // `nodes` is a freshly created element.
+            if let Patch::Instantiate { nodes, .. } = patch {
+                for id in nodes {
+                    if self.map.contains_key(id) {
+                        continue;
                     }
+                    let Ok(ffi) = id.parse::<u64>() else { continue };
+                    let node_id = NodeId::from(slotmap::KeyData::from_ffi(ffi));
+                    if core.tree.get(node_id).is_some() {
+                        self.map.insert(id.clone(), node_id);
+                    }
+                }
+                continue;
+            }
+            if let Patch::Create { id, .. } = patch {
+                if self.map.contains_key(id) {
+                    continue;
+                }
+                // `node_id_str` is `KeyData::as_ffi().to_string()`, so the
+                // reverse is exact: parse the decimal back into the key
+                // rather than scanning the tree for a node that formats to
+                // the same string. The old scan was O(creates × tree size)
+                // and allocated a String per probe — on a 17k-node first
+                // render that is ~145M formatted comparisons.
+                let Ok(ffi) = id.parse::<u64>() else { continue };
+                let node_id = NodeId::from(slotmap::KeyData::from_ffi(ffi));
+                if core.tree.get(node_id).is_some() {
+                    self.map.insert(id.clone(), node_id);
                 }
             }
         }

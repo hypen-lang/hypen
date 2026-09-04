@@ -4,7 +4,8 @@
  * Renders Hypen patches to the DOM
  */
 
-import type { Patch } from "@hypen-space/core/types";
+import type { Patch, TemplateSkeletonNode } from "@hypen-space/core/types";
+import { TemplateExpander } from "@hypen-space/core/patch-expand";
 import type { HypenModuleInstance } from "@hypen-space/core/app";
 import type { HypenRouter } from "@hypen-space/core/router";
 import type { HypenGlobalContext } from "@hypen-space/core/context";
@@ -45,6 +46,28 @@ function compileTextTemplate(template: string): TemplateSegment[] {
 }
 
 /** Element types that treat the "action" prop as an onClick handler */
+/**
+ * Update an element's text in place. When the element's sole child is
+ * already a text node, write `nodeValue` — a characterData mutation that
+ * reuses the node, matching what React does. `textContent = ...` would
+ * tear the text node down and create a fresh one, turning every text
+ * update into a childList remove + add (double the DOM churn a text
+ * change needs). Anything else (empty element, element children) falls
+ * back to `textContent`.
+ */
+function setElementText(element: HTMLElement, text: string): void {
+  // Loose null check: fake-dom (tests) reports missing children as
+  // `undefined` where the DOM spec says `null`.
+  const first = element.firstChild;
+  if (first != null && first.nodeType === 3 /* TEXT_NODE */ && first.nextSibling == null) {
+    if (first.nodeValue !== text) {
+      first.nodeValue = text;
+    }
+    return;
+  }
+  element.textContent = text;
+}
+
 const ACTIONABLE_TYPES = new Set(["button", "link", "card"]);
 
 /**
@@ -112,6 +135,12 @@ export interface DOMRendererOptions {
 export class DOMRenderer {
   private container: HTMLElement;
   private nodes: Map<string, HTMLElement> = new Map();
+
+  /** Registered template prototypes + per-node deferred event props. */
+  private templateProtos: Map<
+    string,
+    { proto: HTMLElement; deferred: Array<Array<[string, any]>> }
+  > = new Map();
   private rootId: string | null = null;
   private components: ComponentRegistry;
   private applicators: ApplicatorRegistry;
@@ -140,6 +169,14 @@ export class DOMRenderer {
   private canvasElements = new Map<string, HTMLCanvasElement>();
   /** Props stashed at create-time so we can forward them to CanvasRenderer */
   private pendingCreateProps = new Map<string, { elementType: string; props: Record<string, any> }>();
+  /**
+   * Lowers canvas-targeted `instantiate` patches into plain create/insert
+   * runs before routing — canvas subtrees can't exploit DOM cloning. Fed
+   * every `registerTemplate` (the engine sends each template once per
+   * session, and a template registered before any canvas subtree exists
+   * may be instantiated inside one later).
+   */
+  private canvasExpander = new TemplateExpander();
 
   /**
    * Focus-restore memory for the Router subtree cache, keyed by detached
@@ -261,6 +298,13 @@ export class DOMRenderer {
     let domPatches = patches;
 
     if (this.canvasRenderers.size > 0 || this.canvasSubtreeMap.size > 0) {
+      // Canvas-targeted instantiates lowered in phase 1 (canvas can't
+      // exploit DOM cloning), consumed by the routing in phase 2.
+      let canvasInstantiates: Map<
+        Patch,
+        { rootId: string; expanded: Patch[] }
+      > | null = null;
+
       // Phase 1: scan inserts to discover new canvas-subtree members
       for (const patch of patches) {
         if (patch.type === "insert" || patch.type === "move") {
@@ -275,6 +319,32 @@ export class DOMRenderer {
           if (canvasRootId) {
             this.registerCanvasMember(childId, parentId, canvasRootId);
           }
+        } else if (patch.type === "registerTemplate") {
+          // Skeleton must be known before a same-batch canvas-targeted
+          // instantiate below is lowered. `onRegisterTemplate` registers
+          // again on the DOM pass (idempotent) — that call covers the
+          // no-canvas fast path that skips these phases entirely.
+          this.canvasExpander.register(patch.templateId!, patch.root);
+        } else if (patch.type === "instantiate" && patch.parentId) {
+          const canvasRootId =
+            this.canvasRenderers.has(patch.parentId) ? patch.parentId
+            : this.canvasSubtreeMap.get(patch.parentId);
+          if (canvasRootId) {
+            // Lower to the plain create/insert run and register the
+            // instance's nodes as subtree members so later patches
+            // (setProp/remove — routed by id) and same-batch inserts
+            // under them resolve to this canvas.
+            const expanded = this.canvasExpander.expand([patch]);
+            for (const p of expanded) {
+              if (p.type === "insert" && p.id && p.parentId) {
+                this.registerCanvasMember(p.id, p.parentId, canvasRootId);
+              }
+            }
+            (canvasInstantiates ??= new Map()).set(patch, {
+              rootId: canvasRootId,
+              expanded,
+            });
+          }
         }
       }
 
@@ -283,11 +353,18 @@ export class DOMRenderer {
       domPatches = [];
 
       for (const patch of patches) {
-        const canvasRootId = this.getCanvasRouteTarget(patch);
+        const lowered = canvasInstantiates?.get(patch);
+        const canvasRootId = lowered
+          ? lowered.rootId
+          : this.getCanvasRouteTarget(patch);
         if (canvasRootId) {
           let batch = canvasBatches.get(canvasRootId);
           if (!batch) { batch = []; canvasBatches.set(canvasRootId, batch); }
-          batch.push(patch);
+          if (lowered) {
+            batch.push(...lowered.expanded);
+          } else {
+            batch.push(patch);
+          }
           if (patch.type === "remove" && patch.id) {
             // Removed canvas nodes never come back (engine node ids are
             // never reused), so drop their routing entries now.
@@ -439,7 +516,10 @@ export class DOMRenderer {
         return this.canvasSubtreeMap.get(id);
       }
       default: {
-        // setProp, removeProp, setText, remove, detach — route by node id
+        // setProp, removeProp, setText, remove, detach — route by node id.
+        // registerTemplate (no id) always stays DOM-side; canvas-targeted
+        // instantiate (no id, routes by parentId) is lowered to plain
+        // patches before routing ever consults this method.
         if (!id) return undefined;
         return this.canvasSubtreeMap.get(id);
       }
@@ -513,7 +593,7 @@ export class DOMRenderer {
       const element = binding.element;
       if (element.textContent !== interpolated) {
         this.debugTracker.trackRerender(id, element, "interpolate");
-        element.textContent = interpolated;
+        setElementText(element, interpolated);
       }
     }
   }
@@ -611,7 +691,128 @@ export class DOMRenderer {
         // batch's first patch is a valid stamp, so a mid-array occurrence
         // is deliberately ignored here.
         break;
+      case "registerTemplate":
+        this.onRegisterTemplate(patch.templateId!, patch.root!);
+        break;
+      case "instantiate":
+        this.onInstantiate(patch);
+        break;
     }
+  }
+
+  /**
+   * Register a reusable element prototype (the engine always emits
+   * `registerTemplate`/`instantiate` for plannable list rows — this
+   * renderer is the consumer that exploits them via DOM cloning). The
+   * prototype is built ONCE with all static props applied; event-flavored
+   * props (`on*` applicators, `action`) are recorded per node instead of
+   * applied, because DOM event listeners do not survive `cloneNode` —
+   * each instance re-applies them.
+   */
+  private onRegisterTemplate(templateId: string, root: TemplateSkeletonNode): void {
+    // Keep the canvas-lowering expander in sync even on the no-canvas
+    // fast path — a canvas subtree created later may instantiate this
+    // template (idempotent with the phase-1 registration).
+    this.canvasExpander.register(templateId, root);
+    const deferred: Array<Array<[string, any]>> = [];
+    const build = (node: TemplateSkeletonNode): HTMLElement => {
+      const index = deferred.length;
+      const mine: Array<[string, any]> = [];
+      deferred.push(mine);
+
+      const staticProps: Record<string, any> = {};
+      for (const [key, value] of Object.entries(node.props ?? {})) {
+        const dot = key.indexOf(".");
+        const base = dot !== -1 ? key.slice(0, dot) : key;
+        if (/^on[A-Z]/.test(base) || base === "action") {
+          mine.push([key, value]);
+        } else {
+          staticProps[key] = value;
+        }
+      }
+
+      let element = this.components.createElement(node.elementType, staticProps);
+      if (!element) {
+        const fallback = document.createElement("div");
+        fallback.style.display = "contents";
+        element = fallback;
+      }
+      element.dataset.hypenType = node.elementType.toLowerCase();
+      this.applicators.applyAll(element, staticProps);
+
+      for (const child of node.children ?? []) {
+        element.appendChild(build(child));
+      }
+      return element;
+    };
+
+    this.templateProtos.set(templateId, { proto: build(root), deferred });
+  }
+
+  /**
+   * Materialize one template instance: `cloneNode(true)` the prototype
+   * (styles, static text, attributes all survive the clone), assign the
+   * engine's ids to the clone's elements in depth-first order, then apply
+   * per-node semantics, the deferred event props, and the dynamic-prop
+   * subs — each through the same `onSetProp` path a plain patch would
+   * take — and insert the finished subtree once.
+   */
+  private onInstantiate(patch: Patch): void {
+    const entry = this.templateProtos.get(patch.templateId!);
+    const ids = patch.nodes ?? [];
+    if (!entry || ids.length === 0) {
+      log.warn(`instantiate for unknown template "${patch.templateId}"`);
+      return;
+    }
+
+    const clone = entry.proto.cloneNode(true) as HTMLElement;
+    // Collect the clone's template elements in the same depth-first order
+    // the engine assigned ids in. Only elements stamped with hypenType
+    // count — a component's internal wrapper elements are skipped, though
+    // the walk still descends through them.
+    const elements: HTMLElement[] = [];
+    const collect = (el: HTMLElement): void => {
+      if (el.dataset?.hypenType) {
+        elements.push(el);
+      }
+      const kids = el.children as unknown as ArrayLike<HTMLElement> | undefined;
+      if (kids?.length) {
+        for (const child of Array.from(kids)) collect(child);
+      }
+    };
+    collect(clone);
+    if (elements.length !== ids.length) {
+      log.warn(
+        `instantiate node count mismatch for "${patch.templateId}": ` +
+          `${elements.length} elements vs ${ids.length} ids`,
+      );
+      return;
+    }
+
+    for (let i = 0; i < elements.length; i++) {
+      const element = elements[i];
+      element.dataset.hypenId = ids[i];
+      setEngine(element, this.engine);
+      this.nodes.set(ids[i], element);
+    }
+    // Per-node passes AFTER all ids are registered, so handlers that look
+    // up related nodes resolve.
+    for (const [index, semantics] of patch.nodeSemantics ?? []) {
+      applySemantics(elements[index], semantics);
+    }
+    for (let i = 0; i < elements.length; i++) {
+      for (const [key, value] of entry.deferred[i] ?? []) {
+        this.onSetProp(ids[i], key, value);
+      }
+      if (elements[i].dataset.hypenType === "text") {
+        this.syncTextBinding(ids[i], elements[i]);
+      }
+    }
+    for (const [index, prop, value] of patch.subs ?? []) {
+      this.onSetProp(ids[index], prop, value);
+    }
+
+    this.onInsert(patch.parentId!, ids[0], patch.beforeId);
   }
 
   /**
@@ -732,7 +933,14 @@ export class DOMRenderer {
     }
 
     this.nodes.set(id, element);
-    this.syncTextBinding(id, element);
+    // Only Text elements can ever register a binding (`syncTextBinding`
+    // requires dataset.hypenType === "text"), and its first act is a
+    // DOMStringMap read — a real attribute access. Skipping the call for
+    // the other 16-of-17 elements in a typical row removes tens of
+    // thousands of dataset reads from a large first render.
+    if (elementType.toLowerCase() === "text") {
+      this.syncTextBinding(id, element);
+    }
     this.debugTracker.trackRerender(id, element, `create:${elementType}`);
 
     // Canvas component: create a CanvasRenderer for its subtree
@@ -831,24 +1039,31 @@ export class DOMRenderer {
       }
 
       const nextText = String(value);
-      element.textContent = nextText;
+      setElementText(element, nextText);
 
       // Preserve the original template when it contains state interpolation.
       // Engine patches may send interpolated strings; if we overwrite the template,
       // future state updates won't be able to re-interpolate.
       const currentTemplate = element.dataset.textTemplate;
       const nextLooksLikeTemplate = nextText.includes("@{");
-      const currentLooksLikeTemplate = typeof currentTemplate === "string" && currentTemplate.includes("@{");
 
+      // A dataset assignment is a real DOM attribute mutation, so writes
+      // are limited to the cases where the stored value's MEANING changes.
+      // The marker's only reader is `syncTextBinding`, which acts solely on
+      // values containing `@{` — so a plain value going stale is unread
+      // noise, and rewriting it turned every plain text update into
+      // text + attribute churn (2 DOM mutations where React does 1).
       if (nextLooksLikeTemplate) {
-        element.dataset.textTemplate = nextText;
+        if (currentTemplate !== nextText) {
+          element.dataset.textTemplate = nextText;
+        }
       } else if (currentTemplate === undefined) {
         // No template stored yet; treat this as the template.
         element.dataset.textTemplate = nextText;
-      } else if (!currentLooksLikeTemplate) {
-        // If current template isn't a template, keep it in sync.
-        element.dataset.textTemplate = nextText;
       }
+      // else: keep the stored value as-is. A stored template must survive
+      // interpolated (plain) output or future state updates can't
+      // re-interpolate; a stored plain value going stale changes nothing.
       this.syncTextBinding(id, element);
       log.debug(`Updated text content: "${value}"`);
       return;
@@ -918,7 +1133,7 @@ export class DOMRenderer {
     if (!element) return;
 
     this.debugTracker.trackRerender(id, element, "setText");
-    element.textContent = text;
+    setElementText(element, text);
   }
 
   /**
@@ -1190,13 +1405,37 @@ export class DOMRenderer {
     // Leaf roots have nothing to sweep (`children`, not `firstChild` —
     // fake-dom only models element children).
     if (!root.children?.length) return;
-    for (const [descId, desc] of this.nodes) {
-      if (desc === root) continue;
-      let node: unknown = (desc as { parentNode?: unknown }).parentNode ?? null;
-      while (node && node !== root) {
-        node = (node as { parentNode?: unknown }).parentNode ?? null;
+    // Walk *down* the removed subtree. The previous implementation scanned
+    // every tracked node in the renderer and walked each one's parentNode
+    // chain looking for `root`, which is O(removes × total nodes): tearing
+    // down a 1,000-row list touched ~17M entries. Descending costs
+    // O(subtree) and reaches exactly the same set, since every element this
+    // renderer tracks carries `dataset.hypenId` and children/parentNode are
+    // consistent in both real DOM and fake-dom.
+    //
+    // Indexed reads over the live HTMLCollection, deliberately: an earlier
+    // version materialized `Array.from(children)` per visited node, which
+    // made this sweep the hottest frame of a full-list clear (~34k array
+    // allocations for 1,000 rows). The collections aren't mutated during
+    // the walk, so index access is stable.
+    const pushKids = (stack: HTMLElement[], el: HTMLElement): void => {
+      const kids = el.children as unknown as ArrayLike<HTMLElement> | undefined;
+      if (!kids) return;
+      for (let i = kids.length - 1; i >= 0; i--) {
+        stack.push(kids[i]!);
       }
-      if (node !== root) continue;
+    };
+
+    const stack: HTMLElement[] = [];
+    pushKids(stack, root);
+    while (stack.length > 0) {
+      const desc = stack.pop()!;
+      pushKids(stack, desc);
+      const descId = (desc as { dataset?: Record<string, string | undefined> })
+        .dataset?.hypenId;
+      // Only forget the id if it still maps to *this* element: a recycled id
+      // pointing elsewhere must not be swept out from under its live node.
+      if (descId === undefined || this.nodes.get(descId) !== desc) continue;
       disposeHypenElement(desc);
       this.nodes.delete(descId);
       this.textBindings.delete(descId);

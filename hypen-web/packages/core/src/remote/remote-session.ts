@@ -49,6 +49,7 @@ import type {
 } from "./types.js";
 import { SessionManager } from "./session.js";
 import type { Patch } from "../types.js";
+import { TemplateExpander } from "../patch-expand.js";
 import { frameworkLoggers } from "../logger.js";
 import { BaseEngine } from "../engine-base.js";
 
@@ -158,6 +159,16 @@ export class RemoteSession {
 
   readonly engine: BaseEngine;
   private _moduleInstance: HypenModuleInstance<any> | null = null;
+
+  /**
+   * Session-lifetime template lowering: remote clients of any version
+   * receive plain patches only, so every batch captured from the engine
+   * is expanded before it is sent. ONE expander spans both capture
+   * points (initial-tree and streaming) — a `registerTemplate` consumed
+   * while building the initial tree must satisfy `instantiate`s arriving
+   * in later streamed batches.
+   */
+  private readonly templateExpander = new TemplateExpander();
 
   private _sessionId: string | null = null;
   private _helloReceived = false;
@@ -616,7 +627,11 @@ export class RemoteSession {
     // patches from other batches — the initial tree never animates anyway.
     const initialPatches: Patch[] = [];
     this.engine.setRenderCallback((patches) => {
-      initialPatches.push(...patches.filter((p) => p.type !== "batchAnimation"));
+      initialPatches.push(
+        ...this.templateExpander
+          .expand(patches)
+          .filter((p) => p.type !== "batchAnimation")
+      );
     });
 
     try {
@@ -813,6 +828,9 @@ export class RemoteSession {
   private setupStreamingRenderCallback(): void {
     this.engine.setRenderCallback((patches) => {
       if (this._destroyed) return;
+      // Lower template patches ONCE, before the message object is built —
+      // the same patchMessage fans out to allow-multiple peers below.
+      patches = this.templateExpander.expand(patches);
       this._revision++;
       log.info(
         `Streaming ${patches.length} patches to ${this.id} (rev ${this._revision})`

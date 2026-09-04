@@ -203,6 +203,8 @@ fn local_vs_deploy_patches_are_structurally_identical() {
                 hypen_engine::Patch::Attach { .. } => "Attach",
                 hypen_engine::Patch::SetSemantics { .. } => "SetSemantics",
                 hypen_engine::Patch::BatchAnimation { .. } => "BatchAnimation",
+                hypen_engine::Patch::RegisterTemplate { .. } => "RegisterTemplate",
+                hypen_engine::Patch::Instantiate { .. } => "Instantiate",
             };
             *counts.entry(tag).or_insert(0) += 1;
         }

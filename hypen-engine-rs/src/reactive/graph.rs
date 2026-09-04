@@ -25,6 +25,12 @@ pub struct DependencyGraph {
     /// Data source providers referenced in bindings but not yet registered.
     /// The host can query this after a render pass to warn about potential typos.
     unregistered_provider_refs: IndexSet<String>,
+
+    /// Reusable buffer for building a binding's graph key in
+    /// [`add_dependency`](Self::add_dependency). Re-registering a dependency
+    /// that already exists is the overwhelmingly common case on re-render, and
+    /// it must not allocate just to discover there is nothing to do.
+    key_scratch: String,
 }
 
 impl DependencyGraph {
@@ -35,6 +41,7 @@ impl DependencyGraph {
             prefix_index: BTreeMap::new(),
             registered_providers: IndexSet::new(),
             unregistered_provider_refs: IndexSet::new(),
+            key_scratch: String::new(),
         }
     }
 
@@ -48,6 +55,12 @@ impl DependencyGraph {
     ///
     /// Data source bindings are namespaced as `ds:provider:path` regardless of
     /// module scope. Item bindings are skipped (handled by ForEach scope).
+    ///
+    /// Re-registering an existing `(node, path)` pair is a no-op. Reconciles
+    /// re-walk every surviving node's bindings, so that is the hot case: the
+    /// key is built into a reusable buffer and one hash probe ends the call
+    /// with nothing allocated. Only a genuinely new registration pays for the
+    /// owned keys the maps and prefix index keep.
     pub fn add_dependency(
         &mut self,
         node_id: NodeId,
@@ -55,39 +68,69 @@ impl DependencyGraph {
         module_scope: Option<&str>,
     ) {
         use super::BindingSource;
-        let path = match &binding.source {
+        if binding.is_item() {
+            return; // Item deps handled by ForEach scope
+        }
+
+        let mut key = std::mem::take(&mut self.key_scratch);
+        key.clear();
+        match &binding.source {
             BindingSource::State => {
                 if let Some(scope) = module_scope {
-                    format!("mod:{}:{}", scope, binding.full_path())
-                } else {
-                    binding.full_path()
+                    key.push_str("mod:");
+                    key.push_str(scope);
+                    key.push(':');
                 }
             }
-            BindingSource::Item => return, // Item deps handled by ForEach scope
+            // Unreachable: filtered above. Restore the buffer and bail.
+            BindingSource::Item => {
+                self.key_scratch = key;
+                return;
+            }
             BindingSource::DataSource(provider) => {
                 // Track references to unregistered providers so the host can warn
                 if !self.registered_providers.contains(provider.as_str()) {
                     self.unregistered_provider_refs.insert(provider.clone());
                 }
-                format!("ds:{}:{}", provider, binding.full_path())
+                key.push_str("ds:");
+                key.push_str(provider);
+                key.push(':');
             }
-        };
+        }
+        // Same as `binding.full_path()`, written in place.
+        for (idx, segment) in binding.path.iter().enumerate() {
+            if idx > 0 {
+                key.push('.');
+            }
+            key.push_str(segment);
+        }
 
-        // Add to dependencies map
-        self.dependencies
-            .entry(path.clone())
-            .or_default()
-            .insert(node_id);
+        // Already registered — the dependencies map, node_bindings map and
+        // prefix index all already carry exactly these facts.
+        let known = self
+            .node_bindings
+            .get(&node_id)
+            .is_some_and(|paths| paths.contains(key.as_str()));
 
-        // Add to node_bindings map
-        self.node_bindings
-            .entry(node_id)
-            .or_default()
-            .insert(path.clone());
+        if !known {
+            // Add to dependencies map
+            self.dependencies
+                .entry(key.clone())
+                .or_default()
+                .insert(node_id);
 
-        // Update prefix index for efficient lookups
-        // Add all prefixes of this path to the index
-        self.add_path_to_prefix_index(&path);
+            // Add to node_bindings map
+            self.node_bindings
+                .entry(node_id)
+                .or_default()
+                .insert(key.clone());
+
+            // Update prefix index for efficient lookups
+            // Add all prefixes of this path to the index
+            self.add_path_to_prefix_index(&key);
+        }
+
+        self.key_scratch = key;
     }
 
     /// Add a path and all its prefixes to the prefix index
@@ -109,12 +152,19 @@ impl DependencyGraph {
         }
     }
 
-    /// Remove all dependencies for a node (when unmounting)
+    /// Remove all dependencies for a node (when unmounting).
+    ///
+    /// Uses `swap_remove` throughout: `shift_remove` is O(map len) per call,
+    /// so unmounting a large tree costs quadratic entry shifts. Both maps are
+    /// membership indexes — `node_bindings` is only ever probed by key, and a
+    /// path's dependent set is drained into the scheduler's dirty set, whose
+    /// members are re-rendered independently — so the residual order of the
+    /// entries a removal leaves behind is not part of the contract.
     pub fn remove_node(&mut self, node_id: NodeId) {
-        if let Some(paths) = self.node_bindings.shift_remove(&node_id) {
+        if let Some(paths) = self.node_bindings.swap_remove(&node_id) {
             for path in paths {
                 if let Some(nodes) = self.dependencies.get_mut(&path) {
-                    nodes.shift_remove(&node_id);
+                    nodes.swap_remove(&node_id);
                 }
             }
         }

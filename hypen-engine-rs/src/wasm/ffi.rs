@@ -760,13 +760,13 @@ mod tests {
 
         let patches = vec![
             Patch::Create {
-                id: "node1".to_string(),
+                id: "node1".into(),
                 element_type: "Text".to_string(),
                 props: std::sync::Arc::new(indexmap::IndexMap::new()),
                 semantics: None,
             },
             Patch::SetText {
-                id: "node1".to_string(),
+                id: "node1".into(),
                 text: "Hello World".to_string(),
             },
         ];
@@ -788,7 +788,7 @@ mod tests {
         use crate::reconcile::Patch;
 
         let create = Patch::Create {
-            id: "n1".to_string(),
+            id: "n1".into(),
             element_type: "Column".to_string(),
             props: std::sync::Arc::new(indexmap::IndexMap::new()),
             semantics: None,
@@ -806,8 +806,8 @@ mod tests {
         );
 
         let insert = Patch::Insert {
-            parent_id: "root".to_string(),
-            id: "n1".to_string(),
+            parent_id: "root".into(),
+            id: "n1".into(),
             before_id: None,
         };
         let json = serde_json::to_string(&insert).unwrap();
@@ -828,9 +828,9 @@ mod tests {
         );
 
         let mv = Patch::Move {
-            parent_id: "root".to_string(),
-            id: "n1".to_string(),
-            before_id: Some("n2".to_string()),
+            parent_id: "root".into(),
+            id: "n1".into(),
+            before_id: Some("n2".into()),
         };
         let json = serde_json::to_string(&mv).unwrap();
         assert!(

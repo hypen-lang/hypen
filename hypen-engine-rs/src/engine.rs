@@ -164,7 +164,13 @@ impl Engine {
         &self.core.modules
     }
 
-    /// Set the render callback
+    /// Set the render callback.
+    ///
+    /// The callback receives the engine's raw patch stream, which carries
+    /// template-shaped list rows as `RegisterTemplate`/`Instantiate`.
+    /// Embedders whose consumers need the plain `Create`+`Insert` wire
+    /// lower each batch through one session-lifetime
+    /// [`crate::portable::TemplateExpander`].
     pub fn set_render_callback<F>(&mut self, callback: F)
     where
         F: Fn(&[Patch]) + Send + Sync + 'static,

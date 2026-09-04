@@ -9,10 +9,33 @@
 
 use hypen_engine::ir::ast_to_ir_node;
 use hypen_engine::reactive::DependencyGraph;
-use hypen_engine::reconcile::{reconcile_ir, InstanceTree, Patch};
+use hypen_engine::reconcile::{InstanceTree, Patch};
 use hypen_engine::ir::Semantics;
 use hypen_parser::parse_component;
 use serde_json::json;
+
+thread_local! {
+    // One expander per test thread (libtest runs each test on its own
+    // thread): registrations persist across a test's successive batches,
+    // exactly like a boundary's session-lifetime expander.
+    static EXPANDER: std::cell::RefCell<hypen_engine::TemplateExpander> =
+        std::cell::RefCell::new(hypen_engine::TemplateExpander::new());
+}
+
+/// [`hypen_engine::reconcile::reconcile_ir`], lowered: these tests assert
+/// the pre-template Create/Insert wire (list rows carry per-item
+/// semantics on their Creates), so every batch goes through the expander.
+fn reconcile_ir(
+    tree: &mut InstanceTree,
+    node: &hypen_engine::IRNode,
+    parent_id: Option<hypen_engine::ir::NodeId>,
+    state: &serde_json::Value,
+    dependencies: &mut DependencyGraph,
+) -> Vec<Patch> {
+    let patches =
+        hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
+    EXPANDER.with(|e| e.borrow_mut().expand(patches))
+}
 
 /// Initial reconcile of `source` against `state`; returns the live tree,
 /// deps, and expanded IR for follow-up reconciles.
