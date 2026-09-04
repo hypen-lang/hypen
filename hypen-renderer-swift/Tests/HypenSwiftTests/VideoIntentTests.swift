@@ -3,7 +3,7 @@ import XCTest
 
 /// Renderer-local fullscreen intent — the pure half of `VideoIntents.swift`.
 ///
-/// Contract: `hypen-web/docs/components/video.md`
+/// Contract: `hypen-docs/content/docs/guide/components.mdx`
 /// §"Fullscreen: `videoIntent("fullscreen")` (renderer-local)". Parity
 /// reference: the DOM handler in
 /// `hypen-web/packages/web/src/dom/applicators/events.ts` — it accepts a

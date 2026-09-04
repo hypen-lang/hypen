@@ -64,10 +64,14 @@
     "typescript": "^5"
   },
   "peerDependencies": {
-    "typescript": "^5"
+    "typescript": "^5",
+    "@hypen-space/web": ">=0.6.0"
   },
   "peerDependenciesMeta": {
     "typescript": {
+      "optional": true
+    },
+    "@hypen-space/web": {
       "optional": true
     }
   },

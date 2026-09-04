@@ -448,6 +448,34 @@ built-in for that concern — a `controls` slot suppresses native chrome
 regardless of the `controls` prop — and visibility is show/hide, not
 mount/unmount, so slot subtrees keep their state across transitions.
 
+**Fullscreen:**
+
+Fullscreen can't ride the normal action → module → state round trip: browsers
+only honor a fullscreen request inside the user's click, and a network hop can
+lose that activation. `.videoIntent("fullscreen")` marks an element inside a
+Video (typically a `controls`-slot button) as a renderer-local toggle — the
+tap is handled on-device, no module involvement:
+
+```hypen
+Button { Icon(@resources.fullscreen) }
+    .videoIntent("fullscreen")
+    .label("Toggle fullscreen")
+```
+
+What goes fullscreen is the video *container*, never the raw platform video
+element — so composition slots stay overlaid and custom controls keep working;
+handing the element itself to the platform would swap in native chrome. Per
+platform: web DOM fullscreens the wrapper via the Fullscreen API, canvas
+fullscreens its host element, Android presents an immersive dialog hosting the
+same player, iOS uses a `fullScreenCover` with the same `AVPlayer`, and
+desktop fullscreens the window. Playback state, the bind, and slot visibility
+are unaffected — fullscreen is presentation only. `.videoIntent` composes with
+`.onClick`: both fire, and outside a Video subtree the applicator is inert.
+
+There is no mute or volume intent — muting has no user-gesture requirement, so
+it stays declarative: bind the `muted` prop to state and toggle it from an
+action (`muted: "@{state.muted}"`).
+
 ### Scrubber
 
 Media timeline for a Video's `controls` slot. Inside a Video it wires itself to

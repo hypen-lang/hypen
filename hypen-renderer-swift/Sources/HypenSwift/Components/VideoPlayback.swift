@@ -12,7 +12,7 @@ import Foundation
 // `MediaComponents.swift` / `ScrubberComponent.swift` are the thin AVPlayer +
 // SwiftUI shells that feed them.
 //
-// Contract: `hypen-web/docs/components/video.md`
+// Contract: `hypen-docs/content/docs/guide/components.mdx`
 //           §"Playback control & composition slots (draft spec — v2)".
 // Shared vocabulary + constants: `hypen-web/packages/core/src/types.ts`
 //           (VideoPlayerState, PlaybackBinding, VIDEO_SLOTS,

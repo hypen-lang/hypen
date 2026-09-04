@@ -9,7 +9,7 @@ import org.junit.Test
 /**
  * Renderer-local fullscreen intent — the pure half of `VideoFullscreen.kt`.
  *
- * Contract: `hypen-web/docs/components/video.md`
+ * Contract: `hypen-docs/content/docs/guide/components.mdx`
  * §"Fullscreen: `videoIntent("fullscreen")` (renderer-local)". Parity
  * reference: the DOM handler in
  * `hypen-web/packages/web/src/dom/applicators/events.ts`, which accepts a

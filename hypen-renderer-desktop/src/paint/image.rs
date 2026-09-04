@@ -272,7 +272,7 @@ pub fn loaded_natural_size(src: &str) -> Option<(f32, f32)> {
 // ---------------------------------------------------------------------------
 // HTTP failure registry — Video `onError` support.
 //
-// The Video contract (`hypen-web/docs/components/video.md`) has the
+// The Video contract (`hypen-docs/content/docs/guide/components.mdx`) has the
 // desktop renderer report `onError` with the HTTP `status` "from the
 // poster/probe fetch". The worker already learns the status from
 // `ureq::Error::Status`; this registry keeps it addressable by src so
@@ -849,7 +849,7 @@ fn paint_placeholder(pixmap: &mut Pixmap, rect: LayoutRect, scale: f32) {
 // Video surface — poster frame + play glyph.
 //
 // Desktop has no inline media decode (capability matrix in
-// `hypen-web/docs/components/video.md`): a Video paints its poster
+// `hypen-docs/content/docs/guide/components.mdx`): a Video paints its poster
 // (through the same cache/tile pipeline as Image, objectFit cover) or
 // a dark #111 placeholder, with a centered play affordance on top.
 // ---------------------------------------------------------------------------

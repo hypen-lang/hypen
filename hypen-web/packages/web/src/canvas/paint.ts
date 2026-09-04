@@ -1054,7 +1054,7 @@ function drawImageCover(
  * the canvas renderer ("offscreen <video> → canvas"). Elements are keyed by
  * NODE ID, not URL: two Video nodes showing the same URL play independently.
  *
- * See hypen-web/docs/components/video.md for the normative contract.
+ * See hypen-docs/content/docs/guide/components.mdx for the normative contract.
  * ========================================================================== */
 
 /** readyState threshold: a decodable frame exists at currentTime. */
@@ -1091,7 +1091,7 @@ interface VideoEntry {
   /** Current track failed to fetch/decode — quiet error state. */
   error: boolean;
   /**
-   * Normative player state (docs/components/video.md §Player states).
+   * Normative player state (hypen-docs/content/docs/guide/components.mdx §Player states).
    * Derived from the offscreen element's events; slot visibility and the
    * `playback` bind struct both read it verbatim.
    */

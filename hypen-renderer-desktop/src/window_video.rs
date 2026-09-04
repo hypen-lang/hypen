@@ -6,7 +6,7 @@
 //! `window_input.rs`) so the main file stays focused on App state and the
 //! ApplicationHandler dispatch loop. The methods attach to the same `App`.
 //!
-//! Normative reference: `hypen-web/docs/components/video.md`
+//! Normative reference: `hypen-docs/content/docs/guide/components.mdx`
 //! §"Playback control & composition slots", mirrored in Rust by
 //! [`crate::video_v2`].
 

@@ -13,7 +13,7 @@ import kotlin.math.roundToLong
  * *instances* (only Media3's compile-time `Player.STATE_*` int constants are
  * referenced), so the whole contract is unit-testable on the JVM.
  *
- * Normative source: `hypen-web/docs/components/video.md`
+ * Normative source: `hypen-docs/content/docs/guide/components.mdx`
  * §"Playback control & composition slots (draft spec — v2)". The constants
  * below mirror `hypen-web/packages/core/src/types.ts` (bottom of file:
  * `PLAYBACK_REPORT_INTERVAL_MS`, `PLAYBACK_SEEK_EPSILON_S`, `VIDEO_SLOTS`,
@@ -97,7 +97,7 @@ fun videoSlotOf(name: String?): VideoSlot? {
 }
 
 /**
- * The normative slot visibility table (docs/components/video.md):
+ * The normative slot visibility table (hypen-docs/content/docs/guide/components.mdx):
  *
  * | Slot | idle | loading | playing | paused | ended | error |
  * |---|---|---|---|---|---|---|
@@ -329,7 +329,7 @@ sealed interface PlaybackCommand {
 /**
  * The normative write semantics of the playback bind (state → renderer),
  * resolved against the renderer's actual transport state and its own report
- * history (docs/components/video.md §"Playback control & composition slots").
+ * history (hypen-docs/content/docs/guide/components.mdx §"Playback control & composition slots").
  *
  * - **Stale-struct guard**: reports are plain state mutations and every one
  *   re-resolves the bound struct back to the renderer, so an in-flight struct

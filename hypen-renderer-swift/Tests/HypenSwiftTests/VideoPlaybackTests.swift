@@ -3,7 +3,7 @@ import XCTest
 
 /// Video v2 — the pure playback logic behind `VideoComponent` / `Scrubber`.
 ///
-/// Contract: `hypen-web/docs/components/video.md`
+/// Contract: `hypen-docs/content/docs/guide/components.mdx`
 /// §"Playback control & composition slots (draft spec — v2)"; shared
 /// constants and the slot table live in
 /// `hypen-web/packages/core/src/types.ts`.

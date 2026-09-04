@@ -3,7 +3,7 @@ import SwiftUI
 // MARK: - Scrubber Component
 
 /// Handler for `Scrubber` — the timeline widget designed for a Video's
-/// `controls` slot (see `hypen-web/docs/components/video.md`
+/// `controls` slot (see `hypen-docs/content/docs/guide/components.mdx`
 /// §"Playback control & composition slots (draft spec — v2)").
 ///
 /// Inside a Video the scrubber wires itself to the **enclosing player

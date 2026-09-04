@@ -1,6 +1,6 @@
 /**
  * DOM Video component — cross-platform Video contract
- * (packages/web/src/dom/components/video.ts, docs/components/video.md)
+ * (packages/web/src/dom/components/video.ts, hypen-docs/content/docs/guide/components.mdx)
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";

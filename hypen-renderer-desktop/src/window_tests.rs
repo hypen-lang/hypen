@@ -1160,7 +1160,7 @@ mod media_errors {
 
 // ---------------------------------------------------------------------------
 // Video v2: `playback` bind reports, Scrubber commit, slot-driven cache key
-// (docs/components/video.md §"Playback control & composition slots")
+// (hypen-docs/content/docs/guide/components.mdx §"Playback control & composition slots")
 // ---------------------------------------------------------------------------
 
 use crate::video_v2::{VideoPlayerState, PLAYBACK_REPORT_INTERVAL_MS};

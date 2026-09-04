@@ -250,7 +250,7 @@ fn process_applicators(
                             "Switch" | "switch" => "on",
                             // Video binds the playback struct ({playing,
                             // position, duration, state}), not a scalar —
-                            // see docs/components/video.md §Playback control.
+                            // see hypen-docs/content/docs/guide/components.mdx §Playback control.
                             "Video" | "video" => "playback",
                             _ => "value",
                         };

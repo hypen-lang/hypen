@@ -13,7 +13,7 @@ export const paragraphHandler: ComponentHandler = {
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
     // Text content
-    const text = props["0"] || props.text;
+    const text = props["0"] ?? props.text;
     if (text !== undefined) {
       el.textContent = String(text);
     }

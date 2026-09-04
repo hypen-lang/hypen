@@ -34,7 +34,7 @@ Deploy with `bunx wrangler login && bun run deploy`.
 
 ## What it shows off
 
-- **`Video` component** (see `hypen-web/docs/components/video.md` for the full
+- **`Video` component** (see `hypen-docs/content/docs/guide/components.mdx` for the full
   contract): single `src` playback with `controls`/`autoplay`/`poster`, and a
   `playlist` (the "Midnight Creature Marathon" plays three features
   back-to-back through one element, with `onTrackChange` keeping the UI in sync).

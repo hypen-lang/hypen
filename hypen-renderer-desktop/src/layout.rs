@@ -75,7 +75,7 @@ pub const TEXT_INPUT_TYPES: &[&str] = &["Input"];
 pub const IMAGE_TYPES: &[&str] = &["Image", "Icon"];
 
 /// Element types rendered as media surfaces. Desktop has no inline
-/// media decode (see `hypen-web/docs/components/video.md`): a `Video`
+/// media decode (see `hypen-docs/content/docs/guide/components.mdx`): a `Video`
 /// renders its `poster` frame (through the shared image pipeline) with
 /// a play-glyph overlay, or a dark placeholder when no poster is
 /// available. Kept separate from [`IMAGE_TYPES`] because the semantics
@@ -3089,7 +3089,7 @@ pub(crate) fn resolve_media_poster(
 }
 
 /// Resolve a Video node's current track: `(src, playlist index)`.
-/// Follows the cross-platform contract (`docs/components/video.md`):
+/// Follows the cross-platform contract (`hypen-docs/content/docs/guide/components.mdx`):
 /// a non-empty `playlist` supersedes `src` / `source` / positional
 /// `0`, starting at `startIndex` clamped to the valid range. `index`
 /// is `0` for single-src playback.

@@ -23,7 +23,7 @@ import space.hypen.renderer.render.LocalActionDispatcher
 /**
  * Renderer-local video intents — `.videoIntent("fullscreen")`.
  *
- * Normative source: `hypen-web/docs/components/video.md`
+ * Normative source: `hypen-docs/content/docs/guide/components.mdx`
  * §"Fullscreen: `videoIntent("fullscreen")` (renderer-local)". Reference
  * implementation: the DOM renderer's `videoIntent` applicator handler in
  * `hypen-web/packages/web/src/dom/applicators/events.ts`.

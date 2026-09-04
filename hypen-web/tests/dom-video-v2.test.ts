@@ -1,6 +1,6 @@
 /**
  * DOM Video v2 — player states, playback bind, composition slots, Scrubber
- * (docs/components/video.md §"Playback control & composition slots").
+ * (hypen-docs/content/docs/guide/components.mdx §"Playback control & composition slots").
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";

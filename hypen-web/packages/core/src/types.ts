@@ -274,7 +274,7 @@ export type ComponentResolver = (
 
 // ---------------------------------------------------------------------------
 // Video v2: playback binding & composition slots
-// (docs/components/video.md §"Playback control & composition slots")
+// (hypen-docs/content/docs/guide/components.mdx §"Playback control & composition slots")
 // ---------------------------------------------------------------------------
 
 /** Normative player states — slot visibility and `PlaybackBinding.state`

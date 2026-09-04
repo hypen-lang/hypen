@@ -1359,7 +1359,7 @@ export function computeLayout(
 
 /**
  * Place every Video's `.slot(name)` children as full-bleed overlays of the
- * player's rect (docs/components/video.md §Composition slots: "Renderers
+ * player's rect (hypen-docs/content/docs/guide/components.mdx §Composition slots: "Renderers
  * overlay slot content on the video surface, full-bleed, in slot order").
  *
  * Each slot subtree is laid out in its own pass with the video rect as its

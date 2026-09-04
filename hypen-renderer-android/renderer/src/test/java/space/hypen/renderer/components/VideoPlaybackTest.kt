@@ -9,7 +9,7 @@ import org.junit.Test
 import space.hypen.renderer.model.ActionValue
 
 /**
- * Video v2 contract (docs/components/video.md §"Playback control & composition
+ * Video v2 contract (hypen-docs/content/docs/guide/components.mdx §"Playback control & composition
  * slots"), pinned against the normative constants and tables in
  * `hypen-web/packages/core/src/types.ts`.
  *

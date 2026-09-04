@@ -305,6 +305,12 @@ export class CanvasRenderer implements Renderer {
    * Apply patches from engine
    */
   applyPatches(patches: Patch[]): void {
+    // Newer engine artifacts deliver the batch as a JSON string; older
+    // core wrappers pass it through unparsed. Accept both so a renderer
+    // never silently drops a batch on a core/engine version skew.
+    if (typeof patches === "string") {
+      patches = JSON.parse(patches) as Patch[];
+    }
     // Lower template patches first. Expansion preserves order, and only
     // `registerTemplate` is ever consumed — a leading `batchAnimation`
     // stamp (always emitted at index 0) keeps its position for the

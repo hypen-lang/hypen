@@ -4,7 +4,7 @@ import SwiftUI
 
 /// `.videoIntent("fullscreen")` — the renderer-local intent channel.
 ///
-/// Normative source: `hypen-web/docs/components/video.md`
+/// Normative source: `hypen-docs/content/docs/guide/components.mdx`
 /// §"Fullscreen: `videoIntent("fullscreen")` (renderer-local)". Reference
 /// implementation: the DOM `videoIntent` applicator handler in
 /// `hypen-web/packages/web/src/dom/applicators/events.ts`.

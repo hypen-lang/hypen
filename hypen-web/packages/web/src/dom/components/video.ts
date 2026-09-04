@@ -2,7 +2,7 @@
  * Video Component
  *
  * Implements the cross-platform Video contract
- * (hypen-web/docs/components/video.md) for the DOM renderer:
+ * (hypen-docs/content/docs/guide/components.mdx) for the DOM renderer:
  *
  * - `0`/`src`/`source` single URL, or `playlist` (supersedes `src`) with
  *   `startIndex`, auto-advance on `ended` and queue wrap under `loop`.
@@ -22,7 +22,7 @@
  * element meta and are re-read on every fire, so re-applied props retarget
  * the dispatch instead of stacking listeners.
  *
- * v2 (docs/components/video.md §"Playback control & composition slots"):
+ * v2 (hypen-docs/content/docs/guide/components.mdx §"Playback control & composition slots"):
  *
  * - A per-node `VideoPlayerState` machine (idle/loading/playing/paused/
  *   ended/error) derived from the media events. Rebuffering re-enters
@@ -108,7 +108,7 @@ interface VideoElementState {
   abortStream: (() => void) | null;
 
   // --- v2: player state machine ------------------------------------------
-  /** Current normative player state (see docs/components/video.md). */
+  /** Current normative player state (see hypen-docs/content/docs/guide/components.mdx). */
   playerState: VideoPlayerState;
   /** A load has begun for the current source (`loadstart` / src assignment). */
   loadStarted: boolean;

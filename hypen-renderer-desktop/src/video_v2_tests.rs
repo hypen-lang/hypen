@@ -124,7 +124,7 @@ fn slot_paint_rank_orders_poster_loading_controls_error() {
 
 #[test]
 fn slot_visibility_table_matches_the_spec_exactly() {
-    // Transcribed straight from docs/components/video.md and
+    // Transcribed straight from hypen-docs/content/docs/guide/components.mdx and
     // VIDEO_SLOT_VISIBILITY: (slot, [idle, loading, playing, paused,
     // ended, error]).
     let table: &[(VideoSlotName, [bool; 6])] = &[

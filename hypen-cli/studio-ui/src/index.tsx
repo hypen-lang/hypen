@@ -274,10 +274,75 @@ if (existsSync(resolve(projectDir, componentsDir))) {
   });
 }
 
+/**
+ * Locate `@hypen-space/web-engine`'s bundled `wasm-browser/` directory —
+ * the project's install first (version-matched with the app), studio-ui's
+ * own copy as fallback. Serving the WASM locally means the in-browser
+ * preview engine works offline / behind proxies instead of fetching
+ * `@latest` from the unpkg CDN.
+ */
+function findWasmBrowserDir(): string | null {
+  for (const root of [projectDir, import.meta.dir]) {
+    try {
+      const entry = Bun.resolveSync("@hypen-space/web-engine", root);
+      let dir = resolve(entry, "..");
+      for (let i = 0; i < 5 && dir !== "/"; i++) {
+        const candidate = join(dir, "wasm-browser");
+        if (existsSync(join(candidate, "hypen_engine.js"))) return candidate;
+        dir = resolve(dir, "..");
+      }
+    } catch {
+      // Not resolvable from this root — try the next.
+    }
+  }
+  return null;
+}
+const wasmBrowserDir = findWasmBrowserDir();
+
+function wasmFileResponse(fileName: string, contentType: string): Response {
+  if (!wasmBrowserDir) return new Response("Not Found", { status: 404 });
+  try {
+    return new Response(Bun.file(join(wasmBrowserDir, fileName)), {
+      headers: { "Content-Type": contentType },
+    });
+  } catch {
+    return new Response("Not Found", { status: 404 });
+  }
+}
+
 const server = serve({
   port: Number(process.env.PORT) || 5173,
 
   routes: {
+    // Local WASM engine for the in-browser preview (see findWasmBrowserDir).
+    // HEAD is the client's availability probe (lib/wasm-urls.ts).
+    "/wasm/hypen_engine.js": {
+      GET: () => wasmFileResponse("hypen_engine.js", "application/javascript"),
+      HEAD: () => wasmFileResponse("hypen_engine.js", "application/javascript"),
+    },
+    "/wasm/hypen_engine_bg.wasm": {
+      GET: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm"),
+      HEAD: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm"),
+    },
+
+    // TS→JS transpile for the in-browser preview's sibling `.ts` modules.
+    // Server-side (Bun.Transpiler) so the preview doesn't depend on a
+    // CDN-hosted typescript build (esm.sh) at runtime.
+    "/api/transpile": {
+      async POST(req) {
+        try {
+          const { code } = await req.json();
+          if (typeof code !== "string") {
+            return Response.json({ error: "code must be a string" }, { status: 400 });
+          }
+          const transpiler = new Bun.Transpiler({ loader: "ts" });
+          return Response.json({ code: transpiler.transformSync(code) });
+        } catch (e: any) {
+          return Response.json({ error: e?.message ?? String(e) }, { status: 400 });
+        }
+      },
+    },
+
     // API Routes - must come before catch-all
     "/api/files": {
       async GET(req) {

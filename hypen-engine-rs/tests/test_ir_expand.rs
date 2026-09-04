@@ -1548,7 +1548,7 @@ fn test_scrub_excluded_inside_states_pose() {
 #[test]
 fn test_video_bind_lowers_to_playback_prop() {
     // .bind on Video targets the playback struct, not the form "value"
-    // channel — docs/components/video.md §Playback control.
+    // channel — hypen-docs/content/docs/guide/components.mdx §Playback control.
     let element = parse_to_element(r#"Video(src: "a.mp4").bind(@state.playback)"#);
 
     assert_eq!(element.element_type, "Video");

@@ -53,6 +53,11 @@ import {
   type SessionHost,
   type SessionTransport,
 } from "./session.js";
+import {
+  getWebClientBundle,
+  renderClientHtml,
+  renderFallbackHtml,
+} from "./web-client.js";
 
 const log = frameworkLoggers.remote;
 
@@ -363,6 +368,15 @@ export class RemoteServer {
     }
     if (this._sourceDir) {
       await this.discoverFromSource();
+      // Discovery imports each component's .ts module, and named modules
+      // (`app.module("Home")...`) self-register in the shared HypenApp
+      // singleton as a side effect. Default `_app` to that registry so the
+      // auto-router can resolve component-backed routes without every
+      // caller having to remember `.app(app)`.
+      if (!this._app) {
+        const { app } = await import("@hypen-space/core/app");
+        this._app = app;
+      }
     }
     if (!this._ui) {
       throw new Error("UI not set. Call .ui() or .source() before prepare()/listen()");
@@ -475,7 +489,7 @@ export class RemoteServer {
         message: (ws, message) => this.handleMessage(ws, message),
         close: (ws) => this.handleClose(ws),
       },
-      fetch: (req, server) => {
+      fetch: async (req, server) => {
         const url = new URL(req.url);
 
         // Upgrade to WebSocket
@@ -500,11 +514,40 @@ export class RemoteServer {
           });
         }
 
+        // Default browser client (on unless config.webClient === false):
+        // `/` serves the HTML shell, `/__hypen__/client.js` the bundled
+        // RemoteEngine + DOMRenderer client that dials back over WebSocket.
+        if (this._config.webClient !== false) {
+          if (url.pathname === "/__hypen__/client.js") {
+            const bundle = await getWebClientBundle();
+            if (bundle) {
+              return new Response(bundle, {
+                headers: { "Content-Type": "application/javascript" },
+              });
+            }
+            return new Response("Web client bundle unavailable", { status: 503 });
+          }
+          if (url.pathname === "/" || url.pathname === "/index.html") {
+            const bundle = await getWebClientBundle();
+            const wsProto = "ws";
+            const html = bundle
+              ? renderClientHtml()
+              : renderFallbackHtml(`${wsProto}://${url.host}`);
+            return new Response(html, {
+              headers: { "Content-Type": "text/html" },
+            });
+          }
+        }
+
         return new Response("Hypen Remote Server", { status: 200 });
       },
     });
 
     log.info(`Hypen app streaming on ws://${hostname}:${finalPort}`);
+    if (this._config.webClient !== false) {
+      const displayHost = hostname === "0.0.0.0" ? "localhost" : hostname;
+      log.info(`Web client at http://${displayHost}:${finalPort}`);
+    }
     log.debug(`permessage-deflate ${compression ? "enabled" : "disabled"}`);
 
     return this;
@@ -604,17 +647,30 @@ export class RemoteServer {
   }
 
   /**
-   * Reload components from the source directory and re-render all connected clients.
-   * Call this when source files change to implement hot reload.
+   * Hot reload: refresh discovery, then disconnect every connected client
+   * so it reconnects into a fresh session built from the newly loaded
+   * code (templates AND module definitions).
    *
-   * The engine's reconciler diffs the old tree against the new one, producing
-   * minimal patches (Create/Remove/SetProp) that are streamed to clients.
+   * Reconnect — not re-render-in-place: reconciling new source into a
+   * live session proved unreliable (the Router's cached subtrees survive
+   * `clearResolvedComponents`, producing empty diffs, and the re-render
+   * left nested modules' reactive wiring dead). Disconnected clients
+   * auto-reconnect with their session id; the suspended session resumes,
+   * and its saved primary-module state is restored automatically (or via
+   * the module's `onReconnect` handler when one is defined).
    */
   async reload(): Promise<void> {
     if (this._sourceDir) {
       // Reset _ui so discoverFromSource picks up the latest entry template
       this._ui = "";
       await this.discoverFromSource();
+      // Refresh the primary module definition too — discovery re-imports
+      // the entry's .ts (mtime-busted), so edited handlers/initial state
+      // apply to resumed sessions without a server restart.
+      const entry = this._discoveredComponents.get(this._moduleName);
+      if (entry?.module) {
+        this._module = entry.module as HypenModule<any>;
+      }
     }
 
     if (!this._ui) {
@@ -622,28 +678,12 @@ export class RemoteServer {
       return;
     }
 
-    // Re-render all connected clients — reconciler diffs old vs new tree
-    for (const session of this._sessions) {
+    for (const session of [...this._sessions]) {
       if (!session.helloReceived) continue;
-
-      // Re-apply component resolver with newly discovered components.
-      // The session installed its own on construction; re-install so it sees
-      // the updated `_discoveredComponents` map (same map reference, but
-      // calling setComponentResolver also invalidates internal caches).
-      session.engine.setComponentResolver((componentName, _ctx) => {
-        const comp = this._discoveredComponents.get(componentName);
-        if (!comp) return null;
-        return { source: comp.template, path: componentName };
-      });
-
-      // Clear cached component definitions so the engine re-resolves from fresh sources
-      session.engine.clearResolvedComponents();
-
       try {
-        session.engine.renderSource(this._ui);
-        log.info(`Hot-reloaded client ${session.id}`);
+        session.disconnectForReload();
       } catch (e: any) {
-        log.error(`Failed to hot-reload client ${session.id}:`, e);
+        log.error(`Failed to disconnect client ${session.id} for reload:`, e);
       }
     }
   }

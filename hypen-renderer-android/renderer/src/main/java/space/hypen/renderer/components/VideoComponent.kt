@@ -47,7 +47,7 @@ import space.hypen.renderer.render.LocalComposeRenderer
 
 /**
  * Handler for Video components — implements the cross-platform Video contract
- * (see hypen-web/docs/components/video.md). Uses Media3 ExoPlayer.
+ * (see hypen-docs/content/docs/guide/components.mdx). Uses Media3 ExoPlayer.
  *
  * Sources (only resolved streamable URLs ever cross the wire):
  *   Video(src: "https://.../movie.mp4", controls: true)

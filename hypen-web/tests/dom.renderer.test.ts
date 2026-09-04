@@ -593,3 +593,26 @@ describe("DOMRenderer patch field name robustness", () => {
     }
   });
 });
+
+describe("DOMRenderer falsy text values", () => {
+  const makeRenderer = () => {
+    const container = document.createElement("div");
+    const renderer = new DOMRenderer(container, new StubEngine() as unknown as Engine);
+    return { container, renderer };
+  };
+
+  // Regression: `props["0"] || props.text` dropped falsy-but-valid values,
+  // so `Text("@{state.count}")` rendered nothing at count 0.
+  test("Text renders the number 0", () => {
+    const { renderer } = makeRenderer();
+
+    renderer.applyPatches([
+      { type: "create", id: "root-1", elementType: "Column", props: {} } as Patch,
+      { type: "create", id: "text", elementType: "Text", props: { "0": 0 } } as Patch,
+      { type: "insert", parentId: "root-1", id: "text" } as Patch,
+    ]);
+
+    const textNode = renderer.getNode("text") as FakeElement;
+    expect(textNode.textContent).toBe("0");
+  });
+});

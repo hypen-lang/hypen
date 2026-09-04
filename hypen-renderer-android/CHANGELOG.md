@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- Video v2 (`docs/components/video.md` §"Playback control & composition
+- Video v2 (`hypen-docs/content/docs/guide/components.mdx` §"Playback control & composition
   slots"): a contract player state (idle/loading/playing/paused/ended/error)
   derived from the ExoPlayer callbacks — a rebuffer re-enters `loading`
   without emitting `onPause`, `error` is sticky until the source list

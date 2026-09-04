@@ -220,7 +220,7 @@ All Hypen components work with the canvas renderer:
 ### Media Components
 - **Image**: Image rendering (basic support)
 - **Video**: Inline playback via an offscreen `<video>` element drawn to the
-  canvas each frame (see `docs/components/video.md` for the cross-platform
+  canvas each frame (see `hypen-docs/content/docs/guide/components.mdx` for the cross-platform
   contract). Supports `src`/`playlist` (auto-advance + `loop` wrap),
   `poster`, `autoplay` (with muted fallback), `muted`, `loop`, `preload`,
   `objectFit` (`contain` default, `cover`, `fill`), `headers`

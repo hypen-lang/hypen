@@ -6,6 +6,7 @@ import type { OpenFile, ConsoleLog } from "./Studio";
 
 // Static imports - bundled by Bun at build time (same as landing page)
 import { Engine } from "@hypen-space/web-engine";
+import { localWasmInitOptions } from "@/lib/wasm-urls";
 import { app, HypenModuleInstance, getStateSnapshot } from "@hypen-space/core";
 import { DOMRenderer } from "@hypen-space/web/dom";
 import { RemoteEngine } from "@hypen-space/core/remote/client";
@@ -77,6 +78,23 @@ type PreviewProps = {
 };
 
 // Module-level engine singleton to avoid WASM memory corruption with StrictMode
+/**
+ * Transpile a `.ts` module through the studio server's Bun.Transpiler
+ * (`/api/transpile`) — no CDN-hosted typescript needed in the browser.
+ */
+async function transpileTs(code: string): Promise<string> {
+  const res = await fetch("/api/transpile", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ code }),
+  });
+  const data = await res.json();
+  if (!res.ok || data.error) {
+    throw new Error(`Transpile failed: ${data.error ?? res.status}`);
+  }
+  return data.code as string;
+}
+
 let globalEngine: any | null = null;
 let engineInitPromise: Promise<any> | null = null;
 let globalRenderCallback: ((patches: any[]) => void) | null = null;
@@ -87,7 +105,8 @@ async function getOrCreateEngine(): Promise<any> {
 
   engineInitPromise = (async () => {
     const engine = new Engine();
-    await engine.init();
+    // Prefer the studio-served project WASM over the CDN default.
+    await engine.init((await localWasmInitOptions()) ?? {});
     globalEngine = engine;
     return engine;
   })();
@@ -157,13 +176,14 @@ export function Preview({
     remoteEngineRef.current = remote;
 
     // Create a DOMRenderer with an engine adapter that forwards actions to RemoteServer
-    const renderer = new DOMRenderer(rendererContainerRef.current, {
-      dispatchAction: (name: string, payload?: unknown) => {
-        remote.dispatchAction(name, payload);
-        onActionLog(name, payload);
-      },
-    });
-    rendererRef.current = renderer;
+    const makeRemoteRenderer = () =>
+      new DOMRenderer(rendererContainerRef.current!, {
+        dispatchAction: (name: string, payload?: unknown) => {
+          remote.dispatchAction(name, payload);
+          onActionLog(name, payload);
+        },
+      });
+    rendererRef.current = makeRemoteRenderer();
 
     remote
       .onPatches((patches) => {
@@ -178,6 +198,13 @@ export function Preview({
       })
       .onSessionEstablished((info) => {
         onLog("info", `Remote session: ${info.sessionId} (${info.isNew ? "new" : "restored"})`);
+        // Each (re)established session streams a full initial tree —
+        // reset the renderer so a hot-reload reconnect doesn't append a
+        // duplicate tree under the old one.
+        if (rendererContainerRef.current) {
+          rendererContainerRef.current.innerHTML = "";
+          rendererRef.current = makeRemoteRenderer();
+        }
         // Subscribe to state updates for the state panel and time-travel
         remote.subscribeState();
         setEngineReady(true);
@@ -340,15 +367,19 @@ export function Preview({
         }
       }
 
-      // Auto-discover child component directories
-      // e.g., for "src/components/App/component.hypen", scan "src/components/App/" for subdirs
+      // Auto-discover components referenced by bare name (no import):
+      // scan the open component folder's CHILD directories (nested
+      // components) and its SIBLING directories — the scaffold layout is
+      // src/components/{App,Home,Counter}, so `Home()` inside App's
+      // template lives in a sibling folder — mirroring the server's
+      // discovery conventions.
       const hypenDir = hypenFile.path.includes("/")
         ? hypenFile.path.substring(0, hypenFile.path.lastIndexOf("/"))
         : "";
 
-      if (hypenDir) {
+      const scanDirForComponents = async (scanDir: string, skipName?: string) => {
         try {
-          const res = await fetch(`/api/files/${encodeURIComponent(hypenDir)}`);
+          const res = await fetch(`/api/files/${encodeURIComponent(scanDir)}`);
           if (res.ok) {
             const dirData = await res.json();
             // dirData is the directory listing; find child directories
@@ -358,11 +389,12 @@ export function Preview({
 
             for (const child of childDirs) {
               const componentName = child.name;
+              if (componentName === skipName) continue;
               if (importMapRef.current.has(componentName)) continue;
 
               // Try component.hypen first, then component.ts (for .ui() inline templates)
-              const hypenPath = `${hypenDir}/${componentName}/component.hypen`;
-              const tsPath = `${hypenDir}/${componentName}/component.ts`;
+              const hypenPath = `${scanDir}/${componentName}/component.hypen`;
+              const tsPath = `${scanDir}/${componentName}/component.ts`;
 
               // Prefer editor buffer over disk for unsaved changes
               const openHypenFile = openFiles.find((f) => f.path === hypenPath);
@@ -410,7 +442,60 @@ export function Preview({
             }
           }
         } catch (e: any) {
-          onLog("warn", `Failed to scan for child components: ${e.message}`);
+          onLog("warn", `Failed to scan ${scanDir} for components: ${e.message}`);
+        }
+      };
+
+      if (hypenDir) {
+        await scanDirForComponents(hypenDir);
+        const slash = hypenDir.lastIndexOf("/");
+        if (slash > 0) {
+          // Parent of the component folder = the components root; scan it
+          // for sibling components, skipping our own folder.
+          await scanDirForComponents(
+            hypenDir.substring(0, slash),
+            hypenDir.substring(slash + 1)
+          );
+        }
+      }
+
+      // Register discovered components' modules with the engine so their
+      // `@{state.*}` bindings resolve in the preview (mirrors the remote
+      // session's registerNestedModules). Action HANDLERS still live only
+      // in Test Mode / the running app — the local preview is layout-first.
+      for (const [name, path] of importMapRef.current) {
+        const tsPath = path.endsWith(".ts")
+          ? path
+          : path.replace(/component\.hypen$/, "component.ts");
+        try {
+          const openTs = openFiles.find((f) => f.path === tsPath);
+          let tsContent: string | null = openTs?.content ?? null;
+          if (tsContent === null) {
+            const r = await fetch(`/api/files/${encodeURIComponent(tsPath)}`);
+            if (r.ok) tsContent = (await r.json()).content ?? null;
+          }
+          if (!tsContent) continue;
+          const jsCode = await transpileTs(tsContent);
+          const moduleCode = jsCode
+            .replace(/import\s+.*?from\s+['"].*?['"];?\s*/g, "")
+            .replace(/export default/, "return");
+          const def = new Function("app", moduleCode)(app);
+          const stateKeys =
+            def?.initialState && typeof def.initialState === "object"
+              ? Object.keys(def.initialState)
+              : [];
+          const hasActions = (def?.actions?.length ?? 0) > 0;
+          if (def && (stateKeys.length > 0 || hasActions)) {
+            (engineRef.current as any).registerModule?.(
+              name,
+              def.actions ?? [],
+              stateKeys,
+              def.initialState ?? {}
+            );
+            onLog("info", `Registered nested module: ${name}`);
+          }
+        } catch (e: any) {
+          onLog("warn", `Nested module ${name} failed to load: ${e.message}`);
         }
       }
 
@@ -464,14 +549,8 @@ export function Preview({
       }
 
       if (moduleContent) {
-        // Transpile and setup module
-        const ts = await import("https://esm.sh/typescript@5.3.3");
-        const jsCode = ts.transpileModule(moduleContent, {
-          compilerOptions: {
-            module: ts.ModuleKind.ESNext,
-            target: ts.ScriptTarget.ES2020,
-          },
-        }).outputText;
+        // Transpile and setup module (server-side, see transpileTs)
+        const jsCode = await transpileTs(moduleContent);
 
         const moduleCode = jsCode
           .replace(/import\s+.*?from\s+['"].*?['"];?\s*/g, "")

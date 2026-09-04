@@ -51,7 +51,7 @@ Image("thumbnail.jpg")
 Video player component. Plays a resolved streamable URL, or an ordered
 `playlist` of URLs with auto-advance. Only URLs cross the wire — never media
 payloads. Full cross-platform contract (failure modes, `headers` behavior,
-platform capability matrix): [video.md](./video.md).
+platform capability matrix): the [Video docs](../../../hypen-docs/content/docs/guide/components.mdx).
 
 **Props:**
 - `src` (String) or first positional argument: Resolved streamable video URL (`source` is an alias)
@@ -63,7 +63,7 @@ platform capability matrix): [video.md](./video.md).
 - `loop` (Boolean): Loop the video — with a playlist, wrap to track 0 after the last track (default: false)
 - `muted` (Boolean): Start muted (default: false)
 - `preload` (String): Web hint: `none` | `metadata` | `auto` (default: `metadata`)
-- `headers` (Map): Extra HTTP request headers for media fetches (auth-protected streams; see [video.md](./video.md) for the web blob fallback)
+- `headers` (Map): Extra HTTP request headers for media fetches (auth-protected streams; see the [Video docs](../../../hypen-docs/content/docs/guide/components.mdx) for the web blob fallback)
 - `title` (String): Accessible label for the player (flagged by the `video-missing-label` a11y check when absent)
 
 **Events** (optional `@actions` refs; payloads carry `src` and the playlist `index`):

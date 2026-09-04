@@ -36,7 +36,7 @@ import space.hypen.renderer.render.LocalActionDispatcher
 
 /**
  * Handler for the `Scrubber` primitive — the media timeline designed for a
- * Video `controls` slot (docs/components/video.md §Scrubber).
+ * Video `controls` slot (hypen-docs/content/docs/guide/components.mdx §Scrubber).
  *
  * Inside a Video it wires itself to the enclosing player renderer-side via
  * [LocalVideoPlaybackController]: the thumb tracks playback off a ticker

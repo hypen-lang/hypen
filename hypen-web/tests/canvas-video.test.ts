@@ -3,7 +3,7 @@
  *
  * The canvas renderer plays Video through an OFFSCREEN <video> element
  * (keyed by node id) and paints its frames with drawImage — see
- * docs/components/video.md for the contract and
+ * hypen-docs/content/docs/guide/components.mdx for the contract and
  * packages/web/src/canvas/paint.ts for the implementation.
  *
  * JSDOM/bun cannot decode real media, so these tests drive the test seams:

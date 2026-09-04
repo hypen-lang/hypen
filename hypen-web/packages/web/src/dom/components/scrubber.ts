@@ -2,7 +2,7 @@
  * Scrubber Component (Video v2)
  *
  * A media timeline designed for a Video's `controls` slot
- * (docs/components/video.md §"`Scrubber` (built-in, slot-aware)").
+ * (hypen-docs/content/docs/guide/components.mdx §"`Scrubber` (built-in, slot-aware)").
  *
  * Inside a Video it wires itself to the enclosing player RENDERER-SIDE:
  *

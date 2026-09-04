@@ -223,7 +223,7 @@ private class AudioPlayerManager: ObservableObject {
 // MARK: - Video Component
 
 /// Handler for Video components implementing the cross-platform Video
-/// contract (see `hypen-web/docs/components/video.md`).
+/// contract (see `hypen-docs/content/docs/guide/components.mdx`).
 ///
 /// Props:
 /// - `0` / `src` / `source` — resolved streamable URL

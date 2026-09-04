@@ -3124,7 +3124,7 @@ fn max_width_child_stays_centred_as_the_window_resizes() {
 // Video (media surface) — sizing, item emission, click wiring.
 //
 // Desktop has no inline media decode (contract:
-// hypen-web/docs/components/video.md). Layout must size a Video like an
+// hypen-docs/content/docs/guide/components.mdx). Layout must size a Video like an
 // Image but with a 16:9 default aspect (poster natural aspect when the
 // poster is already decoded), and emission must produce ItemKind::Video
 // with the poster/src split plus onPlay click wiring.
@@ -3531,7 +3531,7 @@ fn hypeflix_browse_play_button_is_hittable_after_wheel_scroll() {
 
 // ---------------------------------------------------------------------------
 // Video v2: composition slots + Scrubber
-// (docs/components/video.md §"Playback control & composition slots")
+// (hypen-docs/content/docs/guide/components.mdx §"Playback control & composition slots")
 // ---------------------------------------------------------------------------
 
 use crate::video_v2::{
@@ -4048,7 +4048,7 @@ fn slot_styles_survive_the_incremental_taffy_path() {
 
 // ---------------------------------------------------------------------------
 // Video v2: renderer-local intents
-// (docs/components/video.md §"Fullscreen: `videoIntent(\"fullscreen\")`")
+// (hypen-docs/content/docs/guide/components.mdx §"Fullscreen: `videoIntent(\"fullscreen\")`")
 // ---------------------------------------------------------------------------
 
 /// A 320x180 Video with a `controls` slot holding one Button. `intent`

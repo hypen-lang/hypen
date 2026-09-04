@@ -3,7 +3,7 @@
 //!
 //! **This module mirrors, verbatim, the normative tables and constants in
 //! `hypen-web/packages/core/src/types.ts` (bottom section) and the spec in
-//! `hypen-web/docs/components/video.md` §"Playback control & composition
+//! `hypen-docs/content/docs/guide/components.mdx` §"Playback control & composition
 //! slots".** Every renderer keys off one table; when the TS side moves,
 //! this file moves with it.
 //!
@@ -414,7 +414,7 @@ pub fn enclosing_video(tree: &Tree, id: &str) -> Option<String> {
 
 /// A renderer-local video intent: an interaction the renderer performs
 /// ITSELF, without an action → module → state round trip. Normative spec:
-/// `hypen-web/docs/components/video.md` §"Fullscreen: `videoIntent`".
+/// `hypen-docs/content/docs/guide/components.mdx` §"Fullscreen: `videoIntent`".
 ///
 /// Fullscreen is the first one because platforms gate it behind a user
 /// gesture (and, on remote apps, a round trip can lose it entirely).

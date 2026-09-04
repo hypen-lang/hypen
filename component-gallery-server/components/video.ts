@@ -1,7 +1,7 @@
 /**
  * Video Component Example
  * Video player element: single source, playlist auto-advance, poster,
- * and error handling. Full contract: hypen-web/docs/components/video.md
+ * and error handling. Full contract: hypen-docs/content/docs/guide/components.mdx
  */
 
 import { app } from "../../hypen-web/packages/core/src/index.ts";

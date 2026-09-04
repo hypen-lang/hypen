@@ -82,11 +82,26 @@ without the hypen require and runs `go mod tidy` to pin the latest
 the first `./gradlew` build.
 
 ### Dev Server
-Two implementations maintain feature parity:
-- `dev-bun.ts` — Bun.serve() with WebSocket hot reload
-- `dev-node.ts` — http.createServer() + esbuild fallback
+Two implementations with intentionally different architectures:
+- `dev-bun.ts` (primary) — runs the project through a `RemoteServer`:
+  components are discovered from the filesystem, the engine renders
+  server-side, and the browser loads the built-in web client at `/`
+  (patches streamed over WebSocket — the same architecture `hypen test`,
+  `hypen run`, and Studio previews use). Native clients can dial the same
+  `ws://` port directly. Sessions are per-connection but `.syncActions()`
+  replays actions across all of them, so tabs/runners mirror one scene
+  (deliberate for now — drop the call for per-tab isolation).
+  File watching hot-reloads all connected clients via `reload()`;
+  component `.ts` modules are re-imported with mtime cache-busting.
+  `htmlTemplate`/`outDir` are deprecated no-ops here (warn when passed).
+- `dev-node.ts` (fallback) — the legacy browser-SPA flow:
+  http.createServer() + esbuild, generates entry files, client-side WASM.
+  Serves the WASM engine locally from the project's web-engine install
+  when present.
 
-Both discover components, generate entry files, and watch for changes.
+`dev()` throws (`DevServerError` under Bun) on expected failures like a
+missing entry component or a taken port — it never calls `process.exit`;
+the CLI wrapper in `bin/hypen.ts` catches and exits.
 
 ### Studio
 `hypen studio` spawns `studio-ui/` as a child process via `bun --hot`, passing config through environment variables (`HYPEN_PROJECT_DIR`, `HYPEN_COMPONENTS_DIR`, `HYPEN_ENTRY`, etc.).

@@ -1,6 +1,6 @@
 /**
  * DOM Video component — `headers` tiered fallback
- * (packages/web/src/dom/components/video.ts, docs/components/video.md)
+ * (packages/web/src/dom/components/video.ts, hypen-docs/content/docs/guide/components.mdx)
  *
  * When `headers` is present the renderer fetches the stream itself. This
  * suite covers the tier decision on top of that fetch:

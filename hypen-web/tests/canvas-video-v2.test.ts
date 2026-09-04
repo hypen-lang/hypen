@@ -2,7 +2,7 @@
  * Canvas Video v2 Tests — player state machine, playback bind, composition
  * slots, Scrubber.
  *
- * Normative spec: docs/components/video.md §"Playback control & composition
+ * Normative spec: hypen-docs/content/docs/guide/components.mdx §"Playback control & composition
  * slots". The shared constants (`VIDEO_SLOT_VISIBILITY`,
  * `PLAYBACK_REPORT_INTERVAL_MS`, `PLAYBACK_SEEK_EPSILON_S`) are imported
  * from `@hypen-space/core/types` and driven directly — the table below is

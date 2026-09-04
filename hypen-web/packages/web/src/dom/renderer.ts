@@ -89,7 +89,7 @@ const COMPONENT_HTML_ATTRS: Record<string, Set<string>> = {
   // Route URL changes to the handler so it reconnects the embedded app
   // instead of the generic text branch overwriting the subtree.
   hypenapp: new Set(["0", "url"]),
-  // Video contract (docs/components/video.md): every contract prop — media
+  // Video contract (hypen-docs/content/docs/guide/components.mdx): every contract prop — media
   // sources, playback flags, headers, and the media event actions — must
   // reach videoHandler.applyProps on SetProp (the CSS fallback would
   // silently no-op them). Props can arrive as "controls" or "controls.0",
@@ -324,6 +324,12 @@ export class DOMRenderer {
    * the DOMRenderer or the owning CanvasRenderer.
    */
   applyPatches(patches: Patch[]): void {
+    // Newer engine artifacts deliver the batch as a JSON string; older
+    // core wrappers pass it through unparsed. Accept both so a renderer
+    // never silently drops a batch on a core/engine version skew.
+    if (typeof patches === "string") {
+      patches = JSON.parse(patches) as Patch[];
+    }
     // Transaction-scoped animation stamp (Option D): honored ONLY as the
     // batch's FIRST patch — the engine's wire contract emits the prelude at
     // index 0, and a `batchAnimation` anywhere else is not a stamp for this

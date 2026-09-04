@@ -31,7 +31,7 @@ This document summarizes all components and applicators that have been implement
 
 ### Media (4)
 - ✅ **Image** - Image display
-- ✅ **Video** - Video player: single `src` or `playlist` auto-advance, `poster`, auth `headers`, playback events ([contract](./components/video.md))
+- ✅ **Video** - Video player: single `src` or `playlist` auto-advance, `poster`, auth `headers`, playback events ([docs](../../hypen-docs/content/docs/guide/components.mdx), [props](./components/media.md#video))
 - ✅ **Audio** - Audio player
 - ✅ **Icon** - SVG icon (driven by `@resources.xxx`)
 

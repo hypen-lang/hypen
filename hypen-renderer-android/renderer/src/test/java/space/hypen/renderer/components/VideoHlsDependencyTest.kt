@@ -4,7 +4,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * The platform capability matrix (hypen-web/docs/components/video.md) claims
+ * The platform capability matrix (hypen-docs/content/docs/guide/components.mdx) claims
  * HLS support on Android. Media3's `DefaultMediaSourceFactory` discovers the
  * HLS module **reflectively at runtime** — nothing fails at compile time when
  * `media3-exoplayer-hls` is missing from the classpath; `.m3u8` sources just
