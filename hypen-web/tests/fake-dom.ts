@@ -205,6 +205,46 @@ export class FakeElement {
     }
   }
 
+  /**
+   * Structural clone, mirroring `Node.cloneNode` — the operation the DOM
+   * renderer's template instantiation is built on (`registerTemplate` builds
+   * one prototype, `instantiate` clones it per list row).
+   *
+   * Copied: tag, id, dataset, attributes, classes, inline styles, text and
+   * (when `deep`) the child subtree. NOT copied: event listeners and every
+   * other JS-side association — exactly the asymmetry that makes a component
+   * keyed by a WeakMap-on-element go inert unless it re-adopts the clone.
+   * Live element state a real DOM keeps outside the attribute space (a media
+   * element's `src` property assignment, `currentTime`, `duration`) is not
+   * carried either, so a clone starts from its recorded markers alone.
+   */
+  cloneNode(deep = false): FakeElement {
+    const copy = new FakeElement(this.tagName);
+    copy.ownerDocument = this.ownerDocument;
+    copy.id = this.id;
+    copy.dataset = { ...this.dataset };
+    copy.attributes = { ...this.attributes };
+    for (const name of this.classList.toString().split(" ")) {
+      if (name) copy.classList.add(name);
+    }
+    const style = this.style as unknown as Record<string, string> & {
+      getPropertyValue(name: string): string;
+    };
+    for (const key of Object.keys(style)) {
+      copy.style.setProperty(key, style.getPropertyValue(key));
+    }
+    copy.textContent = this.textContent;
+    copy.value = this.value;
+    copy.placeholder = this.placeholder;
+    copy.type = this.type;
+    if (deep) {
+      for (const child of this.children) {
+        copy.appendChild(child.cloneNode(true));
+      }
+    }
+    return copy;
+  }
+
   contains(node: FakeElement): boolean {
     if (this === node) return true;
     return this.children.some((child) => child.contains(node));

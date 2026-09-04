@@ -124,10 +124,14 @@ fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, cha
         // known prefixes (state, item, actions, resources) vs data source providers.
 
         // List: [item1, item2, item3]
+        // The separator is padded so a trailing comma followed by
+        // whitespace/newlines/comments still closes — element padding only
+        // runs when an element is actually parsed, so "[1, 2,\n]" otherwise
+        // left the '\n' unconsumed and failed on ']'.
         let list = value
             .clone()
             .padded_with_comments()
-            .separated_by(just(','))
+            .separated_by(just(',').padded_with_comments())
             .allow_trailing()
             .collect()
             .delimited_by(just('['), just(']').labelled("closing bracket ']'"))
@@ -142,7 +146,7 @@ fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, cha
             .then(value.clone().padded_with_comments().labelled("map value"));
 
         let map = map_entry
-            .separated_by(just(','))
+            .separated_by(just(',').padded_with_comments())
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just('{'), just('}').labelled("closing brace '}'"))
@@ -214,7 +218,7 @@ pub fn component_parser<'a>(
         let args_with_parens = arg
             .clone()
             .padded_with_comments()
-            .separated_by(just(',').labelled("',' between arguments"))
+            .separated_by(just(',').labelled("',' between arguments").padded_with_comments())
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(
@@ -254,7 +258,7 @@ pub fn component_parser<'a>(
         let arg_parser = arg
             .clone()
             .padded_with_comments()
-            .separated_by(just(',').labelled("',' between arguments"))
+            .separated_by(just(',').labelled("',' between arguments").padded_with_comments())
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just('('), just(')').labelled("closing parenthesis ')'"))

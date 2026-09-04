@@ -120,6 +120,9 @@ extension ComponentRegistry {
         // Media components
         registry.register(AudioComponent())
         registry.register(VideoComponent())
+        // Video v2 chrome: a timeline for the `controls` slot (inert
+        // outside a Video).
+        registry.register(ScrubberComponent())
 
         // Icon component (renders server-resolved SVG path data)
         registry.register(IconComponent())

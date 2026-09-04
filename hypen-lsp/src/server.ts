@@ -235,7 +235,7 @@ const commonComponents = [
   // Content
   "Text", "Heading", "Paragraph", "Image", "Avatar", "Badge", "Card", "Spinner", "ProgressBar",
   // Input
-  "Button", "Input", "Textarea", "Checkbox", "Switch", "Select", "Slider",
+  "Button", "Input", "Textarea", "Checkbox", "Switch", "Select", "Slider", "Scrubber",
   // Navigation
   "Router", "Route", "Link",
   // Media
@@ -290,6 +290,10 @@ const commonApplicators = [
   "onFocus", "onBlur", "onMouseEnter", "onMouseLeave",
   // Binding
   "bind",
+  // Composition
+  "slot",
+  // Renderer-local intents
+  "videoIntent",
   // Tailwind
   "tw"
 ];
@@ -480,10 +484,32 @@ const componentSignatures: Record<string, ComponentSignature> = {
 
   // ── Media ──
   Video: {
-    label: "Video(src: String)",
-    documentation: "Embeds a video player.\n\n```hypen\nVideo(src: \"intro.mp4\")\n  .width(\"100%\")\n```",
+    label: "Video(src: String, playlist?: [String], poster?: String)",
+    documentation: "Embeds a video player. Plays a resolved streamable URL, or an ordered `playlist` of URLs with auto-advance — only URLs cross the wire, never media payloads.\n\n```hypen\nVideo(\n  src: \"https://cdn.example.com/intro.mp4\",\n  poster: \"thumbnail.jpg\",\n  controls: true,\n  startPosition: 90,\n  onError: @actions.playbackFailed,\n)\n  .fillMaxWidth(true)\n  .height(220)\n```\n\n**Props:** `src` (or positional), `playlist`, `startIndex`, `startPosition`, `poster`, `controls`, `autoplay`, `loop`, `muted`, `preload`, `headers`, plus the `onPlay` / `onPause` / `onEnded` / `onTrackChange` / `onError` action refs.\n\n`startPosition: Number` seeks once, when the source first becomes seekable — \"resume where you left off\" without a full bind. It re-arms when `src`/`playlist`/`headers` change.\n\n**Playback control — `.bind(@state.playback)`**\n\nBinds a playback struct: `{ playing: Boolean, position: Number, duration: Number, state: String }`. `playing`/`position` are read-write (a `position` write seeks, applied only past a 1 s epsilon); `duration`/`state` are renderer-owned. `state` is one of `idle` | `loading` | `playing` | `paused` | `ended` | `error`. The module must initialize the struct in `defineState` — writes to a missing parent path drop silently. Position reports are throttled to 250 ms while playing; transitions report immediately.\n\n**Composition slots**\n\nChildren tagged `.slot(\"controls\")`, `.slot(\"loading\")`, `.slot(\"error\")` or `.slot(\"poster\")` compose into the player chrome, overlaid full-bleed and shown/hidden by player state. A present slot replaces the built-in for that concern (a `controls` slot suppresses native chrome regardless of the `controls` prop). Untagged children are invalid — Video is a leaf otherwise.\n\n```hypen\nVideo(src: \"@{state.url}\", autoplay: true) {\n  Row {\n    Button { Text(\"⏯\") }\n      .onClick(@actions.togglePlay)\n    Scrubber()\n  }\n    .slot(\"controls\")\n\n  Column { Spinner() }\n    .slot(\"loading\")\n}\n  .bind(@state.playback)\n```",
     parameters: [
-      { label: "src", documentation: "Video URL or asset path" }
+      { label: "src", documentation: "Resolved streamable video URL (progressive MP4/WebM; HLS where the platform supports it)" },
+      { label: "playlist", documentation: "Ordered array of URLs played in sequence. Supersedes src when non-empty; auto-advances when a track ends" },
+      { label: "startIndex", documentation: "Index into playlist to start from (default 0, clamped to valid range)" },
+      { label: "poster", documentation: "Image URL shown before playback starts" },
+      { label: "controls", documentation: "Show native transport controls (default false)" },
+      { label: "autoplay", documentation: "Start playback when ready (default false; browsers fall back to muted autoplay)" },
+      { label: "loop", documentation: "Loop the video; with a playlist, wrap to track 0 after the last track (default false)" },
+      { label: "muted", documentation: "Start muted (default false)" },
+      { label: "preload", documentation: "Web preload hint: \"none\" | \"metadata\" | \"auto\" (default \"metadata\")" },
+      { label: "headers", documentation: "Map of extra HTTP request headers for media fetches (auth-protected streams)" },
+      { label: "onPlay", documentation: "@actions ref — playback starts/resumes. Payload: { type, src, index }" },
+      { label: "onPause", documentation: "@actions ref — playback pauses. Payload: { type, src, index }" },
+      { label: "onEnded", documentation: "@actions ref — a track finishes. Payload: { type, src, index, completed }" },
+      { label: "onTrackChange", documentation: "@actions ref — the playlist advances to a new track. Payload: { type, src, index }" },
+      { label: "onError", documentation: "@actions ref — the stream cannot be fetched or decoded. Payload: { type, src, index, status?, code?, message }" }
+    ]
+  },
+  Scrubber: {
+    label: "Scrubber(onSeek?: @actions.name, disabled?: Boolean)",
+    documentation: "Media timeline for a Video's `controls` slot. Inside a Video it wires itself to the enclosing player renderer-side: the thumb tracks playback at frame rate without touching module state, dragging previews locally, and only the release commits.\n\nCommit resolution: the Scrubber's own `.bind(...)` wins, else the enclosing Video's `.bind(@state.playback)`, else the `onSeek` action (payload `{ type: \"seek\", position }`). The local seek applies in every case, so the playhead moves even with no wire commit. Outside a Video, `Scrubber` renders inert.\n\nExposes the `slider` accessibility role, with `aria-valuemin`/`aria-valuemax`/`aria-valuenow` tracking the timeline; arrow keys seek ±5 s and commit immediately.\n\n```hypen\nVideo(src: \"@{state.url}\") {\n  Row {\n    Scrubber()\n      .fillMaxWidth(true)\n  }\n    .slot(\"controls\")\n}\n  .bind(@state.playback)\n```",
+    parameters: [
+      { label: "onSeek", documentation: "@actions ref — fallback seek commit when neither the Scrubber nor the Video carries a bind. Payload: { type: \"seek\", position }" },
+      { label: "disabled", documentation: "Render inert — not focusable, no commits (default false)" }
     ]
   },
   Audio: {
@@ -615,7 +641,11 @@ const applicatorSignatures: Record<string, ComponentSignature> = {
   onMouseEnter:       { label: ".onMouseEnter(action: @actions.name)", documentation: "Fires when the mouse enters the element (desktop)", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
   onMouseLeave:       { label: ".onMouseLeave(action: @actions.name)", documentation: "Fires when the mouse leaves the element (desktop)", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
   // Binding
-  bind:               { label: ".bind(stateRef: @state.path)", documentation: "Two-way data binding. Syncs the form element's value with the given state path automatically.\n\nWorks with: Input, Textarea, Checkbox, Switch, Select, Slider.", parameters: [{ label: "stateRef", documentation: "@state.fieldName — the state path to bind to" }] },
+  bind:               { label: ".bind(stateRef: @state.path)", documentation: "Two-way data binding. Syncs the element's value with the given state path automatically.\n\nWorks with: Input, Textarea, Checkbox, Switch, Select, Slider.\n\nOn **Video** it binds a playback struct instead of a scalar — `{ playing, position, duration, state }`. `playing`/`position` are read-write (a `position` write seeks); `duration`/`state` are renderer-owned. Initialize the struct in `defineState` or the writes drop.\n\n```hypen\nVideo(src: \"@{state.url}\")\n  .bind(@state.playback)\n```\n\nOn **Scrubber** it overrides which struct a seek commits to (otherwise the enclosing Video's bind is used).", parameters: [{ label: "stateRef", documentation: "@state.fieldName — the state path to bind to" }] },
+  // Composition
+  slot:               { label: ".slot(name: String)", documentation: "Assigns the element to a named slot of its parent.\n\nOn a **component** with `Children().slot(\"name\")` placeholders, it routes the child into that placeholder.\n\nOn a **Video** child it selects a composition slot — `\"controls\"`, `\"loading\"`, `\"error\"` or `\"poster\"` — overlaid full-bleed on the video surface and shown/hidden by player state. A present slot replaces the built-in for that concern.\n\n```hypen\nVideo(src: \"@{state.url}\") {\n  Row { Scrubber() }\n    .slot(\"controls\")\n  Column { Spinner() }\n    .slot(\"loading\")\n}\n```", parameters: [{ label: "name", documentation: "Slot name. On Video: \"controls\", \"loading\", \"error\", \"poster\"" }] },
+  // Renderer-local intents
+  videoIntent:        { label: ".videoIntent(intent: String)", documentation: "Renderer-local video intent. Tag any element inside a **Video**'s subtree — typically a `controls`-slot button — and the renderer handles the tap itself: no action, no module, no round trip (platforms gate fullscreen behind a user gesture, which a network hop can lose).\n\n**`\"fullscreen\"`** — the only intent today. Toggles fullscreen on the **video container** (the wrapper hosting the surface *and* the composition slots), never on the raw platform video element, so custom controls stay overlaid instead of being replaced by native player chrome. The same tagged element toggles back out. Player state and events are unaffected — fullscreen is presentation only.\n\nInert outside a Video subtree, and inert on renderers that have not implemented it — so it is safe to author everywhere.\n\n```hypen\nVideo(src: \"@{state.url}\") {\n  Row {\n    Scrubber()\n    Button { Icon(@resources.fullscreen) }\n      .videoIntent(\"fullscreen\")\n      .label(\"Toggle fullscreen\")\n  }\n    .slot(\"controls\")\n}\n```", parameters: [{ label: "intent", documentation: "\"fullscreen\" — toggle the enclosing Video's container fullscreen" }] },
   // Tailwind
   tw:                 { label: ".tw(classes: String)", documentation: "Apply Tailwind CSS utility classes.\n\n```hypen\nContainer {\n  Text(\"Styled\")\n}\n  .tw(\"p-4 bg-blue-500 rounded-lg\")\n```", parameters: [{ label: "classes", documentation: "Space-separated Tailwind class names" }] }
 };
@@ -635,7 +665,8 @@ const componentArguments: Record<string, string[]> = {
   Slider: ["min", "max", "step", "value"],
   Route: ["path"],
   Link: ["to"],
-  Video: ["src", "autoplay", "controls", "loop", "muted"],
+  Video: ["src", "playlist", "startIndex", "startPosition", "poster", "controls", "autoplay", "loop", "muted", "preload", "headers", "onPlay", "onPause", "onEnded", "onTrackChange", "onError"],
+  Scrubber: ["onSeek", "disabled"],
   Audio: ["src", "autoplay", "controls", "loop"]
 };
 

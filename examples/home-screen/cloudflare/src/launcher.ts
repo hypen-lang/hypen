@@ -95,6 +95,15 @@ export const APPS: LauncherApp[] = [
     glow: "rgba(147, 51, 234, 0.45)",
     url: "wss://hypen-social.ian-dae.workers.dev/ws",
   },
+  {
+    slug: "hypeflix",
+    name: "Hypeflix",
+    resource: "play-circle",
+    iconColor: "#ffffff",
+    tile: "bg-gradient-to-br from-red-500 to-rose-700",
+    glow: "rgba(225, 29, 72, 0.45)",
+    url: "wss://hypen-hypeflix.ian-dae.workers.dev/ws",
+  },
 ];
 
 const iconSvg = (paths: string) =>
@@ -157,6 +166,9 @@ export const resources: Record<string, string> = {
       stroke("M16 3v18") +
       stroke("M2 9h20") +
       stroke("M2 15h20"),
+  ),
+  "play-circle": iconSvg(
+    stroke("M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20") + stroke("M10 8l6 4-6 4V8"),
   ),
   "image": iconSvg(stroke("M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5") + stroke("M8 11l3 3 2-2 5 5") + stroke("M8.5 8.5h.01")),
   "message-circle": iconSvg(stroke("M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5")),

@@ -66,6 +66,7 @@ export const EXPECTED_A11Y_RULES: readonly string[] = [
   "non-portable-aria",
   "unknown-live-token",
   "unknown-ignore-rule",
+  "video-missing-label",
 ];
 
 /**
@@ -215,6 +216,7 @@ const RULE_SEVERITY: Record<string, DiagnosticSeverity> = {
   "nested-interactive": DiagnosticSeverity.Error,
   "missing-accessible-name": DiagnosticSeverity.Warning,
   "image-missing-alt": DiagnosticSeverity.Warning,
+  "video-missing-label": DiagnosticSeverity.Warning,
   "form-control-missing-label": DiagnosticSeverity.Warning,
   "unknown-role-token": DiagnosticSeverity.Warning,
   "unknown-live-token": DiagnosticSeverity.Warning,

@@ -36,7 +36,16 @@ class ButtonComponent : ComponentHandler {
         val actionValue = if (actionProp != null) ActionValue.parse(actionProp) else null
         val dispatcher = LocalActionDispatcher.current
 
+        // A live `.videoIntent(...)` handles this button's tap: its clickable
+        // is applied innermost by the render pipeline and dispatches this
+        // action itself, so both the intent and the action happen. Adding a
+        // second clickable here would sit inside that one, swallow the tap
+        // and leave the intent dead. Inert intents (outside a Video) change
+        // nothing. See VideoFullscreen.kt.
+        val videoIntentOwnsTap = isVideoIntentActive(element)
+
         val effectiveModifier = if (actionValue != null && dispatcher != null &&
+            !videoIntentOwnsTap &&
             element.props["onClick.0"] == null && element.props["onPress.0"] == null
         ) {
             modifier.clickable {

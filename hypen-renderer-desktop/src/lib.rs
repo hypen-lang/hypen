@@ -30,6 +30,8 @@ pub(crate) mod ime;
 pub mod layout;
 #[cfg(target_os = "macos")]
 pub(crate) mod macos;
+#[cfg(feature = "video")]
+pub mod media;
 pub mod module;
 pub mod paint;
 pub mod painter;
@@ -38,6 +40,9 @@ pub mod style;
 pub mod text;
 pub(crate) mod text_nav;
 pub mod tree;
+/// Video v2 — player states, the `playback` bind struct, and composition
+/// slots. Mirrors `hypen-web/packages/core/src/types.ts`.
+pub mod video_v2;
 pub mod window;
 
 pub use app::DesktopApp;

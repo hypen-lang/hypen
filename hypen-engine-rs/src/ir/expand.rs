@@ -248,6 +248,10 @@ fn process_applicators(
                         let prop_name = match element_type {
                             "Checkbox" | "checkbox" => "checked",
                             "Switch" | "switch" => "on",
+                            // Video binds the playback struct ({playing,
+                            // position, duration, state}), not a scalar —
+                            // see docs/components/video.md §Playback control.
+                            "Video" | "video" => "playback",
                             _ => "value",
                         };
                         props.insert(prop_name.to_string(), Value::Binding(binding));

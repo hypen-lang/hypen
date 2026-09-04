@@ -13,6 +13,19 @@ export interface ComponentHandler {
    * asynchronous MutationObserver to keep renderer-owned child state live.
    */
   onChildrenChanged?(element: HTMLElement): void;
+  /**
+   * Rebuild per-element state for a node the renderer materialized by CLONING
+   * a registered template prototype (`registerTemplate` + `instantiate`, the
+   * plannable-list-row path).
+   *
+   * `cloneNode` copies the DOM and nothing else: WeakMap entries keyed by the
+   * element, event listeners and every other JS-side association belong to
+   * the prototype alone. Handlers that keep such state MUST implement this
+   * and rebuild it from markers their `create()`/`applyProps()` stamped into
+   * the DOM (dataset/attributes, which do survive). Handlers whose state
+   * lives entirely in the DOM need nothing.
+   */
+  adopt?(element: HTMLElement): void;
 }
 
 export class ComponentRegistry {
@@ -63,6 +76,16 @@ export class ComponentRegistry {
   }
 
   /**
+   * Let a component re-register the per-element state a `cloneNode`-built
+   * template instance lost. No-op for handlers without an `adopt` hook.
+   */
+  adopt(element: HTMLElement): void {
+    const type = element.dataset.hypenType;
+    if (!type) return;
+    this.get(type)?.adopt?.(element);
+  }
+
+  /**
    * Register all default Hypen components
    */
   private registerDefaults(): void {
@@ -88,6 +111,7 @@ export class ComponentRegistry {
     const { headingHandler } = require("./heading.js");
     const { switchHandler } = require("./switch.js");
     const { sliderHandler } = require("./slider.js");
+    const { scrubberHandler } = require("./scrubber.js");
     const { spinnerHandler } = require("./spinner.js");
     const { badgeHandler } = require("./badge.js");
     const { avatarHandler } = require("./avatar.js");
@@ -128,6 +152,7 @@ export class ComponentRegistry {
     this.register("heading", headingHandler);
     this.register("switch", switchHandler);
     this.register("slider", sliderHandler);
+    this.register("scrubber", scrubberHandler);
     this.register("spinner", spinnerHandler);
     this.register("badge", badgeHandler);
     this.register("avatar", avatarHandler);

@@ -23,7 +23,14 @@ import type {
 } from "./types.js";
 import { computeLayout, initTaffyLayout } from "./layout.js";
 import { clearTextCache } from "./text.js";
-import { paintNode, registerPainter, clearCharAdvanceCache } from "./paint.js";
+import {
+  paintNode,
+  registerPainter,
+  clearCharAdvanceCache,
+  setVideoActionDispatcher,
+  releaseVideo,
+  pauseVideoSubtree,
+} from "./paint.js";
 import { CanvasEventManager } from "./events.js";
 import { AccessibilityLayer } from "./accessibility.js";
 import { FocusManager } from "./focus.js";
@@ -166,6 +173,11 @@ export class CanvasRenderer implements Renderer {
       // same engine channel as pointer/keyboard events.
       dispatchAction: (name, payload) => this.engine.dispatchAction(name, payload),
     });
+
+    // Video playback events (onPlay/onPause/onEnded/onTrackChange/onError)
+    // dispatch through the same engine channel as pointer/keyboard events.
+    // Late-bound module hook, same pattern as the selection/edit hooks.
+    setVideoActionDispatcher((name, payload) => this.engine.dispatchAction(name, payload));
 
     // Initialize subsystems
     this.eventManager = new CanvasEventManager(canvas, engine);
@@ -718,6 +730,11 @@ export class CanvasRenderer implements Renderer {
     this.textEditor.endIfWithin(node);
     this.focusManager.clearIfWithin(node);
 
+    // Off-screen (cached-route) videos must stop playing audio, but their
+    // offscreen elements stay alive so re-attach resumes from the same
+    // position — matching the Router cache's keep-alive semantics.
+    pauseVideoSubtree(node);
+
     // Mirror keeps the element (and subtree ids) alive for re-attach.
     this.accessibilityLayer.detachNode(id);
 
@@ -820,6 +837,9 @@ export class CanvasRenderer implements Renderer {
     // must be swept here or the id→node entries leak for the renderer's
     // lifetime. Mirrors the DOM renderer's sweepDetachedDescendants.
     this.nodes.delete(id);
+    // Release the offscreen media element behind a removed Video node
+    // (pause + drop src + revoke blob URLs) — see paint.ts videoCache.
+    releaseVideo(id);
     const stack: VirtualNode[] = [...node.children];
     while (stack.length > 0) {
       const desc = stack.pop()!;
@@ -830,6 +850,7 @@ export class CanvasRenderer implements Renderer {
       if (this.nodes.get(desc.id) === desc) {
         this.animator.forget(desc.id);
         this.nodes.delete(desc.id);
+        releaseVideo(desc.id);
       }
     }
   }
@@ -1079,6 +1100,7 @@ export class CanvasRenderer implements Renderer {
   clear(): void {
     this.animator.reset();
     this.textEditor.endEditing();
+    this.releaseAllVideos();
     this.rootNode = null;
     this.nodes.clear();
     this.eventManager.setRootNode(null);
@@ -1112,7 +1134,21 @@ export class CanvasRenderer implements Renderer {
   /**
    * Destroy renderer
    */
+  /**
+   * Release the offscreen video elements behind THIS renderer's nodes.
+   * Scoped to `this.nodes` (not `clearVideoCache`) because the paint-level
+   * video cache is module-global and another renderer instance may own
+   * entries in it.
+   */
+  private releaseAllVideos(): void {
+    for (const id of this.nodes.keys()) {
+      releaseVideo(id);
+    }
+  }
+
   destroy(): void {
+    this.releaseAllVideos();
+    setVideoActionDispatcher(null);
     this.animator.destroy();
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);

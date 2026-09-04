@@ -217,6 +217,10 @@ impl DesktopApp {
         // Background image-fetch worker uses the same proxy to wake
         // the renderer when an HTTP avatar finishes decoding.
         crate::paint::image::set_waker(proxy.clone());
+        // Feature `video`: playback pipelines wake the loop the same
+        // way — once per decoded frame and per EOS / error event.
+        #[cfg(feature = "video")]
+        crate::media::set_waker(proxy.clone());
         let mut app = WindowApp::new(
             self.title.clone(),
             self.size,

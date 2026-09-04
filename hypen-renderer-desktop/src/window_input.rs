@@ -311,17 +311,43 @@ impl App {
     }
 
     pub(super) fn dispatch_focused(&mut self) -> bool {
+        // A focused `.videoIntent(...)` control performs its intent on
+        // Enter / Space — keyboard parity with the pointer path (and the
+        // reason such a node is focusable with no `.onClick` at all).
+        let intent = self
+            .focused
+            .clone()
+            .filter(|id| !self.exit_excluded(id))
+            .and_then(|id| self.layout.as_ref()?.item_by_id(&id)?.video_intent);
+        let intent_handled = match intent {
+            Some(i) => {
+                self.perform_video_intent(i);
+                true
+            }
+            None => false,
+        };
         let resolved = self.layout.as_ref().and_then(|layout| {
             focused_dispatch(layout, self.focused.as_deref(), &|id| {
                 self.exit_excluded(id)
             })
         });
         if let Some((action, payload)) = resolved {
+            // Same rule as the click path: a derived `onPlay` is the
+            // built-in's own event and must not fire when a
+            // presentation-only intent consumed the activation.
+            let derived_play = payload
+                .as_ref()
+                .and_then(|p| p.get("type"))
+                .and_then(|v| v.as_str())
+                == Some("play");
+            if intent_handled && derived_play {
+                return true;
+            }
             log::debug!("dispatch (kbd): {action} payload={payload:?}");
             self.module.dispatch_action(&action, payload);
             true
         } else {
-            false
+            intent_handled
         }
     }
 
@@ -370,6 +396,24 @@ impl App {
             self.module
                 .dispatch_action(&binding.action, binding.payload.clone());
             return true;
+        }
+
+        // Video v2: Left / Right on a focused `Scrubber` seek by ±5 s
+        // with an immediate commit (no preview phase) — the keyboard
+        // analogue of a native range input's arrow step. Checked before
+        // the editing-focused arrow handling below; the two are mutually
+        // exclusive (a Scrubber is never a text input).
+        if !editing_focused {
+            let step = match ev.logical_key.as_ref() {
+                Key::Named(NamedKey::ArrowLeft) => Some(-crate::window::window_video::SCRUB_KEY_STEP),
+                Key::Named(NamedKey::ArrowRight) => Some(crate::window::window_video::SCRUB_KEY_STEP),
+                _ => None,
+            };
+            if let Some(step) = step {
+                if self.video_scrub_key(step) {
+                    return true;
+                }
+            }
         }
 
         match ev.logical_key.as_ref() {
@@ -505,6 +549,15 @@ impl App {
                 self.damage.add_region(r);
             }
         }
+        // Resolve the dispatch inside the layout borrow, act on it
+        // after the borrow ends — the video playback toggle (feature
+        // `video`) needs `&mut self`.
+        let mut resolved: Option<(Option<String>, Option<serde_json::Value>)> = None;
+        #[cfg(feature = "video")]
+        let mut video_target: Option<String> = None;
+        // Renderer-local `.videoIntent(...)` on the released item (only
+        // set for a node inside a Video subtree — layout resolves that).
+        let mut intent: Option<crate::video_v2::VideoIntent> = None;
         if let Some(layout) = self.layout.as_ref() {
             // Exit-animating subtrees are excluded: their ids are
             // engine-side dead, so a click during the exit playback
@@ -525,11 +578,55 @@ impl App {
                     .map(|id| id == item.node_id)
                     .unwrap_or(false);
                 if same_target {
-                    if let Some(action) = item.action.clone() {
-                        let payload = item.action_payload.clone();
-                        log::debug!("dispatch action: {action} payload={payload:?}");
-                        self.module.dispatch_action(&action, payload);
+                    resolved = Some((item.action.clone(), item.action_payload.clone()));
+                    intent = item.video_intent;
+                    #[cfg(feature = "video")]
+                    if matches!(item.kind, crate::layout::ItemKind::Video { .. }) {
+                        video_target = Some(item.node_id.clone());
                     }
+                }
+            }
+        }
+        if let Some((action, payload)) = resolved {
+            // Renderer-local intent first: fullscreen is performed HERE,
+            // with no dispatch and no module round trip. It is
+            // presentation only, so it also stands in for the built-in
+            // tap-to-toggle on that tap — a fullscreen button must not
+            // pause the player on the way out.
+            let intent_handled = match intent {
+                Some(i) => {
+                    self.perform_video_intent(i);
+                    true
+                }
+                None => false,
+            };
+            // Feature `video`: a click on a Video surface toggles
+            // playback and dispatches the contract play/pause events
+            // itself (`App::handle_video_click`). A *derived* `onPlay`
+            // item action (payload `type == "play"`, resolved by
+            // `resolve_video_play_action`) must then not double-fire;
+            // an explicit `.onClick` still dispatches alongside the
+            // toggle.
+            #[cfg(feature = "video")]
+            let toggled = match video_target.as_deref() {
+                Some(id) if !intent_handled => self.handle_video_click(id),
+                _ => false,
+            };
+            #[cfg(not(feature = "video"))]
+            let toggled = false;
+            // The derived `onPlay` action is the built-in's own event:
+            // whichever built-in consumed the tap (playback toggle, or a
+            // presentation-only intent that replaced it) suppresses it.
+            let suppress = (toggled || intent_handled)
+                && payload
+                    .as_ref()
+                    .and_then(|p| p.get("type"))
+                    .and_then(|v| v.as_str())
+                    == Some("play");
+            if !suppress {
+                if let Some(action) = action {
+                    log::debug!("dispatch action: {action} payload={payload:?}");
+                    self.module.dispatch_action(&action, payload);
                 }
             }
         }

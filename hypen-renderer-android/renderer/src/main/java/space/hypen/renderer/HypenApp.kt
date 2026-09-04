@@ -21,6 +21,7 @@ import space.hypen.renderer.components.LocalColumnScope
 import space.hypen.renderer.components.LocalParentAllowsHorizontalExpansion
 import space.hypen.renderer.components.LocalRowScope
 import space.hypen.renderer.components.LocalStretchCrossAxis
+import space.hypen.renderer.components.videoIntentClickable
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.navigation.BackNavigationDispatcher
 import space.hypen.renderer.navigation.NavigationOptions
@@ -316,6 +317,14 @@ internal fun HypenElement(
     val animation = rememberHypenAnimation(element, renderer.getAnimationCoordinator())
     ClearFocusOnExit(animation.exiting)
     finalModifier = animation.modifier.then(finalModifier)
+
+    // Renderer-local video intents (`.videoIntent("fullscreen")`): handled
+    // here rather than by an applicator, because the intent needs the
+    // enclosing Video's controller off the composition (applicators run
+    // outside composition). Innermost in the chain, so the intent takes the
+    // tap; a no-op for every node that does not carry the prop or does not
+    // sit inside a Video subtree. See components/VideoFullscreen.kt.
+    finalModifier = finalModifier.videoIntentClickable(element)
 
     // Render the component
     handler.Render(

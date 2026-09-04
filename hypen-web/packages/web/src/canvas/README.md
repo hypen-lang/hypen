@@ -219,6 +219,18 @@ All Hypen components work with the canvas renderer:
 
 ### Media Components
 - **Image**: Image rendering (basic support)
+- **Video**: Inline playback via an offscreen `<video>` element drawn to the
+  canvas each frame (see `docs/components/video.md` for the cross-platform
+  contract). Supports `src`/`playlist` (auto-advance + `loop` wrap),
+  `poster`, `autoplay` (with muted fallback), `muted`, `loop`, `preload`,
+  `objectFit` (`contain` default, `cover`, `fill`), `headers`
+  (fetch → Blob fallback), and the `onPlay`/`onPause`/`onEnded`/
+  `onTrackChange`/`onError` action props. Controls are the canvas common
+  denominator: **tap toggles play/pause** when `controls` is set — there is
+  no scrubber/volume UI. Repaints are driven by a rAF loop that runs only
+  while a video is actually playing. Note: the offscreen elements are keyed
+  by node id in a module-level cache, so two `CanvasRenderer` instances on
+  the same page should not share node ids.
 
 ## Configuration Options
 
@@ -283,6 +295,8 @@ open examples/canvas-counter.html
 - ❌ No shadows
 - ❌ No transforms (rotate/scale/skew)
 - ❌ Limited image support
+- ⚠️ Video controls are tap-to-toggle only (no scrubber, volume, or
+  fullscreen UI); HLS only where the browser decodes it natively (Safari)
 
 ### Future Improvements
 All of these are planned for future releases!

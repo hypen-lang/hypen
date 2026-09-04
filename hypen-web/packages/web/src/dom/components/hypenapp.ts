@@ -39,6 +39,7 @@ import { RemoteEngine } from "@hypen-space/core/remote/client";
 import type { Patch } from "@hypen-space/core/types";
 import { getElementDisposables } from "@hypen-space/core/disposable";
 import { frameworkLoggers } from "@hypen-space/core/logger";
+import { slotChildren, setVisible } from "../slots.js";
 import type { DOMRenderer } from "../renderer.js";
 
 const log = frameworkLoggers.remote;
@@ -58,35 +59,6 @@ interface HypenAppInstance {
 
 // Store active HypenApp instances for cleanup
 const activeInstances = new WeakMap<HTMLElement, HypenAppInstance>();
-
-/** Direct children of the container tagged with `.slot(name)`. */
-function slotChildren(element: HTMLElement, name: string): HTMLElement[] {
-  const out: HTMLElement[] = [];
-  for (const child of Array.from(element.children)) {
-    if ((child as HTMLElement).dataset?.hypenSlot === name) {
-      out.push(child as HTMLElement);
-    }
-  }
-  return out;
-}
-
-/**
- * Hide/show an element while preserving its inline display value —
- * applicators set `display: flex` etc. inline, so a plain `display = ""`
- * on re-show would lose the element's layout.
- */
-function setVisible(el: HTMLElement, visible: boolean): void {
-  const hidden = el.dataset.hypenSlotHidden === "true";
-  if (visible && hidden) {
-    el.style.display = el.dataset.hypenPrevDisplay ?? "";
-    delete el.dataset.hypenPrevDisplay;
-    delete el.dataset.hypenSlotHidden;
-  } else if (!visible && !hidden) {
-    el.dataset.hypenPrevDisplay = el.style.display;
-    el.dataset.hypenSlotHidden = "true";
-    el.style.display = "none";
-  }
-}
 
 /**
  * Connection-state → visibility controller for one HypenApp container.

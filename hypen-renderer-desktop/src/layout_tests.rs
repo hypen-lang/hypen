@@ -2247,6 +2247,7 @@ fn actionable_clip_item(
         action_payload: None,
         hover_action: None,
         hover_payload: None,
+        video_intent: None,
         background: None,
         hover: HoverStyle::default(),
         border: crate::style::Border::default(),
@@ -3117,4 +3118,1380 @@ fn max_width_child_stays_centred_as_the_window_resizes() {
             shell.h
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Video (media surface) — sizing, item emission, click wiring.
+//
+// Desktop has no inline media decode (contract:
+// hypen-web/docs/components/video.md). Layout must size a Video like an
+// Image but with a 16:9 default aspect (poster natural aspect when the
+// poster is already decoded), and emission must produce ItemKind::Video
+// with the poster/src split plus onPlay click wiring.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn video_explicit_width_and_height() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[
+            ("width", json!(320)),
+            ("height", json!(180)),
+            ("src", json!("https://cdn/movie.mp4")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "vid");
+    assert!(
+        (item.rect.w - 320.0).abs() < 0.5 && (item.rect.h - 180.0).abs() < 0.5,
+        "explicit 320x180 expected, got {}x{}",
+        item.rect.w,
+        item.rect.h,
+    );
+    match &item.kind {
+        ItemKind::Video { src, poster, .. } => {
+            assert_eq!(src.as_deref(), Some("https://cdn/movie.mp4"));
+            assert_eq!(poster.as_deref(), None);
+        }
+        other => panic!("expected ItemKind::Video, got {other:?}"),
+    }
+}
+
+#[test]
+fn video_width_only_defaults_to_16_9_height() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("vid", "Video", &[("width", json!(320))]));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "vid");
+    assert!(
+        (item.rect.h - 180.0).abs() < 1.0,
+        "width 320 with no height should derive 180 via 16:9, got {}",
+        item.rect.h,
+    );
+}
+
+#[test]
+fn video_height_only_defaults_to_16_9_width() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("vid", "Video", &[("height", json!(90))]));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "vid");
+    assert!(
+        (item.rect.w - 160.0).abs() < 1.0,
+        "height 90 with no width should derive 160 via 16:9, got {}",
+        item.rect.w,
+    );
+}
+
+#[test]
+fn video_aspect_ratio_prop_overrides_default() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("width", json!(300)), ("aspectRatio", json!("4 / 3"))],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "vid");
+    assert!(
+        (item.rect.h - 225.0).abs() < 1.0,
+        "300 wide at 4:3 should be 225 tall, got {}",
+        item.rect.h,
+    );
+}
+
+#[test]
+fn video_unconstrained_gets_default_16_9_box() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("vid", "Video", &[]));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "vid");
+    assert!(
+        (item.rect.w - DEFAULT_VIDEO_WIDTH_PX).abs() < 0.5,
+        "unconstrained video should take the default width, got {}",
+        item.rect.w,
+    );
+    let expected_h = DEFAULT_VIDEO_WIDTH_PX / DEFAULT_VIDEO_ASPECT;
+    assert!(
+        (item.rect.h - expected_h).abs() < 1.0,
+        "unconstrained video height should follow 16:9 ({expected_h}), got {}",
+        item.rect.h,
+    );
+}
+
+#[test]
+fn video_poster_natural_aspect_wins_over_16_9_once_loaded() {
+    // Seed a 100x50 (2:1) decoded poster so the layout's natural-aspect
+    // probe finds it synchronously.
+    let poster = "test://video-poster-2to1";
+    let pm = tiny_skia::Pixmap::new(100, 50).expect("poster pixmap");
+    crate::paint::image::test_seed_decoded(poster, std::sync::Arc::new(pm));
+
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("width", json!(200)), ("poster", json!(poster))],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "vid");
+    assert!(
+        (item.rect.h - 100.0).abs() < 1.0,
+        "200-wide video with a loaded 2:1 poster should be 100 tall, got {}",
+        item.rect.h,
+    );
+}
+
+#[test]
+fn video_emits_poster_and_src() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[
+            ("src", json!("https://cdn/clip.mp4")),
+            ("poster", json!("https://cdn/frame.jpg")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    match &find_item(&pass, "vid").kind {
+        ItemKind::Video { src, poster, .. } => {
+            assert_eq!(src.as_deref(), Some("https://cdn/clip.mp4"));
+            assert_eq!(poster.as_deref(), Some("https://cdn/frame.jpg"));
+        }
+        other => panic!("expected ItemKind::Video, got {other:?}"),
+    }
+}
+
+#[test]
+fn video_empty_poster_collapses_to_none() {
+    // A record with no poster serialises to `""` — that must be "no
+    // poster", not a queued load against no filename.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("vid", "Video", &[("poster", json!(""))]));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    match &find_item(&pass, "vid").kind {
+        ItemKind::Video { poster, .. } => assert_eq!(poster.as_deref(), None),
+        other => panic!("expected ItemKind::Video, got {other:?}"),
+    }
+}
+
+#[test]
+fn video_onplay_wires_click_action_with_contract_payload() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[
+            ("src", json!("https://cdn/clip.mp4")),
+            ("onPlay.0", json!("@actions.startPlayback")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "vid");
+    assert_eq!(item.action.as_deref(), Some("startPlayback"));
+    let payload = item.action_payload.as_ref().expect("play payload");
+    assert_eq!(payload["type"], json!("play"));
+    assert_eq!(payload["src"], json!("https://cdn/clip.mp4"));
+    assert_eq!(payload["index"], json!(0));
+    // Clickable → participates in hit-testing like any actionable.
+    let hit = pass
+        .hit(item.rect.x + 1.0, item.rect.y + 1.0)
+        .expect("video with onPlay must be hittable");
+    assert_eq!(hit.node_id, "vid");
+}
+
+#[test]
+fn video_playlist_resolves_start_index_track() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[
+            (
+                "playlist",
+                json!(["https://cdn/ep1.mp4", "https://cdn/ep2.mp4", "https://cdn/ep3.mp4"]),
+            ),
+            ("startIndex", json!(1)),
+            ("onPlay.0", json!("@actions.play")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "vid");
+    match &item.kind {
+        ItemKind::Video { src, .. } => {
+            assert_eq!(src.as_deref(), Some("https://cdn/ep2.mp4"));
+        }
+        other => panic!("expected ItemKind::Video, got {other:?}"),
+    }
+    let payload = item.action_payload.as_ref().expect("play payload");
+    assert_eq!(payload["index"], json!(1));
+    assert_eq!(payload["src"], json!("https://cdn/ep2.mp4"));
+}
+
+#[test]
+fn video_without_events_is_not_actionable() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("src", json!("https://cdn/clip.mp4")), ("controls", json!(true))],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "vid");
+    assert!(
+        item.action.is_none(),
+        "no onPlay / onClick wired — the surface must stay inert, got {:?}",
+        item.action,
+    );
+}
+
+#[test]
+fn video_explicit_onclick_wins_over_onplay() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[
+            ("src", json!("https://cdn/clip.mp4")),
+            ("onClick.0", json!("@actions.openDetail")),
+            ("onPlay.0", json!("@actions.play")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    assert_eq!(find_item(&pass, "vid").action.as_deref(), Some("openDetail"));
+}
+
+/// Regression probe for the live Hypeflix repro: a `.onClick`-applicator
+/// Button (engine lowers it to `onClick.0`) inside a tall scrollable
+/// Column must be hittable at its PAINTED position after page scroll —
+/// `compute_with_scroll` items already carry scroll-adjusted rects, so
+/// `hit()` at the on-screen point must find the action.
+#[test]
+fn onclick_button_hits_at_painted_position_after_scroll() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[("scrollable.0", json!(true))]));
+    tree.apply(&insert_patch("root", "col"));
+    // Tall spacer pushes the button below the fold.
+    tree.apply(&create_patch(
+        "spacer",
+        "Container",
+        &[("height.0", json!(1600.0)), ("minHeight.0", json!(1600.0))],
+    ));
+    tree.apply(&insert_patch("col", "spacer"));
+    tree.apply(&create_patch(
+        "play",
+        "Button",
+        &[("onClick.0", json!("@actions.playFeatured"))],
+    ));
+    tree.apply(&insert_patch("col", "play"));
+    add_text(&mut tree, "play", "label", "Play");
+
+    let mut text = TextEngine::new();
+
+    // Unscrolled: button sits below the 720px viewport — not hittable there.
+    let unscrolled = LayoutPass::compute_with_scroll(&tree, &mut text, (960, 720), 1.0, 0.0);
+    let item = find_item(&unscrolled, "play");
+    assert_eq!(item.action.as_deref(), Some("playFeatured"));
+    assert!(
+        item.rect.y >= 720.0,
+        "expected button below the fold, got {:?}",
+        item.rect
+    );
+
+    // Scrolled down 1000px. The window routes wheel-over-a-scrollable to
+    // PER-CONTAINER scroll (window.rs MouseWheel → self.scrollables), so
+    // exercise that path: the item rect must shift up accordingly and
+    // hit() at the painted center must resolve the action.
+    let mut scrolls = HashMap::new();
+    scrolls.insert("col".to_string(), 1000.0_f32);
+    let scrolled =
+        LayoutPass::compute_with_scrolls(&tree, &mut text, (960, 720), 1.0, 0.0, &scrolls);
+    let item = find_item(&scrolled, "play");
+    let (cx, cy) = (
+        item.rect.x + item.rect.w / 2.0,
+        item.rect.y + item.rect.h / 2.0,
+    );
+    assert!(
+        cy < 720.0,
+        "expected scrolled button on screen, got {:?}",
+        item.rect
+    );
+    for it in scrolled.actionables() {
+        eprintln!(
+            "actionable {} rect={:?} clip_to={:?} identity={}",
+            it.node_id,
+            it.rect,
+            it.clip_to,
+            it.transform.is_identity()
+        );
+    }
+    let hit = scrolled
+        .hit(cx, cy)
+        .unwrap_or_else(|| panic!("no actionable hit at painted center ({cx},{cy})"));
+    assert_eq!(hit.node_id, "play");
+    assert_eq!(hit.action.as_deref(), Some("playFeatured"));
+}
+
+/// Replay the REAL Hypeflix browse patch stream (captured from the live
+/// worker over the remote protocol) and verify the featured "Play"
+/// button is actually hittable after wheel-scrolling it into view —
+/// mirroring exactly what the window does: topmost scrollable under the
+/// cursor takes a per-container offset, then the click hit-tests at the
+/// button's painted position.
+#[test]
+fn hypeflix_browse_play_button_is_hittable_after_wheel_scroll() {
+    let json = include_str!("../tests/fixtures/hypeflix-browse-patches.json");
+    let patches: Vec<Patch> = serde_json::from_str(json).expect("fixture deserializes");
+    let mut tree = Tree::new();
+    for p in &patches {
+        tree.apply(p);
+    }
+
+    let mut text = TextEngine::new();
+    let unscrolled = LayoutPass::compute(&tree, &mut text, (960, 720), 1.0);
+
+    // The featured Play button: Button carrying onClick.0 == "@playFeatured".
+    let play = unscrolled
+        .items
+        .iter()
+        .find(|it| it.action.as_deref() == Some("playFeatured"))
+        .expect("play button resolves an action in the layout");
+    let play_id = play.node_id.clone();
+
+    // Route the wheel exactly like window.rs: topmost scrollable under a
+    // mid-viewport cursor.
+    let target = unscrolled
+        .hit_scrollable(350.0, 400.0)
+        .expect("a scrollable container under the cursor");
+    let container = target.node_id.clone();
+    let meta = target.scrollable.expect("scroll meta");
+    assert!(
+        meta.content_h > 720.0,
+        "browse content should overflow the viewport, got {}",
+        meta.content_h
+    );
+
+    // Scroll just enough to bring the button up near the top of the
+    // viewport. Derived from its unscrolled position rather than a magic
+    // constant so the assertion tracks real layout changes above it.
+    let scroll_by = (play.rect.y - 120.0).clamp(0.0, meta.content_h - 720.0);
+    let mut scrolls = HashMap::new();
+    scrolls.insert(container, scroll_by);
+    let scrolled =
+        LayoutPass::compute_with_scrolls(&tree, &mut text, (960, 720), 1.0, 0.0, &scrolls);
+    let item = scrolled
+        .items
+        .iter()
+        .find(|it| it.node_id == play_id)
+        .expect("play button still emitted after scroll");
+    let (cx, cy) = (
+        item.rect.x + item.rect.w / 2.0,
+        item.rect.y + item.rect.h / 2.0,
+    );
+    assert!(
+        cy > 0.0 && cy < 720.0,
+        "expected the scrolled play button on screen, got {:?}",
+        item.rect
+    );
+    let hit = scrolled.hit(cx, cy).unwrap_or_else(|| {
+        panic!(
+            "no actionable hit at play button painted center ({cx},{cy}); item clip_to={:?}",
+            item.clip_to
+        )
+    });
+    assert_eq!(hit.node_id, play_id, "hit should resolve the play button");
+}
+
+// ---------------------------------------------------------------------------
+// Video v2: composition slots + Scrubber
+// (docs/components/video.md §"Playback control & composition slots")
+// ---------------------------------------------------------------------------
+
+use crate::video_v2::{
+    clear_test_states, set_test_state, SlotPresence, VideoPlayerState, VideoSlotName,
+};
+
+const V2_STATES: [VideoPlayerState; 6] = [
+    VideoPlayerState::Idle,
+    VideoPlayerState::Loading,
+    VideoPlayerState::Playing,
+    VideoPlayerState::Paused,
+    VideoPlayerState::Ended,
+    VideoPlayerState::Error,
+];
+
+/// A 320x180 Video with one child per slot (plus one untagged child),
+/// all under a fixed-size root so the player rect is deterministic.
+fn slotted_video_tree() -> Tree {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[
+            ("src", json!("https://cdn/a.mp4")),
+            ("width", json!(320)),
+            ("height", json!(180)),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    for (id, slot) in [
+        ("ctl", "controls"),
+        ("load", "loading"),
+        ("err", "error"),
+        ("post", "poster"),
+    ] {
+        tree.apply(&create_patch(id, "Column", &[("slot.0", json!(slot))]));
+        tree.apply(&insert_patch("vid", id));
+    }
+    // Untagged children are invalid per the spec.
+    tree.apply(&create_patch("stray", "Text", &[("0", json!("nope"))]));
+    tree.apply(&insert_patch("vid", "stray"));
+    tree
+}
+
+fn emitted_ids(pass: &LayoutPass) -> Vec<String> {
+    pass.items.iter().map(|it| it.node_id.clone()).collect()
+}
+
+#[test]
+fn slot_subtrees_lay_out_full_bleed_over_the_video_rect() {
+    clear_test_states();
+    // `ended` co-shows poster + controls, so both overlays can be
+    // measured in one pass (`idle` co-shows the same pair since the
+    // controls-in-idle amendment).
+    let tree = slotted_video_tree();
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Ended); // poster + controls
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let video = find_item(&pass, "vid").rect;
+    assert_eq!((video.w, video.h), (320.0, 180.0));
+    for slot_id in ["post", "ctl"] {
+        let r = find_item(&pass, slot_id).rect;
+        assert_eq!(
+            (r.x, r.y, r.w, r.h),
+            (video.x, video.y, video.w, video.h),
+            "slot `{slot_id}` must be a full-bleed overlay of the player rect"
+        );
+    }
+    clear_test_states();
+}
+
+#[test]
+fn slot_overlays_do_not_change_the_player_geometry() {
+    clear_test_states();
+    let mut bare = Tree::new();
+    bare.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("src", json!("https://cdn/a.mp4"))],
+    ));
+    bare.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let without = LayoutPass::compute(&bare, &mut text, (800, 600), 1.0)
+        .item_by_id("vid")
+        .expect("video item")
+        .rect;
+
+    let mut slotted = Tree::new();
+    slotted.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("src", json!("https://cdn/a.mp4"))],
+    ));
+    slotted.apply(&insert_patch("root", "vid"));
+    slotted.apply(&create_patch("post", "Column", &[("slot.0", json!("poster"))]));
+    slotted.apply(&insert_patch("vid", "post"));
+    add_text(&mut slotted, "post", "cap", "A very long caption indeed");
+    let with = LayoutPass::compute(&slotted, &mut text, (800, 600), 1.0)
+        .item_by_id("vid")
+        .expect("video item")
+        .rect;
+
+    assert_eq!(
+        (without.w, without.h),
+        (with.w, with.h),
+        "absolute slot overlays must not feed back into the player's size"
+    );
+    clear_test_states();
+}
+
+#[test]
+fn slot_emission_follows_the_visibility_table_in_every_state() {
+    clear_test_states();
+    let tree = slotted_video_tree();
+    let mut text = TextEngine::new();
+    for state in V2_STATES {
+        set_test_state("vid", state);
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let ids = emitted_ids(&pass);
+        for (id, slot) in [
+            ("ctl", VideoSlotName::Controls),
+            ("load", VideoSlotName::Loading),
+            ("err", VideoSlotName::Error),
+            ("post", VideoSlotName::Poster),
+        ] {
+            let want = crate::video_v2::slot_visible(slot, state);
+            assert_eq!(
+                ids.iter().any(|i| i == id),
+                want,
+                "slot `{}` in state `{}`",
+                slot.as_str(),
+                state.as_str()
+            );
+        }
+        assert!(
+            ids.iter().any(|i| i == "vid"),
+            "the player itself is always emitted"
+        );
+        assert!(
+            !ids.iter().any(|i| i == "stray"),
+            "untagged Video children are invalid and never emit"
+        );
+    }
+    clear_test_states();
+}
+
+#[test]
+fn hidden_slots_are_not_hit_testable_but_visible_ones_are() {
+    clear_test_states();
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("width", json!(320)), ("height", json!(180))],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    tree.apply(&create_patch(
+        "ctl",
+        "Column",
+        &[("slot.0", json!("controls"))],
+    ));
+    tree.apply(&insert_patch("vid", "ctl"));
+    tree.apply(&create_patch(
+        "btn",
+        "Button",
+        &[("action", json!("@actions.togglePlay"))],
+    ));
+    tree.apply(&insert_patch("ctl", "btn"));
+
+    let mut text = TextEngine::new();
+    // `playing` shows controls: the button inside is hittable.
+    set_test_state("vid", VideoPlayerState::Playing);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn").rect;
+    let hit = pass.hit(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5);
+    assert_eq!(
+        hit.map(|it| it.node_id.as_str()),
+        Some("btn"),
+        "a visible controls slot takes clicks"
+    );
+
+    // `error` hides controls: the same point resolves nothing.
+    set_test_state("vid", VideoPlayerState::Error);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    assert!(pass.item_by_id("btn").is_none());
+    assert!(
+        pass.hit(btn.x + btn.w * 0.5, btn.y + btn.h * 0.5).is_none(),
+        "a hidden slot must not swallow clicks"
+    );
+
+    // `idle` shows controls (amended table): the slot's own buttons are
+    // how a never-played source starts first play, so they MUST take
+    // clicks — the built-in tap-to-toggle stands down when a `controls`
+    // slot is present, and these buttons replace it.
+    set_test_state("vid", VideoPlayerState::Idle);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let idle_btn = find_item(&pass, "btn").rect;
+    let hit = pass.hit(idle_btn.x + idle_btn.w * 0.5, idle_btn.y + idle_btn.h * 0.5);
+    assert_eq!(
+        hit.map(|it| it.node_id.as_str()),
+        Some("btn"),
+        "a controls-slot button must be hittable in idle (it starts first play)"
+    );
+    clear_test_states();
+}
+
+#[test]
+fn co_visible_slots_stack_in_normative_paint_order_not_declaration_order() {
+    clear_test_states();
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("width", json!(320)), ("height", json!(180))],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    // Declare controls BEFORE poster: paint order must still be
+    // poster → loading → controls → error, bottom-to-top.
+    tree.apply(&create_patch(
+        "ctl",
+        "Column",
+        &[("slot.0", json!("controls"))],
+    ));
+    tree.apply(&insert_patch("vid", "ctl"));
+    tree.apply(&create_patch("post", "Column", &[("slot.0", json!("poster"))]));
+    tree.apply(&insert_patch("vid", "post"));
+
+    let mut text = TextEngine::new();
+    // `idle` co-shows poster + controls (the amended table's new pair).
+    set_test_state("vid", VideoPlayerState::Idle);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let ids = emitted_ids(&pass);
+    let post_at = ids.iter().position(|i| i == "post").expect("poster emitted");
+    let ctl_at = ids.iter().position(|i| i == "ctl").expect("controls emitted");
+    assert!(
+        post_at < ctl_at,
+        "controls must paint ABOVE the poster in idle regardless of declaration order"
+    );
+    // Hit-testing walks reverse paint order, so the controls overlay
+    // also wins the pointer over the poster underneath it.
+    let ctl = find_item(&pass, "ctl").rect;
+    let hit = pass.hit(ctl.x + ctl.w * 0.5, ctl.y + ctl.h * 0.5);
+    assert_ne!(
+        hit.map(|it| it.node_id.as_str()),
+        Some("post"),
+        "the poster must not swallow clicks aimed at the controls overlay"
+    );
+    clear_test_states();
+}
+
+#[test]
+fn hiding_a_slot_keeps_its_subtree_in_the_renderer_tree() {
+    clear_test_states();
+    let tree = slotted_video_tree();
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Playing); // controls only
+    let _ = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    // Show/hide, not mount/unmount: every slot node still exists, so its
+    // props, patches and per-node renderer state survive the transition.
+    for id in ["ctl", "load", "err", "post"] {
+        assert!(tree.get(id).is_some(), "slot node `{id}` must stay alive");
+    }
+    clear_test_states();
+}
+
+#[test]
+fn video_item_carries_its_state_and_slot_presence() {
+    clear_test_states();
+    let tree = slotted_video_tree();
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Paused);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    match &find_item(&pass, "vid").kind {
+        ItemKind::Video { state, slots, .. } => {
+            assert_eq!(*state, VideoPlayerState::Paused);
+            assert_eq!(
+                *slots,
+                SlotPresence {
+                    controls: true,
+                    loading: true,
+                    error: true,
+                    poster: true
+                }
+            );
+            // Every slot declared → no built-in chrome anywhere.
+            assert!(!slots.draws_builtin_glyph(*state));
+        }
+        other => panic!("expected a Video item, got {other:?}"),
+    }
+    clear_test_states();
+}
+
+#[test]
+fn video_without_slots_keeps_the_shipped_builtins() {
+    clear_test_states();
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("src", json!("https://cdn/a.mp4"))],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    match &find_item(&pass, "vid").kind {
+        ItemKind::Video { slots, state, .. } => {
+            assert!(!slots.any(), "no slots declared");
+            assert!(slots.draws_builtin_glyph(*state));
+        }
+        other => panic!("expected a Video item, got {other:?}"),
+    }
+    clear_test_states();
+}
+
+// --- Scrubber -------------------------------------------------------------
+
+fn controls_scrubber_tree() -> Tree {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("width", json!(320)), ("height", json!(180))],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    tree.apply(&create_patch(
+        "ctl",
+        "Row",
+        &[("slot.0", json!("controls"))],
+    ));
+    tree.apply(&insert_patch("vid", "ctl"));
+    tree.apply(&create_patch("sc", "Scrubber", &[]));
+    tree.apply(&insert_patch("ctl", "sc"));
+    tree
+}
+
+#[test]
+fn scrubber_inside_a_video_wires_to_the_enclosing_player() {
+    clear_test_states();
+    let tree = controls_scrubber_tree();
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Playing);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    match &find_item(&pass, "sc").kind {
+        ItemKind::Scrubber { video_id, preview } => {
+            assert_eq!(video_id.as_deref(), Some("vid"));
+            assert_eq!(*preview, None);
+        }
+        other => panic!("expected a Scrubber item, got {other:?}"),
+    }
+    clear_test_states();
+}
+
+#[test]
+fn scrubber_outside_a_video_is_inert() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("sc", "Scrubber", &[]));
+    tree.apply(&insert_patch("root", "sc"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "sc");
+    match &item.kind {
+        ItemKind::Scrubber { video_id, .. } => assert_eq!(*video_id, None),
+        other => panic!("expected a Scrubber item, got {other:?}"),
+    }
+    // "Outside a Video, Scrubber renders inert" — disabled, not
+    // focusable, no commits (matches the DOM reference renderer).
+    assert!(
+        !item.is_focusable(),
+        "a loose Scrubber must not take Tab focus"
+    );
+}
+
+#[test]
+fn scrubber_is_focusable_and_dispatches_no_click_action() {
+    clear_test_states();
+    let tree = controls_scrubber_tree();
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Playing);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "sc");
+    assert!(item.is_focusable(), "Left/Right seeking needs focus");
+    assert!(
+        item.action.is_none(),
+        "a tap on the track is a seek, not an activation"
+    );
+    let center = (item.rect.x + item.rect.w * 0.5, item.rect.y + item.rect.h * 0.5);
+    assert_eq!(
+        pass.hit_focusable_excluding(center.0, center.1, &|_| false)
+            .map(|it| it.node_id.as_str()),
+        Some("sc")
+    );
+    clear_test_states();
+}
+
+#[test]
+fn scrubber_grows_to_fill_its_row_and_takes_thumb_height() {
+    clear_test_states();
+    let tree = controls_scrubber_tree();
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Playing);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let video = find_item(&pass, "vid").rect;
+    let sc = find_item(&pass, "sc").rect;
+    assert!(
+        sc.w > video.w * 0.8,
+        "an only-child Scrubber should eat the controls row, got {sc:?} in {video:?}"
+    );
+    assert_eq!(sc.h, DEFAULT_SCRUBBER_HEIGHT_PX);
+    clear_test_states();
+}
+
+#[test]
+fn scrubber_geometry_tracks_progress_and_keeps_the_thumb_inside() {
+    use crate::paint::image::scrubber_geometry;
+    let rect = Rect {
+        x: 10.0,
+        y: 20.0,
+        w: 200.0,
+        h: 16.0,
+    };
+    let zero = scrubber_geometry(rect, 0.0, 1.0).expect("geometry");
+    let half = scrubber_geometry(rect, 0.5, 1.0).expect("geometry");
+    let full = scrubber_geometry(rect, 1.0, 1.0).expect("geometry");
+
+    // Track spans the item; progress scales with the fraction.
+    assert_eq!(zero.track.x, rect.x);
+    assert_eq!(zero.track.w, rect.w);
+    assert_eq!(zero.progress.w, 0.0);
+    assert!((half.progress.w - rect.w * 0.5).abs() < 0.01);
+    assert_eq!(full.progress.w, rect.w);
+    // Track is centred vertically and thinner than the hit box.
+    assert!(zero.track.h < rect.h);
+    assert!((zero.track.y + zero.track.h * 0.5 - (rect.y + rect.h * 0.5)).abs() < 0.01);
+    // Thumb never hangs outside the item box at either end.
+    assert!(zero.thumb_cx - zero.thumb_r >= rect.x - 0.01);
+    assert!(full.thumb_cx + full.thumb_r <= rect.x + rect.w + 0.01);
+    assert!(half.thumb_cx > zero.thumb_cx && full.thumb_cx > half.thumb_cx);
+    // Out-of-range fractions clamp rather than overflow.
+    let over = scrubber_geometry(rect, 5.0, 1.0).expect("geometry");
+    assert_eq!(over.progress.w, full.progress.w);
+    // Degenerate rects produce nothing to draw.
+    assert!(scrubber_geometry(
+        Rect {
+            x: 0.0,
+            y: 0.0,
+            w: 0.0,
+            h: 0.0
+        },
+        0.5,
+        1.0
+    )
+    .is_none());
+}
+
+#[test]
+fn scrubber_preview_prop_overrides_the_live_position() {
+    clear_test_states();
+    let mut tree = controls_scrubber_tree();
+    tree.apply(&Patch::SetProp {
+        id: "sc".into(),
+        name: crate::video_v2::SCRUB_PREVIEW_PROP.to_string(),
+        value: json!(0.75),
+    });
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Playing);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    match &find_item(&pass, "sc").kind {
+        ItemKind::Scrubber { preview, video_id } => {
+            assert_eq!(*preview, Some(0.75));
+            assert_eq!(
+                crate::video_v2::scrubber_fraction(video_id.as_deref(), *preview),
+                0.75
+            );
+        }
+        other => panic!("expected a Scrubber item, got {other:?}"),
+    }
+    clear_test_states();
+}
+
+#[test]
+fn slot_styles_survive_the_incremental_taffy_path() {
+    clear_test_states();
+    // The retained Taffy mirror applies patches incrementally; the
+    // parent-dependent overlay styling has to be re-applied there too
+    // (it is not part of the parent-agnostic `node_style_with`).
+    let mut tree = Tree::new();
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let batch = vec![
+        create_patch(
+            "vid",
+            "Video",
+            &[("width", json!(320)), ("height", json!(180))],
+        ),
+        insert_patch("root", "vid"),
+    ];
+    tree.apply_batch(&batch);
+    assert!(state.apply_patches(&batch, &tree, 1.0, vp(800.0)));
+    let batch = vec![
+        create_patch("post", "Column", &[("slot.0", json!("poster"))]),
+        insert_patch("vid", "post"),
+    ];
+    tree.apply_batch(&batch);
+    assert!(state.apply_patches(&batch, &tree, 1.0, vp(800.0)));
+
+    set_test_state("vid", VideoPlayerState::Idle);
+    let pass =
+        LayoutPass::compute_with_state(&mut state, &tree, &mut text, (800, 600), 1.0, 0.0, &HashMap::new(), 1);
+    let video = find_item(&pass, "vid").rect;
+    let slot = find_item(&pass, "post").rect;
+    assert_eq!((slot.x, slot.y, slot.w, slot.h), (video.x, video.y, video.w, video.h));
+    clear_test_states();
+}
+
+// ---------------------------------------------------------------------------
+// Video v2: renderer-local intents
+// (docs/components/video.md §"Fullscreen: `videoIntent(\"fullscreen\")`")
+// ---------------------------------------------------------------------------
+
+/// A 320x180 Video with a `controls` slot holding one Button. `intent`
+/// (when given) is applied to the Button as `videoIntent.0`; `action`
+/// (when given) as an `.onClick` ref.
+fn intent_button_tree(intent: Option<&str>, action: Option<&str>) -> Tree {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "vid",
+        "Video",
+        &[("width", json!(320)), ("height", json!(180))],
+    ));
+    tree.apply(&insert_patch("root", "vid"));
+    tree.apply(&create_patch(
+        "ctl",
+        "Column",
+        &[("slot.0", json!("controls"))],
+    ));
+    tree.apply(&insert_patch("vid", "ctl"));
+    let mut props: Vec<(&str, Value)> = Vec::new();
+    if let Some(i) = intent {
+        props.push(("videoIntent.0", json!(i)));
+    }
+    if let Some(a) = action {
+        props.push(("onClick.0", json!(a)));
+    }
+    tree.apply(&create_patch("fs", "Button", &props));
+    tree.apply(&insert_patch("ctl", "fs"));
+    tree
+}
+
+#[test]
+fn video_intent_node_is_hittable_without_an_onclick() {
+    clear_test_states();
+    let tree = intent_button_tree(Some("fullscreen"), None);
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Playing); // controls visible
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+    let item = find_item(&pass, "fs");
+    assert_eq!(
+        item.video_intent,
+        Some(crate::video_v2::VideoIntent::Fullscreen),
+        "the item must carry the resolved intent"
+    );
+    assert!(
+        item.action.is_none(),
+        "no `.onClick` — the intent alone makes it interactive"
+    );
+    let r = item.rect;
+    let hit = pass.hit(r.x + r.w * 0.5, r.y + r.h * 0.5);
+    assert_eq!(
+        hit.map(|it| it.node_id.as_str()),
+        Some("fs"),
+        "an intent node is actionable for hit-testing purposes"
+    );
+    assert!(
+        item.is_focusable(),
+        "Enter / Space must be able to reach the intent too"
+    );
+    clear_test_states();
+}
+
+#[test]
+fn video_intent_outside_a_video_subtree_is_inert() {
+    clear_test_states();
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "fs",
+        "Button",
+        &[("videoIntent.0", json!("fullscreen"))],
+    ));
+    tree.apply(&insert_patch("root", "fs"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+
+    let item = find_item(&pass, "fs");
+    assert_eq!(
+        item.video_intent, None,
+        "no enclosing Video: the intent resolves to nothing"
+    );
+    let r = item.rect;
+    assert!(
+        pass.hit(r.x + r.w * 0.5, r.y + r.h * 0.5).is_none(),
+        "an inert intent must not make an action-less node hittable"
+    );
+    assert!(!item.is_focusable());
+    clear_test_states();
+}
+
+#[test]
+fn unknown_video_intents_resolve_to_nothing() {
+    clear_test_states();
+    let tree = intent_button_tree(Some("picture-in-picture"), None);
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Playing);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    // Forward compatible: an intent this renderer doesn't know renders
+    // inert instead of hijacking the tap.
+    assert_eq!(find_item(&pass, "fs").video_intent, None);
+    clear_test_states();
+}
+
+#[test]
+fn a_hidden_slot_hides_its_intent_node_too() {
+    clear_test_states();
+    let tree = intent_button_tree(Some("fullscreen"), None);
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Playing);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let r = find_item(&pass, "fs").rect;
+
+    // `error` hides the controls slot: the intent goes with it.
+    set_test_state("vid", VideoPlayerState::Error);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    assert!(pass.item_by_id("fs").is_none());
+    assert!(pass.hit(r.x + r.w * 0.5, r.y + r.h * 0.5).is_none());
+    clear_test_states();
+}
+
+#[test]
+fn an_intent_node_keeps_its_own_onclick_action() {
+    clear_test_states();
+    let tree = intent_button_tree(Some("fullscreen"), Some("@actions.logged"));
+    let mut text = TextEngine::new();
+    set_test_state("vid", VideoPlayerState::Playing);
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "fs");
+    // The intent is renderer-local and additive: an author-wired action
+    // on the same node still dispatches (only the built-in's own derived
+    // `onPlay` is suppressed, in `window_input`).
+    assert_eq!(item.action.as_deref(), Some("logged"));
+    assert_eq!(
+        item.video_intent,
+        Some(crate::video_v2::VideoIntent::Fullscreen)
+    );
+    clear_test_states();
+}
+
+// ---------------------------------------------------------------------------
+// Content-sized flex containers (`alignSelf(center)` heroes)
+// ---------------------------------------------------------------------------
+
+/// The Hypeflix Browse "featured hero": a page Column (cross-axis
+/// stretch) holding a Row that opts out of the stretch with
+/// `alignSelf("center")` and caps itself at `maxWidth(1200)`. The Row
+/// holds a `flex-1 min-w-0 pr-4` text Column and a fixed-size
+/// `shrink-0` poster Image.
+fn hero_tree() -> Tree {
+    const BLURB: &str = "A ragtag crew of moon prospectors stumbles onto a derelict \
+freighter drifting past Jupiter, and the salvage of a lifetime turns into a \
+night-long fight for the airlock in this restored public-domain thriller.";
+
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "page",
+        "Column",
+        &[("alignItems", json!("stretch"))],
+    ));
+    tree.apply(&insert_patch("root", "page"));
+
+    // .tw("mx-5 p-5 rounded-3xl border items-center").maxWidth(1200).alignSelf("center")
+    tree.apply(&create_patch(
+        "hero",
+        "Row",
+        &[
+            ("marginLeft", json!(20)),
+            ("marginRight", json!(20)),
+            ("padding", json!(20)),
+            ("borderWidth", json!(1)),
+            ("alignItems", json!("center")),
+            ("maxWidth", json!(1200)),
+            ("alignSelf", json!("center")),
+        ],
+    ));
+    tree.apply(&insert_patch("page", "hero"));
+
+    // .tw("flex-1 min-w-0 pr-4 items-start")
+    tree.apply(&create_patch(
+        "herocol",
+        "Column",
+        &[
+            ("flex", json!(1)),
+            ("minWidth", json!(0)),
+            ("paddingRight", json!(16)),
+            ("alignItems", json!("start")),
+        ],
+    ));
+    tree.apply(&insert_patch("hero", "herocol"));
+    add_text(&mut tree, "herocol", "kicker", "FEATURED TONIGHT");
+    add_text(&mut tree, "herocol", "title", "Salvage of the Sky Whale");
+    add_text(&mut tree, "herocol", "meta", "1962 · 88 min · Sci-Fi");
+    add_text(&mut tree, "herocol", "blurb", BLURB);
+
+    // .tw("w-28 h-[168px] rounded-2xl shrink-0")
+    tree.apply(&create_patch(
+        "poster",
+        "Image",
+        &[
+            ("src", json!("/poster.png")),
+            ("width", json!(112)),
+            ("height", json!(168)),
+            ("flexShrink", json!(0)),
+        ],
+    ));
+    tree.apply(&insert_patch("hero", "poster"));
+    tree
+}
+
+#[test]
+fn align_self_center_row_sizes_to_fit_content_not_min_content() {
+    let tree = hero_tree();
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1024, 768), 1.0);
+
+    // fit-content = min(max-content, available) clamped by maxWidth(1200).
+    // max-content here is the unwrapped blurb (well past 1200), so the
+    // hero should take the whole 1024 viewport minus its 20px margins.
+    let hero = find_item(&pass, "hero").rect;
+    assert!(
+        (hero.w - 984.0).abs() < 2.0,
+        "hero Row should fill the viewport minus its mx-5 margins (≈984), got {hero:?}"
+    );
+    // ...and stay centred inside the stretch Column.
+    assert!(
+        (hero.x - (1024.0 - hero.w) / 2.0).abs() < 2.0,
+        "alignSelf(center) should centre the hero, got {hero:?}"
+    );
+}
+
+#[test]
+fn content_sized_row_gives_its_flex_child_the_leftover_width() {
+    let tree = hero_tree();
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1024, 768), 1.0);
+
+    let hero = find_item(&pass, "hero").rect;
+    let col = find_item(&pass, "herocol").rect;
+    // hero inner width = 984 - 2*(20 padding + 1 border) = 942;
+    // the flex-1 column takes all of it bar the 112px poster.
+    assert!(
+        col.w > hero.w - 200.0,
+        "flex-1 column should absorb the hero's leftover width; hero={hero:?} col={col:?}"
+    );
+}
+
+#[test]
+fn shrink_zero_poster_does_not_overlap_the_flex_text_column() {
+    let tree = hero_tree();
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1024, 768), 1.0);
+
+    let col = find_item(&pass, "herocol").rect;
+    let poster = find_item(&pass, "poster").rect;
+    assert!(
+        col.x + col.w <= poster.x + 0.5,
+        "text column must end before the poster starts; col={col:?} poster={poster:?}"
+    );
+    for id in ["kicker", "title", "meta", "blurb"] {
+        let t = find_item(&pass, id).rect;
+        assert!(
+            t.x + t.w <= poster.x + 0.5,
+            "`{id}` must not run under the poster; text={t:?} poster={poster:?}"
+        );
+    }
+}
+
+#[test]
+fn long_blurb_in_a_content_sized_row_does_not_wrap_per_word() {
+    let tree = hero_tree();
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1024, 768), 1.0);
+
+    let blurb = find_item(&pass, "blurb").rect;
+    assert!(
+        blurb.w > 600.0,
+        "blurb should get a wide line box, not a min-content sliver; got {blurb:?}"
+    );
+    // ~200 chars at the default text size across an 800px+ line box is a
+    // handful of lines — the collapsed layout produced 30+.
+    assert!(
+        blurb.h < 200.0,
+        "blurb should wrap to a few lines, not one word per line; got {blurb:?}"
+    );
+}
+
+#[test]
+fn content_sized_row_still_shrinks_to_short_content() {
+    // The fix must not turn every `alignSelf(center)` row into a
+    // full-width bar: with content narrower than the viewport, the row
+    // stays at its max-content width.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "page",
+        "Column",
+        &[("alignItems", json!("stretch"))],
+    ));
+    tree.apply(&insert_patch("root", "page"));
+    tree.apply(&create_patch(
+        "pill",
+        "Row",
+        &[("alignSelf", json!("center")), ("maxWidth", json!(1200))],
+    ));
+    tree.apply(&insert_patch("page", "pill"));
+    tree.apply(&create_patch("grow", "Column", &[("flex", json!(1))]));
+    tree.apply(&insert_patch("pill", "grow"));
+    add_text(&mut tree, "grow", "label", "Live");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1024, 768), 1.0);
+
+    let pill = find_item(&pass, "pill").rect;
+    let label = find_item(&pass, "label").rect;
+    assert!(
+        pill.w < 200.0,
+        "short content should stay at max-content width, got {pill:?}"
+    );
+    assert!(
+        pill.w >= label.w - 0.5,
+        "the row must still fit its text, pill={pill:?} label={label:?}"
+    );
+    assert!(
+        (pill.x - (1024.0 - pill.w) / 2.0).abs() < 2.0,
+        "alignSelf(center) should centre the pill, got {pill:?}"
+    );
+}
+
+#[test]
+fn stretched_rows_are_untouched_by_the_fit_content_pass() {
+    // No alignSelf → the default `stretch` still fills the parent.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "page",
+        "Column",
+        &[("alignItems", json!("stretch"))],
+    ));
+    tree.apply(&insert_patch("root", "page"));
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch("page", "row"));
+    tree.apply(&create_patch("grow", "Column", &[("flex", json!(1))]));
+    tree.apply(&insert_patch("row", "grow"));
+    add_text(&mut tree, "grow", "label", "Live");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1024, 768), 1.0);
+    let row = find_item(&pass, "row").rect;
+    assert!(
+        (row.w - 1024.0).abs() < 1.0,
+        "a stretched Row should still fill the viewport, got {row:?}"
+    );
+}
+
+#[test]
+fn content_sized_button_wrapper_widens_its_stretched_inner_row() {
+    // Hypeflix's marathon banner: the content-sized box is the Button
+    // (column direction, `alignSelf("center")`), and the collapsing
+    // flex-1 line lives one level down inside a stretched Row.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "page",
+        "Column",
+        &[("alignItems", json!("stretch"))],
+    ));
+    tree.apply(&insert_patch("root", "page"));
+    tree.apply(&create_patch(
+        "banner",
+        "Button",
+        &[
+            ("marginLeft", json!(20)),
+            ("marginRight", json!(20)),
+            ("padding", json!(16)),
+            ("alignItems", json!("stretch")),
+            ("maxWidth", json!(1200)),
+            ("alignSelf", json!("center")),
+            ("onClick.0", json!("@actions.playMarathon")),
+        ],
+    ));
+    tree.apply(&insert_patch("page", "banner"));
+    tree.apply(&create_patch(
+        "brow",
+        "Row",
+        &[("alignItems", json!("center"))],
+    ));
+    tree.apply(&insert_patch("banner", "brow"));
+    tree.apply(&create_patch(
+        "icon",
+        "Icon",
+        &[("size", json!(22)), ("flexShrink", json!(0))],
+    ));
+    tree.apply(&insert_patch("brow", "icon"));
+    tree.apply(&create_patch(
+        "btext",
+        "Column",
+        &[
+            ("flex", json!(1)),
+            ("minWidth", json!(0)),
+            ("marginLeft", json!(12)),
+            ("alignItems", json!("start")),
+        ],
+    ));
+    tree.apply(&insert_patch("brow", "btext"));
+    add_text(&mut tree, "btext", "btitle", "Midnight Creature Marathon");
+    add_text(
+        &mut tree,
+        "btext",
+        "bsub",
+        "Three creature features, one continuous stream - a Video playlist demo",
+    );
+    tree.apply(&create_patch(
+        "chev",
+        "Icon",
+        &[("size", json!(16)), ("flexShrink", json!(0))],
+    ));
+    tree.apply(&insert_patch("brow", "chev"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1024, 768), 1.0);
+
+    // fit-content: the banner's max-content here is under the 984px of
+    // available space, so it lands on max-content — one unwrapped line
+    // of subtitle plus the two icons — and stays centred.
+    let banner = find_item(&pass, "banner").rect;
+    assert!(
+        banner.w > 500.0 && banner.w <= 984.0,
+        "banner Button should size to max-content, got {banner:?}"
+    );
+    assert!(
+        (banner.x - (1024.0 - banner.w) / 2.0).abs() < 2.0,
+        "alignSelf(center) should centre the banner, got {banner:?}"
+    );
+    let sub = find_item(&pass, "bsub").rect;
+    assert!(
+        sub.w > 400.0,
+        "subtitle should get a wide line box, got {sub:?}"
+    );
+    assert!(
+        sub.h < 60.0,
+        "subtitle should sit on one or two lines, got {sub:?}"
+    );
+    let title = find_item(&pass, "btitle").rect;
+    let chev = find_item(&pass, "chev").rect;
+    assert!(
+        title.x + title.w <= chev.x + 0.5,
+        "title must not run under the trailing icon; title={title:?} chev={chev:?}"
+    );
 }

@@ -1,5 +1,6 @@
 package space.hypen.renderer.components
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
@@ -11,6 +12,12 @@ import space.hypen.renderer.model.HypenElement
 
 /**
  * Handler for Spinner/Loading component.
+ *
+ * Inside a renderer-managed show/hide scope (e.g. a Video `loading` slot,
+ * which stays composed while hidden), the indeterminate indicator is swapped
+ * for an inert same-size box while [LocalContentVisible] is false — the
+ * Material indicator's infinite transition would otherwise invalidate every
+ * frame for as long as the player lives, invisible or not.
  */
 class SpinnerComponent : ComponentHandler {
     override val typeName: String = "spinner"
@@ -42,6 +49,15 @@ class SpinnerComponent : ComponentHandler {
 
         // Stroke width
         val strokeWidth = element.getFloatProp("strokeWidth")?.dp ?: 4.dp
+
+        if (!LocalContentVisible.current) {
+            // Hidden by a managed show/hide (kept composed): park the
+            // animation, keep the layout slot so re-show never reflows. The
+            // Spinner holds no state, so recreating the indicator on the
+            // next show is observationally identical.
+            Box(modifier = modifier.size(size))
+            return
+        }
 
         CircularProgressIndicator(
             modifier = modifier.size(size),

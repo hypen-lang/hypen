@@ -53,6 +53,7 @@ movie-discovery examples/movie-discovery/cloudflare 8791
 food-ordering examples/food-ordering/cloudflare 8792
 social examples/social/cloudflare 8793
 calculator examples/calculator/cloudflare 8794
+hypeflix examples/hypeflix/cloudflare 8795
 "
 
 # Echoes "relative-dir http-port" for a known name, nothing for an unknown one.
@@ -76,7 +77,7 @@ example_names() {
 }
 
 DEFAULT_SET=(home-screen simple todo calculator)
-ALL_SET=(home-screen simple todo calorie-counter movie-discovery food-ordering social calculator)
+ALL_SET=(home-screen simple todo calorie-counter movie-discovery food-ordering social calculator hypeflix)
 
 FRESH=0
 SELECTED=()
@@ -104,7 +105,33 @@ if [[ $FRESH -eq 1 || ! -f "$ENGINE_DIR/pkg/web/package.json" ]]; then
 fi
 
 # ---- 2. hypen-web package dists ------------------------------------------
-if [[ $FRESH -eq 1 || ! -f "$WEB_DIR/packages/cf/dist/index.js" ]]; then
+# Rebuild when missing OR stale: an existence-only check served examples a
+# pre-existing dist even after renderer sources changed, which silently runs
+# old renderer code against new templates (e.g. Video composition slots
+# rendered as invisible <video> fallback children — no controls at all).
+dists_stale() {
+  local pkg src_dir marker
+  # The cf client bundle (generic.js) bundles core+web sources, so EVERY
+  # package's dist must be newer than EVERY package's src — a core/web
+  # source change with an untouched cf/src still stales generic.js.
+  local markers=(
+    "$WEB_DIR/packages/core/dist/index.js"
+    "$WEB_DIR/packages/web/dist/index.js"
+    "$WEB_DIR/packages/cf/dist/index.js"
+    "$WEB_DIR/packages/cf/dist/client/generic.js"
+  )
+  for marker in "${markers[@]}"; do
+    [[ -f "$marker" ]] || return 0
+    for pkg in core web cf; do
+      src_dir="$WEB_DIR/packages/$pkg/src"
+      if [[ -n "$(find "$src_dir" "$WEB_DIR/packages/cf/client" -type f -newer "$marker" -print -quit 2>/dev/null)" ]]; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+if [[ $FRESH -eq 1 ]] || dists_stale; then
   echo "==> Building @hypen-space packages (core, web, cf)..."
   (cd "$WEB_DIR" && bun install && bun run build:core && bun run build:web)
   (cd "$WEB_DIR/packages/cf" && bun run build)
@@ -125,15 +152,38 @@ dereference() {
   done
 }
 
+# Overwrite an example's installed @hypen-space package with the freshly
+# built local one (package.json + dist + src + client, no nested
+# node_modules). Without this, examples pinned to published versions run
+# OLD runtime code against the NEW local engine WASM copied below — a
+# protocol mismatch (e.g. published cores predate the engine's
+# string-serialized patch batches, so the DO relays an unparsed JSON string
+# and every client dies with "$.filter is not a function").
+sync_local_pkg() {
+  local dir="$1" short="$2"
+  local srcdir="$WEB_DIR/packages/$short"
+  local dest="$dir/node_modules/@hypen-space/$short"
+  rm -rf "$dest"
+  mkdir -p "$dest"
+  cp "$srcdir/package.json" "$dest/"
+  cp -rL "$srcdir/dist" "$dest/dist"
+  [[ -d "$srcdir/src" ]] && cp -rL "$srcdir/src" "$dest/src"
+  [[ -d "$srcdir/client" ]] && cp -rL "$srcdir/client" "$dest/client"
+  return 0
+}
+
 for name in "${SELECTED[@]}"; do
   read -r rel _port <<<"$(example_entry "$name")"
   dir="$REPO_ROOT/$rel"
   echo "==> Installing $name ($rel)..."
   (cd "$dir" && bun install --silent)
   dereference "$dir"
-  # Keep the engine copy current with the latest WASM build.
+  # Keep the engine + @hypen-space copies current with the local builds.
   rm -rf "$dir/node_modules/hypen-engine"
   cp -rL "$ENGINE_DIR/pkg/web" "$dir/node_modules/hypen-engine"
+  for short in core web cf; do
+    sync_local_pkg "$dir" "$short"
+  done
 done
 
 # ---- 4. Launch -------------------------------------------------------------

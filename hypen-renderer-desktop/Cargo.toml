@@ -18,6 +18,13 @@ default = []
 #   static GLOBAL: hypen_renderer_desktop::MiMalloc = hypen_renderer_desktop::MiMalloc;
 # Typical RSS reduction: 20-40 MB versus system malloc.
 mimalloc = ["dep:mimalloc"]
+# Inline video playback (GStreamer). Off by default so the base crate
+# builds without media system libs (libgstreamer1.0-dev + plugin
+# packages). With the feature on, `Video` elements decode and play
+# progressive MP4/WebM streams inline via a playbin → RGBA appsink
+# pipeline (see `src/media/`); without it the renderer keeps the
+# poster + play-glyph presentation byte-for-byte.
+video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 
 [dependencies]
 hypen-engine = { version = "0.6.2", path = "../hypen-engine-rs" }
@@ -106,6 +113,15 @@ sys-locale = "0.3"
 # `#[global_allocator]` line. Off by default — apps that don't enable
 # it pay zero binary cost.
 mimalloc = { version = "0.1", optional = true, default-features = false }
+
+# Feature `video`: GStreamer bindings for inline Video playback.
+# playbin handles demux + decode + HTTP streaming + A/V sync; an
+# RGBA appsink hands decoded frames to the painters. Requires the
+# GStreamer dev packages at build time and the plugin packages
+# (good/bad/libav) at runtime — which is exactly why this is opt-in.
+gstreamer = { version = "0.25", optional = true }
+gstreamer-app = { version = "0.25", optional = true }
+gstreamer-video = { version = "0.25", optional = true }
 
 # macOS-only: reach into the CAMetalLayer wgpu/raw-window-metal create
 # under the NSView so we can set `presentsWithTransaction = YES`. That

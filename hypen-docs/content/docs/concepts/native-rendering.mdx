@@ -1,0 +1,91 @@
+---
+title: Native Rendering
+description: Why Hypen renders to real platform components instead of a WebView
+---
+
+# Native Rendering
+
+Hypen does not ship a WebView. On every platform, the adapter translates the
+engine's patch stream into that platform's own UI primitives:
+
+| Platform | Renders to |
+|----------|-----------|
+| [Web](/docs/adapters/web) | Real DOM elements — or a 2D Canvas scene |
+| [Desktop](/docs/adapters/desktop) | A native window: winit + wgpu + Vello + cosmic-text |
+| [Android](/docs/adapters/android) | Jetpack Compose composables |
+| [iOS](/docs/adapters/ios) | SwiftUI views |
+
+A `Button` in your template becomes an actual `<button>` on the web, an actual
+Compose `Button` on Android, and an actual SwiftUI `Button` on iOS.
+
+## The Patch Model
+
+The engine never hands a renderer a finished screen. It emits a minimal set of
+tree edits:
+
+```
+Create      — make a node of some type
+SetProp     — set a property on a node
+RemoveProp  — clear a property
+Insert      — attach a node to a parent at an index
+Move        — reorder a node
+Remove      — detach a node
+```
+
+Renderers apply these to a live tree they own. That has three consequences:
+
+**Updates are minimal.** Changing one counter sends one `SetProp`, not a new
+screen. Over a [remote](/docs/concepts/remote-ui) connection that is a handful
+of bytes.
+
+**Renderers stay simple.** An adapter implements six operations plus a paint
+pass — not a layout engine, a diffing algorithm, or a scripting runtime. That's
+why the surface is small enough to port.
+
+**Platform state survives.** Because nodes persist across updates rather than
+being re-created, scroll position, text selection, focus, and in-flight
+animations aren't destroyed by a state change.
+
+## What You Inherit
+
+Rendering to native components means you get the platform's own behaviour for
+free, rather than reimplementing it:
+
+- **Text input** — the real IME, the real autocorrect, the real keyboard. The
+  desktop renderer wires winit's `Ime` events through to an inline preedit;
+  mobile adapters use the system editor.
+- **Scrolling** — native momentum, rubber-banding, and trackpad semantics.
+- **Accessibility** — the platform's own tree. VoiceOver, NVDA, and Orca see
+  real widgets (desktop goes through AccessKit); Compose and SwiftUI expose
+  their native semantics. See [Accessibility](/docs/guide/accessibility).
+- **Selection and clipboard** — system copy/paste, with native modifiers.
+- **Look and feel** — native focus rings, cursors, and press states.
+
+## Performance
+
+There is no JavaScript bridge and no DOM emulation on native platforms. The
+desktop renderer rasterises on the GPU through Vello, shapes text with
+cosmic-text, and lays out with Taffy — all in-process, all in Rust. Patches
+arrive, the damaged region repaints, and that's the whole frame.
+
+On the web, DOM mode writes directly to elements. Canvas mode is available when
+you want pixel-identical output across browsers instead of native DOM
+semantics — the same template, a different trade-off.
+
+## Consistency vs. Nativeness
+
+Rendering natively means platforms differ where platforms genuinely differ — a
+SwiftUI button and a Compose button do not look identical, by design. Hypen
+gives you shared *structure and behaviour*, not pixel-identical output. Where
+you need pixel identity, Canvas mode on web and the desktop renderer's own
+rasteriser give you it.
+
+Component coverage per platform is tracked in the
+[component gallery](/docs/comparison), which is regenerated as adapters change.
+
+## See Also
+
+- [Platforms Overview](/docs/adapters) — every adapter
+- [Multi-Platform](/docs/concepts/multi-platform) — what's shared, what isn't
+- [Remote UI](/docs/concepts/remote-ui) — the same patches, over a network
+- [Component Gallery](/docs/comparison) — per-platform component parity

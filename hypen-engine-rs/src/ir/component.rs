@@ -30,6 +30,7 @@ pub const DEFAULT_PRIMITIVES: &[&str] = &[
     "Select",
     "Switch",
     "Slider",
+    "Scrubber",
     "Spinner",
     "Badge",
     "Avatar",

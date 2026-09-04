@@ -1,0 +1,87 @@
+---
+title: Platforms Overview
+description: Every platform Hypen renders to, and how the adapters work
+---
+
+# Platforms
+
+An **adapter** is the piece that turns Hypen's patch stream into real UI on a
+given platform. The engine produces `Create / SetProp / RemoveProp / Insert /
+Move / Remove` patches; the adapter applies them to that platform's native
+widget tree. Nothing about your module changes between platforms — the adapter
+is the only layer that differs.
+
+## Supported platforms
+
+| Platform | Package | Renders to | Status |
+|----------|---------|------------|--------|
+| [Web](/docs/adapters/web) | `@hypen-space/web` | DOM elements or 2D Canvas | Stable |
+| [Desktop](/docs/adapters/desktop) | `hypen-renderer-desktop` | Native window (winit + wgpu + Vello) | Stable |
+| [Android](/docs/adapters/android) | `space.hypen:hypen-renderer` | Jetpack Compose | Stable |
+| [iOS](/docs/adapters/ios) | `HypenSwift` | SwiftUI | Stable |
+| [Rust](/docs/adapters/rust) | `hypen-server` | Embedded engine, no WASM | Stable |
+
+## Two ways to run
+
+Every adapter above supports both of these. The choice is a deployment
+decision, not a code change — the same module and the same `.hypen` template
+work either way.
+
+### Local
+
+The engine runs in-process on the device. The adapter instantiates your module
+directly, dispatches actions to it, and applies the patches it emits. No
+network, no server.
+
+```rust
+// Desktop, local — the engine is embedded in the binary
+DesktopApp::new()
+    .module(Arc::new(instance))
+    .run();
+```
+
+### Remote
+
+The engine runs on your server. The adapter opens a WebSocket, receives the
+initial tree plus a stream of patches, and sends actions back. Clients stay
+thin — they never load WASM or run your business logic.
+
+```rust
+// Desktop, remote — same renderer, streamed from a server
+DesktopApp::new()
+    .connect("ws://localhost:3000", "App")
+    .run();
+```
+
+See [Server SDKs](/docs/servers) for the server half, and
+[Remote UI](/docs/concepts/remote-ui) for what this makes possible.
+
+## Choosing an adapter
+
+- **Shipping a website or web app** → [Web](/docs/adapters/web). DOM mode gives
+  you real HTML elements (accessible, inspectable, SEO-friendly); Canvas mode
+  gives you pixel-identical output across browsers.
+- **Shipping a native desktop app** → [Desktop](/docs/adapters/desktop). One
+  binary on macOS, Linux, and Windows — no Electron, no WebView.
+- **Shipping to phones** → [Android](/docs/adapters/android) and
+  [iOS](/docs/adapters/ios). Both render to the platform's own component
+  toolkit, so your UI inherits native scrolling, text input, and accessibility.
+- **Embedding Hypen in a Rust service** → [Rust](/docs/adapters/rust). The
+  engine links in directly, with no WASM boundary to cross.
+
+## Component parity
+
+Not every component is implemented identically on every platform yet. The
+[component gallery](/docs/comparison) tracks the current state per platform and
+is regenerated as adapters change — check it before relying on a component in
+production.
+
+## See Also
+
+- [Native Rendering](/docs/concepts/native-rendering) — why Hypen targets
+  native components instead of a WebView
+- [Multi-Platform](/docs/concepts/multi-platform) — what stays shared and what
+  is genuinely platform-specific
+- [Server SDKs](/docs/servers) — TypeScript, Go, Kotlin, Swift, and Rust
+- [Cloudflare](/docs/servers/cloudflare) — deploy the server half to Workers +
+  Durable Objects

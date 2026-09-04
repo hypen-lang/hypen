@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import HypenSwift
 
@@ -156,6 +157,123 @@ import Testing
 
     #expect(element.getBoolProp("yes") == true)
     #expect(element.getBoolProp("no") == false)
+}
+
+// MARK: - List / map prop helpers (Video contract: playlist, headers)
+
+@Test func testGetStringListPropFromStringArray() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["playlist": ["https://cdn/ep1.mp4", "https://cdn/ep2.mp4"]]
+    )
+
+    #expect(element.getStringListProp("playlist") == ["https://cdn/ep1.mp4", "https://cdn/ep2.mp4"])
+}
+
+@Test func testGetStringListPropFromAnyArrayStringifiesEntries() {
+    // JSON deserialization yields [Any]; non-string entries are stringified.
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["playlist": ["a.mp4", 2] as [Any]]
+    )
+
+    #expect(element.getStringListProp("playlist") == ["a.mp4", "2"])
+}
+
+@Test func testGetStringListPropDropsNSNullEntries() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["playlist": [NSNull(), "a.mp4"] as [Any]]
+    )
+
+    #expect(element.getStringListProp("playlist") == ["a.mp4"])
+}
+
+@Test func testGetStringListPropDotZeroFallback() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["playlist.0": ["a.mp4"]]
+    )
+
+    #expect(element.getStringListProp("playlist") == ["a.mp4"])
+}
+
+@Test func testGetStringListPropPlainKeyWinsOverDotZero() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: [
+            "playlist": ["plain.mp4"],
+            "playlist.0": ["positional.mp4"],
+        ]
+    )
+
+    #expect(element.getStringListProp("playlist") == ["plain.mp4"])
+}
+
+@Test func testGetStringListPropNilForMissing() {
+    let element = HypenElement(id: "1", elementType: "video")
+
+    #expect(element.getStringListProp("playlist") == nil)
+}
+
+@Test func testGetStringListPropNilForNonList() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["playlist": "not-a-list"]
+    )
+
+    #expect(element.getStringListProp("playlist") == nil)
+}
+
+@Test func testGetStringMapPropFromStringMap() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["headers": ["Authorization": "Bearer x"]]
+    )
+
+    #expect(element.getStringMapProp("headers") == ["Authorization": "Bearer x"])
+}
+
+@Test func testGetStringMapPropFromAnyMapStringifiesValues() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["headers": ["X-Retry": 3, "X-Token": "abc"] as [String: Any]]
+    )
+
+    #expect(element.getStringMapProp("headers") == ["X-Retry": "3", "X-Token": "abc"])
+}
+
+@Test func testGetStringMapPropDropsNSNullValues() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["headers": ["A": NSNull(), "B": "kept"] as [String: Any]]
+    )
+
+    #expect(element.getStringMapProp("headers") == ["B": "kept"])
+}
+
+@Test func testGetStringMapPropDotZeroFallback() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["headers.0": ["Authorization": "Bearer y"]]
+    )
+
+    #expect(element.getStringMapProp("headers") == ["Authorization": "Bearer y"])
+}
+
+@Test func testGetStringMapPropNilForMissing() {
+    let element = HypenElement(id: "1", elementType: "video")
+
+    #expect(element.getStringMapProp("headers") == nil)
+}
+
+@Test func testGetStringMapPropNilForNonMap() {
+    let element = HypenElement(
+        id: "1", elementType: "video",
+        props: ["headers": "not-a-map"]
+    )
+
+    #expect(element.getStringMapProp("headers") == nil)
 }
 
 @Test func testGetCGFloatPropConvertsFromDouble() {

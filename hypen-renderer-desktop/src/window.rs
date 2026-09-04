@@ -408,6 +408,64 @@ pub struct App {
     /// macOS: merge the title bar into the content (Safari-style). Set
     /// via [`App::set_unified_titlebar`]; applied once on window create.
     unified_titlebar: bool,
+    /// Video `onError` dedupe: `"node_id\u{0}poster_url"` keys for
+    /// which we already dispatched the element's `onError` action.
+    /// The failure registry entries are sticky (like
+    /// `CacheEntry::Failed`), so without this every worker wake would
+    /// re-dispatch the same error.
+    dispatched_media_errors: std::collections::HashSet<String>,
+    /// Feature `video`: sticky `"node_id\u{0}src"` keys whose playback
+    /// start or stream errored. Autoplay reconciliation skips them so
+    /// a failing stream can't enter a start → error → restart loop; a
+    /// user click clears the key (an explicit retry).
+    #[cfg(feature = "video")]
+    video_error_keys: std::collections::HashSet<String>,
+    /// Feature `video`: last [`crate::media::frame_generation`] folded
+    /// into painter-cache invalidation. A decoded frame landing since
+    /// the previous build means any cached subtree containing the
+    /// video would replay its encode-time frame — same pattern as
+    /// `last_image_load_gen` on the painter.
+    #[cfg(feature = "video")]
+    last_video_frame_gen: u64,
+    /// Video v2: last values pushed into each bound Video's `playback`
+    /// struct — the 250 ms position throttle and the echo guard against
+    /// the renderer's own reports coming back as writes. Keyed by Video
+    /// node id. See [`window_video::PlaybackReport`].
+    video_bind_reports: HashMap<String, window_video::PlaybackReport>,
+    /// Video v2: node ids whose bound `playback` struct has had at least
+    /// one write applied. The FIRST application of a freshly-bound
+    /// struct carries positive intent only (spec: an initialized
+    /// `playing: false` cannot cancel `autoplay`; `playing: true` and a
+    /// `position` seek do apply); every later write is authoritative in
+    /// both directions. Pruned with `video_bind_reports` when the node
+    /// leaves the tree, so an id reuse re-enters first-application mode.
+    video_playback_applied: std::collections::HashSet<String>,
+    /// Video v2: the in-flight `Scrubber` drag, if any. Preview values
+    /// live in the tree; this is the gesture bookkeeping.
+    video_scrub: Option<window_video::VideoScrubDrag>,
+    /// Feature `video`: per-node fingerprint of the source configuration
+    /// (`src`/`playlist`/`headers` — see
+    /// [`crate::video_v2::source_config_fingerprint`]) whose one-shot
+    /// `startPosition` seek has been applied. The seek re-arms only when
+    /// the source configuration changes — a playlist auto-advance keeps
+    /// the fingerprint, so newly-entered tracks are NOT re-seeked.
+    #[cfg(feature = "video")]
+    video_start_seeked: HashMap<String, String>,
+    /// Feature `video`: inbound `playback.position` writes that arrived
+    /// before their pipeline prerolled, as `node_id -> (track url,
+    /// seconds)`. GStreamer silently drops a `seek_simple` on an
+    /// un-prerolled pipeline, so the write is parked here and re-issued
+    /// when the pipeline can answer a duration query; it is dropped if
+    /// the track changes underneath it or the node leaves the tree.
+    #[cfg(feature = "video")]
+    video_pending_bind_seeks: HashMap<String, (String, f64)>,
+}
+
+/// Sticky-error key for a `(video node, src)` pair — mirrors the
+/// poster path's `"node_id\u{0}poster"` dedupe keys.
+#[cfg(feature = "video")]
+pub(crate) fn video_error_key(node_id: &str, src: &str) -> String {
+    format!("{node_id}\u{0}{src}")
 }
 
 impl App {
@@ -466,7 +524,481 @@ impl App {
             is_occluded: false,
             shortcuts: Vec::new(),
             unified_titlebar: false,
+            dispatched_media_errors: std::collections::HashSet::new(),
+            #[cfg(feature = "video")]
+            video_error_keys: std::collections::HashSet::new(),
+            #[cfg(feature = "video")]
+            last_video_frame_gen: 0,
+            video_bind_reports: HashMap::new(),
+            video_playback_applied: std::collections::HashSet::new(),
+            video_scrub: None,
+            #[cfg(feature = "video")]
+            video_start_seeked: HashMap::new(),
+            #[cfg(feature = "video")]
+            video_pending_bind_seeks: HashMap::new(),
         }
+    }
+
+    /// Dispatch `onError` for Video elements whose poster fetch came
+    /// back with an HTTP error status (the contract's "Desktop —
+    /// status from the poster/probe fetch"). The image worker records
+    /// non-2xx statuses in a registry and fires `AppEvent::Wake`; this
+    /// scan (cheap: one pass over live nodes, gated per node on
+    /// element type + a wired `onError`) runs on every wake / patch
+    /// flush and dispatches each failure once per `(node, poster)`.
+    fn dispatch_media_poster_errors(&mut self) {
+        let viewport = self.logical_viewport();
+        let pending = collect_media_error_dispatches(
+            &self.tree,
+            viewport,
+            &mut self.dispatched_media_errors,
+            &crate::paint::image::load_failure,
+        );
+        for (action, payload) in pending {
+            log::debug!("dispatch (media error): {action} payload={payload:?}");
+            self.module.dispatch_action(&action, Some(payload));
+        }
+    }
+
+    /// Feature `video`: reconcile live playback pipelines with the
+    /// current tree. Three jobs, run on every patch flush:
+    ///
+    /// 1. **Release** — pipelines whose Video node left the tree tear
+    ///    down (decoder + network resources freed promptly).
+    /// 2. **Autoplay** — a Video node with `autoplay` and a resolved
+    ///    src that has no pipeline yet starts playing (skipping
+    ///    `(node, src)` pairs with a sticky error).
+    /// 3. **Retarget** — a single-src node whose `src` prop changed
+    ///    under a live pipeline releases it (and autoplays the new
+    ///    src when asked). Playlist nodes are exempt: their current
+    ///    track legitimately diverges from `startIndex` after an
+    ///    advance.
+    /// 4. **Suspend/resume** — nodes inside a Router-`Detach`ed
+    ///    subtree keep their pipeline (the cache exists to preserve
+    ///    position) but stop advancing; re-`Attach` resumes players
+    ///    the user had playing. Autoplay and retarget are deferred
+    ///    while detached — they run on the flush that reattaches.
+    #[cfg(feature = "video")]
+    fn sync_video_playback(&mut self) {
+        let viewport = self.logical_viewport();
+        let detached = self.tree.detached_node_ids();
+        let mut alive: HashSet<String> = HashSet::new();
+        let mut to_release: Vec<String> = Vec::new();
+        let mut to_start: Vec<(String, String, u64, crate::media::PlayOpts)> = Vec::new();
+        let mut suspend_flips: Vec<(String, bool)> = Vec::new();
+        for node in self.tree.nodes() {
+            if !crate::layout::MEDIA_TYPES
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(&node.element_type))
+            {
+                continue;
+            }
+            alive.insert(node.id.clone());
+            if detached.contains(&node.id) {
+                if crate::media::set_suspended(&node.id, true) {
+                    suspend_flips.push((node.id.clone(), true));
+                }
+                continue;
+            }
+            if crate::media::set_suspended(&node.id, false) {
+                suspend_flips.push((node.id.clone(), false));
+            }
+            let (src, index) = crate::layout::resolve_media_src(node, viewport);
+            // `autoplay`, or the one-way controlled form (`playing:` as
+            // a plain truthy prop — the spec's "module drives, renderer
+            // follows" subset): both mean this node should be playing on
+            // sight, including after a `src` retarget. Play/pause flips
+            // of the prop on a live pipeline are handled patch-driven in
+            // `apply_playback_writes`.
+            let autoplay = crate::media::prop_truthy(node, "autoplay")
+                || crate::video_v2::controlled_playing(node) == Some(true);
+            if let Some((cur_url, _)) = crate::media::current_track(&node.id) {
+                let single_src = crate::media::resolve_playlist(node).is_empty();
+                if single_src && src.as_deref() != Some(cur_url.as_str()) {
+                    to_release.push(node.id.clone());
+                    if let Some(src) = src {
+                        if autoplay
+                            && !self.video_error_keys.contains(&video_error_key(&node.id, &src))
+                        {
+                            let opts = crate::media::resolve_play_opts(node);
+                            to_start.push((node.id.clone(), src, index, opts));
+                        }
+                    }
+                }
+                continue;
+            }
+            let Some(src) = src else { continue };
+            if !autoplay {
+                continue;
+            }
+            if self
+                .video_error_keys
+                .contains(&video_error_key(&node.id, &src))
+            {
+                continue;
+            }
+            let opts = crate::media::resolve_play_opts(node);
+            to_start.push((node.id.clone(), src, index, opts));
+        }
+        crate::media::retain_only(&alive);
+        for id in to_release {
+            crate::media::release(&id);
+        }
+        for (id, src, index, opts) in to_start {
+            self.start_video(&id, &src, index, &opts);
+        }
+        // Suspension flips map onto the contract's playback events:
+        // navigating away pauses (`onPause`), navigating back resumes
+        // (`onPlay`) — same payloads a user-initiated toggle sends.
+        for (id, suspended) in suspend_flips {
+            let Some((src, index)) = crate::media::current_track(&id) else {
+                continue;
+            };
+            let (event, typ) = if suspended {
+                ("onPause", "pause")
+            } else {
+                ("onPlay", "play")
+            };
+            if let Some((action, payload)) =
+                self.video_event_payload(&id, event, typ, &src, index, &[])
+            {
+                log::debug!("dispatch (video {typ}): {action} payload={payload:?}");
+                self.module.dispatch_action(&action, Some(payload));
+            }
+        }
+    }
+
+    /// Feature `video`: start playback of `src` for the node and
+    /// dispatch the contract event — `onPlay` on success, `onError`
+    /// (code `pipeline`, no status) when the pipeline can't even be
+    /// constructed. Failures record a sticky error key so autoplay
+    /// doesn't retry-loop.
+    #[cfg(feature = "video")]
+    fn start_video(&mut self, node_id: &str, src: &str, index: u64, opts: &crate::media::PlayOpts) {
+        // A fresh pipeline invalidates any Scrubber drag captured on the
+        // old one (its fraction belongs to the old track's timeline) and
+        // clears the Video v2 sticky-error marker (which is what shows
+        // the `error` slot); a later failure sets it again below. The
+        // one-shot `startPosition` seek re-arms on source-configuration
+        // changes only (`apply_start_positions`), not on restarts.
+        self.cancel_video_scrub_for(node_id);
+        self.mark_video_error(node_id, false);
+        match crate::media::start(node_id, src, index, opts, true) {
+            Ok(true) => {
+                if let Some((action, payload)) =
+                    self.video_event_payload(node_id, "onPlay", "play", src, index, &[])
+                {
+                    log::debug!("dispatch (video play): {action} payload={payload:?}");
+                    self.module.dispatch_action(&action, Some(payload));
+                }
+            }
+            // The pipeline failed synchronously but its bus already
+            // queued the structured error — `pump_media_events` will
+            // dispatch the single `onError` and record the sticky key.
+            Ok(false) => {}
+            Err(e) => {
+                log::warn!("video: failed to start {src} for {node_id}: {e}");
+                self.video_error_keys.insert(video_error_key(node_id, src));
+                // Video v2: the sticky error is also the `error` player
+                // state, which is what shows an `error` composition slot.
+                self.mark_video_error(node_id, true);
+                if let Some((action, payload)) = self.video_event_payload(
+                    node_id,
+                    "onError",
+                    "error",
+                    src,
+                    index,
+                    &[("code", json!("pipeline")), ("message", json!(e))],
+                ) {
+                    self.module.dispatch_action(&action, Some(payload));
+                }
+            }
+        }
+    }
+
+    /// Feature `video`: build a contract event dispatch for the node's
+    /// `event` action prop (`onPlay` / `onPause` / `onEnded` /
+    /// `onTrackChange` / `onError`). `None` when the node is gone or
+    /// the action isn't wired. Payload is the contract's
+    /// `{ type, src, index, ...extra }` merged over any static named
+    /// args from the applicator.
+    #[cfg(feature = "video")]
+    fn video_event_payload(
+        &self,
+        node_id: &str,
+        event: &str,
+        typ: &str,
+        src: &str,
+        index: u64,
+        extra: &[(&str, serde_json::Value)],
+    ) -> Option<(String, serde_json::Value)> {
+        let node = self.tree.get(node_id)?;
+        let (action, base) = crate::layout::resolve_named_event_action(node, event)?;
+        let mut obj = match base {
+            serde_json::Value::Object(o) => o,
+            _ => serde_json::Map::new(),
+        };
+        obj.insert("type".to_string(), json!(typ));
+        obj.insert("src".to_string(), json!(src));
+        obj.insert("index".to_string(), json!(index));
+        for (k, v) in extra {
+            obj.insert((*k).to_string(), v.clone());
+        }
+        Some((action, serde_json::Value::Object(obj)))
+    }
+
+    /// Feature `video`: drain playback events (EOS / errors) from the
+    /// media registry and route them per the contract — playlist
+    /// advance + `onTrackChange`, queue wrap under `loop`, terminal
+    /// `onEnded {completed: true}`, and `onError` with best-effort
+    /// HTTP status. Called from every patch flush / wake.
+    #[cfg(feature = "video")]
+    fn pump_media_events(&mut self) {
+        let events = crate::media::take_events();
+        if events.is_empty() {
+            return;
+        }
+        let viewport = self.logical_viewport();
+        for ev in events {
+            if self.tree.get(&ev.node_id).is_none() {
+                // Node removed while the event was in flight.
+                crate::media::release(&ev.node_id);
+                continue;
+            }
+            let (cur_src, cur_idx) = match crate::media::current_track(&ev.node_id) {
+                Some((u, i)) => (u, i),
+                None => {
+                    let node = self.tree.get(&ev.node_id).expect("checked above");
+                    let (s, i) = crate::layout::resolve_media_src(node, viewport);
+                    (s.unwrap_or_default(), i)
+                }
+            };
+            match ev.kind {
+                crate::media::MediaEventKind::Ended => {
+                    let node = self.tree.get(&ev.node_id).expect("checked above");
+                    let playlist = crate::media::resolve_playlist(node);
+                    let wraps = crate::media::prop_truthy(node, "loop");
+                    let opts = crate::media::resolve_play_opts(node);
+                    let next = if playlist.is_empty() {
+                        None
+                    } else {
+                        let n = cur_idx + 1;
+                        if (n as usize) < playlist.len() {
+                            Some((playlist[n as usize].clone(), n))
+                        } else if wraps {
+                            Some((playlist[0].clone(), 0))
+                        } else {
+                            None
+                        }
+                    };
+                    match next {
+                        Some((next_src, next_idx)) => {
+                            // Finished track first (`completed: false`
+                            // — the queue continues), then advance and
+                            // announce the new track.
+                            if let Some((action, payload)) = self.video_event_payload(
+                                &ev.node_id,
+                                "onEnded",
+                                "ended",
+                                &cur_src,
+                                cur_idx,
+                                &[("completed", json!(false))],
+                            ) {
+                                self.module.dispatch_action(&action, Some(payload));
+                            }
+                            // An in-flight Scrubber drag was captured on
+                            // the finished track's timeline: committing
+                            // its fraction against the NEW track would
+                            // seek it to a position the user never chose
+                            // (and write it into module state). Cancel
+                            // the gesture before advancing.
+                            self.cancel_video_scrub_for(&ev.node_id);
+                            match crate::media::start(&ev.node_id, &next_src, next_idx, &opts, true)
+                            {
+                                Ok(true) => {
+                                    if let Some((action, payload)) = self.video_event_payload(
+                                        &ev.node_id,
+                                        "onTrackChange",
+                                        "trackchange",
+                                        &next_src,
+                                        next_idx,
+                                        &[],
+                                    ) {
+                                        self.module.dispatch_action(&action, Some(payload));
+                                    }
+                                }
+                                // Bus error already queued — the next
+                                // pump pass dispatches the `onError`
+                                // and records the sticky key.
+                                Ok(false) => {}
+                                Err(e) => {
+                                    log::warn!(
+                                        "video: playlist advance to {next_src} failed: {e}"
+                                    );
+                                    self.video_error_keys
+                                        .insert(video_error_key(&ev.node_id, &next_src));
+                                    self.mark_video_error(&ev.node_id, true);
+                                    if let Some((action, payload)) = self.video_event_payload(
+                                        &ev.node_id,
+                                        "onError",
+                                        "error",
+                                        &next_src,
+                                        next_idx,
+                                        &[("code", json!("pipeline")), ("message", json!(e))],
+                                    ) {
+                                        self.module.dispatch_action(&action, Some(payload));
+                                    }
+                                }
+                            }
+                        }
+                        None => {
+                            // Queue (or single track) done. The player
+                            // stays registered in its ended state — the
+                            // painter shows the last frame + play glyph
+                            // and a click restarts from zero.
+                            if let Some((action, payload)) = self.video_event_payload(
+                                &ev.node_id,
+                                "onEnded",
+                                "ended",
+                                &cur_src,
+                                cur_idx,
+                                &[("completed", json!(true))],
+                            ) {
+                                self.module.dispatch_action(&action, Some(payload));
+                            }
+                        }
+                    }
+                }
+                crate::media::MediaEventKind::Error {
+                    code,
+                    message,
+                    status,
+                } => {
+                    log::warn!(
+                        "video: {} failed for {}: {code}: {message} (status {status:?})",
+                        cur_src,
+                        ev.node_id
+                    );
+                    self.video_error_keys
+                        .insert(video_error_key(&ev.node_id, &cur_src));
+                    self.mark_video_error(&ev.node_id, true);
+                    // The pipeline is going away — an in-flight Scrubber
+                    // drag on it has nothing left to commit against.
+                    self.cancel_video_scrub_for(&ev.node_id);
+                    // Quiet error state per the contract: the pipeline
+                    // goes away and the poster / dark box shows again.
+                    crate::media::release(&ev.node_id);
+                    let mut extra = vec![("code", json!(code)), ("message", json!(message))];
+                    if let Some(s) = status {
+                        extra.push(("status", json!(s)));
+                    }
+                    if let Some((action, payload)) = self.video_event_payload(
+                        &ev.node_id,
+                        "onError",
+                        "error",
+                        &cur_src,
+                        cur_idx,
+                        &extra,
+                    ) {
+                        self.module.dispatch_action(&action, Some(payload));
+                    }
+                }
+            }
+        }
+        self.request_redraw_full();
+    }
+
+    /// Perform a renderer-local video intent (`.videoIntent("…")`).
+    ///
+    /// Presentation only: no action is dispatched, no module is
+    /// involved, and the player's state / events are untouched — the
+    /// pipeline keeps running and the composition slots keep painting,
+    /// they just paint into a bigger window.
+    ///
+    /// Deliberately NOT behind the `video` cargo feature: a poster-only
+    /// build (no GStreamer) still has a window to fullscreen, and the
+    /// intent must behave the same there.
+    pub(crate) fn perform_video_intent(&mut self, intent: crate::video_v2::VideoIntent) {
+        match intent {
+            crate::video_v2::VideoIntent::Fullscreen => self.toggle_window_fullscreen(),
+        }
+    }
+
+    /// Toggle the winit window between borderless fullscreen (current
+    /// monitor, `None` = the one the window is on) and its previous
+    /// windowed geometry. Desktop has no per-player container to
+    /// promote the way the DOM wrapper does, so the WINDOW is the
+    /// fullscreen target: everything painted — video surface and the
+    /// slot chrome overlaid on it — scales together.
+    ///
+    /// Thin by design: it is the one line this crate cannot exercise
+    /// headlessly (no `Window` without an event loop), so all the
+    /// resolution logic lives in layout / `window_input` where tests
+    /// can reach it.
+    fn toggle_window_fullscreen(&mut self) {
+        let Some(window) = self.window.as_ref() else {
+            return;
+        };
+        if window.fullscreen().is_some() {
+            window.set_fullscreen(None);
+        } else {
+            window.set_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+        }
+    }
+
+    /// Feature `video`: a click that landed on a Video surface toggles
+    /// playback — start (or restart-after-error, treating the click as
+    /// an explicit retry), pause, or resume — and dispatches the
+    /// matching contract event (`onPlay` / `onPause`). Returns `true`
+    /// when the toggle ran and handled its own dispatch; the caller
+    /// must then skip a *derived* `onPlay` item action (payload
+    /// `type == "play"`) so the event doesn't double-fire, while an
+    /// explicit `.onClick` action still dispatches alongside.
+    #[cfg(feature = "video")]
+    pub(crate) fn handle_video_click(&mut self, node_id: &str) -> bool {
+        // Video v2: a present `controls` slot replaces the built-in
+        // chrome, and tap-to-toggle IS the built-in chrome on desktop.
+        // The author's own transport buttons drive playback instead;
+        // any `.onClick` / `onPlay` wired on the surface still fires
+        // through the normal item-action path.
+        if self.video_suppresses_tap(node_id) {
+            return false;
+        }
+        let viewport = self.logical_viewport();
+        let Some(node) = self.tree.get(node_id) else {
+            return false;
+        };
+        let (src, index) = match crate::media::current_track(node_id) {
+            Some((u, i)) => (Some(u), i),
+            None => crate::layout::resolve_media_src(node, viewport),
+        };
+        let Some(src) = src else {
+            return false;
+        };
+        let opts = crate::media::resolve_play_opts(node);
+        if crate::media::has_playback(node_id) {
+            let event = match crate::media::toggle(node_id) {
+                Some(true) => "onPlay",
+                Some(false) => "onPause",
+                None => return false,
+            };
+            let typ = if event == "onPlay" { "play" } else { "pause" };
+            if let Some((action, payload)) =
+                self.video_event_payload(node_id, event, typ, &src, index, &[])
+            {
+                log::debug!("dispatch (video {typ}): {action} payload={payload:?}");
+                self.module.dispatch_action(&action, Some(payload));
+            }
+        } else {
+            // Clicking is an explicit retry: forget any sticky error
+            // for this (node, src) so the user can recover from a
+            // transient failure.
+            self.video_error_keys
+                .remove(&video_error_key(node_id, &src));
+            self.start_video(node_id, &src, index, &opts);
+        }
+        self.request_redraw_full();
+        true
     }
 
     /// Enable the macOS Safari-style unified title bar. Applied on
@@ -518,6 +1050,19 @@ impl App {
             // grace period just because no frames are being painted.
             self.finalize_overdue_exits(scale, viewport);
             self.dispatch_animation_completions();
+            // Playback events (EOS / stream errors) arrive without any
+            // patch traffic; route them even on a patch-less flush.
+            #[cfg(feature = "video")]
+            {
+                self.pump_media_events();
+                self.sync_video_playback();
+                self.apply_start_positions();
+                self.apply_pending_bind_seeks();
+            }
+            // Video v2: player state advances (preroll → playing, EOS →
+            // ended) without any patch traffic either, so the `playback`
+            // bind reports ride the patch-less flush too.
+            self.sync_video_bind();
             return 0;
         }
         // Scrub source gets first crack at the batch (Option G, gesture
@@ -686,6 +1231,26 @@ impl App {
         // exit finalizes (defensive re-Create supersede fires none) and the
         // overdue backbone to the module.
         self.dispatch_animation_completions();
+        // A batch may have just created / re-pointed a Video whose
+        // poster already sits in the failure registry (sticky Failed →
+        // no further worker wake for it). Catch those here.
+        self.dispatch_media_poster_errors();
+        // Feature `video`: the batch may have created, removed, or
+        // re-pointed Video nodes — reconcile playback pipelines and
+        // route any pending EOS / error events.
+        #[cfg(feature = "video")]
+        {
+            self.pump_media_events();
+            self.sync_video_playback();
+            self.apply_start_positions();
+            self.apply_pending_bind_seeks();
+        }
+        // Video v2: a `playback` write from module state arrives as a
+        // `SetProp` on the Video's `playback` prop — apply it to the
+        // pipeline (play/pause, epsilon-guarded seek), then push the
+        // resulting renderer → state reports.
+        self.apply_playback_writes(&outcome.forwarded);
+        self.sync_video_bind();
         n
     }
 
@@ -798,6 +1363,29 @@ impl App {
 
     fn redraw(&mut self) {
         self.flush_patches();
+
+        // Feature `video`: one or more decoded frames landed since the
+        // last build — any painter subtree cached with an older frame
+        // would replay it, so drop the cache and repaint fully. Same
+        // monotonic-generation pattern as the image worker's
+        // `image_load_generation`.
+        #[cfg(feature = "video")]
+        {
+            let frame_gen = crate::media::frame_generation();
+            if frame_gen != self.last_video_frame_gen {
+                self.last_video_frame_gen = frame_gen;
+                self.painter.invalidate_subtree_cache();
+                self.damage.add_full();
+                // A landed frame is also the tick that moves `position`
+                // and (on the first one) flips loading → playing: hook
+                // the bind reports onto the same frame-driven path the
+                // Scrubber repaints ride. The 250 ms throttle inside
+                // keeps this from becoming per-frame state traffic.
+                self.apply_start_positions();
+                self.apply_pending_bind_seeks();
+                self.sync_video_bind();
+            }
+        }
 
         let (w, h, scale) = match (self.gpu.as_ref(), self.window.as_ref()) {
             (Some(gpu), Some(window)) => (gpu.size.0, gpu.size.1, window.scale_factor() as f32),
@@ -1168,6 +1756,7 @@ impl App {
             self.hovered.as_deref(),
             self.pressed.as_deref(),
             self.focused.as_deref(),
+            video_state_key_for(&self.tree, self.logical_viewport()),
         )
     }
 
@@ -1375,6 +1964,11 @@ mod input_impl;
 #[cfg(test)]
 pub(crate) use input_impl::focused_dispatch;
 
+// Video v2 (`playback` bind, composition slots, `Scrubber`) glue —
+// another `impl App { ... }` block, same `#[path]` pattern.
+#[path = "window_video.rs"]
+pub(crate) mod window_video;
+
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -1423,6 +2017,22 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 AkWindowEvent::ActionRequested(req) => {
                     if matches!(req.action, AkAction::Click) {
+                        // Renderer-local `.videoIntent(...)`: performed
+                        // right here, exactly as on the pointer and
+                        // keyboard paths — assistive tech activating the
+                        // fullscreen button must not be a dead end.
+                        // Resolved before the borrow below because
+                        // performing an intent needs `&mut self`.
+                        let intent = self.layout.as_ref().and_then(|layout| {
+                            let rid = renderer_id_for(layout, req.target_node)?;
+                            if self.animator.is_exit_excluded(&self.tree, &rid) {
+                                return None;
+                            }
+                            layout.item_by_id(&rid)?.video_intent
+                        });
+                        if let Some(i) = intent {
+                            self.perform_video_intent(i);
+                        }
                         if let Some(layout) = self.layout.as_ref() {
                             if let Some(rid) = renderer_id_for(layout, req.target_node)
                                 .filter(|rid| {
@@ -1452,6 +2062,21 @@ impl ApplicationHandler<AppEvent> for App {
                 AkWindowEvent::AccessibilityDeactivated => {}
             },
             AppEvent::Wake => {
+                // Re-arm the media wake gate FIRST — before reading
+                // frames or events — so a frame landing from here on
+                // sends a fresh wake instead of being coalesced into
+                // this (already in-progress) one.
+                #[cfg(feature = "video")]
+                crate::media::ack_wake();
+                // A wake may mean an image/poster fetch just resolved —
+                // including with an HTTP error. Dispatch any pending
+                // Video `onError`s before deciding whether to repaint.
+                self.dispatch_media_poster_errors();
+                // Playback EOS / errors also arrive via Wake; route
+                // them promptly rather than waiting for the redraw's
+                // flush (which is skipped entirely while occluded).
+                #[cfg(feature = "video")]
+                self.pump_media_events();
                 if self.is_occluded {
                     // Wake fired while hidden. Drain the queue into
                     // the Tree so the worker's Arc'd patches don't
@@ -1476,7 +2101,14 @@ impl ApplicationHandler<AppEvent> for App {
             adapter.process_event(window, &event);
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                // Feature `video`: tear down playback pipelines before
+                // the window goes away so GStreamer streaming threads
+                // stop touching the (about to vanish) waker proxy.
+                #[cfg(feature = "video")]
+                crate::media::release_all();
+                event_loop.exit()
+            }
             WindowEvent::Resized(size) => {
                 // Paint synchronously inside the Resized handler.
                 // request_redraw schedules a frame for the next tick,
@@ -1511,6 +2143,7 @@ impl ApplicationHandler<AppEvent> for App {
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
+                log::trace!("cursor moved: {position:?}");
                 self.cursor = position;
                 let (px, py) = (position.x as f32, position.y as f32);
 
@@ -1523,6 +2156,14 @@ impl ApplicationHandler<AppEvent> for App {
                     self.layout = None;
                     self.painter.invalidate_subtree_cache();
                     self.damage.add_full();
+                    if let Some(w) = self.window.as_ref() {
+                        w.request_redraw();
+                    }
+                }
+
+                // Video v2 `Scrubber` drag: preview-only, no commit and
+                // no module traffic until release.
+                if self.video_scrub_move(px, py) {
                     if let Some(w) = self.window.as_ref() {
                         w.request_redraw();
                     }
@@ -1599,6 +2240,11 @@ impl ApplicationHandler<AppEvent> for App {
                 let (cx, cy) = (self.cursor.x as f32, self.cursor.y as f32);
                 let action_target = self.hit_actionable(cx, cy);
                 let focus_target = self.hit_focusable(cx, cy);
+                // Debug-level so a headless/remote session can verify input
+                // routing (press coords + resolved target) without a rebuild.
+                log::debug!(
+                    "mouse press at ({cx},{cy}) action_target={action_target:?} focus_target={focus_target:?}"
+                );
                 let mut needs_redraw = false;
 
                 // Scrub gesture: open a PENDING drag if the press is inside a
@@ -1611,6 +2257,15 @@ impl ApplicationHandler<AppEvent> for App {
                     if self.scrubber.pointer_down(layout, self.cursor.x, self.cursor.y) {
                         needs_redraw = true;
                     }
+                }
+
+                // Video v2 `Scrubber`: a press on the timeline opens a
+                // local drag (preview only). It coexists with the
+                // press/focus bookkeeping below — the Scrubber is
+                // focusable, so the same press also focuses it for the
+                // Left/Right keyboard seek.
+                if self.video_scrub_down(cx, cy) {
+                    needs_redraw = true;
                 }
 
                 // Compute multi-click count before the input
@@ -1696,6 +2351,15 @@ impl ApplicationHandler<AppEvent> for App {
                 // the click is SUPPRESSED — a drag is not a tap. A below-slop
                 // pointer never claimed, so the ordinary click path runs and
                 // the child's action fires.
+                // Video v2 `Scrubber` release commits the seek and
+                // consumes the click — a scrub is not a tap.
+                if self.video_scrub_up() {
+                    self.pressed = None;
+                    self.dragging_input = None;
+                    let _ = self.scrubber.pointer_up(&mut self.tree);
+                    self.dispatch_scrub_binds();
+                    return;
+                }
                 match self.scrubber.pointer_up(&mut self.tree) {
                     ScrubPointerUp::Claimed => {
                         self.pressed = None;
@@ -1984,6 +2648,13 @@ impl ApplicationHandler<AppEvent> for App {
             self.request_redraw_full();
         }
     }
+
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // Feature `video`: tear down every playback pipeline so the
+        // process exits without live GStreamer streaming threads.
+        #[cfg(feature = "video")]
+        crate::media::release_all();
+    }
 }
 
 /// Outcome of one animation-frame step (or reduced-motion toggle) —
@@ -2120,6 +2791,65 @@ pub(crate) fn clear_focus_if_exiting(
     }
 }
 
+/// Pure scan behind [`App::dispatch_media_poster_errors`]: walk the
+/// tree's Video nodes and produce the `(action, payload)` dispatches
+/// for posters whose fetch failed with an HTTP status, deduped through
+/// `dispatched` (`"node_id\u{0}poster"` keys, mutated in place).
+/// `lookup_failure` is injected so tests don't depend on the global
+/// image-cache registry.
+pub(crate) fn collect_media_error_dispatches(
+    tree: &Tree,
+    viewport: Viewport,
+    dispatched: &mut HashSet<String>,
+    lookup_failure: &dyn Fn(&str) -> Option<crate::paint::image::LoadFailure>,
+) -> Vec<(String, serde_json::Value)> {
+    let mut pending = Vec::new();
+    for node in tree.nodes() {
+        if !crate::layout::MEDIA_TYPES
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(&node.element_type))
+        {
+            continue;
+        }
+        let Some((action, base_payload)) =
+            crate::layout::resolve_named_event_action(node, "onError")
+        else {
+            continue;
+        };
+        let Some(poster) = crate::layout::resolve_media_poster(node, viewport) else {
+            continue;
+        };
+        let Some(failure) = lookup_failure(&poster) else {
+            continue;
+        };
+        let dedupe_key = format!("{}\u{0}{}", node.id, poster);
+        if !dispatched.insert(dedupe_key) {
+            continue;
+        }
+        let (src, index) = crate::layout::resolve_media_src(node, viewport);
+        let mut obj = match base_payload {
+            serde_json::Value::Object(o) => o,
+            _ => serde_json::Map::new(),
+        };
+        obj.insert("type".to_string(), json!("error"));
+        // `src` names the track the error refers to; the poster is
+        // what actually failed, so fall back to it for poster-only
+        // elements.
+        obj.insert(
+            "src".to_string(),
+            match src.as_deref() {
+                Some(s) => json!(s),
+                None => json!(poster),
+            },
+        );
+        obj.insert("index".to_string(), json!(index));
+        obj.insert("status".to_string(), json!(failure.status));
+        obj.insert("message".to_string(), json!(failure.message));
+        pending.push((action, serde_json::Value::Object(obj)));
+    }
+    pending
+}
+
 /// Clamp `y` into the legal scroll range for `content_h` content
 /// against a `viewport_h` viewport.
 pub(crate) fn clamp_scroll(y: f32, content_h: f32, viewport_h: f32) -> f32 {
@@ -2145,6 +2875,7 @@ pub(crate) fn layout_cache_key_inner(
     hovered: Option<&str>,
     pressed: Option<&str>,
     focused: Option<&str>,
+    video_state_key: u64,
 ) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h_hasher = std::collections::hash_map::DefaultHasher::new();
@@ -2173,7 +2904,44 @@ pub(crate) fn layout_cache_key_inner(
         pressed.hash(&mut h_hasher);
         focused.hash(&mut h_hasher);
     }
+    // Video v2: the player state lives in the media registry, not in
+    // tree props, so a preroll→playing / play→pause / EOS transition
+    // bumps nothing else in this key — yet it changes which composition
+    // slots are emitted and what the surface paints. Fold it in (zero
+    // for a tree with no Video, so every non-media app's key is
+    // byte-identical to before).
+    video_state_key.hash(&mut h_hasher);
     h_hasher.finish()
+}
+
+/// Hash of every live Video node's derived player state. Feeds the
+/// layout cache key so a registry-side transition (which touches no tree
+/// prop) still forces the slot-visibility re-emit. `0` when the tree has
+/// no Video at all — the overwhelmingly common case pays one scan of the
+/// node map and produces the same key as before the feature.
+pub(crate) fn video_state_key_for(tree: &Tree, viewport: Viewport) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut ids: Vec<(&str, u8)> = Vec::new();
+    for node in tree.nodes() {
+        if !crate::layout::MEDIA_TYPES
+            .iter()
+            .any(|t| t.eq_ignore_ascii_case(&node.element_type))
+        {
+            continue;
+        }
+        let state = crate::video_v2::player_state(node, viewport);
+        ids.push((node.id.as_str(), state as u8));
+    }
+    if ids.is_empty() {
+        return 0;
+    }
+    ids.sort_unstable();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for (id, state) in ids {
+        id.hash(&mut h);
+        state.hash(&mut h);
+    }
+    h.finish()
 }
 
 /// Step `cursor` left to the start of the previous UTF-8 codepoint.

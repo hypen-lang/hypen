@@ -301,6 +301,7 @@ of, so a clean template stays silent:
 |------|-----------|-----|
 | `missing-accessible-name` | An interactive control (button/link) has no derivable name — e.g. icon-only | Add visible text or `.label("…")` |
 | `image-missing-alt` | An `Image` has no `alt` | Add `alt: "…"` (or `.hidden()` if decorative) |
+| `video-missing-label` | A `Video` has no accessible label | Add `title: "…"` or `.label("…")` (or `.hidden()` if decorative background video) |
 | `form-control-missing-label` | A form control has no label | Add `.label("…")`, a resolving `.labelledby(...)`, or use the auto-association pattern |
 | `heading-missing-level` | A `Heading` has no level | Add `level: N` (1–6) |
 | `nested-interactive` | A button/link is nested inside another | Restructure — one interactive control per node |

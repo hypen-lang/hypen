@@ -259,6 +259,64 @@ pub fn set_waker(proxy: EventLoopProxy<AppEvent>) {
     *cache().waker.lock().expect("image cache waker poisoned") = Some(proxy);
 }
 
+/// Natural (intrinsic) pixel size of a source that has already been
+/// fetched + decoded — `None` while it's loading, failed, or was never
+/// requested. Never *triggers* a load: layout calls this to derive a
+/// Video poster's natural aspect ratio and must stay non-blocking on
+/// the miss path (decode of already-fetched bytes is served from the
+/// decoded-pixmap tier after the first call).
+pub fn loaded_natural_size(src: &str) -> Option<(f32, f32)> {
+    loaded_source(src).map(|pm| (pm.width() as f32, pm.height() as f32))
+}
+
+// ---------------------------------------------------------------------------
+// HTTP failure registry — Video `onError` support.
+//
+// The Video contract (`hypen-web/docs/components/video.md`) has the
+// desktop renderer report `onError` with the HTTP `status` "from the
+// poster/probe fetch". The worker already learns the status from
+// `ureq::Error::Status`; this registry keeps it addressable by src so
+// the window can dispatch the element's `onError` action after the
+// worker's `AppEvent::Wake` lands.
+// ---------------------------------------------------------------------------
+
+/// Details of an HTTP-status fetch failure (non-2xx response).
+/// Network-level and decode failures are NOT recorded here — they have
+/// no status and the renderer only logs them.
+#[derive(Debug, Clone)]
+pub struct LoadFailure {
+    pub status: u16,
+    pub message: String,
+}
+
+fn failure_registry() -> &'static Mutex<std::collections::HashMap<String, LoadFailure>> {
+    static REG: OnceLock<Mutex<std::collections::HashMap<String, LoadFailure>>> = OnceLock::new();
+    REG.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+fn record_failure(src: &str, status: u16, message: String) {
+    failure_registry()
+        .lock()
+        .expect("failure registry poisoned")
+        .insert(src.to_string(), LoadFailure { status, message });
+}
+
+/// HTTP failure details for `src`, if its fetch came back with a
+/// non-2xx status. Sticky, like `CacheEntry::Failed`.
+pub fn load_failure(src: &str) -> Option<LoadFailure> {
+    failure_registry()
+        .lock()
+        .expect("failure registry poisoned")
+        .get(src)
+        .cloned()
+}
+
+/// Test-only: seed an HTTP failure without running the worker.
+#[cfg(test)]
+pub(crate) fn test_seed_failure(src: &str, status: u16, message: &str) {
+    record_failure(src, status, message.to_string());
+}
+
 /// Cap on the per-rect image render cache. Sized to comfortably hold
 /// every Image visible on a busy feed *plus* enough off-screen slack
 /// to scroll past one screenful without wholesale eviction. Each
@@ -690,6 +748,13 @@ fn run_image_worker(rx: mpsc::Receiver<String>) {
 fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
     let response = match ureq::get(url).timeout(Duration::from_secs(10)).call() {
         Ok(r) => r,
+        Err(ureq::Error::Status(code, _)) => {
+            // Non-2xx: keep the status addressable so the renderer can
+            // dispatch Video `onError` with `status` per the contract.
+            log::warn!("image: HTTP {code} for {url}");
+            record_failure(url, code, format!("HTTP {code} fetching {url}"));
+            return None;
+        }
         Err(e) => {
             log::warn!("image: HTTP failed for {url}: {e}");
             return None;
@@ -777,6 +842,334 @@ fn paint_placeholder(pixmap: &mut Pixmap, rect: LayoutRect, scale: f32) {
             Transform::identity(),
             None,
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Video surface — poster frame + play glyph.
+//
+// Desktop has no inline media decode (capability matrix in
+// `hypen-web/docs/components/video.md`): a Video paints its poster
+// (through the same cache/tile pipeline as Image, objectFit cover) or
+// a dark #111 placeholder, with a centered play affordance on top.
+// ---------------------------------------------------------------------------
+
+/// Quiet dark background for a Video with no (loaded) poster. The
+/// contract's "poster or dark box — never an infinite spinner".
+pub const VIDEO_PLACEHOLDER_RGBA: Rgba = Rgba(0x11, 0x11, 0x11, 0xff);
+
+/// Letterbox bands behind a contain-fit live playback frame
+/// (feature `video`). Pure black, like every native video player.
+pub const VIDEO_LETTERBOX_RGBA: Rgba = Rgba(0x00, 0x00, 0x00, 0xff);
+
+/// Translucent scrim circle behind the play triangle.
+pub const PLAY_GLYPH_CIRCLE_RGBA: Rgba = Rgba(0x00, 0x00, 0x00, 0x66);
+
+/// The play triangle itself.
+pub const PLAY_GLYPH_TRIANGLE_RGBA: Rgba = Rgba(0xff, 0xff, 0xff, 0xf2);
+
+/// Resolved play-glyph geometry, shared by the CPU (tiny-skia) and
+/// Vello painters so both draw the identical affordance.
+pub struct PlayGlyph {
+    /// Scrim circle: center + radius, physical px.
+    pub cx: f32,
+    pub cy: f32,
+    pub radius: f32,
+    /// Triangle corner points (pointing right), physical px.
+    pub triangle: [(f32, f32); 3],
+    /// Corner-rounding inset distance for the triangle.
+    pub corner: f32,
+}
+
+/// Compute the play glyph for a video rect: a circle sized against the
+/// shorter side (clamped so tiny thumbnails still get a legible glyph
+/// and huge heroes don't get a billboard), and an equilateral triangle
+/// inscribed in it with a slight rightward optical shift.
+pub fn play_glyph_geometry(rect: LayoutRect, scale: f32) -> Option<PlayGlyph> {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return None;
+    }
+    let short = rect.w.min(rect.h);
+    let radius = (short * 0.18)
+        .clamp(10.0 * scale, 40.0 * scale)
+        .min(short * 0.45);
+    if radius <= 0.0 {
+        return None;
+    }
+    let cx = rect.x + rect.w * 0.5;
+    let cy = rect.y + rect.h * 0.5;
+    let tr = radius * 0.58;
+    // Optical centering: a right-pointing triangle's centroid sits left
+    // of the circle center, so nudge it right a touch.
+    let ox = radius * 0.07;
+    let (s, c) = (120.0f32.to_radians().sin(), 120.0f32.to_radians().cos());
+    let triangle = [
+        (cx + ox + tr, cy),
+        (cx + ox + tr * c, cy + tr * s),
+        (cx + ox + tr * c, cy - tr * s),
+    ];
+    Some(PlayGlyph {
+        cx,
+        cy,
+        radius,
+        triangle,
+        corner: tr * 0.25,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Video v2 `Scrubber`
+// ---------------------------------------------------------------------------
+
+/// Unplayed remainder of the timeline.
+pub const SCRUBBER_TRACK_RGBA: Rgba = Rgba(0xff, 0xff, 0xff, 0x4d);
+
+/// Elapsed portion of the timeline.
+pub const SCRUBBER_PROGRESS_RGBA: Rgba = Rgba(0xff, 0xff, 0xff, 0xf2);
+
+/// Draggable thumb.
+pub const SCRUBBER_THUMB_RGBA: Rgba = Rgba(0xff, 0xff, 0xff, 0xff);
+
+/// Resolved `Scrubber` geometry, shared by the CPU (tiny-skia) and Vello
+/// painters so both draw the identical widget — and so the geometry is
+/// unit-testable without a GPU.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScrubberGeometry {
+    /// Full-width track rect (physical px), vertically centred in the
+    /// item box at [`crate::layout::SCRUBBER_TRACK_PX`] thickness.
+    pub track: LayoutRect,
+    /// Elapsed sub-rect of the track — `track` with the width scaled by
+    /// the progress fraction.
+    pub progress: LayoutRect,
+    /// Thumb circle centre + radius.
+    pub thumb_cx: f32,
+    pub thumb_cy: f32,
+    pub thumb_r: f32,
+    /// Corner radius for the track / progress bars (a pill).
+    pub radius: f32,
+}
+
+/// Compute the Scrubber's geometry for an item rect and a progress
+/// fraction in `0..=1`.
+///
+/// The track spans the full item width so the pointer→fraction mapping
+/// in the window (`(x - rect.x) / rect.w`) and the painted geometry are
+/// the same function — the invariant that keeps the thumb under the
+/// finger. The thumb is inset by its own radius at both ends so it never
+/// hangs outside the item box at 0 % / 100 %.
+pub fn scrubber_geometry(rect: LayoutRect, fraction: f32, scale: f32) -> Option<ScrubberGeometry> {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return None;
+    }
+    let f = fraction.clamp(0.0, 1.0);
+    let thickness = (crate::layout::SCRUBBER_TRACK_PX * scale).min(rect.h);
+    let track = LayoutRect {
+        x: rect.x,
+        y: rect.y + (rect.h - thickness) * 0.5,
+        w: rect.w,
+        h: thickness,
+    };
+    let progress = LayoutRect {
+        w: track.w * f,
+        ..track
+    };
+    let thumb_r = (rect.h * 0.5).min(6.0 * scale).max(thickness * 0.5);
+    let usable = (rect.w - 2.0 * thumb_r).max(0.0);
+    Some(ScrubberGeometry {
+        track,
+        progress,
+        thumb_cx: rect.x + thumb_r + usable * f,
+        thumb_cy: rect.y + rect.h * 0.5,
+        thumb_r,
+        radius: thickness * 0.5,
+    })
+}
+
+/// Move `d` px from `from` towards `to`, clamped to half the edge so
+/// rounding insets from both ends of a short edge never cross.
+fn point_towards(from: (f32, f32), to: (f32, f32), d: f32) -> (f32, f32) {
+    let dx = to.0 - from.0;
+    let dy = to.1 - from.1;
+    let len = (dx * dx + dy * dy).sqrt();
+    if len <= f32::EPSILON {
+        return from;
+    }
+    let d = d.min(len * 0.5);
+    (from.0 + dx / len * d, from.1 + dy / len * d)
+}
+
+/// Closed polygon path with rounded corners (each corner replaced by a
+/// quadratic through the vertex). Used for the play triangle.
+fn rounded_polygon_path(points: &[(f32, f32)], corner: f32) -> Option<tiny_skia::Path> {
+    let n = points.len();
+    if n < 3 {
+        return None;
+    }
+    let mut pb = PathBuilder::new();
+    for i in 0..n {
+        let p = points[i];
+        let prev = points[(i + n - 1) % n];
+        let next = points[(i + 1) % n];
+        let a = point_towards(p, prev, corner);
+        let b = point_towards(p, next, corner);
+        if i == 0 {
+            pb.move_to(a.0, a.1);
+        } else {
+            pb.line_to(a.0, a.1);
+        }
+        pb.quad_to(p.0, p.1, b.0, b.1);
+    }
+    pb.close();
+    pb.finish()
+}
+
+fn fill_path_rgba(pixmap: &mut Pixmap, path: &tiny_skia::Path, color: Rgba) {
+    let mut paint = Paint::default();
+    let [r, g, b, a] = color.premultiplied();
+    paint.set_color(
+        Color::from_rgba(
+            r as f32 / 255.0,
+            g as f32 / 255.0,
+            b as f32 / 255.0,
+            a as f32 / 255.0,
+        )
+        .unwrap_or(Color::BLACK),
+    );
+    paint.anti_alias = true;
+    pixmap.fill_path(path, &paint, FillRule::Winding, Transform::identity(), None);
+}
+
+/// Paint the centered play affordance: translucent circle + white
+/// rounded triangle. tiny-skia flavour; the Vello painter draws the
+/// same [`play_glyph_geometry`] with kurbo shapes.
+pub fn paint_play_glyph(pixmap: &mut Pixmap, rect: LayoutRect, scale: f32) {
+    let Some(glyph) = play_glyph_geometry(rect, scale) else {
+        return;
+    };
+    let mut pb = PathBuilder::new();
+    pb.push_circle(glyph.cx, glyph.cy, glyph.radius);
+    if let Some(circle) = pb.finish() {
+        fill_path_rgba(pixmap, &circle, PLAY_GLYPH_CIRCLE_RGBA);
+    }
+    if let Some(tri) = rounded_polygon_path(&glyph.triangle, glyph.corner) {
+        fill_path_rgba(pixmap, &tri, PLAY_GLYPH_TRIANGLE_RGBA);
+    }
+}
+
+/// Paint a `Video` surface into `rect`: the poster (objectFit cover,
+/// via the shared Image pipeline + tile cache) when one is present and
+/// loaded, else the dark placeholder; then the play glyph on top.
+/// Queues the poster load on first sight — the worker's wake repaints
+/// once it lands.
+pub fn paint_video_surface(
+    pixmap: &mut Pixmap,
+    rect: LayoutRect,
+    poster: Option<&str>,
+    scale_factor: f32,
+    radius: f32,
+    // Video v2: `false` when a composition slot replaces the built-in
+    // affordance (`controls` always, `loading` / `error` in their state).
+    play_glyph: bool,
+    tile_cache: &mut ImageRenderCache,
+) {
+    if rect.w <= 0.0 || rect.h <= 0.0 {
+        return;
+    }
+    let poster_ready = poster
+        .map(|p| {
+            ensure_loaded(p);
+            loaded_source(p).is_some()
+        })
+        .unwrap_or(false);
+    if poster_ready {
+        paint_image_cached(
+            pixmap,
+            rect,
+            poster,
+            scale_factor,
+            radius,
+            crate::layout::ObjectFit::Cover,
+            tile_cache,
+        );
+    } else if let Some(path) = rounded_rect_path(rect.x, rect.y, rect.w, rect.h, radius) {
+        fill_path_rgba(pixmap, &path, VIDEO_PLACEHOLDER_RGBA);
+    }
+    if play_glyph {
+        paint_play_glyph(pixmap, rect, scale_factor);
+    }
+}
+
+/// Video v2 `Scrubber` (tiny-skia flavour of the Vello painter's
+/// `draw_scrubber`): track + elapsed progress + thumb, off the shared
+/// [`scrubber_geometry`].
+pub fn paint_scrubber(pixmap: &mut Pixmap, rect: LayoutRect, fraction: f32, scale_factor: f32) {
+    let Some(g) = scrubber_geometry(rect, fraction, scale_factor) else {
+        return;
+    };
+    if let Some(path) = rounded_rect_path(g.track.x, g.track.y, g.track.w, g.track.h, g.radius) {
+        fill_path_rgba(pixmap, &path, SCRUBBER_TRACK_RGBA);
+    }
+    if g.progress.w > 0.0 {
+        if let Some(path) = rounded_rect_path(
+            g.progress.x,
+            g.progress.y,
+            g.progress.w,
+            g.progress.h,
+            g.radius,
+        ) {
+            fill_path_rgba(pixmap, &path, SCRUBBER_PROGRESS_RGBA);
+        }
+    }
+    if let Some(path) = rounded_rect_path(
+        g.thumb_cx - g.thumb_r,
+        g.thumb_cy - g.thumb_r,
+        g.thumb_r * 2.0,
+        g.thumb_r * 2.0,
+        g.thumb_r,
+    ) {
+        fill_path_rgba(pixmap, &path, SCRUBBER_THUMB_RGBA);
+    }
+}
+
+/// Feature `video`: paint the latest decoded playback frame into
+/// `rect` — objectFit contain, letterboxed on black — and overlay the
+/// play affordance while paused / ended. tiny-skia flavour of the
+/// Vello painter's `draw_video_frame`.
+#[cfg(feature = "video")]
+pub fn paint_video_frame(
+    pixmap: &mut Pixmap,
+    rect: LayoutRect,
+    frame: &crate::media::VideoFrame,
+    scale_factor: f32,
+    radius: f32,
+    paused: bool,
+) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || frame.width == 0 || frame.height == 0 {
+        return;
+    }
+    if let Some(path) = rounded_rect_path(rect.x, rect.y, rect.w, rect.h, radius) {
+        fill_path_rgba(pixmap, &path, VIDEO_LETTERBOX_RGBA);
+    }
+    if let Some(src) = PixmapRef::from_bytes(frame.data.as_slice(), frame.width, frame.height) {
+        let sx = rect.w / frame.width as f32;
+        let sy = rect.h / frame.height as f32;
+        let s = sx.min(sy);
+        let dx = rect.x + (rect.w - frame.width as f32 * s) * 0.5;
+        let dy = rect.y + (rect.h - frame.height as f32 * s) * 0.5;
+        let transform = Transform::from_scale(s, s).post_translate(dx, dy);
+        let paint = PixmapPaint {
+            quality: tiny_skia::FilterQuality::Bilinear,
+            ..PixmapPaint::default()
+        };
+        let mask = if radius > 0.0 {
+            build_rounded_rect_mask(pixmap.width(), pixmap.height(), rect, radius)
+        } else {
+            None
+        };
+        pixmap.draw_pixmap(0, 0, src, &paint, transform, mask.as_ref());
+    }
+    if paused {
+        paint_play_glyph(pixmap, rect, scale_factor);
     }
 }
 
@@ -1276,5 +1669,179 @@ mod tests {
         for k in &keys {
             entries.shift_remove(*k);
         }
+    }
+
+    // -----------------------------------------------------------------
+    // Video surface: poster / placeholder + play glyph
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn play_glyph_geometry_is_none_for_degenerate_rect() {
+        for (w, h) in [(0.0, 40.0), (40.0, 0.0), (0.0, 0.0)] {
+            assert!(play_glyph_geometry(
+                LayoutRect {
+                    x: 0.0,
+                    y: 0.0,
+                    w,
+                    h
+                },
+                1.0
+            )
+            .is_none());
+        }
+    }
+
+    #[test]
+    fn play_glyph_geometry_centers_on_the_rect() {
+        let rect = LayoutRect {
+            x: 10.0,
+            y: 20.0,
+            w: 96.0,
+            h: 54.0,
+        };
+        let g = play_glyph_geometry(rect, 1.0).expect("glyph");
+        assert!((g.cx - (10.0 + 48.0)).abs() < 0.01);
+        assert!((g.cy - (20.0 + 27.0)).abs() < 0.01);
+        assert!(g.radius > 0.0 && g.radius <= 54.0 * 0.5);
+        // Triangle stays inside the circle.
+        for (x, y) in g.triangle {
+            let d = ((x - g.cx).powi(2) + (y - g.cy).powi(2)).sqrt();
+            assert!(
+                d <= g.radius + 0.01,
+                "triangle vertex ({x},{y}) escaped the scrim circle",
+            );
+        }
+    }
+
+    #[test]
+    fn paint_video_surface_without_poster_paints_dark_box_and_glyph() {
+        let mut pm = Pixmap::new(96, 54).unwrap();
+        pm.fill(Color::WHITE);
+        let rect = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 96.0,
+            h: 54.0,
+        };
+        let mut cache = ImageRenderCache::new();
+        paint_video_surface(&mut pm, rect, None, 1.0, 0.0, true, &mut cache);
+
+        // Corner (away from the centered glyph): the dark #111 box.
+        let corner = pm.pixel(4, 4).expect("corner pixel");
+        assert!(
+            corner.red() < 0x20 && corner.green() < 0x20 && corner.blue() < 0x20,
+            "expected dark placeholder at the corner, got R={} G={} B={}",
+            corner.red(),
+            corner.green(),
+            corner.blue(),
+        );
+        // Center: the white play triangle sits over the placeholder.
+        let center = pm.pixel(48, 27).expect("center pixel");
+        assert!(
+            center.red() > 0xB0 && center.green() > 0xB0 && center.blue() > 0xB0,
+            "expected the white play triangle at the center, got R={} G={} B={}",
+            center.red(),
+            center.green(),
+            center.blue(),
+        );
+    }
+
+    #[test]
+    fn paint_video_surface_with_loaded_poster_draws_poster_under_glyph() {
+        // Seed a solid-red encoded poster like the Image tests do.
+        let key = "test://video-poster-red-8x8";
+        let mut img = image::RgbaImage::new(8, 8);
+        for px in img.pixels_mut() {
+            *px = image::Rgba([0xff, 0, 0, 0xff]);
+        }
+        let mut png_bytes = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(
+                &mut std::io::Cursor::new(&mut png_bytes),
+                image::ImageFormat::Png,
+            )
+            .expect("encode red png");
+        cache()
+            .entries
+            .lock()
+            .unwrap()
+            .insert(key.to_string(), CacheEntry::Loaded(Arc::new(png_bytes)));
+
+        let mut pm = Pixmap::new(96, 96).unwrap();
+        pm.fill(Color::WHITE);
+        let rect = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 96.0,
+            h: 96.0,
+        };
+        let mut tile_cache = ImageRenderCache::new();
+        paint_video_surface(&mut pm, rect, Some(key), 1.0, 0.0, true, &mut tile_cache);
+
+        // Away from the glyph: poster red, not the dark placeholder.
+        let edge = pm.pixel(6, 6).expect("edge pixel");
+        assert!(
+            edge.red() > 0xC0 && edge.green() < 0x40,
+            "expected the red poster at the edge, got R={} G={}",
+            edge.red(),
+            edge.green(),
+        );
+        // Center: play triangle (white → green channel jumps) over red.
+        let center = pm.pixel(48, 48).expect("center pixel");
+        assert!(
+            center.green() > 0xA0,
+            "expected the white play triangle over the poster, got G={}",
+            center.green(),
+        );
+
+        cache().entries.lock().unwrap().shift_remove(key);
+        decoded_cache().entries.lock().unwrap().shift_remove(key);
+    }
+
+    #[test]
+    fn paint_video_surface_with_unloaded_poster_falls_back_to_dark_box() {
+        // A poster URL that's Loading (queued, not yet fetched) must
+        // paint the dark quiet state, not the Image gray placeholder,
+        // and never block.
+        let key = "http://hypen-test.invalid/video-poster-loading.jpg";
+        cache().entries.lock().unwrap().shift_remove(key);
+        let mut pm = Pixmap::new(64, 64).unwrap();
+        pm.fill(Color::WHITE);
+        let rect = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 64.0,
+            h: 64.0,
+        };
+        let mut tile_cache = ImageRenderCache::new();
+        paint_video_surface(&mut pm, rect, Some(key), 1.0, 0.0, true, &mut tile_cache);
+        let corner = pm.pixel(3, 3).expect("corner pixel");
+        assert!(
+            corner.red() < 0x20 && corner.green() < 0x20 && corner.blue() < 0x20,
+            "expected dark placeholder while the poster loads, got R={} G={} B={}",
+            corner.red(),
+            corner.green(),
+            corner.blue(),
+        );
+    }
+
+    #[test]
+    fn http_failure_registry_roundtrip() {
+        let key = "http://hypen-test.invalid/poster-403.jpg";
+        assert!(load_failure(key).is_none());
+        test_seed_failure(key, 403, "HTTP 403 fetching poster");
+        let failure = load_failure(key).expect("seeded failure");
+        assert_eq!(failure.status, 403);
+        assert!(failure.message.contains("403"));
+    }
+
+    #[test]
+    fn loaded_natural_size_reports_decoded_dimensions() {
+        let key = "test://natural-size-3x2";
+        let pm = Pixmap::new(3, 2).unwrap();
+        test_seed_decoded(key, Arc::new(pm));
+        assert_eq!(loaded_natural_size(key), Some((3.0, 2.0)));
+        assert_eq!(loaded_natural_size("test://natural-size-missing"), None);
+        decoded_cache().entries.lock().unwrap().shift_remove(key);
     }
 }

@@ -106,6 +106,13 @@ export interface FontStyle {
   fontSize: number;
   fontWeight: string | number;
   lineHeight?: number;
+  /**
+   * Extra tracking in px applied after every glyph (CSS `letter-spacing`,
+   * Tailwind `tracking-*`). Canvas 2D has no native letter-spacing on every
+   * engine, so measurement approximates it as `chars × spacing` — enough to
+   * keep a widely-tracked heading from being under-measured and clipped.
+   */
+  letterSpacing?: number;
 }
 
 export interface TextStyle extends FontStyle {

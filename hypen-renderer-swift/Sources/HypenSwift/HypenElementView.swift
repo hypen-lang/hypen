@@ -143,6 +143,11 @@ struct HypenElementContentView: View {
                     }
                 )
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
+                // Renderer-local video intents (`.videoIntent("fullscreen")`).
+                // Recognized simultaneously with the element's own action tap
+                // above, so a node can carry both; a no-op everywhere else.
+                // See Components/VideoIntents.swift.
+                .videoIntentTap(VideoIntent.from(element))
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
             } else {
@@ -153,6 +158,11 @@ struct HypenElementContentView: View {
                     children: { AnyView(renderChildren(element)) }
                 )
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
+                // Renderer-local video intents (`.videoIntent("fullscreen")`).
+                // Recognized simultaneously with the element's own action tap
+                // above, so a node can carry both; a no-op everywhere else.
+                // See Components/VideoIntents.swift.
+                .videoIntentTap(VideoIntent.from(element))
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
             }
@@ -170,6 +180,11 @@ struct HypenElementContentView: View {
                     }
                 )
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
+                // Renderer-local video intents (`.videoIntent("fullscreen")`).
+                // Recognized simultaneously with the element's own action tap
+                // above, so a node can carry both; a no-op everywhere else.
+                // See Components/VideoIntents.swift.
+                .videoIntentTap(VideoIntent.from(element))
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
             } else {
@@ -178,6 +193,11 @@ struct HypenElementContentView: View {
                 }
                 .hypenModifier(applicatorResult.baseModifier)
                 .applyTapGestures(modifier: applicatorResult.baseModifier)
+                // Renderer-local video intents (`.videoIntent("fullscreen")`).
+                // Recognized simultaneously with the element's own action tap
+                // above, so a node can carry both; a no-op everywhere else.
+                // See Components/VideoIntents.swift.
+                .videoIntentTap(VideoIntent.from(element))
                 .applyStretchCrossAxis(stretchCrossAxis)
                 .applyWeightExpansion(modifier: applicatorResult.baseModifier, allowsHorizontal: parentAllowsHorizontalExpansion, allowsVertical: parentAllowsVerticalExpansion, parentHeight: parentExplicitHeight, parentWidth: parentExplicitWidth, proportionalWidth: proportionalWidth)
             }

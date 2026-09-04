@@ -121,6 +121,11 @@ pub enum A11yRule {
     /// at the directive's own location during located resolution (directives
     /// live only in raw source); bare directives are unaffected.
     UnknownIgnoreRule,
+    /// A `Video` has no accessible label. Its content is a media stream —
+    /// nothing derivable — so without a `title`/`label`/`alt` prop (or an
+    /// explicit `.label(...)`) the player has no accessible name. Same class
+    /// as [`ImageMissingAlt`](Self::ImageMissingAlt).
+    VideoMissingLabel,
 }
 
 /// Every rule the pass can emit, in declaration order. This is the single
@@ -142,6 +147,7 @@ pub const ALL_RULES: &[A11yRule] = &[
     A11yRule::NonPortableAria,
     A11yRule::UnknownLiveToken,
     A11yRule::UnknownIgnoreRule,
+    A11yRule::VideoMissingLabel,
 ];
 
 impl A11yRule {
@@ -621,6 +627,16 @@ fn check_element(
                 A11yRule::ImageMissingAlt,
                 format!("{ty} has no alt text — add `alt: \"…\"` describing the image"),
             );
+        } else if matches!(role, Some(Role::Video)) {
+            push_finding(
+                out,
+                element,
+                A11yRule::VideoMissingLabel,
+                format!(
+                    "{ty} has no accessible label — add `title: \"…\"` (or `.label(\"…\")`) \
+                     describing the video"
+                ),
+            );
         } else {
             push_finding(
                 out,
@@ -868,6 +884,7 @@ mod tests {
             A11yRule::NonPortableAria,
             A11yRule::UnknownLiveToken,
             A11yRule::UnknownIgnoreRule,
+            A11yRule::VideoMissingLabel,
         ];
         for rule in every {
             match rule {
@@ -883,7 +900,8 @@ mod tests {
                 | A11yRule::TablistWiringSkipped
                 | A11yRule::NonPortableAria
                 | A11yRule::UnknownLiveToken
-                | A11yRule::UnknownIgnoreRule => {}
+                | A11yRule::UnknownIgnoreRule
+                | A11yRule::VideoMissingLabel => {}
             }
             assert!(
                 ALL_RULES.contains(&rule),
@@ -918,6 +936,7 @@ mod tests {
                 "non-portable-aria",
                 "unknown-live-token",
                 "unknown-ignore-rule",
+                "video-missing-label",
             ]
         );
     }

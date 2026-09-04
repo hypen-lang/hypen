@@ -50,7 +50,7 @@ const MAX_TEXT_METRICS_CACHE_SIZE = 4096;
  * Get cache key for text metrics
  */
 function getCacheKey(text: string, fontStyle: FontStyle, maxWidth?: number): string {
-  return `${text}|${fontStyle.fontSize}|${fontStyle.fontWeight}|${fontStyle.fontFamily}|${maxWidth || "auto"}`;
+  return `${text}|${fontStyle.fontSize}|${fontStyle.fontWeight}|${fontStyle.fontFamily}|${maxWidth || "auto"}|${fontStyle.letterSpacing || 0}`;
 }
 
 /**
@@ -190,6 +190,16 @@ export function measureText(
     ctx.font = font;
     width = lines.length > 0 ? Math.max(...lines.map((line) => ctx.measureText(line).width)) : 0;
     ctx.restore();
+  }
+
+  // Tracking (`letter-spacing`) widens every line by one spacing per glyph.
+  // Measured widths above come from the untracked font, so add it back —
+  // otherwise a `tracking-[0.2em]` heading is under-measured and its box
+  // clips the text (HYPEFLIX lost its trailing glyphs).
+  const tracking = fontStyle.letterSpacing || 0;
+  if (tracking !== 0 && lines.length > 0) {
+    const longest = lines.reduce((max, line) => Math.max(max, line.length), 0);
+    width += tracking * longest;
   }
 
   const result: TextMetrics = {

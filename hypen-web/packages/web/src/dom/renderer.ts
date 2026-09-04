@@ -89,6 +89,48 @@ const COMPONENT_HTML_ATTRS: Record<string, Set<string>> = {
   // Route URL changes to the handler so it reconnects the embedded app
   // instead of the generic text branch overwriting the subtree.
   hypenapp: new Set(["0", "url"]),
+  // Video contract (docs/components/video.md): every contract prop — media
+  // sources, playback flags, headers, and the media event actions — must
+  // reach videoHandler.applyProps on SetProp (the CSS fallback would
+  // silently no-op them). Props can arrive as "controls" or "controls.0",
+  // so both spellings are listed.
+  video: new Set([
+    "0",
+    ...[
+      "src",
+      "source",
+      "poster",
+      "playlist",
+      "startIndex",
+      "controls",
+      "autoplay",
+      "loop",
+      "muted",
+      "preload",
+      "headers",
+      // v2: playback bind (`playback` struct + `bind` path), the one-way
+      // `playing` controlled prop, and the create-time seek. The bind
+      // channel MUST route to the handler — the generic bind applicator
+      // only knows form controls.
+      "playback",
+      "playing",
+      "bind",
+      "startPosition",
+      "onPlay",
+      "onPause",
+      "onEnded",
+      "onTrackChange",
+      "onError",
+    ].flatMap((name) => [name, `${name}.0`]),
+  ]),
+  // Scrubber (Video v2): its bind path, seek action and value/duration
+  // overrides are handler state, not CSS.
+  scrubber: new Set([
+    "0",
+    ...["bind", "value", "position", "duration", "disabled", "onSeek"].flatMap(
+      (name) => [name, `${name}.0`]
+    ),
+  ]),
 };
 
 import { ComponentRegistry } from "./components/index.js";
@@ -738,6 +780,13 @@ export class DOMRenderer {
         element = fallback;
       }
       element.dataset.hypenType = node.elementType.toLowerCase();
+      // `.slot("name")` marker, same as `onCreate`: slot-aware containers
+      // (HypenApp, Video) identify their slotted children at the DOM level,
+      // and the marker has to be on the prototype to survive into clones.
+      const slotName = staticProps["slot.0"] ?? staticProps.slot;
+      if (typeof slotName === "string" && slotName) {
+        element.dataset.hypenSlot = slotName;
+      }
       this.applicators.applyAll(element, staticProps);
 
       for (const child of node.children ?? []) {
@@ -797,6 +846,15 @@ export class DOMRenderer {
     }
     // Per-node passes AFTER all ids are registered, so handlers that look
     // up related nodes resolve.
+    //
+    // Adoption first: a clone carries the prototype's DOM but none of its
+    // JS-side state (WeakMap entries, listeners, media wiring), and the
+    // passes below — deferred event props, `subs` — assume a live component.
+    // Parents adopt before children (depth-first collect order), so a
+    // Scrubber finds its enclosing Video already wired.
+    for (const element of elements) {
+      this.components.adopt(element);
+    }
     for (const [index, semantics] of patch.nodeSemantics ?? []) {
       applySemantics(elements[index], semantics);
     }

@@ -288,6 +288,64 @@ impl CpuPainter {
                         &mut self.image_cache,
                     );
                 }
+                ItemKind::Video {
+                    poster,
+                    state,
+                    slots,
+                    ..
+                } => {
+                    // Video v2 slot replacement rules — see the matching
+                    // branch in the Vello painter.
+                    let glyph = slots.draws_builtin_glyph(*state);
+                    // Feature `video`: a live decoded frame wins over
+                    // the poster (objectFit contain, letterboxed on
+                    // black, play glyph only while paused / ended).
+                    #[cfg(feature = "video")]
+                    let live_frame_drawn = {
+                        if let Some(frame) = crate::media::current_frame(&item.node_id) {
+                            crate::paint::image::paint_video_frame(
+                                pixmap,
+                                item.rect,
+                                &frame,
+                                scale_factor,
+                                item.border.radius * scale_factor,
+                                glyph && crate::media::is_paused(&item.node_id),
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    #[cfg(not(feature = "video"))]
+                    let live_frame_drawn = false;
+                    if !live_frame_drawn {
+                        // No inline decode (feature off) or no frame
+                        // yet: poster frame (cover) or dark
+                        // placeholder, plus the play affordance.
+                        crate::paint::image::paint_video_surface(
+                            pixmap,
+                            item.rect,
+                            // A `poster` slot replaces the poster prop's
+                            // image — fall through to the dark box, over
+                            // which the slot subtree paints.
+                            poster.as_deref().filter(|_| !slots.poster),
+                            scale_factor,
+                            item.border.radius * scale_factor,
+                            glyph,
+                            &mut self.image_cache,
+                        );
+                    }
+                }
+                ItemKind::Scrubber { video_id, preview } => {
+                    let fraction =
+                        crate::video_v2::scrubber_fraction(video_id.as_deref(), *preview);
+                    crate::paint::image::paint_scrubber(
+                        pixmap,
+                        item.rect,
+                        fraction,
+                        scale_factor,
+                    );
+                }
                 ItemKind::Icon {
                     paths,
                     view_box,

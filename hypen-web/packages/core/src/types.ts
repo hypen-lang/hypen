@@ -271,3 +271,93 @@ export type ComponentResolver = (
   contextPath: string | null
 ) => ResolvedComponent | null;
 
+
+// ---------------------------------------------------------------------------
+// Video v2: playback binding & composition slots
+// (docs/components/video.md §"Playback control & composition slots")
+// ---------------------------------------------------------------------------
+
+/** Normative player states — slot visibility and `PlaybackBinding.state`
+ * use these names verbatim. */
+export type VideoPlayerState =
+  | "idle"
+  | "loading"
+  | "playing"
+  | "paused"
+  | "ended"
+  | "error";
+
+/**
+ * The struct `Video(...).bind(@state.playback)` keeps in sync.
+ * `playing`/`position` are read-write (a `position` write is a seek);
+ * `duration`/`state` are renderer-owned and read-only.
+ */
+export type PlaybackBinding = {
+  playing: boolean;
+  position: number;
+  duration: number;
+  state: VideoPlayerState;
+};
+
+/** Renderer → state position reports are throttled to this interval
+ * while playing; transitions (play/pause/seek/ended/error) always
+ * report immediately. */
+export const PLAYBACK_REPORT_INTERVAL_MS = 250;
+
+/** A `position` write only seeks when it differs from the renderer's
+ * actual position by more than this — prevents the renderer's own
+ * progress reports from echoing back as seeks. */
+export const PLAYBACK_SEEK_EPSILON_S = 1;
+
+/** Video composition slot names (children tagged `.slot(name)`). */
+export const VIDEO_SLOTS = ["controls", "loading", "error", "poster"] as const;
+export type VideoSlotName = (typeof VIDEO_SLOTS)[number];
+
+/**
+ * Normative slot visibility by player state — every renderer keys
+ * show/hide off this single table. A present slot replaces the
+ * built-in for that concern (controls slot suppresses native chrome,
+ * error slot replaces the built-in error surface, poster slot
+ * replaces the `poster` prop image, loading replaces any spinner).
+ */
+export const VIDEO_SLOT_VISIBILITY: Record<
+  VideoSlotName,
+  Record<VideoPlayerState, boolean>
+> = {
+  poster: {
+    idle: true,
+    loading: true,
+    playing: false,
+    paused: false,
+    ended: true,
+    error: false,
+  },
+  loading: {
+    idle: false,
+    loading: true,
+    playing: false,
+    paused: false,
+    ended: false,
+    error: false,
+  },
+  controls: {
+    // Visible in idle so a custom controls slot can start first play
+    // (play-button-over-poster), and in loading so a buffering stream
+    // still offers its transport (a stalled stream must not strand the
+    // viewer with only a spinner).
+    idle: true,
+    loading: true,
+    playing: true,
+    paused: true,
+    ended: true,
+    error: false,
+  },
+  error: {
+    idle: false,
+    loading: false,
+    playing: false,
+    paused: false,
+    ended: false,
+    error: true,
+  },
+};

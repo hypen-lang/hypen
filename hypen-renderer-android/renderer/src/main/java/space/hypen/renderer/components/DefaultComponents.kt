@@ -36,6 +36,9 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     register(SliderComponent())
     register(SwitchComponent())
 
+    // Media timeline for a Video `controls` slot (inert outside a Video)
+    register(ScrubberComponent())
+
     // UI components
     register(CardComponent())
     register(SpinnerComponent())

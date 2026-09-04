@@ -1,4 +1,4 @@
 {
   "title": "Server SDKs",
-  "pages": ["index", "typescript", "golang", "kotlin", "swift", "rust"]
+  "pages": ["index", "typescript", "golang", "kotlin", "swift", "rust", "cloudflare"]
 }

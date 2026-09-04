@@ -6,6 +6,13 @@
 
 import type { Semantics } from "@hypen-space/core/types";
 import type { VirtualNode } from "./types.js";
+import {
+  findEnclosingVideoNode,
+  getScrubberFraction,
+  getVideoPlayback,
+  isScrubberNode,
+  isVideoSlotChildVisible,
+} from "./paint.js";
 
 /**
  * Shadow tags that already convey their role natively, so we don't set an
@@ -34,6 +41,16 @@ const NATIVE_SHADOW_TAGS = new Set([
  * away its `aria-label`.
  */
 const appliedShadowAttrs = new WeakMap<HTMLElement, string[]>();
+
+/** `137.4` → `"2:17"` — the spoken form for a media timeline. */
+function formatMediaTime(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  const hrs = Math.floor(total / 3600);
+  const mins = Math.floor((total % 3600) / 60);
+  const secs = total % 60;
+  const mm = hrs > 0 ? String(mins).padStart(2, "0") : String(mins);
+  return `${hrs > 0 ? `${hrs}:` : ""}${mm}:${String(secs).padStart(2, "0")}`;
+}
 
 /**
  * Apply engine-derived accessibility semantics to a shadow-tree element.
@@ -447,6 +464,23 @@ export class AccessibilityLayer {
     const element = this.nodeMap.get(node.id);
     if (!element || !node.layout) return;
 
+    // Video composition slots are shown/hidden, not mounted/unmounted: a
+    // slot the normative table hides keeps its subtree (and its state) but
+    // must not be announced or reachable, so it drops out of the mirror
+    // the same way `visible: false` does.
+    if (node.parent && findEnclosingVideoNode(node.parent) === node.parent) {
+      const shown = isVideoSlotChildVisible(node);
+      element.style.display = shown && node.visible && !node.semantics?.hidden ? "" : "none";
+      if (!shown) return;
+    }
+
+    // A Scrubber is a slider to AT: keep its value + value text on the live
+    // playback position (this runs after every canvas render, so the
+    // announced time never goes stale).
+    if (isScrubberNode(node)) {
+      this.syncScrubberValue(element, node);
+    }
+
     const x = node.layout.x - scrollX;
     const y = node.layout.y - scrollY;
     const width = node.layout.width;
@@ -468,6 +502,31 @@ export class AccessibilityLayer {
     for (const child of node.children) {
       this.syncNodePosition(child, x, y, childScrollX, childScrollY);
     }
+  }
+
+  /**
+   * `role="slider"` value exposure for a Scrubber. The engine already
+   * derives the role (semantics.rs maps `Scrubber` → `Role::Slider`); the
+   * numbers only exist renderer-side, so they are written here: seconds for
+   * `aria-valuenow`/`max`, and a spoken `m:ss of m:ss` as `aria-valuetext`.
+   * A Scrubber outside a Video has no timeline — it carries no value.
+   */
+  private syncScrubberValue(element: HTMLElement, node: VirtualNode): void {
+    const videoNode = findEnclosingVideoNode(node.parent);
+    const playback = videoNode ? getVideoPlayback(videoNode.id) : null;
+    if (!playback || playback.duration <= 0) {
+      element.removeAttribute("aria-valuenow");
+      element.removeAttribute("aria-valuetext");
+      return;
+    }
+    const position = getScrubberFraction(node) * playback.duration;
+    element.setAttribute("aria-valuemin", "0");
+    element.setAttribute("aria-valuemax", String(Math.round(playback.duration)));
+    element.setAttribute("aria-valuenow", String(Math.round(position)));
+    element.setAttribute(
+      "aria-valuetext",
+      `${formatMediaTime(position)} of ${formatMediaTime(playback.duration)}`,
+    );
   }
 
   /**
@@ -503,6 +562,12 @@ export class AccessibilityLayer {
 
       case "image":
         return document.createElement("img");
+
+      case "video":
+        // Bare mirror element: real playback happens in the paint system's
+        // offscreen element, so this carries only semantics/geometry for AT
+        // (no src — a second network fetch would be wasteful and audible).
+        return document.createElement("video");
 
       case "heading": {
         // Use the derived level when known; fall back to a generic h2.

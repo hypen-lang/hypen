@@ -74,8 +74,47 @@ pub const TEXT_INPUT_TYPES: &[&str] = &["Input"];
 /// rasterised yet).
 pub const IMAGE_TYPES: &[&str] = &["Image", "Icon"];
 
+/// Element types rendered as media surfaces. Desktop has no inline
+/// media decode (see `hypen-web/docs/components/video.md`): a `Video`
+/// renders its `poster` frame (through the shared image pipeline) with
+/// a play-glyph overlay, or a dark placeholder when no poster is
+/// available. Kept separate from [`IMAGE_TYPES`] because the semantics
+/// differ — sizing defaults to 16:9 (video has no natural aspect until
+/// the poster loads), clicks dispatch `onPlay`, and a11y reports a
+/// video role instead of an image.
+pub const MEDIA_TYPES: &[&str] = &["Video"];
+
+/// Element types rendered as a playback timeline (Video v2's `Scrubber`).
+/// Inside a Video the widget wires itself to the enclosing player
+/// renderer-side (thumb tracks playback at frame rate, drag previews
+/// locally, release commits); outside one it renders inert.
+pub const SCRUBBER_TYPES: &[&str] = &["Scrubber"];
+
+/// Default logical height of a `Scrubber` — thumb diameter, so the whole
+/// widget is a comfortable pointer target. The track itself is painted
+/// much thinner, centred in this box.
+pub const DEFAULT_SCRUBBER_HEIGHT_PX: f32 = 16.0;
+
+/// Logical thickness of the Scrubber's track / progress bar.
+pub const SCRUBBER_TRACK_PX: f32 = 4.0;
+
+/// Minimum logical width so a Scrubber in a tight Row never collapses to
+/// an untargetable sliver.
+pub const DEFAULT_SCRUBBER_MIN_W_PX: f32 = 48.0;
+
 /// Default text alignment when `textAlign` isn't set on a `Text`.
 pub const DEFAULT_IMAGE_SIZE_PX: f32 = 60.0;
+
+/// Default logical width for a `Video` with no width/height/size
+/// constraints at all. Paired with [`DEFAULT_VIDEO_ASPECT`] this gives
+/// an unconstrained video a sane 320×180 box instead of collapsing.
+pub const DEFAULT_VIDEO_WIDTH_PX: f32 = 320.0;
+
+/// Fallback aspect ratio (w / h) for `Video` when the node declares no
+/// `aspectRatio` and the poster's natural size isn't known yet. Images
+/// use their natural aspect; a video has none until (unless) a poster
+/// loads, so the universal 16:9 default applies.
+pub const DEFAULT_VIDEO_ASPECT: f32 = 16.0 / 9.0;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -275,6 +314,39 @@ pub enum ItemKind {
         /// canonical Hypen avatar / hero-image setting.
         fit: ObjectFit,
     },
+    /// `Video` media surface. Desktop has no inline decode stack, so
+    /// the painter renders the `poster` bitmap (objectFit cover,
+    /// loaded through the shared image pipeline) — or a dark
+    /// placeholder when there's no poster / the poster failed — and
+    /// overlays a centered play glyph. `src` is the resolved stream
+    /// URL of the current track (playlist-aware); carried for event
+    /// payloads and the a11y label, never fetched as media.
+    Video {
+        poster: Option<String>,
+        src: Option<String>,
+        /// Video v2 player state, derived once per emit from the media
+        /// registry (or the poster/probe failure registry without the
+        /// `video` feature). Drives slot visibility and what the painter
+        /// draws underneath the slots.
+        state: crate::video_v2::VideoPlayerState,
+        /// Which composition slots this node declares. A present slot
+        /// replaces the built-in for its concern — see
+        /// [`crate::video_v2::SlotPresence`].
+        slots: crate::video_v2::SlotPresence,
+    },
+    /// Video v2 `Scrubber`: a playback timeline. Painted as
+    /// track + progress + thumb from the ENCLOSING player's live
+    /// position/duration (read at paint time, so the frame-driven
+    /// repaints already happening during playback advance the thumb
+    /// without a layout pass). `video_id` is `None` outside a Video —
+    /// the widget then renders inert and commits nothing.
+    Scrubber {
+        video_id: Option<String>,
+        /// In-flight drag preview (`0..=1`). While `Some`, the thumb
+        /// follows the pointer and the live position is ignored; the
+        /// release commits.
+        preview: Option<f32>,
+    },
     /// Vector `Icon` whose `paths` were pre-resolved by the engine
     /// (`@resources.foo` → SVG path data). Painter rasterises the
     /// paths into the laid-out rect every frame; cheap because icons
@@ -384,6 +456,12 @@ pub struct LayoutItem {
     /// field never contains it. `None` when only the action ref was
     /// supplied.
     pub hover_payload: Option<serde_json::Value>,
+    /// Renderer-local video intent from `.videoIntent("fullscreen")`,
+    /// resolved only for nodes that sit INSIDE a Video subtree (outside
+    /// one the intent is inert, exactly like a `Scrubber`). An item with
+    /// an intent is actionable and focusable even with no `.onClick` —
+    /// the renderer performs the intent itself instead of dispatching.
+    pub video_intent: Option<crate::video_v2::VideoIntent>,
     /// Optional fill. Painted under everything else for the same item.
     /// Optional fill from `backgroundColor` / tw `bg-*`. Buttons no
     /// longer get implicit chrome — set `.backgroundColor(...)` or
@@ -588,6 +666,14 @@ pub struct TaffyState {
     /// were built against. A mismatch on the next compute triggers a
     /// restyle so the new states reach Taffy.
     interaction_key: u64,
+    /// Taffy nodes whose `size.width` was replaced by a computed
+    /// fit-content length in the content-sizing pre-pass, mapped to the
+    /// value that was written. See [`apply_fit_content_widths`].
+    fit_widths: HashMap<NodeId, f32>,
+    /// `true` when the fit-content pre-pass needs to re-run (cold start,
+    /// restyle, patched content). Scroll-only frames leave it `false` so
+    /// they keep the previous frame's widths and run a single layout.
+    fit_pass_dirty: bool,
 }
 
 impl TaffyState {
@@ -610,6 +696,8 @@ impl TaffyState {
             needs_bulk_rebuild: true,
             interaction: LayoutInteraction::default(),
             interaction_key: 0,
+            fit_widths: HashMap::new(),
+            fit_pass_dirty: true,
         }
     }
 
@@ -619,6 +707,7 @@ impl TaffyState {
     /// any other reason.
     pub fn mark_needs_rebuild(&mut self) {
         self.needs_bulk_rebuild = true;
+        self.fit_pass_dirty = true;
     }
 
     /// Update the interaction snapshot used to resolve layout-affecting
@@ -664,6 +753,11 @@ impl TaffyState {
         viewport: Viewport,
     ) -> bool {
         let mut all_applied = true;
+        if !patches.is_empty() {
+            // Content changed, so every content-sized flex container's
+            // max-content width is potentially stale.
+            self.fit_pass_dirty = true;
+        }
         for patch in patches {
             if !self.apply_patch(patch, tree, scale, viewport) {
                 all_applied = false;
@@ -740,6 +834,26 @@ impl TaffyState {
                             let ctx = node_context(node, scale, viewport);
                             let _ = self.tree.set_node_context(tid, Some(ctx));
                         }
+                    }
+                }
+                // A `slot` (re)tag flips a Video child between full-bleed
+                // overlay and `display: none`, and `node_style_with`
+                // (parent-agnostic, run just above for layout props)
+                // knows nothing about it. Re-apply the parent-dependent
+                // part whenever the tag itself moves.
+                if name == "slot" || name == "slot.0" {
+                    if let Some(parent_tid) = tree
+                        .parent_of(id)
+                        .filter(|p| {
+                            tree.get(p).is_some_and(|n| {
+                                MEDIA_TYPES
+                                    .iter()
+                                    .any(|t| t.eq_ignore_ascii_case(&n.element_type))
+                            })
+                        })
+                        .and_then(|p| self.node_map.get(p).copied())
+                    {
+                        self.apply_video_slot_styles(parent_tid, tree);
                     }
                 }
                 true
@@ -873,7 +987,39 @@ impl TaffyState {
                 if parent_node.element_type.eq_ignore_ascii_case("Stack") {
                     self.apply_stack_overlay_styles(parent_tid);
                 }
+                // Video v2 slots: children of a Video are full-bleed
+                // absolute overlays (untagged ones are `display: none`).
+                // Same reasoning as Stack — `node_style_with` is
+                // parent-agnostic, so the parent-dependent part is
+                // re-applied whenever the child list changes.
+                if MEDIA_TYPES
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&parent_node.element_type))
+                {
+                    self.apply_video_slot_styles(parent_tid, tree);
+                }
             }
+        }
+    }
+
+    /// Re-apply [`apply_slot_overlay_style`] to every child of a Video's
+    /// Taffy node. Called on child-list changes and after `restyle_all`
+    /// (which rebuilds parent-agnostic styles and would otherwise strip
+    /// the overlay positioning).
+    fn apply_video_slot_styles(&mut self, parent_tid: NodeId, tree: &Tree) {
+        let children: Vec<NodeId> = self.tree.children(parent_tid).unwrap_or_default();
+        for child in children {
+            let tagged = self
+                .renderer_for_taffy
+                .get(&child)
+                .and_then(|rid| tree.get(rid))
+                .and_then(crate::video_v2::node_slot)
+                .is_some();
+            let Ok(mut s) = self.tree.style(child).cloned() else {
+                continue;
+            };
+            apply_slot_overlay_style(&mut s, tagged);
+            let _ = self.tree.set_style(child, s);
         }
     }
 
@@ -911,6 +1057,11 @@ impl TaffyState {
         let active_states = self.interaction.active_states_for(id, node);
         let style = node_style_with(node, scale, viewport, &active_states);
         let _ = self.tree.set_style(tid, style);
+        // The freshly-built style has an `auto` width again, so any
+        // fit-content override we wrote is gone — drop the bookkeeping
+        // and re-derive it on the next compute.
+        self.fit_widths.remove(&tid);
+        self.fit_pass_dirty = true;
         if node.element_type == "Text" {
             let ctx = node_context(node, scale, viewport);
             let _ = self.tree.set_node_context(tid, Some(ctx));
@@ -923,6 +1074,10 @@ impl TaffyState {
     /// per-node styles at build time, so we have to recompute them.
     pub fn restyle_all(&mut self, tree: &Tree, scale: f32, viewport_px: (u32, u32)) {
         let viewport = logical_viewport(viewport_px, scale);
+        // Every style is about to be rebuilt from scratch, wiping the
+        // fit-content widths this pass wrote last frame.
+        self.fit_widths.clear();
+        self.fit_pass_dirty = true;
         // Re-style every existing node.
         let entries: Vec<(NodeId, String)> = self
             .renderer_for_taffy
@@ -1004,6 +1159,25 @@ impl TaffyState {
             .collect();
         for tid in stack_parents {
             self.apply_stack_overlay_styles(tid);
+        }
+
+        // Same re-walk for Video v2 slot parents: the parent-agnostic
+        // restyle above stripped the absolute/inset-0 overlay styling
+        // (and the `display: none` on untagged children) off every
+        // Video child.
+        let video_parents: Vec<NodeId> = self
+            .renderer_for_taffy
+            .iter()
+            .filter_map(|(tid, rid)| {
+                let n = tree.get(rid)?;
+                MEDIA_TYPES
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&n.element_type))
+                    .then_some(*tid)
+            })
+            .collect();
+        for tid in video_parents {
+            self.apply_video_slot_styles(tid, tree);
         }
     }
 
@@ -1236,6 +1410,8 @@ impl LayoutPass {
             state.tree = TaffyTree::new();
             state.renderer_for_taffy.clear();
             state.node_map.clear();
+            // NodeIds from the old tree are meaningless in the new one.
+            state.fit_widths.clear();
             let mut root_children = Vec::new();
             for child_id in tree.root_children() {
                 if let Some(node_id) = build_subtree(
@@ -1296,7 +1472,12 @@ impl LayoutPass {
             state.refresh_root_size(scale, viewport);
         }
         state.interaction_key = interaction_key;
+        if needs_rebuild || style_changed || interaction_changed {
+            state.fit_pass_dirty = true;
+        }
         let root = state.root;
+        let fit_pass_dirty = std::mem::take(&mut state.fit_pass_dirty);
+        let fit_widths = &mut state.fit_widths;
         let taffy = &mut state.tree;
         let renderer_for_taffy = &state.renderer_for_taffy;
 
@@ -1311,11 +1492,11 @@ impl LayoutPass {
             width: AvailableSpace::Definite(viewport.0 as f32),
             height: AvailableSpace::MaxContent,
         };
-        let measure = |known: Size<Option<f32>>,
-                       avail: Size<AvailableSpace>,
-                       _node_id: NodeId,
-                       ctx: Option<&mut NodeContext>,
-                       _style: &Style|
+        let mut measure = |known: Size<Option<f32>>,
+                           avail: Size<AvailableSpace>,
+                           _node_id: NodeId,
+                           ctx: Option<&mut NodeContext>,
+                           _style: &Style|
          -> Size<f32> {
             let Some(ctx) = ctx else {
                 return Size::ZERO;
@@ -1356,8 +1537,20 @@ impl LayoutPass {
             }
         };
 
-        if let Err(e) = taffy.compute_layout_with_measure(root, available, measure) {
+        if let Err(e) = taffy.compute_layout_with_measure(root, available, &mut measure) {
             log::warn!("taffy layout failed: {e:?}");
+        }
+
+        // Content-sized flex containers (`alignSelf(center)` heroes and
+        // friends) need a second pass — see `apply_fit_content_widths`
+        // for why Taffy can't get their width right on its own. The
+        // pre-pass reads the parent widths the layout above resolved,
+        // probes each candidate's max-content width, and writes a
+        // definite width; the re-layout below then places it.
+        if fit_pass_dirty && apply_fit_content_widths(taffy, root, &mut measure, fit_widths) {
+            if let Err(e) = taffy.compute_layout_with_measure(root, available, &mut measure) {
+                log::warn!("taffy relayout failed: {e:?}");
+            }
         }
 
         // Walk and emit absolute-rect items in natural (un-scrolled)
@@ -1455,7 +1648,11 @@ impl LayoutPass {
         let mut hoverable_ids = Vec::new();
         for (idx, it) in items.iter().enumerate() {
             by_node_id.insert(it.node_id.clone(), idx);
-            if it.action.is_some() {
+            // A `.videoIntent(...)` node is actionable for hit-testing
+            // purposes even with no `.onClick`: the renderer performs the
+            // intent locally, so the item still has to be findable under
+            // the pointer (and press/release-pairable) like any button.
+            if it.action.is_some() || it.video_intent.is_some() {
                 actionable_ids.push(idx);
             }
             if it.is_focusable() {
@@ -1495,6 +1692,15 @@ impl LayoutPass {
     /// O(1) item lookup by renderer node id.
     pub fn item_by_id(&self, id: &str) -> Option<&LayoutItem> {
         self.by_node_id.get(id).map(|&i| &self.items[i])
+    }
+
+    /// O(1) mutable item lookup by renderer node id. Used for in-place
+    /// patches of paint-only item state (e.g. a Scrubber's drag preview)
+    /// that must reach paint before the next full layout pass without
+    /// dropping the cached pass.
+    pub fn item_by_id_mut(&mut self, id: &str) -> Option<&mut LayoutItem> {
+        let &i = self.by_node_id.get(id)?;
+        self.items.get_mut(i)
     }
 
     /// Recompute the per-item transform post-pass against the CURRENT
@@ -1686,9 +1892,28 @@ impl LayoutPass {
 
 impl LayoutItem {
     /// True for items that take focus on click / Tab — actionables
-    /// (Buttons, Cards, Links) plus text-input elements.
+    /// (Buttons, Cards, Links), renderer-local `.videoIntent(...)`
+    /// controls (Enter / Space performs the intent), text inputs, and
+    /// Scrubbers
+    /// (which take Left / Right to seek, so they must be reachable
+    /// without a pointer). A Scrubber outside any Video renders inert
+    /// per the spec — disabled, not focusable, no commits — so only a
+    /// wired one takes focus.
     pub fn is_focusable(&self) -> bool {
-        self.action.is_some() || matches!(self.kind, ItemKind::Input { .. })
+        self.action.is_some()
+            || self.video_intent.is_some()
+            || matches!(self.kind, ItemKind::Input { .. })
+            || matches!(self.kind, ItemKind::Scrubber { video_id: Some(_), .. })
+    }
+
+    /// The enclosing player id when this item is a `Scrubber` wired to
+    /// one. `None` for every other kind, and for an inert Scrubber
+    /// outside a Video.
+    pub fn scrubber_video_id(&self) -> Option<&str> {
+        match &self.kind {
+            ItemKind::Scrubber { video_id, .. } => video_id.as_deref(),
+            _ => None,
+        }
     }
 
     /// Transform-aware pointer containment: the viewport-space point is
@@ -1753,6 +1978,268 @@ impl LayoutItem {
 }
 
 // ---------------------------------------------------------------------------
+// Content-sized flex containers (CSS `fit-content` in the cross axis).
+// ---------------------------------------------------------------------------
+
+/// A flex container whose cross size (width) is content-derived rather
+/// than stretched, plus the parent it draws its available width from.
+struct FitCandidate {
+    node: NodeId,
+    parent: NodeId,
+}
+
+/// True when `dim` is a definite zero (`Length(0)` or `Percent(0)`) —
+/// the flex-basis `flex: <n>` lowers to.
+fn is_definite_zero(dim: Dimension) -> bool {
+    dim == Dimension::length(0.0) || dim == Dimension::percent(0.0)
+}
+
+/// True when a child with `child_style` inside a container with
+/// `parent_style` is stretched along the container's cross axis (and so
+/// gets a definite cross size handed down rather than a content-derived
+/// one). `align-self` wins over the container's `align-items`; the CSS
+/// initial value for both is `stretch`.
+fn is_cross_stretched(parent_style: &Style, child_style: &Style) -> bool {
+    let align = child_style.align_self.or(parent_style.align_items);
+    matches!(align, None | Some(AlignItems::Stretch))
+}
+
+/// Compute a definite width for every content-sized flex row that Taffy
+/// would otherwise collapse, writing it into the node's style. Returns
+/// `true` if any node was probed (in which case the caller MUST re-run
+/// the root layout — probing overwrites the subtree's stored layout).
+///
+/// ## Why this exists
+///
+/// A `Row` that opts out of its parent Column's cross-axis stretch —
+/// `.alignSelf("center")`, or a parent with `items-center` — is sized by
+/// its content: CSS says `width: fit-content`, i.e.
+/// `clamp(min-content, stretch-fit, max-content)`.
+///
+/// Taffy 0.10 does implement §9.9.1 (the "max-content flex fraction"
+/// walk) — but only when the container is probed with
+/// `AvailableSpace::MinContent | MaxContent`. A non-stretched flex item
+/// is measured through `determine_hypothetical_cross_size`, which hands
+/// the container the parent's *definite* available cross space, so
+/// `determine_container_main_size` takes its `AvailableSpace::Definite`
+/// shortcut instead:
+///
+/// ```text
+/// sum over items of (flex_basis.max(style_min_size.main) + margin).max(padding + border)
+/// ```
+///
+/// That sum uses the flex **base** size, not the item's max-content
+/// contribution. `flex: 1` lowers to `flex-basis: 0` (see
+/// `set_flex_shorthand`), so every growable child contributes *zero* and
+/// the row collapses to roughly its fixed-size children plus padding.
+/// The Hypeflix hero — `Row { Column.tw("flex-1 min-w-0 …"), Image
+/// .tw("w-28 shrink-0") }.maxWidth(1200).alignSelf("center")` — came out
+/// 170px wide with a 16px text column, so the blurb wrapped one word per
+/// line and spilled out underneath the poster.
+///
+/// The fix is to give Taffy the answer it refuses to compute: probe the
+/// container standalone with `MaxContent` / `MinContent` available space
+/// (which *does* route through §9.9.1), then set an explicit
+/// `size.width = clamp(min-content, available, max-content)`. The node's
+/// own `max_size.width` (`.maxWidth(1200)`) still clamps on top, exactly
+/// as it would for an author-written width.
+fn apply_fit_content_widths<M>(
+    taffy: &mut TaffyTree<NodeContext>,
+    root: NodeId,
+    measure: &mut M,
+    overrides: &mut HashMap<NodeId, f32>,
+) -> bool
+where
+    M: FnMut(
+        Size<Option<f32>>,
+        Size<AvailableSpace>,
+        NodeId,
+        Option<&mut NodeContext>,
+        &Style,
+    ) -> Size<f32>,
+{
+    // Undo last frame's overrides so candidate detection sees the
+    // authored (auto-width) style again. Skip nodes whose width has
+    // since been replaced by a real authored value or a restyle.
+    for (node, width) in std::mem::take(overrides) {
+        let Ok(style) = taffy.style(node) else {
+            continue;
+        };
+        if style.size.width != Dimension::length(width) {
+            continue;
+        }
+        let mut style = style.clone();
+        style.size.width = Dimension::auto();
+        let _ = taffy.set_style(node, style);
+    }
+
+    let mut candidates = Vec::new();
+    collect_fit_candidates(taffy, root, &mut candidates);
+    if candidates.is_empty() {
+        return false;
+    }
+
+    // Outermost-first so a nested candidate reads a parent width that
+    // already reflects the enclosing container's resolved size.
+    let mut settled: Vec<(NodeId, f32)> = Vec::new();
+    for FitCandidate { node, parent } in candidates {
+        // A candidate nested inside one we already sized reads its
+        // available width out of a subtree that still carries the
+        // pre-pass layout. Re-lay that ancestor at its new width first.
+        if let Some(&(ancestor, width)) = settled
+            .iter()
+            .find(|(a, _)| is_descendant_of(taffy, node, *a))
+        {
+            let _ = taffy.compute_layout_with_measure(
+                ancestor,
+                Size {
+                    width: AvailableSpace::Definite(width),
+                    height: AvailableSpace::MaxContent,
+                },
+                &mut *measure,
+            );
+        }
+        // Available cross space = the parent's content box minus this
+        // node's own margins, straight off the layout the caller just
+        // computed (margins are only stale if the parent itself moved,
+        // which dirties this pass again anyway).
+        let Ok(parent_layout) = taffy.layout(parent) else {
+            continue;
+        };
+        let parent_inner = parent_layout.size.width
+            - parent_layout.padding.left
+            - parent_layout.padding.right
+            - parent_layout.border.left
+            - parent_layout.border.right
+            - parent_layout.scrollbar_size.width;
+        let Ok(own_layout) = taffy.layout(node) else {
+            continue;
+        };
+        let avail = (parent_inner - own_layout.margin.left - own_layout.margin.right).max(0.0);
+
+        // `compute_layout_with_measure` on a subtree root routes through
+        // the intrinsic-sizing branch of the flex algorithm, which is the
+        // one that honours §9.9.1.
+        let mut probe = |taffy: &mut TaffyTree<NodeContext>, space: AvailableSpace| -> Option<f32> {
+            taffy
+                .compute_layout_with_measure(
+                    node,
+                    Size {
+                        width: space,
+                        height: AvailableSpace::MaxContent,
+                    },
+                    &mut *measure,
+                )
+                .ok()?;
+            taffy.layout(node).ok().map(|l| l.size.width)
+        };
+        let Some(max_content) = probe(taffy, AvailableSpace::MaxContent) else {
+            continue;
+        };
+        let min_content = probe(taffy, AvailableSpace::MinContent).unwrap_or(0.0);
+        // CSS fit-content: shrink to max-content, never past min-content.
+        let fit = max_content.min(avail).max(min_content);
+
+        let Ok(style) = taffy.style(node) else {
+            continue;
+        };
+        let mut style = style.clone();
+        style.size.width = Dimension::length(fit);
+        let _ = taffy.set_style(node, style);
+        overrides.insert(node, fit);
+        settled.insert(0, (node, fit));
+    }
+    true
+}
+
+/// True when `node` sits anywhere under `ancestor`.
+fn is_descendant_of(taffy: &TaffyTree<NodeContext>, node: NodeId, ancestor: NodeId) -> bool {
+    let mut cursor = node;
+    while let Some(parent) = taffy.parent(cursor) {
+        if parent == ancestor {
+            return true;
+        }
+        cursor = parent;
+    }
+    false
+}
+
+/// Walk the Taffy tree collecting flex containers that are (a) sized by
+/// their content in the inline axis and (b) contain a horizontal flex
+/// line with a zero-basis growable item — the exact shape Taffy's
+/// `AvailableSpace::Definite` shortcut under-measures.
+///
+/// The container that needs the definite width is not necessarily the
+/// collapsing Row itself: Hypeflix's marathon banner is a `Button`
+/// (column-direction) with `alignSelf("center")` wrapping a stretched
+/// Row, and the Button's content-derived cross size is what pulls the
+/// collapsed Row width up the tree. So candidacy is about the *outer*
+/// content-sized box; the trigger is looked for anywhere below it.
+fn collect_fit_candidates(
+    taffy: &TaffyTree<NodeContext>,
+    node: NodeId,
+    out: &mut Vec<FitCandidate>,
+) {
+    let Ok(parent_style) = taffy.style(node) else {
+        return;
+    };
+    let column_parent = parent_style.display == Display::Flex
+        && matches!(
+            parent_style.flex_direction,
+            FlexDirection::Column | FlexDirection::ColumnReverse
+        );
+    let parent_style = parent_style.clone();
+    let children = taffy.children(node).unwrap_or_default();
+    for child in &children {
+        let child = *child;
+        if column_parent {
+            if let Ok(child_style) = taffy.style(child) {
+                if child_style.display == Display::Flex
+                    && child_style.position != Position::Absolute
+                    && child_style.size.width.is_auto()
+                    && !is_cross_stretched(&parent_style, child_style)
+                    && has_zero_basis_growable_row(taffy, child)
+                {
+                    out.push(FitCandidate {
+                        node: child,
+                        parent: node,
+                    });
+                }
+            }
+        }
+        collect_fit_candidates(taffy, child, out);
+    }
+}
+
+/// True when `node` — or any flex box below it — lays children out
+/// horizontally and has one that grows from a definite-zero basis. That
+/// child contributes 0 to Taffy's definite-space content-size shortcut
+/// no matter how wide its own content is.
+fn has_zero_basis_growable_row(taffy: &TaffyTree<NodeContext>, node: NodeId) -> bool {
+    let Ok(style) = taffy.style(node) else {
+        return false;
+    };
+    let is_row = style.display == Display::Flex
+        && matches!(
+            style.flex_direction,
+            FlexDirection::Row | FlexDirection::RowReverse
+        );
+    let Ok(children) = taffy.children(node) else {
+        return false;
+    };
+    children.into_iter().any(|child| {
+        if is_row
+            && taffy.style(child).is_ok_and(|s| {
+                s.flex_grow > 0.0 && s.size.width.is_auto() && is_definite_zero(s.flex_basis)
+            })
+        {
+            return true;
+        }
+        has_zero_basis_growable_row(taffy, child)
+    })
+}
+
+// ---------------------------------------------------------------------------
 // Build phase: renderer tree → Taffy tree.
 // ---------------------------------------------------------------------------
 
@@ -1809,6 +2296,58 @@ fn build_subtree(
                 border: border_to_taffy(border_with(node, &vs), scale),
                 ..Default::default()
             };
+            apply_flex_props(&mut style, node, &vs, scale);
+            apply_alignment_props(&mut style, node, viewport);
+            apply_size_props(&mut style, node, &vs, scale);
+            let id = taffy.new_leaf(style).ok()?;
+            renderer_for_taffy.insert(id, node_id.to_string());
+            Some(id)
+        }
+        et if MEDIA_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
+            // Video: sized like Image, but with a 16:9 default aspect
+            // (poster natural aspect when already loaded) instead of a
+            // square fallback — see `media_style` for the rules.
+            let mut style = media_style(node, &vs, scale);
+            apply_flex_props(&mut style, node, &vs, scale);
+            apply_alignment_props(&mut style, node, viewport);
+            apply_size_props(&mut style, node, &vs, scale);
+            // Video v2 composition slots: `.slot(name)`-tagged children
+            // are built as absolutely-positioned, inset-0 overlays of
+            // the video's own box, stacked in declaration order. They
+            // contribute nothing to the player's size (absolute children
+            // are out of flow), so the 16:9 / poster-aspect sizing above
+            // is undisturbed. Untagged children stay invalid per the
+            // spec ("Video is a leaf for ordinary children") — they are
+            // built but forced `display: none` so a stray child can't
+            // silently paint over the surface.
+            let mut children = Vec::new();
+            for child_id in tree.children_of(node_id) {
+                if let Some(c) = build_subtree(
+                    taffy,
+                    tree,
+                    child_id,
+                    scale,
+                    viewport,
+                    renderer_for_taffy,
+                    interaction,
+                ) {
+                    let tagged = tree
+                        .get(child_id)
+                        .and_then(crate::video_v2::node_slot)
+                        .is_some();
+                    if let Ok(mut s) = taffy.style(c).cloned() {
+                        apply_slot_overlay_style(&mut s, tagged);
+                        let _ = taffy.set_style(c, s);
+                    }
+                    children.push(c);
+                }
+            }
+            let id = taffy.new_with_children(style, &children).ok()?;
+            renderer_for_taffy.insert(id, node_id.to_string());
+            Some(id)
+        }
+        et if SCRUBBER_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
+            let mut style = scrubber_style(node, &vs, scale);
             apply_flex_props(&mut style, node, &vs, scale);
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
@@ -2215,6 +2754,10 @@ pub(crate) fn node_style_with(
             border: border_to_taffy(border_with(node, &vs), scale),
             ..Default::default()
         }
+    } else if MEDIA_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
+        media_style(node, &vs, scale)
+    } else if SCRUBBER_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
+        scrubber_style(node, &vs, scale)
     } else if TEXT_INPUT_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
         let pad_x = DEFAULT_INPUT_PAD_X * scale;
         let pad_y = DEFAULT_INPUT_PAD_Y * scale;
@@ -2395,6 +2938,219 @@ pub(crate) fn node_style_with(
     apply_overflow_props(&mut style, node, viewport);
     apply_position_props(&mut style, node, &vs, scale);
     style
+}
+
+/// Base Taffy style for a media (`Video`) leaf. Sized like `Image`
+/// (`width` / `height` px-or-%, `.size(N)` fallback) with one
+/// difference: the fallback aspect ratio. An `Image` with a single
+/// dimension keeps its *natural* aspect via the bitmap; a video has no
+/// natural aspect until its poster loads, so the chain is
+/// explicit `aspectRatio` prop → poster natural aspect (when the
+/// poster is already in the image cache) → 16:9. When neither axis is
+/// constrained at all, the width defaults to
+/// [`DEFAULT_VIDEO_WIDTH_PX`] (or `.size(N)`) with the height derived
+/// from the same aspect chain.
+fn media_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style {
+    let size_fallback = prop_f32_with(node, "size", vs);
+    let w_dim = prop_dim_with(node, "width", vs);
+    let h_dim = prop_dim_with(node, "height", vs);
+    let explicit_ar = crate::style::prop_aspect_ratio_with(node, "aspectRatio", vs);
+    let fallback_ar = explicit_ar
+        .or_else(|| {
+            resolve_media_poster(node, vs.viewport)
+                .and_then(|p| crate::paint::image::loaded_natural_size(&p))
+                .filter(|(_, h)| *h > 0.0)
+                .map(|(w, h)| w / h)
+        })
+        .unwrap_or(DEFAULT_VIDEO_ASPECT);
+    let (width, height, aspect_ratio) = match (w_dim, h_dim) {
+        // Both axes explicit: aspect only applies when the author
+        // asked for it (Taffy ignores it with two definite sizes
+        // anyway; keep the prop for min/max interactions).
+        (Some(w), Some(h)) => (dim_to_dimension(w, scale), dim_to_dimension(h, scale), explicit_ar),
+        // One axis: derive the other through the aspect chain.
+        (Some(w), None) => (dim_to_dimension(w, scale), Dimension::auto(), Some(fallback_ar)),
+        // Height-only with a definite length: resolve the width here
+        // rather than leaving it `auto` + aspect-ratio — inside a
+        // Column the cross axis is width, and flex's default
+        // `align-items: stretch` would win over the aspect ratio and
+        // stretch the video to the full column width.
+        (None, Some(Dim::Length(h))) => (
+            Dimension::length(h * fallback_ar * scale),
+            Dimension::length(h * scale),
+            None,
+        ),
+        (None, Some(h)) => (Dimension::auto(), dim_to_dimension(h, scale), Some(fallback_ar)),
+        // Unconstrained: default width + aspect-derived height.
+        (None, None) => (
+            Dimension::length(size_fallback.unwrap_or(DEFAULT_VIDEO_WIDTH_PX) * scale),
+            Dimension::auto(),
+            Some(fallback_ar),
+        ),
+    };
+    Style {
+        display: Display::Flex,
+        size: Size { width, height },
+        aspect_ratio,
+        // Match Image: don't let sibling flex children crush the
+        // media box to zero when its width is percent-based.
+        flex_shrink: 0.0,
+        margin: margin_to_taffy(margin_with(node, vs), scale),
+        border: border_to_taffy(border_with(node, vs), scale),
+        ..Default::default()
+    }
+}
+
+/// Base Taffy style for a Video v2 `Scrubber` leaf. Grows along the main
+/// axis (its natural home is a `Row` in the `controls` slot, where it
+/// should eat the space between the transport button and the time label)
+/// with a thumb-height fixed cross axis. Explicit `width` / `height`
+/// props override both, through the shared `apply_size_props` pass.
+fn scrubber_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style {
+    let w_dim = prop_dim_with(node, "width", vs);
+    let h_dim = prop_dim_with(node, "height", vs);
+    let width = match w_dim {
+        Some(d) => dim_to_dimension(d, scale),
+        None => Dimension::auto(),
+    };
+    let height = match h_dim {
+        Some(d) => dim_to_dimension(d, scale),
+        None => Dimension::length(DEFAULT_SCRUBBER_HEIGHT_PX * scale),
+    };
+    Style {
+        display: Display::Flex,
+        size: Size { width, height },
+        min_size: Size {
+            width: length(DEFAULT_SCRUBBER_MIN_W_PX * scale),
+            height: length(SCRUBBER_TRACK_PX * scale),
+        },
+        // Fill the free space of its flex line unless the author pinned
+        // a width. `flex_basis: 0` so two Scrubbers in one Row split the
+        // space evenly rather than by content size (they have none).
+        flex_grow: if w_dim.is_some() { 0.0 } else { 1.0 },
+        flex_shrink: 1.0,
+        margin: margin_to_taffy(margin_with(node, vs), scale),
+        border: border_to_taffy(border_with(node, vs), scale),
+        ..Default::default()
+    }
+}
+
+/// Video v2 slot layout: a `.slot(name)`-tagged child of a Video becomes
+/// a full-bleed overlay of the player's box — `position: absolute` with
+/// all four insets pinned to 0 and both axes auto, which Taffy resolves
+/// by stretching the child edge to edge. Any margin the author set is
+/// dropped: "full-bleed" is normative, and a stray `.margin(8)` inherited
+/// from a shared style would otherwise inset the chrome asymmetrically.
+///
+/// Untagged children are invalid per the spec and collapse to
+/// `display: none` — present in the tree (so patches and state survive),
+/// contributing no geometry and emitting no item.
+fn apply_slot_overlay_style(style: &mut Style, tagged: bool) {
+    if !tagged {
+        style.display = Display::None;
+        return;
+    }
+    style.position = Position::Absolute;
+    style.inset = Rect_ {
+        top: LengthPercentageAuto::length(0.0),
+        right: LengthPercentageAuto::length(0.0),
+        bottom: LengthPercentageAuto::length(0.0),
+        left: LengthPercentageAuto::length(0.0),
+    };
+    style.margin = Rect_ {
+        top: LengthPercentageAuto::length(0.0),
+        right: LengthPercentageAuto::length(0.0),
+        bottom: LengthPercentageAuto::length(0.0),
+        left: LengthPercentageAuto::length(0.0),
+    };
+    style.size = Size {
+        width: Dimension::auto(),
+        height: Dimension::auto(),
+    };
+}
+
+fn dim_to_dimension(d: Dim, scale: f32) -> Dimension {
+    match d {
+        Dim::Length(v) => Dimension::length(v * scale),
+        Dim::Percent(p) => Dimension::percent(p),
+    }
+}
+
+/// Resolve a Video node's `poster` prop. Empty / whitespace strings
+/// collapse to `None` (a record with no poster serialises to `""`).
+pub(crate) fn resolve_media_poster(
+    node: &crate::tree::Node,
+    viewport: Viewport,
+) -> Option<String> {
+    crate::style::prop_str_at(node, "poster", viewport)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// Resolve a Video node's current track: `(src, playlist index)`.
+/// Follows the cross-platform contract (`docs/components/video.md`):
+/// a non-empty `playlist` supersedes `src` / `source` / positional
+/// `0`, starting at `startIndex` clamped to the valid range. `index`
+/// is `0` for single-src playback.
+pub(crate) fn resolve_media_src(
+    node: &crate::tree::Node,
+    viewport: Viewport,
+) -> (Option<String>, u64) {
+    let playlist = node
+        .props
+        .get("playlist")
+        .or_else(|| node.props.get("playlist.0"))
+        .and_then(|v| v.as_array());
+    if let Some(arr) = playlist {
+        if !arr.is_empty() {
+            let start = prop_f32_at(node, "startIndex", viewport)
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .unwrap_or(0.0) as usize;
+            let idx = start.min(arr.len() - 1);
+            let src = arr
+                .get(idx)
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            return (src, idx as u64);
+        }
+    }
+    let src = crate::style::prop_str_at(node, "src", viewport)
+        .or_else(|| crate::style::prop_str_at(node, "source", viewport))
+        .or_else(|| node.props.get("0").and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    (src, 0)
+}
+
+/// Click behaviour for a Video surface: when an `onPlay` action is
+/// wired, a click dispatches it with the contract payload
+/// `{ type: "play", src, index }` (plus any static named args from
+/// the applicator). Returns `None` when no `onPlay` is wired — the
+/// caller falls back to a generic `onClick` if one exists. Kept OFF
+/// [`ACTIONABLE_TYPES`] deliberately: that set implies button layout
+/// chrome (default padding) and Button a11y, neither of which fits a
+/// media surface.
+fn resolve_video_play_action(
+    node: &crate::tree::Node,
+    src: Option<&str>,
+    index: u64,
+) -> Option<(String, serde_json::Value)> {
+    let (action, payload) = resolve_named_event_action(node, "onPlay")?;
+    let mut obj = match payload {
+        serde_json::Value::Object(o) => o,
+        _ => serde_json::Map::new(),
+    };
+    obj.insert("type".to_string(), serde_json::Value::from("play"));
+    obj.insert("src".to_string(), match src {
+        Some(s) => serde_json::Value::from(s),
+        None => serde_json::Value::Null,
+    });
+    obj.insert("index".to_string(), serde_json::Value::from(index));
+    Some((action, serde_json::Value::Object(obj)))
 }
 
 /// Apply `position` + `top` / `right` / `bottom` / `left` / `inset`
@@ -2958,6 +3714,10 @@ fn emit_items(
         if let Some(node) = tree.get(rid) {
             let action = resolve_action(node);
             let action_payload = action.as_ref().and_then(|_| resolve_action_payload(node));
+            // Renderer-local `.videoIntent(...)`: resolved once per node
+            // (the enclosing-Video walk is what makes it inert outside a
+            // player), then copied into whichever item kind we push.
+            let video_intent = crate::video_v2::intent_for(tree, rid);
             let hover_action = resolve_hover_action(node);
             let hover_payload = hover_action
                 .as_ref()
@@ -3054,6 +3814,7 @@ fn emit_items(
                         action_payload: None,
                         hover_action: hover_action.clone(),
                         hover_payload: hover_payload.clone(),
+                        video_intent,
                         background,
                         hover,
                         border: item_border,
@@ -3106,6 +3867,7 @@ fn emit_items(
                         action_payload: action_payload.clone(),
                         hover_action: hover_action.clone(),
                         hover_payload: hover_payload.clone(),
+                        video_intent,
                         background: background_explicit,
                         hover,
                         border: item_border,
@@ -3158,6 +3920,7 @@ fn emit_items(
                             action_payload: action_payload.clone(),
                             hover_action: hover_action.clone(),
                             hover_payload: hover_payload.clone(),
+                            video_intent,
                             background: background_explicit,
                             hover,
                             border: item_border,
@@ -3187,6 +3950,7 @@ fn emit_items(
                             action_payload: action_payload.clone(),
                             hover_action: hover_action.clone(),
                             hover_payload: hover_payload.clone(),
+                            video_intent,
                             background: background_explicit,
                             hover,
                             border: item_border,
@@ -3202,6 +3966,88 @@ fn emit_items(
                         });
                     }
                 }
+                et if SCRUBBER_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
+                    // Wired to the enclosing player renderer-side: no
+                    // module round trip for the thumb, and none for the
+                    // drag either (only the release commits).
+                    let video_id = crate::video_v2::enclosing_video(tree, rid);
+                    let preview = crate::video_v2::scrub_preview(node);
+                    out.push(LayoutItem {
+                        node_id: rid.to_string(),
+                        kind: ItemKind::Scrubber { video_id, preview },
+                        rect,
+                        // Scrubbers dispatch through their own commit
+                        // path (bind write / `onSeek`), never the
+                        // generic click action — a tap that lands on the
+                        // track is a seek, not an activation.
+                        action: None,
+                        action_payload: None,
+                        hover_action: hover_action.clone(),
+                        hover_payload: hover_payload.clone(),
+                        video_intent,
+                        background: background_explicit,
+                        hover,
+                        border: item_border,
+                        scrollable: None,
+                        font_weight: 400,
+                        clip_to: parent_clip_to,
+                        subtree_root: subtree_root.map(str::to_string),
+                        background_gradient: background_gradient.clone(),
+                        background_image: background_image.clone(),
+                        state_variants: item_state_variants.clone(),
+                        opacity: 1.0,
+                        transform: Affine2::IDENTITY,
+                    });
+                }
+                et if MEDIA_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
+                    let poster = resolve_media_poster(node, viewport);
+                    let (src, index) = resolve_media_src(node, viewport);
+                    let state = crate::video_v2::player_state(node, viewport);
+                    let slots = crate::video_v2::slot_presence(tree, rid);
+                    // Click routing: an explicit `.onClick(...)` (already
+                    // resolved into `action` above, allowed on any
+                    // element) wins; otherwise a wired `onPlay` makes
+                    // the surface clickable with the contract payload
+                    // `{ type: "play", src, index }`. Deliberately NOT
+                    // via ACTIONABLE_TYPES — that set implies Button
+                    // layout chrome and button-ish semantics.
+                    let (action, action_payload) = if action.is_some() {
+                        (action, action_payload.clone())
+                    } else if let Some((play, payload)) =
+                        resolve_video_play_action(node, src.as_deref(), index)
+                    {
+                        (Some(play), Some(payload))
+                    } else {
+                        (None, None)
+                    };
+                    out.push(LayoutItem {
+                        node_id: rid.to_string(),
+                        kind: ItemKind::Video {
+                            poster,
+                            src,
+                            state,
+                            slots,
+                        },
+                        rect,
+                        action,
+                        action_payload,
+                        hover_action: hover_action.clone(),
+                        hover_payload: hover_payload.clone(),
+                        video_intent,
+                        background: background_explicit,
+                        hover,
+                        border: item_border,
+                        scrollable: None,
+                        font_weight: 400,
+                        clip_to: parent_clip_to,
+                        subtree_root: subtree_root.map(str::to_string),
+                        background_gradient: background_gradient.clone(),
+                        background_image: background_image.clone(),
+                        state_variants: item_state_variants.clone(),
+                        opacity: 1.0,
+                        transform: Affine2::IDENTITY,
+                    });
+                }
                 et if ACTIONABLE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
                     // No implicit Button chrome — ghost/icon controls
                     // (e.g. Story close ✕) only paint what the DSL sets.
@@ -3213,6 +4059,7 @@ fn emit_items(
                         action_payload: action_payload.clone(),
                         hover_action: hover_action.clone(),
                         hover_payload: hover_payload.clone(),
+                        video_intent,
                         background: background_explicit,
                         hover,
                         border: item_border,
@@ -3239,6 +4086,7 @@ fn emit_items(
                         action_payload,
                         hover_action,
                         hover_payload,
+                        video_intent,
                         background: background_explicit,
                         hover,
                         border: item_border,
@@ -3265,11 +4113,52 @@ fn emit_items(
     }
 
     let mut max_child_bottom_natural = y_natural;
+    // Video v2 slot visibility: when THIS node is a Video, its children
+    // are composition slots and the normative table
+    // (`video_v2::slot_visible`) decides which of them are emitted at
+    // all this frame. Not emitting is exactly show/hide, not
+    // mount/unmount: the nodes stay in the renderer tree (patches,
+    // reconciliation, per-node renderer state all survive) — only their
+    // painting, hit-testing and a11y publication pause. Untagged
+    // children are invalid per the spec and never emit.
+    let video_slot_state: Option<crate::video_v2::VideoPlayerState> =
+        renderer_id.as_deref().and_then(|rid| {
+            let node = tree.get(rid)?;
+            MEDIA_TYPES
+                .iter()
+                .any(|t| t.eq_ignore_ascii_case(&node.element_type))
+                .then(|| crate::video_v2::player_state(node, viewport))
+        });
     // Paint flow children before absolutely-positioned overlays so an
     // in-flow sibling (e.g. Story's full-bleed Image) doesn't cover a
     // header declared earlier in the tree. Matches the canvas renderer
     // and CSS stacking: absolute overlays land on top of in-flow content.
     let children = taffy.children(node_id).unwrap_or_default();
+    let children: Vec<NodeId> = match video_slot_state {
+        None => children,
+        Some(state) => {
+            // Visible slots only, stacked in the normative paint order
+            // (`poster → loading → controls → error`, bottom-to-top)
+            // rather than declaration order — co-visible pairs
+            // (poster+loading in `loading`, poster+controls in
+            // `idle`/`ended`) must stack the same way in every app. The
+            // sort is stable, so several children tagged with the same
+            // slot keep their declaration order among themselves.
+            let mut slotted: Vec<(u8, NodeId)> = children
+                .into_iter()
+                .filter_map(|c| {
+                    let slot = renderer_for_taffy
+                        .get(&c)
+                        .and_then(|rid| tree.get(rid))
+                        .and_then(crate::video_v2::node_slot)?;
+                    crate::video_v2::slot_visible(slot, state)
+                        .then_some((crate::video_v2::slot_paint_rank(slot), c))
+                })
+                .collect();
+            slotted.sort_by_key(|(rank, _)| *rank);
+            slotted.into_iter().map(|(_, c)| c).collect()
+        }
+    };
     let mut flow_children = Vec::new();
     let mut overlay_children = Vec::new();
     for child in children {

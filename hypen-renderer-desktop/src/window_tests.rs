@@ -255,13 +255,13 @@ fn cache_key_ignores_hover_without_layout_state_variants() {
     // interaction transition never forces a relayout (no regression on
     // the common path).
     let scrollables = HashMap::new();
-    let base = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, None);
+    let base = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, None, 0);
     let hovered =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, Some("btn"), None, None);
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, Some("btn"), None, None, 0);
     let pressed =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, Some("btn"), None);
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, Some("btn"), None, 0);
     let focused =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, Some("btn"));
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, Some("btn"), 0);
     assert_eq!(base, hovered);
     assert_eq!(base, pressed);
     assert_eq!(base, focused);
@@ -273,20 +273,20 @@ fn cache_key_changes_on_hover_with_layout_state_variants() {
     // hover/press/focus transition bumps the key, forcing `redraw` to
     // recompute the LayoutPass with the new active states.
     let scrollables = HashMap::new();
-    let none = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, None, None);
+    let none = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, None, None, 0);
     let hovered =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, Some("btn"), None, None);
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, Some("btn"), None, None, 0);
     assert_ne!(none, hovered, "hover must bump the key");
     // Hover moving to a different node also changes the key.
     let other =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, Some("other"), None, None);
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, Some("other"), None, None, 0);
     assert_ne!(hovered, other);
     // Press / focus likewise.
     let pressed =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, Some("btn"), None);
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, Some("btn"), None, 0);
     assert_ne!(none, pressed);
     let focused =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, None, Some("btn"));
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, None, Some("btn"), 0);
     assert_ne!(none, focused);
 }
 
@@ -299,8 +299,8 @@ fn cache_key_with_variants_matches_baseline_when_no_interaction() {
     // resulting key still differs only by that — so we assert the
     // enabled-but-idle key is stable across calls).
     let scrollables = HashMap::new();
-    let a = layout_cache_key_inner(3, 1024, 768, 2.0, &scrollables, true, None, None, None);
-    let b = layout_cache_key_inner(3, 1024, 768, 2.0, &scrollables, true, None, None, None);
+    let a = layout_cache_key_inner(3, 1024, 768, 2.0, &scrollables, true, None, None, None, 0);
+    let b = layout_cache_key_inner(3, 1024, 768, 2.0, &scrollables, true, None, None, None, 0);
     assert_eq!(a, b);
 }
 
@@ -1029,4 +1029,657 @@ fn flip_on_move_plays_through_the_window_glue() {
     let pass4 = harness_layout(&mut taffy, &tree, &mut text, 4);
     assert!(pass4.item_by_id("b").unwrap().transform.is_identity());
     assert!(pass4.item_by_id("b").unwrap().rect.y.abs() < 0.5);
+}
+
+// ---------------------------------------------------------------
+// Video poster onError dispatch (pure scan)
+// ---------------------------------------------------------------
+
+mod media_errors {
+    use super::*;
+    use crate::paint::image::LoadFailure;
+    use crate::style::Viewport;
+    use crate::tree::{Tree, ROOT_ID};
+    use hypen_engine::Patch;
+    use serde_json::{json, Value};
+    use std::collections::HashSet;
+
+    fn video_tree(props: &[(&str, Value)]) -> Tree {
+        let mut map = indexmap::IndexMap::new();
+        for (k, v) in props {
+            map.insert((*k).to_string(), v.clone());
+        }
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "vid".into(),
+            element_type: "Video".to_string(),
+            props: std::sync::Arc::new(map),
+            semantics: None,
+        });
+        tree.apply(&Patch::Insert {
+            parent_id: ROOT_ID.into(),
+            id: "vid".into(),
+            before_id: None,
+        });
+        tree
+    }
+
+    fn failing_403(poster: &'static str) -> impl Fn(&str) -> Option<LoadFailure> {
+        move |src: &str| {
+            (src == poster).then(|| LoadFailure {
+                status: 403,
+                message: format!("HTTP 403 fetching {src}"),
+            })
+        }
+    }
+
+    #[test]
+    fn failed_poster_dispatches_onerror_with_status_once() {
+        let tree = video_tree(&[
+            ("src", json!("https://cdn/clip.mp4")),
+            ("poster", json!("https://cdn/frame.jpg")),
+            ("onError.0", json!("@actions.playbackFailed")),
+        ]);
+        let mut dispatched = HashSet::new();
+        let lookup = failing_403("https://cdn/frame.jpg");
+
+        let out = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut dispatched,
+            &lookup,
+        );
+        assert_eq!(out.len(), 1, "exactly one onError dispatch expected");
+        let (action, payload) = &out[0];
+        assert_eq!(action, "playbackFailed");
+        assert_eq!(payload["type"], json!("error"));
+        assert_eq!(payload["src"], json!("https://cdn/clip.mp4"));
+        assert_eq!(payload["index"], json!(0));
+        assert_eq!(payload["status"], json!(403));
+        assert!(payload["message"].as_str().unwrap().contains("403"));
+
+        // Second scan (next Wake): deduped, no re-dispatch.
+        let out2 = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut dispatched,
+            &lookup,
+        );
+        assert!(out2.is_empty(), "sticky failure must dispatch only once");
+    }
+
+    #[test]
+    fn poster_only_video_reports_the_poster_as_src() {
+        let tree = video_tree(&[
+            ("poster", json!("https://cdn/frame.jpg")),
+            ("onError.0", json!("@actions.err")),
+        ]);
+        let mut dispatched = HashSet::new();
+        let lookup = failing_403("https://cdn/frame.jpg");
+        let out = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut dispatched,
+            &lookup,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].1["src"], json!("https://cdn/frame.jpg"));
+    }
+
+    #[test]
+    fn no_onerror_wired_means_no_dispatch() {
+        let tree = video_tree(&[("poster", json!("https://cdn/frame.jpg"))]);
+        let mut dispatched = HashSet::new();
+        let lookup = failing_403("https://cdn/frame.jpg");
+        let out = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut dispatched,
+            &lookup,
+        );
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn healthy_poster_means_no_dispatch() {
+        let tree = video_tree(&[
+            ("poster", json!("https://cdn/ok.jpg")),
+            ("onError.0", json!("@actions.err")),
+        ]);
+        let mut dispatched = HashSet::new();
+        let lookup = |_: &str| None;
+        let out = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut dispatched,
+            &lookup,
+        );
+        assert!(out.is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Video v2: `playback` bind reports, Scrubber commit, slot-driven cache key
+// (docs/components/video.md §"Playback control & composition slots")
+// ---------------------------------------------------------------------------
+
+use crate::video_v2::{VideoPlayerState, PLAYBACK_REPORT_INTERVAL_MS};
+use crate::window::window_video::{
+    plan_playback_write, playback_reports, scrub_commit_dispatch, scrub_fraction_at,
+    PlaybackReport, PlaybackWritePlan,
+};
+
+fn report_at(
+    state: VideoPlayerState,
+    position: f64,
+    duration: f64,
+    at: std::time::Instant,
+) -> PlaybackReport {
+    PlaybackReport {
+        position,
+        duration,
+        playing: state.play_intent(),
+        state,
+        position_reported_at: at,
+    }
+}
+
+fn paths(reports: &[crate::window::window_video::PlaybackFieldReport]) -> Vec<&str> {
+    reports.iter().map(|r| r.path.as_str()).collect()
+}
+
+#[test]
+fn first_playback_report_pushes_every_field() {
+    let now = std::time::Instant::now();
+    let reports = playback_reports("pb", None, VideoPlayerState::Playing, 0.0, 12.0, now);
+    assert_eq!(
+        paths(&reports),
+        vec!["pb.state", "pb.playing", "pb.duration", "pb.position"]
+    );
+    assert_eq!(reports[0].value, json!("playing"));
+    assert_eq!(reports[1].value, json!(true));
+    assert_eq!(reports[2].value, json!(12.0));
+}
+
+#[test]
+fn loading_with_intent_reports_playing_true() {
+    // R3: the bind's `playing` field reports play INTENT. A pipeline in
+    // preroll / no-frame-yet `loading` that intends to play (not paused,
+    // not ended) reports `playing: true` while `state` reports
+    // `"loading"` — a bound toggle must not flicker during a stall.
+    let now = std::time::Instant::now();
+    let reports = playback_reports("pb", None, VideoPlayerState::Loading, 0.0, 0.0, now);
+    assert_eq!(paths(&reports), vec!["pb.state", "pb.playing", "pb.position"]);
+    assert_eq!(reports[0].value, json!("loading"));
+    assert_eq!(
+        reports[1].value,
+        json!(true),
+        "loading-with-intent must report playing: true"
+    );
+}
+
+#[test]
+fn rebuffer_transition_keeps_playing_true_and_flips_only_state() {
+    // playing → loading (rebuffer): `state` reports the transition but
+    // `playing` stays true, so nothing about the play intent changes.
+    let t0 = std::time::Instant::now();
+    let last = report_at(VideoPlayerState::Playing, 5.0, 60.0, t0);
+    let reports = playback_reports(
+        "pb",
+        Some(&last),
+        VideoPlayerState::Loading,
+        5.0,
+        60.0,
+        t0 + std::time::Duration::from_millis(10),
+    );
+    assert_eq!(paths(&reports), vec!["pb.state"]);
+    assert_eq!(reports[0].value, json!("loading"));
+    // And coming back out of the stall flips only `state` again.
+    let stalled = report_at(VideoPlayerState::Loading, 5.0, 60.0, t0);
+    let resumed = playback_reports(
+        "pb",
+        Some(&stalled),
+        VideoPlayerState::Playing,
+        5.0,
+        60.0,
+        t0 + std::time::Duration::from_millis(10),
+    );
+    assert_eq!(paths(&resumed), vec!["pb.state"]);
+}
+
+#[test]
+fn position_reports_are_throttled_to_250ms_while_playing() {
+    let t0 = std::time::Instant::now();
+    let last = report_at(VideoPlayerState::Playing, 1.0, 12.0, t0);
+    // 100 ms later, position moved — still inside the throttle window.
+    let early = playback_reports(
+        "pb",
+        Some(&last),
+        VideoPlayerState::Playing,
+        1.1,
+        12.0,
+        t0 + std::time::Duration::from_millis(100),
+    );
+    assert!(early.is_empty(), "sub-250ms progress must not report");
+    // At exactly the interval it goes out.
+    let due = playback_reports(
+        "pb",
+        Some(&last),
+        VideoPlayerState::Playing,
+        1.3,
+        12.0,
+        t0 + std::time::Duration::from_millis(PLAYBACK_REPORT_INTERVAL_MS),
+    );
+    assert_eq!(paths(&due), vec!["pb.position"]);
+    assert_eq!(due[0].value, json!(1.3));
+}
+
+#[test]
+fn transitions_report_immediately_regardless_of_the_throttle() {
+    let t0 = std::time::Instant::now();
+    let last = report_at(VideoPlayerState::Playing, 1.0, 12.0, t0);
+    // Pause 10 ms in: state + playing + the position it stopped at all
+    // go out at once, throttle notwithstanding.
+    let reports = playback_reports(
+        "pb",
+        Some(&last),
+        VideoPlayerState::Paused,
+        1.05,
+        12.0,
+        t0 + std::time::Duration::from_millis(10),
+    );
+    assert_eq!(
+        paths(&reports),
+        vec!["pb.state", "pb.playing", "pb.position"]
+    );
+    assert_eq!(reports[0].value, json!("paused"));
+    assert_eq!(reports[1].value, json!(false));
+}
+
+#[test]
+fn duration_reports_once_when_it_becomes_known() {
+    let t0 = std::time::Instant::now();
+    let unknown = report_at(VideoPlayerState::Loading, 0.0, 0.0, t0);
+    let learned = playback_reports(
+        "pb",
+        Some(&unknown),
+        VideoPlayerState::Loading,
+        0.0,
+        30.0,
+        t0 + std::time::Duration::from_millis(400),
+    );
+    assert_eq!(paths(&learned), vec!["pb.duration"]);
+    // Same duration again: silent.
+    let known = report_at(VideoPlayerState::Loading, 0.0, 30.0, t0);
+    let quiet = playback_reports(
+        "pb",
+        Some(&known),
+        VideoPlayerState::Loading,
+        0.0,
+        30.0,
+        t0 + std::time::Duration::from_millis(400),
+    );
+    assert!(quiet.is_empty());
+}
+
+#[test]
+fn steady_state_playback_reports_nothing_when_nothing_moved() {
+    let t0 = std::time::Instant::now();
+    let last = report_at(VideoPlayerState::Paused, 4.0, 12.0, t0);
+    let reports = playback_reports(
+        "pb",
+        Some(&last),
+        VideoPlayerState::Paused,
+        4.0,
+        12.0,
+        t0 + std::time::Duration::from_secs(5),
+    );
+    assert!(
+        reports.is_empty(),
+        "a parked player must not keep writing state"
+    );
+}
+
+#[test]
+fn seek_epsilon_is_one_second() {
+    // The write-side guard: `apply_playback_write` seeks only when the
+    // written position differs from the actual one by MORE than the
+    // epsilon, which is what stops the 250 ms progress reports from
+    // echoing back around as seeks.
+    let actual = 10.0_f64;
+    for (written, should_seek) in [
+        (10.2, false),
+        (10.9, false),
+        (11.0, false),
+        (11.5, true),
+        (0.0, true),
+    ] {
+        assert_eq!(
+            (written - actual).abs() > crate::video_v2::PLAYBACK_SEEK_EPSILON_S,
+            should_seek,
+            "written={written}"
+        );
+    }
+}
+
+// --- Inbound playback writes (plan_playback_write) --------------------------
+
+fn playback_obj(fields: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+    fields
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.clone()))
+        .collect()
+}
+
+#[test]
+fn first_bind_application_is_positive_intent_only() {
+    // Spec: "The first application of a freshly-bound struct carries
+    // positive intent only … an initialized `playing: false` cannot
+    // cancel `autoplay`." The required init `{playing: false, …}` lands
+    // in the same flush that started the autoplay pipeline (state =
+    // loading, intent to play) and must NOT pause it.
+    let obj = playback_obj(&[("playing", json!(false)), ("position", json!(0.0))]);
+    let plan = plan_playback_write(&obj, true, None, VideoPlayerState::Loading, 0.0, 0.0);
+    assert_eq!(
+        plan,
+        PlaybackWritePlan::default(),
+        "an initialized playing:false must not cancel same-flush autoplay"
+    );
+
+    // Positive intent DOES apply on the first application: playing:true
+    // plays, and a position (the resume point) seeks.
+    let obj = playback_obj(&[("playing", json!(true)), ("position", json!(545.0))]);
+    let plan = plan_playback_write(&obj, true, None, VideoPlayerState::Idle, 0.0, 600.0);
+    assert_eq!(plan.set_playing, Some(true));
+    assert_eq!(plan.seek_to, Some(545.0), "the first application's position seeks");
+
+    // A negative init still lets its accompanying resume position seek.
+    let obj = playback_obj(&[("playing", json!(false)), ("position", json!(120.0))]);
+    let plan = plan_playback_write(&obj, true, None, VideoPlayerState::Loading, 0.0, 600.0);
+    assert_eq!(plan.set_playing, None);
+    assert_eq!(plan.seek_to, Some(120.0));
+}
+
+#[test]
+fn later_playing_false_writes_are_authoritative() {
+    // "Every later write is authoritative in both directions": a genuine
+    // pause request (not an echo — the last report said playing: true)
+    // must reach the pipeline.
+    let t0 = std::time::Instant::now();
+    let last = report_at(VideoPlayerState::Playing, 5.0, 60.0, t0);
+    let obj = playback_obj(&[("playing", json!(false))]);
+    let plan =
+        plan_playback_write(&obj, false, Some(&last), VideoPlayerState::Playing, 5.0, 60.0);
+    assert_eq!(plan.set_playing, Some(false));
+}
+
+#[test]
+fn echoed_playback_reports_do_not_touch_the_pipeline() {
+    // The renderer's own pause report comes back around the state loop:
+    // both fields match what was last reported / the actual position —
+    // nothing may reach the pipeline.
+    let t0 = std::time::Instant::now();
+    let last = report_at(VideoPlayerState::Paused, 5.0, 60.0, t0);
+    let obj = playback_obj(&[("playing", json!(false)), ("position", json!(5.0))]);
+    let plan =
+        plan_playback_write(&obj, false, Some(&last), VideoPlayerState::Paused, 5.0, 60.0);
+    assert_eq!(plan, PlaybackWritePlan::default());
+}
+
+#[test]
+fn restart_from_ended_yields_to_an_accompanying_seek() {
+    // `{playing: true, position: 37}` on an ended player: the restart
+    // (whose implementation seeks to zero inside `media::set_playing`)
+    // runs first and the explicit seek lands after — the plan carries
+    // both, so the player resumes at 37, not 0.
+    let t0 = std::time::Instant::now();
+    let last = report_at(VideoPlayerState::Ended, 60.0, 60.0, t0);
+    let obj = playback_obj(&[("playing", json!(true)), ("position", json!(37.0))]);
+    let plan =
+        plan_playback_write(&obj, false, Some(&last), VideoPlayerState::Ended, 60.0, 60.0);
+    assert_eq!(plan.set_playing, Some(true), "playing:true on ended restarts");
+    assert_eq!(
+        plan.seek_to,
+        Some(37.0),
+        "the explicit seek must win over the restart's seek-to-zero"
+    );
+}
+
+#[test]
+fn position_writes_clamp_and_respect_the_epsilon() {
+    let obj = playback_obj(&[("position", json!(10.5))]);
+    let plan = plan_playback_write(&obj, false, None, VideoPlayerState::Playing, 10.0, 60.0);
+    assert_eq!(plan.seek_to, None, "within the 1 s epsilon: a progress echo");
+    let obj = playback_obj(&[("position", json!(999.0))]);
+    let plan = plan_playback_write(&obj, false, None, VideoPlayerState::Playing, 10.0, 60.0);
+    assert_eq!(plan.seek_to, Some(60.0), "clamped to the known duration");
+    let obj = playback_obj(&[("position", json!(-8.0))]);
+    let plan = plan_playback_write(&obj, false, None, VideoPlayerState::Playing, 10.0, 60.0);
+    assert_eq!(plan.seek_to, Some(0.0), "clamped at zero");
+}
+
+// --- Scrubber commit ------------------------------------------------------
+
+fn scrub_tree(bind: Option<&str>, on_seek: Option<&str>) -> Tree {
+    scrub_tree_with_own_bind(bind, None, on_seek)
+}
+
+fn scrub_tree_with_own_bind(
+    video_bind: Option<&str>,
+    scrubber_bind: Option<&str>,
+    on_seek: Option<&str>,
+) -> Tree {
+    let mut tree = Tree::new();
+    let mut vprops: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
+    if let Some(b) = video_bind {
+        vprops.insert("bind".into(), json!(b));
+    }
+    tree.apply(&hypen_engine::Patch::Create {
+        id: "vid".into(),
+        element_type: "Video".into(),
+        props: std::sync::Arc::new(vprops),
+        semantics: None,
+    });
+    tree.apply(&hypen_engine::Patch::Insert {
+        parent_id: "root".into(),
+        id: "vid".into(),
+        before_id: None,
+    });
+    let mut sprops: indexmap::IndexMap<String, serde_json::Value> = indexmap::IndexMap::new();
+    if let Some(b) = scrubber_bind {
+        sprops.insert("bind".into(), json!(b));
+    }
+    if let Some(a) = on_seek {
+        sprops.insert("onSeek".into(), json!(a));
+    }
+    tree.apply(&hypen_engine::Patch::Create {
+        id: "sc".into(),
+        element_type: "Scrubber".into(),
+        props: std::sync::Arc::new(sprops),
+        semantics: None,
+    });
+    tree.apply(&hypen_engine::Patch::Insert {
+        parent_id: "vid".into(),
+        id: "sc".into(),
+        before_id: None,
+    });
+    tree
+}
+
+#[test]
+fn scrubber_commits_through_the_enclosing_videos_bind() {
+    let tree = scrub_tree(Some("playback"), Some("@actions.seek"));
+    let (action, payload) =
+        scrub_commit_dispatch(&tree, "sc", Some("vid"), 42.5).expect("a commit dispatch");
+    assert_eq!(action, "__hypen_bind");
+    assert_eq!(payload["path"], json!("playback.position"));
+    assert_eq!(payload["value"], json!(42.5));
+}
+
+#[test]
+fn scrubbers_own_bind_wins_over_the_enclosing_videos_bind() {
+    // R2 commit precedence: own bind → enclosing Video's bind → onSeek.
+    let tree =
+        scrub_tree_with_own_bind(Some("playback"), Some("scrub.pb"), Some("@actions.seek"));
+    let (action, payload) =
+        scrub_commit_dispatch(&tree, "sc", Some("vid"), 12.0).expect("a commit dispatch");
+    assert_eq!(action, "__hypen_bind");
+    assert_eq!(
+        payload["path"],
+        json!("scrub.pb.position"),
+        "the Scrubber's OWN bind must win over the enclosing Video's"
+    );
+    assert_eq!(payload["value"], json!(12.0));
+}
+
+#[test]
+fn scrubbers_own_bind_commits_even_when_the_player_is_bindless() {
+    let tree = scrub_tree_with_own_bind(None, Some("scrub.pb"), Some("@actions.seek"));
+    let (action, payload) =
+        scrub_commit_dispatch(&tree, "sc", Some("vid"), 3.5).expect("a commit dispatch");
+    assert_eq!(action, "__hypen_bind");
+    assert_eq!(payload["path"], json!("scrub.pb.position"));
+    assert_eq!(payload["value"], json!(3.5));
+}
+
+#[test]
+fn scrubber_falls_back_to_its_own_on_seek_when_the_player_is_bindless() {
+    let tree = scrub_tree(None, Some("@actions.seek"));
+    let (action, payload) =
+        scrub_commit_dispatch(&tree, "sc", Some("vid"), 7.0).expect("a commit dispatch");
+    assert_eq!(action, "seek", "the `@actions.` prefix is stripped at resolve time");
+    assert_eq!(payload["type"], json!("seek"));
+    assert_eq!(payload["position"], json!(7.0));
+}
+
+#[test]
+fn bindless_scrubber_without_on_seek_dispatches_nothing() {
+    let tree = scrub_tree(None, None);
+    assert!(scrub_commit_dispatch(&tree, "sc", Some("vid"), 7.0).is_none());
+    // Outside a Video, with no onSeek either: inert.
+    assert!(scrub_commit_dispatch(&tree, "sc", None, 7.0).is_none());
+}
+
+#[test]
+fn scrub_pointer_mapping_clamps_to_the_track() {
+    let rect = crate::layout::Rect {
+        x: 100.0,
+        y: 0.0,
+        w: 200.0,
+        h: 16.0,
+    };
+    assert_eq!(scrub_fraction_at(rect, 100.0), 0.0);
+    assert_eq!(scrub_fraction_at(rect, 200.0), 0.5);
+    assert_eq!(scrub_fraction_at(rect, 300.0), 1.0);
+    // Dragging past either end pins rather than wrapping.
+    assert_eq!(scrub_fraction_at(rect, -50.0), 0.0);
+    assert_eq!(scrub_fraction_at(rect, 9000.0), 1.0);
+    // Degenerate rect: no division by zero.
+    assert_eq!(
+        scrub_fraction_at(
+            crate::layout::Rect {
+                x: 0.0,
+                y: 0.0,
+                w: 0.0,
+                h: 0.0
+            },
+            5.0
+        ),
+        0.0
+    );
+}
+
+// --- Layout cache key -----------------------------------------------------
+
+#[test]
+fn player_state_transitions_bump_the_layout_cache_key() {
+    // Slot visibility is derived from the registry, not from tree props,
+    // so without folding the state into the key a play→pause would reuse
+    // a cached layout and never show/hide the slots.
+    let scrollables = HashMap::new();
+    let idle = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, None, 11);
+    let playing =
+        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, None, 22);
+    assert_ne!(idle, playing);
+}
+
+#[test]
+fn video_state_key_is_zero_without_any_video_node() {
+    let mut tree = Tree::new();
+    tree.apply(&hypen_engine::Patch::Create {
+        id: "col".into(),
+        element_type: "Column".into(),
+        props: std::sync::Arc::new(indexmap::IndexMap::new()),
+        semantics: None,
+    });
+    tree.apply(&hypen_engine::Patch::Insert {
+        parent_id: "root".into(),
+        id: "col".into(),
+        before_id: None,
+    });
+    assert_eq!(
+        crate::window::video_state_key_for(&tree, crate::style::vp(800.0)),
+        0,
+        "non-media apps must keep a key byte-identical to the pre-feature one"
+    );
+}
+
+#[test]
+fn video_state_key_tracks_the_derived_state() {
+    let tree = scrub_tree(Some("playback"), None);
+    let viewport = crate::style::vp(800.0);
+    crate::video_v2::clear_test_states();
+    crate::video_v2::set_test_state("vid", VideoPlayerState::Playing);
+    let playing = crate::window::video_state_key_for(&tree, viewport);
+    crate::video_v2::set_test_state("vid", VideoPlayerState::Paused);
+    let paused = crate::window::video_state_key_for(&tree, viewport);
+    assert_ne!(playing, paused);
+    assert_ne!(playing, 0);
+    crate::video_v2::clear_test_states();
+}
+
+#[test]
+fn controls_slot_suppresses_the_builtin_tap_toggle() {
+    use crate::window::window_video::tap_suppressed;
+    // Without a controls slot the surface keeps today's tap-to-toggle.
+    let bare = scrub_tree(None, None);
+    assert!(!tap_suppressed(&bare, "vid"));
+
+    // With one, the author's own transport chrome owns playback and the
+    // built-in toggle stands down — in every player state, since slot
+    // PRESENCE (not visibility) is what replaces a built-in.
+    let mut with_controls = scrub_tree(None, None);
+    with_controls.apply(&hypen_engine::Patch::Create {
+        id: "ctl".into(),
+        element_type: "Row".into(),
+        props: std::sync::Arc::new(indexmap::IndexMap::from([(
+            "slot.0".to_string(),
+            json!("controls"),
+        )])),
+        semantics: None,
+    });
+    with_controls.apply(&hypen_engine::Patch::Insert {
+        parent_id: "vid".into(),
+        id: "ctl".into(),
+        before_id: None,
+    });
+    assert!(tap_suppressed(&with_controls, "vid"));
+
+    // A non-controls slot leaves the tap affordance alone.
+    let mut poster_only = scrub_tree(None, None);
+    poster_only.apply(&hypen_engine::Patch::Create {
+        id: "post".into(),
+        element_type: "Image".into(),
+        props: std::sync::Arc::new(indexmap::IndexMap::from([(
+            "slot.0".to_string(),
+            json!("poster"),
+        )])),
+        semantics: None,
+    });
+    poster_only.apply(&hypen_engine::Patch::Insert {
+        parent_id: "vid".into(),
+        id: "post".into(),
+        before_id: None,
+    });
+    assert!(!tap_suppressed(&poster_only, "vid"));
 }

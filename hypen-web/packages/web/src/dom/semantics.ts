@@ -38,6 +38,9 @@ const IMPLICIT_ROLE: Record<string, string> = {
   A: "link",
   P: "paragraph",
   IMG: "img",
+  // ARIA has no video role; the engine's Hypen-neutral "video" token is
+  // treated as implicit on the native <video> host and never emitted.
+  VIDEO: "video",
   INPUT: "textbox",
   TEXTAREA: "textbox",
   SELECT: "listbox",
@@ -59,6 +62,17 @@ const IMPLICIT_ROLE: Record<string, string> = {
  */
 const appliedAttrs = new WeakMap<HTMLElement, string[]>();
 
+/** The element that actually carries a node's accessibility semantics. */
+function resolveSemanticsHost(node: HTMLElement): HTMLElement {
+  if (node.dataset?.hypenType !== "video") return node;
+  for (const child of Array.from(node.children ?? [])) {
+    if ((child as HTMLElement).dataset?.hypenVideoSurface === "true") {
+      return child as HTMLElement;
+    }
+  }
+  return node;
+}
+
 /**
  * Apply derived accessibility semantics to a DOM element.
  *
@@ -70,7 +84,13 @@ const appliedAttrs = new WeakMap<HTMLElement, string[]>();
  * `aria-expanded`). No-op when `semantics` was never present, so
  * non-semantic nodes pay nothing.
  */
-export function applySemantics(element: HTMLElement, semantics?: Semantics): void {
+export function applySemantics(node: HTMLElement, semantics?: Semantics): void {
+  // A Video node is a positioned wrapper holding the `<video>` surface (its
+  // composition slots overlay the player inside the wrapper). The media
+  // element is the accessible host — a role/label on the wrapper div would
+  // be invisible to assistive tech and `role="video"` isn't even valid ARIA
+  // — so semantics hop down to the surface.
+  const element = resolveSemanticsHost(node);
   if (!semantics && !appliedAttrs.has(element)) return;
 
   // Everything this pass wants set, collected first so the diff against the
@@ -102,8 +122,10 @@ export function applySemantics(element: HTMLElement, semantics?: Semantics): voi
       // An explicit author label overrides visible content, so it is applied
       // as aria-label even on native elements. A *derived* name is
       // deliberately not applied — the browser already exposes it from the
-      // visible content.
-      if (semantics.nameExplicit && semantics.name) {
+      // visible content. Exception: a <video>'s derived name comes from a
+      // `title` prop that is NOT in the browser's accessible-name
+      // computation, so it must be applied to be exposed at all.
+      if (semantics.name && (semantics.nameExplicit || semantics.role === "video")) {
         next.push(["aria-label", semantics.name]);
       }
 

@@ -172,6 +172,7 @@ fn ak_role(role: hypen_engine::ir::Role) -> Role {
         SemRole::Tabpanel => Role::TabPanel,
         SemRole::OptionItem => Role::ListBoxOption,
         SemRole::Combobox => Role::ComboBox,
+        SemRole::Video => Role::Video,
     }
 }
 
@@ -226,6 +227,59 @@ fn build_node_for(
             // unless the host explicitly surfaces `aria-label`
             // through the engine (Phase 16+).
             Node::new(Role::Image)
+        }
+        ItemKind::Scrubber { video_id, preview } => {
+            // Video v2 timeline. Exposed as a slider whose numeric value
+            // is the ELAPSED SECONDS and whose max is the duration, so
+            // assistive tech announces "0:37 of 2:15"-shaped positions
+            // rather than an abstract percentage. The engine's
+            // `SemRole::Slider` maps to the same AccessKit role, so an
+            // authored `.role("slider")` on a wrapper stays consistent.
+            let mut node = Node::new(Role::Slider);
+            let (position, duration) =
+                crate::video_v2::position_duration(video_id.as_deref());
+            let fraction =
+                crate::video_v2::scrubber_fraction(video_id.as_deref(), *preview);
+            let value = if duration > 0.0 {
+                (fraction as f64) * duration
+            } else {
+                position
+            };
+            node.set_numeric_value(value);
+            node.set_min_numeric_value(0.0);
+            node.set_max_numeric_value(duration);
+            node.set_numeric_value_step(crate::video_v2::SCRUBBER_KEY_STEP_S);
+            node.set_label("Seek".to_string());
+            node
+        }
+        ItemKind::Video {
+            src,
+            poster,
+            state,
+            ..
+        } => {
+            // Media surface. Same label heuristic as Image — the file
+            // name tail of the stream URL (or poster, failing that) so
+            // screen readers say something more useful than "video".
+            // When a click is wired (`onPlay` / `.onClick`), expose the
+            // standard Click action so Enter / VoiceOver activate it.
+            let mut node = Node::new(Role::Video);
+            if let Some(s) = src.as_deref().or(poster.as_deref()) {
+                let label = s
+                    .rsplit('/')
+                    .next()
+                    .filter(|t| !t.is_empty())
+                    .unwrap_or(s)
+                    .to_string();
+                node.set_label(label);
+            }
+            if item.action.is_some() {
+                node.add_action(Action::Click);
+            }
+            // Video v2: surface the player state so assistive tech can
+            // distinguish "loading" from "paused" without polling.
+            node.set_description(state.as_str().to_string());
+            node
         }
         ItemKind::Input {
             value, placeholder, ..

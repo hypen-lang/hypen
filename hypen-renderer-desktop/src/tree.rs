@@ -325,6 +325,23 @@ impl Tree {
         out.push(id.to_string());
     }
 
+    /// Every node id inside a currently detached subtree (the Router
+    /// keep-alive cache). `Detach` only unlinks the root from its
+    /// parent — the subtree's own `children` edges stay intact, so a
+    /// walk from each detached root covers it fully. Used by the
+    /// window to suspend media playback in cached-off-screen routes.
+    pub fn detached_node_ids(&self) -> std::collections::HashSet<String> {
+        let mut ids = std::collections::HashSet::new();
+        let mut stack: Vec<&str> = self.detached.iter().map(String::as_str).collect();
+        while let Some(id) = stack.pop() {
+            if !ids.insert(id.to_string()) {
+                continue;
+            }
+            stack.extend(self.children_of(id).iter().map(String::as_str));
+        }
+        ids
+    }
+
     /// Record `id` as a detached subtree root (most-recent last).
     fn note_detached(&mut self, id: &str) {
         self.detached.retain(|d| d != id);
@@ -613,6 +630,31 @@ mod tests {
         assert_eq!(tree.children_of("a"), a_children_before.as_slice());
         assert!(tree.get("a").is_some());
         assert!(tree.get("b").is_some());
+    }
+
+    #[test]
+    fn detached_node_ids_covers_whole_subtrees_and_clears_on_attach() {
+        let mut tree = Tree::new();
+        tree.apply(&create("route", "Column", &[]));
+        tree.apply(&insert(ROOT_ID, "route", None));
+        tree.apply(&create("vid", "Video", &[]));
+        tree.apply(&insert("route", "vid", None));
+        tree.apply(&create("other", "Text", &[]));
+        tree.apply(&insert(ROOT_ID, "other", None));
+        assert!(tree.detached_node_ids().is_empty());
+
+        tree.apply(&Patch::Detach { id: "route".into() });
+        let detached = tree.detached_node_ids();
+        assert!(detached.contains("route"), "detached root included");
+        assert!(detached.contains("vid"), "descendants of the detached root included");
+        assert!(!detached.contains("other"), "live siblings excluded");
+
+        tree.apply(&Patch::Attach {
+            parent_id: ROOT_ID.into(),
+            id: "route".into(),
+            before_id: None,
+        });
+        assert!(tree.detached_node_ids().is_empty(), "attach clears the set");
     }
 
     #[test]

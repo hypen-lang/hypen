@@ -92,7 +92,7 @@ function toPlainObject(value: unknown): unknown {
  * POSITIONAL payload object (`.onClick("@a", {animate: false})` → arg "1")
  * is user data and reaches the handler untouched.
  */
-function extractActionDetails(value: unknown): {
+export function extractActionDetails(value: unknown): {
   actionName: string | null;
   payload: Record<string, unknown>;
   animate?: unknown;
@@ -538,6 +538,25 @@ const mousePayload = (event: Event, _element: HTMLElement): Record<string, unkno
 // Event Handlers Export
 // ============================================================================
 
+/** Injected once per document: in fullscreen the wrapper covers the
+ * viewport (UA stylesheet), the surface must fill it, and the author's
+ * aspect-ratio must yield. Slot overlays are absolute within the wrapper
+ * and ride along untouched. */
+function ensureFullscreenStyles(doc: Document | null): void {
+  if (!doc || doc.getElementById?.("hypen-video-fullscreen-style")) return;
+  try {
+    const style = doc.createElement("style");
+    style.id = "hypen-video-fullscreen-style";
+    style.textContent =
+      "[data-hypen-video-state]:fullscreen{aspect-ratio:auto !important;max-width:none !important;margin:0 !important;border-radius:0 !important;}" +
+      "[data-hypen-video-state]:fullscreen [data-hypen-video-surface]{width:100% !important;height:100% !important;object-fit:contain;}";
+    doc.head?.appendChild?.(style);
+  } catch {
+    // Headless/fake documents without <head> — fullscreen still works,
+    // sizing just relies on the UA stylesheet.
+  }
+}
+
 export const eventHandlers: Record<string, ApplicatorHandler> = {
   // Basic click/press
   onClick: createEventHandler("click"),
@@ -590,6 +609,40 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
     );
   }) as ApplicatorHandler,
 
+  // Renderer-local video intents (.videoIntent("fullscreen")). Fullscreen
+  // MUST run inside the user gesture — a server round trip can lose
+  // transient activation — and it targets the v2 VIDEO WRAPPER, never the
+  // raw <video>: fullscreening the wrapper keeps the composition slots
+  // (custom controls) overlaid; fullscreening the element would swap in
+  // the browser's native fullscreen chrome.
+  videoIntent: ((element: HTMLElement, value: unknown) => {
+    const intent = typeof value === "string" ? value : null;
+    if (intent !== "fullscreen") return;
+    element.dataset.hypenVideoIntent = intent;
+    const eventKey = "videoIntent:fullscreen";
+    if (getRegisteredEvents(element).has(eventKey)) return;
+    registerEvent(element, eventKey);
+    ensureFullscreenStyles(element.ownerDocument);
+    const disposables = getElementDisposables(element);
+    disposables.add(
+      disposableListener(element, "click", () => {
+        let wrapper: HTMLElement | null = element;
+        while (wrapper && wrapper.dataset?.hypenVideoState === undefined) {
+          wrapper = (wrapper.parentElement ??
+            (wrapper.parentNode as HTMLElement | null)) as HTMLElement | null;
+        }
+        if (!wrapper) return;
+        const doc = (element.ownerDocument ?? globalThis.document) as Document;
+        if (doc?.fullscreenElement === wrapper) {
+          void doc.exitFullscreen?.();
+        } else {
+          void (wrapper as HTMLElement & { requestFullscreen?: () => Promise<void> })
+            .requestFullscreen?.();
+        }
+      })
+    );
+  }) as ApplicatorHandler,
+
   // Two-way binding for .bind(@state.x)
   bind: ((element: HTMLElement, value: unknown) => {
     const bindPath = typeof value === "string" ? value : null;
@@ -602,6 +655,16 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
 
     // Determine the target element, event type, and value extractor based on component type
     const hypenType = element.dataset?.hypenType;
+
+    if (hypenType === "video" || hypenType === "scrubber") {
+      // Media components own their bind channel: Video keeps the playback
+      // struct ({playing, position, duration, state}) in sync from media
+      // events, and Scrubber writes `position` on drag release. Both read
+      // the path from their own `bind` prop (routed to their handler via
+      // COMPONENT_HTML_ATTRS), so there is nothing to wire here.
+      unregisterEvent(element, eventKey);
+      return;
+    }
 
     if (hypenType === "checkbox" || hypenType === "switch") {
       // Checkbox/Switch: wrapper <label> containing <input type="checkbox">

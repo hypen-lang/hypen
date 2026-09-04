@@ -50,6 +50,15 @@ pub enum Role {
     /// An image. Serializes to the ARIA token `"img"`.
     #[serde(rename = "img")]
     Img,
+    /// A video player. Serializes to the token `"video"` — a Hypen-neutral
+    /// token, since ARIA has no video role. Native `<video controls>` is
+    /// already accessible; the role exists so the accessible *name* (from a
+    /// `title`/`label`/`alt` prop, or an explicit `.label(...)`) has a home
+    /// on the block and renderers without native media semantics (Canvas
+    /// shadow, iOS, Android, desktop) can label the player. DOM renderers
+    /// must treat this token as implicit on their native `<video>` host and
+    /// not emit a literal `role="video"` attribute.
+    Video,
     /// A single-line or multi-line text input.
     Textbox,
     /// A binary checkbox.
@@ -329,11 +338,15 @@ impl Semantics {
                 Some(Role::Heading)
             }
             "Image" => Some(Role::Img),
+            "Video" => Some(Role::Video),
             "Input" | "TextArea" => Some(Role::Textbox),
             "Checkbox" => Some(Role::Checkbox),
             "Switch" => Some(Role::Switch),
             "Select" => Some(Role::Listbox),
             "Slider" => Some(Role::Slider),
+            // A media timeline is a slider to assistive tech; renderers
+            // supply the value text (elapsed/duration) at runtime.
+            "Scrubber" => Some(Role::Slider),
             "ProgressBar" => Some(Role::Progressbar),
             "Spinner" => {
                 busy = Some(true);
@@ -438,6 +451,7 @@ impl Semantics {
             Some(Role::Button)
                 | Some(Role::Link)
                 | Some(Role::Img)
+                | Some(Role::Video)
                 | Some(Role::Checkbox)
                 | Some(Role::Switch)
                 | Some(Role::Tab)
@@ -456,6 +470,7 @@ impl Semantics {
         // own text, so it supersedes the own-prop keys when present.
         let keys: &[&str] = match self.role {
             Some(Role::Img) => &["alt"],
+            Some(Role::Video) => &["title", "title.0", "label", "alt"],
             Some(Role::Checkbox) | Some(Role::Switch) => &["0", "label"],
             _ => &["__a11yName", "0", "text"],
         };
@@ -726,6 +741,9 @@ fn derive_name(role: Option<Role>, element: &Element) -> (Option<String>, Option
         }
         // An image's name is its alt text, not its content.
         Some(Role::Img) => image_alt(&element.props),
+        // A video's name comes from a `title`/`label`/`alt` prop — its
+        // content is a media stream, not nameable text.
+        Some(Role::Video) => video_label(&element.props),
         // Checkbox/Switch render a `<label>` wrapping the control, so their
         // visible label text (positional `0` or named `label`) IS the
         // accessible name — including `Checkbox(label: "Accept")`, which must
@@ -791,6 +809,18 @@ pub(crate) fn hoisted_name_template(element: &Element) -> Option<Value> {
 /// Classify an image's `alt` text (named arg or `.alt(...)` applicator).
 fn image_alt(props: &Props) -> TextCollection {
     for key in ["alt", "alt.0"] {
+        let Some(value) = props.get(key) else { continue };
+        return classify_text_value(value);
+    }
+    TextCollection::Empty
+}
+
+/// Classify a video's accessible label: a `title` prop (named arg or
+/// `.title(...)` applicator), or the `label`/`alt` named args for parity with
+/// the other self-naming media/controls. The `.label(...)` a11y applicator
+/// (key `label.0`) is handled separately and overrides all of these.
+fn video_label(props: &Props) -> TextCollection {
+    for key in ["title", "title.0", "label", "alt"] {
         let Some(value) = props.get(key) else { continue };
         return classify_text_value(value);
     }
@@ -966,6 +996,7 @@ mod tests {
         assert_eq!(role_of("Paragraph"), Some(Role::Paragraph));
         assert_eq!(role_of("Heading"), Some(Role::Heading));
         assert_eq!(role_of("Image"), Some(Role::Img));
+        assert_eq!(role_of("Video"), Some(Role::Video));
         assert_eq!(role_of("Input"), Some(Role::Textbox));
         assert_eq!(role_of("TextArea"), Some(Role::Textbox));
         assert_eq!(role_of("Checkbox"), Some(Role::Checkbox));
@@ -1098,6 +1129,52 @@ mod tests {
     }
 
     #[test]
+    fn video_name_comes_from_title_label_or_alt() {
+        // `title` named arg is the primary label source.
+        let titled = Element::new("Video").with_prop("title", Value::Static(json!("Big Buck Bunny")));
+        let s = Semantics::derive(&titled).unwrap();
+        assert_eq!(s.name.as_deref(), Some("Big Buck Bunny"));
+        assert_eq!(s.name_missing, None);
+
+        // `label` and `alt` named args work too (parity with Image/Checkbox).
+        let labelled = Element::new("Video").with_prop("label", Value::Static(json!("Trailer")));
+        assert_eq!(Semantics::derive(&labelled).unwrap().name.as_deref(), Some("Trailer"));
+
+        // No title/label/alt → required-but-missing, like an alt-less Image.
+        let bare = Element::new("Video").with_prop("src", Value::Static(json!("/a.mp4")));
+        let s = Semantics::derive(&bare).unwrap();
+        assert_eq!(s.role, Some(Role::Video));
+        assert_eq!(s.name_missing, Some(true));
+
+        // An explicit `.label(...)` applicator overrides and is explicit.
+        let explicit = with_label(
+            Element::new("Video").with_prop("src", Value::Static(json!("/a.mp4"))),
+            "Product demo",
+        );
+        let s = Semantics::derive(&explicit).unwrap();
+        assert_eq!(s.name.as_deref(), Some("Product demo"));
+        assert_eq!(s.name_explicit, Some(true));
+        assert_eq!(s.name_missing, None);
+    }
+
+    #[test]
+    fn templated_video_title_resolves_at_reconcile() {
+        use crate::reactive::Binding;
+        // Video(title: @state.videoTitle) → deferred at derive, resolved from
+        // the reconcile-time props via with_resolved_name.
+        let el = Element::new("Video").with_prop(
+            "title",
+            Value::Binding(Binding::state(vec!["videoTitle".to_string()])),
+        );
+        let s = Semantics::derive(&el).unwrap();
+        assert_eq!(s.name, None);
+        assert_eq!(s.name_missing, None);
+
+        let resolved = indexmap! { "title".to_string() => json!("Episode 2") };
+        assert_eq!(s.with_resolved_name(&resolved).name.as_deref(), Some("Episode 2"));
+    }
+
+    #[test]
     fn non_interactive_roles_get_no_name() {
         // Headings/paragraphs/images don't take a content-derived accessible
         // name in this phase.
@@ -1131,6 +1208,12 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&derive("Spinner").unwrap()).unwrap(),
             r#"{"role":"status","busy":true}"#
+        );
+        // Video serializes to the Hypen-neutral token "video"; title → name.
+        let video = Element::new("Video").with_prop("title", Value::Static(json!("Intro")));
+        assert_eq!(
+            serde_json::to_string(&Semantics::derive(&video).unwrap()).unwrap(),
+            r#"{"role":"video","name":"Intro"}"#
         );
     }
 

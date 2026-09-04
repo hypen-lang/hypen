@@ -506,6 +506,31 @@ fn test_map_trailing_comma() {
 }
 
 #[test]
+fn test_multiline_arguments_with_trailing_comma() {
+    // Whitespace (incl. newlines/comments) between a trailing comma and the
+    // closing delimiter must not break the parse.
+    let input = "Video(\n    src: \"https://example.com/movie.mp4\",\n    controls: true,\n)";
+    let result = parse_component(input);
+    assert!(result.is_ok(), "{:?}", result.err());
+    assert_eq!(result.unwrap().arguments.arguments.len(), 2);
+}
+
+#[test]
+fn test_list_trailing_comma_with_newline() {
+    let input = "Component(items: [1, 2, 3,\n])";
+    let result = parse_component(input);
+    assert!(result.is_ok(), "{:?}", result.err());
+}
+
+#[test]
+fn test_map_trailing_comma_with_newline() {
+    let input = "Component(config: {a: 1, b: 2, // why not a comment too\n})";
+    let result = parse_component(input);
+    assert!(result.is_ok(), "{:?}", result.err());
+}
+
+
+#[test]
 fn test_component_name_case_sensitivity() {
     let inputs = vec!["Text", "text", "TEXT", "MyComponent", "my_component"];
 

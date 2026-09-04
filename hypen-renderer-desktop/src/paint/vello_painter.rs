@@ -710,6 +710,85 @@ impl VelloPainter {
             ItemKind::Image { src, fit } => {
                 self.draw_image(item.rect, src.as_deref(), *fit, radius);
             }
+            ItemKind::Video {
+                poster,
+                state,
+                slots,
+                ..
+            } => {
+                // Video v2: a present slot REPLACES the built-in for its
+                // concern — `poster` suppresses the poster-prop bitmap,
+                // `controls` suppresses native chrome (the play glyph),
+                // `loading` / `error` replace the glyph in their state.
+                // The slot subtrees themselves are ordinary items
+                // emitted right after this one, so they composite on
+                // top of whatever is drawn here.
+                let glyph = slots.draws_builtin_glyph(*state);
+                // Feature `video`: a live decoded frame wins over the
+                // poster — objectFit contain, letterboxed on black per
+                // the contract, with the play affordance overlaid only
+                // while paused / ended.
+                #[cfg(feature = "video")]
+                let live_frame_drawn = {
+                    if let Some(frame) = crate::media::current_frame(&item.node_id) {
+                        fill_rect(
+                            &mut self.scene,
+                            item.rect,
+                            crate::paint::image::VIDEO_LETTERBOX_RGBA,
+                            radius,
+                        );
+                        self.draw_video_frame(item.rect, &frame, radius);
+                        if glyph && crate::media::is_paused(&item.node_id) {
+                            draw_play_glyph(&mut self.scene, item.rect, scale_factor);
+                        }
+                        true
+                    } else {
+                        false
+                    }
+                };
+                #[cfg(not(feature = "video"))]
+                let live_frame_drawn = false;
+                if !live_frame_drawn {
+                    // No inline decode (feature off) or no frame yet:
+                    // poster frame (cover) or dark placeholder, then
+                    // the play affordance on top.
+                    let poster_ready = !slots.poster
+                        && poster
+                            .as_deref()
+                            .map(|p| {
+                                crate::paint::image::ensure_loaded_public(p);
+                                crate::paint::image::loaded_source(p).is_some()
+                            })
+                            .unwrap_or(false);
+                    if poster_ready {
+                        self.draw_image(
+                            item.rect,
+                            poster.as_deref(),
+                            crate::layout::ObjectFit::Cover,
+                            radius,
+                        );
+                    } else {
+                        fill_rect(
+                            &mut self.scene,
+                            item.rect,
+                            crate::paint::image::VIDEO_PLACEHOLDER_RGBA,
+                            radius,
+                        );
+                    }
+                    if glyph {
+                        draw_play_glyph(&mut self.scene, item.rect, scale_factor);
+                    }
+                }
+            }
+            ItemKind::Scrubber { video_id, preview } => {
+                // Progress is read LIVE here (registry / drag preview),
+                // not baked into the item: playback advances the thumb
+                // through the frame-driven repaints the decoder already
+                // triggers, with no layout pass per frame.
+                let fraction =
+                    crate::video_v2::scrubber_fraction(video_id.as_deref(), *preview);
+                draw_scrubber(&mut self.scene, item.rect, fraction, scale_factor);
+            }
             ItemKind::Icon {
                 paths,
                 view_box,
@@ -1012,6 +1091,55 @@ impl VelloPainter {
             self.scene.pop_layer();
         } else {
             self.scene.draw_image(img, transform);
+        }
+    }
+
+    /// Feature `video`: composite the latest decoded RGBA playback
+    /// frame into `rect` with objectFit contain (the caller fills the
+    /// letterbox black first). A fresh `ImageData` per frame is fine
+    /// for v1 — the frame's bytes are shared via `Arc`, so the CPU
+    /// cost is a pointer bump and Vello uploads the texture per frame
+    /// either way.
+    #[cfg(feature = "video")]
+    fn draw_video_frame(
+        &mut self,
+        rect: LayoutRect,
+        frame: &crate::media::VideoFrame,
+        radius: f32,
+    ) {
+        use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+        if frame.width == 0 || frame.height == 0 || rect.w <= 0.0 || rect.h <= 0.0 {
+            return;
+        }
+        let img = ImageData {
+            data: Blob::new(frame.data.clone()),
+            format: ImageFormat::Rgba8,
+            // Video frames are opaque, so the bytes are identical
+            // under both alpha interpretations; premultiplied matches
+            // the painter's other images.
+            alpha_type: ImageAlphaType::AlphaPremultiplied,
+            width: frame.width,
+            height: frame.height,
+        };
+        let sx = rect.w / frame.width as f32;
+        let sy = rect.h / frame.height as f32;
+        let s = sx.min(sy) as f64;
+        let dx = rect.x as f64 + (rect.w as f64 - frame.width as f64 * s) * 0.5;
+        let dy = rect.y as f64 + (rect.h as f64 - frame.height as f64 * s) * 0.5;
+        let transform = Affine::translate((dx, dy)).pre_scale(s);
+        if radius > 0.0 {
+            let clip_shape = rounded_rect_path(rect, radius);
+            self.scene.push_layer(
+                vello::peniko::Fill::NonZero,
+                vello::peniko::BlendMode::default(),
+                1.0,
+                Affine::IDENTITY,
+                &clip_shape,
+            );
+            self.scene.draw_image(&img, transform);
+            self.scene.pop_layer();
+        } else {
+            self.scene.draw_image(&img, transform);
         }
     }
 }
@@ -1374,6 +1502,102 @@ fn push_outer_clip(scene: &mut Scene, outer_clip: Option<LayoutRect>) -> bool {
     true
 }
 
+/// Video v2 `Scrubber`: track + elapsed progress + thumb. Geometry is
+/// shared with the CPU painter via
+/// [`crate::paint::image::scrubber_geometry`], which is also what the
+/// window's pointer→fraction mapping is written against.
+fn draw_scrubber(scene: &mut Scene, rect: LayoutRect, fraction: f32, scale: f32) {
+    let Some(g) = crate::paint::image::scrubber_geometry(rect, fraction, scale) else {
+        return;
+    };
+    fill_rect(
+        scene,
+        g.track,
+        crate::paint::image::SCRUBBER_TRACK_RGBA,
+        g.radius,
+    );
+    if g.progress.w > 0.0 {
+        fill_rect(
+            scene,
+            g.progress,
+            crate::paint::image::SCRUBBER_PROGRESS_RGBA,
+            g.radius,
+        );
+    }
+    let thumb = vello::kurbo::Circle::new(
+        (g.thumb_cx as f64, g.thumb_cy as f64),
+        g.thumb_r as f64,
+    );
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(color_to_peniko(crate::paint::image::SCRUBBER_THUMB_RGBA)),
+        None,
+        &thumb,
+    );
+}
+
+/// Centered play affordance for a Video surface: translucent scrim
+/// circle + white rounded triangle. Geometry is shared with the CPU
+/// painter via [`crate::paint::image::play_glyph_geometry`] so both
+/// backends draw the identical glyph.
+fn draw_play_glyph(scene: &mut Scene, rect: LayoutRect, scale: f32) {
+    let Some(glyph) = crate::paint::image::play_glyph_geometry(rect, scale) else {
+        return;
+    };
+    let circle = vello::kurbo::Circle::new(
+        (glyph.cx as f64, glyph.cy as f64),
+        glyph.radius as f64,
+    );
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(color_to_peniko(
+            crate::paint::image::PLAY_GLYPH_CIRCLE_RGBA,
+        )),
+        None,
+        &circle,
+    );
+    // Rounded triangle: each corner replaced by a quad through the
+    // vertex, mirroring `image::rounded_polygon_path`.
+    let pts = glyph.triangle;
+    let corner = glyph.corner;
+    let towards = |from: (f32, f32), to: (f32, f32)| -> (f64, f64) {
+        let dx = to.0 - from.0;
+        let dy = to.1 - from.1;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= f32::EPSILON {
+            return (from.0 as f64, from.1 as f64);
+        }
+        let d = corner.min(len * 0.5);
+        ((from.0 + dx / len * d) as f64, (from.1 + dy / len * d) as f64)
+    };
+    let mut path = BezPath::new();
+    for i in 0..3 {
+        let p = pts[i];
+        let prev = pts[(i + 2) % 3];
+        let next = pts[(i + 1) % 3];
+        let a = towards(p, prev);
+        let b = towards(p, next);
+        if i == 0 {
+            path.move_to(a);
+        } else {
+            path.line_to(a);
+        }
+        path.quad_to((p.0 as f64, p.1 as f64), b);
+    }
+    path.close_path();
+    scene.fill(
+        Fill::NonZero,
+        Affine::IDENTITY,
+        &Brush::Solid(color_to_peniko(
+            crate::paint::image::PLAY_GLYPH_TRIANGLE_RGBA,
+        )),
+        None,
+        &path,
+    );
+}
+
 fn rounded_rect_path(rect: LayoutRect, radius: f32) -> RoundedRect {
     let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
     RoundedRect::new(
@@ -1610,6 +1834,7 @@ mod tests {
             action_payload: None,
             hover_action: None,
             hover_payload: None,
+            video_intent: None,
             background: Some(Rgba(0xff, 0, 0, 0xff)),
             hover: crate::layout::HoverStyle::default(),
             border: Border::default(),

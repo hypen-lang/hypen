@@ -36,6 +36,7 @@ Ports are load-bearing: the launcher's `APPS` list
 | food-ordering | `examples/food-ordering/cloudflare` | 8792 |
 | social | `examples/social/cloudflare` | 8793 |
 | calculator | `examples/calculator/cloudflare` | 8794 |
+| hypeflix | `examples/hypeflix/cloudflare` | 8795 |
 
 ## The three gotchas the script handles
 

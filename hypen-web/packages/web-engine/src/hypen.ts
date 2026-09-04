@@ -467,21 +467,42 @@ export class Hypen {
   private setupComponentResolver(): void {
     if (!this.engine) return;
 
-    // List of built-in DOM elements that should NOT be resolved
+    // List of built-in DOM elements that should NOT be resolved.
+    // Kept in sync with the engine's DEFAULT_PRIMITIVES
+    // (hypen-engine-rs/src/ir/component.rs), plus the web-only
+    // Canvas/ScrollView hosts this renderer handles natively.
     const builtInElements = new Set([
+      "Text",
       "Column",
       "Row",
-      "Text",
       "Button",
-      "Image",
       "Input",
+      "Textarea",
+      "Image",
       "Container",
       "Box",
       "Center",
       "List",
-      "Canvas",
       "Spacer",
+      "Stack",
       "Divider",
+      "Grid",
+      "Card",
+      "Heading",
+      "Checkbox",
+      "Select",
+      "Switch",
+      "Slider",
+      "Spinner",
+      "Badge",
+      "Avatar",
+      "ProgressBar",
+      "Video",
+      "Audio",
+      "Paragraph",
+      "Icon",
+      // Web-only primitives (not in the engine list)
+      "Canvas",
       "ScrollView",
     ]);
 

@@ -48,6 +48,7 @@ test("expected rules mirror the engine's kebab-case ids, including the newest ru
       "non-portable-aria",
       "unknown-live-token",
       "unknown-ignore-rule",
+      "video-missing-label",
     ],
   );
 });

@@ -1540,3 +1540,41 @@ fn test_scrub_excluded_inside_states_pose() {
     assert_eq!(cases.get("closed"), Some(&json!(400.0)));
     assert_eq!(cases.get("open"), Some(&json!(0.0)));
 }
+
+// ============================================================================
+// Video v2: playback bind + Scrubber primitive
+// ============================================================================
+
+#[test]
+fn test_video_bind_lowers_to_playback_prop() {
+    // .bind on Video targets the playback struct, not the form "value"
+    // channel — docs/components/video.md §Playback control.
+    let element = parse_to_element(r#"Video(src: "a.mp4").bind(@state.playback)"#);
+
+    assert_eq!(element.element_type, "Video");
+    match element.props.get("playback").unwrap() {
+        Value::Binding(b) => assert_eq!(b.full_path(), "playback"),
+        other => panic!("Expected Binding for playback prop, got {:?}", other),
+    }
+    match element.props.get("bind").unwrap() {
+        Value::Static(v) => assert_eq!(v, &json!("playback")),
+        other => panic!("Expected Static bind path, got {:?}", other),
+    }
+    assert!(
+        !element.props.contains_key("value"),
+        "Video bind must not lower to the form 'value' channel"
+    );
+}
+
+#[test]
+fn test_scrubber_is_a_primitive_with_slot_prop() {
+    // Scrubber parses as a primitive (not an unknown component) and the
+    // .slot marker lowers to the slot.0 prop renderers key on.
+    let element = parse_to_element(r#"Scrubber().slot("controls")"#);
+
+    assert_eq!(element.element_type, "Scrubber");
+    match element.props.get("slot.0").unwrap() {
+        Value::Static(v) => assert_eq!(v, &json!("controls")),
+        other => panic!("Expected Static slot name, got {:?}", other),
+    }
+}

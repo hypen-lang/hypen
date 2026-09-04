@@ -1,0 +1,239 @@
+---
+title: Cloudflare
+description: Deploy Hypen to Cloudflare Workers and Durable Objects with @hypen-space/cf
+---
+
+# Cloudflare
+
+`@hypen-space/cf` runs the Hypen engine inside a **Durable Object** on
+Cloudflare Workers. Each DO holds one session's engine instance and state; the
+Worker routes WebSocket upgrades to it and can also serve the browser client
+itself. The result is a whole Hypen app — server, state, and client — in a
+single `worker.ts`.
+
+## Installation
+
+```bash
+bun add @hypen-space/cf @hypen-space/core
+bun add -d wrangler
+```
+
+## Quick Start
+
+The batteries-included entry (`@hypen-space/cf/worker`) wires the engine WASM
+for you, so the app is one file with no WASM lines:
+
+```typescript
+// src/worker.ts — the entire app
+import { defineHypenWorker } from "@hypen-space/cf/worker";
+import { app } from "@hypen-space/core";
+
+const counter = app
+  .defineState({ count: 0 })
+  .onAction("inc", ({ state }) => {
+    state.count += 1;
+  })
+  .ui(`
+    module App {
+      Column {
+        Text("Count: @{state.count}")
+          .tw("text-3xl font-bold")
+        Button("@actions.inc") { Text("Increment") }
+          .tw("bg-blue-600 text-white rounded px-4 py-2 mt-3")
+      }
+        .tw("items-center justify-center flex-1 gap-2")
+    }
+  `);
+
+const worker = defineHypenWorker({
+  module: counter,
+  doClassName: "AppDO",
+  binding: "APP_DO",
+  serveClient: true, // DOM client at "/"
+});
+
+export const AppDO = worker.AppDO;
+export default { fetch: worker.fetch };
+```
+
+The Durable Object must be a **statically named export** for wrangler to find
+it, which is why the result is keyed by `doClassName` and re-exported under
+that name.
+
+## Wrangler Configuration
+
+```jsonc
+// wrangler.jsonc
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-app",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/*.sql", "**/*.hypen", "**/*.svg", "**/dist/client/*.js"], "fallthrough": true }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "APP_DO", "class_name": "AppDO" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["AppDO"] }
+  ],
+
+  "observability": { "enabled": true }
+}
+```
+
+Three things have to agree:
+
+- `binding` in `defineHypenWorker` ≡ `durable_objects.bindings[].name`
+- `doClassName` ≡ `durable_objects.bindings[].class_name` ≡ the export name
+- The `CompiledWasm` rule is required — it turns the engine `.wasm` into a
+  `WebAssembly.Module`. It applies bundle-wide, including inside the package.
+
+The `Text` rule is what lets you keep `.hypen` templates, `.sql` schemas, and
+`.svg` resources in standalone files and import them as strings.
+
+## Run and Deploy
+
+```bash
+bun run dev              # wrangler dev on http://localhost:8787
+bunx wrangler login
+bun run deploy
+```
+
+Connect a DOM or Canvas client to `ws://localhost:8787`, or open the URL
+directly if you passed `serveClient`.
+
+## Serving Browser Clients
+
+`serveClient` serves the package's prebuilt generic client. One bundle drives
+both renderers; the HTML shell's `data-hypen-renderer` attribute picks which.
+
+```typescript
+serveClient: true                            // DOM at "/"
+serveClient: { dom: "/" }                    // DOM at "/"
+serveClient: { dom: "/", canvas: "/canvas" } // both, custom paths
+serveClient: { canvas: "/" }                 // Canvas at "/"
+```
+
+To ship your own bundles instead, pass `clients` — a map of route path → built
+bundle. Each path serves an HTML shell, and the bundle is served at
+`<path>/client.js` (or `/client.js` for `"/"`):
+
+```typescript
+clients: {
+  "/":       { js: domBundle },
+  "/canvas": { js: canvasBundle, renderer: "canvas" },
+}
+```
+
+An explicit `clients` map wins over `serveClient`. With neither set, the worker
+is WebSocket-only — native [Desktop](/docs/adapters/desktop),
+[Android](/docs/adapters/android), and [iOS](/docs/adapters/ios) clients
+connect over the same URL.
+
+## Options
+
+| Option | Purpose |
+|--------|---------|
+| `module` | The module, built via `app.defineState(...).ui(...)` |
+| `template` | UI template (defaults to the module's own `.ui(...)`) |
+| `moduleName` | Name used in protocol messages (default `"App"`) |
+| `app` | App registry, for multi-module apps and route targets |
+| `componentTemplates` | Templates for components not on the registry |
+| `resources` | SVG bundle for `Icon(@resources.foo)` |
+| `syncActions` | Mirror actions/state across sockets sharing a DO (default `false`) |
+| `doClassName` | Exported DO class name (default `"AppDO"`) |
+| `binding` | DO binding name (default `"HYPEN_DO"`) |
+| `getRoutingKey` | Pick the DO instance per request |
+| `onStorage` | Hook run after the DO's storage is bound |
+| `serveClient` / `clients` | Serve a browser UI |
+| `title` | `<title>` for served pages (default `"Hypen"`) |
+
+## Session Routing
+
+By default the routing key is taken from `?sessionId`, then a cookie, then the
+path, falling back to a fresh UUID. Each distinct key gets its own Durable
+Object — its own engine instance and its own state. Override it to key sessions
+on your own identity:
+
+```typescript
+const worker = defineHypenWorker({
+  module: counter,
+  doClassName: "AppDO",
+  binding: "APP_DO",
+  getRoutingKey: async (request) => {
+    const user = await authenticate(request);
+    return `user:${user.id}`;
+  },
+});
+```
+
+Set `syncActions: true` to mirror actions and state across every socket sharing
+a DO — the basis for multiplayer or shared-session UI.
+
+## Persistence
+
+Durable Objects give you SQLite-backed storage that survives hibernation. The
+`new_sqlite_classes` migration in `wrangler.jsonc` is what enables it.
+
+Use `onStorage` to bind app-specific storage once the DO's stores are ready. It
+runs on `fetch` **and on every message**, so it re-runs after hibernation —
+make the work idempotent:
+
+```typescript
+onStorage: (storage) => {
+  // bind storage.sql into your db shim, seed schema — run-once / idempotent
+  initDb(storage.sql);
+},
+```
+
+> **Gotcha.** The DO's storage isn't bound until the DO constructor runs, so any
+> SQL call at worker module-load time crashes with a "DO SQLite not bound"
+> error. Make top-level queries lazy — a memoised getter rather than
+> `const posts = getPosts()` at module scope.
+
+See [Persistence](/docs/guide/persistence) for the `StateStore` interface and
+`durableObjectStore`.
+
+## Advanced: Bring Your Own Engine
+
+The package root (`@hypen-space/cf`) stays WASM-free so it typechecks and tests
+without wrangler. Import `defineHypenWorker` from there to supply your own
+engine build, passing the two `hypen-engine` imports yourself:
+
+```typescript
+import { defineHypenWorker } from "@hypen-space/cf";
+import * as wasm from "hypen-engine";
+import wasmModule from "hypen-engine/hypen_engine_bg.wasm";
+
+const worker = defineHypenWorker({
+  module: counter,
+  wasm,
+  wasmModule,
+  doClassName: "AppDO",
+  binding: "APP_DO",
+});
+```
+
+Those imports resolve only under wrangler's bundler, which is why the package
+can't make them itself.
+
+The root also exports the lower-level pieces —  `HypenDurableObject`,
+`createCFEngine`, `createWorkerHandler`, `durableObjectStore`,
+`buildClientPages`, and the `global` / `session` / `withKey` key strategies —
+if you need to assemble the worker by hand.
+
+## See Also
+
+- [Server SDKs](/docs/servers) — the full server-side overview
+- [TypeScript SDK](/docs/servers/typescript) — sessions, auth, routing, testing
+- [Persistence](/docs/guide/persistence) — state stores and Durable Objects
+- [Platforms](/docs/adapters) — the clients that connect to this worker

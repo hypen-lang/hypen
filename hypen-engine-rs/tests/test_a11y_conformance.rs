@@ -57,6 +57,34 @@ fn image_missing_alt_fires_without_alt_only() {
 }
 
 #[test]
+fn video_missing_label_fires_without_a_label_only() {
+    // Bad: a video with no title/label — its content is a stream, nothing
+    // derivable.
+    assert!(has(
+        r#"Video(src: "/a.mp4", controls: true)"#,
+        A11yRule::VideoMissingLabel
+    ));
+    // Good: a `title` prop is the label.
+    assert!(!has(
+        r#"Video(src: "/a.mp4", title: "Big Buck Bunny")"#,
+        A11yRule::VideoMissingLabel
+    ));
+    // Good: an explicit .label() supplies the name.
+    assert!(!has(
+        r#"Video(src: "/a.mp4").label("Product demo")"#,
+        A11yRule::VideoMissingLabel
+    ));
+    // Good: decorative background video marked .hidden() is out of the tree.
+    assert!(!has(
+        r#"Video(src: "/bg.mp4").hidden()"#,
+        A11yRule::VideoMissingLabel
+    ));
+    // A Video never fires the image or interactive-name rules.
+    assert!(!has(r#"Video(src: "/a.mp4")"#, A11yRule::ImageMissingAlt));
+    assert!(!has(r#"Video(src: "/a.mp4")"#, A11yRule::MissingAccessibleName));
+}
+
+#[test]
 fn heading_missing_level_fires_without_level_only() {
     assert!(has(r#"Heading("Title")"#, A11yRule::HeadingMissingLevel));
     // Good: level specified.
