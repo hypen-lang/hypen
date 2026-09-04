@@ -50,11 +50,7 @@ impl Scheduler {
 
     /// Mark nodes dirty because the state at `path` changed, keeping the
     /// path on record so iterable re-renders can narrow to touched indices.
-    pub fn mark_dirty_for_path(
-        &mut self,
-        path: &str,
-        node_ids: impl IntoIterator<Item = NodeId>,
-    ) {
+    pub fn mark_dirty_for_path(&mut self, path: &str, node_ids: impl IntoIterator<Item = NodeId>) {
         self.changed_paths.push(path.to_string());
         self.dirty_nodes.extend(node_ids);
     }

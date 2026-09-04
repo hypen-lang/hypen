@@ -8,7 +8,7 @@
     "start": "next start",
     "lint": "next lint",
     "comparison:copy": "bun scripts/copy-comparison-screenshots.ts",
-    "comparison:update": "cd ../component-gallery-server/screenshot-tests && ./run-tests.sh && cd ../../hypen-docs && bun scripts/copy-comparison-screenshots.ts"
+    "comparison:update": "cd ../component-gallery-server/screenshot-tests && ./run-tests.sh && ./compare.sh --allow-differences && cd ../../hypen-docs && bun scripts/copy-comparison-screenshots.ts"
   },
   "dependencies": {
     "fumadocs-core": "^15.0.0",

@@ -12,13 +12,28 @@ use indexmap::IndexMap;
 use tiny_skia::Pixmap;
 
 /// Cap on cached `(text, font_size, wrap_width) -> (w, h)` entries.
-/// 2k is plenty for a busy screen (the social example tops out near
-/// ~120 unique text/font/wrap tuples) and bounds memory at ~32KB.
+///
+/// This was briefly raised to 16k and reverted. The measurement that
+/// justified the raise (a 600-post feed missing on nearly every lookup,
+/// ~85% of a window-height resize frame) was real when taken, but
+/// `TaffyState::wrapped_probes` now answers the repeated "how tall is
+/// this text at this width" question *before* the measure cache is
+/// consulted. Re-measured against the larger cap afterwards: exactly 0%
+/// on a height drag, ~8% on the heaviest width drag — not worth ~950 KB
+/// resident per window, which nothing clears outside an `Occluded(true)`
+/// transition.
+///
+/// Note the real per-entry cost is ~60 B, not the 16 B the payload
+/// suggests: `IndexMap` reserves its entry `Vec` to the index table's
+/// capacity and hashbrown carries a control byte per bucket.
 const MEASURE_CACHE_CAP: usize = 2048;
 /// Cap on cached rasterised-text pixmaps. ~500 unique
 /// (text, font_size, color, wrap) tuples covers a complex screen with
 /// headroom. Avg pixmap size is ~5KB so memory is bounded near 2.5MB.
 const RASTER_CACHE_CAP: usize = 512;
+/// DOM Text sets `line-height: 1` so the line box equals the declared font
+/// size. Native font ascent/descent still positions glyphs within that box.
+const TEXT_LINE_HEIGHT_MULTIPLIER: f32 = 1.0;
 
 /// Owns the long-lived text engine state.
 pub struct TextEngine {
@@ -85,6 +100,17 @@ impl TextEngine {
         wrap_width: Option<f32>,
         weight: u16,
     ) -> (f32, f32) {
+        self.measure_weighted_line_height(text, font_size, wrap_width, weight, font_size)
+    }
+
+    pub fn measure_weighted_line_height(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
+    ) -> (f32, f32) {
         // Cache key: hash text + font_size bits + wrap bits + weight.
         // f32 NaN never reaches us (Taffy hands us finite values), so
         // to_bits() is collision-free across the inputs we get.
@@ -94,12 +120,13 @@ impl TextEngine {
         font_size.to_bits().hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         weight.hash(&mut hasher);
+        line_height.to_bits().hash(&mut hasher);
         let key = hasher.finish();
         if let Some(&hit) = self.measure_cache.get(&key) {
             return hit;
         }
 
-        let metrics = Metrics::new(font_size, font_size * 1.3);
+        let metrics = Metrics::new(font_size, line_height.max(font_size));
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
             .family(Family::SansSerif)
@@ -121,10 +148,10 @@ impl TextEngine {
         let mut total_h: f32 = 0.0;
         for run in buffer.layout_runs() {
             max_w = max_w.max(run.line_w);
-            total_h = total_h.max(run.line_y + run.line_height * 0.3);
+            total_h = total_h.max(run.line_top + run.line_height);
         }
         if total_h == 0.0 {
-            total_h = font_size * 1.3;
+            total_h = font_size * TEXT_LINE_HEIGHT_MULTIPLIER;
         }
         let result = (max_w.ceil(), total_h.ceil());
         if self.measure_cache.len() >= MEASURE_CACHE_CAP {
@@ -133,6 +160,15 @@ impl TextEngine {
             // the cap re-shaped the next 2k unique text/font/wrap
             // tuples in lockstep. Single-entry pop keeps churn
             // proportional to inserts.
+            //
+            // FIFO deliberately, not a cheaper O(1) arbitrary victim:
+            // nothing here re-inserts on a hit, so insertion order *is*
+            // "time since this entry was faulted in", and dropping the
+            // oldest is the only policy that guarantees a just-inserted
+            // entry survives the next CAP-1 inserts. Random replacement
+            // has the same mean lifetime and a worse tail. The O(len)
+            // compaction is affordable at this cap; it would not be at
+            // 16k, which is the other reason that raise was reverted.
             self.measure_cache.shift_remove_index(0);
         }
         self.measure_cache.insert(key, result);
@@ -210,6 +246,24 @@ impl TextEngine {
         wrap_width: Option<f32>,
         weight: u16,
     ) {
+        self.draw_text_weighted_line_height(
+            pixmap, text, x, y, font_size, color, wrap_width, weight, font_size,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_weighted_line_height(
+        &mut self,
+        pixmap: &mut Pixmap,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        color: Rgba,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
+    ) {
         // cosmic-text's swash glyph path overwrites the source colour's
         // alpha byte with the per-pixel coverage byte, so the inner
         // `if a == 0` guard never sees a zero source. Short-circuit
@@ -218,7 +272,7 @@ impl TextEngine {
         if color.3 == 0 {
             return;
         }
-        let metrics = Metrics::new(font_size, font_size * 1.3);
+        let metrics = Metrics::new(font_size, line_height.max(font_size));
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
             .family(Family::SansSerif)
@@ -311,10 +365,29 @@ impl TextEngine {
         wrap_width: Option<f32>,
         weight: u16,
     ) {
+        self.draw_text_into_scene_line_height(
+            scene, text, x, y, font_size, color, wrap_width, weight, font_size,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_into_scene_line_height(
+        &mut self,
+        scene: &mut vello::Scene,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        color: Rgba,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
+    ) {
         if color.3 == 0 || text.is_empty() {
             return;
         }
-        let (mw, mh) = self.measure_weighted(text, font_size, wrap_width, weight);
+        let (mw, mh) =
+            self.measure_weighted_line_height(text, font_size, wrap_width, weight, line_height);
         let cw = mw.ceil().max(1.0) as u32;
         let ch = mh.ceil().max(1.0) as u32;
 
@@ -326,6 +399,7 @@ impl TextEngine {
         color_u32.hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         weight.hash(&mut hasher);
+        line_height.to_bits().hash(&mut hasher);
         cw.hash(&mut hasher);
         ch.hash(&mut hasher);
         let key = hasher.finish();
@@ -342,8 +416,16 @@ impl TextEngine {
                         Some(p) => p,
                         None => return,
                     };
-                    self.draw_text_weighted(
-                        &mut tile, text, 0.0, 0.0, font_size, color, wrap_width, weight,
+                    self.draw_text_weighted_line_height(
+                        &mut tile,
+                        text,
+                        0.0,
+                        0.0,
+                        font_size,
+                        color,
+                        wrap_width,
+                        weight,
+                        line_height,
                     );
                     if self.raster_cache.len() >= RASTER_CACHE_CAP {
                         self.raster_cache.shift_remove_index(0);

@@ -114,6 +114,10 @@ enum GalleryItems {
     }
 
     static func find(byName name: String) -> GalleryItem? {
-        all.first { $0.name.lowercased() == name.lowercased() }
+        let query = name.lowercased()
+        return all.first { item in
+            item.name.lowercased() == query
+                || item.path.split(separator: "/").last?.lowercased() == query
+        }
     }
 }

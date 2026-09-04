@@ -68,17 +68,19 @@ enum class ApplicatorPriority(val order: Int) {
     SIZE(2),
     /** Layout modifiers: alignment, weight, flex, aspectRatio, offset, gap, zIndex */
     LAYOUT(3),
+    /** CSS transforms wrap the complete painted box, not only its child text. */
+    TRANSFORMS(4),
     /** Shadow/elevation - typically rendered under content */
-    SHADOW(4),
+    SHADOW(5),
     /** Corner radius for clipping - outermost visual boundary */
-    CLIP(5),
+    CLIP(6),
     /**
      * Border - drawn at the clip edge, outside the background.
      * Matches CSS box model: border is outside background+padding.
      * In Compose, modifier.clip().border().background().padding() means:
      *   clip shapes the element → border at edge → background fills inside → padding insets content.
      */
-    BORDER(6),
+    BORDER(7),
     /**
      * Background COLOR — must run before gradients/images so it paints
      * underneath them.
@@ -90,15 +92,13 @@ enum class ApplicatorPriority(val order: Int) {
      * happened to come first, an opaque `backgroundColor` painted straight
      * over the gradient or image and erased it.
      */
-    BACKGROUND_COLOR(7),
+    BACKGROUND_COLOR(8),
     /** Background gradients and images - fill inside border, over the color */
-    BACKGROUND(8),
+    BACKGROUND(9),
     /** Internal spacing - innermost, between background and content */
-    PADDING(9),
+    PADDING(10),
     /** Visual effects: opacity, visibility, blur */
-    VISUAL_EFFECTS(10),
-    /** Transforms: rotate, scale, translate */
-    TRANSFORMS(11),
+    VISUAL_EFFECTS(11),
     /** Event handlers: onClick, onPress, onLongClick */
     EVENTS(12),
     /** Unknown applicators - applied last */

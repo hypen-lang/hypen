@@ -37,6 +37,27 @@ extra step:
 cargo run --release -p hypen-browser
 ```
 
+The base build shows Video posters and chrome but intentionally carries no
+native decoder. To play inline Video/Audio, install GStreamer and enable the
+Browser's forwarding feature:
+
+```bash
+# macOS
+brew install gstreamer
+cargo run --release -p hypen-browser --features video
+
+# Debian / Ubuntu (development headers + common codecs)
+sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad gstreamer1.0-libav
+cargo run --release -p hypen-browser --features video
+```
+
+On Windows, install both the MSVC x86-64 GStreamer development and runtime
+packages from the GStreamer project, then build with `--features video`. A
+packaged video-enabled Browser must ship against the matching runtime/plugins;
+the normal installers therefore remain decoder-free until that native runtime
+is bundled by the packaging workflow.
+
 To build the installers locally (same tool CI uses):
 
 ```bash

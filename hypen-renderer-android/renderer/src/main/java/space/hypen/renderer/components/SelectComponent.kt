@@ -15,12 +15,25 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import space.hypen.renderer.render.LocalActionDispatcher
+import space.hypen.renderer.render.LocalComposeRenderer
 import space.hypen.renderer.model.ActionValue
 import space.hypen.renderer.model.HypenElement
 
 /**
  * Handler for Select/Dropdown component.
  */
+internal fun selectChildOptions(children: List<HypenElement>): List<String> =
+    children.mapNotNull { child ->
+        if (child.elementType.equals("text", ignoreCase = true)) {
+            child.getStringProp("0") ?: child.getStringProp("text")
+        } else {
+            null
+        }
+    }
+
+internal fun resolvedSelectInitialValue(authored: String?, options: List<String>): String =
+    authored?.takeIf { it.isNotEmpty() } ?: options.firstOrNull().orEmpty()
+
 class SelectComponent : ComponentHandler {
     override val typeName: String = "select"
 
@@ -32,6 +45,7 @@ class SelectComponent : ComponentHandler {
         renderChildren: @Composable () -> Unit,
     ) {
         val dispatcher = LocalActionDispatcher.current
+        val renderer = LocalComposeRenderer.current
 
         val initialValue = element.getStringProp("value") ?: ""
         val placeholder = element.getStringProp("placeholder") ?: "Select..."
@@ -39,13 +53,16 @@ class SelectComponent : ComponentHandler {
 
         // Options can be passed as a list
         val optionsList = element.props["options"]
-        val options = when (optionsList) {
+        val explicitOptions = when (optionsList) {
             is List<*> -> optionsList.mapNotNull { it?.toString() }
             else -> emptyList()
         }
+        val childOptions = selectChildOptions(renderer?.getChildren(element.id).orEmpty())
+        val options = explicitOptions.ifEmpty { childOptions }
+        val resolvedInitialValue = resolvedSelectInitialValue(initialValue, options)
 
         var expanded by remember { mutableStateOf(false) }
-        var selectedValue by remember(initialValue) { mutableStateOf(initialValue) }
+        var selectedValue by remember(resolvedInitialValue, options) { mutableStateOf(resolvedInitialValue) }
 
         // Event handlers - use ActionValue.parse() for complex action object support
         val onChangeAction = element.props["onChange.0"]?.let { ActionValue.parse(it) }

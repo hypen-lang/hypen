@@ -296,19 +296,13 @@ pub(crate) fn reconcile_iterable_children_full(
     // One fingerprint for the whole pass — every child stamped this cycle
     // shares it, and a keyed match only skips when BOTH its stored item and
     // this fingerprint are unchanged.
-    let templates_hash =
-        fingerprint_for_container(ctx, parent_id, ir_templates, stable_templates);
+    let templates_hash = fingerprint_for_container(ctx, parent_id, ir_templates, stable_templates);
     // Compiled binding maps (cached on the container): memo misses on
     // reused children apply just the item-dependent prop deltas instead of
     // substituting and re-walking the whole subtree. `None` = uncompilable
     // (control flow in the template) → full substitution below.
-    let compiled = super::binding_map::compiled_for(
-        ctx,
-        parent_id,
-        ir_templates,
-        item_name,
-        templates_hash,
-    );
+    let compiled =
+        super::binding_map::compiled_for(ctx, parent_id, ir_templates, item_name, templates_hash);
     // Template-instantiation plans: brand-new children go over the wire as
     // one Instantiate each. Cached beside the compiled maps under the same
     // fingerprint: planning serializes a skeleton per template, and a pass
@@ -355,8 +349,9 @@ pub(crate) fn reconcile_iterable_children_full(
                 // `item_index` shapes fallback keys alone, and a key match
                 // already pins those.)
                 let memo = ctx.tree.get(old_id).and_then(|n| n.iter_memo);
-                let memo_hit = memo
-                    .is_some_and(|m| m.templates_hash == templates_hash && m.item_hash == item_hash);
+                let memo_hit = memo.is_some_and(|m| {
+                    m.templates_hash == templates_hash && m.item_hash == item_hash
+                });
                 // The compiled map covers only the CURRENT template's
                 // item-dependent props, so applying it is sound only when
                 // the child last rendered under this exact template — a
@@ -406,8 +401,9 @@ pub(crate) fn reconcile_iterable_children_full(
                 // applies: substitution output depends only on item and
                 // template content, never on the slot's position.
                 let memo = ctx.tree.get(old_id).and_then(|n| n.iter_memo);
-                let memo_hit = memo
-                    .is_some_and(|m| m.templates_hash == templates_hash && m.item_hash == item_hash);
+                let memo_hit = memo.is_some_and(|m| {
+                    m.templates_hash == templates_hash && m.item_hash == item_hash
+                });
                 let same_template = memo.is_some_and(|m| m.templates_hash == templates_hash);
 
                 if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
@@ -449,9 +445,9 @@ pub(crate) fn reconcile_iterable_children_full(
                     .and_then(Option::as_ref);
                 let created = if let Some(plan) = plan {
                     if row_protos[template_idx].is_none() {
-                        row_protos[template_idx] = Some(
-                            super::binding_map::build_row_prototype(ctx, template, item_name),
-                        );
+                        row_protos[template_idx] = Some(super::binding_map::build_row_prototype(
+                            ctx, template, item_name,
+                        ));
                     }
                     match row_protos[template_idx].as_ref().and_then(Option::as_ref) {
                         Some(proto) => super::binding_map::instantiate_row_from_proto(

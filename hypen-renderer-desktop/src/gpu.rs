@@ -15,6 +15,7 @@
 //! [`vello::util::RenderContext`] does this bookkeeping for us — we
 //! own one per `Gpu` instance.
 
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use vello::util::{RenderContext, RenderSurface};
@@ -161,6 +162,126 @@ impl Gpu {
             log::warn!("device poll failed: {e:?}");
         }
         Ok(())
+    }
+
+    /// Render the current Vello scene into a readable RGBA texture and save a
+    /// chrome-free PNG. `output_size` is logical; a HiDPI physical frame is
+    /// downsampled so screenshot dimensions stay stable across displays.
+    pub fn capture_scene_png(
+        &mut self,
+        scene: &Scene,
+        path: &Path,
+        output_size: (u32, u32),
+    ) -> Result<(), String> {
+        let device_handle = &self.render_ctx.devices[self.surface.dev_id];
+        let device = &device_handle.device;
+        let queue = &device_handle.queue;
+        let (width, height) = self.size;
+
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("hypen-desktop screenshot texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let params = vello::RenderParams {
+            base_color: self.base_color,
+            width,
+            height,
+            antialiasing_method: AaConfig::Area,
+        };
+        self.renderer
+            .render_to_texture(device, queue, scene, &view, &params)
+            .map_err(|error| format!("Vello screenshot render failed: {error}"))?;
+
+        let unpadded_bytes_per_row = width * 4;
+        let alignment = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(alignment) * alignment;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("hypen-desktop screenshot readback"),
+            size: u64::from(padded_bytes_per_row) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("hypen-desktop screenshot copy"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        let submission = queue.submit(Some(encoder.finish()));
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = sender.send(result.map_err(|error| error.to_string()));
+            });
+        device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: Some(std::time::Duration::from_secs(10)),
+            })
+            .map_err(|error| format!("screenshot GPU wait failed: {error:?}"))?;
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .map_err(|_| "screenshot buffer mapping timed out".to_string())?
+            .map_err(|error| format!("screenshot buffer mapping failed: {error}"))?;
+
+        let mapped = buffer.slice(..).get_mapped_range();
+        let mut rgba = vec![0u8; unpadded_bytes_per_row as usize * height as usize];
+        for row in 0..height as usize {
+            let source = row * padded_bytes_per_row as usize;
+            let target = row * unpadded_bytes_per_row as usize;
+            rgba[target..target + unpadded_bytes_per_row as usize]
+                .copy_from_slice(&mapped[source..source + unpadded_bytes_per_row as usize]);
+        }
+        drop(mapped);
+        buffer.unmap();
+
+        let image = image::RgbaImage::from_raw(width, height, rgba)
+            .ok_or_else(|| "invalid screenshot RGBA buffer".to_string())?;
+        let image = if (width, height) == output_size {
+            image
+        } else {
+            image::imageops::resize(
+                &image,
+                output_size.0,
+                output_size.1,
+                image::imageops::FilterType::Lanczos3,
+            )
+        };
+        image
+            .save_with_format(path, image::ImageFormat::Png)
+            .map_err(|error| format!("save screenshot PNG failed: {error}"))
     }
 }
 

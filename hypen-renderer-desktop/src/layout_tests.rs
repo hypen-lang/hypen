@@ -91,6 +91,71 @@ fn row_stacks_two_texts_horizontally() {
 }
 
 #[test]
+fn responsive_fluid_home_track_uses_twenty_vw_gutters_on_wide_windows() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "page",
+        "Column",
+        &[("width", json!("100%")), ("height", json!(568))],
+    ));
+    tree.apply(&insert_patch("root", "page"));
+    tree.apply(&create_patch(
+        "track",
+        "Column",
+        &[
+            ("width", json!("100%")),
+            ("width@xl", json!("60%")),
+            ("alignSelf", json!("center")),
+        ],
+    ));
+    tree.apply(&insert_patch("page", "track"));
+    tree.apply(&create_patch(
+        "grid",
+        "Grid",
+        &[("fillMaxWidth", json!(true)), ("gridColumns", json!(3))],
+    ));
+    tree.apply(&insert_patch("track", "grid"));
+    for id in ["a", "b", "c"] {
+        tree.apply(&create_patch(id, "Container", &[("height", json!(40))]));
+        tree.apply(&insert_patch("grid", id));
+    }
+
+    let mut text = TextEngine::new();
+    let wide = LayoutPass::compute(&tree, &mut text, (1872, 568), 1.0);
+    let track = find_item(&wide, "track");
+    let grid = find_item(&wide, "grid");
+    assert!((track.rect.x - 374.4).abs() < 1.0, "track={:?}", track.rect);
+    assert!(
+        (track.rect.w - 1123.2).abs() < 1.0,
+        "track={:?}",
+        track.rect
+    );
+    assert!(
+        (grid.rect.x - track.rect.x).abs() < 0.5,
+        "grid={:?}",
+        grid.rect
+    );
+    assert!(
+        (grid.rect.w - track.rect.w).abs() < 0.5,
+        "grid={:?}",
+        grid.rect
+    );
+
+    let compact = LayoutPass::compute(&tree, &mut text, (1000, 568), 1.0);
+    let compact_track = find_item(&compact, "track");
+    assert!(
+        compact_track.rect.x.abs() < 0.5,
+        "track={:?}",
+        compact_track.rect
+    );
+    assert!(
+        (compact_track.rect.w - 1000.0).abs() < 0.5,
+        "track={:?}",
+        compact_track.rect
+    );
+}
+
+#[test]
 fn text_rect_size_is_nonzero() {
     let mut tree = Tree::new();
     add_text(&mut tree, "root", "t1", "Hello");
@@ -104,6 +169,43 @@ fn text_rect_size_is_nonzero() {
         "expected non-zero text rect, got {:?}",
         item.rect
     );
+}
+
+#[test]
+fn audio_has_visible_default_chrome_and_honors_controls_false() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("audio-default", "Audio", &[]));
+    tree.apply(&insert_patch("root", "audio-default"));
+    tree.apply(&create_patch(
+        "audio-hidden",
+        "Audio",
+        &[("controls", json!(false))],
+    ));
+    tree.apply(&insert_patch("root", "audio-hidden"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let visible = find_item(&pass, "audio-default");
+    let hidden = find_item(&pass, "audio-hidden");
+
+    assert!(matches!(visible.kind, ItemKind::Audio { controls: true }));
+    assert!(matches!(hidden.kind, ItemKind::Audio { controls: false }));
+    assert_eq!((visible.rect.w, visible.rect.h), (300.0, 54.0));
+}
+
+#[test]
+fn divider_defaults_to_a_visible_full_width_one_pixel_rule() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[("width.0", json!(320))]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch("rule", "Divider", &[]));
+    tree.apply(&insert_patch("col", "rule"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let rule = find_item(&pass, "rule");
+    assert_eq!((rule.rect.w, rule.rect.h), (320.0, 1.0));
+    assert_eq!(rule.background, Some(Rgba(0xe0, 0xe0, 0xe0, 0xff)));
 }
 
 #[test]
@@ -776,6 +878,192 @@ fn image_default_size_when_width_height_unset() {
 }
 
 #[test]
+fn bare_images_stretch_to_grid_tracks_while_explicit_size_wins() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "grid",
+        "Grid",
+        &[
+            ("width", json!(382)),
+            ("gridColumns", json!(3)),
+            ("gap", json!(4)),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "grid"));
+    for id in ["a", "b", "c"] {
+        tree.apply(&create_patch(id, "Image", &[]));
+        tree.apply(&insert_patch("grid", id));
+    }
+    tree.apply(&create_patch("explicit", "Image", &[("size", json!(40))]));
+    tree.apply(&insert_patch("grid", "explicit"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    for id in ["a", "b", "c"] {
+        let image = find_item(&pass, id);
+        assert!(
+            (image.rect.w - 124.66667).abs() < 1.0,
+            "bare Grid image {id} should fill its track, got {}",
+            image.rect.w,
+        );
+        assert!(
+            (image.rect.w - image.rect.h).abs() <= 1.0,
+            "bare Grid image {id} should be square, got {:?}",
+            image.rect,
+        );
+    }
+    let explicit = find_item(&pass, "explicit");
+    assert!((explicit.rect.w - 40.0).abs() < 0.1);
+    assert!((explicit.rect.h - 40.0).abs() < 0.1);
+}
+
+#[test]
+fn grid_column_span_packs_calculator_zero_across_two_tracks() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "grid",
+        "Grid",
+        &[
+            ("width", json!(401)),
+            ("gridColumns", json!(4)),
+            ("gap", json!(1)),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "grid"));
+
+    for id in ["zero", "decimal", "equals"] {
+        let props = if id == "zero" {
+            vec![("height", json!(72)), ("gridColumn.0", json!("span 2"))]
+        } else {
+            vec![("height", json!(72))]
+        };
+        tree.apply(&create_patch(id, "Button", &props));
+        tree.apply(&insert_patch("grid", id));
+    }
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let zero = find_item(&pass, "zero");
+    let decimal = find_item(&pass, "decimal");
+    let equals = find_item(&pass, "equals");
+
+    assert!(
+        (zero.rect.w - 200.0).abs() < 1.0,
+        "zero rect: {:?}",
+        zero.rect
+    );
+    assert!(decimal.rect.x >= zero.rect.x + zero.rect.w);
+    assert!(equals.rect.x >= decimal.rect.x + decimal.rect.w);
+    assert!((zero.rect.y - decimal.rect.y).abs() < 0.5);
+    assert!((decimal.rect.y - equals.rect.y).abs() < 0.5);
+}
+
+#[test]
+fn cached_route_detach_then_attach_restores_layout_and_paint_items() {
+    let mut tree = Tree::new();
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let home_batch = vec![
+        create_patch(
+            "home",
+            "Column",
+            &[
+                ("width", json!(320)),
+                ("height", json!(180)),
+                ("backgroundColor", json!("#102030")),
+            ],
+        ),
+        insert_patch("root", "home"),
+        create_patch(
+            "hero",
+            "Image",
+            &[
+                ("width", json!(96)),
+                ("height", json!(54)),
+                ("__anim.sharedKey", json!("movie-hero")),
+            ],
+        ),
+        insert_patch("home", "hero"),
+    ];
+    tree.apply_batch(&home_batch);
+    assert!(state.apply_patches(&home_batch, &tree, 1.0, vp(800.0)));
+    let initial = LayoutPass::compute_with_state(
+        &mut state,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    assert!(find_item(&initial, "home").background.is_some());
+    assert!(find_item(&initial, "hero").rect.w > 0.0);
+
+    let detail_batch = vec![
+        Patch::Detach { id: "home".into() },
+        create_patch(
+            "detail",
+            "Column",
+            &[
+                ("width", json!(320)),
+                ("height", json!(180)),
+                ("backgroundColor", json!("#405060")),
+            ],
+        ),
+        insert_patch("root", "detail"),
+    ];
+    tree.apply_batch(&detail_batch);
+    assert!(!state.apply_patches(&detail_batch, &tree, 1.0, vp(800.0)));
+    state.mark_needs_rebuild();
+    let detail = LayoutPass::compute_with_state(
+        &mut state,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        2,
+    );
+    assert!(detail.item_by_id("home").is_none());
+    assert!(find_item(&detail, "detail").background.is_some());
+
+    let back_batch = vec![
+        Patch::Detach {
+            id: "detail".into(),
+        },
+        Patch::Attach {
+            parent_id: "root".into(),
+            id: "home".into(),
+            before_id: None,
+        },
+    ];
+    tree.apply_batch(&back_batch);
+    assert!(!state.apply_patches(&back_batch, &tree, 1.0, vp(800.0)));
+    state.mark_needs_rebuild();
+    let returned = LayoutPass::compute_with_state(
+        &mut state,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        3,
+    );
+    assert!(returned.item_by_id("detail").is_none());
+    let home = find_item(&returned, "home");
+    let hero = find_item(&returned, "hero");
+    assert!(
+        home.background.is_some(),
+        "reattached route must repaint its background"
+    );
+    assert_eq!((home.rect.w, home.rect.h), (320.0, 180.0));
+    assert_eq!((hero.rect.w, hero.rect.h), (96.0, 54.0));
+}
+
+#[test]
 fn image_width_percent_resolves_to_parent_width() {
     // A column at 800 px wide containing `Image.width("100%")`
     // should produce an item rect that fills (most of) the column.
@@ -955,6 +1243,45 @@ fn stack_overlays_second_child_on_first_with_margin_offset() {
         base.rect.y,
         badge.rect.y,
     );
+}
+
+#[test]
+fn stack_preserves_authored_right_and_bottom_overlay_insets() {
+    // Food's cart CTA is the second Stack child. Stack makes it an overlay,
+    // but its authored left/right/bottom anchors must survive that
+    // parent-aware conversion instead of being replaced by top-left.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "stack",
+        "Stack",
+        &[("width", json!(800)), ("height", json!(600))],
+    ));
+    tree.apply(&insert_patch("root", "stack"));
+    tree.apply(&create_patch(
+        "content",
+        "Column",
+        &[("width", json!(800)), ("height", json!(600))],
+    ));
+    tree.apply(&insert_patch("stack", "content"));
+    tree.apply(&create_patch(
+        "cart",
+        "Row",
+        &[
+            ("position", json!("absolute")),
+            ("left", json!(32)),
+            ("right", json!(32)),
+            ("bottom", json!(32)),
+            ("height", json!(64)),
+        ],
+    ));
+    tree.apply(&insert_patch("stack", "cart"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let cart = find_item(&pass, "cart");
+    assert!((cart.rect.x - 32.0).abs() < 0.5, "cart={:?}", cart.rect);
+    assert!((cart.rect.w - 736.0).abs() < 0.5, "cart={:?}", cart.rect);
+    assert!((cart.rect.y - 504.0).abs() < 0.5, "cart={:?}", cart.rect);
 }
 
 #[test]
@@ -1279,7 +1606,12 @@ fn appearance_only_setprop_does_not_dirty_taffy() {
     assert!(!crate::layout::is_layout_prop("background-color"));
     assert!(!crate::layout::is_layout_prop("borderColor"));
     assert!(!crate::layout::is_layout_prop("src"));
-    assert!(!crate::layout::is_layout_prop("textAlign"));
+    // `textAlign` used to be asserted here. It is appearance-only on a
+    // Text leaf — it moves glyphs inside an unchanged box — but on a
+    // COLUMN container `apply_alignment_props` lowers it to `align_items`
+    // and it moves the children. This predicate sees only the prop name,
+    // never the node, so it has to answer for the worse case.
+    assert!(crate::layout::is_layout_prop("textAlign"));
     // Box-model + sizing remain layout-affecting.
     assert!(crate::layout::is_layout_prop("padding"));
     assert!(crate::layout::is_layout_prop("paddingTop"));
@@ -1358,7 +1690,10 @@ fn grid_resolves_engine_expanded_breakpoint_columns() {
     let xs: Vec<f32> = (0..4)
         .map(|i| pass.item_by_id(&format!("c{i}")).unwrap().rect.x)
         .collect();
-    assert!(xs[1] > xs[0] && xs[2] > xs[1] && xs[3] > xs[2], "lg → 4 columns: {xs:?}");
+    assert!(
+        xs[1] > xs[0] && xs[2] > xs[1] && xs[3] > xs[2],
+        "lg → 4 columns: {xs:?}"
+    );
     // sub-md (<768) → 2 columns: 3rd cell wraps under the 1st.
     let pass2 = LayoutPass::compute(&tree, &mut text, (600, 600), 1.0);
     assert_eq!(
@@ -1423,8 +1758,14 @@ fn hover_variant_prop_resolves_to_hover_style() {
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
     let item = pass.item_by_id("btn").expect("btn laid out");
-    assert_eq!(item.hover.background, Some(crate::style::Rgba(0xff, 0, 0, 0xff)));
-    assert_eq!(item.hover.border_color, Some(crate::style::Rgba(0, 0xff, 0, 0xff)));
+    assert_eq!(
+        item.hover.background,
+        Some(crate::style::Rgba(0xff, 0, 0, 0xff))
+    );
+    assert_eq!(
+        item.hover.border_color,
+        Some(crate::style::Rgba(0, 0xff, 0, 0xff))
+    );
 }
 
 #[test]
@@ -1627,6 +1968,56 @@ fn justify_content_center_centers_main_axis() {
         "child x should be centered ({expected_x}), got {}",
         child.rect.x,
     );
+}
+
+#[test]
+fn horizontal_alignment_camel_case_space_values_distribute_in_finite_row() {
+    let cases = ["spaceBetween", "spaceAround", "spaceEvenly"];
+
+    for value in cases {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "row",
+            "Row",
+            &[
+                ("width", json!(300)),
+                ("padding", json!(8)),
+                ("horizontalAlignment", json!(value)),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "row"));
+        for id in ["a", "b", "c"] {
+            tree.apply(&create_patch(
+                id,
+                "Container",
+                &[("width", json!(40)), ("height", json!(20))],
+            ));
+            tree.apply(&insert_patch("row", id));
+        }
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let a = find_item(&pass, "a");
+        let b = find_item(&pass, "b");
+        let c = find_item(&pass, "c");
+        assert!(
+            (b.rect.x - 130.0).abs() < 0.01,
+            "{value}: middle child should be centred, got x={}",
+            b.rect.x,
+        );
+        assert!(
+            c.rect.x > 200.0,
+            "{value}: last child should distribute across the finite row, got x={}",
+            c.rect.x,
+        );
+        assert!((a.rect.x + c.rect.x - 260.0).abs() < 0.01);
+        if value == "spaceBetween" {
+            assert!((a.rect.x - 8.0).abs() < 0.01);
+            assert!((c.rect.x - 252.0).abs() < 0.01);
+        } else {
+            assert!(a.rect.x > 8.0 && c.rect.x < 252.0);
+        }
+    }
 }
 
 #[test]
@@ -2222,6 +2613,32 @@ fn non_scrollable_container_does_not_emit_clip_to() {
     );
 }
 
+#[test]
+fn overflow_hidden_container_clips_descendant_paint_without_becoming_scrollable() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    tree.apply(&create_patch(
+        "clip",
+        "Stack",
+        &[
+            ("width.0", json!(150)),
+            ("height.0", json!(100)),
+            ("overflow.0", json!("hidden")),
+        ],
+    ));
+    tree.apply(&insert_patch("col", "clip"));
+    add_text(&mut tree, "clip", "child", "overflowing child");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let clip = find_item(&pass, "clip");
+    let child = find_item(&pass, "child");
+
+    assert_eq!(child.clip_to, Some(clip.rect));
+    assert!(clip.scrollable.is_none());
+}
+
 // -----------------------------------------------------------------
 // clip_to is enforced in HIT-TESTING, not just paint (pixel/hit
 // parity, constraint #5). Paint pushes the scrollable ancestor's
@@ -2250,6 +2667,7 @@ fn actionable_clip_item(
         video_intent: None,
         background: None,
         hover: HoverStyle::default(),
+        shadow: None,
         border: crate::style::Border::default(),
         scrollable: None,
         font_weight: 400,
@@ -2276,7 +2694,7 @@ fn single_actionable_pass(item: LayoutItem) -> LayoutPass {
         scrollable_ids: vec![],
         hoverable_ids: vec![0],
         a11y: std::collections::HashMap::new(),
-            a11y_hash: 0,
+        a11y_hash: 0,
     }
 }
 
@@ -2508,7 +2926,11 @@ fn focus_walk_skips_excluded_ids() {
     tree.apply(&create_patch("col", "Column", &[]));
     tree.apply(&insert_patch("root", "col"));
     for id in ["b1", "b2", "b3"] {
-        tree.apply(&create_patch(id, "Button", &[("action", json!("@actions.x"))]));
+        tree.apply(&create_patch(
+            id,
+            "Button",
+            &[("action", json!("@actions.x"))],
+        ));
         tree.apply(&insert_patch("col", id));
     }
     let mut text = TextEngine::new();
@@ -2516,9 +2938,15 @@ fn focus_walk_skips_excluded_ids() {
 
     // No-op predicate matches the plain walk exactly.
     assert_eq!(pass.focus_next(None), Some("b1".into()));
-    assert_eq!(pass.focus_next_excluding(None, &|_| false), Some("b1".into()));
+    assert_eq!(
+        pass.focus_next_excluding(None, &|_| false),
+        Some("b1".into())
+    );
     // Excluded ids are skipped, continuing to the next candidate…
-    assert_eq!(pass.focus_next_excluding(None, &|id| id == "b1"), Some("b2".into()));
+    assert_eq!(
+        pass.focus_next_excluding(None, &|id| id == "b1"),
+        Some("b2".into())
+    );
     assert_eq!(
         pass.focus_next_excluding(Some("b1"), &|id| id == "b2"),
         Some("b3".into())
@@ -2565,8 +2993,15 @@ fn decorated_opacity_key_opens_the_paint_gate() {
     let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
     let col = find_item(&pass, "col");
     let t = find_item(&pass, "t");
-    assert!((col.opacity - 0.5).abs() < 1e-6, "decorated key must gate in: {}", col.opacity);
-    assert!((t.opacity - 0.5).abs() < 1e-6, "children inherit the decorated value");
+    assert!(
+        (col.opacity - 0.5).abs() < 1e-6,
+        "decorated key must gate in: {}",
+        col.opacity
+    );
+    assert!(
+        (t.opacity - 0.5).abs() < 1e-6,
+        "children inherit the decorated value"
+    );
 }
 
 // -----------------------------------------------------------------
@@ -2596,14 +3031,19 @@ fn static_translate_props_move_the_hit_target() {
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
     let btn = find_item(&pass, "btn");
-    assert!(!btn.transform.is_identity(), "static transform props light up");
+    assert!(
+        !btn.transform.is_identity(),
+        "static transform props light up"
+    );
     // Layout rect is untouched (transforms are paint/hit-only)...
     assert!(btn.rect.x < 10.0, "Taffy geometry unmoved: {:?}", btn.rect);
     // ...but the hit target follows the pixels: the untransformed
     // position misses, the translated one hits.
     let (cx, cy) = (btn.rect.x + 50.0, btn.rect.y + 20.0);
     assert!(pass.hit(cx, cy).is_none(), "old position must not hit");
-    let hit = pass.hit(cx + 200.0, cy + 50.0).expect("translated position hits");
+    let hit = pass
+        .hit(cx + 200.0, cy + 50.0)
+        .expect("translated position hits");
     assert_eq!(hit.node_id, "btn");
     // Visual rect is the translated AABB.
     let vr = btn.visual_rect();
@@ -2719,9 +3159,18 @@ fn nested_transforms_compose_down_the_tree() {
     // The child's rotation happens about its own (untranslated layout)
     // center, then the parent's translate carries it +100 x.
     let (cx, cy) = (btn.rect.x + 100.0, btn.rect.y + 10.0);
-    assert!(pass.hit(cx + 100.0, cy + 80.0).is_some(), "translated+rotated point hits");
-    assert!(pass.hit(cx, cy + 80.0).is_none(), "un-translated rotated point misses");
-    assert!(pass.hit(cx + 100.0 + 80.0, cy).is_none(), "un-rotated translated point misses");
+    assert!(
+        pass.hit(cx + 100.0, cy + 80.0).is_some(),
+        "translated+rotated point hits"
+    );
+    assert!(
+        pass.hit(cx, cy + 80.0).is_none(),
+        "un-translated rotated point misses"
+    );
+    assert!(
+        pass.hit(cx + 100.0 + 80.0, cy).is_none(),
+        "un-rotated translated point misses"
+    );
     // Container (wrap) itself carries a plain translate.
     let wrap = find_item(&pass, "wrap");
     let wr = wrap.visual_rect();
@@ -2736,7 +3185,11 @@ fn transform_free_tree_keeps_identity_and_plain_hits() {
     tree.apply(&create_patch(
         "btn",
         "Button",
-        &[("action", json!("@actions.go")), ("width.0", json!(100.0)), ("height.0", json!(40.0))],
+        &[
+            ("action", json!("@actions.go")),
+            ("width.0", json!(100.0)),
+            ("height.0", json!(40.0)),
+        ],
     ));
     tree.apply(&insert_patch("col", "btn"));
     let mut text = TextEngine::new();
@@ -2755,14 +3208,21 @@ fn rotate_accepts_deg_suffixed_strings() {
     tree.apply(&create_patch(
         "r",
         "Container",
-        &[("width.0", json!(100.0)), ("height.0", json!(20.0)), ("rotate.0", json!("90deg"))],
+        &[
+            ("width.0", json!(100.0)),
+            ("height.0", json!(20.0)),
+            ("rotate.0", json!("90deg")),
+        ],
     ));
     tree.apply(&insert_patch("col", "r"));
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
     let r = find_item(&pass, "r");
     let vr = r.visual_rect();
-    assert!((vr.w - 20.0).abs() < 0.5 && (vr.h - 100.0).abs() < 0.5, "\"90deg\" parses: {vr:?}");
+    assert!(
+        (vr.w - 20.0).abs() < 0.5 && (vr.h - 100.0).abs() < 0.5,
+        "\"90deg\" parses: {vr:?}"
+    );
 }
 
 #[test]
@@ -2794,7 +3254,10 @@ fn affine2_inverse_round_trips_and_conjugation_matches_recompute() {
         .mul(&Affine2::translate(-50.0, -15.0));
     let _ = shifted;
     for (a, b) in conj.0.iter().zip(want.0.iter()) {
-        assert!((a - b).abs() < 1e-3, "conjugation mismatch: {conj:?} vs {want:?}");
+        assert!(
+            (a - b).abs() < 1e-3,
+            "conjugation mismatch: {conj:?} vs {want:?}"
+        );
     }
 }
 
@@ -2823,7 +3286,7 @@ fn breakpoints_resolve_against_logical_not_physical_width() {
     // Base 8, md (>=768) 16, xl (>=1280) 64. A 960pt window on a 2x
     // display is 1920 PHYSICAL px — which would wrongly match `xl`.
     // It must resolve as `md`.
-    let mut props = std::collections::HashMap::new();
+    let mut props = crate::tree::PropMap::default();
     props.insert("padding".to_string(), serde_json::json!(8));
     props.insert("padding@md.0".to_string(), serde_json::json!(16));
     props.insert("padding@xl.0".to_string(), serde_json::json!(64));
@@ -2846,7 +3309,11 @@ fn shrunk_text_in_a_row_keeps_a_box_tall_enough_for_its_wrapped_lines() {
     // draws two lines of glyphs over a one-line background — the "8.8"
     // and "Fi" spilling out from under their pills.
     let mut tree = Tree::new();
-    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&create_patch(
+        "row",
+        "Row",
+        &[("fillMaxWidth", json!(true))],
+    ));
     tree.apply(&insert_patch(ROOT_ID, "row"));
     add_text(&mut tree, "row", "a", "Action, Adventure, Sci-Fi");
     add_text(&mut tree, "row", "b", "Drama, Thriller, Mystery");
@@ -2858,7 +3325,9 @@ fn shrunk_text_in_a_row_keeps_a_box_tall_enough_for_its_wrapped_lines() {
     let h_roomy = find_item(&roomy, "a").rect.h;
 
     // Cramped: the row can't hold both, so they shrink and wrap.
-    let cramped = LayoutPass::compute(&tree, &mut text, (300, 600), 1.0);
+    // The canonical implicit font is now 16px (matching DOM), so use a
+    // genuinely narrow row that still forces these strings to wrap.
+    let cramped = LayoutPass::compute(&tree, &mut text, (220, 600), 1.0);
     let a = find_item(&cramped, "a");
 
     assert!(
@@ -2875,6 +3344,770 @@ fn shrunk_text_in_a_row_keeps_a_box_tall_enough_for_its_wrapped_lines() {
     );
 }
 
+#[test]
+fn wrapped_height_memo_is_invalidated_by_text_and_by_patches() {
+    // `apply_wrapped_text_heights` memoises "how tall is this text at
+    // this content width" across passes, so a resize that moves neither
+    // does not re-shape every Text in the tree. The memo is keyed by
+    // Taffy `NodeId` and content width alone — nothing about the text —
+    // so everything that can change a node's measure inputs, or recycle
+    // a `NodeId`, has to drop it.
+    //
+    // A stale entry produces a silently wrong box height, so this
+    // asserts the invalidation contract directly rather than trying to
+    // observe it through layout output.
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let viewport = (320u32, 600u32);
+    let vp_logical = crate::layout::logical_viewport(viewport, 1.0);
+
+    let batch = vec![
+        create_patch("col", "Column", &[("fillMaxWidth", json!(true))]),
+        insert_patch(ROOT_ID, "col"),
+        create_patch("t", "Text", &[("0", json!("hello there"))]),
+        insert_patch("col", "t"),
+    ];
+    tree.apply_batch(&batch);
+    if !taffy.apply_patches(&batch, &tree, 1.0, vp_logical) {
+        taffy.mark_needs_rebuild();
+    }
+    let compute = |taffy: &mut TaffyState, tree: &Tree, text: &mut TextEngine| {
+        LayoutPass::compute_with_state(taffy, tree, text, viewport, 1.0, 0.0, &scrolls, 0)
+    };
+
+    let first = compute(&mut taffy, &tree, &mut text);
+    let h = find_item(&first, "t").rect.h;
+    assert!(
+        taffy.wrapped_probe_len() > 0,
+        "the memo should be populated after a pass that measured text"
+    );
+
+    // A clean re-layout keeps the memo AND reproduces the same result —
+    // this is the path the memo exists to make cheap.
+    let again = compute(&mut taffy, &tree, &mut text);
+    assert_eq!(find_item(&again, "t").rect.h, h);
+    assert!(
+        taffy.wrapped_probe_len() > 0,
+        "an unchanged pass must not throw the memo away"
+    );
+
+    // Rewriting the text content must drop it. Note `"0"` is not a
+    // "layout-affecting" prop key, so this leans on the context-write
+    // path, not on `patch_affects_layout`.
+    let patch = Patch::SetProp {
+        id: "t".into(),
+        name: "0".into(),
+        value: json!("a considerably longer run of words than before"),
+    };
+    tree.apply(&patch);
+    assert!(
+        taffy.apply_patches(std::slice::from_ref(&patch), &tree, 1.0, vp_logical),
+        "patch should apply to the Taffy mirror"
+    );
+    assert_eq!(
+        taffy.wrapped_probe_len(),
+        0,
+        "changing a Text's content must invalidate its cached measure"
+    );
+
+    // Structural patches recycle `NodeId`s, so they must drop it too —
+    // even when nothing about the surviving nodes changed.
+    let _ = compute(&mut taffy, &tree, &mut text);
+    assert!(taffy.wrapped_probe_len() > 0, "memo repopulates");
+    let structural = vec![
+        create_patch("t2", "Text", &[("0", json!("second"))]),
+        insert_patch("col", "t2"),
+    ];
+    tree.apply_batch(&structural);
+    assert!(taffy.apply_patches(&structural, &tree, 1.0, vp_logical));
+    assert_eq!(
+        taffy.wrapped_probe_len(),
+        0,
+        "a structural batch can recycle NodeIds; the memo must not survive it"
+    );
+
+    // `restyle_all` is the third route, and the one no patch covers.
+    // Emptiness is not observable here — the same pass that invalidates
+    // the memo refills it — so this checks the stronger property: the
+    // entries were genuinely re-measured.
+    //
+    // The shape that makes this bite is a Text with a FIXED width and a
+    // breakpoint-varying font size. Crossing the breakpoint leaves the
+    // content width identical, so the memo's `(node, width)` key still
+    // matches; only the context-write path knows the measure inputs
+    // moved. Get that wrong and the box keeps the smaller font's height
+    // while the painter draws the larger one.
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    let batch = vec![
+        create_patch("col2", "Column", &[]),
+        insert_patch(ROOT_ID, "col2"),
+        create_patch(
+            "fixed",
+            "Text",
+            &[
+                ("0", json!("some words that wrap at this fixed width")),
+                ("width", json!(200)),
+                ("fontSize", json!(10)),
+                ("fontSize@md.0", json!(30)),
+            ],
+        ),
+        insert_patch("col2", "fixed"),
+    ];
+    tree.apply_batch(&batch);
+    if !taffy.apply_patches(
+        &batch,
+        &tree,
+        1.0,
+        crate::layout::logical_viewport((700, 600), 1.0),
+    ) {
+        taffy.mark_needs_rebuild();
+    }
+    let narrow = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (700, 600),
+        1.0,
+        0.0,
+        &scrolls,
+        0,
+    );
+    let small = taffy.wrapped_probe_snapshot();
+    assert!(!small.is_empty(), "memo populated below the breakpoint");
+
+    // 900 is past `md` (768), so the font jumps 10 -> 30; the box stays
+    // 200 wide either side.
+    let wide = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (900, 600),
+        1.0,
+        0.0,
+        &scrolls,
+        0,
+    );
+    assert_eq!(
+        find_item(&narrow, "fixed").rect.w,
+        find_item(&wide, "fixed").rect.w,
+        "fixture is only meaningful while the content width is unchanged"
+    );
+    assert_ne!(
+        small,
+        taffy.wrapped_probe_snapshot(),
+        "the font size changed at the same content width, so every cached \
+         measure is stale — `restyle_all` must have dropped them"
+    );
+}
+
+#[test]
+fn wrapped_height_memo_does_not_survive_a_bulk_rebuild() {
+    // The bulk-rebuild branch installs a FRESH `TaffyTree`, and taffy
+    // re-issues the same `NodeId` sequence from scratch — so a memo
+    // entry that outlives a rebuild does not go stale, it re-points at
+    // whichever node now occupies that slot. If the node counts differ
+    // either side of the rebuild (something was removed in between),
+    // every id shifts and neighbours inherit each other's cached
+    // heights: a one-line Text gets a four-line box, or vice versa.
+    //
+    // This is reachable with no `mark_needs_rebuild` anywhere in sight:
+    // `needs_rebuild` also fires on `image_intrinsics_changed`, which
+    // bumps every single time an image finishes loading or fails.
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let viewport = (320u32, 600u32);
+    let vp_logical = crate::layout::logical_viewport(viewport, 1.0);
+
+    let long = "a considerably longer run of words that has to wrap onto                 several separate lines at this narrow width";
+    let batch = vec![
+        create_patch("col", "Column", &[("fillMaxWidth", json!(true))]),
+        insert_patch(ROOT_ID, "col"),
+        // `pad` exists only to be removed, shifting every later id.
+        create_patch(
+            "pad",
+            "Text",
+            &[("0", json!("x")), ("fillMaxWidth", json!(true))],
+        ),
+        insert_patch("col", "pad"),
+        create_patch(
+            "tall",
+            "Text",
+            &[("0", json!(long)), ("fillMaxWidth", json!(true))],
+        ),
+        insert_patch("col", "tall"),
+        create_patch(
+            "short",
+            "Text",
+            &[("0", json!("ok")), ("fillMaxWidth", json!(true))],
+        ),
+        insert_patch("col", "short"),
+    ];
+    tree.apply_batch(&batch);
+    assert!(taffy.apply_patches(&batch, &tree, 1.0, vp_logical));
+    let compute = |taffy: &mut TaffyState, tree: &Tree, text: &mut TextEngine| {
+        LayoutPass::compute_with_state(taffy, tree, text, viewport, 1.0, 0.0, &scrolls, 0)
+    };
+    let _ = compute(&mut taffy, &tree, &mut text);
+
+    // Free an id so the next full rebuild compacts everything after it.
+    let remove = vec![Patch::Remove {
+        id: "pad".into(),
+        transition: false,
+    }];
+    tree.apply_batch(&remove);
+    assert!(taffy.apply_patches(&remove, &tree, 1.0, vp_logical));
+    let _ = compute(&mut taffy, &tree, &mut text);
+    assert!(
+        taffy.wrapped_probe_len() > 0,
+        "fixture is only meaningful with a populated memo going in"
+    );
+
+    let before = taffy.wrapped_probe_snapshot();
+
+    // The one route into the rebuild branch that no patch and no
+    // `mark_needs_rebuild` announces.
+    crate::paint::image::bump_image_load_generation_for_test();
+    let after = compute(&mut taffy, &tree, &mut text);
+
+    // Ground truth: the same renderer tree measured by a `TaffyState`
+    // that has never held a memo. Both sides are freshly-built taffy
+    // trees over the same nodes, so they hand out the same ids — and a
+    // memo that leaked across the rebuild shows up as an id carrying the
+    // value it was measured for in the OLD tree.
+    //
+    // This is asserted on the memo rather than on the laid-out heights
+    // because `apply_wrapped_text_heights` only *acts* when taffy has
+    // under-sized a text leaf; a fixture where it does nothing hides the
+    // corruption completely while still populating the memo.
+    let mut cold = TaffyState::new();
+    cold.mark_needs_rebuild();
+    let truth = LayoutPass::compute_with_state(
+        &mut cold, &tree, &mut text, viewport, 1.0, 0.0, &scrolls, 0,
+    );
+    assert_ne!(
+        before,
+        cold.wrapped_probe_snapshot(),
+        "fixture is only meaningful if the pre-rebuild memo differs from \
+         the post-rebuild one — otherwise a leak would be invisible"
+    );
+    assert_eq!(
+        taffy.wrapped_probe_snapshot(),
+        cold.wrapped_probe_snapshot(),
+        "a memo entry survived the tree rebuild and re-pointed at a \
+         different node"
+    );
+    for id in ["tall", "short"] {
+        assert_eq!(
+            find_item(&after, id).rect.h,
+            find_item(&truth, id).rect.h,
+            "{id} height diverged from a cold layout after the rebuild"
+        );
+    }
+}
+
+#[test]
+fn runtime_alignment_and_thickness_props_reach_taffy() {
+    // `alignment`, `textAlign` and `thickness` all write into the Taffy
+    // `Style` (`apply_alignment_props` / `apply_divider_defaults`), but
+    // they were missing from `is_layout_prop` — so `patch_affects_layout`
+    // said "no relayout needed" and `apply_patch`'s SetProp handler
+    // skipped the restyle. The value landed in the renderer tree and
+    // never reached Taffy: a module toggling one of these at runtime was
+    // inert until some unrelated change forced a restyle.
+    //
+    // Asserted against a cold layout of the same tree, which is what the
+    // patched state must converge to.
+    fn probe(element: &str, extra: &[(&str, Value)], prop: &str, value: Value) -> (Rect, Rect) {
+        let mut tree = Tree::new();
+        let mut taffy = TaffyState::new();
+        let mut text = TextEngine::new();
+        let scrolls: HashMap<String, f32> = HashMap::new();
+        let viewport = (400u32, 300u32);
+        let vp_logical = crate::layout::logical_viewport(viewport, 1.0);
+
+        let mut props: Vec<(&str, Value)> = vec![("fillMaxWidth", json!(true))];
+        props.extend_from_slice(extra);
+        let batch = vec![
+            create_patch("host", element, &props),
+            insert_patch(ROOT_ID, "host"),
+            create_patch("kid", "Text", &[("0", json!("hi"))]),
+            insert_patch("host", "kid"),
+        ];
+        tree.apply_batch(&batch);
+        if !taffy.apply_patches(&batch, &tree, 1.0, vp_logical) {
+            taffy.mark_needs_rebuild();
+        }
+        let _ = LayoutPass::compute_with_state(
+            &mut taffy, &tree, &mut text, viewport, 1.0, 0.0, &scrolls, 0,
+        );
+
+        // Set the prop at runtime, exactly as a module action would.
+        let patch = Patch::SetProp {
+            id: "host".into(),
+            name: prop.into(),
+            value: value.clone(),
+        };
+        tree.apply(&patch);
+        if !taffy.apply_patches(std::slice::from_ref(&patch), &tree, 1.0, vp_logical) {
+            taffy.mark_needs_rebuild();
+        }
+        let patched = LayoutPass::compute_with_state(
+            &mut taffy, &tree, &mut text, viewport, 1.0, 0.0, &scrolls, 0,
+        );
+
+        // Ground truth: the same tree, laid out cold with the prop set.
+        let mut cold_tree = Tree::new();
+        let mut cold = TaffyState::new();
+        let mut cold_props: Vec<(&str, Value)> = vec![("fillMaxWidth", json!(true))];
+        cold_props.extend_from_slice(extra);
+        cold_props.push((prop, value));
+        let cold_batch = vec![
+            create_patch("host", element, &cold_props),
+            insert_patch(ROOT_ID, "host"),
+            create_patch("kid", "Text", &[("0", json!("hi"))]),
+            insert_patch("host", "kid"),
+        ];
+        cold_tree.apply_batch(&cold_batch);
+        cold.mark_needs_rebuild();
+        let truth = LayoutPass::compute_with_state(
+            &mut cold, &cold_tree, &mut text, viewport, 1.0, 0.0, &scrolls, 0,
+        );
+
+        let observed = if element == "Divider" { "host" } else { "kid" };
+        (
+            find_item(&patched, observed).rect,
+            find_item(&truth, observed).rect,
+        )
+    }
+
+    for (element, extra, prop, value) in [
+        ("Column", &[][..], "textAlign", json!("center")),
+        ("Column", &[][..], "alignment", json!("center")),
+        ("Divider", &[][..], "thickness", json!(9.0)),
+    ] {
+        let (patched, truth) = probe(element, extra, prop, value.clone());
+        assert_eq!(
+            (patched.x, patched.y, patched.w, patched.h),
+            (truth.x, truth.y, truth.w, truth.h),
+            "runtime SetProp {prop}={value} did not reach Taffy on {element}"
+        );
+    }
+}
+
+#[test]
+fn viewport_units_follow_a_height_only_resize() {
+    // `vh` / `vmin` / `vmax` resolve against viewport HEIGHT, and
+    // `node_style_with` bakes the result into the Taffy `Style` as an
+    // absolute pixel length. The structure key used to exclude height on
+    // the stated grounds that "no token resolves against it", so a
+    // height-only drag never restyled and those pixels kept their old
+    // value until an unrelated change (a width step, a scale change)
+    // happened along.
+    //
+    // Note `vmin`/`vmax` are min/max of the two axes, so this is not just
+    // a vertical-axis bug: `box` is a WIDTH that moves with height.
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let batch = vec![
+        create_patch("shell", "Column", &[("height", json!("100vh"))]),
+        insert_patch(ROOT_ID, "shell"),
+        create_patch("box", "Container", &[("width", json!("50vmin"))]),
+        insert_patch("shell", "box"),
+        create_patch("plain", "Container", &[("width", json!(120.0))]),
+        insert_patch("shell", "plain"),
+    ];
+    tree.apply_batch(&batch);
+    if !taffy.apply_patches(
+        &batch,
+        &tree,
+        1.0,
+        crate::layout::logical_viewport((800, 600), 1.0),
+    ) {
+        taffy.mark_needs_rebuild();
+    }
+    let compute = |taffy: &mut TaffyState, tree: &Tree, text: &mut TextEngine, vp: (u32, u32)| {
+        LayoutPass::compute_with_state(taffy, tree, text, vp, 1.0, 0.0, &scrolls, 0)
+    };
+
+    let _ = compute(&mut taffy, &tree, &mut text, (800, 600));
+    // Height-only change on the SAME retained state.
+    let retained = compute(&mut taffy, &tree, &mut text, (800, 1000));
+
+    let mut cold = TaffyState::new();
+    cold.mark_needs_rebuild();
+    let truth = LayoutPass::compute_with_state(
+        &mut cold,
+        &tree,
+        &mut text,
+        (800, 1000),
+        1.0,
+        0.0,
+        &scrolls,
+        0,
+    );
+
+    assert_eq!(
+        find_item(&retained, "shell").rect.h,
+        find_item(&truth, "shell").rect.h,
+        "height:100vh must follow a height-only resize"
+    );
+    assert_eq!(
+        find_item(&retained, "box").rect.w,
+        find_item(&truth, "box").rect.w,
+        "width:50vmin depends on height too, and must follow it"
+    );
+    assert_eq!(
+        find_item(&retained, "plain").rect.w,
+        find_item(&truth, "plain").rect.w,
+        "a viewport-independent width must be unaffected"
+    );
+}
+
+#[test]
+fn a_patch_introduced_vh_follows_a_height_only_resize() {
+    // The dependency trace is only as good as its coverage of style
+    // WRITES. `apply_patch`'s SetProp arm used to rebuild the style with
+    // a raw `node_style_with` — untraced — so a patch that handed a node
+    // its first `vh` left `viewport_deps` claiming the node read no axis,
+    // and the next height-only drag skipped it: the freshly-introduced
+    // length froze at the pixels of the viewport the patch landed on.
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let batch = vec![
+        create_patch("shell", "Column", &[("height", json!(400.0))]),
+        insert_patch(ROOT_ID, "shell"),
+    ];
+    tree.apply_batch(&batch);
+    assert!(taffy.apply_patches(
+        &batch,
+        &tree,
+        1.0,
+        crate::layout::logical_viewport((800, 600), 1.0),
+    ));
+    let compute = |taffy: &mut TaffyState, tree: &Tree, text: &mut TextEngine, vp: (u32, u32)| {
+        LayoutPass::compute_with_state(taffy, tree, text, vp, 1.0, 0.0, &scrolls, 0)
+    };
+    // A viewport step after the build so `restyle_all` runs and the
+    // dependency record is marked complete — the state in which a stale
+    // record is trusted rather than rebuilt.
+    let _ = compute(&mut taffy, &tree, &mut text, (800, 600));
+    let _ = compute(&mut taffy, &tree, &mut text, (800, 601));
+    let _ = compute(&mut taffy, &tree, &mut text, (800, 600));
+
+    let batch = vec![Patch::SetProp {
+        id: "shell".into(),
+        name: "height".into(),
+        value: json!("100vh"),
+    }];
+    tree.apply_batch(&batch);
+    assert!(taffy.apply_patches(
+        &batch,
+        &tree,
+        1.0,
+        crate::layout::logical_viewport((800, 600), 1.0),
+    ));
+    let at_patch = compute(&mut taffy, &tree, &mut text, (800, 600));
+    assert_eq!(
+        find_item(&at_patch, "shell").rect.h,
+        600.0,
+        "the patch itself resolves against the current viewport"
+    );
+    let resized = compute(&mut taffy, &tree, &mut text, (800, 1000));
+    assert_eq!(
+        find_item(&resized, "shell").rect.h,
+        1000.0,
+        "a patch-introduced 100vh must follow a height-only resize"
+    );
+    // And the reverse edge: the patch taking the `vh` away must not leave
+    // a stale dependency pinning the old resolution.
+    let batch = vec![Patch::SetProp {
+        id: "shell".into(),
+        name: "height".into(),
+        value: json!(250.0),
+    }];
+    tree.apply_batch(&batch);
+    assert!(taffy.apply_patches(
+        &batch,
+        &tree,
+        1.0,
+        crate::layout::logical_viewport((800, 1000), 1.0),
+    ));
+    let fixed = compute(&mut taffy, &tree, &mut text, (800, 720));
+    assert_eq!(
+        find_item(&fixed, "shell").rect.h,
+        250.0,
+        "a fixed height patched over a vh must hold through a resize"
+    );
+}
+
+#[test]
+fn an_animation_written_vh_follows_a_height_only_resize() {
+    // `restyle_node` is the patchless twin of the SetProp arm: the
+    // animation runtime writes layout-affecting props straight into the
+    // renderer tree and calls it per tick. Same contract — the style
+    // write must be traced, or a viewport unit it introduces detaches
+    // from resize until an unrelated restyle happens along.
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let batch = vec![
+        create_patch("hero", "Container", &[("height", json!(120.0))]),
+        insert_patch(ROOT_ID, "hero"),
+    ];
+    tree.apply_batch(&batch);
+    assert!(taffy.apply_patches(
+        &batch,
+        &tree,
+        1.0,
+        crate::layout::logical_viewport((800, 600), 1.0),
+    ));
+    let compute = |taffy: &mut TaffyState, tree: &Tree, text: &mut TextEngine, vp: (u32, u32)| {
+        LayoutPass::compute_with_state(taffy, tree, text, vp, 1.0, 0.0, &scrolls, 0)
+    };
+    let _ = compute(&mut taffy, &tree, &mut text, (800, 600));
+    let _ = compute(&mut taffy, &tree, &mut text, (800, 601));
+    let _ = compute(&mut taffy, &tree, &mut text, (800, 600));
+
+    // The runtime lands the animation's final keyframe value in the tree
+    // (no patch flows — `set_prop_raw` is the animator's write) and asks
+    // for the one-node restyle.
+    tree.set_prop_raw("hero", "height", json!("50vh"));
+    taffy.restyle_node(
+        "hero",
+        &tree,
+        1.0,
+        crate::layout::logical_viewport((800, 600), 1.0),
+    );
+    let at_write = compute(&mut taffy, &tree, &mut text, (800, 600));
+    assert_eq!(find_item(&at_write, "hero").rect.h, 300.0);
+    let resized = compute(&mut taffy, &tree, &mut text, (800, 800));
+    assert_eq!(
+        find_item(&resized, "hero").rect.h,
+        400.0,
+        "an animation-written 50vh must follow a height-only resize"
+    );
+}
+
+#[test]
+fn viewport_deps_do_not_survive_a_rebuild_that_renumbers_nodes() {
+    // The dependency record is keyed by Taffy `NodeId`, and the bulk
+    // rebuild installs a fresh `TaffyTree` that re-issues the same id
+    // sequence from zero. Remove a node first and every later id shifts
+    // down — so a `vh` node can inherit the id of a node that read
+    // nothing, drop out of the record, and stop being restyled. Its
+    // length then freezes at whatever the rebuild happened to bake in.
+    //
+    // The rebuild is reachable with no `mark_needs_rebuild` in sight:
+    // `image_intrinsics_changed` gets there on its own, every time an
+    // image finishes loading or fails.
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let vp_at = |vp: (u32, u32)| crate::layout::logical_viewport(vp, 1.0);
+
+    // Plain siblings BEFORE the viewport-dependent one, so removing one
+    // shifts the dependent node onto a previously-independent id.
+    let mut batch = vec![
+        create_patch("shell", "Column", &[]),
+        insert_patch(ROOT_ID, "shell"),
+    ];
+    for i in 0..4 {
+        let id = format!("p{i}");
+        batch.push(create_patch(&id, "Container", &[("width", json!(40.0))]));
+        batch.push(insert_patch("shell", &id));
+    }
+    batch.push(create_patch(
+        "tall",
+        "Container",
+        &[("height", json!("50vh"))],
+    ));
+    batch.push(insert_patch("shell", "tall"));
+    tree.apply_batch(&batch);
+    assert!(taffy.apply_patches(&batch, &tree, 1.0, vp_at((800, 600))));
+
+    let compute = |taffy: &mut TaffyState, tree: &Tree, text: &mut TextEngine, vp: (u32, u32)| {
+        LayoutPass::compute_with_state(taffy, tree, text, vp, 1.0, 0.0, &scrolls, 0)
+    };
+    // Two passes: build, then establish the dependency record.
+    let _ = compute(&mut taffy, &tree, &mut text, (800, 600));
+    let _ = compute(&mut taffy, &tree, &mut text, (801, 600));
+
+    // Renumber, then force the rebuild.
+    let remove = vec![Patch::Remove {
+        id: "p0".into(),
+        transition: false,
+    }];
+    tree.apply_batch(&remove);
+    assert!(taffy.apply_patches(&remove, &tree, 1.0, vp_at((801, 600))));
+    let _ = compute(&mut taffy, &tree, &mut text, (801, 600));
+    crate::paint::image::bump_image_load_generation_for_test();
+    let _ = compute(&mut taffy, &tree, &mut text, (801, 600));
+
+    // Now a height-only change. `tall` must follow it.
+    let after = compute(&mut taffy, &tree, &mut text, (801, 1200));
+    let mut cold = TaffyState::new();
+    cold.mark_needs_rebuild();
+    let truth = LayoutPass::compute_with_state(
+        &mut cold,
+        &tree,
+        &mut text,
+        (801, 1200),
+        1.0,
+        0.0,
+        &scrolls,
+        0,
+    );
+    assert_eq!(
+        find_item(&after, "tall").rect.h,
+        find_item(&truth, "tall").rect.h,
+        "50vh stopped following the viewport after a rebuild renumbered it"
+    );
+}
+
+#[test]
+fn only_breakpoint_variants_count_as_width_dependent() {
+    // A `:hover` variant does not gate on the viewport; a `@md` one does.
+    // Conflating them would drag every hover-styled node into the
+    // width-dependent set and restyle it on every step of a horizontal
+    // drag for nothing — which is most nodes on a page that leans on
+    // `hover:` classes.
+    let probe = |props: &[(&str, Value)]| -> usize {
+        let mut tree = Tree::new();
+        let mut taffy = TaffyState::new();
+        let mut text = TextEngine::new();
+        let scrolls: HashMap<String, f32> = HashMap::new();
+        let batch = vec![
+            create_patch("n", "Container", props),
+            insert_patch(ROOT_ID, "n"),
+        ];
+        tree.apply_batch(&batch);
+        if !taffy.apply_patches(
+            &batch,
+            &tree,
+            1.0,
+            crate::layout::logical_viewport((800, 600), 1.0),
+        ) {
+            taffy.mark_needs_rebuild();
+        }
+        // Build, then a pass that establishes the dependency record.
+        let _ = LayoutPass::compute_with_state(
+            &mut taffy,
+            &tree,
+            &mut text,
+            (800, 600),
+            1.0,
+            0.0,
+            &scrolls,
+            0,
+        );
+        let _ = LayoutPass::compute_with_state(
+            &mut taffy,
+            &tree,
+            &mut text,
+            (801, 600),
+            1.0,
+            0.0,
+            &scrolls,
+            0,
+        );
+        taffy.viewport_dependent_node_count()
+    };
+
+    assert_eq!(
+        probe(&[("padding", json!(4.0)), ("padding:hover.0", json!(8.0))]),
+        0,
+        "an interaction variant is not a viewport dependency"
+    );
+    assert_eq!(
+        probe(&[("padding", json!(4.0)), ("padding@md.0", json!(8.0))]),
+        1,
+        "a breakpoint variant gates on viewport width"
+    );
+    assert_eq!(
+        probe(&[("height", json!("40vh"))]),
+        1,
+        "a vh length gates on viewport height"
+    );
+}
+
+#[test]
+fn a_viewport_independent_tree_does_not_restyle_on_resize() {
+    // The other half of the contract: recording what each node's style
+    // actually read is what lets the common tree — no `vh`, no `vw`, no
+    // breakpoint variants — skip the restyle entirely on BOTH axes. This
+    // used to hold for height only, and only by accident.
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let mut batch = vec![
+        create_patch(
+            "col",
+            "Column",
+            &[("gap", json!(8.0)), ("padding", json!(12.0))],
+        ),
+        insert_patch(ROOT_ID, "col"),
+    ];
+    for i in 0..20 {
+        let id = format!("t{i}");
+        batch.push(create_patch(
+            &id,
+            "Text",
+            &[("0", json!("hello")), ("fontSize", json!(14.0))],
+        ));
+        batch.push(insert_patch("col", &id));
+    }
+    tree.apply_batch(&batch);
+    if !taffy.apply_patches(
+        &batch,
+        &tree,
+        1.0,
+        crate::layout::logical_viewport((800, 600), 1.0),
+    ) {
+        taffy.mark_needs_rebuild();
+    }
+    let compute = |taffy: &mut TaffyState, text: &mut TextEngine, vp: (u32, u32)| {
+        LayoutPass::compute_with_state(taffy, &tree, text, vp, 1.0, 0.0, &scrolls, 0)
+    };
+    // First pass builds; second establishes the dep invariant.
+    let _ = compute(&mut taffy, &mut text, (800, 600));
+    let _ = compute(&mut taffy, &mut text, (801, 600));
+    assert_eq!(
+        taffy.viewport_dependent_node_count(),
+        0,
+        "nothing in this tree reads the viewport"
+    );
+    // Both axes must now be no-op restyles.
+    assert_eq!(
+        taffy.restyle_viewport_dependents(
+            &tree,
+            1.0,
+            (900, 600),
+            crate::style::viewport_trace::WIDTH
+        ),
+        0
+    );
+    assert_eq!(
+        taffy.restyle_viewport_dependents(
+            &tree,
+            1.0,
+            (900, 900),
+            crate::style::viewport_trace::HEIGHT
+        ),
+        0
+    );
+}
 
 #[test]
 fn padded_text_pill_grows_to_fit_its_wrapped_lines() {
@@ -2882,9 +4115,16 @@ fn padded_text_pill_grows_to_fit_its_wrapped_lines() {
     // movie-discovery's rating / genre chips. Padding must not stop the
     // box from growing when the shrunk width forces a second line.
     let mut tree = Tree::new();
-    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&create_patch(
+        "row",
+        "Row",
+        &[("fillMaxWidth", json!(true))],
+    ));
     tree.apply(&insert_patch(ROOT_ID, "row"));
-    for (id, content) in [("a", "Action, Adventure, Sci-Fi"), ("b", "Drama, Thriller, Mystery")] {
+    for (id, content) in [
+        ("a", "Action, Adventure, Sci-Fi"),
+        ("b", "Drama, Thriller, Mystery"),
+    ] {
         tree.apply(&create_patch(
             id,
             "Text",
@@ -2903,7 +4143,7 @@ fn padded_text_pill_grows_to_fit_its_wrapped_lines() {
     let roomy = LayoutPass::compute(&tree, &mut text, (1600, 600), 1.0);
     let h_roomy = find_item(&roomy, "a").rect.h;
 
-    let cramped = LayoutPass::compute(&tree, &mut text, (300, 600), 1.0);
+    let cramped = LayoutPass::compute(&tree, &mut text, (220, 600), 1.0);
     let a = find_item(&cramped, "a");
     assert!(
         a.rect.h > h_roomy,
@@ -2911,7 +4151,6 @@ fn padded_text_pill_grows_to_fit_its_wrapped_lines() {
         a.rect.h
     );
 }
-
 
 #[test]
 fn bold_text_is_measured_bold_so_its_box_fits_the_glyphs_drawn() {
@@ -2958,7 +4197,7 @@ fn single_argument_linear_gradient_applicator_resolves() {
     // featured card both use this form; desktop used to require a second
     // `colors` argument and painted no gradient at all.
     use crate::style::{prop_linear_gradient, Viewport};
-    let mut props = std::collections::HashMap::new();
+    let mut props = crate::tree::PropMap::default();
     props.insert(
         "linearGradient.0".to_string(),
         json!("135deg, #EC4899 0%, #F472B6 100%"),
@@ -2971,7 +4210,12 @@ fn single_argument_linear_gradient_applicator_resolves() {
     };
     let g = prop_linear_gradient(&node, Viewport::new(960.0, 752.0))
         .expect("single-argument linearGradient must resolve");
-    assert_eq!(g.stops.len(), 2, "expected both colour stops, got {:?}", g.stops);
+    assert_eq!(
+        g.stops.len(),
+        2,
+        "expected both colour stops, got {:?}",
+        g.stops
+    );
     assert_eq!(g.stops[0].color, crate::style::Rgba(0xEC, 0x48, 0x99, 0xff));
     assert_eq!(g.stops[1].color, crate::style::Rgba(0xF4, 0x72, 0xB6, 0xff));
 }
@@ -2981,7 +4225,7 @@ fn single_argument_linear_gradient_keeps_rgba_stop_alpha() {
     // The featured card's body uses rgba() stops with real alpha; those
     // must survive, or the card paints opaque over the page background.
     use crate::style::{prop_linear_gradient, Viewport};
-    let mut props = std::collections::HashMap::new();
+    let mut props = crate::tree::PropMap::default();
     props.insert(
         "linearGradient.0".to_string(),
         json!("135deg, rgba(236, 72, 153, 0.38) 0%, rgba(8, 8, 8, 0.98) 42%, rgba(244, 114, 182, 0.20) 100%"),
@@ -3047,7 +4291,7 @@ fn semantic_alignment_aliases_map_by_axis_not_by_name() {
     // to the right edge.
     use taffy::style::{AlignItems, JustifyContent};
     let mk = |kind: &str| {
-        let mut props = std::collections::HashMap::new();
+        let mut props = crate::tree::PropMap::default();
         props.insert("horizontalAlignment".to_string(), json!("space-between"));
         props.insert("verticalAlignment".to_string(), json!("center"));
         let node = crate::tree::Node {
@@ -3065,11 +4309,12 @@ fn semantic_alignment_aliases_map_by_axis_not_by_name() {
     assert_eq!(row.align_items, Some(AlignItems::Center));
 
     // Column: the mapping flips. `verticalAlignment` now drives the main
-    // axis, and `space-between` is not a legal align-items value so the
-    // cross axis is simply left alone rather than set to nonsense.
+    // axis, and `space-between` is not a legal align-items value. It
+    // therefore preserves Desktop's canonical intrinsic-width Column
+    // default (`Start`) rather than replacing it with nonsense.
     let col = mk("Column");
     assert_eq!(col.justify_content, Some(JustifyContent::Center));
-    assert_eq!(col.align_items, None);
+    assert_eq!(col.align_items, Some(AlignItems::Start));
 }
 
 #[test]
@@ -3078,7 +4323,7 @@ fn css_border_shorthand_sets_width_and_colour() {
     // read rejects the string, so without shorthand parsing no border was
     // drawn at all.
     use crate::style::{border_at, Rgba, Viewport};
-    let mut props = std::collections::HashMap::new();
+    let mut props = crate::tree::PropMap::default();
     props.insert("border".to_string(), json!("1px solid #333"));
     let node = crate::tree::Node {
         id: "row".into(),
@@ -3091,7 +4336,7 @@ fn css_border_shorthand_sets_width_and_colour() {
     assert_eq!(b.color, Rgba(0x33, 0x33, 0x33, 0xff));
 
     // Order-independent, and the style keyword is ignored.
-    let mut props2 = std::collections::HashMap::new();
+    let mut props2 = crate::tree::PropMap::default();
     props2.insert("border".to_string(), json!("red dashed 2px"));
     let node2 = crate::tree::Node {
         id: "r2".into(),
@@ -3372,7 +4617,11 @@ fn video_playlist_resolves_start_index_track() {
         &[
             (
                 "playlist",
-                json!(["https://cdn/ep1.mp4", "https://cdn/ep2.mp4", "https://cdn/ep3.mp4"]),
+                json!([
+                    "https://cdn/ep1.mp4",
+                    "https://cdn/ep2.mp4",
+                    "https://cdn/ep3.mp4"
+                ]),
             ),
             ("startIndex", json!(1)),
             ("onPlay.0", json!("@actions.play")),
@@ -3399,7 +4648,10 @@ fn video_without_events_is_not_actionable() {
     tree.apply(&create_patch(
         "vid",
         "Video",
-        &[("src", json!("https://cdn/clip.mp4")), ("controls", json!(true))],
+        &[
+            ("src", json!("https://cdn/clip.mp4")),
+            ("controls", json!(true)),
+        ],
     ));
     tree.apply(&insert_patch("root", "vid"));
     let mut text = TextEngine::new();
@@ -3427,7 +4679,10 @@ fn video_explicit_onclick_wins_over_onplay() {
     tree.apply(&insert_patch("root", "vid"));
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
-    assert_eq!(find_item(&pass, "vid").action.as_deref(), Some("openDetail"));
+    assert_eq!(
+        find_item(&pass, "vid").action.as_deref(),
+        Some("openDetail")
+    );
 }
 
 /// Regression probe for the live Hypeflix repro: a `.onClick`-applicator
@@ -3438,7 +4693,11 @@ fn video_explicit_onclick_wins_over_onplay() {
 #[test]
 fn onclick_button_hits_at_painted_position_after_scroll() {
     let mut tree = Tree::new();
-    tree.apply(&create_patch("col", "Column", &[("scrollable.0", json!(true))]));
+    tree.apply(&create_patch(
+        "col",
+        "Column",
+        &[("scrollable.0", json!(true))],
+    ));
     tree.apply(&insert_patch("root", "col"));
     // Tall spacer pushes the button below the fold.
     tree.apply(&create_patch(
@@ -3668,7 +4927,11 @@ fn slot_overlays_do_not_change_the_player_geometry() {
         &[("src", json!("https://cdn/a.mp4"))],
     ));
     slotted.apply(&insert_patch("root", "vid"));
-    slotted.apply(&create_patch("post", "Column", &[("slot.0", json!("poster"))]));
+    slotted.apply(&create_patch(
+        "post",
+        "Column",
+        &[("slot.0", json!("poster"))],
+    ));
     slotted.apply(&insert_patch("vid", "post"));
     add_text(&mut slotted, "post", "cap", "A very long caption indeed");
     let with = LayoutPass::compute(&slotted, &mut text, (800, 600), 1.0)
@@ -3798,7 +5061,11 @@ fn co_visible_slots_stack_in_normative_paint_order_not_declaration_order() {
         &[("slot.0", json!("controls"))],
     ));
     tree.apply(&insert_patch("vid", "ctl"));
-    tree.apply(&create_patch("post", "Column", &[("slot.0", json!("poster"))]));
+    tree.apply(&create_patch(
+        "post",
+        "Column",
+        &[("slot.0", json!("poster"))],
+    ));
     tree.apply(&insert_patch("vid", "post"));
 
     let mut text = TextEngine::new();
@@ -3806,8 +5073,14 @@ fn co_visible_slots_stack_in_normative_paint_order_not_declaration_order() {
     set_test_state("vid", VideoPlayerState::Idle);
     let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
     let ids = emitted_ids(&pass);
-    let post_at = ids.iter().position(|i| i == "post").expect("poster emitted");
-    let ctl_at = ids.iter().position(|i| i == "ctl").expect("controls emitted");
+    let post_at = ids
+        .iter()
+        .position(|i| i == "post")
+        .expect("poster emitted");
+    let ctl_at = ids
+        .iter()
+        .position(|i| i == "ctl")
+        .expect("controls emitted");
     assert!(
         post_at < ctl_at,
         "controls must paint ABOVE the poster in idle regardless of declaration order"
@@ -3959,7 +5232,10 @@ fn scrubber_is_focusable_and_dispatches_no_click_action() {
         item.action.is_none(),
         "a tap on the track is a seek, not an activation"
     );
-    let center = (item.rect.x + item.rect.w * 0.5, item.rect.y + item.rect.h * 0.5);
+    let center = (
+        item.rect.x + item.rect.w * 0.5,
+        item.rect.y + item.rect.h * 0.5,
+    );
     assert_eq!(
         pass.hit_focusable_excluding(center.0, center.1, &|_| false)
             .map(|it| it.node_id.as_str()),
@@ -4080,11 +5356,22 @@ fn slot_styles_survive_the_incremental_taffy_path() {
     assert!(state.apply_patches(&batch, &tree, 1.0, vp(800.0)));
 
     set_test_state("vid", VideoPlayerState::Idle);
-    let pass =
-        LayoutPass::compute_with_state(&mut state, &tree, &mut text, (800, 600), 1.0, 0.0, &HashMap::new(), 1);
+    let pass = LayoutPass::compute_with_state(
+        &mut state,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
     let video = find_item(&pass, "vid").rect;
     let slot = find_item(&pass, "post").rect;
-    assert_eq!((slot.x, slot.y, slot.w, slot.h), (video.x, video.y, video.w, video.h));
+    assert_eq!(
+        (slot.x, slot.y, slot.w, slot.h),
+        (video.x, video.y, video.w, video.h)
+    );
     clear_test_states();
 }
 
@@ -4586,10 +5873,19 @@ fn cull_window_spans_viewport_plus_buffer_each_side() {
     //   below 2.0 starts later and this assert fails.
     // - c49 (top 4900) sits just past the window bottom, c16 (bottom
     //   1700) just above its top — at 2.5 either assert fails.
-    assert!(pass.item_by_id("c46").is_some(), "inside the below-fold buffer");
+    assert!(
+        pass.item_by_id("c46").is_some(),
+        "inside the below-fold buffer"
+    );
     assert!(pass.item_by_id("c17").is_some(), "on the window's top edge");
-    assert!(pass.item_by_id("c49").is_none(), "just past the window bottom");
-    assert!(pass.item_by_id("c16").is_none(), "just above the window top");
+    assert!(
+        pass.item_by_id("c49").is_none(),
+        "just past the window bottom"
+    );
+    assert!(
+        pass.item_by_id("c16").is_none(),
+        "just above the window top"
+    );
 }
 
 // ---------------------------------------------------------------
@@ -4670,7 +5966,10 @@ mod paint_refresh {
         tree.apply(&create_patch(
             "field",
             "Input",
-            &[("value", json!("hi")), ("placeholder", json!("Say something"))],
+            &[
+                ("value", json!("hi")),
+                ("placeholder", json!("Say something")),
+            ],
         ));
         tree.apply(&insert_patch("card", "field"));
         tree.apply(&create_patch(
@@ -4723,10 +6022,22 @@ mod paint_refresh {
         }
         assert_eq!(refreshed.content_size, fresh.content_size);
         assert_eq!(refreshed.by_node_id, fresh.by_node_id);
-        assert_eq!(refreshed.actionable_ids, fresh.actionable_ids, "actionable index");
-        assert_eq!(refreshed.focusable_ids, fresh.focusable_ids, "focusable index");
-        assert_eq!(refreshed.scrollable_ids, fresh.scrollable_ids, "scrollable index");
-        assert_eq!(refreshed.hoverable_ids, fresh.hoverable_ids, "hoverable index");
+        assert_eq!(
+            refreshed.actionable_ids, fresh.actionable_ids,
+            "actionable index"
+        );
+        assert_eq!(
+            refreshed.focusable_ids, fresh.focusable_ids,
+            "focusable index"
+        );
+        assert_eq!(
+            refreshed.scrollable_ids, fresh.scrollable_ids,
+            "scrollable index"
+        );
+        assert_eq!(
+            refreshed.hoverable_ids, fresh.hoverable_ids,
+            "hoverable index"
+        );
         let mut a: Vec<String> = refreshed
             .a11y
             .iter()
@@ -4748,8 +6059,27 @@ mod paint_refresh {
     }
 
     #[test]
-    fn text_align_change() {
-        assert_refresh_matches(fixture(), &[set_prop("title", "textAlign", json!("center"))]);
+    fn text_align_change_is_no_longer_paint_only() {
+        // This used to assert the in-place refresh reproduced a full
+        // recompute for a `textAlign` change, which held because the
+        // fixture sets it on a Text LEAF. It does not hold on a column
+        // container, where the same prop lowers to `align_items` and
+        // moves the children — and the classifier only sees the name.
+        //
+        // So the batch must now decline the paint-only path and take a
+        // full recompute. That costs one relayout on a prop nobody
+        // animates; the alternative was container alignment that stayed
+        // silently wrong until an unrelated restyle happened along.
+        let mut tree = fixture();
+        let batch = [set_prop("title", "textAlign", json!("center"))];
+        for p in &batch {
+            tree.apply(p);
+        }
+        assert!(
+            crate::window::paint_only_affected_ids(&batch, &[], &tree, false, false, false)
+                .is_none(),
+            "a textAlign batch must force a relayout, not an in-place paint refresh"
+        );
     }
 
     #[test]
@@ -4974,7 +6304,8 @@ mod paint_refresh {
             "precondition: row150 must be culled at scroll 0"
         );
         let affected =
-            crate::window::paint_only_affected_ids(&batch, &[], &tree, false, false, false).unwrap();
+            crate::window::paint_only_affected_ids(&batch, &[], &tree, false, false, false)
+                .unwrap();
         refreshed.refresh_paint_only(
             &tree,
             &affected,
@@ -5042,7 +6373,11 @@ fn taffy_restyle_fires_for_decorated_layout_keys() {
     let mut taffy = TaffyState::new();
     if !taffy.apply_patches(
         &[
-            create_patch("box", "Container", &[("width.0", json!(160.0)), ("height.0", json!(40.0))]),
+            create_patch(
+                "box",
+                "Container",
+                &[("width.0", json!(160.0)), ("height.0", json!(40.0))],
+            ),
             insert_patch("root", "box"),
         ],
         &tree,
@@ -5054,7 +6389,14 @@ fn taffy_restyle_fires_for_decorated_layout_keys() {
     let mut text = TextEngine::new();
     let scrolls: HashMap<String, f32> = HashMap::new();
     let pass = LayoutPass::compute_with_state(
-        &mut taffy, &tree, &mut text, (800, 600), 1.0, 0.0, &scrolls, 0,
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &scrolls,
+        0,
     );
     assert_eq!(find_item(&pass, "box").rect.w, 160.0);
 
@@ -5071,7 +6413,14 @@ fn taffy_restyle_fires_for_decorated_layout_keys() {
         crate::style::Viewport::new(800.0, 600.0)
     ));
     let pass = LayoutPass::compute_with_state(
-        &mut taffy, &tree, &mut text, (800, 600), 1.0, 0.0, &scrolls, 1,
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &scrolls,
+        1,
     );
     assert_eq!(
         find_item(&pass, "box").rect.w,
@@ -5146,10 +6495,7 @@ mod container_shift {
         tree.apply(&insert_patch("root", "scroller"));
         for i in 0..8 {
             let id = format!("r{i}");
-            let mut props = vec![
-                ("0", json!(format!("row {i}"))),
-                ("height", json!(40.0)),
-            ];
+            let mut props = vec![("0", json!(format!("row {i}"))), ("height", json!(40.0))];
             if i == 3 {
                 props.push(("rotate", json!(15.0)));
             }
@@ -5202,6 +6548,63 @@ mod container_shift {
     }
 
     #[test]
+    fn overflow_hidden_card_clip_moves_with_its_image_inside_scroller() {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "scroller",
+            "Column",
+            &[
+                ("overflow", json!("scroll")),
+                ("height", json!(200.0)),
+                ("width", json!(400.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("root", "scroller"));
+        tree.apply(&create_patch(
+            "filler",
+            "Container",
+            &[("height", json!(100.0))],
+        ));
+        tree.apply(&insert_patch("scroller", "filler"));
+        tree.apply(&create_patch(
+            "card",
+            "Column",
+            &[
+                ("overflow", json!("hidden")),
+                ("height", json!(160.0)),
+                ("width", json!(300.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("scroller", "card"));
+        tree.apply(&create_patch(
+            "photo",
+            "Image",
+            &[
+                ("src", json!("test://food-card")),
+                ("height", json!(100.0)),
+                ("width", json!(300.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("card", "photo"));
+
+        let mut text = TextEngine::new();
+        let vp = crate::style::Viewport::new(VP.0 as f32, VP.1 as f32);
+        let mut shifted =
+            LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &HashMap::new());
+        let clip_before = shifted.item_by_id("photo").unwrap().clip_to.unwrap();
+        assert_eq!(clip_before, shifted.item_by_id("card").unwrap().rect);
+
+        shifted.shift_container_scroll(&tree, "scroller", 60.0, vp, 1.0);
+        let clip_after = shifted.item_by_id("photo").unwrap().clip_to.unwrap();
+        assert_eq!(clip_after.y, clip_before.y - 60.0);
+        assert_eq!(clip_after, shifted.item_by_id("card").unwrap().rect);
+
+        let scrolls = HashMap::from([("scroller".to_string(), 60.0)]);
+        let fresh = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        assert_items_match(&shifted, &fresh);
+    }
+
+    #[test]
     fn shift_leaves_container_row_and_siblings_alone() {
         let mut tree = fixture();
         add_text(&mut tree, "root", "outside", "not in the scroller");
@@ -5238,7 +6641,11 @@ mod container_shift {
         tree.apply(&insert_patch("root", "outer"));
         for i in 0..3 {
             let id = format!("f{i}");
-            tree.apply(&create_patch(&id, "Text", &[("0", json!("filler")), ("height", json!(40.0))]));
+            tree.apply(&create_patch(
+                &id,
+                "Text",
+                &[("0", json!("filler")), ("height", json!(40.0))],
+            ));
             tree.apply(&insert_patch("outer", &id));
         }
         tree.apply(&create_patch(
@@ -5249,7 +6656,11 @@ mod container_shift {
         tree.apply(&insert_patch("outer", "inner"));
         for i in 0..4 {
             let id = format!("n{i}");
-            tree.apply(&create_patch(&id, "Text", &[("0", json!("nested")), ("height", json!(40.0))]));
+            tree.apply(&create_patch(
+                &id,
+                "Text",
+                &[("0", json!("nested")), ("height", json!(40.0))],
+            ));
             tree.apply(&insert_patch("inner", &id));
         }
         let mut text = TextEngine::new();
@@ -5262,7 +6673,10 @@ mod container_shift {
         shifted.shift_container_scroll(&tree, "outer", 30.0, vp, 1.0);
         // Direct child of the outer: clip anchored to the outer's
         // (unmoved) rect stays put.
-        assert_eq!(shifted.item_by_id("f0").unwrap().clip_to, filler_clip_before);
+        assert_eq!(
+            shifted.item_by_id("f0").unwrap().clip_to,
+            filler_clip_before
+        );
         // Nested row: clip anchored to the inner container, which
         // moved up 30px.
         let nested_clip_after = shifted.item_by_id("n0").unwrap().clip_to.unwrap();
@@ -5618,4 +7032,275 @@ mod safe_area {
         );
         assert_eq!(content_box(&after), (20.0, 20.0, 760.0, 560.0));
     }
+}
+
+// -----------------------------------------------------------------
+// Component-gallery Desktop parity regressions
+// -----------------------------------------------------------------
+
+#[test]
+fn fill_max_size_root_uses_the_finite_viewport_on_both_axes() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "page",
+        "Column",
+        &[("fillMaxSize.0", json!(true))],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "page"));
+    add_text(&mut tree, "page", "label", "short content");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let page = find_item(&pass, "page").rect;
+    assert!((page.w - 430.0).abs() < 0.5, "fill width: {page:?}");
+    assert!((page.h - 934.0).abs() < 0.5, "fill height: {page:?}");
+}
+
+#[test]
+fn implicit_text_uses_dom_font_size_and_tight_line_box() {
+    let mut tree = Tree::new();
+    add_text(&mut tree, ROOT_ID, "body", "Body");
+    tree.apply(&create_patch(
+        "heading",
+        "Text",
+        &[("0", json!("Heading")), ("fontSize", json!(24))],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "heading"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let body = find_item(&pass, "body");
+    let heading = find_item(&pass, "heading");
+    assert!(matches!(
+        body.kind,
+        ItemKind::Text {
+            font_size: 16.0,
+            ..
+        }
+    ));
+    assert!(
+        (body.rect.h - 16.0).abs() < 0.5,
+        "DOM line-height:1 should make a one-line body box 16px, got {:?}",
+        body.rect,
+    );
+    assert!(matches!(
+        heading.kind,
+        ItemKind::Text {
+            font_size: 24.0,
+            ..
+        }
+    ));
+    assert!((heading.rect.h - 24.0).abs() < 0.5);
+}
+
+#[test]
+fn definite_height_row_wraps_content_width_under_a_filled_column() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "page",
+        "Column",
+        &[("fillMaxSize.0", json!(true))],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "page"));
+    tree.apply(&create_patch(
+        "row",
+        "Row",
+        &[
+            ("height", json!(150)),
+            ("padding", json!(16)),
+            ("gap", json!(8)),
+        ],
+    ));
+    tree.apply(&insert_patch("page", "row"));
+    for (id, label) in [("default", "Default"), ("filled", "fillMaxHeight")] {
+        tree.apply(&create_patch(
+            id,
+            "Stack",
+            &[
+                ("padding", json!(12)),
+                ("fillMaxHeight", json!(id == "filled")),
+            ],
+        ));
+        tree.apply(&insert_patch("row", id));
+        add_text(&mut tree, id, &format!("{id}_text"), label);
+    }
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let row = find_item(&pass, "row").rect;
+    assert!((row.h - 150.0).abs() < 0.5, "definite height: {row:?}");
+    assert!(row.w < 260.0, "auto-width Row should wrap content: {row:?}");
+}
+
+#[test]
+fn generic_size_makes_empty_gradient_tiles_square() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "tile",
+        "Stack",
+        &[
+            ("size.0", json!(100)),
+            (
+                "linearGradient.0",
+                json!("to bottom right, #fbbf24, #f97316, #ef4444"),
+            ),
+        ],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "tile"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let tile = find_item(&pass, "tile");
+    assert_eq!((tile.rect.w, tile.rect.h), (100.0, 100.0));
+    assert!(tile.background_gradient.is_some());
+}
+
+#[test]
+fn fractional_fill_width_divides_a_finite_row() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "row",
+        "Row",
+        &[("width.0", json!(400)), ("gap.0", json!(8))],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "row"));
+    for id in ["a", "b"] {
+        tree.apply(&create_patch(
+            id,
+            "Stack",
+            &[("fillMaxWidth.0", json!(0.5)), ("height.0", json!(40))],
+        ));
+        tree.apply(&insert_patch("row", id));
+    }
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let a = find_item(&pass, "a").rect;
+    let b = find_item(&pass, "b").rect;
+    assert!((a.w - b.w).abs() < 0.5, "equal fractions: a={a:?} b={b:?}");
+    assert!(a.w > 190.0, "fraction should consume about half: {a:?}");
+    assert!(
+        (b.x - (a.x + a.w) - 8.0).abs() < 0.5,
+        "gap: a={a:?} b={b:?}"
+    );
+}
+
+#[test]
+fn fill_max_width_image_keeps_explicit_card_header_height() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "card",
+        "Card",
+        &[("width.0", json!(400)), ("padding.0", json!(16))],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "card"));
+    tree.apply(&create_patch(
+        "image",
+        "Image",
+        &[("fillMaxWidth.0", json!(true)), ("height.0", json!(150))],
+    ));
+    tree.apply(&insert_patch("card", "image"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let image = find_item(&pass, "image").rect;
+    assert!(
+        (image.w - 368.0).abs() < 0.5,
+        "card content width: {image:?}"
+    );
+    assert!((image.h - 150.0).abs() < 0.5, "explicit height: {image:?}");
+}
+
+#[test]
+fn actionable_surfaces_wrap_content_unless_they_request_fill_width() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("column", "Column", &[("width", json!(400))]));
+    tree.apply(&insert_patch(ROOT_ID, "column"));
+
+    tree.apply(&create_patch("raw", "Card", &[]));
+    tree.apply(&insert_patch("column", "raw"));
+    add_text(&mut tree, "raw", "raw_text", "Card content");
+
+    tree.apply(&create_patch(
+        "filled",
+        "Button",
+        &[("fillMaxWidth.0", json!(true))],
+    ));
+    tree.apply(&insert_patch("column", "filled"));
+    add_text(&mut tree, "filled", "filled_text", "Filled");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let raw = find_item(&pass, "raw").rect;
+    let filled = find_item(&pass, "filled").rect;
+    assert!(raw.w < 200.0, "raw Card should wrap content, got {raw:?}");
+    assert!((filled.w - 400.0).abs() < 0.5, "filled Button: {filled:?}");
+}
+
+#[test]
+fn input_uses_explicit_padding_and_object_border_without_default_chrome() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("raw", "Input", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "raw"));
+    tree.apply(&create_patch(
+        "styled",
+        "Input",
+        &[
+            ("padding.0", json!(12)),
+            ("border.0", json!({ "width": 1, "color": "#d1d5db" })),
+            ("cornerRadius.0", json!(8)),
+        ],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "styled"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let raw = find_item(&pass, "raw");
+    assert!(
+        !raw.border.is_visible(),
+        "raw DOM-parity input is borderless"
+    );
+    assert_eq!(raw.background, None);
+    assert!(matches!(
+        raw.kind,
+        ItemKind::Input {
+            padding: (0.0, 0.0, 0.0, 0.0),
+            ..
+        }
+    ));
+
+    let styled = find_item(&pass, "styled");
+    assert_eq!(styled.border.width, 1.0);
+    assert_eq!(styled.border.color, Rgba(0xd1, 0xd5, 0xdb, 0xff));
+    assert_eq!(styled.border.radius, 8.0);
+    assert!(matches!(
+        styled.kind,
+        ItemKind::Input {
+            padding: (12.0, 12.0, 12.0, 12.0),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn card_gets_dom_default_background_and_radius_but_can_override_radius() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("card", "Card", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "card"));
+    add_text(&mut tree, "card", "content", "Card content");
+    tree.apply(&create_patch(
+        "square",
+        "Card",
+        &[("cornerRadius.0", json!(0))],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "square"));
+    add_text(&mut tree, "square", "content2", "Square");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let card = find_item(&pass, "card");
+    assert!(matches!(card.kind, ItemKind::Card));
+    assert_eq!(card.background, Some(Rgba(0xff, 0xff, 0xff, 0xff)));
+    assert_eq!(card.border.radius, 8.0);
+    assert_eq!(find_item(&pass, "square").border.radius, 0.0);
 }

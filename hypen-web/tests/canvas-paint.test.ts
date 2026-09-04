@@ -229,8 +229,11 @@ describe("Canvas Paint System", () => {
 
       expect(ctx.wasCalled("createLinearGradient")).toBe(true);
       const gradientCall = ctx.calls.find((call) => call.method === "createLinearGradient")!;
-      expect(gradientCall.args[0]).not.toBe(gradientCall.args[2]);
-      expect(gradientCall.args[1]).not.toBe(gradientCall.args[3]);
+      // CSS 135deg projects across this 100x50 box's magic corners.
+      expect(gradientCall.args[0]).toBeCloseTo(22.5);
+      expect(gradientCall.args[1]).toBeCloseTo(7.5);
+      expect(gradientCall.args[2]).toBeCloseTo(97.5);
+      expect(gradientCall.args[3]).toBeCloseTo(82.5);
       expect(ctx.countCalls("addColorStop")).toBe(3);
       expect(ctx.calls.filter((call) => call.method === "addColorStop")).toEqual([
         { method: "addColorStop", args: [0, "rgba(236, 72, 153, 0.38)"] },
@@ -238,6 +241,15 @@ describe("Canvas Paint System", () => {
         { method: "addColorStop", args: [1, "rgba(244, 114, 182, 0.20)"] },
       ]);
       expect(ctx.fillStyle.kind).toBe("linearGradient");
+
+      // Corner keywords follow the actual box aspect ratio instead of being
+      // folded to a fixed 45-degree angle. For a non-square box the endpoints
+      // are the named opposite corners exactly.
+      ctx.clearCalls();
+      node.props.linearGradient = "to bottom right, #fbbf24, #ef4444";
+      paintNode(ctx as any, node);
+      const cornerCall = ctx.calls.find((call) => call.method === "createLinearGradient")!;
+      expect(cornerCall.args).toEqual([10, 20, 110, 70]);
     });
 
     test("paints container with rounded corners", () => {
@@ -347,6 +359,59 @@ describe("Canvas Paint System", () => {
       paintNode(ctx as any, node);
 
       expect(ctx.globalAlpha).toBe(0.5);
+    });
+  });
+
+  describe("Audio Painting", () => {
+    test("does not leak right-aligned duration text into later nodes or frames", () => {
+      class StatefulAudioContext extends MockCanvasContext {
+        private stack: Array<{ textAlign: string; textBaseline: string }> = [];
+
+        override save() {
+          this.stack.push({ textAlign: this.textAlign, textBaseline: this.textBaseline });
+          super.save();
+        }
+
+        override restore() {
+          const state = this.stack.pop();
+          if (state) Object.assign(this, state);
+          super.restore();
+        }
+      }
+      const statefulContext = new StatefulAudioContext();
+      const node: VirtualNode = {
+        id: "audio1",
+        type: "audio",
+        props: {},
+        children: [],
+        parent: null,
+        visible: true,
+        opacity: 1,
+        clickable: false,
+        hoverable: false,
+        focusable: false,
+        focused: false,
+        hovered: false,
+        layout: {
+          x: 24,
+          y: 100,
+          width: 300,
+          height: 54,
+          margin: { top: 0, right: 0, bottom: 0, left: 0 },
+          padding: { top: 0, right: 0, bottom: 0, left: 0 },
+          border: { width: 0, color: "transparent", radius: 0 },
+          contentX: 0,
+          contentY: 0,
+          contentWidth: 300,
+          contentHeight: 54,
+        },
+      };
+
+      expect(statefulContext.textAlign).toBe("left");
+      paintNode(statefulContext as any, node);
+      expect(statefulContext.textAlign).toBe("left");
+      expect(statefulContext.textBaseline).toBe("top");
+      expect(statefulContext.countCalls("save")).toBe(statefulContext.countCalls("restore"));
     });
   });
 
@@ -535,6 +600,59 @@ describe("Canvas Paint System", () => {
 
       // Should paint both parent and child
       expect(ctx.countCalls("fillRect")).toBeGreaterThanOrEqual(2);
+    });
+
+    test("Button and Card children are painted exactly once", () => {
+      for (const type of ["button", "card"]) {
+        ctx.clearCalls();
+        const child: VirtualNode = {
+          id: `${type}-text`,
+          type: "text",
+          props: { text: "Once" },
+          children: [],
+          parent: null,
+          visible: true,
+          opacity: 1,
+          clickable: false,
+          hoverable: false,
+          focusable: false,
+          focused: false,
+          hovered: false,
+          layout: {
+            x: 10, y: 10, width: 80, height: 20,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            padding: { top: 0, right: 0, bottom: 0, left: 0 },
+            border: { width: 0, color: "transparent", radius: 0 },
+            contentX: 0, contentY: 0, contentWidth: 80, contentHeight: 20,
+          },
+        };
+        const parent: VirtualNode = {
+          id: type,
+          type,
+          props: {},
+          children: [child],
+          parent: null,
+          visible: true,
+          opacity: 1,
+          clickable: type === "button",
+          hoverable: false,
+          focusable: type === "button",
+          focused: false,
+          hovered: false,
+          layout: {
+            x: 0, y: 0, width: 100, height: 40,
+            margin: { top: 0, right: 0, bottom: 0, left: 0 },
+            padding: { top: 0, right: 0, bottom: 0, left: 0 },
+            border: { width: 0, color: "transparent", radius: 4 },
+            contentX: 0, contentY: 0, contentWidth: 100, contentHeight: 40,
+          },
+        };
+        child.parent = parent;
+
+        paintNode(ctx as any, parent);
+
+        expect(ctx.countCalls("fillText")).toBe(1);
+      }
     });
   });
 

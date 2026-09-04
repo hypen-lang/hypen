@@ -101,7 +101,7 @@ struct ComponentPreviewView: View {
     let item: GalleryItem
 
     private var wsURL: String {
-        "ws://\(GalleryItems.serverHost):\(GalleryItems.serverPort)\(item.path)"
+        "ws://\(GalleryItems.serverHost):\(GalleryItems.serverPort)\(item.path)?platform=ios"
     }
 
     var body: some View {

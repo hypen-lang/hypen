@@ -265,8 +265,7 @@ fn collect_ids(node: &IRNode, scope: &mut IdScope, out: &mut Vec<A11yDiagnostic>
         IRNode::Router {
             routes, fallback, ..
         } => {
-            let mut groups: Vec<&[IRNode]> =
-                routes.iter().map(|r| r.children.as_slice()).collect();
+            let mut groups: Vec<&[IRNode]> = routes.iter().map(|r| r.children.as_slice()).collect();
             if let Some(fallback) = fallback {
                 groups.push(fallback.as_slice());
             }
@@ -521,9 +520,7 @@ fn unknown_ignore_rule_findings(
 /// entry point for hosts that want printable locations without holding a
 /// [`LineIndex`] themselves. Returns the parse error message on a syntax
 /// error.
-pub fn check_accessibility_source_located(
-    source: &str,
-) -> Result<Vec<LocatedDiagnostic>, String> {
+pub fn check_accessibility_source_located(source: &str) -> Result<Vec<LocatedDiagnostic>, String> {
     Ok(locate_diagnostics(
         check_accessibility_source(source)?,
         source,
@@ -540,17 +537,10 @@ fn is_interactive(role: Option<Role>) -> bool {
 /// with `expand::wire_form_labels` plus the self-labeling toggles
 /// (Checkbox/Switch), whose label still has to exist.
 fn is_form_control(role: Option<Role>) -> bool {
-    role.is_some_and(|r| {
-        r.needs_external_label() || matches!(r, Role::Checkbox | Role::Switch)
-    })
+    role.is_some_and(|r| r.needs_external_label() || matches!(r, Role::Checkbox | Role::Switch))
 }
 
-fn walk(
-    node: &IRNode,
-    within_interactive: bool,
-    scope: &IdScope,
-    out: &mut Vec<A11yDiagnostic>,
-) {
+fn walk(node: &IRNode, within_interactive: bool, scope: &IdScope, out: &mut Vec<A11yDiagnostic>) {
     match node {
         IRNode::Element(element) => check_element(element, within_interactive, scope, out),
         // Control-flow containers contribute no semantics themselves; recurse
@@ -592,12 +582,7 @@ fn walk(
 }
 
 /// Push a finding, stamping it with the element's source spans.
-fn push_finding(
-    out: &mut Vec<A11yDiagnostic>,
-    element: &Element,
-    rule: A11yRule,
-    message: String,
-) {
+fn push_finding(out: &mut Vec<A11yDiagnostic>, element: &Element, rule: A11yRule, message: String) {
     out.push(A11yDiagnostic {
         rule,
         element_type: element.element_type.clone(),

@@ -9,8 +9,9 @@ export const listHandler: ComponentHandler = {
     const el = document.createElement("div");
     el.style.display = "flex";
     el.style.flexDirection = "column"; // Default to vertical (like Android)
-    // Default to flex-start to match Android/iOS behavior
-    el.style.alignItems = "flex-start";
+    // List tracks span their finite cross axis. Explicit child widths still
+    // win over flex-item stretch, while ordinary styled rows fill the list.
+    el.style.alignItems = "stretch";
     el.style.overflow = "auto";
     el.dataset.hypenType = "list";
     return el;

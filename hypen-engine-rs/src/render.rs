@@ -242,13 +242,13 @@ fn render_dirty_iterable_partial(
     modules: Option<&indexmap::IndexMap<String, ModuleInstance>>,
     changed_paths: &[String],
 ) -> bool {
+    use crate::ir::IRNode;
     use crate::reconcile::item_bindings::replace_ir_node_item_bindings;
     use crate::reconcile::keyed::{
         generate_item_key, item_fingerprint, iterable_child_key, stamp_iter_memo,
         templates_fingerprint,
     };
     use crate::reconcile::resolve::evaluate_binding_ref;
-    use crate::ir::IRNode;
 
     // ── Extract the iterable's shape from the node ──────────────────────
     // Both flavors reduce to: a source binding, an item name, an optional
@@ -319,7 +319,10 @@ fn render_dirty_iterable_partial(
     for p in changed_paths {
         // A parent of the array path changed → the array itself may be a
         // different value → wholesale.
-        if base.strip_prefix(p.as_str()).is_some_and(|r| r.starts_with('.')) {
+        if base
+            .strip_prefix(p.as_str())
+            .is_some_and(|r| r.starts_with('.'))
+        {
             return false;
         }
         let Some(rest) = p.strip_prefix(base.as_str()) else {
@@ -673,7 +676,9 @@ mod tests {
         scheduler.mark_dirty(node_id);
         let patches = render_dirty_nodes(&mut scheduler, &mut tree, Some(&instance));
         assert!(
-            !patches.iter().any(|p| matches!(p, Patch::SetSemantics { .. })),
+            !patches
+                .iter()
+                .any(|p| matches!(p, Patch::SetSemantics { .. })),
             "unchanged semantics must not re-emit, got {patches:?}"
         );
     }

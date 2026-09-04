@@ -285,9 +285,13 @@ pub(crate) fn plan_instantiation(template: &IRNode) -> Option<InstantiationPlan>
         let mut evaluator = None;
         for (key, value) in &element.props {
             if is_statically_resolvable(value) {
-                if let Some(v) =
-                    resolve_single_value(value, &serde_json::Value::Null, None, None, &mut evaluator)
-                {
+                if let Some(v) = resolve_single_value(
+                    value,
+                    &serde_json::Value::Null,
+                    None,
+                    None,
+                    &mut evaluator,
+                ) {
                     if !is_engine_internal_prop(key) {
                         static_props.insert(key.clone(), v);
                     }
@@ -503,13 +507,8 @@ pub(crate) fn apply_compiled_row(
 
         // Same substitution + resolution the full pass performs.
         let new_raw = replace_value_item_bindings(&entry.value, item, item_name);
-        let new_resolved = resolve_single_value(
-            &new_raw,
-            ctx.state,
-            None,
-            ctx.data_sources,
-            &mut evaluator,
-        );
+        let new_resolved =
+            resolve_single_value(&new_raw, ctx.state, None, ctx.data_sources, &mut evaluator);
 
         let Some(node) = ctx.tree.get_mut(node_id) else {
             return false;
@@ -649,9 +648,13 @@ pub(crate) fn build_row_prototype(
             }
             if value_depends_on_item(value, item_name) {
                 item_entries.push((key.clone(), value.clone()));
-            } else if let Some(v) =
-                resolve_single_value(value, effective_state, None, ctx.data_sources, &mut evaluator)
-            {
+            } else if let Some(v) = resolve_single_value(
+                value,
+                effective_state,
+                None,
+                ctx.data_sources,
+                &mut evaluator,
+            ) {
                 base.insert(key.clone(), v);
             }
         }
@@ -775,7 +778,10 @@ pub(crate) fn instantiate_row_from_proto(
         template_id: plan.template_id.clone(),
         parent_id: super::patch::node_id_str(render_parent),
         before_id: None,
-        nodes: ids.iter().map(|&id| super::patch::node_id_str(id)).collect(),
+        nodes: ids
+            .iter()
+            .map(|&id| super::patch::node_id_str(id))
+            .collect(),
         subs,
         semantics: wire_semantics,
     });

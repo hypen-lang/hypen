@@ -751,7 +751,10 @@ impl WasmEngine {
         let animation = convert_animation(animation)?;
 
         let normalized = scope.as_deref().filter(|s| !s.is_empty());
-        if self.core.update_state_sparse(normalized, &paths, &values, animation) {
+        if self
+            .core
+            .update_state_sparse(normalized, &paths, &values, animation)
+        {
             self.render_dirty();
         }
         Ok(())

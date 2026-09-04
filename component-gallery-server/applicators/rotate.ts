@@ -116,7 +116,10 @@ Column {
     }
     .horizontalAlignment("center")
   }
-  .gap(24)
+  // A 60px square rotated 45deg extends about 12.5px past its layout
+  // bounds. Keep enough space between siblings so later items do not paint
+  // over those transformed corners and look clipped on native renderers.
+  .gap(12)
   .marginBottom(32)
 
   Text("Negative rotation")

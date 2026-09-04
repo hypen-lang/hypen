@@ -32,8 +32,7 @@ fn reconcile_ir(
     state: &serde_json::Value,
     dependencies: &mut DependencyGraph,
 ) -> Vec<Patch> {
-    let patches =
-        hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
+    let patches = hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
     EXPANDER.with(|e| e.borrow_mut().expand(patches))
 }
 

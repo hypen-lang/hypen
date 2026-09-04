@@ -118,78 +118,75 @@ pub(crate) fn resolve_single_value(
     evaluator: &mut Option<exprimo::Evaluator>,
 ) -> Option<serde_json::Value> {
     let resolved_value = match value {
-            Value::Static(v) => v.clone(),
-            Value::Binding(binding) => {
-                if binding.is_item() {
-                    // Evaluate item binding
-                    if let Some(item_value) = item {
-                        evaluate_item_binding(binding, item_value)
-                            .unwrap_or(serde_json::Value::Null)
-                    } else {
-                        serde_json::Value::Null
-                    }
-                } else if binding.is_data_source() {
-                    // Evaluate data source binding against its provider's state
-                    if let (Some(provider), Some(ds_map)) = (binding.provider(), data_sources) {
-                        if let Some(ds_state) = ds_map.get(provider) {
-                            evaluate_binding_path(binding, ds_state)
-                                .unwrap_or(serde_json::Value::Null)
-                        } else {
-                            serde_json::Value::Null
-                        }
+        Value::Static(v) => v.clone(),
+        Value::Binding(binding) => {
+            if binding.is_item() {
+                // Evaluate item binding
+                if let Some(item_value) = item {
+                    evaluate_item_binding(binding, item_value).unwrap_or(serde_json::Value::Null)
+                } else {
+                    serde_json::Value::Null
+                }
+            } else if binding.is_data_source() {
+                // Evaluate data source binding against its provider's state
+                if let (Some(provider), Some(ds_map)) = (binding.provider(), data_sources) {
+                    if let Some(ds_state) = ds_map.get(provider) {
+                        evaluate_binding_path(binding, ds_state).unwrap_or(serde_json::Value::Null)
                     } else {
                         serde_json::Value::Null
                     }
                 } else {
-                    // Evaluate state binding
-                    evaluate_binding(binding, state).unwrap_or(serde_json::Value::Null)
+                    serde_json::Value::Null
+                }
+            } else {
+                // Evaluate state binding
+                evaluate_binding(binding, state).unwrap_or(serde_json::Value::Null)
+            }
+        }
+        Value::TemplateString { template, .. } => {
+            // Build evaluator once and reuse for all template strings
+            let eval = evaluator
+                .get_or_insert_with(|| crate::reactive::build_evaluator(state, item, data_sources));
+            match crate::reactive::evaluate_template_string(template, eval) {
+                Ok(result) => serde_json::Value::String(result),
+                Err(e) => {
+                    // Surface the failure through the existing logger so devs
+                    // see why a template is rendering its raw DSL instead of
+                    // the resolved value. Silent fallback is what made
+                    // template bugs invisible in production.
+                    crate::log_warn!(
+                        crate::logger::LogScope::Reconciler,
+                        "template evaluation failed for {:?}: {}",
+                        template,
+                        e
+                    );
+                    serde_json::Value::String(template.clone())
                 }
             }
-            Value::TemplateString { template, .. } => {
-                // Build evaluator once and reuse for all template strings
-                let eval = evaluator.get_or_insert_with(|| {
-                    crate::reactive::build_evaluator(state, item, data_sources)
-                });
-                match crate::reactive::evaluate_template_string(template, eval) {
-                    Ok(result) => serde_json::Value::String(result),
-                    Err(e) => {
-                        // Surface the failure through the existing logger so devs
-                        // see why a template is rendering its raw DSL instead of
-                        // the resolved value. Silent fallback is what made
-                        // template bugs invisible in production.
-                        crate::log_warn!(
-                            crate::logger::LogScope::Reconciler,
-                            "template evaluation failed for {:?}: {}",
-                            template,
-                            e
-                        );
-                        serde_json::Value::String(template.clone())
-                    }
-                }
+        }
+        Value::Action(action) => {
+            // Actions are serialized with @ prefix for renderer to detect
+            serde_json::Value::String(format!("@{}", action))
+        }
+        Value::Resource(name) => {
+            // Resource references are kept as @resources.name for the icon resolver
+            serde_json::Value::String(format!("@resources.{}", name))
+        }
+        Value::StateSwitch {
+            path,
+            cases,
+            default,
+        } => {
+            // `.states` pose switch: no matching case and no default
+            // means the prop is ABSENT — omit the key entirely, exactly
+            // as if it were never set. Resolution always yields plain
+            // JSON, so the variant never reaches the wire.
+            match resolve_state_switch(path, cases, default.as_ref(), state) {
+                Some(v) => v,
+                None => return None,
             }
-            Value::Action(action) => {
-                // Actions are serialized with @ prefix for renderer to detect
-                serde_json::Value::String(format!("@{}", action))
-            }
-            Value::Resource(name) => {
-                // Resource references are kept as @resources.name for the icon resolver
-                serde_json::Value::String(format!("@resources.{}", name))
-            }
-            Value::StateSwitch {
-                path,
-                cases,
-                default,
-            } => {
-                // `.states` pose switch: no matching case and no default
-                // means the prop is ABSENT — omit the key entirely, exactly
-                // as if it were never set. Resolution always yields plain
-                // JSON, so the variant never reaches the wire.
-                match resolve_state_switch(path, cases, default.as_ref(), state) {
-                    Some(v) => v,
-                    None => return None,
-                }
-            }
-        };
+        }
+    };
     Some(resolved_value)
 }
 

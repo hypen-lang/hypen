@@ -8,6 +8,14 @@ fn pos(x: f64, y: f64) -> winit::dpi::PhysicalPosition<f64> {
     winit::dpi::PhysicalPosition::new(x, y)
 }
 
+#[test]
+fn cursor_icons_match_web_affordances() {
+    assert_eq!(cursor_icon_for_targets(false, false), CursorIcon::Default);
+    assert_eq!(cursor_icon_for_targets(true, false), CursorIcon::Pointer);
+    assert_eq!(cursor_icon_for_targets(false, true), CursorIcon::Text);
+    assert_eq!(cursor_icon_for_targets(true, true), CursorIcon::Text);
+}
+
 mod paint_only_gate {
     use super::*;
     use serde_json::json;
@@ -47,9 +55,15 @@ mod paint_only_gate {
     #[test]
     fn paint_only_props_scope_to_node_and_descendants() {
         let tree = gate_tree();
-        let affected =
-            paint_only_affected_ids(&[set_prop("row", "backgroundColor")], &[], &tree, false, false, false)
-                .expect("paint-only batch qualifies");
+        let affected = paint_only_affected_ids(
+            &[set_prop("row", "backgroundColor")],
+            &[],
+            &tree,
+            false,
+            false,
+            false,
+        )
+        .expect("paint-only batch qualifies");
         assert!(affected.contains("row"), "patched node included");
         assert!(affected.contains("leaf"), "descendants included");
         assert!(!affected.contains("text"), "siblings excluded");
@@ -113,7 +127,8 @@ mod paint_only_gate {
         let tree = gate_tree();
         let batch = [set_prop("text", "color")];
         assert!(
-            paint_only_affected_ids(&batch, &["text".to_string()], &tree, false, false, false).is_none(),
+            paint_only_affected_ids(&batch, &["text".to_string()], &tree, false, false, false)
+                .is_none(),
             "essential-snap restyles disqualify"
         );
         assert!(
@@ -387,12 +402,9 @@ fn cache_key_ignores_hover_without_layout_state_variants() {
     // interaction transition never forces a relayout (no regression on
     // the common path).
     let base = layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, None, 0);
-    let hovered =
-        layout_cache_key_inner(7, 800, 600, 1.0, false, Some("btn"), None, None, 0);
-    let pressed =
-        layout_cache_key_inner(7, 800, 600, 1.0, false, None, Some("btn"), None, 0);
-    let focused =
-        layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, Some("btn"), 0);
+    let hovered = layout_cache_key_inner(7, 800, 600, 1.0, false, Some("btn"), None, None, 0);
+    let pressed = layout_cache_key_inner(7, 800, 600, 1.0, false, None, Some("btn"), None, 0);
+    let focused = layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, Some("btn"), 0);
     assert_eq!(base, hovered);
     assert_eq!(base, pressed);
     assert_eq!(base, focused);
@@ -404,19 +416,15 @@ fn cache_key_changes_on_hover_with_layout_state_variants() {
     // hover/press/focus transition bumps the key, forcing `redraw` to
     // recompute the LayoutPass with the new active states.
     let none = layout_cache_key_inner(7, 800, 600, 1.0, true, None, None, None, 0);
-    let hovered =
-        layout_cache_key_inner(7, 800, 600, 1.0, true, Some("btn"), None, None, 0);
+    let hovered = layout_cache_key_inner(7, 800, 600, 1.0, true, Some("btn"), None, None, 0);
     assert_ne!(none, hovered, "hover must bump the key");
     // Hover moving to a different node also changes the key.
-    let other =
-        layout_cache_key_inner(7, 800, 600, 1.0, true, Some("other"), None, None, 0);
+    let other = layout_cache_key_inner(7, 800, 600, 1.0, true, Some("other"), None, None, 0);
     assert_ne!(hovered, other);
     // Press / focus likewise.
-    let pressed =
-        layout_cache_key_inner(7, 800, 600, 1.0, true, None, Some("btn"), None, 0);
+    let pressed = layout_cache_key_inner(7, 800, 600, 1.0, true, None, Some("btn"), None, 0);
     assert_ne!(none, pressed);
-    let focused =
-        layout_cache_key_inner(7, 800, 600, 1.0, true, None, None, Some("btn"), 0);
+    let focused = layout_cache_key_inner(7, 800, 600, 1.0, true, None, None, Some("btn"), 0);
     assert_ne!(none, focused);
 }
 
@@ -664,7 +672,10 @@ fn reduced_motion_toggle_off_rearms_the_ticker() {
             winsert("col", "dot"),
         ],
     );
-    assert!(!animator.has_active(&tree), "reduced motion: preset never starts");
+    assert!(
+        !animator.has_active(&tree),
+        "reduced motion: preset never starts"
+    );
 
     let frame = drive_reduced_motion_toggle(
         &mut animator,
@@ -769,7 +780,10 @@ fn evict_backstop_forgets_animator_state() {
             winsert("col", "dot"),
         ],
     );
-    assert!(animator.tracked_record_count() > baseline, "spec + ambient tracked");
+    assert!(
+        animator.tracked_record_count() > baseline,
+        "spec + ambient tracked"
+    );
     mirror_ingest(
         &mut animator,
         &mut tree,
@@ -798,7 +812,11 @@ fn evict_backstop_forgets_animator_state() {
 #[test]
 fn focused_dispatch_skips_exit_excluded_ids() {
     let mut tree = Tree::new();
-    tree.apply(&wcreate("btn", "Button", &[("action", json!("@actions.save"))]));
+    tree.apply(&wcreate(
+        "btn",
+        "Button",
+        &[("action", json!("@actions.save"))],
+    ));
     tree.apply(&winsert(ROOT_ID, "btn"));
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
@@ -852,7 +870,12 @@ fn focus_clears_when_its_subtree_begins_exiting() {
         }],
     );
     assert!(animator.is_exit_excluded(&tree, "btn"));
-    assert!(clear_focus_if_exiting(&animator, &tree, &mut focused, &mut ring));
+    assert!(clear_focus_if_exiting(
+        &animator,
+        &tree,
+        &mut focused,
+        &mut ring
+    ));
     assert_eq!(focused, None, "focus cleared at exit begin");
     assert!(!ring, "focus ring cleared with it");
 }
@@ -905,7 +928,10 @@ fn slide_enter_moves_pixels_and_hit_targets_together() {
     assert!(!btn.transform.is_identity(), "hidden slide pose paints");
     let (cx, cy) = (btn.rect.x + 50.0, btn.rect.y + 20.0);
     assert!(
-        pass.hit(cx - 24.0, cy).map(|it| it.node_id.clone()).as_deref() == Some("btn"),
+        pass.hit(cx - 24.0, cy)
+            .map(|it| it.node_id.clone())
+            .as_deref()
+            == Some("btn"),
         "hit target sits at the slid position"
     );
     // The trailing 24px sliver of the un-slid rect is empty space now.
@@ -1102,7 +1128,10 @@ fn flip_on_move_plays_through_the_window_glue() {
     );
     let pass1 = harness_layout(&mut taffy, &tree, &mut text, 1);
     let first_b = pass1.item_by_id("b").unwrap().rect;
-    assert!((first_b.y - 40.0).abs() < 0.5, "b starts below a: {first_b:?}");
+    assert!(
+        (first_b.y - 40.0).abs() < 0.5,
+        "b starts below a: {first_b:?}"
+    );
 
     // flush_patches in miniature, FLIP pre-pass included.
     let batch = [wmove("col", "b", Some("a"))];
@@ -1338,7 +1367,10 @@ fn loading_with_intent_reports_playing_true() {
     // `"loading"` — a bound toggle must not flicker during a stall.
     let now = std::time::Instant::now();
     let reports = playback_reports("pb", None, VideoPlayerState::Loading, 0.0, 0.0, now);
-    assert_eq!(paths(&reports), vec!["pb.state", "pb.playing", "pb.position"]);
+    assert_eq!(
+        paths(&reports),
+        vec!["pb.state", "pb.playing", "pb.position"]
+    );
     assert_eq!(reports[0].value, json!("loading"));
     assert_eq!(
         reports[1].value,
@@ -1493,7 +1525,9 @@ fn seek_epsilon_is_one_second() {
 
 // --- Inbound playback writes (plan_playback_write) --------------------------
 
-fn playback_obj(fields: &[(&str, serde_json::Value)]) -> serde_json::Map<String, serde_json::Value> {
+fn playback_obj(
+    fields: &[(&str, serde_json::Value)],
+) -> serde_json::Map<String, serde_json::Value> {
     fields
         .iter()
         .map(|(k, v)| (k.to_string(), v.clone()))
@@ -1520,7 +1554,11 @@ fn first_bind_application_is_positive_intent_only() {
     let obj = playback_obj(&[("playing", json!(true)), ("position", json!(545.0))]);
     let plan = plan_playback_write(&obj, true, None, VideoPlayerState::Idle, 0.0, 600.0);
     assert_eq!(plan.set_playing, Some(true));
-    assert_eq!(plan.seek_to, Some(545.0), "the first application's position seeks");
+    assert_eq!(
+        plan.seek_to,
+        Some(545.0),
+        "the first application's position seeks"
+    );
 
     // A negative init still lets its accompanying resume position seek.
     let obj = playback_obj(&[("playing", json!(false)), ("position", json!(120.0))]);
@@ -1537,8 +1575,14 @@ fn later_playing_false_writes_are_authoritative() {
     let t0 = std::time::Instant::now();
     let last = report_at(VideoPlayerState::Playing, 5.0, 60.0, t0);
     let obj = playback_obj(&[("playing", json!(false))]);
-    let plan =
-        plan_playback_write(&obj, false, Some(&last), VideoPlayerState::Playing, 5.0, 60.0);
+    let plan = plan_playback_write(
+        &obj,
+        false,
+        Some(&last),
+        VideoPlayerState::Playing,
+        5.0,
+        60.0,
+    );
     assert_eq!(plan.set_playing, Some(false));
 }
 
@@ -1550,8 +1594,14 @@ fn echoed_playback_reports_do_not_touch_the_pipeline() {
     let t0 = std::time::Instant::now();
     let last = report_at(VideoPlayerState::Paused, 5.0, 60.0, t0);
     let obj = playback_obj(&[("playing", json!(false)), ("position", json!(5.0))]);
-    let plan =
-        plan_playback_write(&obj, false, Some(&last), VideoPlayerState::Paused, 5.0, 60.0);
+    let plan = plan_playback_write(
+        &obj,
+        false,
+        Some(&last),
+        VideoPlayerState::Paused,
+        5.0,
+        60.0,
+    );
     assert_eq!(plan, PlaybackWritePlan::default());
 }
 
@@ -1564,9 +1614,19 @@ fn restart_from_ended_yields_to_an_accompanying_seek() {
     let t0 = std::time::Instant::now();
     let last = report_at(VideoPlayerState::Ended, 60.0, 60.0, t0);
     let obj = playback_obj(&[("playing", json!(true)), ("position", json!(37.0))]);
-    let plan =
-        plan_playback_write(&obj, false, Some(&last), VideoPlayerState::Ended, 60.0, 60.0);
-    assert_eq!(plan.set_playing, Some(true), "playing:true on ended restarts");
+    let plan = plan_playback_write(
+        &obj,
+        false,
+        Some(&last),
+        VideoPlayerState::Ended,
+        60.0,
+        60.0,
+    );
+    assert_eq!(
+        plan.set_playing,
+        Some(true),
+        "playing:true on ended restarts"
+    );
     assert_eq!(
         plan.seek_to,
         Some(37.0),
@@ -1578,7 +1638,10 @@ fn restart_from_ended_yields_to_an_accompanying_seek() {
 fn position_writes_clamp_and_respect_the_epsilon() {
     let obj = playback_obj(&[("position", json!(10.5))]);
     let plan = plan_playback_write(&obj, false, None, VideoPlayerState::Playing, 10.0, 60.0);
-    assert_eq!(plan.seek_to, None, "within the 1 s epsilon: a progress echo");
+    assert_eq!(
+        plan.seek_to, None,
+        "within the 1 s epsilon: a progress echo"
+    );
     let obj = playback_obj(&[("position", json!(999.0))]);
     let plan = plan_playback_write(&obj, false, None, VideoPlayerState::Playing, 10.0, 60.0);
     assert_eq!(plan.seek_to, Some(60.0), "clamped to the known duration");
@@ -1648,8 +1711,7 @@ fn scrubber_commits_through_the_enclosing_videos_bind() {
 #[test]
 fn scrubbers_own_bind_wins_over_the_enclosing_videos_bind() {
     // R2 commit precedence: own bind → enclosing Video's bind → onSeek.
-    let tree =
-        scrub_tree_with_own_bind(Some("playback"), Some("scrub.pb"), Some("@actions.seek"));
+    let tree = scrub_tree_with_own_bind(Some("playback"), Some("scrub.pb"), Some("@actions.seek"));
     let (action, payload) =
         scrub_commit_dispatch(&tree, "sc", Some("vid"), 12.0).expect("a commit dispatch");
     assert_eq!(action, "__hypen_bind");
@@ -1676,7 +1738,10 @@ fn scrubber_falls_back_to_its_own_on_seek_when_the_player_is_bindless() {
     let tree = scrub_tree(None, Some("@actions.seek"));
     let (action, payload) =
         scrub_commit_dispatch(&tree, "sc", Some("vid"), 7.0).expect("a commit dispatch");
-    assert_eq!(action, "seek", "the `@actions.` prefix is stripped at resolve time");
+    assert_eq!(
+        action, "seek",
+        "the `@actions.` prefix is stripped at resolve time"
+    );
     assert_eq!(payload["type"], json!("seek"));
     assert_eq!(payload["position"], json!(7.0));
 }
@@ -1726,8 +1791,7 @@ fn player_state_transitions_bump_the_layout_cache_key() {
     // so without folding the state into the key a play→pause would reuse
     // a cached layout and never show/hide the slots.
     let idle = layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, None, 11);
-    let playing =
-        layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, None, 22);
+    let playing = layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, None, 22);
     assert_ne!(idle, playing);
 }
 
@@ -1888,10 +1952,7 @@ mod focus_reveal {
         // so callers don't loop on unreachable items.
         assert_eq!(reveal_offset(-50.0, 30.0, 0.0, 600.0, 0.0, 1000.0), None);
         // Already at max, item below: same.
-        assert_eq!(
-            reveal_offset(700.0, 780.0, 0.0, 600.0, 100.0, 100.0),
-            None
-        );
+        assert_eq!(reveal_offset(700.0, 780.0, 0.0, 600.0, 100.0, 100.0), None);
     }
 
     #[test]
@@ -1911,7 +1972,13 @@ mod focus_reveal {
 
     // ── reveal_target_for ──────────────────────────────────────
 
-    fn node(tree: &mut Tree, id: &str, et: &str, parent: &str, props: &[(&str, serde_json::Value)]) {
+    fn node(
+        tree: &mut Tree,
+        id: &str,
+        et: &str,
+        parent: &str,
+        props: &[(&str, serde_json::Value)],
+    ) {
         let map: indexmap::IndexMap<String, serde_json::Value> = props
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
@@ -1933,7 +2000,13 @@ mod focus_reveal {
     fn reveal_tree(rows: usize) -> Tree {
         let mut tree = Tree::new();
         node(&mut tree, "col", "Column", "root", &[]);
-        node(&mut tree, "plain", "Text", "col", &[("text", json!("outside"))]);
+        node(
+            &mut tree,
+            "plain",
+            "Text",
+            "col",
+            &[("text", json!("outside"))],
+        );
         node(
             &mut tree,
             "scroller",
@@ -1963,7 +2036,10 @@ mod focus_reveal {
         match reveal_target_for(&tree, &pass, "r5", vp) {
             RevealTarget::Container(id, _rect, meta) => {
                 assert_eq!(id, "scroller");
-                assert!(meta.content_h > 0.0, "ScrollMeta content_h should be positive");
+                assert!(
+                    meta.content_h > 0.0,
+                    "ScrollMeta content_h should be positive"
+                );
                 assert_eq!(meta.baked_offset, 0.0, "no scroll offset was baked in");
             }
             other => panic!("expected Container target, got {other:?}"),
@@ -1978,7 +2054,10 @@ mod focus_reveal {
         let vp = crate::style::Viewport::new(400.0, 600.0);
         // `plain` sits outside the scroller; the scroller itself also
         // scrolls with the page (it is not its own ancestor).
-        assert_eq!(reveal_target_for(&tree, &pass, "plain", vp), RevealTarget::Page);
+        assert_eq!(
+            reveal_target_for(&tree, &pass, "plain", vp),
+            RevealTarget::Page
+        );
         assert_eq!(
             reveal_target_for(&tree, &pass, "scroller", vp),
             RevealTarget::Page
@@ -2047,7 +2126,10 @@ mod focus_reveal {
             "precondition: scroller must be culled for this test"
         );
         let vp = crate::style::Viewport::new(400.0, 600.0);
-        assert_eq!(reveal_target_for(&tree, &pass, "r5", vp), RevealTarget::Page);
+        assert_eq!(
+            reveal_target_for(&tree, &pass, "r5", vp),
+            RevealTarget::Page
+        );
     }
 }
 
@@ -2138,7 +2220,10 @@ mod review_regressions {
             crate::style::Viewport::new(800.0, 600.0),
             1.0,
         );
-        assert_eq!(a11y_fingerprint(&refreshed, &[]), a11y_fingerprint(&after, &[]));
+        assert_eq!(
+            a11y_fingerprint(&refreshed, &[]),
+            a11y_fingerprint(&after, &[])
+        );
     }
 
     /// Stale-value guard for the other fingerprint fields the
@@ -2177,7 +2262,11 @@ mod review_regressions {
             value: json!("@actions.open"),
         });
         let with_action = crate::layout::LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
-        assert_ne!(fp_base, a11y_fingerprint(&with_action, &[]), "action enable must republish");
+        assert_ne!(
+            fp_base,
+            a11y_fingerprint(&with_action, &[]),
+            "action enable must republish"
+        );
 
         tree.apply(&Patch::SetProp {
             id: "field".into(),
@@ -2201,7 +2290,13 @@ mod container_drift {
     use super::*;
     use serde_json::json;
 
-    fn node(tree: &mut Tree, id: &str, et: &str, parent: &str, props: &[(&str, serde_json::Value)]) {
+    fn node(
+        tree: &mut Tree,
+        id: &str,
+        et: &str,
+        parent: &str,
+        props: &[(&str, serde_json::Value)],
+    ) {
         let map: indexmap::IndexMap<String, serde_json::Value> = props
             .iter()
             .map(|(k, v)| (k.to_string(), v.clone()))
@@ -2277,7 +2372,10 @@ mod container_drift {
             crate::style::Viewport::new(800.0, 600.0),
             1.0,
         );
-        assert!(container_scroll_drifts(&pass, &live).is_empty(), "caught up");
+        assert!(
+            container_scroll_drifts(&pass, &live).is_empty(),
+            "caught up"
+        );
         live.insert("scroller".to_string(), 90.0);
         let drifts = container_scroll_drifts(&pass, &live);
         assert_eq!(drifts.len(), 1);
@@ -2549,8 +2647,7 @@ mod anim_paint_only {
         assert!(!pass.item_by_id("n").unwrap().transform.is_identity());
         // Animator settle removes the originally-absent prop.
         tree.remove_prop_raw("n", "translateY");
-        let affected: std::collections::HashSet<String> =
-            [String::from("n")].into_iter().collect();
+        let affected: std::collections::HashSet<String> = [String::from("n")].into_iter().collect();
         pass.refresh_paint_only(
             &tree,
             &affected,
@@ -2764,4 +2861,68 @@ mod ingest_finalize_gate {
             "a finalizing tick must take the wholesale path even with paint writes present"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// `Resized` triage (`resize_action`)
+// ---------------------------------------------------------------------
+
+#[test]
+fn resize_action_skips_only_a_repeat_of_the_size_on_screen() {
+    use crate::window::{resize_action, ResizeAction};
+
+    // The case worth skipping: same size, and we have already painted.
+    assert_eq!(
+        resize_action(Some((1280, 720)), (1280, 720), true),
+        ResizeAction::Skip
+    );
+    // A real size change always paints.
+    assert_eq!(
+        resize_action(Some((1280, 720)), (1281, 720), true),
+        ResizeAction::Paint
+    );
+    assert_eq!(
+        resize_action(Some((1280, 720)), (1280, 721), true),
+        ResizeAction::Paint
+    );
+    // Before the first paint there is nothing on screen to match, so the
+    // initial `Resized` must go through even though the sizes agree.
+    assert_eq!(
+        resize_action(Some((1280, 720)), (1280, 720), false),
+        ResizeAction::Paint
+    );
+    // No GPU yet.
+    assert_eq!(resize_action(None, (1280, 720), false), ResizeAction::Paint);
+}
+
+#[test]
+fn resize_action_drops_the_layout_on_a_minimise_so_restore_is_not_skipped() {
+    use crate::window::{resize_action, ResizeAction};
+
+    // `Gpu::resize` refuses a zero size and leaves `gpu.size` holding the
+    // last real one, so a minimise must neither paint nor leave a layout
+    // behind.
+    for zero in [(0, 720), (1280, 0), (0, 0)] {
+        assert_eq!(
+            resize_action(Some((1280, 720)), zero, true),
+            ResizeAction::DropLayout,
+            "zero-size {zero:?} must not paint"
+        );
+    }
+
+    // The sequence that made this necessary: minimise, then restore at
+    // the same size. Because the minimise dropped the layout, the restore
+    // is NOT mistaken for a repeat of what is already on screen.
+    let gpu_size = Some((1280, 720));
+    let mut has_layout = true;
+    let action = resize_action(gpu_size, (0, 0), has_layout);
+    assert_eq!(action, ResizeAction::DropLayout);
+    if action == ResizeAction::DropLayout {
+        has_layout = false;
+    }
+    assert_eq!(
+        resize_action(gpu_size, (1280, 720), has_layout),
+        ResizeAction::Paint,
+        "restore after a minimise must repaint, not be skipped as a repeat"
+    );
 }

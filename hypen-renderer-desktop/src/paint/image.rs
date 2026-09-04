@@ -89,6 +89,23 @@ const DECODED_CACHE_CAP: usize = 32;
 /// or when the entry is already last. Caller must already hold the
 /// cache lock. Generic over the value type so the same logic serves
 /// both the encoded-bytes cache and the decoded-pixmap cache.
+///
+/// These two caches are genuine LRUs — position *is* recency here, and
+/// `evict_overflow` / `store_decoded` drop from the front — unlike the
+/// plain memo caches elsewhere in the renderer, which never re-insert on
+/// a hit and so carry no recency information at all.
+///
+/// Known cost: `move_index` is O(distance), so promoting from the front
+/// of a full cache walks the entry vector, and that sits on the *hit*
+/// path (every visible image, every frame). Skipping the promotion for
+/// entries already near the back would remove it, but it would also
+/// break the invariant callers rely on — that a hit unconditionally
+/// protects an entry from the next overflow. Making hits O(1) properly
+/// means moving recency into the entry (a use counter) and having
+/// `evict_overflow` pick the minimum, which trades an O(n) hit for an
+/// O(n) eviction; evictions are far rarer. Left as-is for now: at
+/// `GLOBAL_IMAGE_CACHE_CAP` this is tens of microseconds a frame, well
+/// below the costs worth restructuring a process-global cache for.
 fn touch_recent<V>(entries: &mut IndexMap<String, V>, src: &str) {
     let len = entries.len();
     if len < 2 {
@@ -613,7 +630,10 @@ fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
         log::warn!("image: non-base64 data URI is not supported");
         return None;
     }
-    let payload: String = src[comma + 1..].chars().filter(|c| !c.is_whitespace()).collect();
+    let payload: String = src[comma + 1..]
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     match base64_decode(&payload) {
         Some(bytes) => Some(bytes),
         None => {
@@ -684,6 +704,18 @@ static IMAGE_LOAD_GEN: AtomicU64 = AtomicU64::new(0);
 /// caches that may have been encoded against an unloaded source.
 pub fn image_load_generation() -> u64 {
     IMAGE_LOAD_GEN.load(Ordering::Relaxed)
+}
+
+/// Bump the generation without going near the worker thread.
+///
+/// The counter is what drives `compute_inner_state`'s bulk-rebuild
+/// branch outside of an explicit `mark_needs_rebuild`, so tests that
+/// need to exercise that branch would otherwise have to queue a real
+/// fetch and poll for the worker to land — slow and flaky. This is the
+/// same store the worker performs.
+#[cfg(test)]
+pub(crate) fn bump_image_load_generation_for_test() {
+    IMAGE_LOAD_GEN.fetch_add(1, Ordering::Relaxed);
 }
 
 fn run_image_worker(rx: mpsc::Receiver<String>) {

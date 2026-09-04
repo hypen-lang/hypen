@@ -20,7 +20,7 @@ Column {
     .color("#666")
     .marginBottom(8)
 
-  Audio(src: "https://www.w3schools.com/html/horse.mp3")
+  Audio(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/sample.wav?platform=__HYPEN_GALLERY_PLATFORM__&example=audio&generation=__HYPEN_GALLERY_GENERATION__")
     .marginBottom(24)
 
   Text("Styled Audio")
@@ -29,7 +29,7 @@ Column {
     .marginBottom(8)
 
   Column {
-    Audio(src: "https://www.w3schools.com/html/horse.mp3", controls: true)
+    Audio(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/sample.wav?platform=__HYPEN_GALLERY_PLATFORM__&example=audio&generation=__HYPEN_GALLERY_GENERATION__", controls: true)
       .fillMaxWidth(true)
   }
   .padding(16)
@@ -70,7 +70,7 @@ Column {
     .horizontalAlignment("center")
     .marginBottom(12)
 
-    Audio(src: "https://www.w3schools.com/html/horse.mp3", controls: true)
+    Audio(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/sample.wav?platform=__HYPEN_GALLERY_PLATFORM__&example=audio&generation=__HYPEN_GALLERY_GENERATION__", controls: true)
       .fillMaxWidth(true)
   }
   .padding(16)

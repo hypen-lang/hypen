@@ -42,7 +42,9 @@ fn button_create_patch_carries_role_button() {
 
     match create {
         Patch::Create { semantics, .. } => {
-            let semantics = semantics.as_ref().expect("Button Create must carry semantics");
+            let semantics = semantics
+                .as_ref()
+                .expect("Button Create must carry semantics");
             assert_eq!(semantics.role, Some(Role::Button));
         }
         _ => unreachable!(),
@@ -82,10 +84,7 @@ fn nested_button_inside_a_column_still_gets_semantics() {
     let patches = patches_for(r#"Column { Button("Go") }"#);
     match create_for(&patches, "Button") {
         Patch::Create { semantics, .. } => {
-            assert_eq!(
-                semantics.as_ref().and_then(|s| s.role),
-                Some(Role::Button)
-            );
+            assert_eq!(semantics.as_ref().and_then(|s| s.role), Some(Role::Button));
         }
         _ => unreachable!(),
     }
@@ -107,7 +106,11 @@ fn role_table_covers_the_structurally_certain_types() {
         (r#"Image(src: "/a.png")"#, "Image", Role::Img),
         (r#"Input(placeholder: "Name")"#, "Input", Role::Textbox),
         (r#"Slider(value: 3)"#, "Slider", Role::Slider),
-        (r#"ProgressBar(value: 50)"#, "ProgressBar", Role::Progressbar),
+        (
+            r#"ProgressBar(value: 50)"#,
+            "ProgressBar",
+            Role::Progressbar,
+        ),
         // A native <select> is listbox-backed, not an ARIA combobox.
         (r#"Select(value: "a")"#, "Select", Role::Listbox),
     ];
@@ -155,7 +158,10 @@ fn accessible_name_derivation_through_the_full_pipeline() {
     // Literal label.
     assert_eq!(name_of(r#"Button("Save")"#).as_deref(), Some("Save"));
     // Text child.
-    assert_eq!(name_of(r#"Button { Text("Save") }"#).as_deref(), Some("Save"));
+    assert_eq!(
+        name_of(r#"Button { Text("Save") }"#).as_deref(),
+        Some("Save")
+    );
     // Icon + text: icon excluded.
     assert_eq!(
         name_of(r#"Button { Icon("trash") Text("Delete") }"#).as_deref(),
@@ -179,7 +185,9 @@ fn explicit_label_applicator_flows_through_and_is_stripped() {
     let patches = patches_for(r#"Button { Icon("trash") }.label("Delete")"#);
     let create = create_for(&patches, "Button");
     match create {
-        Patch::Create { semantics, props, .. } => {
+        Patch::Create {
+            semantics, props, ..
+        } => {
             let s = semantics.as_ref().expect("button has semantics");
             assert_eq!(s.name.as_deref(), Some("Delete"));
             assert_eq!(s.name_explicit, Some(true));
@@ -197,9 +205,14 @@ fn explicit_label_applicator_flows_through_and_is_stripped() {
 fn hidden_applicator_marks_decorative_and_strips_prop() {
     let patches = patches_for(r#"Icon("star").hidden()"#);
     match create_for(&patches, "Icon") {
-        Patch::Create { semantics, props, .. } => {
+        Patch::Create {
+            semantics, props, ..
+        } => {
             assert_eq!(semantics.as_ref().and_then(|s| s.hidden), Some(true));
-            assert!(!props.contains_key("hidden.0"), "hidden.0 should be stripped");
+            assert!(
+                !props.contains_key("hidden.0"),
+                "hidden.0 should be stripped"
+            );
         }
         _ => unreachable!(),
     }
@@ -214,7 +227,9 @@ fn templated_own_name_resolves_at_reconcile() {
         &json!({ "label": "Save changes" }),
     );
     assert_eq!(
-        semantics_of(&patches, "Button").and_then(|s| s.name).as_deref(),
+        semantics_of(&patches, "Button")
+            .and_then(|s| s.name)
+            .as_deref(),
         Some("Save changes")
     );
 
@@ -274,7 +289,9 @@ fn bound_checkbox_label_resolves_through_the_pipeline() {
         &json!({ "terms": "Accept the terms" }),
     );
     assert_eq!(
-        semantics_of(&patches, "Checkbox").and_then(|s| s.name).as_deref(),
+        semantics_of(&patches, "Checkbox")
+            .and_then(|s| s.name)
+            .as_deref(),
         Some("Accept the terms")
     );
 }

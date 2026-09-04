@@ -230,7 +230,7 @@ impl CpuPainter {
                 }
                 item.state_variants.color_for(&states)
             };
-            if matches!(item.kind, ItemKind::Button) {
+            if matches!(item.kind, ItemKind::Button | ItemKind::Card) {
                 if pressed {
                     if !bg_from_variant {
                         if let Some(bg) = background.as_mut() {
@@ -248,6 +248,19 @@ impl CpuPainter {
             }
 
             let radius = item.border.radius * scale_factor;
+            if matches!(item.kind, ItemKind::Card) {
+                // The GPU path uses a gaussian shadow. The CPU fallback keeps
+                // the same offset/alpha with a small expanded soft-looking
+                // underlay; screenshots use Vello, while this preserves a
+                // readable Card surface on software-only hosts.
+                let shadow = crate::layout::Rect {
+                    x: item.rect.x - scale_factor,
+                    y: item.rect.y + scale_factor,
+                    w: item.rect.w + 2.0 * scale_factor,
+                    h: item.rect.h + 2.0 * scale_factor,
+                };
+                fill_rect(pixmap, shadow, Rgba(0, 0, 0, 26), radius);
+            }
             if let Some(bg) = background {
                 fill_rect(pixmap, item.rect, bg, radius);
             }
@@ -339,12 +352,7 @@ impl CpuPainter {
                 ItemKind::Scrubber { video_id, preview } => {
                     let fraction =
                         crate::video_v2::scrubber_fraction(video_id.as_deref(), *preview);
-                    crate::paint::image::paint_scrubber(
-                        pixmap,
-                        item.rect,
-                        fraction,
-                        scale_factor,
-                    );
+                    crate::paint::image::paint_scrubber(pixmap, item.rect, fraction, scale_factor);
                 }
                 ItemKind::Icon {
                     paths,
@@ -367,18 +375,16 @@ impl CpuPainter {
                     align,
                     max_lines: _,
                     padding: _,
+                    line_height: _,
                 } => {
                     // Pre-measure the line so right/center alignment
                     // can offset within the laid-out rect. Wrap width
                     // is the full rect for alignment purposes — long
                     // text still wraps at the rect edge.
                     let scaled_size = *font_size * scale_factor;
-                    let (line_w, _) = self.text.measure_weighted(
-                        content,
-                        scaled_size,
-                        Some(item.rect.w),
-                        item.font_weight,
-                    );
+                    let (line_w, _) =
+                        self.text
+                            .measure_weighted(content, scaled_size, None, item.font_weight);
                     let dx = match align {
                         crate::layout::TextAlign::Start => 0.0,
                         crate::layout::TextAlign::Center => ((item.rect.w - line_w).max(0.0)) * 0.5,
@@ -400,13 +406,13 @@ impl CpuPainter {
                     placeholder,
                     font_size,
                     color,
+                    padding,
                     ..
                 } => {
-                    let pad_x = 12.0 * scale_factor;
-                    let pad_y = 8.0 * scale_factor;
-                    let inner_w = (item.rect.w - 2.0 * pad_x).max(0.0);
-                    let text_x = item.rect.x + pad_x;
-                    let text_y = item.rect.y + pad_y;
+                    let (pad_left, pad_top, pad_right, _) = *padding;
+                    let inner_w = (item.rect.w - pad_left - pad_right).max(0.0);
+                    let text_x = item.rect.x + pad_left;
+                    let text_y = item.rect.y + pad_top;
                     if value.is_empty() {
                         if let Some(p) = placeholder.as_deref() {
                             // Placeholder is muted gray; engine doesn't
@@ -519,6 +525,17 @@ impl CpuPainter {
                             fill_rect(pixmap, caret, Rgba(0x00, 0x7a, 0xff, 0xff), 0.0);
                         }
                     }
+                }
+                ItemKind::Audio { .. }
+                | ItemKind::Checkbox { .. }
+                | ItemKind::Switch { .. }
+                | ItemKind::Slider { .. }
+                | ItemKind::ProgressBar { .. }
+                | ItemKind::Spinner { .. }
+                | ItemKind::Select { .. } => {
+                    // The production Desktop path is Vello. Keep the legacy
+                    // CPU fallback exhaustive; its control raster parity is a
+                    // separate compatibility path.
                 }
                 _ => {}
             }

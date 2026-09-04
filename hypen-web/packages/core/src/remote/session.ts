@@ -80,6 +80,28 @@ export class SessionManager {
   }
 
   /**
+   * Re-adopt a session id supplied by a trusted transport recovery channel.
+   *
+   * This is intentionally separate from `createSession`: ordinary client
+   * hello messages must not be allowed to choose their own id. Cloudflare's
+   * hibernation API, however, stores the server-issued id on the accepted
+   * socket and needs to reconstruct the in-memory SessionManager after the
+   * Durable Object itself has been evicted.
+   */
+  recoverSession(id: string, props?: Record<string, any>): Session {
+    const now = new Date();
+    const session: Session = {
+      id,
+      ttl: this.config.ttl,
+      createdAt: now,
+      lastConnectedAt: now,
+      props,
+    };
+    this.activeSessions.set(id, session);
+    return session;
+  }
+
+  /**
    * Get an active (connected) session by ID
    */
   getActiveSession(id: string): Session | null {

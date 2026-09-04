@@ -103,6 +103,7 @@ export class CanvasRenderer implements Renderer {
 
   private rafId: number | null = null;
   private needsRedraw = false;
+  private captureFrozen = false;
 
   // Whether the next frame must re-run layout. Patches, resize, font loads,
   // and image decodes set it; pure paint frames (scroll, hover, caret blink,
@@ -866,6 +867,7 @@ export class CanvasRenderer implements Renderer {
    * Schedule redraw
    */
   private scheduleRedraw(): void {
+    if (this.captureFrozen) return;
     if (this.rafId !== null) return;
 
     // Use requestAnimationFrame if available (browser), otherwise render immediately (tests)
@@ -1107,9 +1109,25 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * Paint one final deterministic frame and suspend asynchronous redraws.
+   * `clear()` resumes normal rendering for the next gallery item.
+   */
+  freezeForCapture(): void {
+    this.captureFrozen = true;
+    if (this.rafId !== null && typeof cancelAnimationFrame !== "undefined") {
+      cancelAnimationFrame(this.rafId);
+      this.rafId = null;
+    }
+    this.animator.snapAll();
+    this.layoutDirty = true;
+    this.render();
+  }
+
+  /**
    * Clear renderer
    */
   clear(): void {
+    this.captureFrozen = false;
     this.animator.reset();
     this.textEditor.endEditing();
     this.releaseAllVideos();
@@ -1178,4 +1196,3 @@ export class CanvasRenderer implements Renderer {
     this.accessibilityLayer.destroy();
   }
 }
-

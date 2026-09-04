@@ -12,10 +12,18 @@ export const checkboxHandler: ComponentHandler = {
     wrapper.style.alignItems = "center";
     wrapper.style.gap = "8px";
     wrapper.style.cursor = "pointer";
+    wrapper.style.minHeight = "20px";
 
     const input = document.createElement("input");
     input.type = "checkbox";
     input.dataset.hypenCheckbox = "true";
+    // Normalize the visual and layout footprint instead of inheriting each
+    // browser's smaller checkbox size and default margins.
+    input.style.width = "20px";
+    input.style.height = "20px";
+    input.style.margin = "0";
+    input.style.flexShrink = "0";
+    input.style.accentColor = "#3b82f6";
     
     wrapper.appendChild(input);
     
@@ -50,5 +58,4 @@ export const checkboxHandler: ComponentHandler = {
     }
   },
 };
-
 

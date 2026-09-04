@@ -1,17 +1,20 @@
 package space.hypen.renderer.components
 
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextField
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
+import space.hypen.renderer.applicators.ColorParser
 import space.hypen.renderer.render.LocalActionDispatcher
 import space.hypen.renderer.model.ActionValue
 import space.hypen.renderer.model.HypenElement
@@ -34,9 +37,16 @@ class TextAreaComponent : ComponentHandler {
             ?: element.getStringProp("0")
             ?: ""
         val placeholder = element.getStringProp("placeholder") ?: ""
-        val variant = element.getStringProp("variant") ?: "outlined"
         val minLines = element.getIntProp("minLines") ?: 3
         val maxLines = element.getIntProp("maxLines") ?: Int.MAX_VALUE
+        val contentColor = (element.getStringProp("color")
+            ?: element.getStringProp("color.0"))
+            ?.let(ColorParser::parse)
+            ?: LocalContentColor.current
+        val fontFamily = (element.getStringProp("fontFamily")
+            ?: element.getStringProp("fontFamily.0"))
+            ?.takeIf { it.contains("mono", ignoreCase = true) }
+            ?.let { FontFamily.Monospace }
 
         var text by remember(initialValue) { mutableStateOf(initialValue) }
 
@@ -87,31 +97,28 @@ class TextAreaComponent : ComponentHandler {
 
         val textFieldModifier = modifier.defaultMinSize(minHeight = (minLines * 24).dp)
 
-        when (variant.lowercase()) {
-            "filled" -> {
-                TextField(
-                    value = text,
-                    onValueChange = onValueChange,
-                    modifier = textFieldModifier,
-                    placeholder = if (placeholder.isNotEmpty()) {
-                        { Text(placeholder) }
-                    } else null,
-                    minLines = minLines,
-                    maxLines = maxLines,
-                )
-            }
-            else -> {
-                OutlinedTextField(
-                    value = text,
-                    onValueChange = onValueChange,
-                    modifier = textFieldModifier,
-                    placeholder = if (placeholder.isNotEmpty()) {
-                        { Text(placeholder) }
-                    } else null,
-                    minLines = minLines,
-                    maxLines = maxLines,
-                )
-            }
-        }
+        BasicTextField(
+            value = text,
+            onValueChange = onValueChange,
+            modifier = textFieldModifier,
+            minLines = minLines,
+            maxLines = maxLines,
+            textStyle = LocalTextStyle.current.copy(
+                color = contentColor,
+                fontFamily = fontFamily ?: LocalTextStyle.current.fontFamily,
+            ),
+            decorationBox = { innerTextField ->
+                Box {
+                    if (text.isEmpty() && placeholder.isNotEmpty()) {
+                        Text(
+                            placeholder,
+                            color = contentColor.copy(alpha = 0.55f),
+                            fontFamily = fontFamily,
+                        )
+                    }
+                    innerTextField()
+                }
+            },
+        )
     }
 }

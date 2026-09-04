@@ -876,6 +876,7 @@ ${cells.join("\n")}
                 .tw("items-center w-full")
               }
               .tw("w-full max-w-[330px] md:max-w-[350px] rounded-[26px] bg-black/25 border border-white/10 p-5 mt-1")
+              .alignSelf("center")
               .backdropFilter("blur(20px)")
               .opacity({ default: 1, active: 0.8 })
               .transition(150, easeOut)

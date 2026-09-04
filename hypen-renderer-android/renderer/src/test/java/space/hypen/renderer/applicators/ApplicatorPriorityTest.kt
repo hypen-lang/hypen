@@ -50,6 +50,14 @@ class ApplicatorPriorityTest {
     }
 
     @Test
+    fun `transforms wrap the complete painted box`() {
+        assertTrue(order("weight") < order("transform"))
+        assertTrue(order("transform") < order("shadow"))
+        assertTrue(order("transform") < order("backgroundcolor"))
+        assertTrue(order("transform") < order("padding"))
+    }
+
+    @Test
     fun `background color paints beneath gradients and images`() {
         // CSS longhands are order-independent: `background-color` is always
         // the bottom layer regardless of declaration order. Compose draws in

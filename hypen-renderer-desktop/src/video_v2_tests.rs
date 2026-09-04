@@ -258,7 +258,10 @@ fn sticky_error_marker_wins_over_everything() {
 fn poster_probe_failure_is_the_feature_off_error_state() {
     let poster = "https://cdn.example.com/__video_v2_probe_fail.jpg";
     crate::paint::image::test_seed_failure(poster, 404, "Not Found");
-    let n = node(&[("src", json!("https://cdn/a.mp4")), ("poster", json!(poster))]);
+    let n = node(&[
+        ("src", json!("https://cdn/a.mp4")),
+        ("poster", json!(poster)),
+    ]);
     assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Error);
 }
 
@@ -267,7 +270,10 @@ fn poster_probe_failure_is_the_feature_off_error_state() {
 fn without_the_feature_a_playing_source_still_reports_idle() {
     // No decode stack: the contract state is `idle` (poster shows), and
     // the poster/error slots are the only ones that can ever appear.
-    let n = node(&[("src", json!("https://cdn/a.mp4")), ("autoplay", json!(true))]);
+    let n = node(&[
+        ("src", json!("https://cdn/a.mp4")),
+        ("autoplay", json!(true)),
+    ]);
     assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Idle);
 }
 
@@ -276,16 +282,25 @@ fn without_the_feature_a_playing_source_still_reports_idle() {
 fn autoplay_source_without_a_pipeline_yet_is_loading() {
     // The pipeline starts on this same flush; reporting `idle` here
     // would flash the poster slot off and back on.
-    let n = node(&[("src", json!("https://cdn/a.mp4")), ("autoplay", json!(true))]);
+    let n = node(&[
+        ("src", json!("https://cdn/a.mp4")),
+        ("autoplay", json!(true)),
+    ]);
     assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Loading);
     // Without autoplay there is nothing pending: idle.
     let n = node(&[("src", json!("https://cdn/a.mp4"))]);
     assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Idle);
     // The one-way controlled form pends a start exactly like autoplay…
-    let n = node(&[("src", json!("https://cdn/a.mp4")), ("playing", json!(true))]);
+    let n = node(&[
+        ("src", json!("https://cdn/a.mp4")),
+        ("playing", json!(true)),
+    ]);
     assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Loading);
     // …while `playing: false` pends nothing.
-    let n = node(&[("src", json!("https://cdn/a.mp4")), ("playing", json!(false))]);
+    let n = node(&[
+        ("src", json!("https://cdn/a.mp4")),
+        ("playing", json!(false)),
+    ]);
     assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Idle);
 }
 
@@ -310,7 +325,10 @@ fn controlled_playing_reads_both_spellings_and_bool_or_string() {
         controlled_playing(&node(&[("playing", json!(" false "))])),
         Some(false)
     );
-    assert_eq!(controlled_playing(&node(&[("playing", json!("maybe"))])), None);
+    assert_eq!(
+        controlled_playing(&node(&[("playing", json!("maybe"))])),
+        None
+    );
     assert_eq!(controlled_playing(&node(&[])), None);
 }
 
@@ -326,7 +344,10 @@ fn source_config_fingerprint_rearms_on_source_changes_only() {
     // playlist auto-advance moves the current track, and not on
     // unrelated prop updates.
     let base = node(&[
-        ("playlist", json!(["https://cdn/ep1.mp4", "https://cdn/ep2.mp4"])),
+        (
+            "playlist",
+            json!(["https://cdn/ep1.mp4", "https://cdn/ep2.mp4"]),
+        ),
         ("startPosition", json!(300)),
         ("headers", json!({"Authorization": "Bearer x"})),
     ]);
@@ -337,7 +358,10 @@ fn source_config_fingerprint_rearms_on_source_changes_only() {
     assert_eq!(fp, source_config_fingerprint(&base));
     // Unrelated prop updates don't re-arm either.
     let unrelated = node(&[
-        ("playlist", json!(["https://cdn/ep1.mp4", "https://cdn/ep2.mp4"])),
+        (
+            "playlist",
+            json!(["https://cdn/ep1.mp4", "https://cdn/ep2.mp4"]),
+        ),
         ("startPosition", json!(300)),
         ("headers", json!({"Authorization": "Bearer x"})),
         ("muted", json!(true)),
@@ -428,8 +452,14 @@ fn scrub_preview_prop_round_trips() {
 #[test]
 fn video_intent_vocabulary_matches_the_contract() {
     assert_eq!(VideoIntent::Fullscreen.as_str(), "fullscreen");
-    assert_eq!(VideoIntent::parse("fullscreen"), Some(VideoIntent::Fullscreen));
-    assert_eq!(VideoIntent::parse(" fullscreen "), Some(VideoIntent::Fullscreen));
+    assert_eq!(
+        VideoIntent::parse("fullscreen"),
+        Some(VideoIntent::Fullscreen)
+    );
+    assert_eq!(
+        VideoIntent::parse(" fullscreen "),
+        Some(VideoIntent::Fullscreen)
+    );
     // Unknown / future intents stay inert rather than guessing.
     assert_eq!(VideoIntent::parse("Fullscreen"), None);
     assert_eq!(VideoIntent::parse("pip"), None);

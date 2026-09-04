@@ -29,6 +29,33 @@ const ROOT_FONT_PX = 16;
 let viewportWidthPx = 0;
 let viewportHeightPx = 0;
 
+const HEADING_FONT_SIZES: Record<number, number> = {
+  1: 32,
+  2: 24,
+  3: 18.72,
+  4: 16,
+  5: 13.28,
+  6: 10.72,
+};
+
+/** Resolve CSS-inherited text props through the retained virtual parent chain. */
+export function inheritedTextProp(node: VirtualNode, name: string): any {
+  let current: VirtualNode | null = node;
+  while (current) {
+    if (current.props[name] !== undefined) return current.props[name];
+    if (current.type.toLowerCase() === "heading") {
+      const level = Math.max(1, Math.min(6, Number(current.props.level ?? 2) || 2));
+      if (name === "fontSize") return HEADING_FONT_SIZES[level];
+      if (name === "fontWeight") return "bold";
+    }
+    if (name === "color" && current.type.toLowerCase() === "link") {
+      return "#0000ee";
+    }
+    current = current.parent;
+  }
+  return undefined;
+}
+
 /**
  * Set the viewport basis for `vw`/`vh`/`vmin`/`vmax` resolution.
  * Called by the layout pass with the canvas' logical (CSS-pixel) size.
@@ -529,7 +556,6 @@ export function getAbsoluteBounds(node: VirtualNode): Rectangle | null {
     height: node.layout.height,
   };
 }
-
 
 
 

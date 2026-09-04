@@ -16,6 +16,12 @@ import { Engine } from "../hypen-web/packages/server/src/engine.ts";
 import { HypenModuleInstance } from "../hypen-web/packages/core/src/app.ts";
 import { TemplateExpander } from "../hypen-web/packages/core/src/patch-expand.ts";
 import type { ServerWebSocket } from "bun";
+import {
+  fixtureNames,
+  galleryFixture,
+  galleryFixtureContentType,
+  resolveGalleryFixtureSource,
+} from "./gallery-fixtures.ts";
 
 // Import component examples
 import { columnExample } from "./components/column.ts";
@@ -192,10 +198,28 @@ interface ClientData {
   moduleInstance: HypenModuleInstance<any>;
   revision: number;
   connectedAt: Date;
+  platform: string;
+  readinessKey: string;
+  generation: number;
+}
+
+interface GalleryReadiness {
+  clientId: string;
+  generation: number;
+  connected: boolean;
+  initialTreeSent: boolean;
+  expectedFixtures: Set<string>;
+  loadedFixtures: Set<string>;
 }
 
 let nextClientId = 1;
 const clients = new Map<ServerWebSocket<ClientData>, ClientData>();
+const readiness = new Map<string, GalleryReadiness>();
+let nextReadinessGeneration = 1;
+
+function readinessKey(platform: string, example: string): string {
+  return `${platform}:${example.toLowerCase()}`;
+}
 
 // Start the server
 Bun.serve<ClientData>({
@@ -204,6 +228,49 @@ Bun.serve<ClientData>({
 
   fetch(req, server) {
     const url = new URL(req.url);
+
+    if (url.pathname.startsWith("/fixtures/")) {
+      const name = url.pathname.slice("/fixtures/".length);
+      const fixture = galleryFixture(name);
+      if (!fixture) return new Response("Fixture not found", { status: 404 });
+
+      const platform = url.searchParams.get("platform") ?? "unknown";
+      const example = url.searchParams.get("example") ?? "unknown";
+      const state = readiness.get(readinessKey(platform, example));
+      if (Number(url.searchParams.get("generation")) === state?.generation) {
+        state.loadedFixtures.add(name);
+      }
+      return new Response(fixture, {
+        headers: {
+          "Content-Type": galleryFixtureContentType(name) ?? "application/octet-stream",
+          "Cache-Control": "no-store, max-age=0",
+          // Canvas images opt into anonymous CORS so drawing them cannot
+          // taint the gallery canvas. DOM <img> does not require this, which
+          // is why the missing header previously affected Canvas alone.
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
+    }
+
+    if (url.pathname === "/api/readiness") {
+      const platform = url.searchParams.get("platform") ?? "unknown";
+      const example = url.searchParams.get("example") ?? "unknown";
+      const state = readiness.get(readinessKey(platform, example));
+      const expectedFixtures = [...(state?.expectedFixtures ?? [])].sort();
+      const loadedFixtures = [...(state?.loadedFixtures ?? [])].sort();
+      const ready = Boolean(
+        state?.connected && state.initialTreeSent &&
+        expectedFixtures.every(name => state.loadedFixtures.has(name)),
+      );
+      return Response.json({
+        ready,
+        connected: state?.connected ?? false,
+        initialTreeSent: state?.initialTreeSent ?? false,
+        generation: state?.generation ?? 0,
+        expectedFixtures,
+        loadedFixtures,
+      }, { headers: { "Cache-Control": "no-store" } });
+    }
 
     // Try to upgrade WebSocket connections
     // Parse path to find the example
@@ -218,7 +285,9 @@ Bun.serve<ClientData>({
       example = examplesByName.get(name);
     }
 
-    if (example && server.upgrade(req, { data: { example } })) {
+    if (example && server.upgrade(req, {
+      data: { example, platform: url.searchParams.get("platform") ?? "unknown" },
+    })) {
       return; // Connection upgraded
     }
 
@@ -233,6 +302,8 @@ Bun.serve<ClientData>({
       for (const [ws, clientData] of clients) {
         try {
           console.log(`[${clientData.example.name}] Force disconnect: ${clientData.id}`);
+          const currentReadiness = readiness.get(clientData.readinessKey);
+          if (currentReadiness?.clientId === clientData.id) currentReadiness.connected = false;
           ws.close(1000, "Server reset");
           disconnected++;
         } catch {}
@@ -289,8 +360,9 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
     perMessageDeflate: true,
 
     async open(ws) {
-      const upgradeData = ws.data as { example: GalleryExample };
+      const upgradeData = ws.data as unknown as { example: GalleryExample; platform: string };
       const example = upgradeData.example;
+      const platform = upgradeData.platform;
 
       if (!example) {
         ws.close(1008, "Invalid route");
@@ -299,6 +371,25 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
 
       try {
         const clientId = `client_${nextClientId++}`;
+        const key = readinessKey(platform, example.key);
+        const generation = nextReadinessGeneration++;
+        const fixtureBase = platform === "android"
+          ? `http://10.0.2.2:${PORT}`
+          : `http://127.0.0.1:${PORT}`;
+        const renderedSource = resolveGalleryFixtureSource(example.ui, {
+          fixtureBase,
+          platform,
+          example: example.key,
+          generation,
+        });
+        readiness.set(key, {
+          clientId,
+          generation,
+          connected: true,
+          initialTreeSent: false,
+          expectedFixtures: fixtureNames(renderedSource),
+          loadedFixtures: new Set(),
+        });
 
         // Create engine instance for this client
         const engine = new Engine();
@@ -314,6 +405,9 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
           moduleInstance,
           revision: 0,
           connectedAt: new Date(),
+          platform,
+          readinessKey: key,
+          generation,
         };
 
         clients.set(ws, clientData);
@@ -346,7 +440,7 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
         engine.setRenderCallback((patches) => {
           initialPatches.push(...templateExpander.expand(patches));
         });
-        engine.renderSource(example.ui);
+        engine.renderSource(renderedSource);
 
         // Restore streaming callback
         engine.setRenderCallback(streamPatches);
@@ -360,6 +454,8 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
           revision: 0,
         };
         ws.send(JSON.stringify(initialMessage));
+        const currentReadiness = readiness.get(key);
+        if (currentReadiness?.clientId === clientId) currentReadiness.initialTreeSent = true;
 
         console.log(`[${example.name}] Connected: ${clientId}`);
 
@@ -392,6 +488,8 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
 
       await clientData.moduleInstance.destroy();
       clients.delete(ws);
+      const currentReadiness = readiness.get(clientData.readinessKey);
+      if (currentReadiness?.clientId === clientData.id) currentReadiness.connected = false;
     },
   },
 });

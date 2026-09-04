@@ -8,11 +8,19 @@ authors.workspace = true
 description = "Hypen Browser — a native desktop browser for Hypen apps, built on the Hypen engine + desktop renderer"
 readme = "README.md"
 
+[features]
+default = []
+# Forward the renderer's opt-in GStreamer backend. Keeping this explicit is
+# important for a distributable Browser: GStreamer is a native dynamic
+# dependency, so a video-enabled build must be paired with the platform's
+# runtime/plugins instead of silently producing a binary that fails at launch.
+video = ["hypen-renderer-desktop/video"]
+
 [dependencies]
-hypen-engine = { version = "0.6.2", path = "../hypen-engine-rs" }
-hypen-parser = { version = "0.6.2", path = "../parser" }
-hypen-server = { version = "0.6.2", path = "../hypen-sdk-rs" }
-hypen-renderer-desktop = { version = "0.6.2", path = "../hypen-renderer-desktop" }
+hypen-engine = { version = "0.6.3", path = "../hypen-engine-rs" }
+hypen-parser = { version = "0.6.3", path = "../parser" }
+hypen-server = { version = "0.6.3", path = "../hypen-sdk-rs" }
+hypen-renderer-desktop = { version = "0.6.3", path = "../hypen-renderer-desktop" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }

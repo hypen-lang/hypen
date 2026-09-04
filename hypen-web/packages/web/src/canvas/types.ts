@@ -118,7 +118,7 @@ export interface FontStyle {
 
 export interface TextStyle extends FontStyle {
   color: string;
-  textAlign: "left" | "center" | "right";
+  textAlign: "left" | "center" | "right" | "justify";
   verticalAlign: "top" | "middle" | "bottom";
 }
 
@@ -199,7 +199,6 @@ export interface ScrollState {
 export interface DirtyRect extends Rectangle {
   frameId: number;
 }
-
 
 
 

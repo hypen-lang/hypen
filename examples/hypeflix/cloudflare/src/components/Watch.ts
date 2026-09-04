@@ -250,63 +250,73 @@ export default app
             // paints its progress/thumb with currentColor, so the Row's
             // .color is load-bearing — without it the scrubber inherits
             // near-black and disappears against the video.
-            Row {
-              Button {
-                If(condition: "@{state.playback.playing}") {
-                  Icon(@resources.pause)
-                    .size(18)
-                    .color("#0A0A0F")
-                }
-                If(condition: "@{!state.playback.playing}") {
-                  Icon(@resources.play)
-                    .size(18)
-                    .color("#0A0A0F")
-                }
-              }
-              .tw("w-11 h-11 rounded-full border-0 items-center justify-center")
-              .backgroundColor("#F8FAFC")
-              .opacity({ default: 1, active: 0.7 })
-              .transition(160, easeOut)
-              .onClick(@actions.togglePlay)
-              .label("Play or pause")
+            Column {
+              // Slot roots are full-player overlays on every renderer. Keep
+              // that root transparent and use flex space to pin the authored
+              // transport scrim to the bottom; putting the scrim directly on
+              // the slot root made Desktop stretch it over the whole video.
+              Box {}
+                .tw("flex-1 w-full")
 
-              Scrubber()
-                .tw("flex-1 ml-4")
+              Row {
+                Button {
+                  If(condition: "@{state.playback.playing}") {
+                    Icon(@resources.pause)
+                      .size(18)
+                      .color("#0A0A0F")
+                  }
+                  If(condition: "@{!state.playback.playing}") {
+                    Icon(@resources.play)
+                      .size(18)
+                      .color("#0A0A0F")
+                  }
+                }
+                .tw("w-11 h-11 rounded-full border-0 items-center justify-center")
+                .backgroundColor("#F8FAFC")
+                .opacity({ default: 1, active: 0.7 })
+                .transition(160, easeOut)
+                .onClick(@actions.togglePlay)
+                .label("Play or pause")
 
-              Button {
-                Icon(@resources.fullscreen)
-                  .size(18)
-                  .color("#0A0A0F")
-              }
-              .tw("w-11 h-11 ml-4 rounded-full border-0 items-center justify-center")
-              .backgroundColor("#F8FAFC")
-              .opacity({ default: 1, active: 0.7 })
-              .transition(160, easeOut)
-              .videoIntent("fullscreen")
-              .label("Toggle fullscreen")
+                Scrubber()
+                  .tw("flex-1 ml-4")
 
-              Button {
-                If(condition: "@{!state.theater}") {
-                  Icon(@resources.expand)
+                Button {
+                  Icon(@resources.fullscreen)
                     .size(18)
                     .color("#0A0A0F")
                 }
-                If(condition: "@{state.theater}") {
-                  Icon(@resources.shrink)
-                    .size(18)
-                    .color("#0A0A0F")
+                .tw("w-11 h-11 ml-4 rounded-full border-0 items-center justify-center")
+                .backgroundColor("#F8FAFC")
+                .opacity({ default: 1, active: 0.7 })
+                .transition(160, easeOut)
+                .videoIntent("fullscreen")
+                .label("Toggle fullscreen")
+
+                Button {
+                  If(condition: "@{!state.theater}") {
+                    Icon(@resources.expand)
+                      .size(18)
+                      .color("#0A0A0F")
+                  }
+                  If(condition: "@{state.theater}") {
+                    Icon(@resources.shrink)
+                      .size(18)
+                      .color("#0A0A0F")
+                  }
                 }
+                .tw("w-11 h-11 ml-4 rounded-full border-0 items-center justify-center")
+                .backgroundColor("#F8FAFC")
+                .opacity({ default: 1, active: 0.7 })
+                .transition(160, easeOut)
+                .onClick(@actions.toggleTheater)
+                .label("Toggle theater mode")
               }
-              .tw("w-11 h-11 ml-4 rounded-full border-0 items-center justify-center")
-              .backgroundColor("#F8FAFC")
-              .opacity({ default: 1, active: 0.7 })
-              .transition(160, easeOut)
-              .onClick(@actions.toggleTheater)
-              .label("Toggle theater mode")
+              .tw("px-5 py-4 items-center w-full rounded-b-2xl")
+              .backgroundColor("rgba(5, 5, 8, 0.72)")
+              .color("#F8FAFC")
             }
-            .tw("px-5 py-4 items-center self-end w-full rounded-b-2xl")
-            .backgroundColor("rgba(5, 5, 8, 0.72)")
-            .color("#F8FAFC")
+            .tw("w-full h-full")
             .slot("controls")
 
             Column {

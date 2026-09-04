@@ -27,7 +27,9 @@ Column {
         .fontSize(12)
     }
     .backgroundColor("#3b82f6")
-    .padding(24)
+    .width(150)
+    .height(60)
+    .padding(16)
     .cornerRadius(8)
 
     Column {
@@ -36,7 +38,9 @@ Column {
         .fontSize(12)
     }
     .backgroundColor("#22c55e")
-    .padding(24)
+    .width(150)
+    .height(60)
+    .padding(16)
     .cornerRadius(8)
     .marginLeft(40)
     .marginTop(30)
@@ -47,11 +51,14 @@ Column {
         .fontSize(12)
     }
     .backgroundColor("#f59e0b")
-    .padding(24)
+    .width(150)
+    .height(60)
+    .padding(16)
     .cornerRadius(8)
     .marginLeft(80)
     .marginTop(60)
   }
+  .height(120)
   .marginBottom(24)
 
   Text("Using zIndex to reorder")
@@ -66,7 +73,9 @@ Column {
         .fontSize(12)
     }
     .backgroundColor("#ef4444")
-    .padding(24)
+    .width(150)
+    .height(60)
+    .padding(16)
     .cornerRadius(8)
     .zIndex(3)
 
@@ -76,7 +85,9 @@ Column {
         .fontSize(12)
     }
     .backgroundColor("#ec4899")
-    .padding(24)
+    .width(150)
+    .height(60)
+    .padding(16)
     .cornerRadius(8)
     .marginLeft(40)
     .marginTop(30)
@@ -88,12 +99,15 @@ Column {
         .fontSize(12)
     }
     .backgroundColor("#8b5cf6")
-    .padding(24)
+    .width(150)
+    .height(60)
+    .padding(16)
     .cornerRadius(8)
     .marginLeft(80)
     .marginTop(60)
     .zIndex(2)
   }
+  .height(120)
   .marginBottom(24)
 
   Text("Modal overlay example")

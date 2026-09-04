@@ -27,7 +27,8 @@ val LocalColumnScope = compositionLocalOf<ColumnScope?> { null }
 /**
  * Composition local to indicate parent Column allows horizontal expansion.
  * When true, children with fillMaxWidth can expand horizontally.
- * This is set by Column when it has fillMaxWidth or explicit width.
+ * This is set by Column when a width-setting applicator establishes a
+ * horizontal extent (fillMaxWidth, fillMaxSize, or explicit non-wrap width).
  */
 val LocalParentAllowsHorizontalExpansion = compositionLocalOf { false }
 
@@ -133,11 +134,13 @@ class ColumnComponent : ComponentHandler {
         val colorStr = element.getStringProp("color.0")
         val contentColor = if (colorStr != null) ColorParser.parse(colorStr) else null
 
-        // Check if this Column allows children to expand horizontally
-        // Children can only expand if parent has explicit width (fillMaxWidth or explicit width)
-        val hasFillMaxWidth = element.getBoolProp("fillMaxWidth.0") == true
-        val hasExplicitWidth = element.getFloatProp("width.0") != null
-        val allowsHorizontalExpansion = hasFillMaxWidth || hasExplicitWidth
+        // Preserve a finite-width capability inherited from the parent. This
+        // lets a nested wrap-content Column grow around an explicit
+        // fillMaxWidth child; Compose still makes fillMaxWidth a no-op when
+        // the actual incoming constraint is unbounded (for example in a Row).
+        val inheritedHorizontalExpansion = LocalParentAllowsHorizontalExpansion.current
+        val allowsHorizontalExpansion =
+            columnAllowsHorizontalExpansion(element, inheritedHorizontalExpansion)
 
         Column(
             modifier = finalModifier,

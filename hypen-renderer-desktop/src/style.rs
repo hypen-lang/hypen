@@ -112,6 +112,75 @@ fn camel_to_kebab(name: &str) -> String {
     out
 }
 
+/// Inline scratch for the derived prop keys every lookup probes.
+/// Applicator names are short — `paddingHorizontal` is the long tail at
+/// 17 bytes — so this covers every key the engine emits with room to
+/// spare, and the two helpers below fall back to a heap `String` if a
+/// name ever outgrows it.
+const KEY_BUF_CAP: usize = 64;
+
+/// Call `f` with `"{name}.0"` — the single-arg applicator form — built
+/// on the stack.
+///
+/// Every prop probe formats this key, and the overwhelming majority of
+/// probes MISS (a node carries a handful of props while
+/// `node_style_with` asks about dozens). Callgrind on a style build put
+/// `format!` + `String::push` + `malloc`/`free` at roughly a third of
+/// the total; the probe sequence here is unchanged, it just no longer
+/// allocates to ask the question.
+#[inline]
+fn with_dotted<R>(name: &str, f: impl FnOnce(&str) -> R) -> R {
+    let mut buf = [0u8; KEY_BUF_CAP];
+    let n = name.len();
+    if n + 2 > KEY_BUF_CAP {
+        return f(&format!("{name}.0"));
+    }
+    buf[..n].copy_from_slice(name.as_bytes());
+    buf[n] = b'.';
+    buf[n + 1] = b'0';
+    match std::str::from_utf8(&buf[..n + 2]) {
+        Ok(key) => f(key),
+        // Unreachable: `name` is valid UTF-8 and the suffix is ASCII.
+        Err(_) => f(&format!("{name}.0")),
+    }
+}
+
+/// Call `f` with the kebab-case form of `name` (the shape tw-expanded
+/// classes land under), built on the stack. Byte-wise identical to
+/// [`camel_to_kebab`]: only ASCII uppercase triggers the separator, and
+/// every byte of a multi-byte UTF-8 sequence is >= 0x80, so walking
+/// bytes and walking chars agree.
+#[inline]
+fn with_kebab<R>(name: &str, f: impl FnOnce(&str) -> R) -> R {
+    let mut buf = [0u8; KEY_BUF_CAP];
+    let mut len = 0usize;
+    for &b in name.as_bytes() {
+        let extra = if b.is_ascii_uppercase() && len > 0 {
+            2
+        } else {
+            1
+        };
+        if len + extra > KEY_BUF_CAP {
+            return f(&camel_to_kebab(name));
+        }
+        if b.is_ascii_uppercase() {
+            if len > 0 {
+                buf[len] = b'-';
+                len += 1;
+            }
+            buf[len] = b.to_ascii_lowercase();
+        } else {
+            buf[len] = b;
+        }
+        len += 1;
+    }
+    match std::str::from_utf8(&buf[..len]) {
+        Ok(key) => f(key),
+        // Unreachable: see the doc comment.
+        Err(_) => f(&camel_to_kebab(name)),
+    }
+}
+
 /// Read a number prop. Lookup order: explicit applicator
 /// (`backgroundColor`), single-arg form (`backgroundColor.0`), then
 /// the kebab-case fallback (`background-color`) for tw-expanded
@@ -142,10 +211,10 @@ pub fn prop_str<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
 fn lookup_prop<'a>(node: &'a Node, name: &str) -> Option<&'a Value> {
     node.props
         .get(name)
-        .or_else(|| node.props.get(&format!("{name}.0")))
+        .or_else(|| with_dotted(name, |key| node.props.get(key)))
         .or_else(|| {
             if name.bytes().any(|b| b.is_ascii_uppercase()) {
-                node.props.get(&camel_to_kebab(name))
+                with_kebab(name, |key| node.props.get(key))
             } else {
                 None
             }
@@ -378,9 +447,7 @@ impl StateVariants {
     /// the node non-empty: with no `:disabled` candidates there's
     /// nothing to resolve.
     pub fn is_empty(&self) -> bool {
-        self.background_color.is_empty()
-            && self.color.is_empty()
-            && self.border_color.is_empty()
+        self.background_color.is_empty() && self.color.is_empty() && self.border_color.is_empty()
     }
 
     /// Build the live active-state list the painter feeds to the
@@ -479,7 +546,12 @@ pub fn collect_color_variants(node: &Node, base: &str) -> Vec<VariantCandidate> 
             decorated.push(':');
             decorated.push_str(st);
         }
-        if let Some(value) = node.props.get(key).and_then(Value::as_str).and_then(parse_color) {
+        if let Some(value) = node
+            .props
+            .get(key)
+            .and_then(Value::as_str)
+            .and_then(parse_color)
+        {
             out.push(VariantCandidate {
                 key: key.clone(),
                 decorated,
@@ -511,7 +583,7 @@ fn is_disabled(node: &Node) -> bool {
     let as_bool = |name: &str| -> Option<bool> {
         node.props
             .get(name)
-            .or_else(|| node.props.get(&format!("{name}.0")))
+            .or_else(|| with_dotted(name, |key| node.props.get(key)))
             .and_then(Value::as_bool)
     };
     if as_bool("disabled") == Some(true) {
@@ -546,6 +618,15 @@ fn pick_base(node: &Node, name: &str, viewport_w: f32, active_states: &[&str]) -
     if !node.has_variant_prop_keys() {
         return None;
     }
+    // Only a BREAKPOINT variant gates on width; a `:hover` / `:focus`
+    // variant does not. Noting unconditionally here would be safe but
+    // sloppy — a page that leans on `hover:` classes would mark those
+    // nodes width-dependent and restyle them on every step of a
+    // horizontal drag for nothing. `@` is the breakpoint marker, and the
+    // scan is over the same keys the resolver is about to walk anyway.
+    if node.props.keys().any(|k| k.as_bytes().contains(&b'@')) {
+        viewport_trace::note(viewport_trace::WIDTH);
+    }
     let candidate_keys: Vec<&str> = node.props.keys().map(String::as_str).collect();
     hypen_engine::portable::pick_variant_base(name, &candidate_keys, viewport_w, active_states)
 }
@@ -576,6 +657,59 @@ pub fn prop_str_with<'a>(node: &'a Node, name: &str, vs: &VariantState) -> Optio
     prop_str(node, name)
 }
 
+/// Which viewport axes a style resolution actually consulted.
+///
+/// The renderer's whole invalidation story used to be a hand-written
+/// assertion about this — `taffy_structure_key` hashed viewport WIDTH and
+/// deliberately not height, on the stated grounds that "no token resolves
+/// against it". That was false (`vh`, `vmin` and `vmax` all do), and the
+/// bug was invisible because nothing connected the claim to the code that
+/// does the resolving.
+///
+/// So don't assert it: record it. Every path that can consult the
+/// viewport goes through one of the primitives below (`parse_length` for
+/// units, `pick_base` and `lookup_responsive_object` for breakpoints), and
+/// each stamps the axis it touched. A caller gets traced whether or not it
+/// remembered to ask, and a new unit or a new breakpoint form is covered
+/// the moment it is written, because it has to go through the same door.
+pub mod viewport_trace {
+    use std::cell::Cell;
+
+    /// Style resolution read the viewport's WIDTH — a `vw` length, or a
+    /// breakpoint variant, whose thresholds gate on width.
+    pub const WIDTH: u8 = 1 << 0;
+    /// Style resolution read the viewport's HEIGHT — a `vh` length.
+    pub const HEIGHT: u8 = 1 << 1;
+    /// `vmin` / `vmax` read both axes: which one wins depends on their
+    /// ratio, so a change to either can change the resolved value.
+    pub const BOTH: u8 = WIDTH | HEIGHT;
+
+    thread_local! {
+        static READS: Cell<u8> = const { Cell::new(0) };
+    }
+
+    /// Record that `axes` were consulted. Called from the resolution
+    /// primitives; cheap enough to leave unconditional (one TLS load, an
+    /// or, a store) rather than gate behind a "tracing on" flag that
+    /// could itself be forgotten.
+    #[inline]
+    pub(crate) fn note(axes: u8) {
+        READS.with(|r| r.set(r.get() | axes));
+    }
+
+    /// Clear the log. Call immediately before resolving one node.
+    #[inline]
+    pub fn begin() {
+        READS.with(|r| r.set(0));
+    }
+
+    /// Axes consulted since the last [`begin`].
+    #[inline]
+    pub fn take() -> u8 {
+        READS.with(|r| r.replace(0))
+    }
+}
+
 /// Tailwind-style breakpoint thresholds (px), largest-first. Matches the
 /// defaults the engine's `hypen-tailwind-parse` emits in `name@bp` keys.
 /// Used by [`lookup_responsive_object`] to pick the largest active band
@@ -596,16 +730,14 @@ const BREAKPOINTS_DESC: &[(&str, f32)] = &[
 /// suffix keys that tailwind classes produce. Pick the value for the
 /// largest active breakpoint, falling back to `default` / `base`.
 /// Returns `None` when the prop is absent or isn't an object.
-fn lookup_responsive_object<'a>(
-    node: &'a Node,
-    name: &str,
-    viewport_w: f32,
-) -> Option<&'a Value> {
+fn lookup_responsive_object<'a>(node: &'a Node, name: &str, viewport_w: f32) -> Option<&'a Value> {
     let raw = node
         .props
         .get(name)
-        .or_else(|| node.props.get(&format!("{name}.0")))?;
+        .or_else(|| with_dotted(name, |key| node.props.get(key)))?;
     let obj = raw.as_object()?;
+    // A responsive value-map picks its band by width.
+    viewport_trace::note(viewport_trace::WIDTH);
     for (bp, threshold) in BREAKPOINTS_DESC {
         if viewport_w >= *threshold {
             if let Some(v) = obj.get(*bp) {
@@ -636,6 +768,49 @@ pub fn prop_f32_with(node: &Node, name: &str, vs: &VariantState) -> Option<f32> 
     // plain `height: "100vh"` takes, and dropping the viewport here
     // would undo the whole resolution chain above it.
     prop_f32_in(node, name, viewport)
+}
+
+/// Resolve the boolean-or-fraction contract used by `fillMaxWidth`,
+/// `fillMaxHeight`, and `fillMaxSize`.
+///
+/// The applicators accept `true` as a full fill, `false` as disabled, and a
+/// numeric fraction in `0..=1`. They therefore cannot use `prop_f32_with`
+/// directly: serde's JSON booleans deliberately do not coerce to numbers.
+/// Keep the same responsive/state-variant selection as the other layout
+/// properties and clamp numeric values like the native renderers do.
+pub fn prop_fill_fraction_with(node: &Node, name: &str, vs: &VariantState) -> Option<f32> {
+    fn parse(value: &Value) -> Option<f32> {
+        match value {
+            Value::Bool(true) => Some(1.0),
+            Value::Bool(false) | Value::Null => None,
+            Value::Number(number) => number.as_f64().map(|v| (v as f32).clamp(0.0, 1.0)),
+            Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+                "true" => Some(1.0),
+                "false" => None,
+                value => value.parse::<f32>().ok().map(|v| v.clamp(0.0, 1.0)),
+            },
+            _ => None,
+        }
+    }
+
+    let read = |base: &str| {
+        node.props
+            .get(base)
+            .or_else(|| with_dotted(base, |key| node.props.get(key)))
+            .and_then(parse)
+    };
+
+    if let Some(decorated) = pick_base(node, name, vs.viewport.w, &vs.active_states) {
+        if decorated != name {
+            // A winning explicit `false` must disable the base fill rather
+            // than fall through to it, so return this branch directly.
+            return read(&decorated);
+        }
+    }
+    if let Some(value) = lookup_responsive_object(node, name, vs.viewport.w) {
+        return parse(value);
+    }
+    read(name)
 }
 
 /// Colour counterpart of [`prop_str_with`] — runs the result through
@@ -921,6 +1096,13 @@ pub const BORDER_SIDE_LEFT: u8 = 8;
 pub const BORDER_SIDES_ALL: u8 =
     BORDER_SIDE_TOP | BORDER_SIDE_RIGHT | BORDER_SIDE_BOTTOM | BORDER_SIDE_LEFT;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BorderLineStyle {
+    Solid,
+    Dashed,
+    Dotted,
+}
+
 /// Resolved border style for a node.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Border {
@@ -934,6 +1116,7 @@ pub struct Border {
     /// the layout reads here, then the painter strokes only the set
     /// sides as thin un-rounded fill rects.
     pub sides: u8,
+    pub style: BorderLineStyle,
 }
 
 impl Default for Border {
@@ -943,6 +1126,7 @@ impl Default for Border {
             color: Rgba::TRANSPARENT,
             radius: 0.0,
             sides: BORDER_SIDES_ALL,
+            style: BorderLineStyle::Solid,
         }
     }
 }
@@ -976,9 +1160,33 @@ pub fn border(node: &Node) -> Border {
     // otherwise an explicit `.borderColor("transparent")` would be
     // silently rewritten to black (Rgba::TRANSPARENT == Rgba::default()).
     let mut color: Option<Rgba> = None;
+    let mut line_style = BorderLineStyle::Solid;
 
     if let Some(v) = prop_f32(node, "border") {
         width = v;
+    }
+    if let Some(object) = node
+        .props
+        .get("border.0")
+        .or_else(|| node.props.get("border"))
+        .and_then(Value::as_object)
+    {
+        if let Some(v) = object.get("width").and_then(|v| value_to_f32(v, viewport)) {
+            width = v;
+        }
+        if let Some(v) = object
+            .get("color")
+            .and_then(Value::as_str)
+            .and_then(parse_color)
+        {
+            color = Some(v);
+        }
+        if let Some(v) = object.get("radius").and_then(|v| value_to_f32(v, viewport)) {
+            radius = v;
+        }
+        if let Some(value) = object.get("style").and_then(Value::as_str) {
+            line_style = parse_border_line_style(value);
+        }
     }
     if let Some(v) = node
         .props
@@ -1015,6 +1223,9 @@ pub fn border(node: &Node) -> Border {
     if let Some(v) = prop_f32(node, "cornerRadius") {
         radius = v;
     }
+    if let Some(value) = prop_str(node, "borderStyle") {
+        line_style = parse_border_line_style(value);
+    }
 
     Border {
         width,
@@ -1027,6 +1238,7 @@ pub fn border(node: &Node) -> Border {
         }),
         radius,
         sides: BORDER_SIDES_ALL,
+        style: line_style,
     }
 }
 
@@ -1046,6 +1258,7 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
     let mut width = 0.0_f32;
     let mut radius = 0.0_f32;
     let mut color: Option<Rgba> = None;
+    let mut line_style = BorderLineStyle::Solid;
     let mut uniform_set = false;
     // Per-side widths feed `sides` and the eventual stroke width
     // — set when tw `border-b` / `border-t` / etc. emits a directional
@@ -1059,6 +1272,39 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
         width = v;
         uniform_set = true;
     }
+    // A single object argument is serialized as `border.0 = { width,
+    // color, radius }`. Desktop previously only understood the flattened
+    // `border.width` form, so gallery Inputs and Cards painted no line.
+    if let Some(object) = node
+        .props
+        .get("border.0")
+        .or_else(|| node.props.get("border"))
+        .and_then(Value::as_object)
+    {
+        if let Some(v) = object
+            .get("width")
+            .and_then(|v| value_to_f32(v, viewport_opt))
+        {
+            width = v;
+            uniform_set = true;
+        }
+        if let Some(v) = object
+            .get("color")
+            .and_then(Value::as_str)
+            .and_then(parse_color)
+        {
+            color = Some(v);
+        }
+        if let Some(v) = object
+            .get("radius")
+            .and_then(|v| value_to_f32(v, viewport_opt))
+        {
+            radius = v;
+        }
+        if let Some(value) = object.get("style").and_then(Value::as_str) {
+            line_style = parse_border_line_style(value);
+        }
+    }
     // CSS `border` shorthand: `.border("1px solid #333")`. Not a bare
     // length, so the numeric read above rejects it and the border was
     // simply not drawn — todo's task rows lost their outline entirely
@@ -1071,6 +1317,7 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
         if let Some(c) = sh.1 {
             color = Some(c);
         }
+        line_style = sh.2;
     }
     if let Some(v) = node
         .props
@@ -1107,6 +1354,9 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
     }
     if let Some(v) = prop_f32_at(node, "cornerRadius", viewport) {
         radius = v;
+    }
+    if let Some(value) = prop_str_with(node, "borderStyle", vs) {
+        line_style = parse_border_line_style(&value);
     }
     // Per-side: tw `border-b` → `border-bottom-width: 1px`. We accept
     // both camelCase + kebab via the standard `prop_f32_with` chain
@@ -1152,6 +1402,7 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
         }),
         radius,
         sides,
+        style: line_style,
     }
 }
 
@@ -1219,13 +1470,14 @@ fn parse_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
     // before `em` for the same reason. A `None` viewport means the unit
     // is unresolvable here, so fall through to `None` rather than 0.
     if let Some(vp) = viewport {
-        for (suffix, basis) in [
-            ("vmin", vp.vmin()),
-            ("vmax", vp.vmax()),
-            ("vw", vp.w),
-            ("vh", vp.h),
+        for (suffix, basis, axes) in [
+            ("vmin", vp.vmin(), viewport_trace::BOTH),
+            ("vmax", vp.vmax(), viewport_trace::BOTH),
+            ("vw", vp.w, viewport_trace::WIDTH),
+            ("vh", vp.h, viewport_trace::HEIGHT),
         ] {
             if let Some(num) = trimmed.strip_suffix(suffix) {
+                viewport_trace::note(axes);
                 return num.trim().parse::<f32>().ok().map(|v| v * basis * 0.01);
             }
         }
@@ -1796,25 +2048,33 @@ fn split_top_level_ws(s: &str) -> Vec<&str> {
     out
 }
 
+fn parse_border_line_style(value: &str) -> BorderLineStyle {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "dashed" => BorderLineStyle::Dashed,
+        "dotted" => BorderLineStyle::Dotted,
+        _ => BorderLineStyle::Solid,
+    }
+}
+
 /// Parse the CSS `border` shorthand — `1px solid #333`, `2px #f00`,
-/// `solid red`. Returns `(width, colour)`, either of which may be
-/// absent; the line style is deliberately dropped, since the painter
-/// only strokes solid.
+/// `solid red`. Returns `(width, colour, style)`.
 ///
 /// Order-independent per CSS: whichever token parses as a length is the
 /// width, whichever parses as a colour is the colour, and the style
 /// keyword is ignored. Returns `None` when nothing usable was found, so
 /// callers can distinguish "not a shorthand" from "shorthand with
 /// defaults".
-fn parse_border_shorthand(s: &str) -> Option<(Option<f32>, Option<Rgba>)> {
+fn parse_border_shorthand(s: &str) -> Option<(Option<f32>, Option<Rgba>, BorderLineStyle)> {
     const STYLES: &[&str] = &[
         "none", "hidden", "solid", "dashed", "dotted", "double", "groove", "ridge", "inset",
         "outset",
     ];
     let mut width = None;
     let mut color = None;
+    let mut line_style = BorderLineStyle::Solid;
     for tok in s.split_whitespace() {
         if STYLES.contains(&tok.to_ascii_lowercase().as_str()) {
+            line_style = parse_border_line_style(tok);
             continue;
         }
         if width.is_none() {
@@ -1834,7 +2094,7 @@ fn parse_border_shorthand(s: &str) -> Option<(Option<f32>, Option<Rgba>)> {
     if width.is_none() && color.is_none() {
         return None;
     }
-    Some((width, color))
+    Some((width, color, line_style))
 }
 
 /// First-class applicator path: read `.linearGradient(..)` props off
@@ -2446,23 +2706,27 @@ pub fn prop_dim_with(node: &Node, name: &str, vs: &VariantState) -> Option<Dim> 
             return Some(Dim::Percent(pct));
         }
     }
-    let dotted = format!("{name}.0");
-    if let Some(s) = node.props.get(&dotted).and_then(|v| v.as_str()) {
-        if let Some(pct) = parse_percent(s) {
-            return Some(Dim::Percent(pct));
-        }
+    if let Some(pct) = with_dotted(name, |key| {
+        node.props
+            .get(key)
+            .and_then(|v| v.as_str())
+            .and_then(parse_percent)
+    }) {
+        return Some(Dim::Percent(pct));
     }
     // Kebab-case fallback: tw("w-1/2") emits `width: "50%"` and the
     // engine flattens that under the kebab key for CSS-style props.
     // Without this branch, percent dimensions from Tailwind silently
     // fell through to prop_f32_at → parse_length, which rejects `%`,
     // and the width/height was dropped.
-    let kebab_name = camel_to_kebab(name);
-    if kebab_name != name {
-        if let Some(s) = node.props.get(&kebab_name).and_then(|v| v.as_str()) {
-            if let Some(pct) = parse_percent(s) {
-                return Some(Dim::Percent(pct));
-            }
+    if name.bytes().any(|b| b.is_ascii_uppercase()) {
+        if let Some(pct) = with_kebab(name, |key| {
+            node.props
+                .get(key)
+                .and_then(|v| v.as_str())
+                .and_then(parse_percent)
+        }) {
+            return Some(Dim::Percent(pct));
         }
     }
     prop_f32_with(node, name, vs).map(Dim::Length)
@@ -2594,10 +2858,9 @@ fn parse_hex(hex: &str) -> Option<Rgba> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn node_with(props: &[(&str, Value)]) -> Node {
-        let mut map = HashMap::new();
+        let mut map = crate::tree::PropMap::default();
         for (k, v) in props {
             map.insert((*k).to_string(), v.clone());
         }
@@ -2708,8 +2971,30 @@ mod tests {
         assert!((sx - 50.0).abs() < 1e-3);
         assert!((sy - 200.0).abs() < 1e-3);
         assert!((ex - 50.0).abs() < 1e-3);
-        assert!((sy - 200.0).abs() < 1e-3);
-        let _ = ey; // already covered by sy assertion symmetry
+        assert!(ey.abs() < 1e-3);
+    }
+
+    #[test]
+    fn gradient_axis_arbitrary_angle_covers_rect_corner_projections() {
+        // CSS 45deg runs bottom-left -> top-right. On a non-square rect the
+        // endpoints extend beyond the top/bottom edges: projecting all four
+        // corners onto this axis must still stay within the [start, end]
+        // interval, otherwise Vello would clamp part of the shape to an end
+        // colour and the diagonal would look clipped.
+        let direction = GradientDirection::Angle(45.0);
+        let ((sx, sy), (ex, ey)) = direction.axis(10.0, 20.0, 200.0, 100.0);
+        let axis = (ex - sx, ey - sy);
+        let axis_len_sq = axis.0 * axis.0 + axis.1 * axis.1;
+        assert!(axis_len_sq > 0.0);
+
+        for (x, y) in [(10.0, 20.0), (210.0, 20.0), (10.0, 120.0), (210.0, 120.0)] {
+            let offset = (x - sx, y - sy);
+            let t = (offset.0 * axis.0 + offset.1 * axis.1) / axis_len_sq;
+            assert!(
+                (-1e-5..=1.0 + 1e-5).contains(&t),
+                "corner ({x}, {y}) projected outside gradient bounds at t={t}",
+            );
+        }
     }
 
     #[test]
@@ -3889,8 +4174,63 @@ mod tests {
             Some(Dim::Length(100.0))
         );
         assert_eq!(
-            prop_dim_with(&node, "width", &VariantState::paint(vp(800.0), vec!["focus"])),
+            prop_dim_with(
+                &node,
+                "width",
+                &VariantState::paint(vp(800.0), vec!["focus"])
+            ),
             Some(Dim::Length(200.0))
+        );
+    }
+
+    #[test]
+    fn stack_built_keys_match_the_formatted_ones() {
+        // `with_dotted` / `with_kebab` exist only to keep the prop-lookup
+        // chain off the allocator; they must produce byte-identical keys
+        // to the `format!` / `camel_to_kebab` they replaced, including
+        // for names long enough to spill past the inline buffer.
+        for name in [
+            "",
+            "color",
+            "fontSize",
+            "backgroundColor",
+            "paddingHorizontal",
+            "borderTopLeftRadius",
+            "Width",
+            "ünïcödeName",
+            &"aVeryLongApplicatorName".repeat(6),
+        ] {
+            assert_eq!(
+                with_dotted(name, str::to_string),
+                format!("{name}.0"),
+                "dotted key for {name:?}"
+            );
+            assert_eq!(
+                with_kebab(name, str::to_string),
+                camel_to_kebab(name),
+                "kebab key for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn percent_dimensions_still_resolve_through_every_key_spelling() {
+        // The percent path lost its `format!`/`camel_to_kebab` temporaries;
+        // all three spellings must still be found.
+        let vs = VariantState::layout(vp(1024.0));
+        for key in ["width", "width.0"] {
+            let node = node_with(&[(key, serde_json::json!("50%"))]);
+            assert_eq!(
+                prop_dim_with(&node, "width", &vs),
+                Some(Dim::Percent(0.5)),
+                "spelling {key}"
+            );
+        }
+        // tw("w-1/2") lands under the kebab key for a camelCase name.
+        let node = node_with(&[("max-width", serde_json::json!("75%"))]);
+        assert_eq!(
+            prop_dim_with(&node, "maxWidth", &vs),
+            Some(Dim::Percent(0.75))
         );
     }
 }
@@ -3924,7 +4264,10 @@ mod rgb_color_tests {
 
     #[test]
     fn clamps_out_of_range_channels_and_alpha() {
-        assert_eq!(parse_color("rgba(300, 0, 0, 2)"), Some(Rgba(255, 0, 0, 255)));
+        assert_eq!(
+            parse_color("rgba(300, 0, 0, 2)"),
+            Some(Rgba(255, 0, 0, 255))
+        );
     }
 
     #[test]

@@ -20,6 +20,7 @@ import {
   cssLengthToPxForFont,
   cssLineHeightToPx,
   isDisplayNone,
+  inheritedTextProp,
 } from "./utils.js";
 import {
   PLAYBACK_REPORT_INTERVAL_MS,
@@ -212,10 +213,14 @@ export function paintNode(
   const type = node.type.toLowerCase();
   const customPainter = customPainters.get(type);
   const needsTransform = hasTransformProps(node.props);
+  const blurRadius = Math.max(0, cssLengthToPx(node.props.blur) ?? 0);
+  // Transform, opacity and blur are subtree effects in every other renderer.
+  // Keep the Canvas state alive while descendants paint as well; restoring it
+  // immediately after the host box made child text escape those effects.
+  const hasSubtreeEffect = needsTransform || node.opacity < 1 || blurRadius > 0;
   const needsSave =
     customPainter !== undefined ||
-    needsTransform ||
-    node.opacity < 1 ||
+    hasSubtreeEffect ||
     STATE_UNSAFE_TYPES.has(type);
 
   if (needsSave) {
@@ -229,6 +234,10 @@ export function paintNode(
     // Apply opacity
     if (node.opacity < 1) {
       ctx.globalAlpha = node.opacity;
+    }
+
+    if (blurRadius > 0 && "filter" in ctx) {
+      ctx.filter = `blur(${blurRadius}px)`;
     }
   }
 
@@ -247,6 +256,11 @@ export function paintNode(
       paintContainer(ctx, node);
       break;
     case "text":
+      // Text can own the same visual box applicators as any other element
+      // (background, border, radius, shadow). Paint that box before glyphs;
+      // previously Spacer demos looked empty because their colored children
+      // were Text nodes and only the white glyphs were drawn.
+      paintContainer(ctx, node);
       paintText(ctx, node);
       break;
     case "button":
@@ -255,6 +269,9 @@ export function paintNode(
     case "input":
     case "textarea":
       paintInput(ctx, node);
+      break;
+    case "select":
+      paintSelect(ctx, node);
       break;
     case "image":
       paintImage(ctx, node);
@@ -302,6 +319,9 @@ export function paintNode(
     case "avatar":
       paintAvatar(ctx, node);
       break;
+    case "audio":
+      paintAudio(ctx, node);
+      break;
     case "icon":
       paintIcon(ctx, node);
       break;
@@ -320,7 +340,7 @@ export function paintNode(
       paintContainer(ctx, node);
   }
 
-  if (needsSave) {
+  if (needsSave && !hasSubtreeEffect) {
     ctx.restore();
   }
 
@@ -353,7 +373,9 @@ export function paintNode(
   // paint (hidden ≠ removed — the subtree keeps its state, it is simply
   // skipped here, by hit testing, and by the a11y mirror). Untagged
   // children of a Video are invalid per the contract and never paint.
-  const childrenToPaint = isVideoNode(node)
+  let childrenToPaint = type === "select"
+    ? []
+    : isVideoNode(node)
     ? visibleVideoSlotChildren(node)
     : shouldVirtualize
     ? getVisibleChildren(node, {
@@ -363,6 +385,17 @@ export function paintNode(
         height: node.layout!.height,
       })
     : node.children;
+
+  if (type === "stack" && childrenToPaint.length > 1) {
+    // Layout child indices are keyed to retained tree order. Never mutate
+    // node.children while choosing a paint order, or nodes get paired with
+    // another sibling's computed rectangle.
+    childrenToPaint = [...childrenToPaint].sort((a, b) => {
+      const za = Number(a.props.zIndex ?? a.props["z-index"] ?? 0);
+      const zb = Number(b.props.zIndex ?? b.props["z-index"] ?? 0);
+      return za - zb;
+    });
+  }
 
   // Paint flow children first, then absolute-positioned overlays on top.
   // CSS uses `z-index` to order absolute siblings; Canvas just paints in
@@ -404,6 +437,10 @@ export function paintNode(
   if ((node as any)._needsRestore) {
     ctx.restore();
     delete (node as any)._needsRestore;
+  }
+
+  if (needsSave && hasSubtreeEffect) {
+    ctx.restore();
   }
 }
 
@@ -451,12 +488,14 @@ function paintContainer(ctx: CanvasRenderingContext2D, node: VirtualNode): void 
   if (layout.border.width > 0 && layout.border.color !== "transparent") {
     ctx.strokeStyle = layout.border.color;
     ctx.lineWidth = layout.border.width;
+    applyBorderLineStyle(ctx, props, layout.border.width);
     if (radius > 0) {
       drawRoundedRect(ctx, x, y, width, height, radius);
       ctx.stroke();
     } else {
       ctx.strokeRect(x, y, width, height);
     }
+    ctx.setLineDash?.([]);
   }
 
   // Apply overflow clipping for children.
@@ -487,6 +526,25 @@ function paintContainer(ctx: CanvasRenderingContext2D, node: VirtualNode): void 
   }
 }
 
+/** Match the DOM border applicator's solid/dashed/dotted styles. */
+function applyBorderLineStyle(
+  ctx: CanvasRenderingContext2D,
+  props: Record<string, any>,
+  width: number,
+): void {
+  const compound = props.border && typeof props.border === "object"
+    ? props.border as Record<string, any>
+    : null;
+  const style = String(props.borderStyle ?? compound?.style ?? "solid").toLowerCase();
+  if (style === "dashed") {
+    ctx.setLineDash?.([Math.max(3, width * 3), Math.max(2, width * 2)]);
+  } else if (style === "dotted") {
+    ctx.setLineDash?.([Math.max(1, width), Math.max(2, width * 1.75)]);
+  } else {
+    ctx.setLineDash?.([]);
+  }
+}
+
 /**
  * Paint text node
  */
@@ -500,12 +558,12 @@ function paintText(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const props = node.props;
 
   let text = String(props[0] || props.text || "");
-  const color = props.color || "#000000";
-  const fontSize = cssLengthToPx(props.fontSize) ?? 16;
-  const fontWeight = props.fontWeight || "normal";
-  const fontFamily = props.fontFamily || "system-ui, sans-serif";
-  const textAlign = props.textAlign || "left";
-  const lineHeight = cssLineHeightToPx(props.lineHeight, fontSize) ?? fontSize * 1.2;
+  const color = inheritedTextProp(node, "color") || "#000000";
+  const fontSize = cssLengthToPx(inheritedTextProp(node, "fontSize")) ?? 16;
+  const fontWeight = inheritedTextProp(node, "fontWeight") || "normal";
+  const fontFamily = inheritedTextProp(node, "fontFamily") || "system-ui, sans-serif";
+  const textAlign = inheritedTextProp(node, "textAlign") || "left";
+  const lineHeight = cssLineHeightToPx(inheritedTextProp(node, "lineHeight"), fontSize) ?? fontSize * 1.2;
   const textDecoration = props.textDecoration || "none";
   const textTransform = props.textTransform || "none";
   // `em` in `letter-spacing` is relative to the element's OWN font size, so
@@ -582,7 +640,7 @@ function paintText(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     const textOverflow =
       props.textOverflow === "ellipsis" || props.textOverflow === "clip"
         ? (props.textOverflow as "ellipsis" | "clip")
-        : undefined;
+        : maxLines !== undefined ? "ellipsis" : undefined;
 
     renderText(
       ctx,
@@ -696,10 +754,6 @@ function paintButton(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     ctx.restore();
   }
 
-  // Paint children (typically Text)
-  for (const child of node.children) {
-    paintNode(ctx, child);
-  }
 }
 
 /**
@@ -835,6 +889,39 @@ function paintInput(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   ctx.restore();
 }
 
+function paintSelect(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
+  const layout = node.layout!;
+  const props = node.props;
+  const radius = layout.border.radius || 4;
+  ctx.fillStyle = props.backgroundColor || "#ffffff";
+  drawRoundedRect(ctx, layout.x, layout.y, layout.width, layout.height, radius);
+  ctx.fill();
+  ctx.strokeStyle = layout.border.width > 0 ? layout.border.color : "#d1d5db";
+  ctx.lineWidth = layout.border.width || 1;
+  drawRoundedRect(ctx, layout.x, layout.y, layout.width, layout.height, radius);
+  ctx.stroke();
+
+  const selected = props.value
+    ?? props.placeholder
+    ?? node.children.find(child => child.type.toLowerCase() === "text")?.props[0]
+    ?? "Select…";
+  const fontSize = cssLengthToPx(props.fontSize) ?? 16;
+  ctx.fillStyle = props.color || "#111827";
+  ctx.font = `${props.fontWeight || "normal"} ${fontSize}px ${props.fontFamily || "system-ui, sans-serif"}`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+  ctx.fillText(String(selected), layout.x + 10, layout.y + layout.height / 2);
+
+  const cx = layout.x + layout.width - 14;
+  const cy = layout.y + layout.height / 2;
+  ctx.beginPath();
+  ctx.moveTo(cx - 4, cy - 2);
+  ctx.lineTo(cx + 4, cy - 2);
+  ctx.lineTo(cx, cy + 3);
+  ctx.closePath();
+  ctx.fill();
+}
+
 /**
  * Image cache for canvas renderer
  */
@@ -856,16 +943,23 @@ const IMAGE_MAX_ATTEMPTS = 3;
  * `setImageNaturalSize` to assert the layout path without a real DOM.
  */
 const imageNaturalAspect = new Map<string, number>();
+const imageNaturalSize = new Map<string, { width: number; height: number }>();
 
 /** Returns width/height of the cached image, or null if unknown. */
 export function getImageNaturalAspect(src: string): number | null {
   return imageNaturalAspect.get(src) ?? null;
 }
 
+/** Returns the decoded intrinsic pixel dimensions, or null before load. */
+export function getImageNaturalSize(src: string): { width: number; height: number } | null {
+  return imageNaturalSize.get(src) ?? null;
+}
+
 /** Test helper: seed the intrinsic-size cache without loading a real image. */
 export function setImageNaturalSize(src: string, width: number, height: number): void {
   if (width > 0 && height > 0) {
     imageNaturalAspect.set(src, width / height);
+    imageNaturalSize.set(src, { width, height });
   }
 }
 
@@ -912,6 +1006,7 @@ export function clearImageCache(): void {
   imagePending.clear();
   imageFailCache.clear();
   imageNaturalAspect.clear();
+  imageNaturalSize.clear();
 }
 
 /**
@@ -992,6 +1087,7 @@ function paintImage(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
       imageCache.set(src, img);
       if (img.naturalWidth > 0 && img.naturalHeight > 0) {
         imageNaturalAspect.set(src, img.naturalWidth / img.naturalHeight);
+        imageNaturalSize.set(src, { width: img.naturalWidth, height: img.naturalHeight });
       }
       imagePending.delete(src);
       imageFailCache.delete(src);
@@ -2415,6 +2511,7 @@ function ensureImageLoaded(
       imageCache.set(src, img);
       if (img.naturalWidth > 0 && img.naturalHeight > 0) {
         imageNaturalAspect.set(src, img.naturalWidth / img.naturalHeight);
+        imageNaturalSize.set(src, { width: img.naturalWidth, height: img.naturalHeight });
       }
       imagePending.delete(src);
       imageFailCache.delete(src);
@@ -2662,9 +2759,8 @@ function parseGradient(
       colorStart = 1;
       const direction = parts[0];
 
-      const angle = parseCssGradientAngle(direction);
-      if (angle !== null) {
-        const line = gradientLineForAngle(angle, x, y, width, height);
+      const line = gradientLineForDirection(direction, x, y, width, height);
+      if (line !== null) {
         x0 = line.x0;
         y0 = line.y0;
         x1 = line.x1;
@@ -2732,22 +2828,27 @@ function splitCssArgs(input: string): string[] {
   return parts;
 }
 
-function parseCssGradientAngle(direction: string): number | null {
+function gradientLineForDirection(
+  direction: string,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): { x0: number; y0: number; x1: number; y1: number } | null {
   const trimmed = direction.trim().toLowerCase();
   const deg = trimmed.match(/^(-?(?:\d+|\d*\.\d+))deg$/);
-  if (deg) return Number(deg[1]);
+  if (deg) return gradientLineForAngle(Number(deg[1]), x, y, width, height);
   if (!trimmed.startsWith("to ")) return null;
 
   const words = new Set(trimmed.slice(3).split(/\s+/).filter(Boolean));
-  if (words.has("top") && words.has("right")) return 45;
-  if (words.has("right") && words.has("bottom")) return 135;
-  if (words.has("bottom") && words.has("left")) return 225;
-  if (words.has("left") && words.has("top")) return 315;
-  if (words.has("top")) return 0;
-  if (words.has("right")) return 90;
-  if (words.has("bottom")) return 180;
-  if (words.has("left")) return 270;
-  return null;
+  let vx = 0;
+  let vy = 0;
+  if (words.has("right")) vx = width;
+  else if (words.has("left")) vx = -width;
+  if (words.has("bottom")) vy = height;
+  else if (words.has("top")) vy = -height;
+  if (vx === 0 && vy === 0) return null;
+  return gradientLineForVector(vx, vy, x, y, width, height);
 }
 
 function gradientLineForAngle(
@@ -2758,11 +2859,36 @@ function gradientLineForAngle(
   height: number,
 ): { x0: number; y0: number; x1: number; y1: number } {
   const radians = (cssDegrees * Math.PI) / 180;
+  return gradientLineForVector(
+    Math.sin(radians),
+    -Math.cos(radians),
+    x,
+    y,
+    width,
+    height,
+  );
+}
+
+/** Convert a direction vector into the CSS line crossing the paint box. */
+function gradientLineForVector(
+  vx: number,
+  vy: number,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+): { x0: number; y0: number; x1: number; y1: number } {
+  const magnitude = Math.hypot(vx, vy) || 1;
+  const ux = vx / magnitude;
+  const uy = vy / magnitude;
   const cx = x + width / 2;
   const cy = y + height / 2;
-  const half = Math.sqrt(width * width + height * height) / 2;
-  const dx = Math.sin(radians) * half;
-  const dy = -Math.cos(radians) * half;
+  // Project the rectangle onto the gradient direction. This is the CSS
+  // "magic corners" extent: 0/100% land on the correct box edges rather
+  // than outside them, which otherwise makes diagonal fills look solid.
+  const half = (Math.abs(width * ux) + Math.abs(height * uy)) / 2;
+  const dx = ux * half;
+  const dy = uy * half;
   return {
     x0: cx - dx,
     y0: cy - dy,
@@ -3183,10 +3309,11 @@ function paintSpinner(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const centerY = layout.y + size / 2;
   const radius = size / 2 - 4;
   const thickness = cssLengthToPx(props.thickness) ?? 4;
-  const color = props.color || "#007bff";
+  const color = props.color || "#3b82f6";
 
   // Use timestamp for animation if available
-  const rotation = (Date.now() / 1000) * Math.PI; // Rotate based on time
+  const animated = props.animated ?? props["animated.0"] ?? true;
+  const rotation = animated === false ? -Math.PI / 2 : (Date.now() / 1000) * Math.PI;
 
   ctx.strokeStyle = color;
   ctx.lineWidth = thickness;
@@ -3243,10 +3370,6 @@ function paintCard(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     ctx.stroke();
   }
 
-  // Paint children
-  for (const child of node.children) {
-    paintNode(ctx, child);
-  }
 }
 
 /**
@@ -3260,10 +3383,10 @@ function paintBadge(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const y = layout.y;
   const width = layout.width;
   const height = layout.height;
-  const radius = layout.border.radius || height / 2;
+  const radius = layout.border.radius || 4;
 
   // Background
-  const backgroundColor = props.backgroundColor || "#dc3545";
+  const backgroundColor = props.backgroundColor || "#e0e0e0";
   ctx.fillStyle = backgroundColor;
   drawRoundedRect(ctx, x, y, width, height, radius);
   ctx.fill();
@@ -3304,6 +3427,14 @@ function paintAvatar(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
   ctx.fill();
 
+  const src = props.src || props.image;
+  if (typeof src === "string" && src.length > 0) {
+    const image = ensureImageLoaded(src, ctx.canvas);
+    if (image) {
+      drawImageCover(ctx, image, layout.x, layout.y, size, size);
+    }
+  }
+
   // Text initials if provided
   const text = String(props[0] || props.text || props.initials || "");
   if (text) {
@@ -3324,6 +3455,81 @@ function paintAvatar(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
     ctx.stroke();
   }
+}
+
+const audioLoaded = new Set<string>();
+const audioPending = new Set<string>();
+const audioFailed = new Set<string>();
+
+function ensureAudioLoaded(src: string, canvas: HTMLCanvasElement): void {
+  if (audioLoaded.has(src) || audioPending.has(src) || audioFailed.has(src)) return;
+  audioPending.add(src);
+  fetch(src, { cache: "no-store" })
+    .then(response => {
+      if (!response.ok) throw new Error(`Audio request returned ${response.status}`);
+      return response.arrayBuffer();
+    })
+    .then(() => {
+      audioPending.delete(src);
+      audioLoaded.add(src);
+      canvas.dispatchEvent(new CustomEvent("hypen:redraw"));
+    })
+    .catch(() => {
+      audioPending.delete(src);
+      audioFailed.add(src);
+      canvas.dispatchEvent(new CustomEvent("hypen:redraw"));
+    });
+}
+
+/** Paint a deterministic Canvas-native audio control surface. */
+function paintAudio(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
+  const { layout, props } = node;
+  if (!layout) return;
+  const src = props.src || props[0];
+  if (typeof src === "string" && src.length > 0) ensureAudioLoaded(src, ctx.canvas);
+  if (props.controls === false) return;
+
+  // Audio changes textAlign/textBaseline while drawing its duration. Canvas
+  // context state survives between nodes and even between frames, so leaking
+  // `right` here makes later ordinary Text use its left coordinate as a right
+  // anchor (the gallery headings were pushed off the left edge). Keep the
+  // control surface completely paint-local.
+  ctx.save();
+
+  const { x, y, width, height } = layout;
+  const middleY = y + height / 2;
+  ctx.fillStyle = props.backgroundColor || "#f3f4f6";
+  drawRoundedRect(ctx, x, y, width, height, Math.min(height / 2, 12));
+  ctx.fill();
+
+  const buttonRadius = Math.min(15, Math.max(9, height * 0.28));
+  const buttonX = x + 12 + buttonRadius;
+  ctx.fillStyle = props.color || "#374151";
+  ctx.beginPath();
+  ctx.arc(buttonX, middleY, buttonRadius, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.beginPath();
+  ctx.moveTo(buttonX - 3, middleY - 6);
+  ctx.lineTo(buttonX + 6, middleY);
+  ctx.lineTo(buttonX - 3, middleY + 6);
+  ctx.closePath();
+  ctx.fill();
+
+  const timeWidth = 62;
+  const trackX = buttonX + buttonRadius + 12;
+  const trackWidth = Math.max(0, width - (trackX - x) - timeWidth - 12);
+  ctx.fillStyle = "#d1d5db";
+  drawRoundedRect(ctx, trackX, middleY - 2, trackWidth, 4, 2);
+  ctx.fill();
+
+  ctx.fillStyle = "#6b7280";
+  ctx.font = "12px sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "middle";
+  const duration = typeof src === "string" && audioLoaded.has(src) ? "0:01" : "--:--";
+  ctx.fillText(`0:00 / ${duration}`, x + width - 12, middleY);
+  ctx.restore();
 }
 
 /**
@@ -3569,9 +3775,3 @@ function drawStar(
   ctx.lineTo(cx, cy - outerRadius);
   ctx.closePath();
 }
-
-
-
-
-
-

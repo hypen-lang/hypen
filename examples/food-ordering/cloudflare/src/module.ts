@@ -1,4 +1,5 @@
 import { app } from "@hypen-space/core/app";
+import { durableObjectStore, session } from "@hypen-space/cf";
 
 type Category = { id: string; name: string; icon: string };
 type Restaurant = {
@@ -115,13 +116,59 @@ const categories: Category[] = [
   { id: "cat_coffee", name: "Coffee", icon: "coffee" },
 ];
 
-const restaurants: Restaurant[] = [
+const featuredRestaurants: Restaurant[] = [
   { id: "r1", name: "Napoli Pizzeria", cuisine: "Italian", imageUrl: "https://images.unsplash.com/photo-1513104890138-7c749659a591?w=800&h=600&fit=crop", rating: 4.8, ratingCount: 2043, deliveryTimeMin: 20, deliveryTimeMax: 30, deliveryFee: 2.99, distanceKm: 1.2, isOpen: true, description: "Wood-fired Neapolitan pizza with San Marzano tomatoes.", categoryId: "cat_pizza" },
   { id: "r2", name: "Smash & Stack", cuisine: "American", imageUrl: "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=800&h=600&fit=crop", rating: 4.6, ratingCount: 1580, deliveryTimeMin: 15, deliveryTimeMax: 25, deliveryFee: 1.99, distanceKm: 0.8, isOpen: true, description: "Smash burgers with hand-cut fries and milkshakes.", categoryId: "cat_burger" },
   { id: "r3", name: "Sakura Sushi Bar", cuisine: "Japanese", imageUrl: "https://images.unsplash.com/photo-1579871494447-9811cf80d66c?w=800&h=600&fit=crop", rating: 4.9, ratingCount: 3120, deliveryTimeMin: 25, deliveryTimeMax: 40, deliveryFee: 3.99, distanceKm: 2.1, isOpen: true, description: "Omakase-grade sushi delivered straight to your door.", categoryId: "cat_sushi" },
   { id: "r4", name: "Bangkok Wok", cuisine: "Thai", imageUrl: "https://images.unsplash.com/photo-1559314809-0d155014e29e?w=800&h=600&fit=crop", rating: 4.5, ratingCount: 910, deliveryTimeMin: 20, deliveryTimeMax: 35, deliveryFee: 2.49, distanceKm: 1.7, isOpen: true, description: "Thai street food with bold, bright flavor.", categoryId: "cat_asian" },
   { id: "r5", name: "El Jefe Taqueria", cuisine: "Mexican", imageUrl: "https://images.unsplash.com/photo-1565299585323-38d6b0865b47?w=800&h=600&fit=crop", rating: 4.7, ratingCount: 1340, deliveryTimeMin: 15, deliveryTimeMax: 25, deliveryFee: 1.49, distanceKm: 0.9, isOpen: true, description: "Tacos al pastor, burritos, and handmade salsas.", categoryId: "cat_mex" },
   { id: "r7", name: "Daily Grind Cafe", cuisine: "Coffee & Bakery", imageUrl: "https://images.unsplash.com/photo-1501339847302-ac426a4a7cbb?w=800&h=600&fit=crop", rating: 4.6, ratingCount: 890, deliveryTimeMin: 10, deliveryTimeMax: 20, deliveryFee: 1.49, distanceKm: 0.7, isOpen: true, description: "Specialty coffee, pastries, and all-day brunch.", categoryId: "cat_coffee" },
+];
+
+const additionalRestaurantSeeds = [
+  ["Trattoria Luna", "Italian", "cat_pizza", "photo-1571997478779-2adcbbe9ab2f", "Roman-style pizza, handmade pasta, and seasonal antipasti."],
+  ["Ember & Grain", "American", "cat_burger", "photo-1550547660-d9450f859349", "Chargrilled burgers, loaded fries, and smoked house sauces."],
+  ["Nori House", "Japanese", "cat_sushi", "photo-1515003197210-e0cd71810b5f", "Hand rolls, sashimi, and warm rice bowls made to order."],
+  ["Lotus Bowl", "Vietnamese", "cat_asian", "photo-1540189549336-e6e99c3679fe", "Fresh pho, crunchy banh mi, and herb-packed noodle bowls."],
+  ["Casa Verde", "Mexican", "cat_mex", "photo-1601050690597-df0568f70950", "Slow-cooked fillings, fresh tortillas, and bright citrus salsas."],
+  ["Morning Ritual", "Coffee & Brunch", "cat_coffee", "photo-1493770348161-369560ae357d", "Single-origin coffee, baked goods, and generous brunch plates."],
+  ["Forno Rosso", "Italian", "cat_pizza", "photo-1513104890138-7c749659a591", "Crisp sourdough pizza from a blazing red-tile oven."],
+  ["Highline Burger", "American", "cat_burger", "photo-1568901346375-23c9450c58cd", "Tall smash burgers with sharp pickles and potato buns."],
+  ["Kumo Sushi", "Japanese", "cat_sushi", "photo-1579871494447-9811cf80d66c", "Modern sushi boxes, nigiri, and delicate seasonal rolls."],
+  ["Golden Wok", "Chinese", "cat_asian", "photo-1504674900247-0877df9cc836", "Wok-fired noodles, dumplings, and comforting rice plates."],
+  ["Pico & Lime", "Mexican", "cat_mex", "photo-1565299585323-38d6b0865b47", "Street tacos, grilled corn, and fresh guacamole."],
+  ["Common Ground", "Coffee & Bakery", "cat_coffee", "photo-1501339847302-ac426a4a7cbb", "Neighborhood espresso, warm pastries, and quick lunches."],
+  ["Piazza 29", "Italian", "cat_pizza", "photo-1579751626657-72bc17010498", "Classic pies, folded calzones, and tiramisu for the table."],
+  ["Stackhouse", "American", "cat_burger", "photo-1550317138-10000687a72b", "Double patties, crispy onions, and house-made shakes."],
+  ["Sora Omakase", "Japanese", "cat_sushi", "photo-1553621042-f6e147245754", "Chef-selected sushi and sashimi with pristine ingredients."],
+  ["Lemongrass Kitchen", "Thai", "cat_asian", "photo-1559314809-0d155014e29e", "Fragrant curries, wok noodles, and spicy salads."],
+  ["Mercado Azul", "Mexican", "cat_mex", "photo-1562565652-a0d8f0c59eb4", "Coastal tacos, ceviche, and smoky grilled vegetables."],
+  ["Daybreak Coffee", "Coffee & Brunch", "cat_coffee", "photo-1534778101976-62847782c213", "Bright espresso, flaky croissants, and all-day breakfast."],
+  ["Olive & Stone", "Italian", "cat_pizza", "photo-1574071318508-1cdbab80d002", "Rustic pizza, roasted vegetables, and creamy burrata."],
+  ["The Patty Lab", "American", "cat_burger", "photo-1553979459-d2229ba7433b", "Experimental burgers, bold toppings, and seasoned fries."],
+  ["Mizu", "Japanese", "cat_sushi", "photo-1617196034796-73dfa7b1fd56", "Minimalist rolls, salmon bowls, and miso comfort food."],
+  ["Red Lantern", "Asian Fusion", "cat_asian", "photo-1546069901-ba9599a7e63c", "Shareable plates inspired by kitchens across East Asia."],
+  ["Sol Cantina", "Mexican", "cat_mex", "photo-1626700051175-6818013e1d4f", "Big burritos, crispy tacos, and roasted chile salsa."],
+  ["Early Bird", "Coffee & Bakery", "cat_coffee", "photo-1525351484163-7529414344d8", "Fresh bread, specialty coffee, and colorful breakfast bowls."],
+] as const;
+
+const restaurants: Restaurant[] = [
+  ...featuredRestaurants,
+  ...additionalRestaurantSeeds.map(([name, cuisine, categoryId, imageId, description], index) => ({
+    id: `r${index + 8}`,
+    name,
+    cuisine,
+    imageUrl: `https://images.unsplash.com/${imageId}?w=800&h=600&fit=crop`,
+    rating: Math.round((4.4 + (index % 6) * 0.1) * 10) / 10,
+    ratingCount: 620 + index * 137,
+    deliveryTimeMin: 10 + (index % 4) * 5,
+    deliveryTimeMax: 25 + (index % 5) * 5,
+    deliveryFee: Math.round((1.49 + (index % 4) * 0.5) * 100) / 100,
+    distanceKm: Math.round((0.6 + (index % 9) * 0.3) * 10) / 10,
+    isOpen: true,
+    description,
+    categoryId,
+  })),
 ];
 
 const menuItems: MenuItem[] = [
@@ -137,6 +184,32 @@ const menuItems: MenuItem[] = [
   { id: "m502", restaurantId: "r5", name: "Chicken Burrito", description: "Chicken, rice, beans, salsa, cheese, guacamole.", imageUrl: "https://images.unsplash.com/photo-1626700051175-6818013e1d4f?w=600&h=600&fit=crop", price: 12.5, isVegetarian: false, isPopular: true, section: "Burritos", cartQuantity: 0 },
   { id: "m701", restaurantId: "r7", name: "Cappuccino", description: "Espresso with velvety steamed milk foam.", imageUrl: "https://images.unsplash.com/photo-1534778101976-62847782c213?w=600&h=600&fit=crop", price: 4.5, isVegetarian: true, isPopular: true, section: "Coffee", cartQuantity: 0 },
   { id: "m703", restaurantId: "r7", name: "Avocado Toast", description: "Sourdough, avocado, chili flakes, lemon.", imageUrl: "https://images.unsplash.com/photo-1525351484163-7529414344d8?w=600&h=600&fit=crop", price: 8.5, isVegetarian: true, isPopular: true, section: "Food", cartQuantity: 0 },
+  ...restaurants.slice(featuredRestaurants.length).flatMap((restaurant, index) => [
+    {
+      id: `m${restaurant.id.slice(1)}01`,
+      restaurantId: restaurant.id,
+      name: `${restaurant.cuisine} Signature`,
+      description: `The house favorite from ${restaurant.name}.`,
+      imageUrl: restaurant.imageUrl,
+      price: Math.round((11.5 + (index % 7) * 0.75) * 100) / 100,
+      isVegetarian: index % 3 === 0,
+      isPopular: true,
+      section: "Popular",
+      cartQuantity: 0,
+    },
+    {
+      id: `m${restaurant.id.slice(1)}02`,
+      restaurantId: restaurant.id,
+      name: "Chef's Seasonal Pick",
+      description: "A rotating seasonal plate prepared fresh today.",
+      imageUrl: restaurant.imageUrl,
+      price: Math.round((14 + (index % 6) * 0.8) * 100) / 100,
+      isVegetarian: index % 2 === 0,
+      isPopular: index % 2 === 1,
+      section: "Seasonal",
+      cartQuantity: 0,
+    },
+  ]),
 ];
 
 const emptyRestaurant = restaurants[0];
@@ -165,14 +238,21 @@ function restaurantsForCategory(categoryId: string) {
     .sort((a, b) => b.rating - a.rating);
 }
 
-function searchRestaurants(query: string) {
+export function searchRestaurants(query: string) {
   const q = query.trim().toLowerCase();
   if (!q) return restaurantsForCategory("cat_all");
+  const matchingCategoryIds = new Set(
+    categories
+      .filter((category) => category.name.toLowerCase().includes(q))
+      .map((category) => category.id),
+  );
   return restaurants.filter((restaurant) => {
     const restaurantMenu = menuItems.filter((item) => item.restaurantId === restaurant.id);
     return (
       restaurant.name.toLowerCase().includes(q) ||
       restaurant.cuisine.toLowerCase().includes(q) ||
+      restaurant.description.toLowerCase().includes(q) ||
+      matchingCategoryIds.has(restaurant.categoryId) ||
       restaurantMenu.some((item) => item.name.toLowerCase().includes(q))
     );
   });
@@ -390,6 +470,7 @@ export function navigateState(state: AppState, to: string) {
 
 export const appModule = app
   .defineState<AppState>(initialState())
+  .persist(durableObjectStore<AppState>(session<AppState>()))
   .onAction<{ categoryId: string }>("selectCategory", ({ state, action }) => {
     state.selectedCategory = action.payload?.categoryId ?? "cat_all";
     state.restaurants = restaurantsForCategory(state.selectedCategory);
@@ -462,6 +543,9 @@ export const appModule = app
   })
   .onAction<{ query: string }>("applySuggestion", ({ state, action }) => {
     state.searchQuery = action.payload?.query ?? "";
+    state.searchResults = searchRestaurants(state.searchQuery);
+  })
+  .onAction("search", ({ state }) => {
     state.searchResults = searchRestaurants(state.searchQuery);
   })
   .onAction<{ to: string }>("router.push", ({ state, action }) => {

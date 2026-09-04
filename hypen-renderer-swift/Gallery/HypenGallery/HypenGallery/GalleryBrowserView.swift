@@ -96,13 +96,12 @@ struct GalleryBrowserView: View {
             }
         }
         .onChange(of: deepLinkItem) { _, newValue in
-            guard let item = newValue else { return }
-            // Route a hypengallery:// deep link into the component sheet and
-            // jump straight to the requested item.
-            componentPath = NavigationPath()
-            componentPath.append(item)
-            showComponentGallery = true
-            deepLinkItem = nil
+            presentGalleryItem(newValue)
+        }
+        .onAppear {
+            // onChange does not fire for a value supplied during process launch.
+            // Route launch arguments as soon as the root browser is mounted.
+            presentGalleryItem(deepLinkItem)
         }
         .onChange(of: previewUrl) { _, newValue in
             if let url = newValue {
@@ -202,6 +201,14 @@ struct GalleryBrowserView: View {
     }
 
     // MARK: - Navigation
+
+    private func presentGalleryItem(_ item: GalleryItem?) {
+        guard let item else { return }
+        componentPath = NavigationPath()
+        componentPath.append(item)
+        showComponentGallery = true
+        deepLinkItem = nil
+    }
 
     private func connect(to rawUrl: String, name: String? = nil) {
         let normalized = normalizeUrl(rawUrl)

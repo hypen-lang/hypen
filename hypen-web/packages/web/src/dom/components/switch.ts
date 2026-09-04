@@ -21,7 +21,6 @@ export const switchHandler: ComponentHandler = {
     input.style.appearance = "none";
     input.style.width = "44px";
     input.style.height = "24px";
-    input.style.backgroundColor = "#ccc";
     input.style.borderRadius = "12px";
     input.style.position = "relative";
     input.style.cursor = "pointer";
@@ -30,6 +29,9 @@ export const switchHandler: ComponentHandler = {
     // Add pseudo-element styling via CSS
     const style = document.createElement("style");
     style.textContent = `
+      input[data-hypen-switch="true"] {
+        background-color: #ccc;
+      }
       input[data-hypen-switch="true"]::before {
         content: "";
         position: absolute;
@@ -59,8 +61,9 @@ export const switchHandler: ComponentHandler = {
     if (!input) return;
 
     // On state (checked)
-    if (props.on !== undefined) {
-      input.checked = Boolean(props.on);
+    const checked = props.checked ?? props.on ?? props.value;
+    if (checked !== undefined) {
+      input.checked = Boolean(checked);
     }
 
     // Disabled
@@ -82,5 +85,3 @@ export const switchHandler: ComponentHandler = {
     }
   },
 };
-
-

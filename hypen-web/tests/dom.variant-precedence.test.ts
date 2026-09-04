@@ -236,9 +236,8 @@ describe("no variants: the handler path is untouched", () => {
   });
 
   test("a handler's non-CSS side effects survive the class conversion", () => {
-    // `.weight()` writes `data-hypen-flex`, which a component stylesheet keys
-    // off via `:has(> [data-hypen-flex])`. It must not be lost when the prop
-    // moves to a rule.
+    // `.weight()` writes the durable `data-hypen-flex` marker consumed by
+    // Row width-demand reconciliation. It must survive variant lowering.
     const registry = new ApplicatorRegistry();
     const plain = makeElement();
     const varied = makeElement();

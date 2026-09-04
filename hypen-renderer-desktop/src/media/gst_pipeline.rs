@@ -176,8 +176,8 @@ pub(crate) fn build(
                         let gerr = err.error();
                         let debug = err.debug().map(|d| d.to_string()).unwrap_or_default();
                         let message = gerr.to_string();
-                        let status = extract_http_status(&message)
-                            .or_else(|| extract_http_status(&debug));
+                        let status =
+                            extract_http_status(&message).or_else(|| extract_http_status(&debug));
                         super::push_event(
                             &node_id,
                             MediaEventKind::Error {
@@ -272,7 +272,11 @@ pub(crate) fn extract_http_status(text: &str) -> Option<u16> {
         // Standalone: not embedded in a longer alnum/dotted run (so
         // the `264` in `h264parse` / `x264` and version-ish `1.403`
         // spellings don't match).
-        let prev = if start > 0 { Some(bytes[start - 1]) } else { None };
+        let prev = if start > 0 {
+            Some(bytes[start - 1])
+        } else {
+            None
+        };
         if matches!(prev, Some(c) if c.is_ascii_alphanumeric() || c == b'.') {
             continue;
         }
@@ -300,8 +304,8 @@ fn status_context(text: &str, start: usize, end: usize) -> bool {
     // identifier; a genuine `Not Found (404)` has whitespace (or
     // start-of-string) before its paren.
     if start >= 1 && bytes[start - 1] == b'(' && bytes.get(end) == Some(&b')') {
-        let ident_paren = start >= 2
-            && (bytes[start - 2].is_ascii_alphanumeric() || bytes[start - 2] == b'.');
+        let ident_paren =
+            start >= 2 && (bytes[start - 2].is_ascii_alphanumeric() || bytes[start - 2] == b'.');
         return !ident_paren;
     }
     // The remaining patterns require a plain separator directly before

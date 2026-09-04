@@ -94,5 +94,4 @@ Row {
     .transition(150, easeOut)
     .onClick(@router.push, to: "/profile")
 }
-.display({default: "flex", md: "none"})
 .tw("px-3 pt-1 pb-6 bg-white border-t border-gray-200 items-center justify-around")

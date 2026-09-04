@@ -20,7 +20,7 @@ Column {
     .color("#666")
     .marginBottom(8)
 
-  Spinner()
+  Spinner(animated: false)
     .marginBottom(24)
 
   Text("Styled Spinners")
@@ -30,7 +30,7 @@ Column {
 
   Row {
     Column {
-      Spinner()
+      Spinner(animated: false)
         .width(24)
         .height(24)
       Text("Small")
@@ -41,7 +41,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Spinner()
+      Spinner(animated: false)
         .width(40)
         .height(40)
       Text("Medium")
@@ -52,7 +52,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Spinner()
+      Spinner(animated: false)
         .width(56)
         .height(56)
       Text("Large")
@@ -72,7 +72,7 @@ Column {
 
   Column {
     Row {
-      Spinner()
+      Spinner(animated: false)
         .width(20)
         .height(20)
       Text("Loading content...")
@@ -95,18 +95,17 @@ Column {
 
   Button {
     Row {
-      Spinner()
+      Spinner(animated: false)
         .width(16)
         .height(16)
+        .color("#fff")
       Text("Processing...")
         .color("#fff")
         .marginLeft(8)
     }
-    .horizontalAlignment("center")
   }
   .backgroundColor("#3b82f6")
-  .padding(12)
-  .paddingHorizontal(24)
+  .padding(12, 24)
   .cornerRadius(8)
   .opacity(0.8)
 }

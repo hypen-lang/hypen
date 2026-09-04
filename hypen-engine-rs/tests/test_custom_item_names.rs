@@ -171,7 +171,10 @@ fn custom_item_name_id_applicator_resolves_per_item_semantics() {
             _ => None,
         })
         .collect();
-    assert_eq!(option_ids, vec!["opt-apple".to_string(), "opt-pear".to_string()]);
+    assert_eq!(
+        option_ids,
+        vec!["opt-apple".to_string(), "opt-pear".to_string()]
+    );
 
     let listbox = patches
         .iter()

@@ -29,10 +29,12 @@ Column {
       Stack {
         Text("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.")
           .maxLines(1)
+          .fillMaxWidth(true)
       }
       .backgroundColor("#f0f0f0")
       .padding(12)
       .cornerRadius(4)
+      .fillMaxWidth(true)
     }
 
     Column {
@@ -43,10 +45,12 @@ Column {
       Stack {
         Text("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.")
           .maxLines(2)
+          .fillMaxWidth(true)
       }
       .backgroundColor("#f0f0f0")
       .padding(12)
       .cornerRadius(4)
+      .fillMaxWidth(true)
     }
 
     Column {
@@ -57,10 +61,12 @@ Column {
       Stack {
         Text("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.")
           .maxLines(3)
+          .fillMaxWidth(true)
       }
       .backgroundColor("#f0f0f0")
       .padding(12)
       .cornerRadius(4)
+      .fillMaxWidth(true)
     }
 
     Column {
@@ -70,10 +76,12 @@ Column {
         .marginBottom(4)
       Stack {
         Text("Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.")
+          .fillMaxWidth(true)
       }
       .backgroundColor("#e0e7ff")
       .padding(12)
       .cornerRadius(4)
+      .fillMaxWidth(true)
     }
   }
   .gap(16)
@@ -86,7 +94,7 @@ Column {
 
   Row {
     Column {
-      Image(src: "https://picsum.photos/120/80")
+      Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/image-120x80-1.png?platform=__HYPEN_GALLERY_PLATFORM__&example=maxLines&generation=__HYPEN_GALLERY_GENERATION__")
         .fillMaxWidth(true)
         .height(80)
         .cornerRadius(8)
@@ -106,10 +114,10 @@ Column {
     .padding(12)
     .cornerRadius(8)
     .border({width: 1, color: "#e5e7eb"})
-    .width(200)
+    .width(175)
 
     Column {
-      Image(src: "https://picsum.photos/121/80")
+      Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/image-120x80-2.png?platform=__HYPEN_GALLERY_PLATFORM__&example=maxLines&generation=__HYPEN_GALLERY_GENERATION__")
         .fillMaxWidth(true)
         .height(80)
         .cornerRadius(8)
@@ -129,7 +137,7 @@ Column {
     .padding(12)
     .cornerRadius(8)
     .border({width: 1, color: "#e5e7eb"})
-    .width(200)
+    .width(175)
   }
   .gap(12)
 }

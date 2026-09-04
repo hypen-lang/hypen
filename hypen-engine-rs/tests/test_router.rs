@@ -28,8 +28,7 @@ fn reconcile_ir(
     state: &serde_json::Value,
     dependencies: &mut DependencyGraph,
 ) -> Vec<Patch> {
-    let patches =
-        hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
+    let patches = hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
     EXPANDER.with(|e| e.borrow_mut().expand(patches))
 }
 
@@ -743,7 +742,8 @@ fn test_router_at_root_inserts_children_under_root_not_router_node() {
         "Router-at-root: HomeView must Insert under \"root\", not under \
          the __Router control-flow NodeId. Got parent = {:?}. \
          Full patches: {:#?}",
-        parent, patches,
+        parent,
+        patches,
     );
 }
 
@@ -801,7 +801,8 @@ fn test_router_at_root_nav_attaches_children_under_root_not_router_node() {
         "root",
         "Router-at-root nav: SearchView Insert must target \"root\", not \
          the __Router NodeId. Got parent = {:?}. Full patches: {:#?}",
-        parent, nav_patches,
+        parent,
+        nav_patches,
     );
 
     // Now navigate back to "/" — this should hit the cache and emit an
@@ -825,7 +826,8 @@ fn test_router_at_root_nav_attaches_children_under_root_not_router_node() {
             "root",
             "Router-at-root nav-back: cached Attach must target \"root\". \
              Got parent = {:?}. Full patches: {:#?}",
-            p, back_patches,
+            p,
+            back_patches,
         );
     }
 }
@@ -991,7 +993,8 @@ fn test_nested_router_nav_routes_children_under_wrapping_element() {
             column_id.as_ref(),
             "Nested Router nav-back: cached Attach must target Column, \
              not \"root\". Got parent = {:?}. Patches: {:#?}",
-            p, back,
+            p,
+            back,
         );
     }
 }

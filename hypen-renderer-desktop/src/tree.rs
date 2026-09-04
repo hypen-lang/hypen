@@ -7,18 +7,39 @@
 //! (reserved by the engine) are stubbed and will land in a later phase.
 
 use hypen_engine::Patch;
+use rustc_hash::FxRandomState;
 use serde_json::Value;
 use std::collections::HashMap;
 
 /// The synthetic parent ID used by the engine for top-level nodes.
 pub const ROOT_ID: &str = "root";
 
+/// A node's resolved props, keyed by applicator / CSS property name.
+///
+/// Not the default hasher. `style::node_style_with` probes dozens of
+/// applicator names against a node that carries a handful, and each probe
+/// tries up to three spellings (`padding`, `padding.0`, `padding-left`),
+/// so the overwhelming majority of lookups are misses whose entire cost
+/// is the hash. Callgrind put SipHash at ~42% of the instructions retired
+/// in a style build, ahead of every piece of actual layout work.
+///
+/// [`FxRandomState`] rather than the deterministic `FxBuildHasher`,
+/// because the usual excuse for dropping SipHash does not apply here:
+/// these keys are not all authored locally. `remote.rs` applies `Patch`
+/// streams from a RemoteServer, and their prop keys land in this map
+/// unvalidated and with no cap on how many. Against an unseeded
+/// multiplicative hash those are offline-constructible — 20k colliding
+/// 8-byte keys took under a second to generate and turned a 1.9 ms
+/// insert into 46 ms, on the event-loop thread. Seeding per process
+/// removes the precomputation and keeps the win.
+pub type PropMap = HashMap<String, Value, FxRandomState>;
+
 /// A flat node in the renderer tree.
 #[derive(Debug, Clone)]
 pub struct Node {
     pub id: String,
     pub element_type: String,
-    pub props: HashMap<String, Value>,
+    pub props: PropMap,
     /// Engine-derived accessibility semantics (role, name, hidden, …), carried
     /// from the Create patch so the AccessKit translation can use the engine's
     /// accessible name/role instead of layout heuristics.
@@ -303,7 +324,8 @@ impl Tree {
                 props,
                 semantics,
             } => {
-                let mut prop_map = HashMap::with_capacity(props.len());
+                let mut prop_map =
+                    PropMap::with_capacity_and_hasher(props.len(), FxRandomState::default());
                 for (k, v) in props.iter() {
                     self.count_key_added(k);
                     prop_map.insert(k.clone(), v.clone());
@@ -469,7 +491,10 @@ impl Tree {
     /// made inserting N children under one parent O(N²), which showed
     /// up on every initial render of a long list.
     fn insert_at(siblings: &mut Vec<String>, id: String, before_id: Option<&str>) {
-        debug_assert!(!siblings.contains(&id), "insert_at caller must unlink first");
+        debug_assert!(
+            !siblings.contains(&id),
+            "insert_at caller must unlink first"
+        );
         match before_id {
             Some(before) => match siblings.iter().position(|c| c == before) {
                 Some(idx) => siblings.insert(idx, id),
@@ -828,7 +853,10 @@ mod tests {
         tree.apply(&Patch::Detach { id: "route".into() });
         let detached = tree.detached_node_ids();
         assert!(detached.contains("route"), "detached root included");
-        assert!(detached.contains("vid"), "descendants of the detached root included");
+        assert!(
+            detached.contains("vid"),
+            "descendants of the detached root included"
+        );
         assert!(!detached.contains("other"), "live siblings excluded");
 
         tree.apply(&Patch::Attach {
@@ -985,7 +1013,10 @@ mod tests {
             id: "b".into(),
             transition: false,
         });
-        assert!(!tree.has_transform_props(), "removed subtree's transform gone");
+        assert!(
+            !tree.has_transform_props(),
+            "removed subtree's transform gone"
+        );
     }
 
     #[test]

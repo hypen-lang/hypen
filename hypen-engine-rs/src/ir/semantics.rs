@@ -457,10 +457,7 @@ impl Semantics {
                 | Some(Role::Tab)
                 | Some(Role::OptionItem)
         );
-        if !needs
-            || self.name.is_some()
-            || self.name_missing.is_some()
-            || self.hidden == Some(true)
+        if !needs || self.name.is_some() || self.name_missing.is_some() || self.hidden == Some(true)
         {
             return self;
         }
@@ -610,7 +607,10 @@ fn explicit_label(props: &Props) -> Option<TextCollection> {
 /// Whether a boolean flag prop (e.g. the `hidden.0` produced by a zero-arg
 /// `.hidden()` applicator) is present and true.
 fn read_flag(props: &Props, key: &str) -> bool {
-    matches!(props.get(key), Some(Value::Static(serde_json::Value::Bool(true))))
+    matches!(
+        props.get(key),
+        Some(Value::Static(serde_json::Value::Bool(true)))
+    )
 }
 
 /// Read a static boolean prop. `None` when absent or dynamic (a bound value
@@ -809,7 +809,9 @@ pub(crate) fn hoisted_name_template(element: &Element) -> Option<Value> {
 /// Classify an image's `alt` text (named arg or `.alt(...)` applicator).
 fn image_alt(props: &Props) -> TextCollection {
     for key in ["alt", "alt.0"] {
-        let Some(value) = props.get(key) else { continue };
+        let Some(value) = props.get(key) else {
+            continue;
+        };
         return classify_text_value(value);
     }
     TextCollection::Empty
@@ -821,7 +823,9 @@ fn image_alt(props: &Props) -> TextCollection {
 /// (key `label.0`) is handled separately and overrides all of these.
 fn video_label(props: &Props) -> TextCollection {
     for key in ["title", "title.0", "label", "alt"] {
-        let Some(value) = props.get(key) else { continue };
+        let Some(value) = props.get(key) else {
+            continue;
+        };
         return classify_text_value(value);
     }
     TextCollection::Empty
@@ -939,7 +943,9 @@ fn collect_text(element: &Element) -> TextCollection {
 /// prop, classifying it as static, dynamic, or absent.
 fn own_text(props: &Props) -> Option<TextCollection> {
     for key in ["0", "text"] {
-        let Some(value) = props.get(key) else { continue };
+        let Some(value) = props.get(key) else {
+            continue;
+        };
         return Some(classify_text_value(value));
     }
     None
@@ -1023,7 +1029,9 @@ mod tests {
         // The de-risked cases: a confident wrong role is worse than none.
         // List is keyed iteration, Card is a generic container, Icon is
         // decorative-or-meaningful — none get an automatic role.
-        for ty in ["List", "Card", "Icon", "Text", "Column", "Row", "Stack", "Whatever"] {
+        for ty in [
+            "List", "Card", "Icon", "Text", "Column", "Row", "Stack", "Whatever",
+        ] {
             assert_eq!(derive(ty), None, "{ty} must not derive semantics");
         }
     }
@@ -1037,15 +1045,26 @@ mod tests {
     #[test]
     fn heading_reads_level_from_named_and_applicator_props() {
         let named = Props::from_map(indexmap! { "level".to_string() => Value::Static(json!(3)) });
-        assert_eq!(Semantics::derive(&heading_with_props(named)).unwrap().level, Some(3));
+        assert_eq!(
+            Semantics::derive(&heading_with_props(named)).unwrap().level,
+            Some(3)
+        );
 
         let applied =
             Props::from_map(indexmap! { "level.0".to_string() => Value::Static(json!(1)) });
-        assert_eq!(Semantics::derive(&heading_with_props(applied)).unwrap().level, Some(1));
+        assert_eq!(
+            Semantics::derive(&heading_with_props(applied))
+                .unwrap()
+                .level,
+            Some(1)
+        );
 
         // Out-of-range levels clamp into 1..=6.
         let big = Props::from_map(indexmap! { "level".to_string() => Value::Static(json!(9)) });
-        assert_eq!(Semantics::derive(&heading_with_props(big)).unwrap().level, Some(6));
+        assert_eq!(
+            Semantics::derive(&heading_with_props(big)).unwrap().level,
+            Some(6)
+        );
     }
 
     #[test]
@@ -1061,15 +1080,24 @@ mod tests {
         // Button { Icon("trash") Text("Delete") } → name "Delete" (icon excluded).
         let el = with_children(
             "Button",
-            vec![Element::new("Icon").with_prop("0", Value::Static(json!("trash"))), text("Delete")],
+            vec![
+                Element::new("Icon").with_prop("0", Value::Static(json!("trash"))),
+                text("Delete"),
+            ],
         );
-        assert_eq!(Semantics::derive(&el).unwrap().name.as_deref(), Some("Delete"));
+        assert_eq!(
+            Semantics::derive(&el).unwrap().name.as_deref(),
+            Some("Delete")
+        );
     }
 
     #[test]
     fn button_concatenates_nested_text() {
         // Button { Column { Text("a") Text("b") } } → "a b".
-        let el = with_children("Button", vec![with_children("Column", vec![text("a"), text("b")])]);
+        let el = with_children(
+            "Button",
+            vec![with_children("Column", vec![text("a"), text("b")])],
+        );
         assert_eq!(Semantics::derive(&el).unwrap().name.as_deref(), Some("a b"));
     }
 
@@ -1131,14 +1159,18 @@ mod tests {
     #[test]
     fn video_name_comes_from_title_label_or_alt() {
         // `title` named arg is the primary label source.
-        let titled = Element::new("Video").with_prop("title", Value::Static(json!("Big Buck Bunny")));
+        let titled =
+            Element::new("Video").with_prop("title", Value::Static(json!("Big Buck Bunny")));
         let s = Semantics::derive(&titled).unwrap();
         assert_eq!(s.name.as_deref(), Some("Big Buck Bunny"));
         assert_eq!(s.name_missing, None);
 
         // `label` and `alt` named args work too (parity with Image/Checkbox).
         let labelled = Element::new("Video").with_prop("label", Value::Static(json!("Trailer")));
-        assert_eq!(Semantics::derive(&labelled).unwrap().name.as_deref(), Some("Trailer"));
+        assert_eq!(
+            Semantics::derive(&labelled).unwrap().name.as_deref(),
+            Some("Trailer")
+        );
 
         // No title/label/alt → required-but-missing, like an alt-less Image.
         let bare = Element::new("Video").with_prop("src", Value::Static(json!("/a.mp4")));
@@ -1171,7 +1203,10 @@ mod tests {
         assert_eq!(s.name_missing, None);
 
         let resolved = indexmap! { "title".to_string() => json!("Episode 2") };
-        assert_eq!(s.with_resolved_name(&resolved).name.as_deref(), Some("Episode 2"));
+        assert_eq!(
+            s.with_resolved_name(&resolved).name.as_deref(),
+            Some("Episode 2")
+        );
     }
 
     #[test]
@@ -1233,7 +1268,8 @@ mod tests {
 
     /// Apply the `.label(x)` applicator (prop `label.0`) to an element.
     fn with_label(mut el: Element, label: &str) -> Element {
-        el.props.insert("label.0".to_string(), Value::Static(json!(label)));
+        el.props
+            .insert("label.0".to_string(), Value::Static(json!(label)));
         el
     }
 
@@ -1264,7 +1300,8 @@ mod tests {
     #[test]
     fn hidden_makes_an_element_decorative_only() {
         let mut icon = Element::new("Icon").with_prop("0", Value::Static(json!("star")));
-        icon.props.insert("hidden.0".to_string(), Value::Static(json!(true)));
+        icon.props
+            .insert("hidden.0".to_string(), Value::Static(json!(true)));
         let s = Semantics::derive(&icon).unwrap();
         assert_eq!(s.hidden, Some(true));
         assert_eq!(s.role, None);
@@ -1274,16 +1311,20 @@ mod tests {
 
     /// Apply an applicator prop (e.g. `role.0`) to an element.
     fn with_applicator(mut el: Element, key: &str, value: &str) -> Element {
-        el.props.insert(key.to_string(), Value::Static(json!(value)));
+        el.props
+            .insert(key.to_string(), Value::Static(json!(value)));
         el
     }
 
     #[test]
     fn self_state_applicators_set_their_fields() {
         let mut el = Element::new("Button").with_prop("0", Value::Static(json!("Menu")));
-        el.props.insert("expanded.0".into(), Value::Static(json!(true)));
-        el.props.insert("pressed.0".into(), Value::Static(json!(false)));
-        el.props.insert("current.0".into(), Value::Static(json!("page")));
+        el.props
+            .insert("expanded.0".into(), Value::Static(json!(true)));
+        el.props
+            .insert("pressed.0".into(), Value::Static(json!(false)));
+        el.props
+            .insert("current.0".into(), Value::Static(json!("page")));
         let s = Semantics::derive(&el).unwrap();
         assert_eq!(s.expanded, Some(true));
         assert_eq!(s.pressed, Some(false));
@@ -1303,7 +1344,10 @@ mod tests {
         // resolution has somewhere to land — even on a generic container
         // with no other derivable semantics.
         let s = Semantics::derive(&el);
-        assert!(s.is_some(), "bound .expanded on a bare Column must keep the block");
+        assert!(
+            s.is_some(),
+            "bound .expanded on a bare Column must keep the block"
+        );
         assert_eq!(s.and_then(|s| s.expanded), None);
     }
 
@@ -1311,10 +1355,16 @@ mod tests {
     fn checkbox_label_is_the_accessible_name() {
         // Positional and named visible-label forms both become the name.
         let positional = Element::new("Checkbox").with_prop("0", Value::Static(json!("Accept")));
-        assert_eq!(Semantics::derive(&positional).unwrap().name.as_deref(), Some("Accept"));
+        assert_eq!(
+            Semantics::derive(&positional).unwrap().name.as_deref(),
+            Some("Accept")
+        );
 
         let named = Element::new("Switch").with_prop("label", Value::Static(json!("Dark mode")));
-        assert_eq!(Semantics::derive(&named).unwrap().name.as_deref(), Some("Dark mode"));
+        assert_eq!(
+            Semantics::derive(&named).unwrap().name.as_deref(),
+            Some("Dark mode")
+        );
 
         // A bare checkbox has no name → required-but-missing.
         let bare = Element::new("Checkbox");
@@ -1364,7 +1414,10 @@ mod tests {
     #[test]
     fn landmark_opt_in_gives_a_container_a_role() {
         let nav = with_applicator(Element::new("Column"), "landmark.0", "navigation");
-        assert_eq!(Semantics::derive(&nav).unwrap().role, Some(Role::Navigation));
+        assert_eq!(
+            Semantics::derive(&nav).unwrap().role,
+            Some(Role::Navigation)
+        );
 
         let region = with_applicator(Element::new("Card"), "landmark.0", "region");
         assert_eq!(Semantics::derive(&region).unwrap().role, Some(Role::Region));
@@ -1422,7 +1475,10 @@ mod tests {
             ..Semantics::default()
         };
         let resolved = indexmap! { "on".to_string() => json!(false) };
-        assert_eq!(s.clone().with_resolved_state(&resolved).checked, Some(false));
+        assert_eq!(
+            s.clone().with_resolved_state(&resolved).checked,
+            Some(false)
+        );
 
         // Non-bool / non-toggle roles leave `checked` unset.
         let s = Semantics {
@@ -1450,7 +1506,10 @@ mod tests {
             r#"{"role":"tab","name":"Overview"}"#
         );
         let opt = with_applicator(Element::new("Column"), "role.0", "option");
-        assert_eq!(Semantics::derive(&opt).unwrap().role, Some(Role::OptionItem));
+        assert_eq!(
+            Semantics::derive(&opt).unwrap().role,
+            Some(Role::OptionItem)
+        );
     }
 
     #[test]
@@ -1467,7 +1526,10 @@ mod tests {
     #[test]
     fn owns_derives_from_its_applicator() {
         let combo = with_applicator(Element::new("Combobox"), "owns.0", "popup-1");
-        assert_eq!(Semantics::derive(&combo).unwrap().owns.as_deref(), Some("popup-1"));
+        assert_eq!(
+            Semantics::derive(&combo).unwrap().owns.as_deref(),
+            Some("popup-1")
+        );
     }
 
     #[test]
@@ -1483,7 +1545,10 @@ mod tests {
         assert_eq!(base.id, None);
 
         let resolved = indexmap! { "id.0".to_string() => json!("opt-42") };
-        assert_eq!(base.with_resolved_state(&resolved).id.as_deref(), Some("opt-42"));
+        assert_eq!(
+            base.with_resolved_state(&resolved).id.as_deref(),
+            Some("opt-42")
+        );
     }
 
     #[test]
@@ -1519,8 +1584,14 @@ mod tests {
             Value::Binding(Binding::state(vec!["focused".to_string()])),
         );
         let base = Semantics::derive(&el);
-        assert!(base.is_some(), "bound deferred prop must keep the block alive");
-        assert_eq!(base.as_ref().and_then(|s| s.active_descendant.clone()), None);
+        assert!(
+            base.is_some(),
+            "bound deferred prop must keep the block alive"
+        );
+        assert_eq!(
+            base.as_ref().and_then(|s| s.active_descendant.clone()),
+            None
+        );
 
         // Resolves from the reconcile-time props…
         let resolved = indexmap! { "activedescendant.0".to_string() => json!("opt-3") };
@@ -1559,7 +1630,9 @@ mod tests {
             "Button",
             vec![Element::new("Icon").with_prop("0", Value::Static(json!("x")))],
         );
-        button.props.insert("hidden.0".to_string(), Value::Static(json!(true)));
+        button
+            .props
+            .insert("hidden.0".to_string(), Value::Static(json!(true)));
         let s = Semantics::derive(&button).unwrap();
         assert_eq!(s.hidden, Some(true));
         assert_eq!(s.name_missing, None);

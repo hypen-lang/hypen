@@ -71,9 +71,18 @@ fn time_it<F: FnMut()>(name: &str, warmup: usize, runs: usize, mut f: F) {
         samples.push(t.elapsed());
     }
     samples.sort();
-    let min = samples[0];
     let median = samples[samples.len() / 2];
-    println!("[perf] {name}: min {min:>10.3?}  median {median:>10.3?}  ({runs} runs)");
+    // p95, clamped into range for small `runs`.
+    let p95 = samples[((runs * 95) / 100).min(runs - 1)];
+    let max = samples[runs - 1];
+    // Median and tail, NOT min. Jank is caused by the slow frames, and
+    // in a bench that reuses caches across iterations the minimum is
+    // systematically the warmest sample rather than the least-noisy one
+    // — which is exactly how the first version of this file came to
+    // report width-drag figures ~1.7x better than a real drag.
+    println!(
+        "[perf] {name}: median {median:>10.3?}  p95 {p95:>10.3?}  max {max:>10.3?}  ({runs} runs)"
+    );
 }
 
 /// Patch batch for a social-feed-shaped tree: one scrollable Column
@@ -132,7 +141,12 @@ fn feed_batch_dense(posts: usize, density: u8) -> Vec<Patch> {
                 &body2,
                 "Text",
                 &[
-                    ("0", json!(format!("Second paragraph {i} with a bit more wrapped body text for shaping."))),
+                    (
+                        "0",
+                        json!(format!(
+                            "Second paragraph {i} with a bit more wrapped body text for shaping."
+                        )),
+                    ),
                     ("fontSize", json!(14.0)),
                 ],
             ),
@@ -140,7 +154,10 @@ fn feed_batch_dense(posts: usize, density: u8) -> Vec<Patch> {
             create(
                 &divider,
                 "Container",
-                &[("height", json!(1.0)), ("backgroundColor", json!("#e2e8f0"))],
+                &[
+                    ("height", json!(1.0)),
+                    ("backgroundColor", json!("#e2e8f0")),
+                ],
             ),
             insert(&post, &divider),
             create(&comment, "Row", &[("gap", json!(6.0))]),
@@ -163,7 +180,10 @@ fn feed_batch_dense(posts: usize, density: u8) -> Vec<Patch> {
                 &cbody,
                 "Text",
                 &[
-                    ("0", json!(format!("Top comment {i}: nice post, love the detail!"))),
+                    (
+                        "0",
+                        json!(format!("Top comment {i}: nice post, love the detail!")),
+                    ),
                     ("fontSize", json!(12.0)),
                     ("color", json!("#475569")),
                 ],
@@ -193,7 +213,11 @@ fn feed_batch_dense(posts: usize, density: u8) -> Vec<Patch> {
 
 fn feed_batch(posts: usize) -> Vec<Patch> {
     let mut batch = vec![
-        create("feed", "Column", &[("scrollable", json!(true)), ("gap", json!(8.0))]),
+        create(
+            "feed",
+            "Column",
+            &[("scrollable", json!(true)), ("gap", json!(8.0))],
+        ),
         insert("root", "feed"),
     ];
     for i in 0..posts {
@@ -350,7 +374,13 @@ fn perf_bench_style_resolution() {
     let vp = viewport_logical();
     time_it("node_style_with × 20k (12-prop node)", 1, 5, || {
         for _ in 0..20_000 {
-            std::hint::black_box(crate::layout::node_style_with(node, SCALE, vp, &[], crate::layout::SafeAreaInsets::default()));
+            std::hint::black_box(crate::layout::node_style_with(
+                node,
+                SCALE,
+                vp,
+                &[],
+                crate::layout::SafeAreaInsets::default(),
+            ));
         }
     });
 }
@@ -399,9 +429,7 @@ fn perf_bench_scene_encode_and_one_prop_frame() {
     let scrolls: HashMap<String, f32> = HashMap::new();
     let mut pass = {
         let text = painter.text_engine_mut();
-        LayoutPass::compute_with_state(
-            &mut taffy, &tree, text, VIEWPORT, SCALE, 0.0, &scrolls, 0,
-        )
+        LayoutPass::compute_with_state(&mut taffy, &tree, text, VIEWPORT, SCALE, 0.0, &scrolls, 0)
     };
 
     // Cold encode: every visible subtree misses.
@@ -729,6 +757,394 @@ fn perf_bench_scaling_nodes() {
             "[sweep-nodes] posts={posts} nodes={nodes} items={items} min_us={} median_us={}",
             min.as_micros(),
             median.as_micros()
+        );
+    }
+}
+
+/// Live-resize frame, decomposed. A window drag delivers a burst of
+/// `WindowEvent::Resized`, and `App::window_event` paints each one
+/// synchronously: drop the layout cache, recompute the pass at the new
+/// viewport, re-encode the whole Vello scene (the painter drops its
+/// subtree cache on any viewport change), then republish AccessKit
+/// (the fingerprint moves every frame because every rect moved).
+///
+/// This bench measures those stages separately so the per-frame CPU
+/// budget during a drag is attributable. GPU submit/present is excluded
+/// — headless — so the real frame is this plus vsync.
+#[test]
+#[ignore = "manual perf benchmark"]
+fn perf_bench_resize_frame() {
+    for (label, posts, density, base, scale) in [
+        (
+            "light,  20 posts  @1280x720",
+            20usize,
+            0u8,
+            (1280u32, 720u32),
+            1.0f32,
+        ),
+        ("medium, 150 posts @1920x1080", 150, 0, (1920, 1080), 1.0),
+        ("heavy,  600 posts @1920x1080", 600, 2, (1920, 1080), 1.0),
+    ] {
+        let batch = feed_batch_dense(posts, density);
+        let mut tree = Tree::new();
+        let mut taffy = TaffyState::new();
+        let vp_logical = crate::layout::logical_viewport(base, scale);
+        tree.apply_batch(&batch);
+        if !taffy.apply_patches(&batch, &tree, scale, vp_logical) {
+            taffy.mark_needs_rebuild();
+        }
+        let mut painter = VelloPainter::new();
+        let scrolls: HashMap<String, f32> = HashMap::new();
+        let mut pass = {
+            let text = painter.text_engine_mut();
+            LayoutPass::compute_with_state(&mut taffy, &tree, text, base, scale, 0.0, &scrolls, 0)
+        };
+        let _ = painter.build_scene(&pass, base, scale, 0.0);
+        println!("[resize] --- {label} ({} items) ---", pass.items.len());
+
+        // Stage 1: layout pass at a NEW width (restyle_all + Taffy + emit).
+        //
+        // The width MUST decrease monotonically and never repeat. An
+        // earlier version cycled through 8 widths, which let every text
+        // measure hit the cache from the 9th iteration on and made the
+        // reported figure ~1.7x better than a drag ever is: `wrap_width`
+        // is part of the measure-cache key, so a real drag mints a fresh
+        // key for every text node on every frame.
+        let mut w_step = 0u32;
+        time_it(&format!("resize LAYOUT width-drag  {label}"), 2, 10, || {
+            w_step += 1;
+            let vp = (base.0 - w_step * 2, base.1);
+            let text = painter.text_engine_mut();
+            std::hint::black_box(LayoutPass::compute_with_state(
+                &mut taffy, &tree, text, vp, scale, 0.0, &scrolls, 0,
+            ));
+        });
+
+        // Stage 2: layout pass at a NEW height only (no restyle_all;
+        // `taffy_structure_key` deliberately excludes height).
+        // Monotonic too, for symmetry — though height does not feed the
+        // measure key, so this axis was never distorted by the cycle.
+        let mut h_step = 0u32;
+        time_it(&format!("resize LAYOUT height-drag {label}"), 2, 10, || {
+            h_step += 1;
+            let vp = (base.0, base.1 - h_step * 2);
+            let text = painter.text_engine_mut();
+            std::hint::black_box(LayoutPass::compute_with_state(
+                &mut taffy, &tree, text, vp, scale, 0.0, &scrolls, 0,
+            ));
+        });
+
+        // Restore a pass at the base viewport for the paint / a11y stages.
+        pass = {
+            let text = painter.text_engine_mut();
+            LayoutPass::compute_with_state(&mut taffy, &tree, text, base, scale, 0.0, &scrolls, 0)
+        };
+
+        // Stage 3: scene encode with the subtree cache cold — what a
+        // viewport change forces on every single resize frame.
+        time_it(
+            &format!("resize ENCODE (cache cold) {label}"),
+            2,
+            10,
+            || {
+                painter.invalidate_subtree_cache();
+                std::hint::black_box(painter.build_scene(&pass, base, scale, 0.0));
+            },
+        );
+
+        // Stage 4: AccessKit republish — fingerprint + full TreeUpdate.
+        // Runs on every resize frame: `layout_generation` bumps and the
+        // fingerprint changes because every rect moved.
+        let excluded: Vec<String> = Vec::new();
+        time_it(
+            &format!("resize A11Y publish        {label}"),
+            2,
+            10,
+            || {
+                let fp = std::hint::black_box(crate::window::a11y_fingerprint(&pass, &excluded));
+                std::hint::black_box(fp);
+                std::hint::black_box(crate::accessibility::tree_update_for_layout_excluding(
+                    &pass,
+                    &|_id| false,
+                ));
+            },
+        );
+    }
+}
+
+/// Isolate the per-node style build — the inner loop of `restyle_all`,
+/// which a width-resize runs over every node in the tree (not just the
+/// visible ones) on every frame of the drag.
+#[test]
+#[ignore = "manual perf benchmark"]
+fn perf_bench_node_style_build() {
+    let batch = feed_batch_dense(20, 2);
+    let mut tree = Tree::new();
+    tree.apply_batch(&batch);
+    let vp = viewport_logical();
+    let ids: Vec<String> = batch
+        .iter()
+        .filter_map(|p| match p {
+            Patch::Create { id, .. } => Some(id.to_string()),
+            _ => None,
+        })
+        .collect();
+    let nodes: Vec<&crate::tree::Node> = ids.iter().filter_map(|id| tree.get(id)).collect();
+    let n = nodes.len();
+    println!("[style] {n} nodes");
+    let empty: [&str; 0] = [];
+    let safe = crate::layout::SafeAreaInsets::default();
+    time_it("node_style_with x all nodes", 3, 20, || {
+        for node in &nodes {
+            std::hint::black_box(crate::layout::node_style_with(
+                node, SCALE, vp, &empty, safe,
+            ));
+        }
+    });
+    // Per-call figure for the write-up.
+    let t = Instant::now();
+    const REPS: usize = 50;
+    for _ in 0..REPS {
+        for node in &nodes {
+            std::hint::black_box(crate::layout::node_style_with(
+                node, SCALE, vp, &empty, safe,
+            ));
+        }
+    }
+    let per = t.elapsed() / (REPS * n) as u32;
+    println!("[style] per node_style_with call: {per:?}");
+}
+
+/// What virtualising the scrollable containers would actually be worth.
+///
+/// The renderer solves every node in the tree and then culls at emit, so
+/// a 600-post feed hands Taffy ~13k nodes to place 381 visible items. A
+/// virtualised container would instead give Taffy only the window plus
+/// two spacers standing in for the scrolled-past and not-yet-reached
+/// content, sized from cached heights.
+///
+/// This measures that shape directly — same viewport, same visible post
+/// count, same total content height, but the off-window posts collapsed
+/// into two fixed-height leaves. It is not an implementation; it is the
+/// floor any implementation would be aiming at, measured before
+/// committing to the work.
+#[test]
+#[ignore = "manual perf benchmark"]
+fn perf_bench_virtualization_headroom() {
+    const VP: (u32, u32) = (1920, 1080);
+    let vp_logical = crate::layout::logical_viewport(VP, SCALE);
+    let scrolls: HashMap<String, f32> = HashMap::new();
+
+    // Measure the real thing first, and learn the content height and how
+    // many posts actually land inside the cull window.
+    let full_batch = feed_batch_dense(600, 0);
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    tree.apply_batch(&full_batch);
+    if !taffy.apply_patches(&full_batch, &tree, SCALE, vp_logical) {
+        taffy.mark_needs_rebuild();
+    }
+    let mut painter = VelloPainter::new();
+    let pass = {
+        let text = painter.text_engine_mut();
+        LayoutPass::compute_with_state(&mut taffy, &tree, text, VP, SCALE, 0.0, &scrolls, 0)
+    };
+    let full_nodes = full_batch
+        .iter()
+        .filter(|p| matches!(p, Patch::Create { .. }))
+        .count();
+    let content_h = pass.content_size.1;
+    // Posts whose own item survived the cull — the window a virtualised
+    // container would have to keep real.
+    let live_posts = pass
+        .items
+        .iter()
+        .filter(|it| it.node_id.starts_with("post"))
+        .count();
+    println!(
+        "[virt] full: {full_nodes} nodes, {} items, content_h {content_h:.0}, {live_posts} posts in window",
+        pass.items.len()
+    );
+
+    let mut w_step = 0u32;
+    time_it("virt FULL      600 posts, all real", 2, 10, || {
+        w_step += 1;
+        let vp = (VP.0 - w_step * 2, VP.1);
+        let text = painter.text_engine_mut();
+        std::hint::black_box(LayoutPass::compute_with_state(
+            &mut taffy, &tree, text, vp, SCALE, 0.0, &scrolls, 0,
+        ));
+    });
+
+    // The virtualised shape: the same window of real posts, with the rest
+    // of the content height carried by two spacer leaves.
+    let window = live_posts.max(1);
+    let mut virt_batch = feed_batch_dense(window, 0);
+    let spacer_h = ((content_h as f64 - content_h as f64 * window as f64 / 600.0) / 2.0).max(1.0);
+    for tag in ["lead", "trail"] {
+        virt_batch.push(create(
+            tag,
+            "Container",
+            &[("height", json!(spacer_h)), ("width", json!(100.0))],
+        ));
+        virt_batch.push(insert("feed", tag));
+    }
+    let mut vtree = Tree::new();
+    let mut vtaffy = TaffyState::new();
+    vtree.apply_batch(&virt_batch);
+    if !vtaffy.apply_patches(&virt_batch, &vtree, SCALE, vp_logical) {
+        vtaffy.mark_needs_rebuild();
+    }
+    let mut vpainter = VelloPainter::new();
+    let vnodes = virt_batch
+        .iter()
+        .filter(|p| matches!(p, Patch::Create { .. }))
+        .count();
+    {
+        let text = vpainter.text_engine_mut();
+        let vpass =
+            LayoutPass::compute_with_state(&mut vtaffy, &vtree, text, VP, SCALE, 0.0, &scrolls, 0);
+        println!(
+            "[virt] virtualised: {vnodes} nodes, {} items",
+            vpass.items.len()
+        );
+    }
+    let mut vw_step = 0u32;
+    time_it("virt WINDOWED  window + 2 spacers", 2, 10, || {
+        vw_step += 1;
+        let vp = (VP.0 - vw_step * 2, VP.1);
+        let text = vpainter.text_engine_mut();
+        std::hint::black_box(LayoutPass::compute_with_state(
+            &mut vtaffy,
+            &vtree,
+            text,
+            vp,
+            SCALE,
+            0.0,
+            &scrolls,
+            0,
+        ));
+    });
+}
+
+/// The gated path: a tree that DOES read the viewport.
+///
+/// `h-screen` lowers to `height: "100vh"` and is the ordinary app-shell
+/// idiom, so the interesting question for the per-node viewport
+/// dependency record is not how fast a vh-free tree resizes (that is the
+/// tier above) but how much a vh-bearing one gives back. If this row is
+/// close to the vh-free height-drag row, resolving viewport units lazily
+/// instead of eagerly would buy nothing, because the restyle it would
+/// avoid is already down to a handful of nodes.
+#[test]
+#[ignore = "manual perf benchmark"]
+fn perf_bench_resize_frame_viewport_units() {
+    const VP: (u32, u32) = (1920, 1080);
+    for (label, posts, vh_nodes) in [
+        ("150 posts, shell only", 150usize, 0usize),
+        ("150 posts, shell + 20 vh", 150, 20),
+        ("600 posts, shell only", 600, 0),
+    ] {
+        let mut batch = feed_batch_dense(posts, 0);
+        // The app shell: one `h-screen`-equivalent at the root.
+        batch.push(Patch::SetProp {
+            id: "feed".into(),
+            name: "height".into(),
+            value: json!("100vh"),
+        });
+        // Optionally scatter more viewport-relative lengths through the
+        // tree, to see how the cost tracks the number of dependents.
+        for i in 0..vh_nodes {
+            batch.push(Patch::SetProp {
+                id: format!("post{i}").into(),
+                name: "paddingTop".into(),
+                value: json!("2vh"),
+            });
+        }
+        let vp_logical = crate::layout::logical_viewport(VP, SCALE);
+        let mut tree = Tree::new();
+        let mut taffy = TaffyState::new();
+        tree.apply_batch(&batch);
+        if !taffy.apply_patches(&batch, &tree, SCALE, vp_logical) {
+            taffy.mark_needs_rebuild();
+        }
+        let mut painter = VelloPainter::new();
+        let scrolls: HashMap<String, f32> = HashMap::new();
+        {
+            let text = painter.text_engine_mut();
+            let _ = LayoutPass::compute_with_state(
+                &mut taffy, &tree, text, VP, SCALE, 0.0, &scrolls, 0,
+            );
+        }
+        let mut h_step = 0u32;
+        time_it(&format!("resize vh height-drag {label}"), 2, 10, || {
+            h_step += 1;
+            let vp = (VP.0, VP.1 - h_step * 2);
+            let text = painter.text_engine_mut();
+            std::hint::black_box(LayoutPass::compute_with_state(
+                &mut taffy, &tree, text, vp, SCALE, 0.0, &scrolls, 0,
+            ));
+        });
+    }
+}
+
+/// Resize sweep: fixed 1920×1080 viewport (so the number of VISIBLE,
+/// post-cull items saturates early) while total node count grows.
+///
+/// This isolates the per-total-node tax on a resize frame. A flat curve
+/// would mean the pass costs what it draws; a linear one means we pay
+/// for the whole tree to draw a fixed window of it.
+#[test]
+#[ignore = "manual perf benchmark"]
+fn perf_bench_resize_scaling_nodes() {
+    const VP: (u32, u32) = (1920, 1080);
+    const SCALE: f32 = 1.0;
+    for posts in [25usize, 50, 100, 200, 400, 800] {
+        let batch = feed_batch_dense(posts, 0);
+        let nodes = batch
+            .iter()
+            .filter(|p| matches!(p, Patch::Create { .. }))
+            .count();
+        let vp_logical = crate::layout::logical_viewport(VP, SCALE);
+        let mut tree = Tree::new();
+        let mut taffy = TaffyState::new();
+        tree.apply_batch(&batch);
+        if !taffy.apply_patches(&batch, &tree, SCALE, vp_logical) {
+            taffy.mark_needs_rebuild();
+        }
+        let mut painter = VelloPainter::new();
+        let scrolls: HashMap<String, f32> = HashMap::new();
+        let pass = {
+            let text = painter.text_engine_mut();
+            LayoutPass::compute_with_state(&mut taffy, &tree, text, VP, SCALE, 0.0, &scrolls, 0)
+        };
+        let items = pass.items.len();
+
+        // Monotonic, and every sample counts. The previous version
+        // stepped `% 4` and then kept only steps 4..8 — it threw away
+        // the cold samples that actually resemble a drag and reported
+        // the minimum of the warm repeats.
+        let mut sample = |dw: u32, dh: u32| -> Duration {
+            let mut samples: Vec<Duration> = Vec::with_capacity(8);
+            for step in 1..=8u32 {
+                let vp = (VP.0 - dw * step * 2, VP.1 - dh * step * 2);
+                let text = painter.text_engine_mut();
+                let t = Instant::now();
+                std::hint::black_box(LayoutPass::compute_with_state(
+                    &mut taffy, &tree, text, vp, SCALE, 0.0, &scrolls, 0,
+                ));
+                samples.push(t.elapsed());
+            }
+            samples.sort();
+            samples[samples.len() / 2]
+        };
+        let w = sample(8, 0);
+        let h = sample(0, 8);
+        println!(
+            "[sweep-resize] posts={posts} nodes={nodes} items={items} \
+             width_median_us={} height_median_us={}",
+            w.as_micros(),
+            h.as_micros()
         );
     }
 }

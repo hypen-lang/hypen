@@ -372,7 +372,11 @@ fn replace_props_item_bindings(props: &Props, item: &serde_json::Value, item_nam
 /// Replace item bindings in a Value
 /// Uses optimized single-pass replacement to avoid O(n²) string operations.
 /// `item_name` allows custom iteration variable names (e.g., "todo", "user" instead of "item").
-pub(crate) fn replace_value_item_bindings(value: &Value, item: &serde_json::Value, item_name: &str) -> Value {
+pub(crate) fn replace_value_item_bindings(
+    value: &Value,
+    item: &serde_json::Value,
+    item_name: &str,
+) -> Value {
     match value {
         Value::Binding(binding) => {
             if binding.is_item() {
@@ -420,8 +424,9 @@ fn replace_template_string_item_bindings(
     // bindings — so the template carries no parsed item bindings for them.
     // They are only detectable textually, and only here at substitution time
     // where the iteration variable's name is known.
-    let has_named_refs =
-        with_item_markers(item_name, |dot, bare| template.contains(dot) || template.contains(bare));
+    let has_named_refs = with_item_markers(item_name, |dot, bare| {
+        template.contains(dot) || template.contains(bare)
+    });
 
     if !has_item_bindings && !has_named_refs {
         return original.clone();

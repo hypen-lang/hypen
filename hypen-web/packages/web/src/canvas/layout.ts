@@ -18,6 +18,7 @@ import {
   parseCalcLength,
   setCssViewport,
   isDisplayNone,
+  inheritedTextProp,
 } from "./utils.js";
 import { measureText } from "./text.js";
 import {
@@ -27,6 +28,7 @@ import {
 } from "../safe-area.js";
 import {
   getImageNaturalAspect,
+  getImageNaturalSize,
   getVideoIntrinsicAspect,
   isVideoNode,
   videoSlotName,
@@ -41,6 +43,7 @@ import {
 const INTRINSIC_SIZED = new Set([
   "icon",
   "avatar",
+  "audio",
   "badge",
   "checkbox",
   "radio",
@@ -68,7 +71,7 @@ const INTRINSIC_SIZED = new Set([
  * page. Keep this list explicit (rather than "unknown ⇒ row") so an
  * unrecognised custom component behaves like the DOM's transparent wrapper.
  */
-const ROW_FLOW_TYPES = new Set(["row", "tabs", "hstack"]);
+const ROW_FLOW_TYPES = new Set(["row", "tabs", "hstack", "badge"]);
 
 /**
  * Does this node lay its children out along the vertical axis?
@@ -263,6 +266,116 @@ function toAxisDimension(
   return cssLengthToDimension(value);
 }
 
+/**
+ * Expand combined/fill sizing applicators into the per-axis value the DOM
+ * renderer would write to CSS. Canvas does not run the DOM applicator
+ * registry, so these declarations otherwise remain inert props.
+ */
+function axisSizeValue(
+  props: Record<string, any>,
+  axis: "width" | "height",
+): any {
+  if (props[axis] !== undefined) return props[axis];
+
+  const size = props.size;
+  if (size !== undefined && size !== null) {
+    if (typeof size === "object") {
+      if (size[axis] !== undefined) return size[axis];
+    } else {
+      return size;
+    }
+  }
+
+  const fill = props.fillMaxSize !== undefined
+    ? props.fillMaxSize
+    : axis === "width"
+      ? props.fillMaxWidth
+      : props.fillMaxHeight;
+  if (fill === false || fill === null || fill === undefined) return undefined;
+  const fraction = typeof fill === "number" ? fill : 1;
+  return `${fraction * 100}%`;
+}
+
+function borderObject(props: Record<string, any>): Record<string, any> | null {
+  return props.border && typeof props.border === "object" ? props.border : null;
+}
+
+function resolvedBorderWidth(props: Record<string, any>): number {
+  const border = borderObject(props);
+  const value = props.borderWidth ?? border?.width ??
+    (typeof props.border === "number" ? props.border : undefined);
+  return cssLengthToPx(value) ?? 0;
+}
+
+function resolvedBorderColor(props: Record<string, any>): string {
+  return String(props.borderColor ?? borderObject(props)?.color ?? "transparent");
+}
+
+function resolvedBorderRadius(props: Record<string, any>): number {
+  return cssLengthToPx(
+    props.borderRadius ?? props.cornerRadius ?? borderObject(props)?.radius,
+  ) ?? 0;
+}
+
+const BADGE_PADDING_KEYS = [
+  "padding", "paddingTop", "paddingRight", "paddingBottom", "paddingLeft",
+  "paddingHorizontal", "paddingVertical",
+];
+
+function basePaddingValue(props: Record<string, any>, type: string): any {
+  if (props.padding !== undefined) return props.padding;
+  if (type === "card") {
+    const hasCustomPadding = BADGE_PADDING_KEYS.some(
+      (name) => name !== "padding" && props[name] !== undefined,
+    );
+    return hasCustomPadding ? 0 : 16;
+  }
+  if (type !== "badge") return 0;
+  const hasCustomPadding = BADGE_PADDING_KEYS.some(
+    (name) => name !== "padding" && props[name] !== undefined,
+  );
+  const hasFixedBox =
+    axisSizeValue(props, "width") !== undefined &&
+    axisSizeValue(props, "height") !== undefined;
+  return hasFixedBox && !hasCustomPadding ? 0 : "4 8";
+}
+
+const HORIZONTAL_DEMAND_CARRIERS = new Set(["column", "list", "card"]);
+
+function horizontalWidthKind(node: VirtualNode): "fixed" | "relative" | null {
+  const value = axisSizeValue(node.props, "width");
+  if (value === undefined || value === null || value === "auto") return null;
+  return typeof value === "string" && value.includes("%") ? "relative" : "fixed";
+}
+
+/** Pure Canvas equivalent of DOM cross-axis width-demand propagation. */
+function carriesHorizontalDemand(node: VirtualNode): boolean {
+  const ownWidth = horizontalWidthKind(node);
+  if (ownWidth === "fixed") return false;
+  if (ownWidth === "relative") return true;
+
+  const type = node.type.toLowerCase();
+  if (type === "grid" || type === "list") return true;
+  if (type === "divider" || type === "separator") {
+    return node.props.orientation !== "vertical";
+  }
+  if (type === "row") {
+    const justify = String(node.props.horizontalAlignment ?? node.props.justifyContent ?? "start");
+    if (justify !== "start" && justify !== "flex-start") return true;
+    return node.children.some((child) => {
+      if (child.type.toLowerCase() === "spacer") return true;
+      const flex = Number(child.props.flex ?? child.props.weight ?? child.props.flexGrow ?? 0);
+      return flex > 0 || carriesHorizontalDemand(child);
+    });
+  }
+  return HORIZONTAL_DEMAND_CARRIERS.has(type) &&
+    node.children.some(carriesHorizontalDemand);
+}
+
+function needsAutomaticCrossAxisStretch(node: VirtualNode): boolean {
+  return horizontalWidthKind(node) === null && carriesHorizontalDemand(node);
+}
+
 function toLengthPct(value: any): number | `${number}%` {
   const d = cssLengthToDimension(value);
   return d === "auto" ? 0 : d;
@@ -334,6 +447,7 @@ function buildTaffyStyle(
   // renderer's `grid-template-areas: "stack"` strategy. Children get
   // `gridColumn: 1 / 2; gridRow: 1 / 2` further down.
   const isStack = type === "stack";
+  const isCenter = type === "center";
   const isColumn = !isStack && isColumnFlow(node);
   const isGrid = !isStack && (type === "grid" || props.display === "grid");
 
@@ -348,11 +462,12 @@ function buildTaffyStyle(
     // align-items: start`) and iOS/Android ZStack defaults — also keeps
     // explicitly-sized children at their declared size instead of letting
     // Taffy's default `stretch` overwrite the box.
-    style.justifyItems = props.horizontalAlignment
-      ? mapAlign(T, props.horizontalAlignment)
+    const stackAlignment = props.alignment ?? props["alignment.0"];
+    style.justifyItems = (props.horizontalAlignment || stackAlignment)
+      ? mapAlign(T, props.horizontalAlignment || stackAlignment)
       : T.AlignItems.Start;
-    style.alignItems = props.verticalAlignment
-      ? mapAlign(T, props.verticalAlignment)
+    style.alignItems = (props.verticalAlignment || stackAlignment)
+      ? mapAlign(T, props.verticalAlignment || stackAlignment)
       : T.AlignItems.Start;
   } else if (isGrid) {
     style.display = T.Display.Grid;
@@ -437,7 +552,8 @@ function buildTaffyStyle(
   // overflowing flex item starts at its intrinsic content size (e.g. a
   // huge feed) and Taffy redistributes from there, which under-allocates
   // the BottomNav and pushes it off-screen on routes with tall content.
-  const flexShorthand = props.flex !== undefined ? parseFloat(props.flex) : NaN;
+  const flexValue = props.flex ?? props.weight;
+  const flexShorthand = flexValue !== undefined ? parseFloat(flexValue) : NaN;
   style.flexGrow = parseFloat(props.flexGrow) || (Number.isFinite(flexShorthand) ? flexShorthand : 0);
   // Default flex-shrink is 0 when:
   //   - the component has an intrinsic size (icon, avatar, …) — otherwise it
@@ -478,6 +594,23 @@ function buildTaffyStyle(
 
     if (justifyRaw) style.justifyContent = mapJustify(T, justifyRaw);
     if (alignRaw) style.alignItems = mapAlign(T, alignRaw);
+    else if (isColumn && props.textAlign) {
+      const inheritedAlign = String(props.textAlign).toLowerCase();
+      if (inheritedAlign === "center") style.alignItems = T.AlignItems.Center;
+      else if (inheritedAlign === "right" || inheritedAlign === "end") style.alignItems = T.AlignItems.End;
+      else style.alignItems = T.AlignItems.Start;
+    }
+    else {
+      // Hypen Columns and Rows both default to cross-axis start. Expansion
+      // is explicit via a fill applicator or stretch alignment, matching the
+      // DOM, SwiftUI, and Compose contracts. Taffy's flex default is Stretch,
+      // which made an ordinary Row child silently fill a fixed Row height.
+      style.alignItems = T.AlignItems.Start;
+    }
+    if (isCenter) {
+      style.justifyContent = T.JustifyContent.Center;
+      style.alignItems = T.AlignItems.Center;
+    }
   }
 
   // --- Align-self (per-item cross-axis override) -----------------------------
@@ -497,6 +630,19 @@ function buildTaffyStyle(
       style.alignSelf = self;
       if (parentType === "stack") style.justifySelf = self;
     }
+  } else if (
+    type === "text" &&
+    parentType === "stack" &&
+    inheritedTextAlign(node) !== null
+  ) {
+    style.alignSelf = T.AlignSelf.Stretch;
+    style.justifySelf = T.AlignSelf.Stretch;
+  } else if (needsAutomaticCrossAxisStretch(node)) {
+    style.alignSelf = T.AlignSelf.Stretch;
+  } else if (type === "badge") {
+    // DOM Badge is inline-flex and therefore remains content-sized inside a
+    // Column instead of accepting the parent's default cross-axis stretch.
+    style.alignSelf = T.AlignSelf.Start;
   }
   if (props.justifySelf !== undefined && props.justifySelf !== "auto") {
     const jself = mapAlignSelf(T, String(props.justifySelf));
@@ -504,47 +650,94 @@ function buildTaffyStyle(
   }
 
   // --- Size ------------------------------------------------------------------
-  const w = parseSize(props.width);
-  const h = parseSize(props.height);
+  const widthValue = axisSizeValue(props, "width");
+  const heightValue = axisSizeValue(props, "height");
+  const widthDimension = toAxisDimension(widthValue, parent, "width");
+  const heightDimension = toAxisDimension(heightValue, parent, "height");
+  const widthIsSet = widthValue !== undefined && widthValue !== null;
+  const heightIsSet = heightValue !== undefined && heightValue !== null;
 
   // Component-type defaults
-  if (type === "app" || type === "spacer" || type === "safearea") {
+  if (type === "app" || type === "safearea") {
     style.size = {
-      width: w !== null ? w : "100%",
-      height: h !== null ? h : "100%",
+      width: widthIsSet ? widthDimension : "100%",
+      height: heightIsSet ? heightDimension : "100%",
     };
+  } else if (type === "spacer") {
+    style.size = { width: widthDimension, height: heightDimension };
+    style.flexGrow = 1;
+    style.flexShrink = 1;
+    style.flexBasis = 0;
   } else if (type === "divider" || type === "separator") {
     const orientation = props.orientation || "horizontal";
     const thickness = cssLengthToPx(props.thickness) ?? 1;
     if (orientation === "vertical") {
-      style.size = { width: w ?? thickness, height: h !== null ? h : "100%" };
+      style.size = {
+        width: widthIsSet ? widthDimension : thickness,
+        height: heightIsSet ? heightDimension : "100%",
+      };
     } else {
-      style.size = { width: w !== null ? w : "100%", height: h ?? thickness };
+      style.size = {
+        width: widthIsSet ? widthDimension : "100%",
+        height: heightIsSet ? heightDimension : thickness,
+      };
     }
   } else if (type === "checkbox" || type === "radio") {
     const sz = cssLengthToPx(props.size) ?? 20;
-    style.size = { width: w ?? sz, height: h ?? sz };
+    style.size = {
+      width: widthIsSet ? widthDimension : sz,
+      height: heightIsSet ? heightDimension : sz,
+    };
   } else if (type === "switch" || type === "toggle") {
-    style.size = { width: w ?? 44, height: h ?? 24 };
+    style.size = {
+      width: widthIsSet ? widthDimension : 44,
+      height: heightIsSet ? heightDimension : 24,
+    };
   } else if (type === "slider") {
-    style.size = { width: w ?? 200, height: h ?? 20 };
+    style.size = {
+      width: widthIsSet ? widthDimension : 200,
+      height: heightIsSet ? heightDimension : 20,
+    };
   } else if (type === "scrubber") {
     // Same intrinsic box as Slider: a timeline in a controls Row grows via
     // `.flex(1)` / `.fillMaxWidth(true)` like any other child.
-    style.size = { width: w ?? 200, height: h ?? 20 };
+    style.size = {
+      width: widthIsSet ? widthDimension : 200,
+      height: heightIsSet ? heightDimension : 20,
+    };
   } else if (type === "progress" || type === "progressbar") {
-    style.size = { width: w ?? 200, height: h ?? 8 };
+    style.size = {
+      width: widthIsSet ? widthDimension : 200,
+      height: heightIsSet ? heightDimension : 8,
+    };
   } else if (type === "spinner" || type === "loading") {
     const sz = cssLengthToPx(props.size) ?? 24;
-    style.size = { width: w ?? sz, height: h ?? sz };
+    style.size = {
+      width: widthIsSet ? widthDimension : sz,
+      height: heightIsSet ? heightDimension : sz,
+    };
   } else if (type === "badge") {
-    style.size = { width: w ?? 20, height: h ?? 20 };
+    style.size = {
+      width: widthDimension,
+      height: heightDimension,
+    };
   } else if (type === "avatar") {
     const sz = cssLengthToPx(props.size) ?? 40;
-    style.size = { width: w ?? sz, height: h ?? sz };
+    style.size = {
+      width: widthIsSet ? widthDimension : sz,
+      height: heightIsSet ? heightDimension : sz,
+    };
+  } else if (type === "audio") {
+    style.size = {
+      width: widthIsSet ? widthDimension : 300,
+      height: heightIsSet ? heightDimension : 54,
+    };
   } else if (type === "icon") {
     const sz = cssLengthToPx(props.size) ?? 24;
-    style.size = { width: w ?? sz, height: h ?? sz };
+    style.size = {
+      width: widthIsSet ? widthDimension : sz,
+      height: heightIsSet ? heightDimension : sz,
+    };
   } else if (type === "input" || type === "textarea" || type === "select") {
     // Form controls have no painted children, so without an intrinsic
     // height they collapse to padding only (the social Search bar
@@ -557,10 +750,20 @@ function buildTaffyStyle(
     const minRows = type === "textarea" ? Math.max(1, Number(props.rows) || 3) : 1;
     const padTop = cssLengthToPx(props.paddingTop ?? props.padding) ?? 0;
     const padBottom = cssLengthToPx(props.paddingBottom ?? props.padding) ?? 0;
-    const borderTop = cssLengthToPx(props.borderTopWidth ?? props.borderWidth) ?? 0;
-    const borderBottom = cssLengthToPx(props.borderBottomWidth ?? props.borderWidth) ?? 0;
+    const borderTop = props.borderTopWidth !== undefined
+      ? cssLengthToPx(props.borderTopWidth) ?? 0
+      : resolvedBorderWidth(props);
+    const borderBottom = props.borderBottomWidth !== undefined
+      ? cssLengthToPx(props.borderBottomWidth) ?? 0
+      : resolvedBorderWidth(props);
     const intrinsicH = lineHeight * minRows + padTop + padBottom + borderTop + borderBottom;
-    style.size = { width: toDimension(props.width), height: h ?? intrinsicH };
+    style.size = {
+      // A native/DOM Select has an intrinsic inline width even without an
+      // authored width. Canvas leaves otherwise measure to zero because the
+      // option children are semantic data rather than layout descendants.
+      width: type === "select" && !widthIsSet ? 120 : widthDimension,
+      height: heightIsSet ? heightDimension : intrinsicH,
+    };
   } else {
     // Children of a Grid that ask for `width: 100%` actually mean "fill
     // the cell" — that's the DOM behavior (`grid > * { justify-self:
@@ -573,8 +776,8 @@ function buildTaffyStyle(
     const parentIsGridLayout =
       parent &&
       (parent.type.toLowerCase() === "grid" || parent.props.display === "grid");
-    const widthIn = parentIsGridLayout && props.width === "100%" ? undefined : props.width;
-    const heightIn = parentIsGridLayout && props.height === "100%" ? undefined : props.height;
+    const widthIn = parentIsGridLayout && widthValue === "100%" ? undefined : widthValue;
+    const heightIn = parentIsGridLayout && heightValue === "100%" ? undefined : heightValue;
     style.size = {
       width: toAxisDimension(widthIn, parent, "width"),
       height: toAxisDimension(heightIn, parent, "height"),
@@ -591,13 +794,15 @@ function buildTaffyStyle(
   // workaround and matches the DOM grid's `justify-self: stretch` shape.
   const parentIsGrid =
     parent &&
-    (parent.type.toLowerCase() === "grid" || parent.props.display === "grid");
+    (parent.type.toLowerCase() === "grid" ||
+      parent.type.toLowerCase() === "stack" ||
+      parent.props.display === "grid");
   if (props.minWidth !== undefined || props.minHeight !== undefined) {
     style.minSize = {
       width: toAxisDimension(props.minWidth, parent, "width"),
       height: toAxisDimension(props.minHeight, parent, "height"),
     };
-  } else if (parentIsGrid) {
+  } else if (parentIsGrid || (parentIsRow && style.flexGrow > 0)) {
     style.minSize = { width: 0, height: 0 };
   }
   if (props.maxWidth !== undefined || props.maxHeight !== undefined) {
@@ -609,6 +814,14 @@ function buildTaffyStyle(
 
   // --- Margin ----------------------------------------------------------------
   const m = parseSpacing(props.margin || 0);
+  if (props.marginHorizontal !== undefined) {
+    m.left = cssLengthToPx(props.marginHorizontal) ?? 0;
+    m.right = cssLengthToPx(props.marginHorizontal) ?? 0;
+  }
+  if (props.marginVertical !== undefined) {
+    m.top = cssLengthToPx(props.marginVertical) ?? 0;
+    m.bottom = cssLengthToPx(props.marginVertical) ?? 0;
+  }
   if (props.marginTop !== undefined) m.top = cssLengthToPx(props.marginTop) ?? 0;
   if (props.marginRight !== undefined) m.right = cssLengthToPx(props.marginRight) ?? 0;
   if (props.marginBottom !== undefined) m.bottom = cssLengthToPx(props.marginBottom) ?? 0;
@@ -616,7 +829,15 @@ function buildTaffyStyle(
   style.margin = { top: m.top, right: m.right, bottom: m.bottom, left: m.left };
 
   // --- Padding ---------------------------------------------------------------
-  const p = parseSpacing(props.padding || 0);
+  const p = parseSpacing(basePaddingValue(props, type));
+  if (props.paddingHorizontal !== undefined) {
+    p.left = cssLengthToPx(props.paddingHorizontal) ?? 0;
+    p.right = cssLengthToPx(props.paddingHorizontal) ?? 0;
+  }
+  if (props.paddingVertical !== undefined) {
+    p.top = cssLengthToPx(props.paddingVertical) ?? 0;
+    p.bottom = cssLengthToPx(props.paddingVertical) ?? 0;
+  }
   if (props.paddingTop !== undefined) p.top = cssLengthToPx(props.paddingTop) ?? 0;
   if (props.paddingRight !== undefined) p.right = cssLengthToPx(props.paddingRight) ?? 0;
   if (props.paddingBottom !== undefined) p.bottom = cssLengthToPx(props.paddingBottom) ?? 0;
@@ -625,7 +846,7 @@ function buildTaffyStyle(
   style.padding = { top: p.top, right: p.right, bottom: p.bottom, left: p.left };
 
   // --- Border ----------------------------------------------------------------
-  const bw = cssLengthToPx(props.borderWidth) ?? 0;
+  const bw = resolvedBorderWidth(props);
   if (bw > 0) {
     style.border = { top: bw, right: bw, bottom: bw, left: bw };
   }
@@ -642,28 +863,29 @@ function buildTaffyStyle(
     const ar = parseAspectRatio(props.aspectRatio);
     if (ar !== null) style.aspectRatio = ar;
   } else if (type === "image") {
-    // Implicit aspect ratio from the decoded image's intrinsic size — only
-    // useful when the caller fixes one dimension and lets the other follow.
-    // Without this, an image with `width: 100` stretches to whatever Taffy
-    // picks for the height (the parent's full height under the default
-    // `align-items: stretch` of a flex row).
-    //
-    // We can't rely on Taffy's `aspectRatio` alone: with `align-items:
-    // stretch`, the cross-axis size is forced before aspect-ratio is
-    // applied. Pin both dimensions explicitly instead.
+    // A decoded image contributes its intrinsic ratio even when neither
+    // dimension was declared. This is essential for auto-row grids such as
+    // `.gridColumns(3) { Image(...) }`: the track supplies the width and the
+    // natural ratio supplies a non-zero row height.
     const wParsed = parseSize(props.width);
     const hParsed = parseSize(props.height);
-    if ((wParsed === null) !== (hParsed === null)) {
-      const src = props.src ?? props[0];
-      if (typeof src === "string") {
-        const intrinsic = getImageNaturalAspect(src);
-        if (intrinsic !== null) {
+    const src = props.src ?? props[0];
+    if (typeof src === "string") {
+      const intrinsic = getImageNaturalAspect(src);
+      if (intrinsic !== null) {
+        style.aspectRatio = intrinsic;
+        // With exactly one declared axis, pin both dimensions explicitly:
+        // cross-axis stretch otherwise wins before Taffy applies the ratio.
+        if ((wParsed === null) !== (hParsed === null)) {
           if (wParsed !== null) {
             style.size = { width: wParsed, height: wParsed / intrinsic };
-            style.aspectRatio = intrinsic;
           } else if (hParsed !== null) {
             style.size = { width: hParsed * intrinsic, height: hParsed };
-            style.aspectRatio = intrinsic;
+          }
+        } else if (wParsed === null && hParsed === null && parentType !== "grid") {
+          const natural = getImageNaturalSize(src);
+          if (natural !== null) {
+            style.size = { width: natural.width, height: natural.height };
           }
         }
       }
@@ -737,8 +959,18 @@ function buildTaffyStyle(
   return style;
 }
 
+function inheritedTextAlign(node: VirtualNode): string | null {
+  let current: VirtualNode | null = node;
+  while (current) {
+    const value = current.props.textAlign ?? current.props["text-align"];
+    if (value !== undefined) return String(value).toLowerCase();
+    current = current.parent;
+  }
+  return null;
+}
+
 function mapJustify(T: typeof import("taffy-layout"), value: string) {
-  switch (value) {
+  switch (normalizeJustify(value)) {
     case "center": return T.JustifyContent.Center;
     case "flex-end": case "end": return T.JustifyContent.End;
     case "space-between": return T.JustifyContent.SpaceBetween;
@@ -1007,10 +1239,10 @@ function buildTree(
   // symptom).
   if (node.type.toLowerCase() === "text" && props[0] && node.children.length === 0) {
     const text = String(props[0] || "");
-    const fontSize = cssLengthToPx(props.fontSize) ?? 16;
-    const fontWeight = props.fontWeight || "normal";
-    const fontFamily = props.fontFamily || "system-ui, sans-serif";
-    const lineHeight = cssLineHeightToPx(props.lineHeight, fontSize) ?? fontSize * 1.2;
+    const fontSize = cssLengthToPx(inheritedTextProp(node, "fontSize")) ?? 16;
+    const fontWeight = inheritedTextProp(node, "fontWeight") || "normal";
+    const fontFamily = inheritedTextProp(node, "fontFamily") || "system-ui, sans-serif";
+    const lineHeight = cssLineHeightToPx(inheritedTextProp(node, "lineHeight"), fontSize) ?? fontSize * 1.2;
 
     const p = parseSpacing(props.padding || 0);
     if (props.paddingTop !== undefined) p.top = cssLengthToPx(props.paddingTop) ?? 0;
@@ -1028,7 +1260,7 @@ function buildTree(
     const textOverflow =
       props.textOverflow === "ellipsis" || props.textOverflow === "clip"
         ? (props.textOverflow as "ellipsis" | "clip")
-        : undefined;
+        : maxLines !== undefined ? "ellipsis" : undefined;
 
     const ctx: TextMeasureContext = {
       text,
@@ -1052,9 +1284,11 @@ function buildTree(
   // for the leaf's max-content height, which for an image with no fixed
   // height is 0; without the callback the row collapses.
   if (node.type.toLowerCase() === "image" && node.children.length === 0) {
-    const ar =
-      props.aspectRatio !== undefined
-        ? parseAspectRatio(props.aspectRatio)
+    const src = props.src ?? props[0];
+    const ar = props.aspectRatio !== undefined
+      ? parseAspectRatio(props.aspectRatio)
+      : typeof src === "string"
+        ? getImageNaturalAspect(src)
         : null;
     if (ar !== null) {
       const ictx: ImageAspectMeasureContext = { aspectRatio: ar };
@@ -1079,6 +1313,12 @@ function buildTree(
       aspectRatio: ar ?? getVideoIntrinsicAspect(node.id, props),
     };
     return tree.newLeafWithContext(style, ictx);
+  }
+
+  // Select options are semantic data for the control, not painted/layout
+  // descendants. Treat Select as one intrinsic-height form-control leaf.
+  if (node.type.toLowerCase() === "select") {
+    return tree.newLeaf(style);
   }
 
   // Container nodes
@@ -1114,8 +1354,8 @@ function writeLayout(
   const absX = parentX + tl.x + (isRoot ? tl.marginLeft : 0);
   const absY = parentY + tl.y + (isRoot ? tl.marginTop : 0);
 
-  const borderColor = node.props.borderColor || "transparent";
-  const borderRadius = cssLengthToPx(node.props.borderRadius) ?? 0;
+  const borderColor = resolvedBorderColor(node.props);
+  const borderRadius = resolvedBorderRadius(node.props);
   // Taffy computes uniform border width per side; pick top as representative
   const borderWidth = tl.borderTop;
 
@@ -1151,7 +1391,7 @@ function writeLayout(
 
   // A Video was built as a leaf (see buildTree) — its children are slot
   // overlays with no Taffy nodes; `layoutVideoSlots` places them.
-  if (isVideoNode(node)) return;
+  if (isVideoNode(node) || node.type.toLowerCase() === "select") return;
 
   // Recurse children (same order as buildTree)
   for (let i = 0; i < node.children.length; i++) {
@@ -1195,7 +1435,9 @@ function annotateCollapsedAspectGrids(node: VirtualNode): boolean {
     const ar =
       child.props.aspectRatio !== undefined
         ? parseAspectRatio(child.props.aspectRatio)
-        : null;
+        : typeof (child.props.src ?? child.props[0]) === "string"
+          ? getImageNaturalAspect(child.props.src ?? child.props[0])
+          : null;
     if (ar === null) continue;
     firstAspectKid = child;
     aspectRatio = ar;
@@ -1252,18 +1494,18 @@ function computeLayoutTaffy(
     // items at w-24 inflated the entire feed to 607px on a 470px canvas,
     // pushing the BottomNav off-screen.
     const rootProps = node.props;
-    const rootHasExplicitWidth =
-      rootProps.width !== undefined || rootProps["width.0"] !== undefined;
-    const rootHasExplicitHeight =
-      rootProps.height !== undefined || rootProps["height.0"] !== undefined;
+    const rootWidth = axisSizeValue(rootProps, "width");
+    const rootHeight = axisSizeValue(rootProps, "height");
+    const rootHasExplicitWidth = rootWidth !== undefined && rootWidth !== null;
+    const rootHasExplicitHeight = rootHeight !== undefined && rootHeight !== null;
     if (!rootHasExplicitWidth || !rootHasExplicitHeight) {
       const rootStyle = tree.getStyle(rootId);
       rootStyle.size = {
         width: rootHasExplicitWidth
-          ? cssLengthToDimension(rootProps.width ?? rootProps["width.0"])
+          ? cssLengthToDimension(rootWidth)
           : availableWidth,
         height: rootHasExplicitHeight
-          ? cssLengthToDimension(rootProps.height ?? rootProps["height.0"])
+          ? cssLengthToDimension(rootHeight)
           : availableHeight,
       };
       tree.setStyle(rootId, rootStyle);
@@ -1468,6 +1710,14 @@ interface FallbackBox {
 
 function readMarginFallback(props: Record<string, any>): BoxSpacing {
   const m = parseSpacing(props.margin || 0);
+  if (props.marginHorizontal !== undefined) {
+    m.left = cssLengthToPx(props.marginHorizontal) ?? 0;
+    m.right = cssLengthToPx(props.marginHorizontal) ?? 0;
+  }
+  if (props.marginVertical !== undefined) {
+    m.top = cssLengthToPx(props.marginVertical) ?? 0;
+    m.bottom = cssLengthToPx(props.marginVertical) ?? 0;
+  }
   if (props.marginTop !== undefined) m.top = cssLengthToPx(props.marginTop) ?? 0;
   if (props.marginRight !== undefined) m.right = cssLengthToPx(props.marginRight) ?? 0;
   if (props.marginBottom !== undefined) m.bottom = cssLengthToPx(props.marginBottom) ?? 0;
@@ -1475,8 +1725,16 @@ function readMarginFallback(props: Record<string, any>): BoxSpacing {
   return m;
 }
 
-function readPaddingFallback(props: Record<string, any>, type?: string): BoxSpacing {
-  const p = parseSpacing(props.padding || 0);
+function readPaddingFallback(props: Record<string, any>, type: string): BoxSpacing {
+  const p = parseSpacing(basePaddingValue(props, type));
+  if (props.paddingHorizontal !== undefined) {
+    p.left = cssLengthToPx(props.paddingHorizontal) ?? 0;
+    p.right = cssLengthToPx(props.paddingHorizontal) ?? 0;
+  }
+  if (props.paddingVertical !== undefined) {
+    p.top = cssLengthToPx(props.paddingVertical) ?? 0;
+    p.bottom = cssLengthToPx(props.paddingVertical) ?? 0;
+  }
   if (props.paddingTop !== undefined) p.top = cssLengthToPx(props.paddingTop) ?? 0;
   if (props.paddingRight !== undefined) p.right = cssLengthToPx(props.paddingRight) ?? 0;
   if (props.paddingBottom !== undefined) p.bottom = cssLengthToPx(props.paddingBottom) ?? 0;
@@ -1485,11 +1743,11 @@ function readPaddingFallback(props: Record<string, any>, type?: string): BoxSpac
   return p;
 }
 
-function readBoxFallback(props: Record<string, any>, type?: string): FallbackBox {
+function readBoxFallback(props: Record<string, any>, type: string): FallbackBox {
   return {
     margin: readMarginFallback(props),
     padding: readPaddingFallback(props, type),
-    border: cssLengthToPx(props.borderWidth) ?? 0,
+    border: resolvedBorderWidth(props),
   };
 }
 
@@ -1531,9 +1789,10 @@ function intrinsicSizeFallback(
   const type = node.type.toLowerCase();
   switch (type) {
     case "app":
-    case "spacer":
     case "safearea":
       return { width: availW, height: availH };
+    case "spacer":
+      return { width: null, height: null };
     case "divider":
     case "separator": {
       const thickness = cssLengthToPx(props.thickness) ?? 1;
@@ -1561,12 +1820,12 @@ function intrinsicSizeFallback(
       const sz = cssLengthToPx(props.size) ?? 24;
       return { width: sz, height: sz };
     }
-    case "badge":
-      return { width: 20, height: 20 };
     case "avatar": {
       const sz = cssLengthToPx(props.size) ?? 40;
       return { width: sz, height: sz };
     }
+    case "audio":
+      return { width: 300, height: 54 };
     case "icon": {
       const sz = cssLengthToPx(props.size) ?? 24;
       return { width: sz, height: sz };
@@ -1604,7 +1863,7 @@ function textMetricsFallback(
   maxWidth: number | undefined,
 ) {
   const props = node.props;
-  const fontSize = cssLengthToPx(props.fontSize) ?? 16;
+  const fontSize = cssLengthToPx(inheritedTextProp(node, "fontSize")) ?? 16;
   const maxLinesRaw = props.maxLines;
   const maxLines =
     typeof maxLinesRaw === "number"
@@ -1615,15 +1874,15 @@ function textMetricsFallback(
   const textOverflow =
     props.textOverflow === "ellipsis" || props.textOverflow === "clip"
       ? (props.textOverflow as "ellipsis" | "clip")
-      : undefined;
+      : maxLines !== undefined ? "ellipsis" : undefined;
   return measureText(
     ctx,
     String(props[0] ?? props.text ?? ""),
     {
       fontSize,
-      fontWeight: props.fontWeight || "normal",
-      fontFamily: props.fontFamily || "system-ui, sans-serif",
-      lineHeight: cssLineHeightToPx(props.lineHeight, fontSize) ?? fontSize * 1.2,
+      fontWeight: inheritedTextProp(node, "fontWeight") || "normal",
+      fontFamily: inheritedTextProp(node, "fontFamily") || "system-ui, sans-serif",
+      lineHeight: cssLineHeightToPx(inheritedTextProp(node, "lineHeight"), fontSize) ?? fontSize * 1.2,
       letterSpacing: cssLengthToPxForFont(props.letterSpacing, fontSize) ?? 0,
     },
     maxWidth,
@@ -1667,8 +1926,8 @@ function measureFallback(
   const insetW = box.padding.left + box.padding.right + box.border * 2;
   const insetH = box.padding.top + box.padding.bottom + box.border * 2;
 
-  let width = resolveLenFallback(props.width, availW);
-  let height = resolveLenFallback(props.height, availH);
+  let width = resolveLenFallback(axisSizeValue(props, "width"), availW);
+  let height = resolveLenFallback(axisSizeValue(props, "height"), availH);
   if (width === null && pinnedW !== undefined) width = pinnedW;
 
   const intrinsic = intrinsicSizeFallback(node, availW, availH);
@@ -1814,18 +2073,21 @@ function measureChildrenFallback(
  * The effective cross-axis alignment for one child: `align-self` overrides
  * the container's `align-items`, and the Hypen-native
  * `horizontalAlignment` / `verticalAlignment` props alias `align-items` on
- * the cross axis. Defaults mirror the DOM handlers — Column stretches its
- * children, Row leaves them at their content size.
+ * the cross axis. Defaults mirror the DOM handlers: both Column and Row keep
+ * intrinsic child cross sizes; expansion is explicit.
  */
 function childAlign(parent: VirtualNode, child: VirtualNode, isCol: boolean): string {
   const selfRaw = child.props.alignSelf;
   if (selfRaw !== undefined && selfRaw !== "auto") return normalizeAlign(String(selfRaw));
+  if (isCol && needsAutomaticCrossAxisStretch(child)) return "stretch";
+  if (child.type.toLowerCase() === "badge") return "flex-start";
   const props = parent.props;
+  if (parent.type.toLowerCase() === "center") return "center";
   const raw = isCol
     ? (props.horizontalAlignment || props.alignItems)
     : (props.verticalAlignment || props.alignItems);
   if (raw) return normalizeAlign(String(raw));
-  return isCol ? "stretch" : "flex-start";
+  return "flex-start";
 }
 
 /** Fold the `start`/`flex-start` and `end`/`flex-end` spellings together. */
@@ -1839,10 +2101,17 @@ function normalizeAlign(value: string): string {
 
 /** Same folding for justify-content, including the space-* keywords. */
 function normalizeJustify(value: string): string {
-  switch (value) {
+  // Engine applicator values use camelCase (`spaceBetween`) while Tailwind
+  // and CSS use kebab-case (`space-between`). Accept both spellings so the
+  // production Taffy path and the JS fallback distribute free space alike.
+  const canonical = value
+    .trim()
+    .replace(/([a-z0-9])([A-Z])/g, "$1-$2")
+    .toLowerCase();
+  switch (canonical) {
     case "start": case "flex-start": return "flex-start";
     case "end": case "flex-end": return "flex-end";
-    default: return value;
+    default: return canonical;
   }
 }
 
@@ -1872,8 +2141,8 @@ function placeFallback(
     padding: box.padding,
     border: {
       width: borderWidth,
-      color: props.borderColor || "transparent",
-      radius: cssLengthToPx(props.borderRadius) ?? 0,
+      color: resolvedBorderColor(props),
+      radius: resolvedBorderRadius(props),
     },
     contentX: box.padding.left + borderWidth,
     contentY: box.padding.top + borderWidth,
@@ -1922,7 +2191,9 @@ function placeChildrenFallback(ctx: CanvasRenderingContext2D, parent: VirtualNod
 
     const justify = normalizeJustify(
       String(
-        (isCol
+        parent.type.toLowerCase() === "center"
+          ? "center"
+          : (isCol
           ? props.verticalAlignment || props.justifyContent
           : props.horizontalAlignment || props.justifyContent) || "flex-start",
       ),
@@ -1950,7 +2221,7 @@ function placeChildrenFallback(ctx: CanvasRenderingContext2D, parent: VirtualNod
       const childAvailCross = Math.max(0, availCross - crossMargin);
 
       // Cross axis first: it decides how text wraps, hence the main size.
-      const crossProp = isCol ? cp.width : cp.height;
+      const crossProp = axisSizeValue(cp, isCol ? "width" : "height");
       const crossBasis = isCol ? availCross : availCross;
       let cross = resolveLenFallback(crossProp, crossBasis);
       const crossIsExplicit = cross !== null;
@@ -1968,12 +2239,17 @@ function placeChildrenFallback(ctx: CanvasRenderingContext2D, parent: VirtualNod
       if (cross === null) cross = isCol ? measured.width : measured.height;
 
       // Main axis: explicit size, else flex-basis, else content.
-      const flexShorthand = cp.flex !== undefined ? parseFloat(cp.flex) : NaN;
-      let main = resolveLenFallback(isCol ? cp.height : cp.width, availMain);
+      const flexValue = cp.flex ?? cp.weight;
+      const flexShorthand = flexValue !== undefined ? parseFloat(flexValue) : NaN;
+      const childType = child.type.toLowerCase();
+      let main = resolveLenFallback(
+        axisSizeValue(cp, isCol ? "height" : "width"),
+        availMain,
+      );
       if (main === null && cp.flexBasis !== undefined) {
         main = resolveLenFallback(cp.flexBasis, availMain);
       }
-      if (main === null && Number.isFinite(flexShorthand)) {
+      if (main === null && (Number.isFinite(flexShorthand) || childType === "spacer")) {
         // `flex: N` is `N N 0%` — start from zero and grow up, matching the
         // Taffy path (and CSS). Without the zero basis a `flex-1` sibling
         // starts at its content size and steals the container's free space.
@@ -1981,9 +2257,9 @@ function placeChildrenFallback(ctx: CanvasRenderingContext2D, parent: VirtualNod
       }
       if (main === null) main = isCol ? measured.height : measured.width;
 
-      const grow =
-        parseFloat(cp.flexGrow) || (Number.isFinite(flexShorthand) ? flexShorthand : 0);
-      const childType = child.type.toLowerCase();
+      const grow = childType === "spacer"
+        ? 1
+        : parseFloat(cp.flexGrow) || (Number.isFinite(flexShorthand) ? flexShorthand : 0);
       const defaultShrink = INTRINSIC_SIZED.has(childType) || mainScrolls ? 0 : 1;
       const shrink = cp.flexShrink !== undefined ? parseFloat(cp.flexShrink) : defaultShrink;
 
@@ -2156,8 +2432,8 @@ function placeAbsoluteFallback(
   const bottom = resolveLenFallback(cp.bottom, contentH);
 
   const measured = measureFallback(ctx, child, contentW, contentH, false, false);
-  let width = resolveLenFallback(cp.width, contentW);
-  let height = resolveLenFallback(cp.height, contentH);
+  let width = resolveLenFallback(axisSizeValue(cp, "width"), contentW);
+  let height = resolveLenFallback(axisSizeValue(cp, "height"), contentH);
   if (width === null) {
     width = left !== null && right !== null ? Math.max(0, contentW - left - right) : measured.width;
   }

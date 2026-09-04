@@ -26,10 +26,8 @@ fn fixture_path() -> Option<PathBuf> {
     static FIXTURE: OnceLock<Option<PathBuf>> = OnceLock::new();
     FIXTURE
         .get_or_init(|| {
-            let path = std::env::temp_dir().join(format!(
-                "hypen_video_fixture_{}.mp4",
-                std::process::id()
-            ));
+            let path = std::env::temp_dir()
+                .join(format!("hypen_video_fixture_{}.mp4", std::process::id()));
             build_fixture(&path).then_some(path)
         })
         .clone()
@@ -95,7 +93,10 @@ fn build_fixture(path: &std::path::Path) -> bool {
             gst::ClockTime::from_seconds(20),
             &[gst::MessageType::Eos, gst::MessageType::Error],
         );
-        let ok = matches!(msg.as_ref().map(|m| m.view()), Some(gst::MessageView::Eos(_)));
+        let ok = matches!(
+            msg.as_ref().map(|m| m.view()),
+            Some(gst::MessageView::Eos(_))
+        );
         let _ = pipeline.set_state(gst::State::Null);
         if ok && path.exists() {
             return true;
@@ -176,7 +177,10 @@ fn eos_surfaces_ended_event_and_marks_paused() {
             .into_iter()
             .find(|e| e.node_id == node && matches!(e.kind, MediaEventKind::Ended))
     });
-    assert!(ended.is_some(), "EOS should surface a MediaEventKind::Ended");
+    assert!(
+        ended.is_some(),
+        "EOS should surface a MediaEventKind::Ended"
+    );
     assert!(
         is_paused(node),
         "an ended player reports paused so the painter overlays the play glyph"
@@ -212,7 +216,12 @@ fn missing_file_surfaces_error_event() {
             .find(|e| e.node_id == node && matches!(e.kind, MediaEventKind::Error { .. }))
     });
     let Some(MediaEvent {
-        kind: MediaEventKind::Error { code, message, status },
+        kind:
+            MediaEventKind::Error {
+                code,
+                message,
+                status,
+            },
         ..
     }) = err
     else {
@@ -241,8 +250,7 @@ fn toggle_pauses_and_resumes() {
     let node = "test-video-toggle";
     start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
         .expect("start playback of local fixture");
-    poll_until(Duration::from_secs(15), || current_frame(node))
-        .expect("frame before toggling");
+    poll_until(Duration::from_secs(15), || current_frame(node)).expect("frame before toggling");
     assert_eq!(toggle(node), Some(false), "first toggle pauses");
     assert!(is_paused(node));
     assert_eq!(toggle(node), Some(true), "second toggle resumes");
@@ -265,19 +273,30 @@ fn suspend_pauses_playing_pipeline_and_resume_restores_it() {
     let node = "test-video-suspend";
     start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
         .expect("start playback of local fixture");
-    poll_until(Duration::from_secs(15), || current_frame(node))
-        .expect("frame before suspending");
+    poll_until(Duration::from_secs(15), || current_frame(node)).expect("frame before suspending");
 
-    assert!(set_suspended(node, true), "suspending a playing pipeline changes state");
+    assert!(
+        set_suspended(node, true),
+        "suspending a playing pipeline changes state"
+    );
     assert!(is_suspended(node));
-    assert!(!is_paused(node), "suspension must not surface as user-facing pause");
+    assert!(
+        !is_paused(node),
+        "suspension must not surface as user-facing pause"
+    );
     assert!(!set_suspended(node, true), "re-suspending is a no-op");
 
-    assert!(set_suspended(node, false), "resuming a suspended pipeline changes state");
+    assert!(
+        set_suspended(node, false),
+        "resuming a suspended pipeline changes state"
+    );
     assert!(!is_suspended(node));
     assert!(!set_suspended(node, false), "re-resuming is a no-op");
     release(node);
-    assert!(!set_suspended("test-video-suspend", true), "released node has nothing to suspend");
+    assert!(
+        !set_suspended("test-video-suspend", true),
+        "released node has nothing to suspend"
+    );
 }
 
 #[test]
@@ -294,8 +313,7 @@ fn suspend_leaves_user_paused_player_paused_across_the_round_trip() {
     let node = "test-video-suspend-paused";
     start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
         .expect("start playback of local fixture");
-    poll_until(Duration::from_secs(15), || current_frame(node))
-        .expect("frame before pausing");
+    poll_until(Duration::from_secs(15), || current_frame(node)).expect("frame before pausing");
     assert_eq!(toggle(node), Some(false), "user pauses");
 
     assert!(
@@ -307,7 +325,10 @@ fn suspend_leaves_user_paused_player_paused_across_the_round_trip() {
         !set_suspended(node, false),
         "resuming must not restart a player the user paused"
     );
-    assert!(is_paused(node), "user-facing pause survives the detach/attach round trip");
+    assert!(
+        is_paused(node),
+        "user-facing pause survives the detach/attach round trip"
+    );
     release(node);
 }
 
@@ -408,7 +429,11 @@ fn set_playing_drives_explicit_states_and_restarts_after_eos() {
         return;
     };
     let node = "test-video-set-playing";
-    assert_eq!(set_playing(node, true), None, "no pipeline, no state change");
+    assert_eq!(
+        set_playing(node, true),
+        None,
+        "no pipeline, no state change"
+    );
     let _ = take_events();
     start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
         .expect("start playback of local fixture");
@@ -509,19 +534,38 @@ fn node_with(props: &[(&str, serde_json::Value)]) -> crate::tree::Node {
 #[test]
 fn prop_truthy_accepts_bool_and_string_under_both_keys() {
     use serde_json::json;
-    assert!(prop_truthy(&node_with(&[("autoplay", json!(true))]), "autoplay"));
-    assert!(prop_truthy(&node_with(&[("autoplay.0", json!("true"))]), "autoplay"));
-    assert!(!prop_truthy(&node_with(&[("autoplay", json!(false))]), "autoplay"));
-    assert!(!prop_truthy(&node_with(&[("autoplay", json!("no"))]), "autoplay"));
+    assert!(prop_truthy(
+        &node_with(&[("autoplay", json!(true))]),
+        "autoplay"
+    ));
+    assert!(prop_truthy(
+        &node_with(&[("autoplay.0", json!("true"))]),
+        "autoplay"
+    ));
+    assert!(!prop_truthy(
+        &node_with(&[("autoplay", json!(false))]),
+        "autoplay"
+    ));
+    assert!(!prop_truthy(
+        &node_with(&[("autoplay", json!("no"))]),
+        "autoplay"
+    ));
     assert!(!prop_truthy(&node_with(&[]), "autoplay"));
 }
 
 #[test]
 fn resolve_playlist_keeps_index_alignment() {
     use serde_json::json;
-    let node = node_with(&[("playlist", json!(["https://cdn/a.mp4", "", "https://cdn/c.mp4"]))]);
+    let node = node_with(&[(
+        "playlist",
+        json!(["https://cdn/a.mp4", "", "https://cdn/c.mp4"]),
+    )]);
     let list = resolve_playlist(&node);
-    assert_eq!(list.len(), 3, "empty entries must NOT be filtered — indexes align");
+    assert_eq!(
+        list.len(),
+        3,
+        "empty entries must NOT be filtered — indexes align"
+    );
     assert_eq!(list[2], "https://cdn/c.mp4");
 }
 
@@ -559,7 +603,10 @@ fn play_opts_disable_single_src_loop_for_playlists() {
 fn http_status_extraction_ignores_codec_numbers_and_source_lines() {
     use super::gst_pipeline::extract_http_status;
     assert_eq!(extract_http_status("Not Found (404)"), Some(404));
-    assert_eq!(extract_http_status("server returned 403, giving up"), Some(403));
+    assert_eq!(
+        extract_http_status("server returned 403, giving up"),
+        Some(403)
+    );
     // Status-line echoes count as an explicit pattern.
     assert_eq!(extract_http_status("HTTP/1.1 403 Forbidden"), Some(403));
     assert_eq!(extract_http_status("got HTTP/2 502"), Some(502));

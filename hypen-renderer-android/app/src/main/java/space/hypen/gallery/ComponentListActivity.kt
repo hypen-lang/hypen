@@ -119,6 +119,15 @@ object GalleryItems {
     )
 
     val all = components + applicators
+
+    /** Resolve either the user-facing item name or its canonical deeplink segment. */
+    fun find(nameOrPathSegment: String): GalleryItem? {
+        val query = nameOrPathSegment.trim()
+        return all.find { item ->
+            item.name.equals(query, ignoreCase = true) ||
+                item.path.substringAfterLast('/').equals(query, ignoreCase = true)
+        }
+    }
 }
 
 class ComponentListActivity : ComponentActivity() {
@@ -164,13 +173,10 @@ class ComponentListActivity : ComponentActivity() {
         // Get the name parameter, removing any surrounding quotes
         val name = uri.getQueryParameter("name")?.trim()?.removeSurrounding("\"")
 
-        // Validate that the component exists
-        return if (name != null && GalleryItems.all.any { it.name.equals(name, ignoreCase = true) }) {
-            // Return the actual name with correct casing
-            GalleryItems.all.find { it.name.equals(name, ignoreCase = true) }?.name
-        } else {
-            null
-        }
+        // Accept both the user-facing name and the canonical deeplink segment.
+        // Some applicators intentionally use different labels, such as
+        // verticalAlignment -> /applicators/justifyContent.
+        return name?.let(GalleryItems::find)?.name
     }
 }
 
@@ -362,7 +368,7 @@ fun ComponentPreviewScreen(
     item: GalleryItem,
     onClose: () -> Unit,
 ) {
-    val url = "ws://10.0.2.2:${GalleryItems.SERVER_PORT}${item.path}"
+    val url = "ws://10.0.2.2:${GalleryItems.SERVER_PORT}${item.path}?platform=android"
 
     Scaffold(
         // The preview surface has to reach the bottom window edge, or `SafeArea` inside the

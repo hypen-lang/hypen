@@ -17,6 +17,7 @@ use crate::remote::RemoteModule;
 use crate::window::{App as WindowApp, AppEvent, PatchQueue};
 use hypen_server::app::HypenApp;
 use hypen_server::module::ModuleBuilder;
+use std::path::PathBuf;
 use std::sync::Arc;
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -29,6 +30,7 @@ pub struct DesktopApp {
     reduced_motion: Option<bool>,
     window_icon: Option<winit::window::Icon>,
     safe_area_insets: crate::layout::SafeAreaInsets,
+    screenshot_path: Option<PathBuf>,
 }
 
 impl DesktopApp {
@@ -42,6 +44,7 @@ impl DesktopApp {
             reduced_motion: None,
             window_icon: None,
             safe_area_insets: crate::layout::SafeAreaInsets::default(),
+            screenshot_path: None,
         }
     }
 
@@ -176,6 +179,16 @@ impl DesktopApp {
         }
     }
 
+    /// Save one settled renderer frame as a PNG and close the app.
+    ///
+    /// The exported image uses the logical dimensions configured by
+    /// [`Self::size`], so Retina and standard-density hosts produce the same
+    /// screenshot size. This is intended for gallery and visual-regression
+    /// capture; ordinary apps should omit it.
+    pub fn screenshot(mut self, path: impl Into<PathBuf>) -> Self {
+        self.screenshot_path = Some(path.into());
+        self
+    }
     /// Drive the window with a fully-built SDK module instance.
     ///
     /// ```rust,ignore
@@ -302,7 +315,11 @@ impl DesktopApp {
         if let Some(on) = self.reduced_motion {
             app.set_reduced_motion(on);
         }
+        app.set_screenshot_path(self.screenshot_path.clone());
         event_loop.run_app(&mut app).expect("event loop run");
+        if let Some(error) = app.take_screenshot_error() {
+            panic!("desktop screenshot failed: {error}");
+        }
     }
 }
 

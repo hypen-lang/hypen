@@ -399,8 +399,7 @@ fn create_list_tree_impl(
         let multi_template = element.ir_children.len() > 1;
         // Warm the iterable memo at creation (see create_foreach_ir_tree):
         // the first re-reconcile then skips unchanged items outright.
-        let templates_hash =
-            crate::reconcile::keyed::templates_fingerprint(&element.ir_children);
+        let templates_hash = crate::reconcile::keyed::templates_fingerprint(&element.ir_children);
         // This node's stored template IS this element — warm the cache so
         // the first update pass skips the serialization.
         if let Some(node) = ctx.tree.get_mut(node_id) {
@@ -431,11 +430,10 @@ fn create_list_tree_impl(
                     .and_then(Option::as_ref);
                 let child_id = if let Some(plan) = plan {
                     if row_protos[template_idx].is_none() {
-                        row_protos[template_idx] = Some(
-                            crate::reconcile::binding_map::build_row_prototype(
+                        row_protos[template_idx] =
+                            Some(crate::reconcile::binding_map::build_row_prototype(
                                 ctx, child_ir, "item",
-                            ),
-                        );
+                            ));
                     }
                     match row_protos[template_idx].as_ref().and_then(Option::as_ref) {
                         Some(proto) => crate::reconcile::binding_map::instantiate_row_from_proto(
@@ -1491,18 +1489,15 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             // Read the current cache state out of the existing node. Each
             // Router instance carries its own detached-subtree cache keyed
             // by route pattern (see ControlFlowKind::Router).
-            let (mut cache, prev_route_key, max_cache_size) = match ctx
-                .tree
-                .get(node_id)
-                .and_then(|n| n.control_flow.as_ref())
-            {
-                Some(ControlFlowKind::Router {
-                    cache,
-                    current_route_key,
-                    max_cache_size,
-                }) => (cache.clone(), current_route_key.clone(), *max_cache_size),
-                _ => (IndexMap::new(), None, DEFAULT_ROUTER_CACHE_SIZE),
-            };
+            let (mut cache, prev_route_key, max_cache_size) =
+                match ctx.tree.get(node_id).and_then(|n| n.control_flow.as_ref()) {
+                    Some(ControlFlowKind::Router {
+                        cache,
+                        current_route_key,
+                        max_cache_size,
+                    }) => (cache.clone(), current_route_key.clone(), *max_cache_size),
+                    _ => (IndexMap::new(), None, DEFAULT_ROUTER_CACHE_SIZE),
+                };
 
             let matched = find_matching_route_with_key(&location_str, routes, fallback.as_deref());
             let new_route_key = matched.as_ref().map(|(k, _)| k.clone());

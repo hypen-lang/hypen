@@ -242,11 +242,11 @@ describe("fallback alignment", () => {
     expect(child.layout!.x).toBe(100);
   });
 
-  test("Column children stretch to the container width by default", () => {
-    const child = makeNode("Column", { "height.0": "40px" });
+  test("Column children keep their intrinsic width by default", () => {
+    const child = makeNode("Column", { "width.0": "60px", "height.0": "40px" });
     const col = makeNode("Column", { "width.0": "300px", "height.0": "100px" }, [child]);
     layout(col, 800, 400);
-    expect(child.layout!.width).toBe(300);
+    expect(child.layout!.width).toBe(60);
   });
 
   test("items-start opts a Column's children out of the stretch", () => {

@@ -67,6 +67,7 @@ class AudioComponent : ComponentHandler {
         val loop = element.getBoolProp("loop")
             ?: element.getBoolProp("loop.0")
             ?: false
+        val showsControls = audioControlsVisible(element)
 
         if (src == null) {
             // No source - render children (for playlist UI, etc.)
@@ -119,6 +120,11 @@ class AudioComponent : ComponentHandler {
                 delay(500)
             }
         }
+
+        // Keep the player alive for headless/autoplay use, but match the DOM
+        // contract: explicit `controls: false` contributes no transport UI or
+        // layout footprint.
+        if (!showsControls) return
 
         // Simple audio player UI
         Box(modifier = modifier) {
@@ -180,3 +186,6 @@ class AudioComponent : ComponentHandler {
         return "$minutes:${seconds.toString().padStart(2, '0')}"
     }
 }
+
+internal fun audioControlsVisible(element: HypenElement): Boolean =
+    element.getBoolProp("controls") ?: element.getBoolProp("controls.0") ?: true

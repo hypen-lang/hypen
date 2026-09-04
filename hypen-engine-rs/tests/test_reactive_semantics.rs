@@ -8,9 +8,9 @@
 //! fixed point. See the `Patch::SetSemantics` docs in `reconcile/patch.rs`.
 
 use hypen_engine::ir::ast_to_ir_node;
+use hypen_engine::ir::Semantics;
 use hypen_engine::reactive::DependencyGraph;
 use hypen_engine::reconcile::{InstanceTree, Patch};
-use hypen_engine::ir::Semantics;
 use hypen_parser::parse_component;
 use serde_json::json;
 
@@ -32,8 +32,7 @@ fn reconcile_ir(
     state: &serde_json::Value,
     dependencies: &mut DependencyGraph,
 ) -> Vec<Patch> {
-    let patches =
-        hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
+    let patches = hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
     EXPANDER.with(|e| e.borrow_mut().expand(patches))
 }
 
@@ -42,7 +41,12 @@ fn reconcile_ir(
 fn setup(
     source: &str,
     state: &serde_json::Value,
-) -> (InstanceTree, DependencyGraph, hypen_engine::IRNode, Vec<Patch>) {
+) -> (
+    InstanceTree,
+    DependencyGraph,
+    hypen_engine::IRNode,
+    Vec<Patch>,
+) {
     let component = parse_component(source).unwrap();
     let ir = ast_to_ir_node(&component);
     let mut tree = InstanceTree::new();
@@ -83,13 +87,20 @@ fn templated_name_re_emits_on_change() {
         _ => None,
     });
     assert_eq!(create_sem.and_then(|s| s.name), Some("Save".to_string()));
-    assert!(set_semantics(&initial).is_empty(), "no SetSemantics at create");
+    assert!(
+        set_semantics(&initial).is_empty(),
+        "no SetSemantics at create"
+    );
 
     // The name's source path changes → exactly one SetSemantics with the
     // new resolved name.
     let patches = update(&mut tree, &mut deps, &ir, &json!({"label": "Submit"}));
     let blocks = set_semantics(&patches);
-    assert_eq!(blocks.len(), 1, "expected exactly one SetSemantics, got {patches:?}");
+    assert_eq!(
+        blocks.len(),
+        1,
+        "expected exactly one SetSemantics, got {patches:?}"
+    );
     let block = blocks[0].as_ref().expect("block should be Some");
     assert_eq!(block.name.as_deref(), Some("Submit"));
 }
@@ -99,7 +110,12 @@ fn unrelated_state_change_emits_no_set_semantics() {
     let state = json!({"label": "Save", "count": 1});
     let (mut tree, mut deps, ir, _) = setup(r#"Button("@{state.label}")"#, &state);
 
-    let patches = update(&mut tree, &mut deps, &ir, &json!({"label": "Save", "count": 2}));
+    let patches = update(
+        &mut tree,
+        &mut deps,
+        &ir,
+        &json!({"label": "Save", "count": 2}),
+    );
     assert!(
         set_semantics(&patches).is_empty(),
         "unchanged semantics must not re-emit, got {patches:?}"
@@ -243,23 +259,24 @@ fn foreach_items_mint_ids_from_item_data() {
     let option_ids: Vec<String> = patches
         .iter()
         .filter_map(|p| match p {
-            Patch::Create { semantics: Some(s), .. } if s.role == Some(hypen_engine::ir::Role::OptionItem) => {
-                s.id.clone()
-            }
+            Patch::Create {
+                semantics: Some(s), ..
+            } if s.role == Some(hypen_engine::ir::Role::OptionItem) => s.id.clone(),
             _ => None,
         })
         .collect();
-    assert_eq!(option_ids, vec!["opt-apple".to_string(), "opt-pear".to_string()]);
+    assert_eq!(
+        option_ids,
+        vec!["opt-apple".to_string(), "opt-pear".to_string()]
+    );
 
     // The container resolved its bound activedescendant.
     let listbox = patches
         .iter()
         .find_map(|p| match p {
-            Patch::Create { semantics: Some(s), .. }
-                if s.role == Some(hypen_engine::ir::Role::Listbox) =>
-            {
-                Some(s.clone())
-            }
+            Patch::Create {
+                semantics: Some(s), ..
+            } if s.role == Some(hypen_engine::ir::Role::Listbox) => Some(s.clone()),
             _ => None,
         })
         .expect("listbox container");

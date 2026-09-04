@@ -224,7 +224,10 @@ fn transition_interpolates_colors_in_rgba_hex() {
     animator.set_manual_time_ms(100.0);
     animator.tick(&mut tree);
     // Settle restores the engine's exact raw value.
-    assert_eq!(prop_str(&tree, "box", "backgroundColor").unwrap(), "#ffffff");
+    assert_eq!(
+        prop_str(&tree, "box", "backgroundColor").unwrap(),
+        "#ffffff"
+    );
 }
 
 #[test]
@@ -354,7 +357,11 @@ fn layout_affecting_animation_reports_restyle_and_moves_real_geometry() {
     // The tick reports the node for a Taffy restyle (the window bumps
     // the patch epoch and restyles exactly these ids).
     assert!(out.wrote);
-    assert!(out.restyle.contains(&"box".to_string()), "restyle: {:?}", out.restyle);
+    assert!(
+        out.restyle.contains(&"box".to_string()),
+        "restyle: {:?}",
+        out.restyle
+    );
 
     // And the REAL layout geometry follows: a fresh LayoutPass over the
     // ticked tree solves the interpolated width, so hit-testing tracks
@@ -395,7 +402,11 @@ fn layout_affecting_animation_reports_restyle_and_moves_real_geometry() {
     animator2.set_manual_time_ms(50.0);
     let out2 = animator2.tick(&mut tree2);
     assert!(out2.wrote);
-    assert!(out2.restyle.is_empty(), "colors are paint-only: {:?}", out2.restyle);
+    assert!(
+        out2.restyle.is_empty(),
+        "colors are paint-only: {:?}",
+        out2.restyle
+    );
 }
 
 // ---------------------------------------------------------------
@@ -417,7 +428,11 @@ fn enter_suppressed_on_first_batch_then_plays() {
         &[
             create("col", "Column", &[]),
             insert(ROOT_ID, "col"),
-            create("a", "Text", &[("0", json!("hi")), ("__anim.enter", enter_fade(100))]),
+            create(
+                "a",
+                "Text",
+                &[("0", json!("hi")), ("__anim.enter", enter_fade(100))],
+            ),
             insert("col", "a"),
         ],
         &mut tree,
@@ -429,7 +444,11 @@ fn enter_suppressed_on_first_batch_then_plays() {
     // immediately so the batch's first paint shows it.
     animator.ingest(
         &[
-            create("b", "Text", &[("0", json!("yo")), ("__anim.enter", enter_fade(100))]),
+            create(
+                "b",
+                "Text",
+                &[("0", json!("yo")), ("__anim.enter", enter_fade(100))],
+            ),
             insert("col", "b"),
         ],
         &mut tree,
@@ -504,7 +523,10 @@ fn slide_only_enter_plays_translate_x() {
     assert!(animator.has_active(&tree));
     animator.set_manual_time_ms(50.0);
     animator.tick(&mut tree);
-    assert_eq!(prop_f64(&tree, "a", "translateX"), Some(-SLIDE_OFFSET_PX / 2.0));
+    assert_eq!(
+        prop_f64(&tree, "a", "translateX"),
+        Some(-SLIDE_OFFSET_PX / 2.0)
+    );
     animator.set_manual_time_ms(100.0);
     animator.tick(&mut tree);
     // Settle restores the pre-playback prop exactly (absent here).
@@ -625,10 +647,18 @@ fn flagged_remove_defers_teardown_and_excludes_hit_testing() {
     // Settle: teardown finalizes, removal patches surface for Taffy.
     animator.set_manual_time_ms(150.0);
     let out = animator.tick(&mut tree);
-    assert_eq!(out.finalized.len(), 2, "root + descendant: {:?}", out.finalized);
+    assert_eq!(
+        out.finalized.len(),
+        2,
+        "root + descendant: {:?}",
+        out.finalized
+    );
     assert!(tree.get("card").is_none());
     assert!(tree.get("label").is_none());
-    assert!(!animator.has_active(&tree), "ticker stands down after finalize");
+    assert!(
+        !animator.has_active(&tree),
+        "ticker stands down after finalize"
+    );
     assert!(!animator.is_exit_excluded(&tree, "card"));
 }
 
@@ -670,7 +700,9 @@ fn slide_only_exit_defers_and_animates_translate() {
         ],
         &mut tree,
     );
-    let forwarded = animator.ingest(&[remove("card", true)], &mut tree).forwarded;
+    let forwarded = animator
+        .ingest(&[remove("card", true)], &mut tree)
+        .forwarded;
     assert!(forwarded.is_empty(), "flagged remove withheld for the exit");
     assert!(tree.get("card").is_some(), "corpse still painted mid-exit");
     assert!(animator.is_exit_excluded(&tree, "card"));
@@ -704,7 +736,10 @@ fn create_for_exiting_id_finalizes_the_corpse_first() {
     assert!(matches!(forwarded[0], Patch::Remove { .. }));
     assert!(tree.get("card").is_some());
     assert!(!animator.is_exit_excluded(&tree, "card"));
-    assert!(tree.get("label").is_none(), "old descendant went with the corpse");
+    assert!(
+        tree.get("label").is_none(),
+        "old descendant went with the corpse"
+    );
 }
 
 // ---------------------------------------------------------------
@@ -728,7 +763,10 @@ fn pulse_loop_advances_and_keeps_ticker_armed() {
         ],
         &mut tree,
     );
-    assert!(animator.has_active(&tree), "looping ambient keeps frames coming");
+    assert!(
+        animator.has_active(&tree),
+        "looping ambient keeps frames coming"
+    );
     // Pulse keyframes: opacity 1 → 0.5 → 1; at 1/4 duration the linear
     // curve puts us halfway down the first leg (0.75).
     animator.set_manual_time_ms(250.0);
@@ -779,7 +817,10 @@ fn finite_preset_completes_restores_and_never_replays() {
     // replays an exhausted finite preset.
     animator.set_reduced_motion(true, &mut tree);
     animator.set_reduced_motion(false, &mut tree);
-    assert!(!animator.has_active(&tree), "exhausted preset must not replay");
+    assert!(
+        !animator.has_active(&tree),
+        "exhausted preset must not replay"
+    );
 }
 
 #[test]
@@ -803,14 +844,22 @@ fn spin_and_shake_play_shimmer_stays_a_noop() {
     }
     // spin + shake own transform props now; shimmer (DOM gradient
     // overlay, no desktop equivalent) never starts.
-    assert!(animator.has_active(&tree), "spin/shake keep the ticker armed");
+    assert!(
+        animator.has_active(&tree),
+        "spin/shake keep the ticker armed"
+    );
     animator.set_manual_time_ms(400.0);
     animator.tick(&mut tree);
     // spin: rotate = 360 × eased(0.5) = 180 under linear.
     assert_eq!(prop_f64(&tree, "s1", "rotate"), Some(180.0));
     // shake at p = 0.5: midway between the 0.4 (+6) and 0.6 (−4) stops = +1.
     assert_eq!(prop_f64(&tree, "s3", "translateX"), Some(1.0));
-    assert!(!tree.get("s2").unwrap().props.keys().any(|k| k != "__anim.animate"));
+    assert!(!tree
+        .get("s2")
+        .unwrap()
+        .props
+        .keys()
+        .any(|k| k != "__anim.animate"));
     // spin advances frame over frame (0.25 → rotate 90).
     animator.set_manual_time_ms(1000.0);
     animator.tick(&mut tree);
@@ -841,7 +890,10 @@ fn detached_subtree_holds_its_ambient() {
     assert!(animator.has_active(&tree));
     // Router cache detach: not painted → not ticked → no runaway frames.
     animator.ingest(&[Patch::Detach { id: "dot".into() }], &mut tree);
-    assert!(!animator.has_active(&tree), "detached ambient must stand down");
+    assert!(
+        !animator.has_active(&tree),
+        "detached ambient must stand down"
+    );
     // Re-attach resumes.
     animator.ingest(
         &[Patch::Attach {
@@ -1102,9 +1154,15 @@ fn reduced_motion_toggle_off_restarts_loops() {
         ],
         &mut tree,
     );
-    assert!(!animator.has_active(&tree), "reduced motion: preset never starts");
+    assert!(
+        !animator.has_active(&tree),
+        "reduced motion: preset never starts"
+    );
     animator.set_reduced_motion(false, &mut tree);
-    assert!(animator.has_active(&tree), "toggle-off starts the cached spec");
+    assert!(
+        animator.has_active(&tree),
+        "toggle-off starts the cached spec"
+    );
 }
 
 #[test]
@@ -1158,7 +1216,10 @@ fn ticker_stands_down_when_everything_settles() {
     animator.ingest(&[set_prop("box", "width.0", json!(100.0))], &mut tree);
     animator.set_manual_time_ms(100.0);
     animator.tick(&mut tree);
-    assert!(!animator.has_active(&tree), "all settled — loop must stand down");
+    assert!(
+        !animator.has_active(&tree),
+        "all settled — loop must stand down"
+    );
     // A further tick writes nothing (no phantom work).
     animator.set_manual_time_ms(200.0);
     let out = animator.tick(&mut tree);
@@ -1180,7 +1241,10 @@ fn malformed_specs_degrade_to_snap() {
                 &[
                     ("width.0", json!(0.0)),
                     // Unknown curve → channel malformed → snap.
-                    ("__anim.transition", json!({ "duration": 100, "curve": "bouncy" })),
+                    (
+                        "__anim.transition",
+                        json!({ "duration": 100, "curve": "bouncy" }),
+                    ),
                 ],
             ),
             insert("col", "box"),
@@ -1195,9 +1259,16 @@ fn malformed_specs_degrade_to_snap() {
 #[test]
 fn animatable_base_prop_resolution() {
     assert_eq!(animatable_base_prop("width.0"), Some("width"));
-    assert_eq!(animatable_base_prop("backgroundColor"), Some("backgroundColor"));
+    assert_eq!(
+        animatable_base_prop("backgroundColor"),
+        Some("backgroundColor")
+    );
     assert_eq!(animatable_base_prop("paddingTop.0"), Some("paddingTop"));
-    assert_eq!(animatable_base_prop("width@md.0"), None, "breakpoint variant");
+    assert_eq!(
+        animatable_base_prop("width@md.0"),
+        None,
+        "breakpoint variant"
+    );
     assert_eq!(animatable_base_prop("color:hover"), None, "state variant");
     assert_eq!(animatable_base_prop("fontFamily"), None, "off-whitelist");
 }
@@ -1227,7 +1298,11 @@ fn removed_transition_channel_stops_future_glides() {
         &mut tree,
     );
     animator.ingest(&[set_prop("box", "width.0", json!(100.0))], &mut tree);
-    assert_eq!(prop_f64(&tree, "box", "width.0"), Some(100.0), "channel cleared → snap");
+    assert_eq!(
+        prop_f64(&tree, "box", "width.0"),
+        Some(100.0),
+        "channel cleared → snap"
+    );
 }
 
 // ---------------------------------------------------------------
@@ -1244,7 +1319,11 @@ fn engine_dotted_write_mid_enter_lands_engine_value_and_cleans_plain_key() {
     let (mut animator, mut tree) = armed();
     animator.ingest(
         &[
-            create("b", "Text", &[("0", json!("yo")), ("__anim.enter", enter_fade(100))]),
+            create(
+                "b",
+                "Text",
+                &[("0", json!("yo")), ("__anim.enter", enter_fade(100))],
+            ),
             insert("col", "b"),
         ],
         &mut tree,
@@ -1265,10 +1344,17 @@ fn engine_dotted_write_mid_enter_lands_engine_value_and_cleans_plain_key() {
     animator.set_manual_time_ms(100.0);
     animator.tick(&mut tree); // settle
     assert!(!tree.get("b").unwrap().props.contains_key("opacity"));
-    assert_eq!(prop_f64(&tree, "b", "opacity.0"), Some(0.3), "engine value wins");
+    assert_eq!(
+        prop_f64(&tree, "b", "opacity.0"),
+        Some(0.3),
+        "engine value wins"
+    );
     // The style chain resolves to the engine's value (this is what the
     // probe caught stranded at the mid-fade value pre-fix).
-    assert_eq!(crate::style::prop_f32(tree.get("b").unwrap(), "opacity"), Some(0.3));
+    assert_eq!(
+        crate::style::prop_f32(tree.get("b").unwrap(), "opacity"),
+        Some(0.3)
+    );
     assert!(!animator.has_active(&tree));
 }
 
@@ -1303,7 +1389,10 @@ fn engine_dotted_write_mid_enter_with_transition_snaps_clean() {
         !tree.get("b").unwrap().props.contains_key("opacity"),
         "retired playback's plain write cleaned"
     );
-    assert_eq!(crate::style::prop_f32(tree.get("b").unwrap(), "opacity"), Some(0.3));
+    assert_eq!(
+        crate::style::prop_f32(tree.get("b").unwrap(), "opacity"),
+        Some(0.3)
+    );
     assert!(!animator.has_active(&tree));
 }
 
@@ -1353,7 +1442,10 @@ fn engine_dotted_write_mid_pulse_follows_the_engine_key() {
     assert_eq!(prop_f64(&tree, "dot", "opacity.0"), Some(0.5));
     assert!(!tree.get("dot").unwrap().props.contains_key("opacity"));
     animator.ingest(&[set_prop("dot", "opacity.0", json!(1.0))], &mut tree);
-    assert_eq!(crate::style::prop_f32(tree.get("dot").unwrap(), "opacity"), Some(1.0));
+    assert_eq!(
+        crate::style::prop_f32(tree.get("dot").unwrap(), "opacity"),
+        Some(1.0)
+    );
 }
 
 // ---------------------------------------------------------------
@@ -1384,9 +1476,9 @@ fn essential_snap_at_flush_reports_restyle() {
     animator.ingest(&[set_prop("box", "width.0", json!(100.0))], &mut tree);
     animator.set_manual_time_ms(50.0);
     animator.tick(&mut tree); // essential node mid-glide at 50
-    // Dropping the essential flag under reduced motion snaps the node's
-    // in-flight work at the END of the batch: the layout-affecting
-    // write must reach the caller through `IngestOutcome::restyle`.
+                              // Dropping the essential flag under reduced motion snaps the node's
+                              // in-flight work at the END of the batch: the layout-affecting
+                              // write must reach the caller through `IngestOutcome::restyle`.
     let out = animator.ingest(
         &[Patch::RemoveProp {
             id: "box".into(),
@@ -1394,7 +1486,11 @@ fn essential_snap_at_flush_reports_restyle() {
         }],
         &mut tree,
     );
-    assert_eq!(prop_f64(&tree, "box", "width.0"), Some(100.0), "snapped to target");
+    assert_eq!(
+        prop_f64(&tree, "box", "width.0"),
+        Some(100.0),
+        "snapped to target"
+    );
     assert!(
         out.restyle.contains(&"box".to_string()),
         "flush-time snap restyle must surface: {:?}",
@@ -1422,7 +1518,10 @@ fn essential_snap_at_flush_forwards_finalized_exit_removals() {
         &mut tree,
     );
     let out = animator.ingest(&[remove("card", true)], &mut tree);
-    assert!(out.forwarded.is_empty(), "essential exit defers under reduced motion");
+    assert!(
+        out.forwarded.is_empty(),
+        "essential exit defers under reduced motion"
+    );
     assert!(animator.is_exit_excluded(&tree, "card"));
     // Dropping the essential flag mid-exit finalizes the exit at flush:
     // the withheld Remove was applied to the tree just now and MUST
@@ -1465,7 +1564,10 @@ fn layout_items_carry_inherited_opacity() {
     let inner = pass.items.iter().find(|i| i.node_id == "inner").unwrap();
     let t = pass.items.iter().find(|i| i.node_id == "t").unwrap();
     assert!((outer.opacity - 0.5).abs() < 1e-6);
-    assert!((inner.opacity - 0.25).abs() < 1e-6, "multiplies down the tree");
+    assert!(
+        (inner.opacity - 0.25).abs() < 1e-6,
+        "multiplies down the tree"
+    );
     assert!((t.opacity - 0.25).abs() < 1e-6, "children inherit");
 }
 
@@ -1498,7 +1600,9 @@ fn flip_inverts_from_first_to_last_and_settles_to_base() {
     let (mut animator, mut tree) = armed();
     animator.ingest(&[layout_spec_node("a"), insert("col", "a")], &mut tree);
     let mv = move_patch("col", "a");
-    animator.prepare_moves(&tree, std::slice::from_ref(&mv), |id| (id == "a").then_some((10.0, 100.0)));
+    animator.prepare_moves(&tree, std::slice::from_ref(&mv), |id| {
+        (id == "a").then_some((10.0, 100.0))
+    });
     assert!(animator.has_pending_flips());
     animator.ingest(&[mv], &mut tree);
     // Post-batch layout: the node landed 40px right, 30px down.
@@ -1540,8 +1644,7 @@ fn flip_zero_delta_skips_and_without_spec_never_snapshots() {
     let mv = move_patch("col", "a");
     animator.prepare_moves(&tree, std::slice::from_ref(&mv), |_| Some((10.0, 10.0)));
     animator.ingest(&[mv], &mut tree);
-    let played =
-        animator.play_pending_flips(&mut tree, 1.0, |_| Some((10.3, 10.4)));
+    let played = animator.play_pending_flips(&mut tree, 1.0, |_| Some((10.3, 10.4)));
     assert!(!played, "zero-delta FLIP must skip (DOM parity)");
     assert!(!tree.get("a").unwrap().props.contains_key("translateX"));
     assert!(!animator.has_active(&tree));
@@ -1824,7 +1927,10 @@ fn detach(id: &str) -> Patch {
 fn shared_node(id: &str, key: &str, spec: bool) -> Patch {
     let mut entries: Vec<(&str, Value)> = vec![("__anim.sharedKey", json!(key))];
     if spec {
-        entries.push(("__anim.shared", json!({ "duration": 300, "curve": "linear" })));
+        entries.push((
+            "__anim.shared",
+            json!({ "duration": 300, "curve": "linear" }),
+        ));
     }
     create(id, "Container", &entries)
 }
@@ -1856,12 +1962,18 @@ fn shared_match_flips_incoming_from_outgoing_rect_and_settles() {
     ];
     // Step 1: snapshot the source `thumb` (under the detach root) off the
     // PRE-batch layout — (10,20) size 100×50.
-    animator.prepare_shared(&tree, &nav, |id| (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0)));
-    assert!(animator.has_pending_shared(), "navigation shape → pending shared");
+    animator.prepare_shared(&tree, &nav, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
+    assert!(
+        animator.has_pending_shared(),
+        "navigation shape → pending shared"
+    );
     animator.ingest(&nav, &mut tree);
     // Step 3: post-batch, `detail`'s Last rect is (60,120) size 200×100.
-    let played =
-        animator.play_shared_flips(&mut tree, 1.0, |id| (id == "detail").then_some((60.0, 120.0, 200.0, 100.0)));
+    let played = animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "detail").then_some((60.0, 120.0, 200.0, 100.0))
+    });
     assert!(played, "matched key must FLIP");
     // s = mean(100/200, 50/100) = 0.5.
     // dx = (src_cx - last_cx) = (10+50) - (60+100) = -100.
@@ -1887,6 +1999,58 @@ fn shared_match_flips_incoming_from_outgoing_rect_and_settles() {
 }
 
 #[test]
+fn cached_route_attach_plays_the_reverse_shared_element_flip() {
+    let (mut animator, mut tree) = with_source_route("hero");
+    animator.ingest(
+        &[Patch::SetProp {
+            id: "thumb".into(),
+            name: "__anim.shared".into(),
+            value: json!({ "duration": 300, "curve": "linear" }),
+        }],
+        &mut tree,
+    );
+    let forward = vec![
+        detach("page1"),
+        shared_node("detail", "hero", true),
+        insert("col", "detail"),
+    ];
+    animator.prepare_shared(&tree, &forward, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
+    animator.ingest(&forward, &mut tree);
+    assert!(animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "detail").then_some((60.0, 120.0, 200.0, 100.0))
+    }));
+    animator.set_manual_time_ms(300.0);
+    animator.tick(&mut tree);
+
+    // Back navigation does not recreate the Home route: Router reuses the
+    // cached `page1` subtree via Attach. That existing `thumb` still has to
+    // become the incoming shared target, otherwise the return can paint a
+    // blank frame while only the outgoing detail source is tracked.
+    let back = vec![
+        detach("detail"),
+        Patch::Attach {
+            parent_id: "col".into(),
+            id: "page1".into(),
+            before_id: None,
+        },
+    ];
+    animator.prepare_shared(&tree, &back, |id| {
+        (id == "detail").then_some((60.0, 120.0, 200.0, 100.0))
+    });
+    animator.ingest(&back, &mut tree);
+    assert_eq!(tree.parent_of("page1"), Some("col"));
+    let played = animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
+    assert!(played, "the cached shared target must FLIP on Attach");
+    assert_eq!(prop_f64(&tree, "thumb", "translateX"), Some(100.0));
+    assert_eq!(prop_f64(&tree, "thumb", "translateY"), Some(125.0));
+    assert_eq!(prop_f64(&tree, "thumb", "scale"), Some(2.0));
+}
+
+#[test]
 fn shared_match_suppresses_the_incoming_nodes_own_enter() {
     let (mut animator, mut tree) = with_source_route("hero");
     // Incoming carries BOTH a matching shared key AND a fade enter.
@@ -1895,12 +2059,20 @@ fn shared_match_suppresses_the_incoming_nodes_own_enter() {
         "Container",
         &[
             ("__anim.sharedKey", json!("hero")),
-            ("__anim.shared", json!({ "duration": 300, "curve": "linear" })),
-            ("__anim.enter", json!({ "presets": ["fade"], "duration": 200, "curve": "linear" })),
+            (
+                "__anim.shared",
+                json!({ "duration": 300, "curve": "linear" }),
+            ),
+            (
+                "__anim.enter",
+                json!({ "presets": ["fade"], "duration": 200, "curve": "linear" }),
+            ),
         ],
     );
     let nav = vec![detach("page1"), detail, insert("col", "detail")];
-    animator.prepare_shared(&tree, &nav, |id| (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0)));
+    animator.prepare_shared(&tree, &nav, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
     animator.ingest(&nav, &mut tree);
     // The fade enter would have written the hidden opacity pose (0.0) at
     // flush; a shared match suppresses it — one motion, not two.
@@ -1909,8 +2081,9 @@ fn shared_match_suppresses_the_incoming_nodes_own_enter() {
         "matched node's own enter must be suppressed (no hidden pose)"
     );
     // The FLIP itself still plays.
-    let played =
-        animator.play_shared_flips(&mut tree, 1.0, |id| (id == "detail").then_some((60.0, 20.0, 100.0, 50.0)));
+    let played = animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "detail").then_some((60.0, 20.0, 100.0, 50.0))
+    });
     assert!(played);
     assert_eq!(prop_f64(&tree, "detail", "translateX"), Some(-50.0));
 }
@@ -1924,12 +2097,18 @@ fn shared_unmatched_key_is_plain_navigation_and_warns_once() {
         create("detail", "Container", &[]),
         insert("col", "detail"),
     ];
-    animator.prepare_shared(&tree, &nav, |id| (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0)));
+    animator.prepare_shared(&tree, &nav, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
     animator.ingest(&nav, &mut tree);
     let played = animator.play_shared_flips(&mut tree, 1.0, |_| Some((0.0, 0.0, 100.0, 50.0)));
     assert!(!played, "no incoming target → plain navigation");
     assert!(!tree.get("detail").unwrap().props.contains_key("translateX"));
-    assert_eq!(animator.shared_warned_count(), 1, "one-sided key warns once");
+    assert_eq!(
+        animator.shared_warned_count(),
+        1,
+        "one-sided key warns once"
+    );
 
     // A second identical navigation must not re-warn (dedup per key).
     let (mut animator, mut tree) = with_source_route("hero");
@@ -1938,10 +2117,14 @@ fn shared_unmatched_key_is_plain_navigation_and_warns_once() {
         create("detail", "Container", &[]),
         insert("col", "detail"),
     ];
-    animator.prepare_shared(&tree, &nav2, |id| (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0)));
+    animator.prepare_shared(&tree, &nav2, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
     animator.ingest(&nav2, &mut tree);
     animator.play_shared_flips(&mut tree, 1.0, |_| Some((0.0, 0.0, 100.0, 50.0)));
-    animator.prepare_shared(&tree, &nav2, |id| (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0)));
+    animator.prepare_shared(&tree, &nav2, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
     animator.play_shared_flips(&mut tree, 1.0, |_| Some((0.0, 0.0, 100.0, 50.0)));
     assert_eq!(animator.shared_warned_count(), 1, "same key never re-warns");
 }
@@ -1969,14 +2152,18 @@ fn shared_detach_root_scoping_ignores_a_persistent_shell_source() {
         _ => None,
     });
     animator.ingest(&nav, &mut tree);
-    let played =
-        animator.play_shared_flips(&mut tree, 1.0, |id| (id == "detail").then_some((60.0, 120.0, 100.0, 50.0)));
+    let played = animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "detail").then_some((60.0, 120.0, 100.0, 50.0))
+    });
     assert!(played);
     // From `thumb`: dx = (10+50)-(60+50) = -50, dy = (20+25)-(120+25) = -100.
     // (From `shell` it would be +440 / +405.) s = 1 → scale untouched.
     assert_eq!(prop_f64(&tree, "detail", "translateX"), Some(-50.0));
     assert_eq!(prop_f64(&tree, "detail", "translateY"), Some(-100.0));
-    assert!(!tree.get("detail").unwrap().props.contains_key("scale"), "unit scale is not written");
+    assert!(
+        !tree.get("detail").unwrap().props.contains_key("scale"),
+        "unit scale is not written"
+    );
 }
 
 #[test]
@@ -1988,10 +2175,14 @@ fn shared_interruption_retargets_from_the_current_presentation_rect() {
         shared_node("detail", "hero", true),
         insert("col", "detail"),
     ];
-    animator.prepare_shared(&tree, &nav1, |id| (id == "thumb").then_some((0.0, 0.0, 100.0, 100.0)));
+    animator.prepare_shared(&tree, &nav1, |id| {
+        (id == "thumb").then_some((0.0, 0.0, 100.0, 100.0))
+    });
     animator.ingest(&nav1, &mut tree);
     // `detail` Last at (200,0): dx = (0+50)-(200+50) = -200.
-    animator.play_shared_flips(&mut tree, 1.0, |id| (id == "detail").then_some((200.0, 0.0, 100.0, 100.0)));
+    animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "detail").then_some((200.0, 0.0, 100.0, 100.0))
+    });
     assert_eq!(prop_f64(&tree, "detail", "translateX"), Some(-200.0));
     // Mid-flight (150/300): translateX is halfway back → -100.
     animator.set_manual_time_ms(150.0);
@@ -2001,22 +2192,28 @@ fn shared_interruption_retargets_from_the_current_presentation_rect() {
     // Its PRESENTATION rect is the natural rect shifted by the live
     // transform — what `visual_rect` reports and the window snapshots.
     let pres_x = 200.0 + tx as f32; // scale 1, natural x 200
-    // Nav 2 interrupts: `detail` now leaves, `detail2` (same key) arrives.
+                                    // Nav 2 interrupts: `detail` now leaves, `detail2` (same key) arrives.
     let nav2 = vec![
         detach("detail"),
         shared_node("detail2", "hero", true),
         insert("col", "detail2"),
     ];
-    animator.prepare_shared(&tree, &nav2, |id| (id == "detail").then_some((pres_x, 0.0, 100.0, 100.0)));
+    animator.prepare_shared(&tree, &nav2, |id| {
+        (id == "detail").then_some((pres_x, 0.0, 100.0, 100.0))
+    });
     animator.ingest(&nav2, &mut tree);
-    let played =
-        animator.play_shared_flips(&mut tree, 1.0, |id| (id == "detail2").then_some((300.0, 0.0, 100.0, 100.0)));
+    let played = animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "detail2").then_some((300.0, 0.0, 100.0, 100.0))
+    });
     assert!(played);
     // Retargeted from the PRESENTATION rect (pres_x=100), not original A(0):
     // dx = (100+50) - (300+50) = -200. (From A it would be -300.)
     let expected = (pres_x + 50.0) as f64 - (300.0 + 50.0);
     assert_eq!(prop_f64(&tree, "detail2", "translateX"), Some(expected));
-    assert!((expected - (-200.0)).abs() < 1e-6, "retarget dx = {expected}");
+    assert!(
+        (expected - (-200.0)).abs() < 1e-6,
+        "retarget dx = {expected}"
+    );
 }
 
 #[test]
@@ -2030,11 +2227,17 @@ fn shared_reduced_motion_skips_the_flip_globally() {
     ];
     // Reduced motion takes no snapshot — so the batch is never treated as
     // a shared navigation (cross-route continuity is globally decorative).
-    animator.prepare_shared(&tree, &nav, |id| (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0)));
-    assert!(!animator.has_pending_shared(), "reduced motion → no shared snapshot");
+    animator.prepare_shared(&tree, &nav, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
+    assert!(
+        !animator.has_pending_shared(),
+        "reduced motion → no shared snapshot"
+    );
     animator.ingest(&nav, &mut tree);
-    let played =
-        animator.play_shared_flips(&mut tree, 1.0, |id| (id == "detail").then_some((60.0, 120.0, 200.0, 100.0)));
+    let played = animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "detail").then_some((60.0, 120.0, 200.0, 100.0))
+    });
     assert!(!played, "reduced motion FLIPs nothing");
     assert!(!tree.get("detail").unwrap().props.contains_key("translateX"));
 }
@@ -2069,7 +2272,14 @@ fn enter_settle_fires_enter_completion() {
     let (mut animator, mut tree) = armed();
     animator.ingest(
         &[
-            create("a", "Text", &[on_complete("@actions.done"), ("__anim.enter", enter_fade(100))]),
+            create(
+                "a",
+                "Text",
+                &[
+                    on_complete("@actions.done"),
+                    ("__anim.enter", enter_fade(100)),
+                ],
+            ),
             insert("col", "a"),
         ],
         &mut tree,
@@ -2077,7 +2287,10 @@ fn enter_settle_fires_enter_completion() {
     // Mid-flight: nothing has settled yet.
     animator.set_manual_time_ms(50.0);
     animator.tick(&mut tree);
-    assert!(animator.take_completions().is_empty(), "no fire before settle");
+    assert!(
+        animator.take_completions().is_empty(),
+        "no fire before settle"
+    );
     // Natural settle → { animation: "enter" }.
     animator.set_manual_time_ms(100.0);
     animator.tick(&mut tree);
@@ -2091,7 +2304,14 @@ fn exit_settle_fires_exit_completion_before_finalize() {
     let (mut animator, mut tree) = armed();
     animator.ingest(
         &[
-            create("card", "Container", &[on_complete("@actions.gone"), ("__anim.exit", exit_fade(150))]),
+            create(
+                "card",
+                "Container",
+                &[
+                    on_complete("@actions.gone"),
+                    ("__anim.exit", exit_fade(150)),
+                ],
+            ),
             insert("col", "card"),
         ],
         &mut tree,
@@ -2159,7 +2379,10 @@ fn looping_preset_never_fires_completion() {
         animator.set_manual_time_ms(t);
         animator.tick(&mut tree);
     }
-    assert!(animator.take_completions().is_empty(), "looping preset must never fire");
+    assert!(
+        animator.take_completions().is_empty(),
+        "looping preset must never fire"
+    );
 }
 
 #[test]
@@ -2167,7 +2390,14 @@ fn states_settle_fires_states_completion_with_label() {
     let (mut animator, mut tree) = armed();
     animator.ingest(
         &[
-            create("chip", "Container", &[on_complete("@actions.posed"), ("__anim.transition", transition_spec(200, "linear"))]),
+            create(
+                "chip",
+                "Container",
+                &[
+                    on_complete("@actions.posed"),
+                    ("__anim.transition", transition_spec(200, "linear")),
+                ],
+            ),
             insert("col", "chip"),
         ],
         &mut tree,
@@ -2176,12 +2406,19 @@ fn states_settle_fires_states_completion_with_label() {
     // OBJECT shape it actually lowers (`{"label": "<label>"}`) — never a bare
     // string. Driving the real shape here guards the object-shape read.
     animator.ingest(
-        &[set_prop("chip", "__anim.states", json!({ "label": "active" }))],
+        &[set_prop(
+            "chip",
+            "__anim.states",
+            json!({ "label": "active" }),
+        )],
         &mut tree,
     );
     animator.set_manual_time_ms(100.0);
     animator.tick(&mut tree);
-    assert!(animator.take_completions().is_empty(), "no fire before the window elapses");
+    assert!(
+        animator.take_completions().is_empty(),
+        "no fire before the window elapses"
+    );
     // Window (duration 200) elapses → { animation: "states", state: "active" }.
     animator.set_manual_time_ms(200.0);
     animator.tick(&mut tree);
@@ -2195,20 +2432,35 @@ fn states_superseding_label_change_fires_only_the_latest() {
     let (mut animator, mut tree) = armed();
     animator.ingest(
         &[
-            create("chip", "Container", &[on_complete("@actions.posed"), ("__anim.transition", transition_spec(200, "linear"))]),
+            create(
+                "chip",
+                "Container",
+                &[
+                    on_complete("@actions.posed"),
+                    ("__anim.transition", transition_spec(200, "linear")),
+                ],
+            ),
             insert("col", "chip"),
         ],
         &mut tree,
     );
     animator.ingest(
-        &[set_prop("chip", "__anim.states", json!({ "label": "hover" }))],
+        &[set_prop(
+            "chip",
+            "__anim.states",
+            json!({ "label": "hover" }),
+        )],
         &mut tree,
     );
     // Before the first window elapses, a new pose supersedes it.
     animator.set_manual_time_ms(100.0);
     animator.tick(&mut tree);
     animator.ingest(
-        &[set_prop("chip", "__anim.states", json!({ "label": "active" }))],
+        &[set_prop(
+            "chip",
+            "__anim.states",
+            json!({ "label": "active" }),
+        )],
         &mut tree,
     );
     // The superseded `hover` window would have fired at 300; it must not.
@@ -2216,7 +2468,11 @@ fn states_superseding_label_change_fires_only_the_latest() {
     animator.tick(&mut tree);
     let (action, payload) = one_completion(&mut animator);
     assert_eq!(action, "posed");
-    assert_eq!(payload, json!({ "animation": "states", "state": "active" }), "only the latest pose reports");
+    assert_eq!(
+        payload,
+        json!({ "animation": "states", "state": "active" }),
+        "only the latest pose reports"
+    );
 }
 
 #[test]
@@ -2232,23 +2488,36 @@ fn states_settle_fires_from_engine_object_shape_end_to_end() {
             create(
                 "chip",
                 "Container",
-                &[on_complete("@actions.posed"), ("__anim.transition", transition_spec(200, "linear"))],
+                &[
+                    on_complete("@actions.posed"),
+                    ("__anim.transition", transition_spec(200, "linear")),
+                ],
             ),
             insert("col", "chip"),
         ],
         &mut tree,
     );
     animator.ingest(
-        &[set_prop("chip", "__anim.states", json!({ "label": "expanded" }))],
+        &[set_prop(
+            "chip",
+            "__anim.states",
+            json!({ "label": "expanded" }),
+        )],
         &mut tree,
     );
     // The window must be armed by the object-shape label alone.
-    assert!(animator.has_active(&tree), "object-shape label must open the settle window");
+    assert!(
+        animator.has_active(&tree),
+        "object-shape label must open the settle window"
+    );
     animator.set_manual_time_ms(200.0);
     animator.tick(&mut tree);
     let (action, payload) = one_completion(&mut animator);
     assert_eq!(action, "posed");
-    assert_eq!(payload, json!({ "animation": "states", "state": "expanded" }));
+    assert_eq!(
+        payload,
+        json!({ "animation": "states", "state": "expanded" })
+    );
 }
 
 #[test]
@@ -2261,13 +2530,19 @@ fn states_settle_tolerates_bare_string_label() {
             create(
                 "chip",
                 "Container",
-                &[on_complete("@actions.posed"), ("__anim.transition", transition_spec(200, "linear"))],
+                &[
+                    on_complete("@actions.posed"),
+                    ("__anim.transition", transition_spec(200, "linear")),
+                ],
             ),
             insert("col", "chip"),
         ],
         &mut tree,
     );
-    animator.ingest(&[set_prop("chip", "__anim.states", json!("active"))], &mut tree);
+    animator.ingest(
+        &[set_prop("chip", "__anim.states", json!("active"))],
+        &mut tree,
+    );
     animator.set_manual_time_ms(200.0);
     animator.tick(&mut tree);
     let (action, payload) = one_completion(&mut animator);
@@ -2284,15 +2559,25 @@ fn shared_element_settle_fires_shared_completion() {
         &[
             on_complete("@actions.flew"),
             ("__anim.sharedKey", json!("hero")),
-            ("__anim.shared", json!({ "duration": 300, "curve": "linear" })),
+            (
+                "__anim.shared",
+                json!({ "duration": 300, "curve": "linear" }),
+            ),
         ],
     );
     let nav = vec![detach("page1"), detail, insert("col", "detail")];
-    animator.prepare_shared(&tree, &nav, |id| (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0)));
+    animator.prepare_shared(&tree, &nav, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
     animator.ingest(&nav, &mut tree);
-    let played = animator.play_shared_flips(&mut tree, 1.0, |id| (id == "detail").then_some((60.0, 120.0, 200.0, 100.0)));
+    let played = animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "detail").then_some((60.0, 120.0, 200.0, 100.0))
+    });
     assert!(played, "non-zero delta FLIPs");
-    assert!(animator.take_completions().is_empty(), "no fire until the FLIP settles");
+    assert!(
+        animator.take_completions().is_empty(),
+        "no fire until the FLIP settles"
+    );
     animator.set_manual_time_ms(300.0);
     animator.tick(&mut tree);
     let (action, payload) = one_completion(&mut animator);
@@ -2309,14 +2594,21 @@ fn shared_element_zero_delta_fires_immediately() {
         &[
             on_complete("@actions.flew"),
             ("__anim.sharedKey", json!("hero")),
-            ("__anim.shared", json!({ "duration": 300, "curve": "linear" })),
+            (
+                "__anim.shared",
+                json!({ "duration": 300, "curve": "linear" }),
+            ),
         ],
     );
     let nav = vec![detach("page1"), detail, insert("col", "detail")];
     // Source and target measure identical rects → zero delta.
-    animator.prepare_shared(&tree, &nav, |id| (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0)));
+    animator.prepare_shared(&tree, &nav, |id| {
+        (id == "thumb").then_some((10.0, 20.0, 100.0, 50.0))
+    });
     animator.ingest(&nav, &mut tree);
-    let played = animator.play_shared_flips(&mut tree, 1.0, |id| (id == "detail").then_some((10.0, 20.0, 100.0, 50.0)));
+    let played = animator.play_shared_flips(&mut tree, 1.0, |id| {
+        (id == "detail").then_some((10.0, 20.0, 100.0, 50.0))
+    });
     assert!(!played, "zero delta plays no transform");
     // …but the shared element settled immediately, so it fires now.
     let (action, payload) = one_completion(&mut animator);
@@ -2351,7 +2643,11 @@ fn interrupted_enter_fires_nothing_while_superseding_exit_fires_its_own() {
     animator.set_manual_time_ms(200.0);
     animator.tick(&mut tree);
     let completions = animator.take_completions();
-    assert_eq!(completions.len(), 1, "exactly one fire: the exit, never the interrupted enter");
+    assert_eq!(
+        completions.len(),
+        1,
+        "exactly one fire: the exit, never the interrupted enter"
+    );
     assert_eq!(completions[0].action, "x");
     assert_eq!(completions[0].payload, json!({ "animation": "exit" }));
 }
@@ -2368,7 +2664,10 @@ fn node_without_the_prop_dispatches_nothing() {
     );
     animator.set_manual_time_ms(100.0);
     animator.tick(&mut tree);
-    assert!(animator.take_completions().is_empty(), "no onAnimationComplete prop → no dispatch");
+    assert!(
+        animator.take_completions().is_empty(),
+        "no onAnimationComplete prop → no dispatch"
+    );
 }
 
 #[test]
@@ -2377,7 +2676,14 @@ fn reduced_motion_enter_skip_fires_nothing() {
     animator.reduced_motion = true;
     animator.ingest(
         &[
-            create("a", "Text", &[on_complete("@actions.done"), ("__anim.enter", enter_fade(100))]),
+            create(
+                "a",
+                "Text",
+                &[
+                    on_complete("@actions.done"),
+                    ("__anim.enter", enter_fade(100)),
+                ],
+            ),
             insert("col", "a"),
         ],
         &mut tree,
@@ -2387,7 +2693,10 @@ fn reduced_motion_enter_skip_fires_nothing() {
         animator.set_manual_time_ms(t);
         animator.tick(&mut tree);
     }
-    assert!(animator.take_completions().is_empty(), "reduced-motion skip fires nothing");
+    assert!(
+        animator.take_completions().is_empty(),
+        "reduced-motion skip fires nothing"
+    );
 }
 
 #[test]

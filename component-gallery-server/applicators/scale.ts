@@ -37,7 +37,7 @@ Column {
         .marginTop(8)
     }
     .horizontalAlignment("center")
-    .width(80)
+    .width(60)
 
     Column {
       Stack {
@@ -55,7 +55,7 @@ Column {
         .marginTop(8)
     }
     .horizontalAlignment("center")
-    .width(80)
+    .width(60)
 
     Column {
       Stack {
@@ -73,7 +73,7 @@ Column {
         .marginTop(8)
     }
     .horizontalAlignment("center")
-    .width(80)
+    .width(60)
 
     Column {
       Stack {
@@ -91,7 +91,7 @@ Column {
         .marginTop(8)
     }
     .horizontalAlignment("center")
-    .width(100)
+    .width(64)
 
     Column {
       Stack {
@@ -109,9 +109,9 @@ Column {
         .marginTop(8)
     }
     .horizontalAlignment("center")
-    .width(120)
+    .width(68)
   }
-  .gap(16)
+  .gap(4)
   .marginBottom(32)
 
   Text("Directional scale")

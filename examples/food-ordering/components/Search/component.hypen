@@ -7,6 +7,7 @@ Column {
             Input(placeholder: "Search restaurants or dishes")
                 .tw("flex-1 bg-transparent border-0 ml-2 text-sm")
                 .bind(@state.searchQuery)
+                .onInput(@actions.search)
         }
         .tw("flex-1 bg-gray-100 rounded-xl px-4 py-3 items-center")
     }
@@ -57,11 +58,11 @@ Column {
                 .tw("px-4")
             }
 
-            Column {
-                ForEach(items: @state.searchResults, key: "id") {
-                    RestaurantCard()
-                }
+            Grid(@state.searchResults, key: "id") {
+                RestaurantCard()
             }
+            .gridColumns({default: 1, md: 2, lg: 3, xl: 4, 2xl: 5})
+            .gap(18)
             .tw("px-4 pt-4 w-full")
         }
         .scrollable(true)

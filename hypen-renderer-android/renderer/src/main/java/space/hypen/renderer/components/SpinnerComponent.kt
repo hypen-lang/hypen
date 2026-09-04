@@ -49,6 +49,9 @@ class SpinnerComponent : ComponentHandler {
 
         // Stroke width
         val strokeWidth = element.getFloatProp("strokeWidth")?.dp ?: 4.dp
+        val animated = element.getBoolProp("animated")
+            ?: element.getBoolProp("animated.0")
+            ?: true
 
         if (!LocalContentVisible.current) {
             // Hidden by a managed show/hide (kept composed): park the
@@ -59,10 +62,19 @@ class SpinnerComponent : ComponentHandler {
             return
         }
 
-        CircularProgressIndicator(
-            modifier = modifier.size(size),
-            color = color,
-            strokeWidth = strokeWidth,
-        )
+        if (animated) {
+            CircularProgressIndicator(
+                modifier = modifier.size(size),
+                color = color,
+                strokeWidth = strokeWidth,
+            )
+        } else {
+            CircularProgressIndicator(
+                progress = { 0.75f },
+                modifier = modifier.size(size),
+                color = color,
+                strokeWidth = strokeWidth,
+            )
+        }
     }
 }

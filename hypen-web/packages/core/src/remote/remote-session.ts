@@ -142,6 +142,13 @@ export interface RemoteSessionOptions {
    * escape hatch when it needs it.
    */
   socketHandle?: unknown;
+  /**
+   * Server-authenticated session id recovered from a transport-owned channel
+   * (for example a Cloudflare hibernatable WebSocket attachment). When the
+   * in-memory SessionManager has been evicted, this id may be re-adopted.
+   * Never populate this from an untrusted client hello payload.
+   */
+  recoverySessionId?: string;
 }
 
 let nextSessionCounter = 1;
@@ -156,6 +163,7 @@ export class RemoteSession {
   private readonly host: SessionHost;
   private readonly transport: SessionTransport;
   private readonly socketHandle: unknown;
+  private readonly recoverySessionId: string | undefined;
 
   readonly engine: BaseEngine;
   private _moduleInstance: HypenModuleInstance<any> | null = null;
@@ -211,6 +219,7 @@ export class RemoteSession {
     this.id = options.clientId ?? `client_${nextSessionCounter++}`;
     this.connectedAt = new Date();
     this.socketHandle = options.socketHandle;
+    this.recoverySessionId = options.recoverySessionId;
 
     this.ready = new Promise<void>((resolve) => {
       this._resolveReady = resolve;
@@ -615,6 +624,13 @@ export class RemoteSession {
           if (!allowed) return;
           session = activeSession;
           isNew = false;
+        } else if (requestedSessionId === this.recoverySessionId) {
+          // A hibernated host has lost its in-memory SessionManager, but the
+          // transport still carries the server-issued id. Re-adopt that id so
+          // session-keyed module persistence resolves the same storage key.
+          session = sm.recoverSession(requestedSessionId, props);
+          isNew = false;
+          isRestored = true;
         } else {
           session = sm.createSession(props);
         }
@@ -640,7 +656,10 @@ export class RemoteSession {
     if (!this._moduleInstance) {
       this._moduleInstance = new HypenModuleInstance(
         this.engine,
-        this.host.module
+        this.host.module,
+        undefined,
+        undefined,
+        session.id
       );
     }
 
@@ -827,6 +846,18 @@ export class RemoteSession {
     // synchronous notify path (Rust rejects re-entrant WASM state
     // proxy calls).
     if (locationKey) {
+      // Persistence is loaded before auto-wiring. Seed the windowless router
+      // from that restored location before any subscribers are attached;
+      // otherwise its default `/` is immediately mirrored back into state
+      // and a hibernation wake silently replaces the restored detail route
+      // with Home before the triggering action runs.
+      const restoredLocation = (
+        primary?.getState() as Record<string, unknown> | undefined
+      )?.[locationKey];
+      if (typeof restoredLocation === "string" && restoredLocation) {
+        router.replace(restoredLocation);
+      }
+
       router.onNavigate((rs) => {
         const path = rs.currentPath;
         queueMicrotask(() => {

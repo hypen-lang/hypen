@@ -30,6 +30,7 @@ export const gridHandler: ComponentHandler = {
 
     const el = document.createElement("div");
     el.style.display = "grid";
+    el.style.gap = "0px";
     el.dataset.hypenType = "grid";
     return el;
   },
@@ -58,5 +59,4 @@ export const gridHandler: ComponentHandler = {
     }
   },
 };
-
 

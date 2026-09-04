@@ -18,8 +18,8 @@ use std::sync::{Arc, Mutex};
 fn stamped_engine() -> (Engine, Arc<Mutex<Vec<Patch>>>) {
     let mut engine = Engine::new();
 
-    let module = Module::new("TestModule")
-        .with_state_keys(vec!["label".to_string(), "unbound".to_string()]);
+    let module =
+        Module::new("TestModule").with_state_keys(vec!["label".to_string(), "unbound".to_string()]);
     engine.set_module(ModuleInstance::new(
         module,
         json!({"label": "a", "unbound": "z"}),

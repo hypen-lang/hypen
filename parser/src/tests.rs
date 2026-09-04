@@ -529,7 +529,6 @@ fn test_map_trailing_comma_with_newline() {
     assert!(result.is_ok(), "{:?}", result.err());
 }
 
-
 #[test]
 fn test_component_name_case_sensitivity() {
     let inputs = vec!["Text", "text", "TEXT", "MyComponent", "my_component"];
@@ -2033,7 +2032,8 @@ fn test_expr_range_covers_a_multiline_applicator_chain() {
     // The full-expression span must end at the LAST applicator's ')' so
     // downstream tooling (a11y suppression directives) can match a trailing
     // comment on any line of the chain to this element.
-    let input = "Button {\n    Icon(\"trash\")\n}\n    .padding(16)\n    .color(red)\n    .margin(8)";
+    let input =
+        "Button {\n    Icon(\"trash\")\n}\n    .padding(16)\n    .color(red)\n    .margin(8)";
     let component = parse_component(input).unwrap();
     let range = component.metadata.expr_range.clone();
     assert_eq!(range.start, 0);
@@ -2114,5 +2114,8 @@ fn test_hypenapp_with_slot_children() {
         .flat_map(|c| c.applicators.iter())
         .filter(|a| a.name == "slot")
         .count();
-    assert_eq!(slot_count, 2, "expected two .slot() applicators on children");
+    assert_eq!(
+        slot_count, 2,
+        "expected two .slot() applicators on children"
+    );
 }

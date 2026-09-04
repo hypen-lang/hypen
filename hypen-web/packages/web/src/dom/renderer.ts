@@ -69,6 +69,7 @@ function setElementText(element: HTMLElement, text: string): void {
 }
 
 const ACTIONABLE_TYPES = new Set(["button", "link", "card"]);
+const HORIZONTAL_DEMAND_PROP = /^(?:width|size|fillMaxWidth|fillMaxSize|horizontalAlignment|horizontalAlign|justifyContent|alignSelf|weight|flex|flexGrow|orientation)(?:\.|$)/;
 
 /**
  * Per-component-type props that map to HTML element attributes (not CSS).
@@ -84,8 +85,14 @@ const COMPONENT_HTML_ATTRS: Record<string, Set<string>> = {
   textarea: new Set(["placeholder", "value", "rows", "cols", "disabled", "readonly", "name"]),
   select: new Set(["name", "multiple", "disabled", "value"]),
   checkbox: new Set(["checked", "disabled", "name"]),
+  switch: new Set(["checked", "on", "value", "disabled", "name"]),
   radio: new Set(["checked", "disabled", "name", "value"]),
   link: new Set(["href", "target", "rel"]),
+  divider: new Set([
+    "orientation", "orientation.0",
+    "color", "color.0", "backgroundColor", "backgroundColor.0",
+    "height", "height.0", "thickness", "thickness.0",
+  ]),
   // Route URL changes to the handler so it reconnects the embedded app
   // instead of the generic text branch overwriting the subtree.
   hypenapp: new Set(["0", "url"]),
@@ -158,6 +165,7 @@ import { ensureA11yStyles } from "./a11y-styles.js";
 import { ensureAnimStyles } from "./anim-styles.js";
 import type { SafeAreaInsetOverrides } from "../safe-area.js";
 import { createSafeAreaHandler } from "./components/safearea.js";
+import { reconcileColumnWidthDemandFrom } from "./cross-axis-width.js";
 
 // Interface for the engine that renderer needs
 interface IEngine {
@@ -815,8 +823,14 @@ export class DOMRenderer {
       this.applicators.applyAll(element, staticProps);
 
       for (const child of node.children ?? []) {
-        element.appendChild(build(child));
+        const childElement = build(child);
+        element.appendChild(childElement);
+        reconcileColumnWidthDemandFrom(childElement);
       }
+      // Prototype subtrees are assembled without normal insert patches.
+      // Reconcile bottom-up here so the generated demand markers and
+      // automatic Column stretch survive cloneNode(true) on instantiate.
+      reconcileColumnWidthDemandFrom(element);
       return element;
     };
 
@@ -1129,6 +1143,9 @@ export class DOMRenderer {
         const handler = this.components.get(elementType);
         if (handler?.applyProps) {
           handler.applyProps(element, { [name]: value });
+          if (HORIZONTAL_DEMAND_PROP.test(name)) {
+            reconcileColumnWidthDemandFrom(element);
+          }
           return;
         }
       }
@@ -1183,11 +1200,18 @@ export class DOMRenderer {
       const handler = this.components.get(elementType);
       if (handler?.applyProps) {
         handler.applyProps(element, { [name]: value });
+        if (HORIZONTAL_DEMAND_PROP.test(name)) {
+          reconcileColumnWidthDemandFrom(element);
+        }
         return;
       }
     }
 
     this.applicators.apply(element, name, value);
+
+    if (HORIZONTAL_DEMAND_PROP.test(name)) {
+      reconcileColumnWidthDemandFrom(element);
+    }
 
     // Forward canvas dimension changes to its CanvasRenderer
     if ((name === "width" || name === "height") && this.canvasRenderers.has(id)) {
@@ -1217,7 +1241,16 @@ export class DOMRenderer {
       return;
     }
 
+    if (element.dataset.hypenType === "divider" && COMPONENT_HTML_ATTRS.divider.has(name)) {
+      this.components.get("divider")?.applyProps?.(element, { [name]: undefined });
+      reconcileColumnWidthDemandFrom(element);
+      return;
+    }
+
     this.applicators.apply(element, name, undefined);
+    if (HORIZONTAL_DEMAND_PROP.test(name)) {
+      reconcileColumnWidthDemandFrom(element);
+    }
   }
 
   /**
@@ -1271,9 +1304,11 @@ export class DOMRenderer {
 
     if (previousParent instanceof HTMLElement && previousParent !== parent) {
       this.components.notifyChildrenChanged(previousParent);
+      reconcileColumnWidthDemandFrom(previousParent);
     }
     if (parent instanceof HTMLElement) {
       this.components.notifyChildrenChanged(parent);
+      reconcileColumnWidthDemandFrom(child);
     }
 
     // Dialog entering the document (insert or cached re-attach): queue mount
@@ -1361,6 +1396,7 @@ export class DOMRenderer {
     }
     if (previousParent instanceof HTMLElement) {
       this.components.notifyChildrenChanged(previousParent);
+      reconcileColumnWidthDemandFrom(previousParent);
     }
 
     // Any open dialog inside the detached subtree just left the document:
@@ -1462,6 +1498,7 @@ export class DOMRenderer {
     }
     if (previousParent instanceof HTMLElement) {
       this.components.notifyChildrenChanged(previousParent);
+      reconcileColumnWidthDemandFrom(previousParent);
     }
 
     // Restore-to-trigger for any open dialog in the removed subtree, before

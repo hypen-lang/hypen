@@ -269,7 +269,10 @@ fn compiled_ternary_prop_updates_on_item_change() {
     assert_eq!(
         batch
             .iter()
-            .filter(|p| matches!(p, Patch::Create { .. } | Patch::Remove { .. } | Patch::Move { .. }))
+            .filter(|p| matches!(
+                p,
+                Patch::Create { .. } | Patch::Remove { .. } | Patch::Move { .. }
+            ))
             .count(),
         0,
         "a highlight toggle is non-structural, got: {:?}",
@@ -306,7 +309,12 @@ fn template_patches_always_emitted() {
         })
         .collect();
     assert_eq!(registers, 1, "one template registration, got: {:?}", batch);
-    assert_eq!(instantiates.len(), 3, "one Instantiate per row, got: {:?}", batch);
+    assert_eq!(
+        instantiates.len(),
+        3,
+        "one Instantiate per row, got: {:?}",
+        batch
+    );
     for (node_count, sub_count) in &instantiates {
         assert_eq!(*node_count, 1, "template has one element (Text leaf)");
         assert_eq!(*sub_count, 1, "the @item.name prop must arrive as a sub");
@@ -317,7 +325,11 @@ fn template_patches_always_emitted() {
         .iter()
         .filter(|p| matches!(p, Patch::Create { .. }))
         .count();
-    assert_eq!(creates, 1, "only the List container is a plain Create, got: {:?}", batch);
+    assert_eq!(
+        creates, 1,
+        "only the List container is a plain Create, got: {:?}",
+        batch
+    );
 }
 
 /// Nested ForEach: the inner per-row template is byte-identical across
@@ -441,7 +453,12 @@ fn expanded_wire_matches_plain_create_runs() {
 
     // Then each row as an adjacent Create+Insert pair under the container,
     // in item order, with the item's value substituted into the props.
-    assert_eq!(batch.len(), 8, "container pair + 3 row pairs, got: {:?}", batch);
+    assert_eq!(
+        batch.len(),
+        8,
+        "container pair + 3 row pairs, got: {:?}",
+        batch
+    );
     for (row, expected) in ["A", "B", "C"].iter().enumerate() {
         let base = 2 + row * 2;
         let row_id = match &batch[base] {

@@ -293,7 +293,10 @@ impl Engine {
         values: &serde_json::Value,
         animation: Option<serde_json::Value>,
     ) {
-        if self.core.update_state_sparse(scope, paths, values, animation) {
+        if self
+            .core
+            .update_state_sparse(scope, paths, values, animation)
+        {
             self.render_dirty();
         }
     }

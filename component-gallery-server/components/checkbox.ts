@@ -40,7 +40,7 @@ Column {
       Text("Accept terms and conditions")
         .marginLeft(8)
     }
-    .horizontalAlignment("center")
+    .verticalAlignment("center")
 
     Row {
       Checkbox(checked: "@{state.checked2}")
@@ -48,7 +48,7 @@ Column {
       Text("Subscribe to newsletter")
         .marginLeft(8)
     }
-    .horizontalAlignment("center")
+    .verticalAlignment("center")
 
     Row {
       Checkbox(checked: "@{state.checked3}")
@@ -56,12 +56,13 @@ Column {
       Text("Remember me")
         .marginLeft(8)
     }
-    .horizontalAlignment("center")
+    .verticalAlignment("center")
   }
   .gap(12)
   .padding(16)
   .backgroundColor("#f9fafb")
   .cornerRadius(8)
+  .fillMaxWidth(true)
   .marginBottom(24)
 
   Text("Checkbox in Card")
@@ -85,7 +86,7 @@ Column {
     .backgroundColor("#fff")
     .border({width: 1, color: "#e5e7eb"})
     .cornerRadius(8)
-    .horizontalAlignment("center")
+    .verticalAlignment("center")
 
     Row {
       Column {
@@ -102,12 +103,13 @@ Column {
     .backgroundColor("#eff6ff")
     .border({width: 2, color: "#3b82f6"})
     .cornerRadius(8)
-    .horizontalAlignment("center")
+    .verticalAlignment("center")
   }
   .gap(8)
   .fillMaxWidth(true)
 }
 .padding(24)
 .fillMaxSize(true)
+.backgroundColor("#ffffff")
 `
 };

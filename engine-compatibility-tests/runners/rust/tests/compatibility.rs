@@ -501,10 +501,9 @@ fn run_fixture(tc: &TestCase) {
                     // Re-render with replacement source — reconciled against
                     // the existing tree, exercising subtree replacement /
                     // teardown paths.
-                    let source = step
-                        .source
-                        .as_deref()
-                        .unwrap_or_else(|| panic!("[{}] renderSource step needs `source`", tc.name));
+                    let source = step.source.as_deref().unwrap_or_else(|| {
+                        panic!("[{}] renderSource step needs `source`", tc.name)
+                    });
                     let ir_node = parse_source_to_ir(&tc.name, source);
                     engine.render_ir_node(&ir_node);
                 }

@@ -58,7 +58,12 @@ fn rerender_patches(initial: serde_json::Value, next: serde_json::Value) -> Vec<
 
     instance.update_state(next);
     scheduler.mark_dirty(list_node_id);
-    render_dirty_nodes_with_deps(&mut scheduler, &mut tree, Some(&instance), &mut dependencies)
+    render_dirty_nodes_with_deps(
+        &mut scheduler,
+        &mut tree,
+        Some(&instance),
+        &mut dependencies,
+    )
 }
 
 /// A re-render where every item is value-identical must emit no patches at
@@ -135,9 +140,7 @@ fn reorder_emits_moves_only() {
     ]});
     let patches = rerender_patches(before, after);
     assert!(
-        patches
-            .iter()
-            .all(|p| matches!(p, Patch::Move { .. })),
+        patches.iter().all(|p| matches!(p, Patch::Move { .. })),
         "a pure reorder must emit only Move patches, got: {:?}",
         patches
     );
@@ -182,9 +185,7 @@ fn changed_template_defeats_memo() {
         "0".to_string(),
         Value::Binding(Binding::state(vec!["items".to_string()])),
     );
-    changed_list
-        .ir_children
-        .push(IRNode::Element(changed_leaf));
+    changed_list.ir_children.push(IRNode::Element(changed_leaf));
 
     let patches = reconcile_ir(
         &mut tree,

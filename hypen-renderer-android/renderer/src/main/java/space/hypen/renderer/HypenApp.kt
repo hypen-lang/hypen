@@ -22,7 +22,10 @@ import space.hypen.renderer.components.LocalColumnScope
 import space.hypen.renderer.components.LocalHypenSafeAreaInsets
 import space.hypen.renderer.components.LocalParentAllowsHorizontalExpansion
 import space.hypen.renderer.components.LocalRowScope
+import space.hypen.renderer.components.LocalManagedRowId
 import space.hypen.renderer.components.LocalStretchCrossAxis
+import space.hypen.renderer.components.isManagedRowChild
+import space.hypen.renderer.components.permittedFillMaxWidthFraction
 import space.hypen.renderer.components.videoIntentClickable
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.navigation.BackNavigationDispatcher
@@ -274,10 +277,15 @@ internal fun HypenElement(
             ?: element.getFloatProp("weight")
             ?: element.getFloatProp("flex.0")
             ?: element.getFloatProp("flex")
+            ?: element.getFloatProp("flexGrow.0")
+            ?: element.getFloatProp("flexgrow.0")
+            ?: element.getFloatProp("flexGrow")
 
     var finalModifier = modifier
 
     val rowScope = LocalRowScope.current
+    val managedRowId = LocalManagedRowId.current
+    val isManagedRowChild = isManagedRowChild(element, managedRowId, renderer)
     val columnScope = LocalColumnScope.current
     val shouldStretch = LocalStretchCrossAxis.current
     val parentAllowsHorizontalExpansion = LocalParentAllowsHorizontalExpansion.current
@@ -285,25 +293,24 @@ internal fun HypenElement(
     // Apply stretch (fillMaxHeight for Row children, fillMaxWidth for Column children)
     if (shouldStretch) {
         finalModifier = when {
-            rowScope != null -> finalModifier.fillMaxHeight()
+            rowScope != null || isManagedRowChild -> finalModifier.fillMaxHeight()
             columnScope != null -> finalModifier.fillMaxWidth()
             else -> finalModifier
         }
     }
 
-    // Apply fillMaxWidth only if parent Column allows expansion
-    // This ensures children only expand if parent has explicit width (fillMaxWidth or explicit width)
-    val hasFillMaxWidth = element.getBoolProp("fillMaxWidth.0") == true
-    if (hasFillMaxWidth && parentAllowsHorizontalExpansion) {
-        val fraction = element.getFloatProp("fillMaxWidth.0") ?: 1f
-        finalModifier = finalModifier.fillMaxWidth(if (fraction > 0) fraction else 1f)
+    // Apply fillMaxWidth only if the parent Column establishes a usable width.
+    // Compose itself resolves the request against the finite incoming constraint.
+    val fillMaxWidthFraction = permittedFillMaxWidthFraction(element, parentAllowsHorizontalExpansion)
+    if (fillMaxWidthFraction != null) {
+        finalModifier = finalModifier.fillMaxWidth(fillMaxWidthFraction)
     }
 
     // Apply weight only if explicitly specified via .weight() or .flex() applicators
     // Note: We don't auto-apply weight to Row children (unlike Web's flex:1) because
     // it can cause unexpected layout behavior with nested layouts. Users should
     // explicitly use .weight(1) or .flex(1) if they want children to stretch.
-    if (explicitWeight != null && explicitWeight > 0) {
+    if (!isManagedRowChild && explicitWeight != null && explicitWeight > 0) {
         finalModifier =
             when {
                 rowScope != null -> with(rowScope) { finalModifier.weight(explicitWeight) }

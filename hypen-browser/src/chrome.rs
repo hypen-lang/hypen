@@ -31,7 +31,7 @@
 //! | state                                    | measured height |
 //! |------------------------------------------|-----------------|
 //! | expanded toolbar, no tabs (home screen)   | 63 px           |
-//! | expanded toolbar + tab strip (app open)   | 102 px          |
+//! | expanded toolbar + tab strip (app open)   | 90 px           |
 //! | collapsed pill (`Esc` / hover-out)        | 51 px           |
 //!
 //! Those numbers come from `chrome_height_matches_measured_layout`
@@ -56,23 +56,22 @@ use crate::shell::ShellState;
 pub const TOOLBAR_HEIGHT: f32 = 64.0;
 
 /// Extra height the tab strip adds under the toolbar when at least one
-/// tab is open. Measured 102 - 63 = 39.
-pub const TAB_STRIP_HEIGHT: f32 = 40.0;
+/// tab is open. Measured 90 - 63 = 27.
+pub const TAB_STRIP_HEIGHT: f32 = 28.0;
 
-/// Height of the collapsed island — the pill showing the active tab's
-/// URL and status. Only ever shown while a tab is open. Measured 51.
+/// Height of the collapsed island — the pill showing either the active
+/// tab's URL and status or the Home label. Measured 51.
 pub const COLLAPSED_PILL_HEIGHT: f32 = 52.0;
 
 /// Logical-px height the island chrome occupies at the top of the
 /// window for `state`.
 ///
 /// Mirrors the two `If` gates in the shell DSL exactly: the toolbar is
-/// expanded when the island is expanded *or* no tab is open (a collapsed
-/// pill with nothing to label would be useless), and the tab strip only
-/// renders alongside it when there are tabs. Everything else is the
-/// collapsed pill.
+/// expanded only while the island is expanded, and the tab strip renders
+/// alongside it only when there are tabs. Every collapsed state uses the
+/// pill, including the first-open Home screen.
 pub fn chrome_height(state: &ShellState) -> f32 {
-    if state.island_expanded || !state.has_tabs {
+    if state.island_expanded {
         let strip = if state.has_tabs {
             TAB_STRIP_HEIGHT
         } else {
@@ -138,10 +137,8 @@ mod tests {
     }
 
     #[test]
-    fn collapsing_with_no_tabs_still_shows_the_toolbar() {
-        // The DSL gates the pill on `has_tabs`, so a collapsed island
-        // with nothing open still renders the full toolbar.
-        assert_eq!(chrome_height(&state(false, false)), TOOLBAR_HEIGHT);
+    fn collapsing_with_no_tabs_shows_the_home_pill() {
+        assert_eq!(chrome_height(&state(false, false)), COLLAPSED_PILL_HEIGHT);
     }
 
     #[test]
@@ -209,6 +206,14 @@ mod tests {
             "the viewport must be full-bleed — the chrome is an overlay, not a header",
         );
 
+        instance
+            .dispatch_action("island_hover", Some(serde_json::json!({"hovered": false})))
+            .expect("home hover-out collapses");
+        let (_, collapsed_home) = measure(&mut text);
+
+        instance
+            .dispatch_action("island_hover", Some(serde_json::json!({"hovered": true})))
+            .expect("home hover-in expands");
         crate::shell::push_tabs(
             &instance,
             vec![TabInfo {
@@ -220,6 +225,13 @@ mod tests {
             }],
             Some("t-1".into()),
         );
+        // Publishing the first active tab intentionally auto-collapses the
+        // chrome. Reopen it so this probe measures the distinct expanded
+        // toolbar + tab-strip state named below, rather than relabelling the
+        // collapsed pill's geometry.
+        instance
+            .dispatch_action("focus_url", None)
+            .expect("reopen toolbar with active tab");
         let (_, with_tab_strip) = measure(&mut text);
 
         instance
@@ -238,6 +250,11 @@ mod tests {
                 "toolbar only",
                 chrome_height(&state(true, false)),
                 toolbar_only,
+            ),
+            (
+                "collapsed home pill",
+                chrome_height(&state(false, false)),
+                collapsed_home,
             ),
             (
                 "toolbar + tab strip",

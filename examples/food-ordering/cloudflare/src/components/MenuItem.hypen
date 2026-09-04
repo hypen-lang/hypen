@@ -84,6 +84,6 @@ Column {
     }
     .tw("p-4")
 }
-.tw("bg-white rounded-2xl border border-gray-100 overflow-hidden")
+.tw("w-full bg-white rounded-2xl border border-gray-100 overflow-hidden")
 .boxShadow("0 1px 3px rgba(17, 24, 39, 0.06)")
 .enter(fade, duration: 300)

@@ -2,7 +2,7 @@
 /**
  * Screenshot Comparison Tool
  *
- * Compares screenshots across iOS, Android, and Web platforms.
+ * Compares screenshots across Web DOM, Canvas, Desktop, iOS, and Android.
  * Handles different screen dimensions and toolbar cropping.
  *
  * Usage:
@@ -11,49 +11,175 @@
  * Options:
  *   --component=X    Compare only a specific component
  *   --threshold=X    Pixel difference threshold 0-1 (default: 0.1)
- *   --output=dir     Output directory for diff images (default: results/diffs)
+ *   --output=dir     Output directory for five-platform strips (default: results/diffs)
+ *   --allow-differences  Exit successfully after producing output even below similarity targets
+ *   --ios-width/--ios-height/--ios-scale/--ios-crop-top/--ios-crop-bottom=X
+ *   --android-width/--android-height/--android-density/--android-crop-top/--android-crop-bottom=X
+ *   --web-width/--web-height=X
+ *   --canvas-width/--canvas-height=X
+ *   --desktop-width/--desktop-height=X
  */
 
-import { readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "fs";
-import { join, dirname, basename } from "path";
-import sharp from "sharp";
+import { writeFileSync, existsSync, mkdirSync, unlinkSync } from "fs";
+import { join, dirname } from "path";
+import { registeredGalleryDeeplinks } from "./gallery-registry";
+import {
+  CONTACT_SHEET_PLATFORMS,
+  createPlatformContactSheet,
+} from "./comparison-contact-sheet";
+import {
+  DEFAULT_SCREENSHOT_PROFILES,
+  type ScreenshotProfiles,
+  comparisonCanvas,
+  normalizeScreenshot,
+  normalizationGeometry,
+} from "./screenshot-normalization";
 
 // Configuration
 const SCRIPT_DIR = dirname(import.meta.path);
 const RESULTS_DIR = join(SCRIPT_DIR, "results");
 
-// Platform-specific configuration
-// Crop values determined by measuring actual screenshots
-const PLATFORM_CONFIG = {
-  web: {
-    width: 430,
-    height: 934,
-    cropTop: 0,      // No toolbar
-    cropBottom: 0,   // No home indicator
-    scale: 1,
-  },
-  ios: {
-    width: 1320,
-    height: 2868,
-    cropTop: 408,    // Status bar (~141px) + Nav bar (~267px) at 3x
-    cropBottom: 102, // Home indicator at 3x
-    scale: 1320 / 430,
-  },
-  android: {
-    width: 1344,
-    height: 2992,
-    cropTop: 441,    // Status bar (~126px) + App bar (~315px) at 3x
-    cropBottom: 126, // Navigation bar at 3x
-    scale: 1344 / 430,
-  },
-};
-
-// Target comparison size (web dimensions)
-const TARGET_WIDTH = 430;
-const TARGET_HEIGHT = 934;
-
 // Parse arguments
 const args = process.argv.slice(2);
+const allowDifferences = args.includes("--allow-differences");
+function numericOption(
+  name: string,
+  environmentValue: string | undefined,
+  fallback: number,
+  allowZero = false,
+): number {
+  const argument = args.find(value => value.startsWith(`--${name}=`));
+  const raw = argument?.slice(name.length + 3) ?? environmentValue;
+  const value = raw === undefined ? fallback : Number(raw);
+  if (!Number.isFinite(value) || (allowZero ? value < 0 : value <= 0)) {
+    throw new Error(`--${name} must be ${allowZero ? "non-negative" : "positive"}; received ${raw}`);
+  }
+  return value;
+}
+
+// These values deliberately use the same native dimension/density option names
+// as run-tests.ts. Chrome insets are logical CSS px/points/dp, never raw pixels.
+const PLATFORM_CONFIG = {
+  web: {
+    expectedPixels: {
+      width: numericOption(
+        "web-width",
+        process.env.HYPEN_WEB_WIDTH,
+        DEFAULT_SCREENSHOT_PROFILES.web.expectedPixels.width,
+      ),
+      height: numericOption(
+        "web-height",
+        process.env.HYPEN_WEB_HEIGHT,
+        DEFAULT_SCREENSHOT_PROFILES.web.expectedPixels.height,
+      ),
+    },
+    pixelsPerLogicalUnit: DEFAULT_SCREENSHOT_PROFILES.web.pixelsPerLogicalUnit,
+    chrome: DEFAULT_SCREENSHOT_PROFILES.web.chrome,
+  },
+  canvas: {
+    expectedPixels: {
+      width: numericOption(
+        "canvas-width",
+        process.env.HYPEN_CANVAS_WIDTH,
+        DEFAULT_SCREENSHOT_PROFILES.canvas.expectedPixels.width,
+      ),
+      height: numericOption(
+        "canvas-height",
+        process.env.HYPEN_CANVAS_HEIGHT,
+        DEFAULT_SCREENSHOT_PROFILES.canvas.expectedPixels.height,
+      ),
+    },
+    pixelsPerLogicalUnit: DEFAULT_SCREENSHOT_PROFILES.canvas.pixelsPerLogicalUnit,
+    chrome: DEFAULT_SCREENSHOT_PROFILES.canvas.chrome,
+  },
+  desktop: {
+    expectedPixels: {
+      width: numericOption(
+        "desktop-width",
+        process.env.HYPEN_DESKTOP_WIDTH,
+        DEFAULT_SCREENSHOT_PROFILES.desktop.expectedPixels.width,
+      ),
+      height: numericOption(
+        "desktop-height",
+        process.env.HYPEN_DESKTOP_HEIGHT,
+        DEFAULT_SCREENSHOT_PROFILES.desktop.expectedPixels.height,
+      ),
+    },
+    pixelsPerLogicalUnit: DEFAULT_SCREENSHOT_PROFILES.desktop.pixelsPerLogicalUnit,
+    chrome: DEFAULT_SCREENSHOT_PROFILES.desktop.chrome,
+  },
+  ios: {
+    expectedPixels: {
+      width: numericOption(
+        "ios-width",
+        process.env.HYPEN_IOS_WIDTH,
+        DEFAULT_SCREENSHOT_PROFILES.ios.expectedPixels.width,
+      ),
+      height: numericOption(
+        "ios-height",
+        process.env.HYPEN_IOS_HEIGHT,
+        DEFAULT_SCREENSHOT_PROFILES.ios.expectedPixels.height,
+      ),
+    },
+    pixelsPerLogicalUnit: numericOption(
+      "ios-scale",
+      process.env.HYPEN_IOS_SCALE,
+      DEFAULT_SCREENSHOT_PROFILES.ios.pixelsPerLogicalUnit,
+    ),
+    chrome: {
+      top: numericOption(
+        "ios-crop-top",
+        process.env.HYPEN_IOS_CROP_TOP,
+        DEFAULT_SCREENSHOT_PROFILES.ios.chrome.top,
+        true,
+      ),
+      bottom: numericOption(
+        "ios-crop-bottom",
+        process.env.HYPEN_IOS_CROP_BOTTOM,
+        DEFAULT_SCREENSHOT_PROFILES.ios.chrome.bottom,
+        true,
+      ),
+    },
+  },
+  android: {
+    expectedPixels: {
+      width: numericOption(
+        "android-width",
+        process.env.HYPEN_ANDROID_WIDTH,
+        DEFAULT_SCREENSHOT_PROFILES.android.expectedPixels.width,
+      ),
+      height: numericOption(
+        "android-height",
+        process.env.HYPEN_ANDROID_HEIGHT,
+        DEFAULT_SCREENSHOT_PROFILES.android.expectedPixels.height,
+      ),
+    },
+    pixelsPerLogicalUnit:
+      numericOption(
+        "android-density",
+        process.env.HYPEN_ANDROID_DENSITY,
+        DEFAULT_SCREENSHOT_PROFILES.android.pixelsPerLogicalUnit * 160,
+      ) / 160,
+    chrome: {
+      top: numericOption(
+        "android-crop-top",
+        process.env.HYPEN_ANDROID_CROP_TOP,
+        DEFAULT_SCREENSHOT_PROFILES.android.chrome.top,
+        true,
+      ),
+      bottom: numericOption(
+        "android-crop-bottom",
+        process.env.HYPEN_ANDROID_CROP_BOTTOM,
+        DEFAULT_SCREENSHOT_PROFILES.android.chrome.bottom,
+        true,
+      ),
+    },
+  },
+} satisfies ScreenshotProfiles;
+const COMPARISON_CANVAS = comparisonCanvas(PLATFORM_CONFIG);
+const TARGET_WIDTH = COMPARISON_CANVAS.width;
+const TARGET_HEIGHT = COMPARISON_CANVAS.height;
+
 const componentArg = args.find(a => a.startsWith("--component="));
 const specificComponent = componentArg ? componentArg.split("=")[1] : null;
 const thresholdArg = args.find(a => a.startsWith("--threshold="));
@@ -63,55 +189,16 @@ const DIFF_DIR = outputArg ? outputArg.split("=")[1] : join(RESULTS_DIR, "diffs"
 
 interface ComparisonResult {
   component: string;
+  contactSheetPath: string;
   comparisons: {
     pair: string;
     diffPercent: number;
     diffPixels: number;
     totalPixels: number;
     ssimScore: number;  // 0-1, higher = more similar
-    diffImagePath: string;
   }[];
   missingPlatforms: string[];
-}
-
-/**
- * Normalize a screenshot: crop toolbars/indicators and resize to target dimensions
- */
-async function normalizeScreenshot(
-  inputPath: string,
-  platform: "web" | "ios" | "android"
-): Promise<Buffer> {
-  const config = PLATFORM_CONFIG[platform];
-
-  let image = sharp(inputPath);
-  const metadata = await image.metadata();
-
-  if (!metadata.width || !metadata.height) {
-    throw new Error(`Could not read image dimensions: ${inputPath}`);
-  }
-
-  // Crop top (status bar, nav bar) and bottom (home indicator, nav bar)
-  const cropTop = config.cropTop || 0;
-  const cropBottom = config.cropBottom || 0;
-  const contentHeight = metadata.height - cropTop - cropBottom;
-
-  if (cropTop > 0 || cropBottom > 0) {
-    image = image.extract({
-      left: 0,
-      top: cropTop,
-      width: metadata.width,
-      height: contentHeight,
-    });
-  }
-
-  // Resize to target dimensions
-  image = image.resize(TARGET_WIDTH, TARGET_HEIGHT, {
-    fit: "fill",  // Stretch to exact dimensions
-    kernel: "lanczos3",
-  });
-
-  // Convert to raw RGBA for comparison
-  return image.ensureAlpha().raw().toBuffer();
+  invalidPlatforms: { platform: string; error: string }[];
 }
 
 /**
@@ -238,80 +325,19 @@ function calculateDiff(
 }
 
 /**
- * Create a side-by-side comparison image: [Image A] [Diff] [Image B]
- */
-async function createComparisonImage(
-  buf1: Buffer,
-  buf2: Buffer,
-  diffBuffer: Buffer,
-  width: number,
-  height: number,
-  outputPath: string,
-  label1: string,
-  label2: string
-): Promise<void> {
-  // Convert buffers to sharp images
-  const img1 = sharp(buf1, { raw: { width, height, channels: 4 } });
-  const img2 = sharp(buf2, { raw: { width, height, channels: 4 } });
-  const diffImg = sharp(diffBuffer, { raw: { width, height, channels: 4 } });
-
-  // Create PNG buffers
-  const [png1, png2, pngDiff] = await Promise.all([
-    img1.png().toBuffer(),
-    img2.png().toBuffer(),
-    diffImg.png().toBuffer(),
-  ]);
-
-  // Create side-by-side composite (3 images wide)
-  const totalWidth = width * 3;
-  const labelHeight = 30;
-  const totalHeight = height + labelHeight;
-
-  // Create the composite image
-  await sharp({
-    create: {
-      width: totalWidth,
-      height: totalHeight,
-      channels: 4,
-      background: { r: 40, g: 40, b: 40, alpha: 1 },
-    },
-  })
-    .composite([
-      // Image 1 (left)
-      { input: png1, left: 0, top: labelHeight },
-      // Diff (center)
-      { input: pngDiff, left: width, top: labelHeight },
-      // Image 2 (right)
-      { input: png2, left: width * 2, top: labelHeight },
-      // Labels
-      {
-        input: Buffer.from(
-          `<svg width="${totalWidth}" height="${labelHeight}">
-            <rect width="100%" height="100%" fill="#282828"/>
-            <text x="${width / 2}" y="20" text-anchor="middle" fill="#fff" font-family="sans-serif" font-size="14">${label1}</text>
-            <text x="${width * 1.5}" y="20" text-anchor="middle" fill="#ff6b6b" font-family="sans-serif" font-size="14">DIFF</text>
-            <text x="${width * 2.5}" y="20" text-anchor="middle" fill="#fff" font-family="sans-serif" font-size="14">${label2}</text>
-          </svg>`
-        ),
-        left: 0,
-        top: 0,
-      },
-    ])
-    .png()
-    .toFile(outputPath);
-}
-
-/**
  * Compare screenshots for a single component
  */
 async function compareComponent(componentName: string): Promise<ComparisonResult> {
+  const contactSheetPath = join(DIFF_DIR, `${componentName}_all_platforms.png`);
   const result: ComparisonResult = {
     component: componentName,
+    contactSheetPath,
     comparisons: [],
     missingPlatforms: [],
+    invalidPlatforms: [],
   };
 
-  const platforms = ["web", "ios", "android"] as const;
+  const platforms = ["web", "canvas", "desktop", "ios", "android"] as const;
   const normalizedImages: { [key: string]: Buffer } = {};
 
   // Normalize all available screenshots
@@ -319,29 +345,49 @@ async function compareComponent(componentName: string): Promise<ComparisonResult
     const imagePath = join(RESULTS_DIR, `${componentName}_${platform}.png`);
     if (existsSync(imagePath)) {
       try {
-        normalizedImages[platform] = await normalizeScreenshot(imagePath, platform);
+        normalizedImages[platform] = await normalizeScreenshot(
+          imagePath,
+          platform,
+          PLATFORM_CONFIG,
+          COMPARISON_CANVAS,
+        );
       } catch (error) {
-        console.warn(`  Warning: Could not process ${platform} image: ${error}`);
-        result.missingPlatforms.push(platform);
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn(`  Warning: Could not process ${platform} image: ${message}`);
+        result.invalidPlatforms.push({ platform, error: message });
       }
     } else {
       result.missingPlatforms.push(platform);
     }
   }
 
+  await createPlatformContactSheet(
+    normalizedImages,
+    TARGET_WIDTH,
+    TARGET_HEIGHT,
+    contactSheetPath,
+    Object.fromEntries(
+      CONTACT_SHEET_PLATFORMS.map(platform => {
+        const geometry = normalizationGeometry(PLATFORM_CONFIG[platform]);
+        return [platform, geometry.normalizedPixels];
+      }),
+    ),
+  );
+
   // Compare all pairs
-  const pairs: [string, string][] = [
-    ["web", "ios"],
-    ["web", "android"],
-    ["ios", "android"],
-  ];
+  const pairs: [string, string][] = [];
+  for (let first = 0; first < platforms.length; first++) {
+    for (let second = first + 1; second < platforms.length; second++) {
+      pairs.push([platforms[first], platforms[second]]);
+    }
+  }
 
   for (const [p1, p2] of pairs) {
     if (!normalizedImages[p1] || !normalizedImages[p2]) {
       continue;
     }
 
-    const { diffPixels, diffBuffer, ssimScore } = calculateDiff(
+    const { diffPixels, ssimScore } = calculateDiff(
       normalizedImages[p1],
       normalizedImages[p2],
       TARGET_WIDTH,
@@ -351,47 +397,21 @@ async function compareComponent(componentName: string): Promise<ComparisonResult
     const totalPixels = TARGET_WIDTH * TARGET_HEIGHT;
     const diffPercent = (diffPixels / totalPixels) * 100;
 
-    // Save side-by-side comparison image
-    const diffImagePath = join(DIFF_DIR, `${componentName}_${p1}_vs_${p2}.png`);
-    await createComparisonImage(
-      normalizedImages[p1],
-      normalizedImages[p2],
-      diffBuffer,
-      TARGET_WIDTH,
-      TARGET_HEIGHT,
-      diffImagePath,
-      p1.toUpperCase(),
-      p2.toUpperCase()
-    );
-
     result.comparisons.push({
       pair: `${p1} vs ${p2}`,
       diffPercent,
       diffPixels,
       totalPixels,
       ssimScore,
-      diffImagePath,
     });
   }
 
   return result;
 }
 
-/**
- * Get list of components from screenshot files
- */
+/** Get the authoritative page list rather than inferring it from stale artifacts. */
 function getComponents(): string[] {
-  const files = readdirSync(RESULTS_DIR);
-  const components = new Set<string>();
-
-  for (const file of files) {
-    const match = file.match(/^(.+)_(web|ios|android)\.png$/);
-    if (match) {
-      components.add(match[1]);
-    }
-  }
-
-  return Array.from(components).sort();
+  return registeredGalleryDeeplinks(join(SCRIPT_DIR, ".."));
 }
 
 /**
@@ -420,6 +440,21 @@ async function main(): Promise<void> {
     }
   }
 
+  // Pairwise diff sheets were the old output format. Remove only those exact
+  // generated artifacts so the output directory cannot mix both designs.
+  for (const component of components) {
+    for (let first = 0; first < CONTACT_SHEET_PLATFORMS.length; first++) {
+      for (let second = 0; second < CONTACT_SHEET_PLATFORMS.length; second++) {
+        if (first === second) continue;
+        const legacyPath = join(
+          DIFF_DIR,
+          `${component}_${CONTACT_SHEET_PLATFORMS[first]}_vs_${CONTACT_SHEET_PLATFORMS[second]}.png`,
+        );
+        if (existsSync(legacyPath)) unlinkSync(legacyPath);
+      }
+    }
+  }
+
   console.log(`Comparing ${components.length} components...\n`);
 
   const results: ComparisonResult[] = [];
@@ -431,6 +466,9 @@ async function main(): Promise<void> {
 
     if (result.missingPlatforms.length > 0) {
       process.stdout.write(`(missing: ${result.missingPlatforms.join(", ")}) `);
+    }
+    if (result.invalidPlatforms.length > 0) {
+      process.stdout.write(`(invalid: ${result.invalidPlatforms.map(item => item.platform).join(", ")}) `);
     }
 
     // Show comparison results
@@ -451,14 +489,40 @@ async function main(): Promise<void> {
 
   // Aggregate stats
   const allComparisons = results.flatMap(r => r.comparisons);
-  const avgSimilarity = allComparisons.reduce((sum, c) => sum + c.ssimScore, 0) / allComparisons.length;
-  const minSimilarity = Math.min(...allComparisons.map(c => c.ssimScore));
+  const invalidScreenshots = results.flatMap(result =>
+    result.invalidPlatforms.map(item => ({ component: result.component, ...item })),
+  );
+  const missingScreenshots = results.flatMap(result =>
+    result.missingPlatforms.map(platform => ({ component: result.component, platform })),
+  );
+  const avgSimilarity = allComparisons.length > 0
+    ? allComparisons.reduce((sum, c) => sum + c.ssimScore, 0) / allComparisons.length
+    : 0;
+  const minSimilarity = allComparisons.length > 0
+    ? Math.min(...allComparisons.map(c => c.ssimScore))
+    : 0;
   const lowSimilarity = allComparisons.filter(c => c.ssimScore < 0.85);
 
   console.log(`Total comparisons: ${allComparisons.length}`);
   console.log(`Average similarity: ${(avgSimilarity * 100).toFixed(1)}%`);
   console.log(`Minimum similarity: ${(minSimilarity * 100).toFixed(1)}%`);
   console.log(`Low similarity (<85%): ${lowSimilarity.length}`);
+  console.log(`Missing screenshots: ${missingScreenshots.length}`);
+  console.log(`Invalid screenshots: ${invalidScreenshots.length}`);
+
+  if (missingScreenshots.length > 0) {
+    console.log("\nMissing platform screenshots:");
+    for (const item of missingScreenshots) {
+      console.log(`  - ${item.component} (${item.platform})`);
+    }
+  }
+
+  if (invalidScreenshots.length > 0) {
+    console.log("\nScreenshots rejected by their device profile:");
+    for (const item of invalidScreenshots) {
+      console.log(`  - ${item.component} (${item.platform}): ${item.error}`);
+    }
+  }
 
   if (lowSimilarity.length > 0) {
     console.log("\nComponents needing attention:");
@@ -468,7 +532,7 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log(`\nDiff images saved to: ${DIFF_DIR}`);
+  console.log(`\nFive-platform comparison strips saved to: ${DIFF_DIR}`);
 
   // Write JSON report
   const reportPath = join(DIFF_DIR, "comparison-report.json");
@@ -486,13 +550,21 @@ async function main(): Promise<void> {
       averageSimilarity: avgSimilarity,
       minimumSimilarity: minSimilarity,
       lowSimilarityCount: lowSimilarity.length,
+      missingScreenshotCount: missingScreenshots.length,
+      invalidScreenshotCount: invalidScreenshots.length,
     },
     results,
   }, null, 2));
   console.log(`Report saved to: ${reportPath}`);
 
   // Exit with error if any comparisons have very low similarity
-  if (lowSimilarity.length > 0) {
+  // Docs may intentionally publish known visual differences, but never accept
+  // screenshots rejected by the pinned device profiles.
+  if (
+    missingScreenshots.length > 0
+    || invalidScreenshots.length > 0
+    || (!allowDifferences && lowSimilarity.length > 0)
+  ) {
     process.exit(1);
   }
 }

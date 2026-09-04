@@ -749,7 +749,13 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
         "When" => convert_when(component),
         "If" => convert_if(component),
         "Router" => convert_router(component),
-        "List" | "Grid" => convert_list(component),
+        // List and Grid have a dual role: with an iterable binding they are
+        // keyed iteration containers, while without one they are ordinary
+        // layout wrappers with static children. Only take the iterable path
+        // when an actual binding is present; otherwise fall through to the
+        // regular Element lowering below so static gallery/application markup
+        // keeps its type, props, applicators, and children.
+        "List" | "Grid" if iterable_source_binding(component).is_some() => convert_list(component),
         _ => {
             // Regular element - convert children to IRNodes recursively
             let mut element = Element::new(&component.name);
@@ -1271,6 +1277,17 @@ fn parser_to_binding(value: &ParserValue) -> Option<Binding> {
     }
 }
 
+/// Return the array binding that makes a List/Grid an iterable container.
+///
+/// List and Grid also support static children, so the mere component name is
+/// not enough to select the ForEach lowering path.
+fn iterable_source_binding(component: &ComponentSpecification) -> Option<Binding> {
+    let args = &component.arguments.arguments;
+    find_named_arg(args, &["items", "in"])
+        .or_else(|| first_positional_arg(args))
+        .and_then(parser_to_binding)
+}
+
 /// Build an `__Error` element with `message` set to `msg`.
 fn error_element(msg: impl Into<String>) -> IRNode {
     let mut err = Element::new("__Error");
@@ -1336,9 +1353,7 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
     let element_type = &component.name;
     let args = &component.arguments.arguments;
 
-    let source = find_named_arg(args, &["items", "in"])
-        .or_else(|| first_positional_arg(args))
-        .and_then(parser_to_binding);
+    let source = iterable_source_binding(component);
 
     let item_name = find_named_arg(args, &["as"])
         .and_then(parser_string_unquoted)
@@ -1804,6 +1819,108 @@ mod tests {
         assert_eq!(element.ir_children.len(), 2);
         assert!(matches!(&element.ir_children[0], IRNode::Element(e) if e.element_type == "Text"));
         assert!(matches!(&element.ir_children[1], IRNode::Element(e) if e.element_type == "Text"));
+    }
+
+    #[test]
+    fn test_static_list_lowers_to_element_with_props_and_children() {
+        let element = parse_to_element(
+            r##"
+                List(direction: "horizontal") {
+                    Text("First")
+                    Text("Second")
+                }
+                .gap(7)
+                .backgroundColor("#f0f0f0")
+            "##,
+        );
+
+        assert_eq!(element.element_type, "List");
+        assert!(matches!(
+            element.props.get("direction"),
+            Some(Value::Static(value)) if value == "horizontal"
+        ));
+        assert!(matches!(
+            element.props.get("gap.0"),
+            Some(Value::Static(value)) if value.as_f64() == Some(7.0)
+        ));
+        assert!(matches!(
+            element.props.get("backgroundColor.0"),
+            Some(Value::Static(value)) if value == "#f0f0f0"
+        ));
+        assert_eq!(element.ir_children.len(), 2);
+        assert!(matches!(&element.ir_children[0], IRNode::Element(e) if e.element_type == "Text"));
+        assert!(matches!(&element.ir_children[1], IRNode::Element(e) if e.element_type == "Text"));
+    }
+
+    #[test]
+    fn test_static_grid_lowers_to_element_with_props_and_children() {
+        let element = parse_to_element(
+            r#"
+                Grid(columns: 3) {
+                    Text("A")
+                    Column { Text("B") }
+                }
+                .gridColumns(2)
+                .gap(8)
+            "#,
+        );
+
+        assert_eq!(element.element_type, "Grid");
+        assert!(matches!(
+            element.props.get("columns"),
+            Some(Value::Static(value)) if value.as_f64() == Some(3.0)
+        ));
+        assert!(matches!(
+            element.props.get("gridColumns.0"),
+            Some(Value::Static(value)) if value.as_f64() == Some(2.0)
+        ));
+        assert!(matches!(
+            element.props.get("gap.0"),
+            Some(Value::Static(value)) if value.as_f64() == Some(8.0)
+        ));
+        assert_eq!(element.ir_children.len(), 2);
+        assert!(matches!(&element.ir_children[0], IRNode::Element(e) if e.element_type == "Text"));
+        assert!(
+            matches!(&element.ir_children[1], IRNode::Element(e) if e.element_type == "Column")
+        );
+    }
+
+    #[test]
+    fn test_bound_list_keeps_foreach_wrapper_lowering() {
+        let element = parse_to_element(
+            r#"
+                List(@state.items, key: "id") {
+                    Text("@{item.name}")
+                }
+                .gap(4)
+            "#,
+        );
+
+        assert_eq!(element.element_type, "List");
+        assert!(matches!(
+            element.props.get("gap.0"),
+            Some(Value::Static(value)) if value.as_f64() == Some(4.0)
+        ));
+        assert_eq!(element.ir_children.len(), 1);
+
+        match &element.ir_children[0] {
+            IRNode::ForEach {
+                source,
+                item_name,
+                key_path,
+                template,
+                props,
+                ..
+            } => {
+                assert_eq!(source.full_path(), "items");
+                assert_eq!(item_name, "item");
+                assert_eq!(key_path.as_deref(), Some("id"));
+                assert_eq!(template.len(), 1);
+                assert!(matches!(&template[0], IRNode::Element(e) if e.element_type == "Text"));
+                assert!(props.contains_key("gap.0"));
+            }
+            other => panic!("Expected bound List child to remain ForEach, got {other:?}"),
+        }
     }
 
     #[test]

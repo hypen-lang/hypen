@@ -79,7 +79,6 @@ public struct ColumnComponent: ComponentHandler {
         if (justifyContent != .start || hasWeightedChild) && !scrollable {
             effectiveModifier.fillMaxHeight = true
         }
-
         // Set modifier alignment so hypenModifier's frames position content correctly.
         // Without this, applyFillExpansion defaults to .topLeading, ignoring items-center/justify-center.
         let verticalAlign: VerticalAlignment = {
@@ -96,8 +95,8 @@ public struct ColumnComponent: ComponentHandler {
         let allowsHorizontalExpansion = effectiveModifier.fillMaxWidth || modifier.width != nil
 
         // Get explicit dimensions for percentage calculations in children
-        let explicitWidth = modifier.width
-        let explicitHeight = modifier.height
+        let explicitWidth = modifier.explicitContentWidth
+        let explicitHeight = modifier.explicitContentHeight
 
         // Wrap children with appropriate environments
         let wrappedChildren: () -> AnyView = {
@@ -110,6 +109,9 @@ public struct ColumnComponent: ComponentHandler {
             // Pass explicit width for percentage width calculations
             if let width = explicitWidth {
                 view = AnyView(view.environment(\.parentExplicitWidth, width))
+            }
+            if let height = explicitHeight {
+                view = AnyView(view.environment(\.parentExplicitHeight, height))
             }
             return view
         }
@@ -132,6 +134,7 @@ public struct ColumnComponent: ComponentHandler {
                                 .environment(\.stretchCrossAxis, isStretch ? .horizontal : .none)
                                 .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
                                 .environment(\.parentExplicitWidth, explicitWidth)
+                                .environment(\.parentExplicitHeight, explicitHeight)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: verticalFrameAlignment(verticalAlignmentStr))
@@ -149,6 +152,7 @@ public struct ColumnComponent: ComponentHandler {
                                 .environment(\.stretchCrossAxis, isStretch ? .horizontal : .none)
                                 .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
                                 .environment(\.parentExplicitWidth, explicitWidth)
+                                .environment(\.parentExplicitHeight, explicitHeight)
                                 if index < childElements.count - 1 {
                                     Spacer(minLength: gap)
                                 }
@@ -168,6 +172,7 @@ public struct ColumnComponent: ComponentHandler {
                                 .environment(\.stretchCrossAxis, isStretch ? .horizontal : .none)
                                 .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
                                 .environment(\.parentExplicitWidth, explicitWidth)
+                                .environment(\.parentExplicitHeight, explicitHeight)
                                 Spacer(minLength: gap / 2)
                             }
                         }
@@ -185,6 +190,7 @@ public struct ColumnComponent: ComponentHandler {
                                 .environment(\.stretchCrossAxis, isStretch ? .horizontal : .none)
                                 .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
                                 .environment(\.parentExplicitWidth, explicitWidth)
+                                .environment(\.parentExplicitHeight, explicitHeight)
                             }
                             Spacer(minLength: gap)
                         }
@@ -333,13 +339,11 @@ public struct RowComponent: ComponentHandler {
 
         // Check if any child has a weight property
         // When a child has weight, it should take remaining space, making centering ineffective
-        let hasWeightedChild = childElements.contains { child in
-            child.getCGFloatProp("weight.0") != nil || child.getCGFloatProp("flex.0") != nil || child.getCGFloatProp("flexGrow.0") != nil
-        }
+        let hasManagedWidthChild = childElements.contains { RowItemSizing(element: $0).isManaged }
 
         // For non-start arrangements or when children have weights, Row needs to fill available width
         var effectiveModifier = modifier
-        if (justifyContent != .start || hasWeightedChild) && !scrollable {
+        if (justifyContent != .start || hasManagedWidthChild) && !scrollable {
             effectiveModifier.fillMaxWidth = true
         }
 
@@ -354,11 +358,11 @@ public struct RowComponent: ComponentHandler {
         effectiveModifier.alignment = Alignment(horizontal: horizontalAlign, vertical: verticalAlignment)
 
         // Row allows horizontal expansion when it has width (fillMaxWidth, explicit width, or weighted children)
-        let allowsHorizontalExpansion = effectiveModifier.fillMaxWidth || modifier.width != nil || hasWeightedChild
+        let allowsHorizontalExpansion = effectiveModifier.fillMaxWidth || modifier.width != nil || hasManagedWidthChild
 
         // Get explicit dimensions for percentage calculations in children
-        let explicitHeight = modifier.height
-        let explicitWidth = modifier.width
+        let explicitHeight = modifier.explicitContentHeight
+        let explicitWidth = modifier.explicitContentWidth
 
         // Wrap children with appropriate environments
         let wrappedChildren: () -> AnyView = {
@@ -457,55 +461,46 @@ public struct RowComponent: ComponentHandler {
                         }
 
                     case .center:
-                        // When children have weights, use FlexDistributingRow for proportional distribution
-                        if hasWeightedChild {
-                            FlexDistributingRow(
-                                childElements: childElements,
-                                gap: gap,
-                                verticalAlignment: verticalAlignment,
-                                isStretch: isStretch,
-                                allowsHorizontalExpansion: allowsHorizontalExpansion,
-                                explicitHeight: explicitHeight,
-                                explicitWidth: explicitWidth,
-                                renderer: context.renderer,
-                                actionDispatcher: context.actionDispatcher
-                            )
-                        } else {
-                            HStack(alignment: verticalAlignment, spacing: gap) {
-                                Spacer(minLength: 0)
-                                wrappedChildren()
-                                Spacer(minLength: 0)
-                            }
-                        }
+                        // Keep the children as one compact group. Putting a
+                        // variadic `children()` value between two SwiftUI
+                        // Spacers lets the view builder interleave those
+                        // spacers with the individual children, splitting an
+                        // avatar and its label across the full row.
+                        FlexDistributingRow(
+                            childElements: childElements,
+                            gap: gap,
+                            verticalAlignment: verticalAlignment,
+                            horizontalAlignment: horizontalAlign,
+                            isStretch: isStretch,
+                            allowsHorizontalExpansion: allowsHorizontalExpansion,
+                            explicitHeight: explicitHeight,
+                            explicitWidth: explicitWidth,
+                            renderer: context.renderer,
+                            actionDispatcher: context.actionDispatcher
+                        )
 
                     case .end:
-                        // When children have weights, use FlexDistributingRow for proportional distribution
-                        if hasWeightedChild {
-                            FlexDistributingRow(
-                                childElements: childElements,
-                                gap: gap,
-                                verticalAlignment: verticalAlignment,
-                                isStretch: isStretch,
-                                allowsHorizontalExpansion: allowsHorizontalExpansion,
-                                explicitHeight: explicitHeight,
-                                explicitWidth: explicitWidth,
-                                renderer: context.renderer,
-                                actionDispatcher: context.actionDispatcher
-                            )
-                        } else {
-                            HStack(alignment: verticalAlignment, spacing: gap) {
-                                Spacer(minLength: 0)
-                                wrappedChildren()
-                            }
-                        }
+                        FlexDistributingRow(
+                            childElements: childElements,
+                            gap: gap,
+                            verticalAlignment: verticalAlignment,
+                            horizontalAlignment: horizontalAlign,
+                            isStretch: isStretch,
+                            allowsHorizontalExpansion: allowsHorizontalExpansion,
+                            explicitHeight: explicitHeight,
+                            explicitWidth: explicitWidth,
+                            renderer: context.renderer,
+                            actionDispatcher: context.actionDispatcher
+                        )
 
                     case .start:
-                        if hasWeightedChild {
+                        if hasManagedWidthChild {
                             // Use FlexDistributingRow for proportional flex distribution
                             FlexDistributingRow(
                                 childElements: childElements,
                                 gap: gap,
                                 verticalAlignment: verticalAlignment,
+                                horizontalAlignment: horizontalAlign,
                                 isStretch: isStretch,
                                 allowsHorizontalExpansion: allowsHorizontalExpansion,
                                 explicitHeight: explicitHeight,
@@ -563,12 +558,179 @@ public struct RowComponent: ComponentHandler {
 
 // MARK: - Flex Distributing Row Helper
 
-/// Helper view for Row with weighted children
-/// Uses SwiftUI's natural flex layout - children with weight expand via applyWeightExpansion
+/// Sizing metadata used by the Row's one parent-aware width allocation pass.
+/// `flex` uses a zero basis, while `flexGrow` grows from the child's intrinsic
+/// (or explicit) width, matching CSS flexbox behavior.
+struct RowItemSizing: Equatable {
+    let fraction: CGFloat?
+    let basis: CGFloat?
+    let flexWeight: CGFloat
+    let usesZeroFlexBasis: Bool
+    let shrink: CGFloat
+    let minimum: CGFloat?
+    let maximum: CGFloat?
+
+    var isManaged: Bool {
+        fraction != nil || flexWeight > 0 || shrink == 0
+    }
+
+    init(
+        fraction: CGFloat? = nil,
+        basis: CGFloat? = nil,
+        flexWeight: CGFloat = 0,
+        usesZeroFlexBasis: Bool = false,
+        shrink: CGFloat = 1,
+        minimum: CGFloat? = nil,
+        maximum: CGFloat? = nil
+    ) {
+        self.fraction = fraction
+        self.basis = basis.map { max(0, $0) }
+        self.flexWeight = max(0, flexWeight)
+        self.usesZeroFlexBasis = usesZeroFlexBasis
+        self.shrink = max(0, shrink)
+        self.minimum = minimum
+        self.maximum = maximum
+    }
+
+    init(element: HypenElement) {
+        let flex = element.getCGFloatProp("flex.0") ?? element.getCGFloatProp("weight.0")
+        let grow = element.getCGFloatProp("flexGrow.0") ?? element.getCGFloatProp("flexgrow.0")
+        let rawFill = element.props["fillMaxWidth.0"] ?? element.props["fillmaxwidth.0"]
+        let rawWidth = element.props["width.0"]
+
+        func fillPercentage(_ value: Any?) -> CGFloat? {
+            if let bool = value as? Bool { return bool ? 1 : nil }
+            if let number = value as? Double { return min(max(CGFloat(number), 0), 1) }
+            if let number = value as? Int { return min(max(CGFloat(number), 0), 1) }
+            guard let string = value as? String else { return nil }
+            if string.hasSuffix("%"), let number = Double(string.dropLast()) {
+                return min(max(CGFloat(number / 100), 0), 1)
+            }
+            if let number = Double(string), number >= 0, number <= 1 {
+                return CGFloat(number)
+            }
+            return nil
+        }
+
+        func widthPercentage(_ value: Any?) -> CGFloat? {
+            guard let string = value as? String,
+                  string.hasSuffix("%"),
+                  let number = Double(string.dropLast()) else { return nil }
+            return min(max(CGFloat(number / 100), 0), 1)
+        }
+
+        // Numeric width is a point basis (`width(48)`), never a fraction.
+        // Only the `%` string form participates in relative Row allocation.
+        // Treating 48/64/200 as a number-to-fraction conversion clamped every
+        // fixed avatar and shrink basis to 100% of the row.
+        fraction = fillPercentage(rawFill) ?? widthPercentage(rawWidth)
+        basis = fraction == nil ? element.getCGFloatProp("width.0") : nil
+        let isFlexibleSpacer = element.elementType.lowercased() == "spacer"
+            && element.getCGFloatProp("size.0") == nil
+        flexWeight = max(0, flex ?? grow ?? (isFlexibleSpacer ? 1 : 0))
+        usesZeroFlexBasis = (flex ?? 0) > 0 || isFlexibleSpacer
+        shrink = max(0,
+            element.getCGFloatProp("flexShrink.0")
+                ?? element.getCGFloatProp("flexshrink.0")
+                ?? 1
+        )
+        minimum = element.getCGFloatProp("minWidth.0") ?? element.getCGFloatProp("minwidth.0")
+        maximum = element.getCGFloatProp("maxWidth.0") ?? element.getCGFloatProp("maxwidth.0")
+    }
+}
+
+/// Pure row width allocator, kept separate from SwiftUI's placement machinery
+/// so the cross-platform sizing contract can be tested deterministically.
+struct RowWidthAllocator {
+    static func widths(
+        availableWidth: CGFloat,
+        gap: CGFloat,
+        naturalWidths: [CGFloat],
+        items: [RowItemSizing]
+    ) -> [CGFloat] {
+        guard naturalWidths.count == items.count, !items.isEmpty else { return [] }
+        let gapTotal = max(0, gap) * CGFloat(max(0, items.count - 1))
+        let pool = max(0, availableWidth - gapTotal)
+
+        var result = zip(naturalWidths, items).map { natural, item -> CGFloat in
+            let base: CGFloat
+            if let fraction = item.fraction {
+                base = pool * min(max(fraction, 0), 1)
+            } else if item.usesZeroFlexBasis {
+                base = 0
+            } else if let basis = item.basis {
+                base = basis
+            } else {
+                base = max(0, natural)
+            }
+            return clamp(base, item: item)
+        }
+
+        let totalGrow = items.reduce(CGFloat.zero) { $0 + $1.flexWeight }
+        var free = pool - result.reduce(0, +)
+        if free > 0, totalGrow > 0 {
+            var active = Set(items.indices.filter { items[$0].flexWeight > 0 })
+            while free > 0.001, !active.isEmpty {
+                let activeWeight = active.reduce(CGFloat.zero) { $0 + items[$1].flexWeight }
+                guard activeWeight > 0 else { break }
+                let startingFree = free
+                var consumed: CGFloat = 0
+                var capped: [Int] = []
+                for index in active {
+                    let share = startingFree * items[index].flexWeight / activeWeight
+                    let grown = clamp(result[index] + share, item: items[index])
+                    consumed += grown - result[index]
+                    result[index] = grown
+                    if let maximum = items[index].maximum, grown >= maximum { capped.append(index) }
+                }
+                free -= consumed
+                capped.forEach { active.remove($0) }
+                if consumed < 0.001 { break }
+            }
+        } else if free < 0 {
+            var overflow = -free
+            var active = Set(items.indices.filter { items[$0].shrink > 0 && result[$0] > (items[$0].minimum ?? 0) })
+            while overflow > 0.001, !active.isEmpty {
+                let factors = active.reduce(CGFloat.zero) { $0 + items[$1].shrink * max(result[$1], 1) }
+                guard factors > 0 else { break }
+                let startingOverflow = overflow
+                var removed: CGFloat = 0
+                var floored: [Int] = []
+                for index in active {
+                    let share = startingOverflow * (items[index].shrink * max(result[index], 1)) / factors
+                    let floor = items[index].minimum ?? 0
+                    let shrunk = max(floor, result[index] - share)
+                    removed += result[index] - shrunk
+                    result[index] = shrunk
+                    if shrunk <= floor { floored.append(index) }
+                }
+                overflow -= removed
+                floored.forEach { active.remove($0) }
+                if removed < 0.001 { break }
+            }
+        }
+        return result
+    }
+
+    private static func clamp(_ width: CGFloat, item: RowItemSizing) -> CGFloat {
+        var result = width
+        if let maximum = item.maximum { result = min(result, maximum) }
+        if let minimum = item.minimum { result = max(result, minimum) }
+        return result
+    }
+}
+
+@available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *)
+struct RowSizingLayoutValueKey: LayoutValueKey {
+    static let defaultValue = RowItemSizing()
+}
+
+/// Helper view for Row children that need coordinated sizing.
 private struct FlexDistributingRow: View {
     let childElements: [HypenElement]
     let gap: CGFloat
     let verticalAlignment: VerticalAlignment
+    let horizontalAlignment: HorizontalAlignment
     let isStretch: Bool
     let allowsHorizontalExpansion: Bool
     let explicitHeight: CGFloat?
@@ -577,27 +739,105 @@ private struct FlexDistributingRow: View {
     let actionDispatcher: ActionDispatcher
 
     var body: some View {
-        HStack(alignment: verticalAlignment, spacing: gap) {
-            ForEach(childElements, id: \.id) { childElement in
-                // Check if this child has weight/flex - if so, it should expand
-                let childWeight = childElement.getCGFloatProp("flex.0") ?? childElement.getCGFloatProp("weight.0") ?? childElement.getCGFloatProp("flexGrow.0")
-                let shouldExpand = childWeight != nil && childWeight! > 0
-
-                HypenElementView(
-                    elementId: childElement.id,
-                    renderer: renderer,
-                    actionDispatcher: actionDispatcher
-                )
-                .environment(\.stretchCrossAxis, isStretch ? .vertical : .none)
-                .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
-                .environment(\.parentExplicitHeight, explicitHeight)
-                .environment(\.parentExplicitWidth, explicitWidth)
-                // Directly apply expansion for weighted children
-                .frame(maxWidth: shouldExpand ? .infinity : nil, alignment: .topLeading)
+        Group {
+            if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) {
+                HypenRowLayout(
+                    gap: gap,
+                    verticalAlignment: verticalAlignment,
+                    horizontalAlignment: horizontalAlignment
+                ) {
+                    ForEach(childElements, id: \.id) { childElement in
+                        HypenElementView(
+                            elementId: childElement.id,
+                            renderer: renderer,
+                            actionDispatcher: actionDispatcher
+                        )
+                        .environment(\.stretchCrossAxis, isStretch ? .vertical : .none)
+                        .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                        .environment(\.parentExplicitHeight, explicitHeight)
+                        .environment(\.parentExplicitWidth, explicitWidth)
+                        .environment(\.parentControlsHorizontalSizing, true)
+                        .layoutValue(key: RowSizingLayoutValueKey.self, value: RowItemSizing(element: childElement))
+                    }
+                }
+            } else {
+                HStack(alignment: verticalAlignment, spacing: gap) {
+                    ForEach(childElements, id: \.id) { childElement in
+                        HypenElementView(
+                            elementId: childElement.id,
+                            renderer: renderer,
+                            actionDispatcher: actionDispatcher
+                        )
+                        .environment(\.stretchCrossAxis, isStretch ? .vertical : .none)
+                        .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                        .environment(\.parentExplicitHeight, explicitHeight)
+                        .environment(\.parentExplicitWidth, explicitWidth)
+                        .frame(maxWidth: RowItemSizing(element: childElement).flexWeight > 0 ? .infinity : nil)
+                    }
+                }
             }
         }
-        // Row with weighted children needs to fill available width
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(
+            maxWidth: .infinity,
+            alignment: horizontalAlignment == .center ? .center : (horizontalAlignment == .trailing ? .trailing : .leading)
+        )
+    }
+}
+
+@available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *)
+struct HypenRowLayout: Layout {
+    let gap: CGFloat
+    let verticalAlignment: VerticalAlignment
+    let horizontalAlignment: HorizontalAlignment
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let natural = subviews.map { $0.sizeThatFits(.unspecified).width }
+        let naturalTotal = natural.reduce(0, +) + gap * CGFloat(max(0, subviews.count - 1))
+        let width = proposal.width ?? naturalTotal
+        let widths = RowWidthAllocator.widths(
+            availableWidth: width,
+            gap: gap,
+            naturalWidths: natural,
+            items: subviews.map { $0[RowSizingLayoutValueKey.self] }
+        )
+        let height = zip(subviews, widths).map { subview, width in
+            subview.sizeThatFits(ProposedViewSize(width: width, height: nil)).height
+        }.max() ?? 0
+        // A Row is intrinsically only as tall as its tallest child. Accepting
+        // an ancestor's generous/infinite height proposal here makes cards and
+        // controls balloon vertically. An explicit Row height remains enforced
+        // by the outer Hypen border-box frame.
+        return CGSize(width: width, height: height)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let natural = subviews.map { $0.sizeThatFits(.unspecified).width }
+        let widths = RowWidthAllocator.widths(
+            availableWidth: bounds.width,
+            gap: gap,
+            naturalWidths: natural,
+            items: subviews.map { $0[RowSizingLayoutValueKey.self] }
+        )
+        let contentWidth = widths.reduce(0, +) + gap * CGFloat(max(0, widths.count - 1))
+        let remainingWidth = max(0, bounds.width - contentWidth)
+        var x: CGFloat
+        switch horizontalAlignment {
+        case .center: x = bounds.minX + remainingWidth / 2
+        case .trailing: x = bounds.minX + remainingWidth
+        default: x = bounds.minX
+        }
+        for (subview, width) in zip(subviews, widths) {
+            let childProposal = ProposedViewSize(width: width, height: bounds.height)
+            let size = subview.sizeThatFits(childProposal)
+            let y: CGFloat
+            switch verticalAlignment {
+            case .bottom: y = bounds.maxY - size.height
+            case .center: y = bounds.midY - size.height / 2
+            default: y = bounds.minY
+            }
+            subview.place(at: CGPoint(x: x, y: y), anchor: .topLeading, proposal: childProposal)
+            x += width + gap
+        }
     }
 }
 
@@ -764,9 +1004,10 @@ public struct BoxComponent: ComponentHandler {
         return AnyView(
             ZStack(alignment: .topLeading) {
                 children()
-                    .environment(\.parentExplicitHeight, modifier.height)
-                    .environment(\.parentExplicitWidth, modifier.width)
+                    .environment(\.parentExplicitHeight, modifier.explicitContentHeight)
+                    .environment(\.parentExplicitWidth, modifier.explicitContentWidth)
                     .environment(\.parentAllowsHorizontalExpansion, modifier.fillMaxWidth || modifier.width != nil)
+                    .environment(\.parentAllowsVerticalExpansion, modifier.fillMaxHeight || modifier.height != nil)
             }
             .hypenModifier(modifier)
         )
@@ -788,9 +1029,10 @@ public struct ContainerComponent: ComponentHandler {
         return AnyView(
             ZStack(alignment: .topLeading) {
                 children()
-                    .environment(\.parentExplicitHeight, modifier.height)
-                    .environment(\.parentExplicitWidth, modifier.width)
+                    .environment(\.parentExplicitHeight, modifier.explicitContentHeight)
+                    .environment(\.parentExplicitWidth, modifier.explicitContentWidth)
                     .environment(\.parentAllowsHorizontalExpansion, modifier.fillMaxWidth || modifier.width != nil)
+                    .environment(\.parentAllowsVerticalExpansion, modifier.fillMaxHeight || modifier.height != nil)
             }
             .hypenModifier(modifier)
         )
@@ -859,7 +1101,13 @@ public struct StackComponent: ComponentHandler {
         modifier: HypenModifier,
         children: @escaping () -> AnyView
     ) -> AnyView {
-        let alignment = parseAlignment(context.element.getStringProp("alignment.0"))
+        let alignment = StackAlignmentResolver.resolve(
+            context.element.getStringProp("alignment.0"),
+            horizontal: context.element.getStringProp("horizontalAlignment.0")
+                ?? context.element.getStringProp("alignItems.0"),
+            vertical: context.element.getStringProp("verticalAlignment.0")
+                ?? context.element.getStringProp("justifyContent.0")
+        )
 
         // Stack wraps content by default — matches Android's Box and Canvas's
         // grid-`auto` tracks. Opt in to expansion via `.fillMaxWidth()` or a
@@ -877,19 +1125,41 @@ public struct StackComponent: ComponentHandler {
         )
     }
 
-    private func parseAlignment(_ value: String?) -> Alignment {
+}
+
+struct StackAlignmentResolver {
+    static func resolve(_ value: String?, horizontal: String?, vertical: String?) -> Alignment {
+        let base: Alignment
         switch value?.lowercased() {
-        case "topleft", "topleading": return .topLeading
-        case "top": return .top
-        case "topright", "toptrailing": return .topTrailing
-        case "left", "leading": return .leading
-        case "center": return .center
-        case "right", "trailing": return .trailing
-        case "bottomleft", "bottomleading": return .bottomLeading
-        case "bottom": return .bottom
-        case "bottomright", "bottomtrailing": return .bottomTrailing
-        default: return .topLeading  // Match web/Android - top-left by default
+        case "topleft", "topleading": base = .topLeading
+        case "top": base = .top
+        case "topright", "toptrailing": base = .topTrailing
+        case "left", "leading": base = .leading
+        case "center": base = .center
+        case "right", "trailing": base = .trailing
+        case "bottomleft", "bottomleading": base = .bottomLeading
+        case "bottom": base = .bottom
+        case "bottomright", "bottomtrailing": base = .bottomTrailing
+        default: base = .topLeading  // Match web/Android - top-left by default
         }
+
+        let horizontalValue: HorizontalAlignment = {
+            switch horizontal?.lowercased() {
+            case "center": return .center
+            case "end", "right", "trailing", "flex-end": return .trailing
+            case "start", "left", "leading", "flex-start": return .leading
+            default: return base.horizontal
+            }
+        }()
+        let verticalValue: VerticalAlignment = {
+            switch vertical?.lowercased() {
+            case "center": return .center
+            case "end", "bottom", "flex-end": return .bottom
+            case "start", "top", "flex-start": return .top
+            default: return base.vertical
+            }
+        }()
+        return Alignment(horizontal: horizontalValue, vertical: verticalValue)
     }
 }
 
@@ -901,19 +1171,41 @@ private struct StackContentView: View {
     let children: () -> AnyView
 
     @Environment(\.parentAllowsHorizontalExpansion) private var parentAllowsHorizontalExpansion
+    @Environment(\.parentAllowsVerticalExpansion) private var parentAllowsVerticalExpansion
+    @Environment(\.parentExplicitHeight) private var parentExplicitHeight
 
     var body: some View {
         // Wrap children with environment for percentage sizing
         let wrappedChildren = AnyView(
             children()
-                .environment(\.parentExplicitHeight, modifier.height)
-                .environment(\.parentExplicitWidth, modifier.width)
+                .environment(\.parentExplicitHeight, modifier.explicitContentHeight)
+                .environment(\.parentExplicitWidth, modifier.explicitContentWidth)
                 .environment(\.parentAllowsHorizontalExpansion, modifier.fillMaxWidth || modifier.width != nil)
+                .environment(\.parentAllowsVerticalExpansion, modifier.fillMaxHeight || modifier.height != nil)
         )
 
-        let content = ZStack(alignment: alignment) {
-            wrappedChildren
-        }
+        let content: AnyView = {
+            let base = AnyView(ZStack(alignment: alignment) {
+                wrappedChildren
+            })
+
+            // A Stack is an overlay container, so it is safe to establish its
+            // parent-assigned height before paint. This lets its own alignment
+            // position children within fillMaxSize/fillMaxHeight instead of inside
+            // a natural-height ZStack that is only wrapped in a taller outer frame.
+            if modifier.fillMaxHeight, let parentExplicitHeight {
+                let borderBoxHeight = parentExplicitHeight
+                    * min(max(modifier.fillMaxHeightFraction, 0), 1)
+                return AnyView(base.frame(
+                    height: modifier.contentHeight(forFilledBorderBox: borderBoxHeight),
+                    alignment: alignment
+                ))
+            }
+            if modifier.fillMaxHeight && parentAllowsVerticalExpansion {
+                return AnyView(base.frame(maxHeight: .infinity, alignment: alignment))
+            }
+            return base
+        }()
 
         // Expand to fill cell when in Grid context (parentAllowsHorizontalExpansion)
         // and Stack doesn't have explicit width
@@ -945,6 +1237,9 @@ public struct ListComponent: ComponentHandler {
         // needs to lay out the individual items directly in the ScrollView.
         let rawChildren = context.renderer.getChildren(of: context.element.id)
         let childElements = ControlFlowUtils.flattenControlFlowChildren(rawChildren, renderer: context.renderer)
+        let hasDynamicItems = rawChildren.contains {
+            ControlFlowUtils.controlFlowTypes.contains($0.elementType)
+        }
         let direction = context.element.getStringProp("direction.0")
             ?? context.element.getStringProp("1")
             ?? "vertical"
@@ -962,11 +1257,23 @@ public struct ListComponent: ComponentHandler {
             || flexDirection?.lowercased() == "row"
             || flexDirection?.lowercased() == "row-reverse"
 
+        let layout = resolveListLayout(
+            element: context.element,
+            modifier: modifier,
+            hasDynamicItems: hasDynamicItems
+        )
+
+        // A List consumes a finite cross-axis proposal. This is distinct from
+        // its vertical policy: static content wraps, while a bounded/dynamic
+        // list retains scrolling.
+        var effectiveModifier = modifier
+        effectiveModifier.fillMaxWidth = true
+
         // Propagate expansion permissions to children, like Column/Row do.
         // A horizontal List always lays children out in a row, so children's
         // flex/weight expansion should resolve against the row's width even
         // when the list itself has no explicit width — same contract as Row.
-        let allowsHorizontalExpansion = isHorizontal || modifier.fillMaxWidth || modifier.width != nil
+        let allowsHorizontalExpansion = true
         let allowsVerticalExpansion = modifier.fillMaxHeight || modifier.height != nil
         let explicitWidth = modifier.width
 
@@ -990,7 +1297,7 @@ public struct ListComponent: ComponentHandler {
                         }
                     }
                     .frame(maxWidth: .infinity)
-                } else {
+                } else if layout.scrollsVertically {
                     ScrollView(.vertical, showsIndicators: true) {
                         LazyVStack(alignment: .leading, spacing: gap) {
                             ForEach(childElements, id: \.id) { childElement in
@@ -1002,14 +1309,63 @@ public struct ListComponent: ComponentHandler {
                                 .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
                                 .environment(\.parentAllowsVerticalExpansion, allowsVerticalExpansion)
                                 .environment(\.parentExplicitWidth, explicitWidth)
+                                .environment(\.parentStretchesHorizontalSizing, true)
                             }
                         }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                } else {
+                    VStack(alignment: .leading, spacing: gap) {
+                        ForEach(childElements, id: \.id) { childElement in
+                            HypenElementView(
+                                elementId: childElement.id,
+                                renderer: context.renderer,
+                                actionDispatcher: context.actionDispatcher
+                            )
+                            .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                            .environment(\.parentAllowsVerticalExpansion, allowsVerticalExpansion)
+                            .environment(\.parentExplicitWidth, explicitWidth)
+                            .environment(\.parentStretchesHorizontalSizing, true)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
-            .hypenModifier(modifier)
+            .hypenModifier(effectiveModifier)
         )
     }
+}
+
+struct ListLayoutResolution: Equatable {
+    let fillsFiniteWidth: Bool
+    let scrollsVertically: Bool
+}
+
+func resolveListLayout(
+    element: HypenElement,
+    modifier: HypenModifier,
+    hasDynamicItems: Bool = false
+) -> ListLayoutResolution {
+    let overflow = [
+        "overflowY.0", "overflow-y.0", "overflowY", "overflow-y", "overflow.0", "overflow",
+    ].compactMap { element.getStringProp($0)?.lowercased() }.first
+    let scrollSpec = element.getScrollable()
+    let explicitlyScrollable: Bool = {
+        switch scrollSpec.axis {
+        case .horizontal: return false
+        case .vertical, .both, nil: return scrollSpec.enabled
+        }
+    }()
+    let hasFiniteHeight = modifier.height != nil || modifier.maxHeight != nil ||
+        modifier.fillMaxHeight || element.props["size.0"] != nil || element.props["size"] != nil
+    let clipsOverflow = overflow == "hidden" || overflow == "clip"
+    return ListLayoutResolution(
+        fillsFiniteWidth: true,
+        scrollsVertically: !clipsOverflow && (
+            hasDynamicItems || explicitlyScrollable || hasFiniteHeight ||
+            overflow == "auto" || overflow == "scroll"
+        )
+    )
 }
 
 // MARK: - ScrollView Component
@@ -1056,14 +1412,9 @@ public struct GridComponent: ComponentHandler {
         modifier: HypenModifier,
         children: @escaping () -> AnyView
     ) -> AnyView {
-        // Check gridColumns applicator first, then columns prop, default to 2
-        let columns = context.element.getIntProp("gridColumns.0")
-            ?? context.element.getIntProp("columns.0")
-            ?? 2
-        // Check gap applicator first, then spacing prop, default to 8
-        let spacing = context.element.getCGFloatProp("gap.0")
-            ?? context.element.getCGFloatProp("spacing.0")
-            ?? 8
+        let style = resolveGridStyle(element: context.element, modifier: modifier)
+        let columns = style.columns
+        let spacing = style.spacing
         // Grid's natural scroll axis is vertical (LazyVGrid). Accept bool,
         // `"vertical"`, `"both"`, `"auto"` as scrollable; drop `"horizontal"`
         // as unsupported here (no LazyHGrid branch).
@@ -1098,7 +1449,9 @@ public struct GridComponent: ComponentHandler {
                                 actionDispatcher: context.actionDispatcher
                             )
                             .environment(\.parentAllowsHorizontalExpansion, true)
-                            .frame(maxWidth: .infinity, alignment: .topLeading)
+                            .environment(\.parentStretchesHorizontalSizing, true)
+                            .environment(\.parentStretchesBareGridImage, true)
+                            .environment(\.parentTrackAlignment, GridComponent.cellAlignment(childElement))
                         }
                     }
                 }
@@ -1120,6 +1473,9 @@ public struct GridComponent: ComponentHandler {
                             actionDispatcher: context.actionDispatcher
                         )
                         .environment(\.parentAllowsHorizontalExpansion, true)
+                        .environment(\.parentStretchesHorizontalSizing, true)
+                        .environment(\.parentStretchesBareGridImage, true)
+                        .environment(\.parentTrackAlignment, GridComponent.cellAlignment(childElement))
                         .layoutValue(key: GridSpanLayoutKey.self, value: span)
                     }
                 }
@@ -1138,7 +1494,9 @@ public struct GridComponent: ComponentHandler {
                             actionDispatcher: context.actionDispatcher
                         )
                         .environment(\.parentAllowsHorizontalExpansion, true)
-                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .environment(\.parentStretchesHorizontalSizing, true)
+                        .environment(\.parentStretchesBareGridImage, true)
+                        .environment(\.parentTrackAlignment, GridComponent.cellAlignment(childElement))
                     }
                 }
                 .hypenModifier(modifier)
@@ -1160,6 +1518,45 @@ public struct GridComponent: ComponentHandler {
         }
         return Int(trimmed) ?? 1
     }
+
+    fileprivate static func cellAlignment(_ element: HypenElement) -> Alignment? {
+        let combined = element.getStringProp("alignment.0")
+            ?? element.getStringProp("alignment")
+        let horizontal = element.getStringProp("horizontalAlignment.0")
+            ?? element.getStringProp("horizontalAlignment")
+            ?? element.getStringProp("alignItems.0")
+            ?? element.getStringProp("alignItems")
+        let vertical = element.getStringProp("verticalAlignment.0")
+            ?? element.getStringProp("verticalAlignment")
+            ?? element.getStringProp("justifyContent.0")
+            ?? element.getStringProp("justifyContent")
+        guard combined != nil || horizontal != nil || vertical != nil else { return nil }
+        return StackAlignmentResolver.resolve(
+            combined,
+            horizontal: horizontal,
+            vertical: vertical
+        )
+    }
+}
+
+struct GridStyleResolution: Equatable {
+    let columns: Int
+    let spacing: CGFloat
+}
+
+func resolveGridStyle(element: HypenElement, modifier: HypenModifier) -> GridStyleResolution {
+    let columns = element.getIntProp("gridColumns.0")
+        ?? element.getIntProp("gridColumns")
+        ?? element.getIntProp("columns.0")
+        ?? element.getIntProp("columns")
+        ?? 2
+    let spacing = modifier.gap
+        ?? element.getCGFloatProp("gap.0")
+        ?? element.getCGFloatProp("gap")
+        ?? element.getCGFloatProp("spacing.0")
+        ?? element.getCGFloatProp("spacing")
+        ?? 0
+    return GridStyleResolution(columns: max(1, columns), spacing: max(0, spacing))
 }
 
 // MARK: - Custom Grid Layout (iOS 16+)
@@ -1179,7 +1576,7 @@ private struct GridSpanLayoutKey: LayoutValueKey {
 /// 3. For each row, propose column-width to each child, take max height as row height
 /// 4. Total height = sum of row heights + (rowCount-1) * spacing
 @available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *)
-private struct HypenGridLayout: Layout {
+struct HypenGridLayout: Layout {
     let columns: Int
     let spacing: CGFloat
 
@@ -1218,7 +1615,9 @@ private struct HypenGridLayout: Layout {
     }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        guard !subviews.isEmpty else { return .zero }
+        guard !subviews.isEmpty else {
+            return CGSize(width: proposal.width ?? 0, height: 0)
+        }
 
         let totalWidth = proposal.width ?? 0
         let colWidth = columnWidth(in: totalWidth)

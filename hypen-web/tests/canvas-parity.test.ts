@@ -14,6 +14,7 @@ import {
   initTaffyLayout,
 } from "../packages/web/src/canvas/layout.js";
 import { normalizeAllApplicators } from "../packages/web/src/canvas/props.js";
+import { setImageNaturalSize } from "../packages/web/src/canvas/paint.js";
 import {
   ScrollManager,
   isScrollable,
@@ -79,6 +80,31 @@ function makeNode(
   for (const c of children) c.parent = node;
   return node;
 }
+
+describe("Row justify-content applicator values", () => {
+  test("camel-case space variants distribute children across a finite Row", () => {
+    const expected: Record<string, number[]> = {
+      spaceBetween: [0, 135, 270],
+      spaceAround: [35, 135, 235],
+      // Taffy pixel-rounds the mathematical 52.5 / 217.5 positions.
+      spaceEvenly: [53, 135, 218],
+    };
+
+    for (const [alignment, positions] of Object.entries(expected)) {
+      const children = ["a", "b", "c"].map((id) =>
+        makeNode(`${alignment}-${id}`, "Stack", { width: 30, height: 20 }),
+      );
+      const row = makeNode(`row-${alignment}`, "Row", {
+        width: 300,
+        height: 40,
+        horizontalAlignment: alignment,
+      }, children);
+
+      computeLayout(ctx, row, 300, 40);
+      expect(children.map((child) => child.layout!.x)).toEqual(positions);
+    }
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Stack absolute positioning
@@ -185,6 +211,189 @@ describe("Image: implicit aspect from intrinsic size", () => {
 
     expect(img.layout!.width).toBe(100);
     expect(img.layout!.height).toBe(50);
+  });
+
+  test("an unsized standalone Image uses its decoded intrinsic dimensions", () => {
+    setImageNaturalSize("https://example.com/raw.png", 200, 150);
+    const img = makeNode("raw", "image", { src: "https://example.com/raw.png" });
+    const column = makeNode("column", "column", { width: 382 }, [img]);
+
+    computeLayout(ctx, column, 382, 400, 0, 0);
+
+    expect(img.layout!.width).toBe(200);
+    expect(img.layout!.height).toBe(150);
+  });
+
+  test("explicit Image width and height override its decoded natural size", () => {
+    setImageNaturalSize("https://example.com/tile.png", 128, 128);
+    const img = makeNode("tile", "image", {
+      src: "https://example.com/tile.png",
+      width: 80,
+      height: 80,
+    });
+    const row = makeNode("row", "row", { width: 382 }, [img]);
+
+    computeLayout(ctx, row, 382, 200, 0, 0);
+
+    expect(img.layout!.width).toBe(80);
+    expect(img.layout!.height).toBe(80);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gallery applicator parity regressions
+// ---------------------------------------------------------------------------
+
+describe("Gallery sizing and border applicators", () => {
+
+  test("a raw Row child keeps intrinsic height while fillMaxHeight fills", () => {
+    const raw = makeNode("raw", "stack", { padding: 12 }, [
+      makeNode("raw-text", "text", { 0: "Default", fontSize: 12 }),
+    ]);
+    const fill = makeNode("fill", "stack", { padding: 12, fillMaxHeight: true }, [
+      makeNode("fill-text", "text", { 0: "Fill", fontSize: 12 }),
+    ]);
+    const row = makeNode("row", "row", { width: 200, height: 150, padding: 16 }, [raw, fill]);
+
+    computeLayout(ctx, row, 200, 150, 0, 0);
+
+    expect(raw.layout!.height).toBeLessThan(118);
+    expect(fill.layout!.height).toBe(118);
+  });
+
+  test("weighted Row children shrink below their text min-content width", () => {
+    const cards = ["one", "two", "three"].map((id) =>
+      makeNode(id, "column", { weight: 1, padding: 16 }, [
+        makeNode(`${id}-text`, "text", { 0: "A very long card label" }),
+      ]),
+    );
+    const row = makeNode("row", "row", { width: 382, gap: 12 }, cards);
+
+    computeLayout(ctx, row, 382, 200, 0, 0);
+
+    expect(cards[2]!.layout!.x + cards[2]!.layout!.width).toBeLessThanOrEqual(382);
+    expect(Math.abs(cards[0]!.layout!.width - cards[1]!.layout!.width)).toBeLessThanOrEqual(1);
+  });
+
+  test("Text inside a finite Stack wraps within its grid track", () => {
+    const text = makeNode("text", "text", {
+      0: "Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+    });
+    const stack = makeNode("stack", "stack", { width: 120, padding: 16 }, [text]);
+
+    computeLayout(ctx, stack, 120, 300, 0, 0);
+
+    expect(text.layout!.width).toBeLessThanOrEqual(88);
+    expect(text.layout!.height).toBeGreaterThan(20);
+  });
+
+  test("fillMaxWidth supports fractional values", () => {
+    const half = makeNode("half", "stack", {
+      "fillMaxWidth.0": 0.5,
+      "height.0": 20,
+    });
+    const parent = makeNode("parent", "column", { width: 200, height: 80 }, [half]);
+
+    computeLayout(ctx, parent, 200, 80, 0, 0);
+
+    expect(half.layout!.width).toBe(100);
+    expect(half.layout!.height).toBe(20);
+  });
+
+  test("fillMaxSize fills the parent's content box on both axes", () => {
+    const fill = makeNode("fill", "stack", { "fillMaxSize.0": true });
+    const parent = makeNode(
+      "parent",
+      "stack",
+      { width: 200, height: 100, padding: 10 },
+      [fill],
+    );
+
+    computeLayout(ctx, parent, 200, 100, 0, 0);
+
+    expect(fill.layout!.width).toBe(180);
+    expect(fill.layout!.height).toBe(80);
+  });
+
+  test("size gives empty gradient boxes a real square layout", () => {
+    const gradient = makeNode("gradient", "stack", {
+      "size.0": 100,
+      "linearGradient.0": "to bottom right, #fbbf24, #ef4444",
+      "cornerRadius.0": 8,
+    });
+    const row = makeNode("row", "row", { width: 300, height: 120 }, [gradient]);
+
+    computeLayout(ctx, row, 300, 120, 0, 0);
+
+    expect(gradient.layout!.width).toBe(100);
+    expect(gradient.layout!.height).toBe(100);
+    expect(gradient.layout!.border.radius).toBe(8);
+  });
+
+  test("compound border and cornerRadius populate the Canvas box model", () => {
+    const input = makeNode("input", "input", {
+      "width.0": 180,
+      "height.0": 44,
+      "border.0": { width: 2, color: "#d1d5db" },
+      "cornerRadius.0": 12,
+    });
+
+    computeLayout(ctx, input, 300, 100, 0, 0);
+
+    expect(input.layout!.border).toEqual({
+      width: 2,
+      color: "#d1d5db",
+      radius: 12,
+    });
+    expect(input.layout!.contentWidth).toBe(176);
+    expect(input.layout!.contentHeight).toBe(40);
+  });
+
+  test("weight is the cross-platform alias for flex", () => {
+    const first = makeNode("first", "stack", { "weight.0": 1, height: 20 });
+    const second = makeNode("second", "stack", { "weight.0": 1, height: 20 });
+    const row = makeNode("row", "row", { width: 200, height: 20 }, [first, second]);
+
+    computeLayout(ctx, row, 200, 20, 0, 0);
+
+    expect(first.layout!.width).toBe(100);
+    expect(second.layout!.width).toBe(100);
+  });
+
+  test("Badge is content-sized with its DOM default padding", () => {
+    const label = makeNode("label", "text", { 0: "Popular", fontSize: 12 });
+    const badge = makeNode("badge", "badge", {}, [label]);
+    const row = makeNode("row", "row", { width: 200, height: 40 }, [badge]);
+
+    computeLayout(ctx, row, 200, 40, 0, 0);
+
+    expect(badge.layout!.padding).toEqual({ top: 4, right: 8, bottom: 4, left: 8 });
+    expect(badge.layout!.width).toBeGreaterThan(16);
+    expect(badge.layout!.height).toBeGreaterThan(8);
+  });
+
+  test("an unsized Column carries a descendant fillMaxWidth demand", () => {
+    const input = makeNode("input", "input", { "fillMaxWidth.0": true });
+    const field = makeNode("field", "column", {}, [input]);
+    const form = makeNode("form", "column", { width: 200, height: 80 }, [field]);
+
+    computeLayout(ctx, form, 200, 80, 0, 0);
+
+    expect(field.layout!.width).toBe(200);
+    expect(input.layout!.width).toBe(200);
+  });
+
+  test("a Spacer makes its wrapping Row consume the available list width", () => {
+    const label = makeNode("label", "text", { 0: "Item 1" });
+    const spacer = makeNode("spacer", "spacer", {});
+    const caret = makeNode("caret", "text", { 0: ">" });
+    const row = makeNode("row", "row", { padding: 12 }, [label, spacer, caret]);
+    const list = makeNode("list", "column", { width: 200 }, [row]);
+
+    computeLayout(ctx, list, 200, 100, 0, 0);
+
+    expect(row.layout!.width).toBe(200);
+    expect(caret.layout!.x).toBeGreaterThan(170);
   });
 });
 
@@ -734,6 +943,26 @@ describe("Form controls have an intrinsic height matching the DOM box", () => {
 });
 
 describe("Grid with aspect-ratio image children sizes implicit rows", () => {
+  test("decoded intrinsic ratios size gallery images without explicit dimensions", () => {
+    const items = Array.from({ length: 6 }, (_, i) => {
+      const src = `gallery-intrinsic-${i}.png`;
+      setImageNaturalSize(src, 96, 96);
+      return makeNode(`natural-${i}`, "Image", { src, cornerRadius: 8 });
+    });
+    const grid = makeNode("natural-grid", "Grid", {
+      gridColumns: 3,
+      gap: 4,
+      width: 382,
+    }, items);
+
+    computeLayout(ctx, grid, 382, 400, 0, 0);
+
+    expect(items[0].layout!.width).toBeGreaterThan(120);
+    expect(items[0].layout!.height).toBe(items[0].layout!.width);
+    expect(items[3].layout!.y - items[0].layout!.y)
+      .toBeGreaterThanOrEqual(items[0].layout!.height + 3);
+  });
+
   test("3 cols × N aspect-square images don't overlap (Search explore grid)", () => {
     // Reproduces the Search route: a `.gridColumns(3).gap(4).scrollable(true)`
     // grid of `Image.aspectRatio(1).width("100%")` items. Without the 2-pass

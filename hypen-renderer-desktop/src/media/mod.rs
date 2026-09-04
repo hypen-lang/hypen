@@ -193,12 +193,7 @@ pub(crate) fn push_event(node_id: &str, kind: MediaEventKind) {
 /// Drain all pending playback events. Called by the window on every
 /// patch flush / wake.
 pub fn take_events() -> Vec<MediaEvent> {
-    std::mem::take(
-        &mut *registry()
-            .events
-            .lock()
-            .expect("media events poisoned"),
-    )
+    std::mem::take(&mut *registry().events.lock().expect("media events poisoned"))
 }
 
 /// `true` when `node_id` has a live playback pipeline (playing,
@@ -226,10 +221,7 @@ pub fn current_track(node_id: &str) -> Option<(String, u64)> {
 /// Latest decoded frame for the node, if playback has produced one.
 pub fn current_frame(node_id: &str) -> Option<VideoFrame> {
     let shared = {
-        let players = registry()
-            .players
-            .lock()
-            .expect("media registry poisoned");
+        let players = registry().players.lock().expect("media registry poisoned");
         Arc::clone(&players.get(node_id)?.shared)
     };
     let frame = shared.frame.lock().expect("frame slot poisoned");
@@ -240,10 +232,7 @@ pub fn current_frame(node_id: &str) -> Option<VideoFrame> {
 /// paused by the user or ended. Drives the painters' play-glyph
 /// overlay on top of the last decoded frame.
 pub fn is_paused(node_id: &str) -> bool {
-    let players = registry()
-        .players
-        .lock()
-        .expect("media registry poisoned");
+    let players = registry().players.lock().expect("media registry poisoned");
     match players.get(node_id) {
         Some(p) => p.paused || p.shared.ended.load(Ordering::Relaxed),
         None => false,
@@ -277,10 +266,7 @@ pub struct PlayerStatus {
 /// before the GStreamer position/duration queries run.
 pub fn status(node_id: &str) -> Option<PlayerStatus> {
     let (pipeline, shared, paused, suspended) = {
-        let players = registry()
-            .players
-            .lock()
-            .expect("media registry poisoned");
+        let players = registry().players.lock().expect("media registry poisoned");
         let p = players.get(node_id)?;
         (
             p.pipeline.clone(),
@@ -289,11 +275,7 @@ pub fn status(node_id: &str) -> Option<PlayerStatus> {
             p.suspended,
         )
     };
-    let has_frame = shared
-        .frame
-        .lock()
-        .expect("frame slot poisoned")
-        .is_some();
+    let has_frame = shared.frame.lock().expect("frame slot poisoned").is_some();
     let (position, duration) = query_position_duration(&pipeline);
     Some(PlayerStatus {
         paused,
@@ -310,10 +292,7 @@ pub fn status(node_id: &str) -> Option<PlayerStatus> {
 /// when it has none.
 pub fn position_duration(node_id: &str) -> Option<(f64, f64)> {
     let pipeline = {
-        let players = registry()
-            .players
-            .lock()
-            .expect("media registry poisoned");
+        let players = registry().players.lock().expect("media registry poisoned");
         players.get(node_id)?.pipeline.clone()
     };
     Some(query_position_duration(&pipeline))
@@ -341,10 +320,7 @@ fn query_position_duration(pipeline: &gstreamer::Element) -> (f64, f64) {
 /// position rather than after the remaining queued buffers.
 pub fn seek(node_id: &str, seconds: f64) -> bool {
     let pipeline = {
-        let players = registry()
-            .players
-            .lock()
-            .expect("media registry poisoned");
+        let players = registry().players.lock().expect("media registry poisoned");
         match players.get(node_id) {
             Some(p) => p.pipeline.clone(),
             None => return false,
@@ -374,10 +350,7 @@ pub fn seek(node_id: &str, seconds: f64) -> bool {
 /// has no pipeline.
 pub fn set_playing(node_id: &str, playing: bool) -> Option<bool> {
     let (pipeline, shared, was_paused) = {
-        let players = registry()
-            .players
-            .lock()
-            .expect("media registry poisoned");
+        let players = registry().players.lock().expect("media registry poisoned");
         let p = players.get(node_id)?;
         (p.pipeline.clone(), Arc::clone(&p.shared), p.paused)
     };
@@ -399,10 +372,7 @@ pub fn set_playing(node_id: &str, playing: bool) -> Option<bool> {
     } else {
         let _ = pipeline.set_state(gstreamer::State::Paused);
     }
-    let mut players = registry()
-        .players
-        .lock()
-        .expect("media registry poisoned");
+    let mut players = registry().players.lock().expect("media registry poisoned");
     if let Some(p) = players.get_mut(node_id) {
         p.paused = !playing;
     }
@@ -475,10 +445,7 @@ pub fn start(
 pub fn toggle(node_id: &str) -> Option<bool> {
     // Snapshot what we need under the lock; do gst calls after.
     let (pipeline, shared, was_paused) = {
-        let players = registry()
-            .players
-            .lock()
-            .expect("media registry poisoned");
+        let players = registry().players.lock().expect("media registry poisoned");
         let p = players.get(node_id)?;
         (p.pipeline.clone(), Arc::clone(&p.shared), p.paused)
     };
@@ -499,10 +466,7 @@ pub fn toggle(node_id: &str) -> Option<bool> {
         let _ = pipeline.set_state(gstreamer::State::Paused);
         false
     };
-    let mut players = registry()
-        .players
-        .lock()
-        .expect("media registry poisoned");
+    let mut players = registry().players.lock().expect("media registry poisoned");
     if let Some(p) = players.get_mut(node_id) {
         p.paused = !now_playing;
     }
@@ -524,10 +488,7 @@ pub fn toggle(node_id: &str) -> Option<bool> {
 pub fn set_suspended(node_id: &str, suspended: bool) -> bool {
     // Snapshot under the lock; gst state changes happen after.
     let audible = {
-        let mut players = registry()
-            .players
-            .lock()
-            .expect("media registry poisoned");
+        let mut players = registry().players.lock().expect("media registry poisoned");
         let Some(p) = players.get_mut(node_id) else {
             return false;
         };
@@ -577,10 +538,7 @@ pub fn release(node_id: &str) {
 /// decoder + network resources promptly.
 pub fn retain_only(alive: &HashSet<String>) {
     let removed: Vec<Player> = {
-        let mut players = registry()
-            .players
-            .lock()
-            .expect("media registry poisoned");
+        let mut players = registry().players.lock().expect("media registry poisoned");
         let dead: Vec<String> = players
             .keys()
             .filter(|id| !alive.contains(*id))
@@ -598,10 +556,7 @@ pub fn retain_only(alive: &HashSet<String>) {
 /// Tear down everything. Called on window close / app exit.
 pub fn release_all() {
     let removed: Vec<Player> = {
-        let mut players = registry()
-            .players
-            .lock()
-            .expect("media registry poisoned");
+        let mut players = registry().players.lock().expect("media registry poisoned");
         players.drain().map(|(_, p)| p).collect()
     };
     for p in removed {

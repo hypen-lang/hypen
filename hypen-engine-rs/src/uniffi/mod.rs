@@ -308,9 +308,7 @@ impl Patch {
             // patch-producing entry point bypassed `lower_patches`; route
             // it through there rather than extending `PatchType`.
             InternalPatch::RegisterTemplate { .. } | InternalPatch::Instantiate { .. } => {
-                unreachable!(
-                    "template patches are expanded by lower_patches before FFI conversion"
-                )
+                unreachable!("template patches are expanded by lower_patches before FFI conversion")
             }
             InternalPatch::BatchAnimation { spec } => Patch {
                 patch_type: PatchType::BatchAnimation,

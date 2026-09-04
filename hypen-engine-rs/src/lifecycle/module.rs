@@ -282,7 +282,11 @@ fn merge_json(target: &mut serde_json::Value, source: serde_json::Value) -> bool
 /// Returns `true` when the write actually changed something — either the
 /// final leaf differed from `value`, or an intermediate segment had to be
 /// auto-vivified / an array grown.
-fn set_value_at_path(target: &mut serde_json::Value, path: &str, value: &serde_json::Value) -> bool {
+fn set_value_at_path(
+    target: &mut serde_json::Value,
+    path: &str,
+    value: &serde_json::Value,
+) -> bool {
     use serde_json::Value;
 
     let parts: Vec<&str> = path.split('.').collect();

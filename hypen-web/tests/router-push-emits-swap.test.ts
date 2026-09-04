@@ -81,6 +81,92 @@ async function setUpSession(server: RemoteServer) {
 
 describe("router.push emits a real route swap", () => {
   test(
+    "a detail action can return to a persisted root route without leaving a blank tree",
+    async () => {
+      const dir = writeComponents({
+        App: `module App {
+          Router {
+            Route(path: "/") { RoundTripHome() }
+            Route(path: "/movie/:id") { RoundTripDetail() }
+          }
+        }`,
+        RoundTripHome: `module RoundTripHome { Text("HOME_AFTER_BACK") }`,
+        RoundTripDetail: `module RoundTripDetail {
+          Button { Text("Back") }.onClick(@actions.back)
+        }`,
+      });
+      cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+
+      const primary = app
+        .defineState<{ location: string }>({ location: "/" })
+        .build();
+      const homeActivations: string[] = [];
+      app
+        .module("RoundTripHome")
+        .defineState({})
+        .onActivated((_state, context) => {
+          homeActivations.push(context?.router?.getCurrentPath() ?? "");
+        })
+        .build();
+      app
+        .module("RoundTripDetail")
+        .defineState({})
+        .onAction("back", ({ context }) => context?.router?.push("/"))
+        .build();
+
+      const server = new RemoteServer()
+        .app(app)
+        .module("App", primary)
+        .source(dir)
+        .ui(`module App {
+          Router {
+            Route(path: "/") { RoundTripHome() }
+            Route(path: "/movie/:id") { RoundTripDetail() }
+          }
+        }`);
+      await server.prepare();
+      cleanups.push(() => server.stop());
+
+      const { session, post } = await setUpSession(server);
+      await session.receive({
+        type: "dispatchAction",
+        action: "router.push",
+        payload: { to: "/movie/tt001" },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const beforeBack = post.patches.length;
+
+      await session.receive({
+        type: "dispatchAction",
+        action: "back",
+        payload: {},
+      });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+
+      const state = session.moduleInstance?.getState() as
+        | { location?: string }
+        | undefined;
+      expect(state?.location).toBe("/");
+      expect(homeActivations).toEqual(["/", "/"]);
+
+      const backPatches = post.patches.slice(beforeBack);
+      expect(backPatches.some((patch) => patch.type === "attach")).toBe(true);
+      expect(
+        backPatches.some((patch) => {
+          if (patch.type !== "setProp" && patch.type !== "create") return false;
+          const values =
+            patch.type === "create"
+              ? Object.values(patch.props ?? {})
+              : [patch.value];
+          return values.includes("HOME_AFTER_BACK");
+        }),
+      ).toBe(false);
+
+      await session.destroy();
+    },
+  );
+
+  test(
     "swapping primary routes produces Create patches for the new route's children, not just a single setProp",
     async () => {
       // Two distinct route subtrees, each with a uniquely-tagged Text so we

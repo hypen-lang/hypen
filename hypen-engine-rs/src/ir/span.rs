@@ -54,7 +54,11 @@ pub struct LineIndex<'a> {
 impl<'a> LineIndex<'a> {
     pub fn new(source: &'a str) -> Self {
         let mut line_starts = vec![0];
-        line_starts.extend(source.char_indices().filter_map(|(i, c)| (c == '\n').then_some(i + 1)));
+        line_starts.extend(
+            source
+                .char_indices()
+                .filter_map(|(i, c)| (c == '\n').then_some(i + 1)),
+        );
         Self {
             source,
             line_starts,
@@ -156,7 +160,7 @@ mod tests {
         let src = "é𝄞X";
         let idx = LineIndex::new(src);
         let x_byte = src.find('X').unwrap(); // 6
-        // Human column: 2 codepoints precede X → column 3 (1-based).
+                                             // Human column: 2 codepoints precede X → column 3 (1-based).
         assert_eq!(idx.locate(x_byte), (1, 3));
         // LSP column: 1 + 2 = 3 UTF-16 units precede X (0-based).
         assert_eq!(idx.locate_utf16(x_byte), (0, 3));

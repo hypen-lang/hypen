@@ -208,9 +208,14 @@ impl BrowserModule {
             // HypenApp creates) — run the embed lifecycle over the
             // combined stream. Shell-origin ids carry no stream prefix,
             // so shell patches are inert to the scan.
-            let extra = handle_embed_lifecycle(&inner_for_shell, &forwarded);
-            forwarded.extend(extra);
+            let lifecycle = handle_embed_lifecycle(&inner_for_shell, &forwarded);
+            forwarded.extend(lifecycle.extra);
             forward(&inner_for_shell, &forwarded);
+            // The host Create/Insert must reach the renderer before a fast
+            // embedded worker can send children targeting that host.
+            for marker in lifecycle.to_connect {
+                connect_embed(&inner_for_shell, marker);
+            }
         });
 
         Arc::new(Self {
@@ -391,14 +396,17 @@ impl BrowserModule {
             let mut rewritten = process_tab_patches(&inner_for_remote, &tab_id_for_remote, patches);
             // HypenApp embeds: register / tear down any the batch
             // creates or removes, and reconcile their slot visibility.
-            let extra = handle_embed_lifecycle(&inner_for_remote, &rewritten);
-            rewritten.extend(extra);
+            let lifecycle = handle_embed_lifecycle(&inner_for_remote, &rewritten);
+            rewritten.extend(lifecycle.extra);
             log::debug!(
                 "hypen-browser: tab {tab_id_for_remote} rewritten {} → forwarding",
                 rewritten.len(),
             );
             if !rewritten.is_empty() {
                 forward(&inner_for_remote, &rewritten);
+            }
+            for marker in lifecycle.to_connect {
+                connect_embed(&inner_for_remote, marker);
             }
             // Debug console: record the incoming batch (no-op when the
             // console is closed).
@@ -686,19 +694,26 @@ impl BrowserModule {
     /// pressing the home button in the island chrome.
     fn go_home(&self) {
         let ids: Vec<String> = {
-            let inner = self.inner.lock().expect("inner poisoned");
+            let mut inner = self.inner.lock().expect("inner poisoned");
+            // Publish Home BEFORE removing the active app roots. Removing
+            // first produces a real empty-viewport frame between the two
+            // synchronous shell callbacks; the native window can present and
+            // retain that dark frame even though the final merged Tree is
+            // correct. With no active tab the shell immediately inserts the
+            // Previous Visits surface while the old roots are still alive,
+            // then the teardown below removes those roots behind it.
+            inner.active_tab_id = None;
             inner.tabs.keys().cloned().collect()
         };
+        self.publish_tabs();
         for id in ids {
             // Each close drops its own RemoteModule + emits Removes.
             // We accept the O(n^2) shift_remove cost — `tabs` is
             // user-driven and won't exceed a handful of entries.
             self.close_tab_silent(&id);
         }
-        {
-            let mut inner = self.inner.lock().expect("inner poisoned");
-            inner.active_tab_id = None;
-        }
+        // Final pass removes the now-closed tabs from the strip and changes
+        // the collapsed chip from an empty tab URL to the labelled Home pill.
         self.publish_tabs();
     }
 
@@ -757,8 +772,15 @@ impl BrowserModule {
             }
         };
         log::debug!("hypen-browser: dispatch_action {name} → embed");
+        let payload_summary = payload
+            .as_ref()
+            .map(|value| format!(" payload={value}"))
+            .unwrap_or_default();
         remote.dispatch_action(&name, payload);
-        record_console(&self.shell, format!("▶ out  embed action {name}"));
+        record_console(
+            &self.shell,
+            format!("▶ out  embed action {name}{payload_summary}"),
+        );
         true
     }
 
@@ -1067,10 +1089,16 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
         Some(t) => t.expander.expand(patches.to_vec()),
         None => return Vec::new(),
     };
-    let (prefix, attached) = match g.tabs.get(tab_id) {
-        Some(t) => (t.id_prefix.clone(), t.attached),
+    let (prefix, attached, source_url) = match g.tabs.get(tab_id) {
+        Some(t) => (t.id_prefix.clone(), t.attached, t.info.url.clone()),
         None => return Vec::new(),
     };
+    // DOM clients resolve `/poster/foo` and other root-relative media URLs
+    // against the page origin. A native renderer has no document URL, so do
+    // that small browser responsibility here while the owning tab endpoint is
+    // still known. This is what makes Hypeflix's same-origin poster proxy work
+    // in the Desktop Browser instead of handing the image loader `/poster/foo`.
+    let patches = absolutize_tab_media_urls(patches, &source_url);
     let viewport = match g.viewport_id.clone() {
         Some(v) => v,
         None => {
@@ -1083,8 +1111,40 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
         }
     };
     let mut new_roots: Vec<Arc<str>> = Vec::new();
-    let mut rewritten = rewrite_tab_batch(patches, &prefix, &viewport, &mut new_roots);
+    let rewritten = rewrite_tab_batch(patches, &prefix, &viewport, &mut new_roots);
+    let created: std::collections::HashSet<&str> = rewritten
+        .iter()
+        .filter_map(|patch| match patch {
+            Patch::Create { id, .. } => Some(id.as_ref()),
+            _ => None,
+        })
+        .collect();
+    // A normal Router transition also creates/inserts a new root, but it
+    // Detaches the previous route in the same batch so it can Attach it on
+    // Back/Home. Treating that Create as a reconnect replacement destroys the
+    // cached route immediately and turns the later Attach into a black frame.
+    // A genuine reconnect InitialTree has fresh root Creates without a route
+    // cache Detach, so it remains the replacement signal.
+    let has_route_cache_detach = rewritten
+        .iter()
+        .any(|patch| matches!(patch, Patch::Detach { .. }));
+    let has_replacement_root =
+        !has_route_cache_detach && new_roots.iter().any(|root| created.contains(root.as_ref()));
+    let mut prelude = Vec::new();
     if let Some(tab) = g.tabs.get_mut(tab_id) {
+        // A hibernated/reconnected server re-sends an InitialTree while the
+        // Browser still owns the previous tree. Replace those roots before
+        // applying the new Create/Insert batch; otherwise the two sessions'
+        // trees stack (and same-id restarts leave stale descendants behind).
+        // An Attach is deliberately not a replacement signal.
+        if has_replacement_root && !tab.app_root_ids.is_empty() {
+            for old in tab.app_root_ids.drain(..) {
+                prelude.push(Patch::Remove {
+                    id: old.into(),
+                    transition: false,
+                });
+            }
+        }
         // Track new root ids so future Detach / Attach / Remove
         // patches know which ids to operate on.
         tab.app_root_ids
@@ -1106,12 +1166,97 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
     // the active tab's tree. The renderer's Tree keeps the nodes
     // around; an Attach on switch-back puts them right back where
     // they were.
+    let mut out = prelude;
+    out.extend(rewritten);
     if !attached {
         for id in new_roots {
-            rewritten.push(Patch::Detach { id });
+            out.push(Patch::Detach { id });
         }
     }
-    rewritten
+    out
+}
+
+/// Resolve root-relative Image/Video media props against a tab's WebSocket
+/// endpoint (`wss:` → `https:`, `ws:` → `http:`). The renderer deliberately
+/// stays transport-agnostic; only the Browser knows which remote origin owns a
+/// streamed tree.
+fn absolutize_tab_media_urls(patches: Vec<Patch>, endpoint: &str) -> Vec<Patch> {
+    let Some((http_scheme, authority)) = websocket_http_origin(endpoint) else {
+        return patches;
+    };
+
+    let resolve = |value: &mut Value| {
+        let Value::String(raw) = value else { return };
+        if raw.starts_with("//") {
+            *raw = format!("{http_scheme}:{raw}");
+        } else if raw.starts_with('/') {
+            *raw = format!("{http_scheme}://{authority}{raw}");
+        }
+    };
+    let is_media_prop = |name: &str| {
+        matches!(
+            hypen_engine::portable::parse_prop_key(name).base.as_str(),
+            "src" | "poster"
+        )
+    };
+
+    patches
+        .into_iter()
+        .map(|patch| match patch {
+            Patch::Create {
+                id,
+                element_type,
+                props,
+                semantics,
+            } => {
+                let is_media = matches!(
+                    element_type.to_ascii_lowercase().as_str(),
+                    "image" | "video" | "audio"
+                );
+                if !is_media {
+                    return Patch::Create {
+                        id,
+                        element_type,
+                        props,
+                        semantics,
+                    };
+                }
+                let mut resolved = (*props).clone();
+                for (name, value) in resolved.iter_mut() {
+                    if is_media_prop(name) {
+                        resolve(value);
+                    }
+                }
+                Patch::Create {
+                    id,
+                    element_type,
+                    props: Arc::new(resolved),
+                    semantics,
+                }
+            }
+            Patch::SetProp {
+                id,
+                name,
+                mut value,
+            } if is_media_prop(&name) => {
+                resolve(&mut value);
+                Patch::SetProp { id, name, value }
+            }
+            other => other,
+        })
+        .collect()
+}
+
+fn websocket_http_origin(endpoint: &str) -> Option<(&'static str, &str)> {
+    let (scheme, rest) = if let Some(rest) = endpoint.strip_prefix("wss://") {
+        ("https", rest)
+    } else if let Some(rest) = endpoint.strip_prefix("ws://") {
+        ("http", rest)
+    } else {
+        return None;
+    };
+    let authority = rest.split('/').next()?.split('?').next()?;
+    (!authority.is_empty()).then_some((scheme, authority))
 }
 
 // ---------------------------------------------------------------------------
@@ -1172,7 +1317,13 @@ fn track_reconcile(
 /// Returns extra patches (slot Detach / Attach) to append to the batch
 /// — they touch ids the batch just inserted, so they must ride in the
 /// same forward() call to stay ordered.
-fn handle_embed_lifecycle(inner: &Arc<Mutex<Inner>>, batch: &[Patch]) -> Vec<Patch> {
+#[derive(Default)]
+struct EmbedLifecycle {
+    extra: Vec<Patch>,
+    to_connect: Vec<String>,
+}
+
+fn handle_embed_lifecycle(inner: &Arc<Mutex<Inner>>, batch: &[Patch]) -> EmbedLifecycle {
     use std::collections::HashMap;
 
     let mut extra: Vec<Patch> = Vec::new();
@@ -1371,10 +1522,7 @@ fn handle_embed_lifecycle(inner: &Arc<Mutex<Inner>>, batch: &[Patch]) -> Vec<Pat
     // Dropping a RemoteModule Arc shuts down its worker — do it
     // outside the lock, like `close_tab_silent`.
     drop(torn_down);
-    for marker in to_connect {
-        connect_embed(inner, marker);
-    }
-    extra
+    EmbedLifecycle { extra, to_connect }
 }
 
 /// Open the embed's WebSocket and wire its callbacks. Runs without the
@@ -1397,10 +1545,13 @@ fn connect_embed(inner: &Arc<Mutex<Inner>>, marker: String) {
     remote.on_patches(Arc::new(move |patches: &[Patch]| {
         let mut rewritten = process_embed_patches(&inner_for_patches, &marker_for_patches, patches);
         // Embedded apps can embed further apps.
-        let extra = handle_embed_lifecycle(&inner_for_patches, &rewritten);
-        rewritten.extend(extra);
+        let lifecycle = handle_embed_lifecycle(&inner_for_patches, &rewritten);
+        rewritten.extend(lifecycle.extra);
         if !rewritten.is_empty() {
             forward(&inner_for_patches, &rewritten);
+        }
+        for marker in lifecycle.to_connect {
+            connect_embed(&inner_for_patches, marker);
         }
     }));
 
@@ -1457,6 +1608,7 @@ fn process_embed_patches(inner: &Arc<Mutex<Inner>>, marker: &str, patches: &[Pat
         return Vec::new();
     };
     let patches = embed.expander.expand(patches.to_vec());
+    let patches = absolutize_tab_media_urls(patches, &embed.url);
     let prefix = embed.id_prefix.clone();
     let host = embed.host_id.clone();
 
@@ -1737,6 +1889,200 @@ mod tests {
         (module, captured)
     }
 
+    /// Exercises the exact live nesting that the standalone renderer tests do
+    /// not cover: Browser tab -> Home Screen -> HypenApp(MovieDB). The merged
+    /// stream is replayed through Desktop's retained tree/layout/painter so a
+    /// cached inner route cannot silently disappear behind healthy shell UI.
+    #[test]
+    #[ignore = "hits the live Home Screen and MovieDB deploys"]
+    fn live_embedded_movie_db_back_restores_home_through_desktop_paint() {
+        let storage = Storage::at_path(std::env::temp_dir().join(format!(
+            "hypen-browser-live-back-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        )));
+        let module = BrowserModule::build(storage);
+        let batches: Arc<Mutex<Vec<Vec<Patch>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&batches);
+        module.on_patches(Arc::new(move |patches| {
+            sink.lock().unwrap().push(patches.to_vec());
+        }));
+        module.mount();
+        module.open_url("wss://hypen-home-screen.ian-dae.workers.dev/ws");
+        std::thread::sleep(std::time::Duration::from_secs(4));
+
+        // Enter the launcher's MovieDB route, which creates the nested embed.
+        module.dispatch_action("router.push", Some(json!({"to": "/app/movies"})));
+        std::thread::sleep(std::time::Duration::from_secs(5));
+        let marker = {
+            let inner = module.inner.lock().unwrap();
+            inner
+                .embeds
+                .iter()
+                .find(|(_, embed)| embed.url.contains("movie-discovery"))
+                .map(|(marker, _)| marker.clone())
+                .expect("Home Screen must create the MovieDB HypenApp embed")
+        };
+
+        module.dispatch_action(
+            &format!("{marker}openMovie"),
+            Some(json!({"movieId": "tt1375666", "token": "featured"})),
+        );
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        module.dispatch_action(&format!("{marker}back"), None);
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        // Browser's own merged shadow tree must already have the cached Home
+        // linked again; this catches namespacing/action/slot reconciliation.
+        let cinebox_id = {
+            let inner = module.inner.lock().unwrap();
+            let id = inner
+                .tree
+                .nodes()
+                .find(|node| {
+                    node.element_type == "Text" && node.text_content().as_deref() == Some("Cinebox")
+                })
+                .map(|node| node.id.clone())
+                .expect("MovieDB Home text must be attached after Back");
+            id
+        };
+
+        // Replay exactly what Browser forwarded, retaining every Desktop
+        // subsystem across batches just like the real window.
+        let batches = batches.lock().unwrap();
+        let mut tree = Tree::new();
+        let mut taffy = hypen_renderer_desktop::layout::TaffyState::new();
+        let mut animator = hypen_renderer_desktop::anim::DesktopAnimator::new();
+        let mut expander = hypen_engine::TemplateExpander::new();
+        let mut painter = hypen_renderer_desktop::paint::vello_painter::VelloPainter::new();
+        let viewport = hypen_renderer_desktop::style::Viewport::new(1024.0, 720.0);
+        let mut generation = 0_u64;
+        let mut final_layout = None;
+        let mut final_paths = 0;
+        for raw in batches.iter() {
+            let expanded = expander.expand(raw.clone());
+            let outcome = animator.ingest(&expanded, &mut tree);
+            if !taffy.apply_patches(&outcome.forwarded, &tree, 1.0, viewport) {
+                taffy.mark_needs_rebuild();
+            }
+            generation = generation.wrapping_add(1);
+            let layout = hypen_renderer_desktop::layout::LayoutPass::compute_with_state(
+                &mut taffy,
+                &tree,
+                painter.text_engine_mut(),
+                (1024, 720),
+                1.0,
+                0.0,
+                &std::collections::HashMap::new(),
+                generation,
+            );
+            painter.invalidate_subtree_cache();
+            final_paths = painter
+                .build_scene(&layout, (1024, 720), 1.0, 0.0)
+                .encoding()
+                .path_tags
+                .len();
+            final_layout = Some(layout);
+        }
+        let layout = final_layout.expect("Browser emitted patches");
+        let cinebox = layout
+            .item_by_id(&cinebox_id)
+            .expect("merged Desktop layout must emit MovieDB Home after Back");
+        assert!(cinebox.rect.w > 0.0 && cinebox.rect.h > 0.0);
+        assert!(
+            final_paths > 0,
+            "returned merged frame must encode paint paths"
+        );
+    }
+
+    /// Regression for the Food app's real cached-route failure: Search ->
+    /// Home used to leave the Browser viewport black even though the remote
+    /// server emitted an Attach for its cached Home route.
+    #[test]
+    #[ignore = "hits the live Food Ordering deploy"]
+    fn live_food_search_home_restores_through_desktop_paint() {
+        let storage = Storage::at_path(std::env::temp_dir().join(format!(
+            "hypen-browser-live-food-home-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        )));
+        let module = BrowserModule::build(storage);
+        let batches: Arc<Mutex<Vec<Vec<Patch>>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&batches);
+        module.on_patches(Arc::new(move |patches| {
+            sink.lock().unwrap().push(patches.to_vec());
+        }));
+        module.mount();
+        module.open_url("wss://hypen-food-ordering.ian-dae.workers.dev/ws");
+        std::thread::sleep(std::time::Duration::from_secs(4));
+        module.dispatch_action("router.push", Some(json!({"to": "/search"})));
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        module.dispatch_action("router.push", Some(json!({"to": "/"})));
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        let home_heading_id = {
+            let inner = module.inner.lock().unwrap();
+            let id = inner
+                .tree
+                .nodes()
+                .find(|node| {
+                    node.element_type == "Text"
+                        && node.text_content().as_deref() == Some("Crave Cart")
+                })
+                .map(|node| node.id.clone())
+                .expect("Food Home heading must remain in Browser's merged tree");
+            id
+        };
+
+        let batches = batches.lock().unwrap();
+        let mut tree = Tree::new();
+        let mut taffy = hypen_renderer_desktop::layout::TaffyState::new();
+        let mut animator = hypen_renderer_desktop::anim::DesktopAnimator::new();
+        let mut expander = hypen_engine::TemplateExpander::new();
+        let mut painter = hypen_renderer_desktop::paint::vello_painter::VelloPainter::new();
+        let viewport = hypen_renderer_desktop::style::Viewport::new(1024.0, 720.0);
+        let mut generation = 0_u64;
+        let mut final_layout = None;
+        let mut final_paths = 0;
+        for raw in batches.iter() {
+            let expanded = expander.expand(raw.clone());
+            let outcome = animator.ingest(&expanded, &mut tree);
+            if !taffy.apply_patches(&outcome.forwarded, &tree, 1.0, viewport) {
+                taffy.mark_needs_rebuild();
+            }
+            generation = generation.wrapping_add(1);
+            let layout = hypen_renderer_desktop::layout::LayoutPass::compute_with_state(
+                &mut taffy,
+                &tree,
+                painter.text_engine_mut(),
+                (1024, 720),
+                1.0,
+                0.0,
+                &std::collections::HashMap::new(),
+                generation,
+            );
+            painter.invalidate_subtree_cache();
+            final_paths = painter
+                .build_scene(&layout, (1024, 720), 1.0, 0.0)
+                .encoding()
+                .path_tags
+                .len();
+            final_layout = Some(layout);
+        }
+        let layout = final_layout.expect("Browser emitted Food patches");
+        let heading = layout
+            .item_by_id(&home_heading_id)
+            .expect("reattached Food Home must be present in Desktop layout");
+        assert!(heading.rect.w > 0.0 && heading.rect.h > 0.0);
+        assert!(final_paths > 0, "reattached Food Home must repaint");
+    }
+
     #[test]
     fn serialize_tree_renders_indented_outline() {
         let props = |entries: &[(&str, Value)]| {
@@ -1799,6 +2145,18 @@ mod tests {
             classify_dispatch("increment", None),
             DispatchTarget::Remote
         ));
+        // Movie DB's detail view uses a module-local `back` action, while
+        // declarative apps may use the reserved `router.back` action. Neither
+        // belongs to browser chrome/history; both must cross the WebSocket to
+        // the hosted app's ManagedRouter.
+        assert!(matches!(
+            classify_dispatch("back", None),
+            DispatchTarget::Remote
+        ));
+        assert!(matches!(
+            classify_dispatch("router.back", None),
+            DispatchTarget::Remote
+        ));
     }
 
     #[test]
@@ -1818,6 +2176,66 @@ mod tests {
             classify_dispatch("__hypen_bind", Some(&tabs_bind)),
             DispatchTarget::Shell
         ));
+    }
+
+    #[test]
+    fn tab_media_urls_resolve_against_the_remote_http_origin() {
+        let patches = absolutize_tab_media_urls(
+            vec![
+                create_with(
+                    "poster",
+                    "Image",
+                    &[("src", json!("/poster/big-buck-bunny"))],
+                ),
+                create_with(
+                    "video",
+                    "Video",
+                    &[
+                        ("src", json!("https://cdn.example/movie.mp4")),
+                        ("poster.0", json!("/poster/sintel")),
+                    ],
+                ),
+                Patch::SetProp {
+                    id: "poster".into(),
+                    name: "src".into(),
+                    value: json!("/poster/updated"),
+                },
+            ],
+            "wss://hypeflix.example/ws?session=abc",
+        );
+
+        let values: Vec<Value> = patches
+            .iter()
+            .flat_map(|patch| match patch {
+                Patch::Create { props, .. } => props.values().cloned().collect(),
+                Patch::SetProp { value, .. } => vec![value.clone()],
+                _ => Vec::new(),
+            })
+            .collect();
+        assert!(values.contains(&json!("https://hypeflix.example/poster/big-buck-bunny")));
+        assert!(values.contains(&json!("https://hypeflix.example/poster/sintel")));
+        assert!(values.contains(&json!("https://hypeflix.example/poster/updated")));
+        assert!(values.contains(&json!("https://cdn.example/movie.mp4")));
+    }
+
+    #[test]
+    fn tab_media_url_resolution_preserves_non_websocket_transports() {
+        let original = vec![create_with(
+            "poster",
+            "Image",
+            &[("src", json!("/poster/local"))],
+        )];
+        assert_eq!(
+            format!(
+                "{:?}",
+                absolutize_tab_media_urls(original.clone(), "file:///tmp/app")
+            ),
+            format!("{original:?}"),
+        );
+        assert_eq!(
+            websocket_http_origin("ws://localhost:5556/app"),
+            Some(("http", "localhost:5556"))
+        );
     }
 
     #[test]
@@ -1973,6 +2391,72 @@ mod tests {
                 "go_home must Remove every tab's roots; missing {expected}; got {removes:?}",
             );
         }
+    }
+
+    #[test]
+    fn go_home_restores_the_shell_home_after_an_active_app() {
+        let (module, captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-movies", "a1:", &[], true);
+        module.inner.lock().unwrap().active_tab_id = Some("tab-movies".into());
+        push_tabs(
+            &module.shell,
+            vec![TabInfo {
+                id: "tab-movies".into(),
+                url: "wss://movies.example/ws".into(),
+                name: "Movies".into(),
+                status: "connected".into(),
+                status_message: String::new(),
+            }],
+            Some("tab-movies".into()),
+        );
+        ingest_tab_batch(
+            &module,
+            "tab-movies",
+            &[
+                create_with("1", "Column", &[]),
+                insert("root", "1"),
+                create_with("2", "Text", &[("0", json!("Movie DB"))]),
+                insert("1", "2"),
+            ],
+        );
+
+        let during = serialize_tree(&module.inner.lock().unwrap().tree);
+        assert!(during.contains("Movie DB"), "active app missing:\n{during}");
+        assert!(
+            !during.contains("Hypen Browser"),
+            "home should be hidden while a tab is active:\n{during}"
+        );
+
+        let before = captured.lock().unwrap().len();
+        module.dispatch_action("go_home", None);
+
+        {
+            let captured = captured.lock().unwrap();
+            let emitted = &captured[before..];
+            let home_create = emitted.iter().position(|patch| match patch {
+                Patch::Create { props, .. } => props
+                    .values()
+                    .any(|value| value.as_str() == Some("Hypen Browser")),
+                _ => false,
+            });
+            let app_remove = emitted.iter().position(
+                |patch| matches!(patch, Patch::Remove { id, .. } if id.as_ref() == "a1:1"),
+            );
+            assert!(
+                home_create.is_some() && app_remove.is_some() && home_create < app_remove,
+                "Home must be made visible before the active app is removed; got {emitted:?}"
+            );
+        }
+
+        let after = serialize_tree(&module.inner.lock().unwrap().tree);
+        assert!(
+            after.contains("Hypen Browser"),
+            "browser Home must restore the shell home subtree:\n{after}"
+        );
+        assert!(
+            !after.contains("Movie DB"),
+            "closed app must no longer be attached:\n{after}"
+        );
     }
 
     #[test]
@@ -2201,6 +2685,62 @@ mod tests {
     }
 
     #[test]
+    fn route_root_create_does_not_delete_the_detached_cached_route() {
+        let (module, captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-route", "a3:", &[], true);
+        module.inner.lock().unwrap().active_tab_id = Some("tab-route".into());
+
+        ingest_tab_batch(
+            &module,
+            "tab-route",
+            &[
+                create_with("1", "Column", &[]),
+                insert("root", "1"),
+                create_with("11", "Text", &[("0", json!("Cached Home"))]),
+                insert("1", "11"),
+            ],
+        );
+        let before = captured.lock().unwrap().len();
+
+        // The Router caches Home, then creates Search as the new active root.
+        ingest_tab_batch(
+            &module,
+            "tab-route",
+            &[
+                Patch::Detach { id: "1".into() },
+                create_with("2", "Column", &[]),
+                insert("root", "2"),
+            ],
+        );
+        let route_patches = captured.lock().unwrap()[before..].to_vec();
+        assert!(
+            !route_patches
+                .iter()
+                .any(|patch| matches!(patch, Patch::Remove { id, .. } if id.as_ref() == "a3:1")),
+            "creating Search must not delete cached Home: {route_patches:?}",
+        );
+
+        ingest_tab_batch(
+            &module,
+            "tab-route",
+            &[
+                Patch::Detach { id: "2".into() },
+                Patch::Attach {
+                    parent_id: "root".into(),
+                    id: "1".into(),
+                    before_id: None,
+                },
+            ],
+        );
+
+        let returned = serialize_tree(&module.inner.lock().unwrap().tree);
+        assert!(
+            returned.contains("Cached Home"),
+            "Attach must restore the cached route after Search:\n{returned}",
+        );
+    }
+
+    #[test]
     fn process_tab_patches_does_not_detach_active_tab_roots() {
         let (module, _captured) = fresh_browser_with_capture();
         install_tab(&module, "tab-fg", "a3:", &[], true);
@@ -2223,6 +2763,38 @@ mod tests {
         assert!(
             !out.iter().any(|p| matches!(p, Patch::Detach { .. })),
             "active tab's roots must NOT be Detach'd; got {out:?}",
+        );
+    }
+
+    #[test]
+    fn tab_reconnect_with_same_ids_replaces_the_old_root_before_create() {
+        // Durable Object hibernation reconstructs the server engine while the
+        // Browser keeps painting the last tree. Node ids commonly restart at
+        // the same values, so the replacement InitialTree must remove the old
+        // root before re-creating it or stale children survive and the page is
+        // visibly duplicated.
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &["a9:1"], true);
+
+        let again = vec![
+            create_with("1", "Column", &[]),
+            create_with("2", "Text", &[("text", json!("restored"))]),
+            insert("root", "1"),
+            insert("1", "2"),
+        ];
+        let out = process_tab_patches(&module.inner, "tab-1", &again);
+
+        assert!(
+            matches!(&out[0], Patch::Remove { id, transition: false } if id.as_ref() == "a9:1"),
+            "expected the old root removed before the replacement tree, got {out:?}",
+        );
+        assert!(
+            matches!(&out[1], Patch::Create { id, .. } if id.as_ref() == "a9:1"),
+            "replacement Create must follow the prelude Remove, got {out:?}",
+        );
+        assert_eq!(
+            module.inner.lock().unwrap().tabs["tab-1"].app_root_ids,
+            vec!["a9:1".to_string()],
         );
     }
 
@@ -2473,9 +3045,12 @@ mod tests {
     /// on_patches closure runs: rewrite, embed lifecycle, forward.
     fn ingest_tab_batch(module: &Arc<BrowserModule>, tab_id: &str, batch: &[Patch]) -> Vec<Patch> {
         let mut rewritten = process_tab_patches(&module.inner, tab_id, batch);
-        let extra = handle_embed_lifecycle(&module.inner, &rewritten);
-        rewritten.extend(extra);
+        let lifecycle = handle_embed_lifecycle(&module.inner, &rewritten);
+        rewritten.extend(lifecycle.extra);
         forward(&module.inner, &rewritten);
+        for marker in lifecycle.to_connect {
+            connect_embed(&module.inner, marker);
+        }
         rewritten
     }
 
@@ -2594,6 +3169,86 @@ mod tests {
         let embed = inner.embeds.get("e1:").unwrap();
         assert_eq!(embed.app_root_ids, vec!["e1:1".to_string()]);
         assert_eq!(embed.status, EmbedStatus::Connected);
+    }
+
+    #[test]
+    fn embed_connection_is_deferred_until_its_host_batch_is_forwarded() {
+        let (module, captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        let raw = hypenapp_route_batch("ws://127.0.0.1:1/nope");
+        let rewritten = process_tab_patches(&module.inner, "tab-1", &raw);
+        let lifecycle = handle_embed_lifecycle(&module.inner, &rewritten);
+
+        assert_eq!(lifecycle.to_connect.len(), 1);
+        let marker = &lifecycle.to_connect[0];
+        assert!(
+            module.inner.lock().unwrap().embeds[marker].remote.is_none(),
+            "lifecycle scan must register, but not start, the worker",
+        );
+        assert!(
+            module.inner.lock().unwrap().tree.get("a9:51").is_none(),
+            "the host has not reached the forwarded shadow tree yet",
+        );
+
+        let mut host_batch = rewritten;
+        host_batch.extend(lifecycle.extra);
+        forward(&module.inner, &host_batch);
+
+        assert!(module.inner.lock().unwrap().tree.get("a9:51").is_some());
+        assert!(captured.lock().unwrap().iter().any(
+            |patch| matches!(patch, Patch::Create { id, element_type, .. }
+                if id.as_ref() == "a9:51" && element_type == "HypenApp")
+        ));
+        // Do not connect the intentionally invalid URL; the production
+        // callbacks perform that step only after this forwarding point.
+    }
+
+    #[test]
+    fn embed_media_urls_resolve_against_the_embedded_app_origin() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("wss://hypeflix.example/ws"),
+        );
+
+        let out = process_embed_patches(
+            &module.inner,
+            "e1:",
+            &[
+                create_with("1", "Column", &[]),
+                insert("root", "1"),
+                create_with("2", "Image", &[("src", json!("/poster/sintel"))]),
+                insert("1", "2"),
+                create_with(
+                    "3",
+                    "Video",
+                    &[("poster.0", json!("/poster/big-buck-bunny"))],
+                ),
+                insert("1", "3"),
+            ],
+        );
+
+        let media_props: Vec<&Arc<IndexMap<String, Value>>> = out
+            .iter()
+            .filter_map(|patch| match patch {
+                Patch::Create {
+                    element_type,
+                    props,
+                    ..
+                } if element_type == "Image" || element_type == "Video" => Some(props),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            media_props[0].get("src"),
+            Some(&json!("https://hypeflix.example/poster/sintel"))
+        );
+        assert_eq!(
+            media_props[1].get("poster.0"),
+            Some(&json!("https://hypeflix.example/poster/big-buck-bunny"))
+        );
     }
 
     #[test]
@@ -2728,11 +3383,12 @@ mod tests {
         assert_eq!(inner.embeds.len(), 1, "old embed must be replaced");
         assert!(inner.embeds.contains_key("e2:"));
         assert!(!inner.embeds.contains_key("e1:"));
-        // The stale embed's grafted root is removed from the tree.
+        // Replacing the tab root reclaims the stale embed root transitively;
+        // no second explicit Remove(e1:1) is needed for a linked descendant.
         assert!(
             out.iter()
-                .any(|p| matches!(p, Patch::Remove { id, .. } if id.as_ref() == "e1:1")),
-            "expected the stale embed root removed, got {out:?}",
+                .any(|p| matches!(p, Patch::Remove { id, .. } if id.as_ref() == "a9:50")),
+            "expected the stale tab root removed, got {out:?}",
         );
     }
 

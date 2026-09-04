@@ -206,8 +206,9 @@ Row {
 Visual separator line between content sections.
 
 **Props:**
-- `thickness` (Number | String): Line thickness (default: 1px)
-- `orientation` (String): `"horizontal"` (default) or `"vertical"`
+- `thickness` / `height` (Number | String): Line thickness (default: 1px)
+- `color` / `backgroundColor` (String): Line color (default: `#e0e0e0`)
+- `orientation` (String): `"horizontal"` (default). `"vertical"` is currently Web-only.
 
 **Example:**
 ```hypen
@@ -218,7 +219,7 @@ Column {
 }
 ```
 
-**Vertical Divider:**
+**Web-only vertical Divider:**
 ```hypen
 Row()
   .height(100) {
@@ -229,7 +230,7 @@ Row()
 }
 ```
 
-**Rendered as:** `<hr>`
+**Rendered as:** `<div>`
 
 ---
 
@@ -362,5 +363,4 @@ Grid()
 ## See Also
 - [Layout Applicators](../applicators/layout.md) - Flexbox and grid styling
 - [Spacing Applicators](../applicators/spacing.md) - Padding, margin, and gap
-
 

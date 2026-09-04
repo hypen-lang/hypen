@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/cli",
-  "version": "0.6.2",
+  "version": "0.6.3",
   "description": "Hypen CLI - Create and manage Hypen applications",
   "type": "module",
   "bin": {
@@ -32,11 +32,11 @@
   },
   "dependencies": {
     "@babel/runtime": "^7.24.0",
-    "@hypen-space/core": "^0.6.2",
-    "@hypen-space/lsp": "^0.6.2",
-    "@hypen-space/server": "^0.6.2",
-    "@hypen-space/web": "^0.6.2",
-    "@hypen-space/web-engine": "^0.6.2",
+    "@hypen-space/core": "^0.6.3",
+    "@hypen-space/lsp": "^0.6.3",
+    "@hypen-space/server": "^0.6.3",
+    "@hypen-space/web": "^0.6.3",
+    "@hypen-space/web-engine": "^0.6.3",
     "@radix-ui/react-label": "^2.1.7",
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-slot": "^1.2.3",

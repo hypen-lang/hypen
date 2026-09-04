@@ -19,6 +19,35 @@ import coil.compose.AsyncImage
 import space.hypen.renderer.applicators.ColorParser
 import space.hypen.renderer.model.HypenElement
 
+internal const val DEFAULT_AVATAR_SIZE_DP = 40f
+
+internal data class AvatarSizeResolution(
+    val sizeDp: Float,
+    val hasExplicitDimensions: Boolean,
+)
+
+internal fun resolveAvatarSize(element: HypenElement): AvatarSizeResolution {
+    // Applicators use .0 suffix: .width(32) becomes "width.0".
+    val explicitWidth = element.getFloatProp("width.0")
+    val explicitHeight = element.getFloatProp("height.0")
+    val sizeValue = element.getStringProp("size")
+
+    val sizeDp = when (sizeValue?.lowercase()) {
+        "small" -> 32f
+        "medium" -> 48f
+        "large" -> 64f
+        else -> element.getFloatProp("size")
+            ?: explicitWidth
+            ?: explicitHeight
+            ?: DEFAULT_AVATAR_SIZE_DP
+    }
+
+    return AvatarSizeResolution(
+        sizeDp = sizeDp,
+        hasExplicitDimensions = explicitWidth != null || explicitHeight != null,
+    )
+}
+
 /**
  * Handler for Avatar component - user profile image or initials.
  */
@@ -44,22 +73,10 @@ class AvatarComponent : ComponentHandler {
             ?: element.getStringProp("initials")
             ?: ""
 
-        // Size - check applicator width/height first, then size prop, then defaults
-        // Applicators use .0 suffix: .width(32) becomes "width.0"
-        val explicitWidth = element.getFloatProp("width.0")
-        val explicitHeight = element.getFloatProp("height.0")
-        val hasExplicitSize = explicitWidth != null || explicitHeight != null
-
-        val sizeValue = element.getStringProp("size")
-        val size = when (sizeValue?.lowercase()) {
-            "small" -> 32.dp
-            "medium" -> 48.dp
-            "large" -> 64.dp
-            else -> element.getFloatProp("size")?.dp
-                ?: explicitWidth?.dp
-                ?: explicitHeight?.dp
-                ?: 48.dp
-        }
+        // Explicit width/height applicators already live in `modifier`, so they
+        // must not be overwritten by the component's square default.
+        val sizeResolution = resolveAvatarSize(element)
+        val size = sizeResolution.sizeDp.dp
 
         // Background color for fallback
         val bgColorStr = element.getStringProp("backgroundColor.0")
@@ -71,7 +88,7 @@ class AvatarComponent : ComponentHandler {
 
         // Only apply .size() if no explicit width/height from applicators
         // Otherwise the modifier already has the correct dimensions
-        val boxModifier = if (hasExplicitSize) {
+        val boxModifier = if (sizeResolution.hasExplicitDimensions) {
             modifier.clip(CircleShape).background(backgroundColor)
         } else {
             modifier.size(size).clip(CircleShape).background(backgroundColor)

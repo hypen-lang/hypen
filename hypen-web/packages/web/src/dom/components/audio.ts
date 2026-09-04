@@ -8,6 +8,10 @@ export const audioHandler: ComponentHandler = {
   create(): HTMLElement {
     const el = document.createElement("audio");
     el.dataset.hypenType = "audio";
+    // Audio is a player component, so its transport is visible by default on
+    // every renderer. Authors can still opt into headless playback with
+    // `controls: false`.
+    el.controls = true;
     return el as any as HTMLElement;
   },
 
@@ -41,5 +45,4 @@ export const audioHandler: ComponentHandler = {
     }
   },
 };
-
 

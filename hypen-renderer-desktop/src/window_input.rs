@@ -405,8 +405,12 @@ impl App {
         // exclusive (a Scrubber is never a text input).
         if !editing_focused {
             let step = match ev.logical_key.as_ref() {
-                Key::Named(NamedKey::ArrowLeft) => Some(-crate::window::window_video::SCRUB_KEY_STEP),
-                Key::Named(NamedKey::ArrowRight) => Some(crate::window::window_video::SCRUB_KEY_STEP),
+                Key::Named(NamedKey::ArrowLeft) => {
+                    Some(-crate::window::window_video::SCRUB_KEY_STEP)
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    Some(crate::window::window_video::SCRUB_KEY_STEP)
+                }
                 _ => None,
             };
             if let Some(step) = step {
@@ -427,13 +431,11 @@ impl App {
                 // so focus walks past them exactly like hit-testing
                 // walks past them.
                 let next = if shift {
-                    layout.focus_prev_excluding(self.focused.as_deref(), &|id| {
-                        self.exit_excluded(id)
-                    })
+                    layout
+                        .focus_prev_excluding(self.focused.as_deref(), &|id| self.exit_excluded(id))
                 } else {
-                    layout.focus_next_excluding(self.focused.as_deref(), &|id| {
-                        self.exit_excluded(id)
-                    })
+                    layout
+                        .focus_next_excluding(self.focused.as_deref(), &|id| self.exit_excluded(id))
                 };
                 if next != self.focused {
                     self.focused = next;
@@ -567,9 +569,9 @@ impl App {
             // engine-side dead, so a click during the exit playback
             // must not dispatch (mirrors the DOM renderer's
             // exiting-subtree event drop).
-            if let Some(item) = layout.hit_excluding(px, py, &|id| {
-                self.animator.is_exit_excluded(&self.tree, id)
-            }) {
+            if let Some(item) =
+                layout.hit_excluding(px, py, &|id| self.animator.is_exit_excluded(&self.tree, id))
+            {
                 // A click only fires when the press AND release land on
                 // the same actionable. `unwrap_or(false)` rejects the
                 // case where nothing was pressed (e.g. press landed on

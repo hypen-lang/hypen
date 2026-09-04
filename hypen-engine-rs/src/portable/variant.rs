@@ -467,7 +467,11 @@ mod tests {
 
     #[test]
     fn pick_hover_overrides_breakpoint() {
-        let keys = ["backgroundColor.0", "backgroundColor@md.0", "backgroundColor:hover.0"];
+        let keys = [
+            "backgroundColor.0",
+            "backgroundColor@md.0",
+            "backgroundColor:hover.0",
+        ];
         // md active and hover active: hover (a state) outranks breakpoint.
         assert_eq!(
             pick_variant_base("backgroundColor", &keys, 1000.0, &["hover"]),

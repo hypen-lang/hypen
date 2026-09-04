@@ -35,6 +35,8 @@ public struct AudioComponent: ComponentHandler {
             ?? context.element.getBoolProp("loop.0")
             ?? false
 
+        let showsControls = audioControlsVisible(context.element)
+
         guard let src = src, let url = URL(string: src) else {
             // No source - render children (for playlist UI, etc.)
             return AnyView(
@@ -45,10 +47,10 @@ public struct AudioComponent: ComponentHandler {
             )
         }
 
-        return AnyView(
-            AudioPlayerView(url: url, autoplay: autoplay, loop: loop)
-                .hypenModifier(modifier)
-        )
+        let player = AudioPlayerView(url: url, autoplay: autoplay, loop: loop, showsControls: showsControls)
+        return showsControls
+            ? AnyView(player.hypenModifier(modifier))
+            : AnyView(player)
     }
 }
 
@@ -59,17 +61,32 @@ private struct AudioPlayerView: View {
     let url: URL
     let autoplay: Bool
     let loop: Bool
+    let showsControls: Bool
 
     @StateObject private var playerManager: AudioPlayerManager
 
-    init(url: URL, autoplay: Bool, loop: Bool) {
+    init(url: URL, autoplay: Bool, loop: Bool, showsControls: Bool) {
         self.url = url
         self.autoplay = autoplay
         self.loop = loop
+        self.showsControls = showsControls
         _playerManager = StateObject(wrappedValue: AudioPlayerManager(url: url, autoplay: autoplay, loop: loop))
     }
 
     var body: some View {
+        Group {
+            if showsControls {
+                controlsView
+            } else {
+                EmptyView()
+            }
+        }
+        .onDisappear {
+            playerManager.cleanup()
+        }
+    }
+
+    private var controlsView: some View {
         HStack(spacing: 12) {
             // Play/Pause button
             Button(action: {
@@ -110,9 +127,6 @@ private struct AudioPlayerView: View {
         }
         .padding(12)
         .background(Color(red: 0.95, green: 0.96, blue: 0.96)) // #F3F4F6
-        .onDisappear {
-            playerManager.cleanup()
-        }
     }
 
     private func formatDuration(_ seconds: Double) -> String {
@@ -122,6 +136,10 @@ private struct AudioPlayerView: View {
         let secs = totalSeconds % 60
         return "\(minutes):\(String(format: "%02d", secs))"
     }
+}
+
+internal func audioControlsVisible(_ element: HypenElement) -> Bool {
+    element.getBoolProp("controls") ?? element.getBoolProp("controls.0") ?? true
 }
 
 // MARK: - Audio Player Manager

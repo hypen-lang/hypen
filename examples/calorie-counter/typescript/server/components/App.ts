@@ -1,6 +1,6 @@
 import { app } from "@hypen-space/core";
 
-// App — the shell module. Now a bare Router with param'd routes; the
+// App — the shell module. The bounded root hosts the param'd Router; the
 // URL is the single source of truth for "which day / which meal" each
 // screen is showing. No cross-module state reads, no shared App state
 // beyond `location` (which the client mirrors from the URL via the
@@ -26,58 +26,62 @@ export default app
     module App {
       Column {
         Router {
-          Route(path: "/") {
-            Column {
-              Home()
-                .tw("flex-1")
-              BottomNav()
+            Route(path: "/") {
+              Column {
+                Home()
+                  .tw("flex-1 min-h-0")
+                BottomNav()
+                  .tw("shrink-0")
+              }
+              .tw("flex-1 h-full min-h-0 overflow-hidden bg-white")
             }
-            .tw("flex-1 bg-white")
-          }
 
-          Route(path: "/diary") {
-            Column {
-              Diary()
-                .tw("flex-1")
-              BottomNav()
+            Route(path: "/diary") {
+              Column {
+                Diary()
+                  .tw("flex-1 min-h-0")
+                BottomNav()
+                  .tw("shrink-0")
+              }
+              .tw("flex-1 h-full min-h-0 overflow-hidden bg-white")
             }
-            .tw("flex-1 bg-white")
-          }
 
-          Route(path: "/diary/:date") {
-            Column {
-              Diary()
-                .tw("flex-1")
-              BottomNav()
+            Route(path: "/diary/:date") {
+              Column {
+                Diary()
+                  .tw("flex-1 min-h-0")
+                BottomNav()
+                  .tw("shrink-0")
+              }
+              .tw("flex-1 h-full min-h-0 overflow-hidden bg-white")
             }
-            .tw("flex-1 bg-white")
-          }
 
-          Route(path: "/add/:meal") {
-            AddFood()
-              .tw("flex-1")
-          }
-
-          Route(path: "/stats") {
-            Column {
-              Stats()
-                .tw("flex-1")
-              BottomNav()
+            Route(path: "/add/:meal") {
+              AddFood()
+                .tw("flex-1 min-h-0")
             }
-            .tw("flex-1 bg-white")
-          }
 
-          Route(path: "/profile") {
-            Column {
-              Profile()
-                .tw("flex-1")
-              BottomNav()
+            Route(path: "/stats") {
+              Column {
+                Stats()
+                  .tw("flex-1 min-h-0")
+                BottomNav()
+                  .tw("shrink-0")
+              }
+              .tw("flex-1 h-full min-h-0 overflow-hidden bg-white")
             }
-            .tw("flex-1 bg-white")
-          }
+
+            Route(path: "/profile") {
+              Column {
+                Profile()
+                  .tw("flex-1 min-h-0")
+                BottomNav()
+                  .tw("shrink-0")
+              }
+              .tw("flex-1 h-full min-h-0 overflow-hidden bg-white")
+            }
         }
-        .tw("flex-1 w-full h-full")
       }
-      .tw("flex-1 w-full min-h-screen bg-white")
+      .tw("flex-1 w-full h-screen min-h-0 overflow-hidden bg-white")
     }
   `);

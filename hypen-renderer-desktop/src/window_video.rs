@@ -249,9 +249,7 @@ pub(crate) fn plan_playback_write(
         }
     }
     if let Some(want_position) = obj.get("position").and_then(|v| v.as_f64()) {
-        if want_position.is_finite()
-            && (want_position - position).abs() > PLAYBACK_SEEK_EPSILON_S
-        {
+        if want_position.is_finite() && (want_position - position).abs() > PLAYBACK_SEEK_EPSILON_S {
             let mut target = want_position.max(0.0);
             if duration > 0.0 {
                 target = target.min(duration);
@@ -337,7 +335,11 @@ impl App {
         for (node_id, reports, state, position, duration) in pending {
             let reported_position = reports.iter().any(|r| r.path.ends_with(".position"));
             for report in reports {
-                log::debug!("dispatch (playback bind): {} = {}", report.path, report.value);
+                log::debug!(
+                    "dispatch (playback bind): {} = {}",
+                    report.path,
+                    report.value
+                );
                 self.module.dispatch_action(
                     "__hypen_bind",
                     Some(json!({ "path": report.path, "value": report.value })),
@@ -475,8 +477,7 @@ impl App {
         let Some((state, _, _)) = self.video_playback_snapshot(node_id) else {
             return;
         };
-        let already =
-            state.play_intent() == want && !(want && state == VideoPlayerState::Ended);
+        let already = state.play_intent() == want && !(want && state == VideoPlayerState::Ended);
         if !already {
             self.set_video_playing(node_id, want);
         }
@@ -651,8 +652,7 @@ impl App {
             };
             match crate::media::current_track(id) {
                 Some((cur, _)) if &cur == url => {
-                    let seekable =
-                        crate::media::status(id).is_some_and(|s| s.duration > 0.0);
+                    let seekable = crate::media::status(id).is_some_and(|s| s.duration > 0.0);
                     if seekable {
                         ready.push((id.clone(), *secs));
                     }
@@ -829,9 +829,7 @@ impl App {
     #[cfg_attr(not(feature = "video"), allow(dead_code))]
     pub(crate) fn cancel_video_scrub_for(&mut self, video_id: &str) {
         let scrubber_id = match self.video_scrub.as_mut() {
-            Some(drag)
-                if !drag.cancelled && drag.video_id.as_deref() == Some(video_id) =>
-            {
+            Some(drag) if !drag.cancelled && drag.video_id.as_deref() == Some(video_id) => {
                 drag.cancelled = true;
                 drag.scrubber_id.clone()
             }
@@ -930,8 +928,7 @@ impl App {
         if let Some(id) = video_id {
             self.seek_video(id, position);
         }
-        let dispatch =
-            scrub_commit_dispatch(&self.tree, scrubber_id, video_id, position);
+        let dispatch = scrub_commit_dispatch(&self.tree, scrubber_id, video_id, position);
         if let Some((action, payload)) = dispatch {
             log::debug!("dispatch (scrubber commit): {action} payload={payload:?}");
             self.module.dispatch_action(&action, Some(payload));

@@ -322,7 +322,10 @@ export abstract class HypenDurableObject {
     // driven explicitly (real or synthesised `hello`) so it always completes
     // before the triggering message is dispatched, and no timer dangles
     // across a hibernation boundary.
-    session = new RemoteSession(this.getHost(), transport, { helloGraceMs: null });
+    session = new RemoteSession(this.getHost(), transport, {
+      helloGraceMs: null,
+      recoverySessionId: this.rememberedSessionId(ws),
+    });
     this.sessions.set(ws, session);
     return session;
   }

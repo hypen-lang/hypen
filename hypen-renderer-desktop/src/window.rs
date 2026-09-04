@@ -11,23 +11,23 @@ use crate::damage::Damage;
 use crate::gpu::Gpu;
 use crate::ime::{apply_ime_transition, ImeEffect};
 use crate::layout::{ItemKind, LayoutPass, TaffyState};
-use crate::style::Viewport;
 use crate::module::HypenModule;
 use crate::paint::vello_painter::VelloPainter;
+use crate::style::Viewport;
 use crate::tree::Tree;
 use accesskit::Action as AkAction;
 use accesskit_winit::{Adapter as AkAdapter, Event as AkEvent, WindowEvent as AkWindowEvent};
 use arboard::Clipboard;
 use hypen_engine::Patch;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use winit::window::{Window, WindowAttributes, WindowId};
+use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
 /// Anchor + head selection within an `Input`'s text. Both fields are
 /// byte offsets into the value string; collapsed (`anchor == head`)
@@ -155,7 +155,13 @@ impl From<AkEvent> for AppEvent {
 /// event-loop thread.
 #[derive(Default)]
 pub struct PatchQueue {
-    queued: Mutex<Vec<Patch>>,
+    queued: Mutex<QueuedPatchBatches>,
+}
+
+#[derive(Default)]
+struct QueuedPatchBatches {
+    batches: VecDeque<Vec<Patch>>,
+    patch_count: usize,
 }
 
 /// Hard cap so a misbehaving engine can't accumulate gigabytes of
@@ -189,29 +195,78 @@ impl PatchQueue {
             return false;
         }
         let mut q = self.queued.lock().expect("patch queue poisoned");
-        let was_empty = q.is_empty();
-        q.extend_from_slice(patches);
-        if q.len() > PATCH_QUEUE_CAP {
-            let drop_n = q.len() - PATCH_QUEUE_CAP;
+        let was_empty = q.batches.is_empty();
+        q.patch_count = q.patch_count.saturating_add(patches.len());
+        q.batches.push_back(patches.to_vec());
+        if q.patch_count > PATCH_QUEUE_CAP {
+            let before = q.patch_count;
+            let mut dropped = 0usize;
+            // Drop whole callback transactions. Splitting one batch can
+            // leave Create/Insert or Detach/Attach pairs inconsistent.
+            while q.patch_count > PATCH_QUEUE_CAP && q.batches.len() > 1 {
+                if let Some(batch) = q.batches.pop_front() {
+                    dropped = dropped.saturating_add(batch.len());
+                    q.patch_count = q.patch_count.saturating_sub(batch.len());
+                }
+            }
             log::warn!(
-                "patch queue at {}; dropping {} oldest — \
+                "patch queue at {}; dropping {} oldest patches in whole batches — \
                  event loop falling behind the engine (window minimised? \
                  SDK in a render loop?)",
-                q.len(),
-                drop_n
+                before,
+                dropped
             );
-            q.drain(..drop_n);
         }
         was_empty
     }
 
+    /// Drain exactly one callback transaction.
+    ///
+    /// Distinct engine callbacks are semantic batch boundaries: animation
+    /// transactions and embedded-app host creation depend on the first batch
+    /// being fully ingested before the next one. Flattening a fast burst into
+    /// one Vec made GUI behaviour depend on network timing.
     pub fn drain(&self) -> Vec<Patch> {
         let mut q = self.queued.lock().expect("patch queue poisoned");
-        std::mem::take(&mut *q)
+        let batch = q.batches.pop_front().unwrap_or_default();
+        q.patch_count = q.patch_count.saturating_sub(batch.len());
+        batch
     }
 
     pub fn is_empty(&self) -> bool {
-        self.queued.lock().expect("patch queue poisoned").is_empty()
+        self.queued
+            .lock()
+            .expect("patch queue poisoned")
+            .batches
+            .is_empty()
+    }
+}
+
+#[cfg(test)]
+mod patch_queue_tests {
+    use super::PatchQueue;
+    use hypen_engine::Patch;
+
+    fn remove(id: &str) -> Patch {
+        Patch::Remove {
+            id: id.into(),
+            transition: false,
+        }
+    }
+
+    #[test]
+    fn preserves_callback_transaction_boundaries() {
+        let queue = PatchQueue::new();
+        assert!(queue.push(&[remove("host-a"), remove("host-b")]));
+        assert!(!queue.push(&[remove("embedded-child")]));
+
+        let first = queue.drain();
+        assert_eq!(first.len(), 2);
+        assert!(!queue.is_empty());
+
+        let second = queue.drain();
+        assert_eq!(second.len(), 1);
+        assert!(queue.is_empty());
     }
 }
 
@@ -360,7 +415,6 @@ pub struct App {
     /// never detect divergence and items beyond the original buffer
     /// stay un-emitted forever — the "white forever" scroll bug.
     last_scroll_y_emitted: f32,
-    /// Pending resize coalescing. macOS / GNOME emit a burst of
     /// Hash of the last AccessKit tree we published. `None` until the
     /// first publish so an empty layout (whose hash legitimately could
     /// be `0`) doesn't trick us into skipping the very first send.
@@ -473,6 +527,12 @@ pub struct App {
     /// the track changes underneath it or the node leaves the tree.
     #[cfg(feature = "video")]
     video_pending_bind_seeks: HashMap<String, (String, f64)>,
+    /// Optional visual-test export. A settled frame is captured through the
+    /// same Vello scene used on screen, then the event loop exits.
+    screenshot_path: Option<std::path::PathBuf>,
+    screenshot_ready_at: Option<std::time::Instant>,
+    screenshot_complete: bool,
+    screenshot_error: Option<String>,
 }
 
 /// Sticky-error key for a `(video node, src)` pair — mirrors the
@@ -552,6 +612,10 @@ impl App {
             video_start_seeked: HashMap::new(),
             #[cfg(feature = "video")]
             video_pending_bind_seeks: HashMap::new(),
+            screenshot_path: None,
+            screenshot_ready_at: None,
+            screenshot_complete: false,
+            screenshot_error: None,
         }
     }
 
@@ -647,7 +711,9 @@ impl App {
                     to_release.push(node.id.clone());
                     if let Some(src) = src {
                         if autoplay
-                            && !self.video_error_keys.contains(&video_error_key(&node.id, &src))
+                            && !self
+                                .video_error_keys
+                                .contains(&video_error_key(&node.id, &src))
                         {
                             let opts = crate::media::resolve_play_opts(node);
                             to_start.push((node.id.clone(), src, index, opts));
@@ -861,9 +927,7 @@ impl App {
                                 // and records the sticky key.
                                 Ok(false) => {}
                                 Err(e) => {
-                                    log::warn!(
-                                        "video: playlist advance to {next_src} failed: {e}"
-                                    );
+                                    log::warn!("video: playlist advance to {next_src} failed: {e}");
                                     self.video_error_keys
                                         .insert(video_error_key(&ev.node_id, &next_src));
                                     self.mark_video_error(&ev.node_id, true);
@@ -1042,10 +1106,8 @@ impl App {
     /// insets stay zero.
     pub fn set_unified_titlebar(&mut self, on: bool) {
         self.unified_titlebar = on;
-        let platform = crate::layout::window_controls_platform_insets(
-            on,
-            cfg!(target_os = "macos"),
-        );
+        let platform =
+            crate::layout::window_controls_platform_insets(on, cfg!(target_os = "macos"));
         if self.taffy.platform_safe_area() != platform {
             self.taffy.set_platform_safe_area(platform);
             self.layout = None;
@@ -1058,6 +1120,17 @@ impl App {
     /// `resumed` (Windows + Linux/X11; no-op on macOS and Wayland).
     pub fn set_window_icon(&mut self, icon: Option<winit::window::Icon>) {
         self.window_icon = icon;
+    }
+
+    pub fn set_screenshot_path(&mut self, path: Option<std::path::PathBuf>) {
+        self.screenshot_path = path;
+        self.screenshot_ready_at = None;
+        self.screenshot_complete = false;
+        self.screenshot_error = None;
+    }
+
+    pub fn take_screenshot_error(&mut self) -> Option<String> {
+        self.screenshot_error.take()
     }
 
     /// Replace the shortcut table. Called once by
@@ -1164,10 +1237,13 @@ impl App {
             // transform, so a mid-flight second navigation retargets for
             // free (protocol step 5).
             self.animator.prepare_shared(tree, &patches, |id| {
-                prev_layout.as_ref().and_then(|l| l.item_by_id(id)).map(|it| {
-                    let r = it.visual_rect();
-                    (r.x, r.y, r.w, r.h)
-                })
+                prev_layout
+                    .as_ref()
+                    .and_then(|l| l.item_by_id(id))
+                    .map(|it| {
+                        let r = it.visual_rect();
+                        (r.x, r.y, r.w, r.h)
+                    })
             });
         }
         // Route the batch through the animation runtime: it honors the
@@ -1357,6 +1433,13 @@ impl App {
         // resulting renderer → state reports.
         self.apply_playback_writes(&outcome.forwarded);
         self.sync_video_bind();
+        // `PatchQueue::drain` intentionally preserves callback transaction
+        // boundaries by returning one batch at a time. If a burst queued more
+        // work before this flush, schedule the next transaction now. A producer
+        // racing after this check observes an empty queue and sends its own Wake.
+        if !self.queue.is_empty() {
+            let _ = self.proxy.send_event(AppEvent::Wake);
+        }
         n
     }
 
@@ -1682,8 +1765,7 @@ impl App {
         // triggers happens in THIS frame, before paint — a wheel burst
         // of any size lands on a freshly-emitted window, never on
         // blank space.
-        let scroll_recompute_threshold =
-            (h as f32) * crate::layout::SCROLL_REEMIT_THRESHOLD_VH;
+        let scroll_recompute_threshold = (h as f32) * crate::layout::SCROLL_REEMIT_THRESHOLD_VH;
         // Per-container offsets live outside the cache key (like page
         // `scroll_y`): a wheel over a `.scrollable` no longer forces
         // a full Taffy + emit per frame. Instead measure each emitted
@@ -1755,9 +1837,10 @@ impl App {
             if self.animator.has_pending_flips() {
                 flips_played |= {
                     let layout_ref = self.layout.as_ref().expect("layout populated above");
-                    self.animator.play_pending_flips(&mut self.tree, scale, |id| {
-                        layout_ref.item_by_id(id).map(|it| (it.rect.x, it.rect.y))
-                    })
+                    self.animator
+                        .play_pending_flips(&mut self.tree, scale, |id| {
+                            layout_ref.item_by_id(id).map(|it| (it.rect.x, it.rect.y))
+                        })
                 };
             }
             // Shared-element FLIP resolution (Option H, protocol steps 3/4):
@@ -1768,12 +1851,13 @@ impl App {
             if self.animator.has_pending_shared() {
                 flips_played |= {
                     let layout_ref = self.layout.as_ref().expect("layout populated above");
-                    self.animator.play_shared_flips(&mut self.tree, scale, |id| {
-                        layout_ref.item_by_id(id).map(|it| {
-                            let r = it.visual_rect();
-                            (r.x, r.y, r.w, r.h)
+                    self.animator
+                        .play_shared_flips(&mut self.tree, scale, |id| {
+                            layout_ref.item_by_id(id).map(|it| {
+                                let r = it.visual_rect();
+                                (r.x, r.y, r.w, r.h)
+                            })
                         })
-                    })
                 };
             }
             if flips_played {
@@ -1832,13 +1916,8 @@ impl App {
                 let vp_logical = crate::layout::logical_viewport((w, h), scale);
                 if let Some(layout) = self.layout.as_mut() {
                     for d in &container_drifts {
-                        layout.shift_container_scroll(
-                            &self.tree,
-                            &d.id,
-                            d.shift,
-                            vp_logical,
-                            scale,
-                        );
+                        layout
+                            .shift_container_scroll(&self.tree, &d.id, d.shift, vp_logical, scale);
                     }
                 }
                 self.layout_generation = self.layout_generation.wrapping_add(1);
@@ -1879,6 +1958,41 @@ impl App {
         let gpu = self.gpu.as_mut().expect("gpu set");
         if let Err(e) = gpu.present(scene) {
             log::warn!("present failed: {e}");
+        }
+
+        // Screenshot mode waits briefly after the first non-empty frame. The
+        // first paint queues local image fetches; their worker wakes the event
+        // loop, while this timer guarantees a final redraw for fixture-free
+        // pages too. The capture path re-renders this exact Vello scene into a
+        // readable texture, excluding OS chrome and display-dependent window
+        // decorations.
+        if self.screenshot_path.is_some() && !self.tree.root_children().is_empty() {
+            let now = std::time::Instant::now();
+            match self.screenshot_ready_at {
+                None => {
+                    self.screenshot_ready_at = Some(now + std::time::Duration::from_millis(750));
+                    let proxy = self.proxy.clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_millis(750));
+                        let _ = proxy.send_event(AppEvent::Wake);
+                    });
+                }
+                Some(ready_at) if now >= ready_at && !self.screenshot_complete => {
+                    let path = self.screenshot_path.as_ref().expect("checked above");
+                    match gpu.capture_scene_png(scene, path, self.initial_size) {
+                        Ok(()) => {
+                            log::info!("desktop screenshot saved to {}", path.display());
+                            self.screenshot_complete = true;
+                        }
+                        Err(error) => {
+                            log::error!("desktop screenshot failed: {error}");
+                            self.screenshot_error = Some(error);
+                            self.screenshot_complete = true;
+                        }
+                    }
+                }
+                _ => {}
+            }
         }
 
         self.publish_accessibility();
@@ -2012,9 +2126,7 @@ impl App {
             return;
         };
         adapter.update_if_active(|| {
-            tree_update_for_layout_excluding(layout, &|id| {
-                exit_excluded.iter().any(|e| e == id)
-            })
+            tree_update_for_layout_excluding(layout, &|id| exit_excluded.iter().any(|e| e == id))
         });
     }
 
@@ -2304,8 +2416,8 @@ impl ApplicationHandler<AppEvent> for App {
                             self.perform_video_intent(i);
                         }
                         if let Some(layout) = self.layout.as_ref() {
-                            if let Some(rid) = renderer_id_for(layout, req.target_node)
-                                .filter(|rid| {
+                            if let Some(rid) =
+                                renderer_id_for(layout, req.target_node).filter(|rid| {
                                     // Exit-animating ids are engine-side
                                     // dead: no dispatch, and focus must
                                     // never land (or be restored) on one.
@@ -2385,6 +2497,27 @@ impl ApplicationHandler<AppEvent> for App {
                 event_loop.exit()
             }
             WindowEvent::Resized(size) => {
+                match resize_action(
+                    self.gpu.as_ref().map(|gpu| gpu.size),
+                    (size.width, size.height),
+                    self.layout.is_some(),
+                ) {
+                    ResizeAction::Skip => return,
+                    ResizeAction::DropLayout => {
+                        // Minimised. Do NOT paint: `Gpu::resize` refuses a
+                        // zero size and leaves `gpu.size` holding the last
+                        // real one, and `redraw` reads its viewport from
+                        // `gpu.size` — so painting here would render a full
+                        // frame at a size the surface no longer has, for a
+                        // window nobody can see. Worse, it would repopulate
+                        // `self.layout`, which is exactly what the skip
+                        // above reads as "already presented at this size"
+                        // when the window comes back.
+                        self.layout = None;
+                        return;
+                    }
+                    ResizeAction::Paint => {}
+                }
                 // Paint synchronously inside the Resized handler.
                 // request_redraw schedules a frame for the next tick,
                 // but macOS stretches the existing swapchain image to
@@ -2426,7 +2559,10 @@ impl ApplicationHandler<AppEvent> for App {
                 // claims on slop and interpolates the pose props straight
                 // into the tree, so a dirty move invalidates layout/paint
                 // exactly like an animation frame.
-                if self.scrubber.pointer_move(&mut self.tree, position.x, position.y) {
+                if self
+                    .scrubber
+                    .pointer_move(&mut self.tree, position.x, position.y)
+                {
                     self.tree_generation = self.tree_generation.wrapping_add(1);
                     self.layout = None;
                     self.painter.invalidate_subtree_cache();
@@ -2478,6 +2614,16 @@ impl ApplicationHandler<AppEvent> for App {
                 }
 
                 let new_hover = self.hit_actionable(px, py);
+                let editable_hover = self
+                    .layout
+                    .as_ref()
+                    .and_then(|layout| {
+                        layout.hit_focusable_excluding(px, py, &|id| self.exit_excluded(id))
+                    })
+                    .is_some_and(|item| matches!(item.kind, ItemKind::Input { .. }));
+                if let Some(window) = self.window.as_ref() {
+                    window.set_cursor(cursor_icon_for_targets(new_hover.is_some(), editable_hover));
+                }
                 if new_hover != self.hovered {
                     let prev = self.hovered.clone();
                     self.mark_interaction_damage(prev.as_deref(), new_hover.as_deref());
@@ -2492,6 +2638,9 @@ impl ApplicationHandler<AppEvent> for App {
                 self.update_hover_subject(px, py);
             }
             WindowEvent::CursorLeft { .. } => {
+                if let Some(window) = self.window.as_ref() {
+                    window.set_cursor(CursorIcon::Default);
+                }
                 let prev = self.hovered.take();
                 if let Some(id) = prev.as_deref() {
                     if let Some(r) = self.item_damage_rect(id) {
@@ -2529,7 +2678,10 @@ impl ApplicationHandler<AppEvent> for App {
                 // below-slop tap remains an ordinary click (suppressed only
                 // when the drag actually claims, at release).
                 if let Some(layout) = self.layout.as_ref() {
-                    if self.scrubber.pointer_down(layout, self.cursor.x, self.cursor.y) {
+                    if self
+                        .scrubber
+                        .pointer_down(layout, self.cursor.x, self.cursor.y)
+                    {
                         needs_redraw = true;
                     }
                 }
@@ -2661,14 +2813,11 @@ impl ApplicationHandler<AppEvent> for App {
                     let cy = self.cursor.y as f32;
                     // Topmost scrollable Container under the cursor wins
                     // — fall back to page scroll when there isn't one.
-                    let target = self
-                        .layout
-                        .as_ref()
-                        .and_then(|l| {
-                            l.hit_scrollable_excluding(cx, cy, &|id| {
-                                self.animator.is_exit_excluded(&self.tree, id)
-                            })
-                        });
+                    let target = self.layout.as_ref().and_then(|l| {
+                        l.hit_scrollable_excluding(cx, cy, &|id| {
+                            self.animator.is_exit_excluded(&self.tree, id)
+                        })
+                    });
                     let mut container_damage: Option<crate::layout::Rect> = None;
                     let mut full_damage = false;
                     if let Some(item) = target {
@@ -2733,7 +2882,8 @@ impl ApplicationHandler<AppEvent> for App {
                     let mut scrub_dirty = false;
                     if let Some(layout) = self.layout.as_ref() {
                         scrub_dirty =
-                            self.scrubber.on_scroll(&mut self.tree, layout, &self.scrollables);
+                            self.scrubber
+                                .on_scroll(&mut self.tree, layout, &self.scrollables);
                     }
                     if scrub_dirty {
                         self.tree_generation = self.tree_generation.wrapping_add(1);
@@ -2876,6 +3026,9 @@ impl ApplicationHandler<AppEvent> for App {
                     return;
                 }
                 self.redraw();
+                if self.screenshot_complete {
+                    event_loop.exit();
+                }
             }
             _ => {}
         }
@@ -3043,7 +3196,11 @@ pub(crate) fn drive_animation_frame(
                 }
             }
         }
-        if capped { None } else { Some(affected) }
+        if capped {
+            None
+        } else {
+            Some(affected)
+        }
     } else {
         None
     };
@@ -3271,7 +3428,10 @@ pub(crate) fn paint_only_affected_ids(
 /// name / hidden without touching any of the above), and the
 /// exit-excluded set. Pure — extracted from `App` so tests can pin
 /// that every field AccessKit publishes participates.
-pub(crate) fn a11y_fingerprint(layout: &crate::layout::LayoutPass, exit_excluded: &[String]) -> u64 {
+pub(crate) fn a11y_fingerprint(
+    layout: &crate::layout::LayoutPass,
+    exit_excluded: &[String],
+) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     layout.items.len().hash(&mut hasher);
@@ -3422,7 +3582,9 @@ pub(crate) fn container_scroll_drifts(
 ) -> Vec<ContainerDrift> {
     let mut out = Vec::new();
     for item in layout.scrollable_items() {
-        let Some(meta) = item.scrollable else { continue };
+        let Some(meta) = item.scrollable else {
+            continue;
+        };
         let live = scrollables.get(&item.node_id).copied().unwrap_or(0.0);
         let shift = live - meta.baked_offset;
         let emit_drift = live - meta.emitted_offset;
@@ -3470,6 +3632,52 @@ pub(crate) fn chain_emit_drift(
         anc = tree.parent_of(a);
     }
     sum
+}
+
+/// What a `WindowEvent::Resized` should do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResizeAction {
+    /// Reconfigure the surface and repaint synchronously.
+    Paint,
+    /// Nothing to draw at this size; forget the cached layout so the
+    /// next real size is not mistaken for one we have already presented.
+    DropLayout,
+    /// Same size we are already presenting — ignore it entirely.
+    Skip,
+}
+
+/// Decide what to do with a `Resized`, as a pure function so it can be
+/// tested; the event loop itself cannot be driven headlessly.
+///
+/// Two cases are worth skipping the (expensive) repaint for. The handler
+/// drops the layout cache, which forces a full Taffy re-solve over the
+/// whole tree rather than just the visible items, and ends in a
+/// vsync-blocked present — so a `Resized` that cannot change a pixel is
+/// pure lost budget during a drag.
+///
+/// - **Same size, already painted.** Windows in particular re-sends the
+///   current size on transitions that changed nothing. (X11 filters
+///   same-size configures itself and macOS does not emit on a window
+///   move, so this is less universal than it looks.) Gated on an
+///   existing layout, because before the first paint there is nothing
+///   on screen to match.
+/// - **Zero size.** A minimise. There is no surface to configure and
+///   nothing to show; the caller must also forget the cached layout, or
+///   the restore event looks like the same-size case above and gets
+///   skipped — leaving the window blank until something else happens to
+///   request a redraw.
+pub(crate) fn resize_action(
+    gpu_size: Option<(u32, u32)>,
+    event_size: (u32, u32),
+    has_layout: bool,
+) -> ResizeAction {
+    if event_size.0 == 0 || event_size.1 == 0 {
+        return ResizeAction::DropLayout;
+    }
+    if has_layout && gpu_size == Some(event_size) {
+        return ResizeAction::Skip;
+    }
+    ResizeAction::Paint
 }
 
 /// Pure layout-cache-key hash. Folds the live interaction state
@@ -3615,6 +3823,19 @@ pub(crate) fn next_click_count(
         }
     } else {
         1
+    }
+}
+
+/// Native equivalent of CSS cursor affordances. Editable text wins when an
+/// element is both editable and actionable; otherwise clickable elements use
+/// the hand pointer and inert content keeps the platform default.
+fn cursor_icon_for_targets(actionable: bool, editable: bool) -> CursorIcon {
+    if editable {
+        CursorIcon::Text
+    } else if actionable {
+        CursorIcon::Pointer
+    } else {
+        CursorIcon::Default
     }
 }
 

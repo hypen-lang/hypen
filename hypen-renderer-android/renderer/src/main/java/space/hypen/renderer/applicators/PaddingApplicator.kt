@@ -3,6 +3,9 @@ package space.hypen.renderer.applicators
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
+private fun ApplicatorContext.cardOwnsContentPadding(): Boolean =
+    element.elementType.equals("card", ignoreCase = true)
+
 /**
  * Applicator for padding.
  *
@@ -27,6 +30,7 @@ class PaddingApplicator : ApplicatorHandler {
         value: Any?,
         context: ApplicatorContext,
     ): Modifier =
+        if (context.cardOwnsContentPadding()) modifier else
         when (value) {
             is Number -> modifier.cssPadding(value.toFloat().dp)
             is String -> {
@@ -84,6 +88,7 @@ class PaddingApplicator : ApplicatorHandler {
 class PaddingTopApplicator : ApplicatorHandler {
     override val name: String = "paddingTop"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
+        if (context.cardOwnsContentPadding()) return modifier
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
         return modifier.cssPadding(top = dp)
     }
@@ -92,6 +97,7 @@ class PaddingTopApplicator : ApplicatorHandler {
 class PaddingBottomApplicator : ApplicatorHandler {
     override val name: String = "paddingBottom"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
+        if (context.cardOwnsContentPadding()) return modifier
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
         return modifier.cssPadding(bottom = dp)
     }
@@ -100,6 +106,7 @@ class PaddingBottomApplicator : ApplicatorHandler {
 class PaddingLeftApplicator : ApplicatorHandler {
     override val name: String = "paddingLeft"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
+        if (context.cardOwnsContentPadding()) return modifier
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
         return modifier.cssPadding(start = dp)
     }
@@ -108,6 +115,7 @@ class PaddingLeftApplicator : ApplicatorHandler {
 class PaddingRightApplicator : ApplicatorHandler {
     override val name: String = "paddingRight"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
+        if (context.cardOwnsContentPadding()) return modifier
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
         return modifier.cssPadding(end = dp)
     }
@@ -116,6 +124,7 @@ class PaddingRightApplicator : ApplicatorHandler {
 class PaddingHorizontalApplicator : ApplicatorHandler {
     override val name: String = "paddingHorizontal"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
+        if (context.cardOwnsContentPadding()) return modifier
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
         return modifier.cssPadding(start = dp, end = dp)
     }
@@ -124,6 +133,7 @@ class PaddingHorizontalApplicator : ApplicatorHandler {
 class PaddingVerticalApplicator : ApplicatorHandler {
     override val name: String = "paddingVertical"
     override fun apply(modifier: Modifier, value: Any?, context: ApplicatorContext): Modifier {
+        if (context.cardOwnsContentPadding()) return modifier
         val dp = (value as? Number)?.toFloat()?.dp ?: (value as? String)?.let { parseCssUnit(it) } ?: return modifier
         return modifier.cssPadding(top = dp, bottom = dp)
     }

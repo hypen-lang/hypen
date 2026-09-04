@@ -27,9 +27,9 @@ mimalloc = ["dep:mimalloc"]
 video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 
 [dependencies]
-hypen-engine = { version = "0.6.2", path = "../hypen-engine-rs" }
-hypen-parser = { version = "0.6.2", path = "../parser" }
-hypen-server = { version = "0.6.2", path = "../hypen-sdk-rs" }
+hypen-engine = { version = "0.6.3", path = "../hypen-engine-rs" }
+hypen-parser = { version = "0.6.3", path = "../parser" }
+hypen-server = { version = "0.6.3", path = "../hypen-sdk-rs" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -91,6 +91,24 @@ bytemuck = { version = "1.16", features = ["derive"] }
 
 # Insertion-ordered map for the image render-tile cache (FIFO eviction).
 indexmap = "2.0"
+
+# Fast hasher for `tree::PropMap`. `style::node_style_with` probes far
+# more applicator names against a node than any node carries, so most
+# lookups are misses that cost a hash and nothing else — SipHash was
+# ~42% of the instructions retired in a style build.
+#
+# `FxRandomState` (the `rand` feature), not the deterministic
+# `FxBuildHasher`: these keys are NOT all authored locally. The renderer
+# applies `Patch` streams from a RemoteServer over a WebSocket, and their
+# prop keys reach `PropMap` unvalidated and uncapped, so an unseeded
+# multiplicative hash is offline-constructible — a hand-rolled version of
+# this made a 20k-key map ~24x slower to fill than the SipHash it
+# replaced. Per-process seeding removes the precomputation entirely and
+# keeps the speed.
+#
+# Costs nothing to add: rustc-hash 2.x is already in the build via
+# cosmic-text, and it wants the `rand 0.8` this crate already has.
+rustc-hash = { version = "2", features = ["rand"] }
 
 # Cross-platform cache directory for the on-disk wgpu pipeline cache
 # (~/Library/Caches on macOS, $XDG_CACHE_HOME on Linux, %LOCALAPPDATA%
