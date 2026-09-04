@@ -160,7 +160,7 @@ pub fn build_shell_module(
 
     HypenApp::module::<ShellState>("Shell")
         .state(ShellState::home(recents))
-        .ui(SHELL_UI)
+        .ui(shell_ui())
         .on_action::<()>("connect", move |state, _payload, _ctx| {
             let raw = state.url_input.trim().to_string();
             if raw.is_empty() {
@@ -416,6 +416,17 @@ pub struct TabsUpdatePayload {
 /// ```
 ///
 /// The home content is padded so it doesn't sit under the chrome bar.
+///
+/// The toolbar's left inset is platform-dependent: on macOS the
+/// unified title bar puts the traffic-light cluster on the toolbar's
+/// row, so the buttons start past it; on Linux / Windows the title bar
+/// is ordinary window decoration above us and the buttons hug the
+/// left edge like the rest of the toolbar padding.
+fn shell_ui() -> String {
+    let inset = if cfg!(target_os = "macos") { 82 } else { 8 };
+    SHELL_UI.replace("__TOOLBAR_LEFT_INSET__", &inset.to_string())
+}
+
 const SHELL_UI: &str = r##"
 Stack {
     Container {
@@ -423,21 +434,21 @@ Stack {
             Column {
                 Text("Hypen Browser")
                     .fontSize(40)
-                    .color("#0f172a")
+                    .color("#F4F4F5")
                 Text("Open any Hypen app over WebSocket — no installs, no servers.")
                     .fontSize(15)
-                    .color("#64748b")
+                    .color("#9CA3AF")
                     .marginTop(8)
 
                 Text("Last opened")
                     .fontSize(13)
-                    .color("#94a3b8")
+                    .color("#8A8F98")
                     .marginTop(40)
 
                 If(condition: "@{length(state.recents) == 0}") {
                     Text("No apps opened yet. Type a URL above and press →.")
                         .fontSize(13)
-                        .color("#94a3b8")
+                        .color("#8A8F98")
                         .marginTop(8)
                 }
 
@@ -449,31 +460,31 @@ Stack {
                                     Column {
                                         Text("@{item.name}")
                                             .fontSize(14)
-                                            .color("#0f172a")
+                                            .color("#F4F4F5")
                                         Text("@{item.url}")
                                             .fontSize(12)
-                                            .color("#94a3b8")
+                                            .color("#8A8F98")
                                             .marginTop(2)
                                     }
                                 }
-                                    .backgroundColor("white")
+                                    .backgroundColor("#1F1F24")
                                     .borderWidth(0)
                                     .padding(14)
                                     .flex(1)
                                     .onClick(@actions.connect_recent, url: "@{item.url}", name: "@{item.name}")
                                 Button {
                                     Text("×")
-                                        .color("#cbd5e1")
+                                        .color("#6B7280")
                                         .fontSize(16)
                                 }
-                                    .backgroundColor("white")
+                                    .backgroundColor("#1F1F24")
                                     .borderWidth(0)
                                     .padding(14)
                                     .onClick(@actions.delete_recent, url: "@{item.url}")
                             }
-                                .backgroundColor("white")
+                                .backgroundColor("#1F1F24")
                                 .borderWidth(1)
-                                .borderColor("#e2e8f0")
+                                .borderColor("#2A2A31")
                                 .borderRadius(10)
                                 .marginTop(8)
                         }
@@ -495,19 +506,19 @@ Stack {
             Column {
                 Text("●")
                     .fontSize(28)
-                    .color("#3554d1")
+                    .color("#FFA7E1")
                 Text("Connecting…")
                     .fontSize(15)
-                    .color("#0f172a")
+                    .color("#F4F4F5")
                     .marginTop(12)
                 Text("@{state.active_url}")
                     .fontSize(13)
-                    .color("#64748b")
+                    .color("#9CA3AF")
                     .marginTop(6)
                 If(condition: "@{state.active_status_message != ''}") {
                     Text("@{state.active_status_message}")
                         .fontSize(12)
-                        .color("#94a3b8")
+                        .color("#8A8F98")
                         .marginTop(8)
                 }
             }
@@ -516,7 +527,7 @@ Stack {
                 .padding(56)
                 .paddingTop(120)
                 .alignItems("center")
-                .backgroundColor("#f8fafc")
+                .backgroundColor("#161616")
         }
 
         If(condition: "@{state.has_active_tab && state.active_status == 'failed'}") {
@@ -526,32 +537,32 @@ Stack {
                     .color("#ef4444")
                 Text("Couldn't connect")
                     .fontSize(16)
-                    .color("#0f172a")
+                    .color("#F4F4F5")
                     .marginTop(12)
                 Text("@{state.active_url}")
                     .fontSize(13)
-                    .color("#64748b")
+                    .color("#9CA3AF")
                     .marginTop(6)
                 Text("@{state.active_status_message}")
                     .fontSize(12)
-                    .color("#94a3b8")
+                    .color("#8A8F98")
                     .marginTop(8)
                 Row {
                     Button("@actions.refresh") {
                         Text("Try again")
-                            .color("white")
+                            .color("#161616")
                             .fontSize(13)
                     }
-                        .backgroundColor("#3554d1")
+                        .backgroundColor("#FFA7E1")
                         .borderWidth(0)
                         .borderRadius(8)
                         .padding(10)
                     Button("@actions.go_home") {
                         Text("Home")
-                            .color("#475569")
+                            .color("#C9CDD3")
                             .fontSize(13)
                     }
-                        .backgroundColor("#e2e8f0")
+                        .backgroundColor("#26262C")
                         .borderWidth(0)
                         .borderRadius(8)
                         .padding(10)
@@ -564,12 +575,12 @@ Stack {
                 .padding(56)
                 .paddingTop(120)
                 .alignItems("center")
-                .backgroundColor("#f8fafc")
+                .backgroundColor("#161616")
         }
     }
         .width("100%")
         .height("100%")
-        .backgroundColor("#f1f5f9")
+        .backgroundColor("#161616")
 
     Column {
         // Toolbar is expanded when (a) there's no tab open (so the
@@ -581,23 +592,23 @@ Stack {
                 Row {
                     Button {
                         Text("⌂")
-                            .color("#475569")
+                            .color("#C9CDD3")
                             .fontSize(13)
                     }
-                        .backgroundColor("#ffffff")
+                        .backgroundColor("#1F1F24")
                         .borderWidth(1)
-                        .borderColor("#e2e8f0")
+                        .borderColor("#2A2A31")
                         .borderRadius(8)
                         .padding(6)
                         .onClick(@actions.go_home)
                     Button {
                         Text("⟳")
-                            .color("#475569")
+                            .color("#C9CDD3")
                             .fontSize(13)
                     }
-                        .backgroundColor("#ffffff")
+                        .backgroundColor("#1F1F24")
                         .borderWidth(1)
-                        .borderColor("#e2e8f0")
+                        .borderColor("#2A2A31")
                         .borderRadius(8)
                         .padding(6)
                         .onClick(@actions.refresh)
@@ -606,32 +617,32 @@ Stack {
                         Input(placeholder: "Enter a URL — e.g. localhost:3000")
                             .bind(@state.url_input)
                             .backgroundColor("transparent")
-                            .color("#0f172a")
+                            .color("#F4F4F5")
                             .borderWidth(0)
                             .padding(6)
                             .fontSize(13)
                             .flex(1)
                         Button("@actions.connect") {
                             Text("→")
-                                .color("white")
+                                .color("#161616")
                                 .fontSize(14)
                         }
-                            .backgroundColor("#3554d1")
+                            .backgroundColor("#FFA7E1")
                             .borderWidth(0)
                             .borderRadius(999)
                             .padding(6)
                     }
                         .flex(1)
-                        .backgroundColor("#ffffff")
+                        .backgroundColor("#1F1F24")
                         .borderWidth(1)
-                        .borderColor("#e2e8f0")
+                        .borderColor("#2A2A31")
                         .borderRadius(999)
                         .padding(2)
                         .alignItems("center")
 
                     Button {
                         Text("{ }")
-                            .color("@{state.debug_open ? '#3554d1' : '#94a3b8'}")
+                            .color("@{state.debug_open ? '#FFA7E1' : '#8A8F98'}")
                             .fontSize(13)
                     }
                         .backgroundColor("transparent")
@@ -641,7 +652,7 @@ Stack {
                         .onClick(@actions.toggle_debug)
                     Button {
                         Text("⊞")
-                            .color("#94a3b8")
+                            .color("#8A8F98")
                             .fontSize(13)
                     }
                         .backgroundColor("transparent")
@@ -651,10 +662,10 @@ Stack {
                         .onClick(@actions.dump_tree)
                     Button {
                         Text("@{state.island_pinned ? '⌃' : '⌄'}")
-                            .color("@{state.island_pinned ? '#3554d1' : '#94a3b8'}")
+                            .color("@{state.island_pinned ? '#FFA7E1' : '#8A8F98'}")
                             .fontSize(13)
                     }
-                        .backgroundColor("@{state.island_pinned ? '#eef2ff' : 'transparent'}")
+                        .backgroundColor("@{state.island_pinned ? '#332632' : 'transparent'}")
                         .borderWidth(0)
                         .borderRadius(8)
                         .padding(6)
@@ -662,10 +673,10 @@ Stack {
                 }
                     .width("100%")
                     .padding(8)
-                    // Clear the macOS traffic lights (unified title bar):
-                    // the toolbar shares the top row with them, so inset
-                    // the left edge past the ~70px light cluster.
-                    .paddingLeft(82)
+                    // macOS: clear the traffic lights (unified title bar)
+                    // sharing this row — see `shell_ui()`. Elsewhere this
+                    // matches the toolbar's own padding.
+                    .paddingLeft(__TOOLBAR_LEFT_INSET__)
                     .gap(8)
                     .alignItems("center")
 
@@ -677,7 +688,7 @@ Stack {
                                     Row {
                                         If(condition: "@{item.status == 'connecting' || item.status == 'reconnecting'}") {
                                             Text("◐")
-                                                .color("#94a3b8")
+                                                .color("#8A8F98")
                                                 .fontSize(11)
                                         }
                                         If(condition: "@{item.status == 'connected'}") {
@@ -691,7 +702,7 @@ Stack {
                                                 .fontSize(10)
                                         }
                                         Text("@{item.name}")
-                                            .color("#0f172a")
+                                            .color("#F4F4F5")
                                             .fontSize(12)
                                             .marginLeft(6)
                                     }
@@ -703,7 +714,7 @@ Stack {
                                     .onClick(@actions.switch_tab, tabId: "@{item.id}")
                                 Button {
                                     Text("×")
-                                        .color("#94a3b8")
+                                        .color("#8A8F98")
                                         .fontSize(13)
                                 }
                                     .backgroundColor("transparent")
@@ -711,16 +722,16 @@ Stack {
                                     .padding(6)
                                     .onClick(@actions.close_tab, tabId: "@{item.id}")
                             }
-                                .backgroundColor("#ffffff")
+                                .backgroundColor("#1F1F24")
                                 .borderWidth(1)
-                                .borderColor("#e2e8f0")
+                                .borderColor("#2A2A31")
                                 .borderRadius(8)
                                 .gap(0)
                         }
 
                         Button {
                             Text("+")
-                                .color("#475569")
+                                .color("#C9CDD3")
                                 .fontSize(14)
                         }
                             .backgroundColor("transparent")
@@ -737,9 +748,9 @@ Stack {
                 }
             }
                 .width("100%")
-                .linearGradient("to bottom", ["#fbfcfd", "#e9ebef"])
+                .linearGradient("to bottom", ["#1E1E24", "#141417"])
                 .borderWidth(1)
-                .borderColor("#d8dade")
+                .borderColor("#26262C")
                 .onHover(@actions.island_hover)
         }
 
@@ -750,7 +761,7 @@ Stack {
                 Row {
                     If(condition: "@{state.active_status == 'connecting' || state.active_status == 'reconnecting'}") {
                         Text("◐")
-                            .color("#94a3b8")
+                            .color("#8A8F98")
                             .fontSize(10)
                     }
                     If(condition: "@{state.active_status == 'connected'}") {
@@ -764,18 +775,18 @@ Stack {
                             .fontSize(10)
                     }
                     Text("@{state.active_url}")
-                        .color("#0f172a")
+                        .color("#F4F4F5")
                         .fontSize(12)
                         .marginLeft(8)
                     Text("▾")
-                        .color("#94a3b8")
+                        .color("#8A8F98")
                         .fontSize(10)
                         .marginLeft(8)
                 }
                     .alignItems("center")
-                    .backgroundColor("#ffffff")
+                    .backgroundColor("#1F1F24")
                     .borderWidth(1)
-                    .borderColor("#d8dade")
+                    .borderColor("#26262C")
                     .borderRadius(999)
                     .padding(8)
                     .onClick(@actions.toggle_pin)
@@ -800,7 +811,7 @@ Stack {
                     .fontSize(12)
                     .marginBottom(2)
                 Text("▶ out (actions) · ◀ in (patches) · · logs")
-                    .color("#94a3b8")
+                    .color("#8A8F98")
                     .fontSize(10)
                     .marginBottom(8)
                 Text("@{state.debug_log}")
@@ -810,8 +821,8 @@ Stack {
                 .width(440)
                 .height("100%")
                 .padding(12)
-                .backgroundColor("#0f172a")
-                .borderColor("#1e293b")
+                .backgroundColor("#101014")
+                .borderColor("#26262C")
                 .borderWidth(1)
                 .scrollable("vertical")
         }

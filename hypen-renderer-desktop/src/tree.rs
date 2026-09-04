@@ -26,6 +26,20 @@ pub struct Node {
 }
 
 impl Node {
+    /// True when any prop key carries a variant marker (`@bp` / `:state`,
+    /// e.g. `padding@md.0`, `backgroundColor:hover.0`). Conservative — a
+    /// `@` / `:` with an unrecognised token also returns `true`, which
+    /// only costs the caller the slow path, never correctness. This is
+    /// the style resolver's fast-path gate: the overwhelmingly common
+    /// plainly-styled node answers `false` with a byte scan and skips
+    /// the per-lookup key parsing in `style::pick_base` entirely.
+    #[inline]
+    pub fn has_variant_prop_keys(&self) -> bool {
+        self.props
+            .keys()
+            .any(|k| k.as_bytes().iter().any(|&b| b == b'@' || b == b':'))
+    }
+
     /// Convenience: positional text content lives at prop key `"0"`.
     /// Returns the value as a string for any JSON scalar — strings
     /// pass through verbatim, numbers / booleans get stringified.
@@ -75,6 +89,31 @@ pub struct Tree {
     /// re-Attaching or Removing (a looping / buggy server) can't grow
     /// the node arena without bound.
     detached: Vec<String>,
+    /// Live count of prop keys starting with `opacity` across every
+    /// node (detached subtrees included, matching the scan these
+    /// counters replace). Maintained by every prop mutation path so
+    /// the layout pass's opacity post-pass gate is O(1) instead of a
+    /// full per-frame prop scan — which measured ~1.4 ms/frame on an
+    /// 11k-node tree.
+    opacity_keys: usize,
+    /// Same, for the transform prop vocabulary (`translateX` /
+    /// `translateY` / `scale` / `rotate`).
+    transform_keys: usize,
+}
+
+/// Which paint-gate counters a prop key belongs to:
+/// `(opacity, transform)`. Prefix-based, so variant-decorated keys
+/// (`opacity@md.0`, `scale:hover.0`) count too — identical to the
+/// full scans this replaces.
+#[inline]
+fn paint_gate_class(key: &str) -> (bool, bool) {
+    (
+        key.starts_with("opacity"),
+        key.starts_with("translateX")
+            || key.starts_with("translateY")
+            || key.starts_with("scale")
+            || key.starts_with("rotate"),
+    )
 }
 
 impl Tree {
@@ -86,7 +125,55 @@ impl Tree {
             children,
             parent_by_child: HashMap::new(),
             detached: Vec::new(),
+            opacity_keys: 0,
+            transform_keys: 0,
         }
+    }
+
+    /// O(1): does any node carry an `opacity*` prop key? Gates the
+    /// layout pass's effective-opacity post-pass.
+    pub fn has_opacity_props(&self) -> bool {
+        self.opacity_keys > 0
+    }
+
+    /// O(1): does any node carry a transform prop key? Gates the
+    /// layout pass's transform post-pass.
+    pub fn has_transform_props(&self) -> bool {
+        self.transform_keys > 0
+    }
+
+    #[inline]
+    fn count_key_added(&mut self, key: &str) {
+        let (o, t) = paint_gate_class(key);
+        if o {
+            self.opacity_keys += 1;
+        }
+        if t {
+            self.transform_keys += 1;
+        }
+    }
+
+    #[inline]
+    fn count_key_removed(&mut self, key: &str) {
+        let (o, t) = paint_gate_class(key);
+        if o {
+            self.opacity_keys = self.opacity_keys.saturating_sub(1);
+        }
+        if t {
+            self.transform_keys = self.transform_keys.saturating_sub(1);
+        }
+    }
+
+    fn count_node_removed(&mut self, node: &Node) {
+        let mut o = 0usize;
+        let mut t = 0usize;
+        for key in node.props.keys() {
+            let (is_o, is_t) = paint_gate_class(key);
+            o += is_o as usize;
+            t += is_t as usize;
+        }
+        self.opacity_keys = self.opacity_keys.saturating_sub(o);
+        self.transform_keys = self.transform_keys.saturating_sub(t);
     }
 
     /// O(1) parent lookup. Returns `None` for the synthetic root,
@@ -120,16 +207,24 @@ impl Tree {
     /// entries layout, paint, and hit-testing read (design constraint
     /// #5: never a paint-only presentation layer).
     pub(crate) fn set_prop_raw(&mut self, id: &str, name: &str, value: Value) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.props.insert(name.to_string(), value);
+        let added = match self.nodes.get_mut(id) {
+            Some(node) => node.props.insert(name.to_string(), value).is_none(),
+            None => false,
+        };
+        if added {
+            self.count_key_added(name);
         }
     }
 
     /// Remove a prop directly (animator settle restoring an
     /// originally-absent prop). See [`Tree::set_prop_raw`].
     pub(crate) fn remove_prop_raw(&mut self, id: &str, name: &str) {
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.props.remove(name);
+        let removed = match self.nodes.get_mut(id) {
+            Some(node) => node.props.remove(name).is_some(),
+            None => false,
+        };
+        if removed {
+            self.count_key_removed(name);
         }
     }
 
@@ -158,9 +253,10 @@ impl Tree {
             } => {
                 let mut prop_map = HashMap::with_capacity(props.len());
                 for (k, v) in props.iter() {
+                    self.count_key_added(k);
                     prop_map.insert(k.clone(), v.clone());
                 }
-                self.nodes.insert(
+                let replaced = self.nodes.insert(
                     id.to_string(),
                     Node {
                         id: id.to_string(),
@@ -169,13 +265,23 @@ impl Tree {
                         semantics: semantics.clone(),
                     },
                 );
+                // A host re-Creating an existing id replaces the node —
+                // its old props leave the tree with it.
+                if let Some(old) = replaced {
+                    self.count_node_removed(&old);
+                }
                 self.children.entry(id.to_string()).or_default();
             }
             Patch::SetProp { id, name, value } => {
-                if let Some(node) = self.nodes.get_mut(id.as_ref()) {
-                    node.props.insert(name.clone(), value.clone());
-                } else {
-                    log::warn!("SetProp on unknown node {id}");
+                let added = match self.nodes.get_mut(id.as_ref()) {
+                    Some(node) => node.props.insert(name.clone(), value.clone()).is_none(),
+                    None => {
+                        log::warn!("SetProp on unknown node {id}");
+                        false
+                    }
+                };
+                if added {
+                    self.count_key_added(name);
                 }
             }
             Patch::SetSemantics { id, semantics } => {
@@ -191,14 +297,19 @@ impl Tree {
                 }
             }
             Patch::RemoveProp { id, name } => {
-                if let Some(node) = self.nodes.get_mut(id.as_ref()) {
-                    node.props.remove(name);
+                let removed = match self.nodes.get_mut(id.as_ref()) {
+                    Some(node) => node.props.remove(name).is_some(),
+                    None => false,
+                };
+                if removed {
+                    self.count_key_removed(name);
                 }
             }
             Patch::SetText { id, text } => {
                 // Reserved by the engine — currently unreachable in production.
                 // Emulate by writing prop "0" so renderer behaviour stays
-                // consistent if a host emits it.
+                // consistent if a host emits it. (`"0"` is in neither
+                // paint-gate class, so no counter update is needed.)
                 if let Some(node) = self.nodes.get_mut(id.as_ref()) {
                     node.props.insert("0".into(), Value::String(text.clone()));
                 }
@@ -266,6 +377,15 @@ impl Tree {
                 id,
                 before_id,
             } => {
+                // Defensive unlink, mirroring Insert/Move: a healthy
+                // Attach targets a detached root (already out of every
+                // children list), but a buggy host attaching a live
+                // node must not leave it duplicated in its old parent.
+                if let Some(prev_parent) = self.parent_by_child.get(id.as_ref()).cloned() {
+                    if let Some(siblings) = self.children.get_mut(&prev_parent) {
+                        siblings.retain(|c| c.as_str() != id.as_ref());
+                    }
+                }
                 let siblings = self.children.entry(parent_id.to_string()).or_default();
                 Self::insert_at(siblings, id.to_string(), before_id.as_deref());
                 self.parent_by_child
@@ -290,8 +410,14 @@ impl Tree {
         }
     }
 
+    /// Insert `id` into `siblings` before `before_id` (append when the
+    /// anchor is absent). Callers must have unlinked `id` from its
+    /// previous parent first (all patch handlers do, via the O(1)
+    /// `parent_by_child` index) — the old per-call `retain` dedupe here
+    /// made inserting N children under one parent O(N²), which showed
+    /// up on every initial render of a long list.
     fn insert_at(siblings: &mut Vec<String>, id: String, before_id: Option<&str>) {
-        siblings.retain(|c| c != &id);
+        debug_assert!(!siblings.contains(&id), "insert_at caller must unlink first");
         match before_id {
             Some(before) => match siblings.iter().position(|c| c == before) {
                 Some(idx) => siblings.insert(idx, id),
@@ -308,7 +434,9 @@ impl Tree {
                 self.remove_subtree(child);
             }
         }
-        self.nodes.remove(id);
+        if let Some(node) = self.nodes.remove(id) {
+            self.count_node_removed(&node);
+        }
     }
 
     /// Like [`Tree::remove_subtree`] but records every removed node id
@@ -321,7 +449,9 @@ impl Tree {
                 self.remove_subtree_collecting(child, out);
             }
         }
-        self.nodes.remove(id);
+        if let Some(node) = self.nodes.remove(id) {
+            self.count_node_removed(&node);
+        }
         out.push(id.to_string());
     }
 
@@ -754,6 +884,56 @@ mod tests {
             transition: false,
         });
         assert_eq!(tree.detached_len(), 0);
+    }
+
+    #[test]
+    fn paint_gate_counters_track_every_mutation_path() {
+        let mut tree = Tree::new();
+        assert!(!tree.has_opacity_props() && !tree.has_transform_props());
+
+        // Create with a gate prop counts; variant decorations count too.
+        tree.apply(&create("a", "Container", &[("opacity", json!(0.5))]));
+        tree.apply(&create("b", "Container", &[("translateX@md.0", json!(4))]));
+        assert!(tree.has_opacity_props() && tree.has_transform_props());
+
+        // SetProp adds only on a NEW key; overwrites don't double-count.
+        tree.apply(&Patch::SetProp {
+            id: "a".into(),
+            name: "scale".into(),
+            value: json!(1.2),
+        });
+        tree.apply(&Patch::SetProp {
+            id: "a".into(),
+            name: "scale".into(),
+            value: json!(1.4),
+        });
+        // RemoveProp decrements; a second remove of the same key doesn't.
+        tree.apply(&Patch::RemoveProp {
+            id: "a".into(),
+            name: "scale".into(),
+        });
+        tree.apply(&Patch::RemoveProp {
+            id: "a".into(),
+            name: "scale".into(),
+        });
+        assert!(tree.has_transform_props(), "b's translateX still live");
+
+        // Raw animator writes and removals balance.
+        tree.set_prop_raw("a", "rotate", json!(45.0));
+        tree.remove_prop_raw("a", "rotate");
+        tree.remove_prop_raw("a", "rotate");
+
+        // Re-Create replacing a node forgets its old props.
+        tree.apply(&create("a", "Container", &[]));
+        assert!(!tree.has_opacity_props(), "replaced node's opacity gone");
+
+        // Subtree teardown forgets descendants' props.
+        tree.apply(&insert(ROOT_ID, "b", None));
+        tree.apply(&Patch::Remove {
+            id: "b".into(),
+            transition: false,
+        });
+        assert!(!tree.has_transform_props(), "removed subtree's transform gone");
     }
 
     #[test]

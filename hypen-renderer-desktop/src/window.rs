@@ -332,6 +332,14 @@ pub struct App {
     /// hover/press/focus transitions never enter the layout cache key,
     /// so they stay on the repaint-only fast path with zero relayout.
     has_layout_state_variants: bool,
+    /// `true` when the current renderer tree contains at least one
+    /// media (`Video`) node. Recomputed in the same per-flush scan as
+    /// `has_layout_state_variants`. Gates the per-frame
+    /// `video_state_key_for` walk (layout cache key) and the per-flush
+    /// media scans (`dispatch_media_poster_errors`,
+    /// `sync_video_playback`) so the overwhelmingly common no-media
+    /// app never pays a full node walk for them.
+    has_media_nodes: bool,
     /// Hash of the inputs that fed the most recent successful layout
     /// pass — excluding page `scroll_y`. Page scroll is applied as a
     /// uniform post-pass shift, so a scroll-only frame can re-shift
@@ -408,6 +416,12 @@ pub struct App {
     /// macOS: merge the title bar into the content (Safari-style). Set
     /// via [`App::set_unified_titlebar`]; applied once on window create.
     unified_titlebar: bool,
+    /// Window / taskbar icon, set via [`App::set_window_icon`] and
+    /// applied once on window create. Shows in the title bar + taskbar
+    /// on Windows and in X11 window switchers on Linux; macOS ignores
+    /// per-window icons (the Dock icon comes from the .app bundle's
+    /// .icns, and Wayland has no window-icon protocol).
+    window_icon: Option<winit::window::Icon>,
     /// Video `onError` dedupe: `"node_id\u{0}poster_url"` keys for
     /// which we already dispatched the element's `onError` action.
     /// The failure registry entries are sticky (like
@@ -510,6 +524,7 @@ impl App {
             damage: Damage::Full,
             tree_generation: 0,
             has_layout_state_variants: false,
+            has_media_nodes: false,
             last_layout_key: None,
             last_scroll_y_in_layout: 0.0,
             last_scroll_y_emitted: 0.0,
@@ -524,6 +539,7 @@ impl App {
             is_occluded: false,
             shortcuts: Vec::new(),
             unified_titlebar: false,
+            window_icon: None,
             dispatched_media_errors: std::collections::HashSet::new(),
             #[cfg(feature = "video")]
             video_error_keys: std::collections::HashSet::new(),
@@ -547,6 +563,11 @@ impl App {
     /// element type + a wired `onError`) runs on every wake / patch
     /// flush and dispatches each failure once per `(node, poster)`.
     fn dispatch_media_poster_errors(&mut self) {
+        // No media nodes → no poster errors to dispatch. Skips the
+        // full node walk this scan otherwise pays on every flush/wake.
+        if !self.has_media_nodes {
+            return;
+        }
         let viewport = self.logical_viewport();
         let pending = collect_media_error_dispatches(
             &self.tree,
@@ -580,6 +601,14 @@ impl App {
     ///    while detached — they run on the flush that reattaches.
     #[cfg(feature = "video")]
     fn sync_video_playback(&mut self) {
+        // Media-free tree: nothing to autoplay / retarget / suspend.
+        // Still sweep the registry so pipelines whose Video node just
+        // left the tree are released promptly (job 1), then skip the
+        // full node walk + detached-set build.
+        if !self.has_media_nodes {
+            crate::media::retain_only(&HashSet::new());
+            return;
+        }
         let viewport = self.logical_viewport();
         let detached = self.tree.detached_node_ids();
         let mut alive: HashSet<String> = HashSet::new();
@@ -1007,6 +1036,12 @@ impl App {
         self.unified_titlebar = on;
     }
 
+    /// Set the window / taskbar icon. Applied on window creation in
+    /// `resumed` (Windows + Linux/X11; no-op on macOS and Wayland).
+    pub fn set_window_icon(&mut self, icon: Option<winit::window::Icon>) {
+        self.window_icon = icon;
+    }
+
     /// Replace the shortcut table. Called once by
     /// [`crate::DesktopApp::run`] after all bindings have been
     /// registered.
@@ -1075,7 +1110,12 @@ impl App {
         // paths exclude scrub-active nodes (scrub > playbacks > transaction >
         // `.transition`).
         self.scrubber.pre_ingest(&mut patches, &mut self.tree);
-        self.animator.set_scrub_active(self.scrubber.owned_ids());
+        let scrub_owned = self.scrubber.owned_ids();
+        // A scrub-owning frame can replay swallowed values straight
+        // into the tree with no patch left in the batch — invisible to
+        // the paint-only gate below, so it forces the wholesale drop.
+        let scrub_owns_any = !scrub_owned.is_empty();
+        self.animator.set_scrub_active(scrub_owned);
         self.dispatch_scrub_binds();
         // FLIP pre-pass (before the batch mutates the tree): snapshot
         // First rects off the still-current PRE-batch layout for every
@@ -1146,15 +1186,27 @@ impl App {
         // and every Move/removal-sibling FLIP silently stops inverting.
         self.layout = None;
         // Patches changed something somewhere in the tree, so the
-        // painter's subtree scene cache is potentially stale: a prop
-        // change inside any cached Post / Grid cell / etc. would
-        // make its previously-encoded Vello scene wrong. Per-key
-        // invalidation would require tracking which subtree each
-        // patch's `id` belongs to — far more bookkeeping than the
-        // bulk drop costs. The next paint pass rebuilds fragments
-        // for whatever is still visible; off-screen subtrees just
-        // don't re-cache until they scroll into view.
-        self.painter.invalidate_subtree_cache();
+        // painter's subtree scene cache is potentially stale. For a
+        // batch made ENTIRELY of paint-only prop writes (no structural
+        // patch, no layout-affecting prop, no essential-snap restyles,
+        // no media nodes, no scrub-owned nodes) the stale set is
+        // provably just the cached fragments containing an affected
+        // node — paint props feed neither Taffy styles nor item rects,
+        // so every retained fragment re-emits byte-identical items.
+        // Typing, a counter tick, or a colour flip then re-encodes ONE
+        // subtree instead of every visible one. Anything else keeps
+        // the wholesale drop: the next paint pass rebuilds fragments
+        // for whatever is still visible.
+        match paint_only_affected_ids(
+            &patches,
+            &outcome.restyle,
+            &self.tree,
+            self.has_media_nodes,
+            scrub_owns_any,
+        ) {
+            Some(affected) => self.painter.invalidate_subtrees_containing(&affected),
+            None => self.painter.invalidate_subtree_cache(),
+        }
         // Rolling 1-second flush-rate counter. The engine sending
         // patches per-frame (suspected render loop) is the most
         // plausible cause of: stale post images cycling during
@@ -1217,14 +1269,26 @@ impl App {
             // detached root's subtree leaves the arena, so its entries go.
             self.scrubber.forget(&evicted);
         }
-        // Recompute the layout-state-variant gate for the new tree.
-        // Cheap whole-tree scan, runs only on patch flush (not per
-        // frame). Drives whether interaction transitions participate in
-        // the layout cache key + are threaded into the layout pass.
-        self.has_layout_state_variants = self
-            .tree
-            .nodes()
-            .any(crate::style::node_has_layout_state_variant);
+        // Recompute the layout-state-variant + media gates for the new
+        // tree in one scan. Cheap, runs only on patch flush (not per
+        // frame). The first drives whether interaction transitions
+        // participate in the layout cache key; the second gates the
+        // per-frame video-state key walk and the per-flush media scans.
+        let mut has_layout_state_variants = false;
+        let mut has_media_nodes = false;
+        for node in self.tree.nodes() {
+            has_layout_state_variants =
+                has_layout_state_variants || crate::style::node_has_layout_state_variant(node);
+            has_media_nodes = has_media_nodes
+                || crate::layout::MEDIA_TYPES
+                    .iter()
+                    .any(|t| t.eq_ignore_ascii_case(&node.element_type));
+            if has_layout_state_variants && has_media_nodes {
+                break;
+            }
+        }
+        self.has_layout_state_variants = has_layout_state_variants;
+        self.has_media_nodes = has_media_nodes;
         self.damage.add_full();
         self.finalize_overdue_exits(scale, viewport);
         // Route any `.onAnimationComplete` dispatches queued by this batch's
@@ -1756,7 +1820,14 @@ impl App {
             self.hovered.as_deref(),
             self.pressed.as_deref(),
             self.focused.as_deref(),
-            video_state_key_for(&self.tree, self.logical_viewport()),
+            // `video_state_key_for` walks every node; skip it entirely
+            // for the (common) media-free tree — its key is 0 there by
+            // definition, so the hash is byte-identical.
+            if self.has_media_nodes {
+                video_state_key_for(&self.tree, self.logical_viewport())
+            } else {
+                0
+            },
         )
     }
 
@@ -1987,6 +2058,7 @@ impl ApplicationHandler<AppEvent> for App {
                 self.initial_size.0,
                 self.initial_size.1,
             ))
+            .with_window_icon(self.window_icon.clone())
             .with_visible(false);
         let window = Arc::new(
             event_loop
@@ -2848,6 +2920,64 @@ pub(crate) fn collect_media_error_dispatches(
         pending.push((action, serde_json::Value::Object(obj)));
     }
     pending
+}
+
+/// Decide whether a just-ingested patch batch qualifies for SCOPED
+/// painter subtree-cache invalidation. Returns `Some(affected)` — the
+/// patched node ids plus all their descendants (opacity and transforms
+/// inherit downward; for leaf paint props the descendants over-include
+/// harmlessly) — when EVERY patch in the batch is a paint-only prop
+/// write; `None` when anything requires the wholesale drop:
+///
+/// - any structural patch (Create / Insert / Move / Remove / Detach /
+///   Attach / templates / BatchAnimation) — geometry or item sets can
+///   change in subtrees the patch ids don't name;
+/// - any prop whose base is layout-affecting (`is_layout_prop`), plus
+///   `slot` (flips a Video child's visibility) and `scrollable`
+///   (changes overflow/clip structure);
+/// - end-of-batch essential-snap restyles (`restyle` non-empty) —
+///   those wrote layout targets directly into the tree;
+/// - a tree with media nodes (player state machinery repaints on
+///   registry transitions the batch doesn't describe);
+/// - scrub-owned nodes (the scrub source can replay swallowed values
+///   into the tree with no patch left in the batch).
+///
+/// The safety argument for the retained entries: paint-only props feed
+/// neither Taffy styles nor emitted item rects, so after the batch the
+/// fresh layout pass re-emits byte-identical items for every subtree
+/// that contains no affected node — the cached fragment replays
+/// exactly what a re-encode would produce.
+pub(crate) fn paint_only_affected_ids(
+    patches: &[Patch],
+    restyle: &[String],
+    tree: &Tree,
+    has_media_nodes: bool,
+    scrub_owns_any: bool,
+) -> Option<HashSet<String>> {
+    if has_media_nodes || scrub_owns_any || !restyle.is_empty() {
+        return None;
+    }
+    let mut affected: HashSet<String> = HashSet::new();
+    for patch in patches {
+        let id = match patch {
+            Patch::SetProp { id, name, .. } | Patch::RemoveProp { id, name } => {
+                if crate::layout::is_layout_prop_key(name) {
+                    return None;
+                }
+                id
+            }
+            // Accessibility-only; repaints nothing.
+            Patch::SetSemantics { .. } => continue,
+            _ => return None,
+        };
+        let mut stack: Vec<&str> = vec![id.as_ref()];
+        while let Some(cur) = stack.pop() {
+            if affected.insert(cur.to_string()) {
+                stack.extend(tree.children_of(cur).iter().map(String::as_str));
+            }
+        }
+    }
+    Some(affected)
 }
 
 /// Clamp `y` into the legal scroll range for `content_h` content

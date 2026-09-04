@@ -64,6 +64,11 @@ struct CachedSubtree {
     /// `append` call so the clip stays fixed in viewport space
     /// while items inside translate with scroll.
     clip_to: Option<LayoutRect>,
+    /// Renderer node ids of every item encoded into this fragment.
+    /// Backs [`VelloPainter::invalidate_subtrees_containing`]: a
+    /// paint-only patch batch drops exactly the entries whose id set
+    /// intersects the affected nodes instead of the whole cache.
+    item_ids: Vec<String>,
 }
 
 pub struct VelloPainter {
@@ -167,6 +172,27 @@ impl VelloPainter {
             self.subtree_cache_hits = 0;
             self.subtree_cache_misses = 0;
         }
+    }
+
+    /// Scoped alternative to [`VelloPainter::invalidate_subtree_cache`]
+    /// for batches that only rewrote paint props (no structural patch,
+    /// no layout-affecting prop): drop exactly the cached fragments
+    /// that encoded one of the `affected` nodes and keep the rest.
+    /// The caller is responsible for the safety precondition — every
+    /// retained fragment's items must be geometrically identical after
+    /// the batch (see `paint_only_affected_ids` in `window.rs`), which
+    /// holds because paint-only props feed neither Taffy styles nor
+    /// item rects. `affected` must already include descendants of the
+    /// patched nodes (opacity / transforms inherit downward).
+    pub fn invalidate_subtrees_containing(
+        &mut self,
+        affected: &std::collections::HashSet<String>,
+    ) {
+        if affected.is_empty() {
+            return;
+        }
+        self.subtree_cache
+            .retain(|_, entry| !entry.item_ids.iter().any(|id| affected.contains(id)));
     }
 
     #[cfg(test)]
@@ -411,6 +437,7 @@ impl VelloPainter {
                 scene: sub_scene,
                 origin_y: current_origin_y,
                 clip_to: outer_clip,
+                item_ids: items.iter().map(|it| it.node_id.clone()).collect(),
             },
         );
         // Append the just-cached scene at identity translation. Same
@@ -436,21 +463,35 @@ impl VelloPainter {
         scale_factor: f32,
         outer_clip: Option<LayoutRect>,
     ) {
-        // Temporarily clear the per-item clip if it matches the outer
-        // clip we already pushed at the subtree level — `draw_item`
-        // would re-push it otherwise. For items whose clip_to differs
+        // Skip the per-item clip if it matches the outer clip we
+        // already pushed at the subtree level — `draw_item` would
+        // re-push it otherwise. For items whose clip_to differs
         // (rare; normally everything in a subtree shares the same
-        // scrollable ancestor), leave it alone.
+        // scrollable ancestor), leave it alone. The clip is threaded
+        // as a parameter so no per-item `LayoutItem` clone is needed.
         if item.clip_to == outer_clip {
-            let mut item_no_clip = item.clone();
-            item_no_clip.clip_to = None;
-            self.draw_item(&item_no_clip, scale_factor);
+            self.draw_item_with(item, scale_factor, None, item.transform);
         } else {
             self.draw_item(item, scale_factor);
         }
     }
 
     fn draw_item(&mut self, item: &crate::layout::LayoutItem, scale_factor: f32) {
+        self.draw_item_with(item, scale_factor, item.clip_to, item.transform);
+    }
+
+    /// `draw_item` body with the outer clip and transform threaded as
+    /// parameters instead of read off the item. Lets the subtree-cache
+    /// encode path and the transform recursion suppress either without
+    /// cloning the whole `LayoutItem` (Strings, icon paths, variant
+    /// vecs) per drawn item per frame.
+    fn draw_item_with(
+        &mut self,
+        item: &crate::layout::LayoutItem,
+        scale_factor: f32,
+        clip_to: Option<LayoutRect>,
+        transform: crate::layout::Affine2,
+    ) {
         // Per-item transform (static `translateX` / `translateY` /
         // `scale` / `rotate` props and animator-driven writes alike —
         // one resolution path, composed in the layout transform
@@ -465,17 +506,13 @@ impl VelloPainter {
         // the ancestor's own (untransformed) space. Hit-testing reads
         // the same cumulative affine (`LayoutItem::hit_contains`), so
         // pixels and hit targets move identically by construction.
-        if !item.transform.is_identity() {
-            let outer_clip = item.clip_to;
-            let mut inner = item.clone();
-            inner.clip_to = None;
-            inner.transform = crate::layout::Affine2::IDENTITY;
+        if !transform.is_identity() {
             let prev_scene = std::mem::replace(&mut self.scene, Scene::new());
-            self.draw_item(&inner, scale_factor);
+            self.draw_item_with(item, scale_factor, None, crate::layout::Affine2::IDENTITY);
             let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
-            let pushed = push_outer_clip(&mut self.scene, outer_clip);
+            let pushed = push_outer_clip(&mut self.scene, clip_to);
             self.scene
-                .append(&sub_scene, Some(affine2_to_kurbo(item.transform)));
+                .append(&sub_scene, Some(affine2_to_kurbo(transform)));
             if pushed {
                 self.scene.pop_layer();
             }
@@ -490,8 +527,8 @@ impl VelloPainter {
         // push/pop pair per clipped item; Vello composes nested
         // clips cleanly when the per-Text-truncate path below also
         // pushes its own.
-        let outer_clip_active = item.clip_to.is_some();
-        if let Some(clip) = item.clip_to {
+        let outer_clip_active = clip_to.is_some();
+        if let Some(clip) = clip_to {
             let r = vello::kurbo::Rect::new(
                 clip.x as f64,
                 clip.y as f64,
@@ -1954,6 +1991,35 @@ mod tests {
         assert_eq!(painter.subtree_cache_len(), 0);
         assert_eq!(painter.subtree_cache_hits(), 0);
         assert_eq!(painter.subtree_cache_misses(), 0);
+    }
+
+    #[test]
+    fn invalidate_subtrees_containing_drops_only_affected_entries() {
+        let mut painter = VelloPainter::new();
+        let layout = three_post_layout();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // Affect post_b only: its entry drops, the other two stay and
+        // hit on the next build while post_b takes a fresh miss.
+        let mut affected = std::collections::HashSet::new();
+        affected.insert("post_b".to_string());
+        painter.invalidate_subtrees_containing(&affected);
+        assert_eq!(painter.subtree_cache_len(), 2);
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_hits(), 2);
+        assert_eq!(painter.subtree_cache_misses(), 4);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // Empty affected set is a no-op.
+        painter.invalidate_subtrees_containing(&std::collections::HashSet::new());
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // An id unknown to every entry drops nothing.
+        let mut unknown = std::collections::HashSet::new();
+        unknown.insert("ghost".to_string());
+        painter.invalidate_subtrees_containing(&unknown);
+        assert_eq!(painter.subtree_cache_len(), 3);
     }
 
     #[test]

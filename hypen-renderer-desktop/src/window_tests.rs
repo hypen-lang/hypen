@@ -8,6 +8,136 @@ fn pos(x: f64, y: f64) -> winit::dpi::PhysicalPosition<f64> {
     winit::dpi::PhysicalPosition::new(x, y)
 }
 
+mod paint_only_gate {
+    use super::*;
+    use serde_json::json;
+
+    /// Tree: root → col → { text, row → leaf }.
+    fn gate_tree() -> Tree {
+        let mut tree = Tree::new();
+        for (id, et, parent) in [
+            ("col", "Column", "root"),
+            ("text", "Text", "col"),
+            ("row", "Row", "col"),
+            ("leaf", "Text", "row"),
+        ] {
+            tree.apply(&Patch::Create {
+                id: id.into(),
+                element_type: et.to_string(),
+                props: std::sync::Arc::new(indexmap::IndexMap::new()),
+                semantics: None,
+            });
+            tree.apply(&Patch::Insert {
+                parent_id: parent.into(),
+                id: id.into(),
+                before_id: None,
+            });
+        }
+        tree
+    }
+
+    fn set_prop(id: &str, name: &str) -> Patch {
+        Patch::SetProp {
+            id: id.into(),
+            name: name.into(),
+            value: json!("x"),
+        }
+    }
+
+    #[test]
+    fn paint_only_props_scope_to_node_and_descendants() {
+        let tree = gate_tree();
+        let affected =
+            paint_only_affected_ids(&[set_prop("row", "backgroundColor")], &[], &tree, false, false)
+                .expect("paint-only batch qualifies");
+        assert!(affected.contains("row"), "patched node included");
+        assert!(affected.contains("leaf"), "descendants included");
+        assert!(!affected.contains("text"), "siblings excluded");
+        assert!(!affected.contains("col"), "ancestors excluded");
+    }
+
+    #[test]
+    fn variant_and_dotted_keys_resolve_to_their_base() {
+        let tree = gate_tree();
+        // Paint prop under variant/arg decoration still qualifies …
+        assert!(paint_only_affected_ids(
+            &[set_prop("text", "backgroundColor:hover.0")],
+            &[],
+            &tree,
+            false,
+            false
+        )
+        .is_some());
+        // … while a decorated LAYOUT prop still disqualifies.
+        assert!(paint_only_affected_ids(
+            &[set_prop("text", "padding@md.0")],
+            &[],
+            &tree,
+            false,
+            false
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn layout_props_structural_patches_and_denylist_force_full_drop() {
+        let tree = gate_tree();
+        for name in ["width", "padding", "fontSize", "0", "slot", "scrollable"] {
+            assert!(
+                paint_only_affected_ids(&[set_prop("text", name)], &[], &tree, false, false)
+                    .is_none(),
+                "{name} must force the wholesale drop"
+            );
+        }
+        let structural = Patch::Remove {
+            id: "leaf".into(),
+            transition: false,
+        };
+        assert!(paint_only_affected_ids(&[structural], &[], &tree, false, false).is_none());
+        // A mixed batch is disqualified by its structural member.
+        let mixed = [
+            set_prop("text", "color"),
+            Patch::Insert {
+                parent_id: "col".into(),
+                id: "text".into(),
+                before_id: None,
+            },
+        ];
+        assert!(paint_only_affected_ids(&mixed, &[], &tree, false, false).is_none());
+    }
+
+    #[test]
+    fn restyle_media_and_scrub_force_full_drop() {
+        let tree = gate_tree();
+        let batch = [set_prop("text", "color")];
+        assert!(
+            paint_only_affected_ids(&batch, &["text".to_string()], &tree, false, false).is_none(),
+            "essential-snap restyles disqualify"
+        );
+        assert!(
+            paint_only_affected_ids(&batch, &[], &tree, true, false).is_none(),
+            "media trees disqualify"
+        );
+        assert!(
+            paint_only_affected_ids(&batch, &[], &tree, false, true).is_none(),
+            "scrub-owned nodes disqualify"
+        );
+        assert!(paint_only_affected_ids(&batch, &[], &tree, false, false).is_some());
+    }
+
+    #[test]
+    fn set_semantics_is_paint_neutral() {
+        let tree = gate_tree();
+        let batch = [Patch::SetSemantics {
+            id: "text".into(),
+            semantics: None,
+        }];
+        let affected = paint_only_affected_ids(&batch, &[], &tree, false, false)
+            .expect("semantics-only batch qualifies");
+        assert!(affected.is_empty(), "semantics repaint nothing");
+    }
+}
+
 #[test]
 fn next_click_count_first_click_is_one() {
     let now = std::time::Instant::now();

@@ -27,6 +27,7 @@ pub struct DesktopApp {
     shortcuts: Vec<crate::window::ShortcutBinding>,
     unified_titlebar: bool,
     reduced_motion: Option<bool>,
+    window_icon: Option<winit::window::Icon>,
 }
 
 impl DesktopApp {
@@ -38,6 +39,7 @@ impl DesktopApp {
             shortcuts: Vec::new(),
             unified_titlebar: false,
             reduced_motion: None,
+            window_icon: None,
         }
     }
 
@@ -107,6 +109,38 @@ impl DesktopApp {
     pub fn size(mut self, w: u32, h: u32) -> Self {
         self.size = (w, h);
         self
+    }
+
+    /// Set the window / taskbar icon from raw RGBA pixels (row-major,
+    /// 4 bytes per pixel). Shows in the title bar + taskbar on Windows
+    /// and in X11 window switchers on Linux. macOS and Wayland ignore
+    /// per-window icons — there the icon comes from the packaged app
+    /// (.app bundle .icns / .desktop entry). Invalid data (length ≠
+    /// `w * h * 4`) is logged and skipped rather than aborting launch.
+    pub fn icon_rgba(mut self, rgba: Vec<u8>, w: u32, h: u32) -> Self {
+        match winit::window::Icon::from_rgba(rgba, w, h) {
+            Ok(icon) => self.window_icon = Some(icon),
+            Err(e) => log::warn!("window icon rejected: {e}"),
+        }
+        self
+    }
+
+    /// Set the window / taskbar icon from an encoded PNG (typically an
+    /// `include_bytes!` of a 256px asset). See [`Self::icon_rgba`] for
+    /// platform behaviour. A PNG that fails to decode is logged and
+    /// skipped rather than aborting launch.
+    pub fn icon_png(self, bytes: &[u8]) -> Self {
+        match image::load_from_memory_with_format(bytes, image::ImageFormat::Png) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                self.icon_rgba(rgba.into_raw(), w, h)
+            }
+            Err(e) => {
+                log::warn!("window icon PNG failed to decode: {e}");
+                self
+            }
+        }
     }
 
     /// Drive the window with a fully-built SDK module instance.
@@ -230,6 +264,7 @@ impl DesktopApp {
         );
         app.set_shortcuts(self.shortcuts.clone());
         app.set_unified_titlebar(self.unified_titlebar);
+        app.set_window_icon(self.window_icon.clone());
         if let Some(on) = self.reduced_motion {
             app.set_reduced_motion(on);
         }

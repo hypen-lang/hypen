@@ -81,7 +81,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
                     findings are counted in the report, never in the exit code
     ${pink("studio")}          Open Hypen Studio IDE
     ${pink("test")}            Open Studio Test Mode (live previews + device mirrors)
-    ${pink("run")} <platform>  Install and launch on device (android|ios)
+    ${pink("run")} <platform>  Install and launch on device (android|ios|desktop)
 
   ${boldYellow("Options:")}
     -h, --help      Show this help message
@@ -101,6 +101,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${dim("$")} hypen studio --port 5173
     ${dim("$")} hypen test
     ${dim("$")} hypen run android
+    ${dim("$")} hypen run desktop
     ${dim("$")} hypen run android --url ws://localhost:3000
     ${dim("$")} hypen run ios --studio
 `;
@@ -947,7 +948,7 @@ async function testMode(options: { port?: number; open?: boolean }) {
 }
 
 /**
- * Handle run command: hypen run android|ios
+ * Handle run command: hypen run android|ios|desktop
  *
  * Starts the dev server, installs/launches the runner app on the device,
  * and keeps the server running until the user presses Ctrl+C.
@@ -956,11 +957,11 @@ async function handleRun(
   platform: string | undefined,
   options: { port?: number; url?: string; studio?: boolean; clean?: boolean }
 ) {
-  const { runAndroid, runIOS, cleanRunners, RUN_HELP } = await import("../src/run.js");
+  const { runAndroid, runIOS, runDesktop, cleanRunners, RUN_HELP } = await import("../src/run.js");
   const config = await loadConfig();
   const port = options.port || config.port || 3000;
 
-  if (!platform || (platform !== "android" && platform !== "ios")) {
+  if (!platform || (platform !== "android" && platform !== "ios" && platform !== "desktop")) {
     if (platform) {
       console.error(`\n  Unknown platform: ${platform}\n`);
     }
@@ -970,13 +971,15 @@ async function handleRun(
 
   // Clean cached runners if --clean flag is set
   if (options.clean) {
-    cleanRunners(platform as "android" | "ios");
+    cleanRunners(platform as "android" | "ios" | "desktop");
   }
 
   // --url mode: skip built-in server, just install and launch the runner
   // pointing at an existing server
   if (options.url) {
-    console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow(platform === "android" ? "Android" : "iOS")}\n`);
+    const platformLabel =
+      platform === "android" ? "Android" : platform === "ios" ? "iOS" : "Desktop";
+    console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow(platformLabel)}\n`);
     console.log(`  ${dim("Connecting to:")} ${yellow(options.url)}\n`);
 
     switch (platform) {
@@ -985,6 +988,9 @@ async function handleRun(
         break;
       case "ios":
         await runIOS(port, options.url);
+        break;
+      case "desktop":
+        await runDesktop(port, options.url);
         break;
     }
 
@@ -1075,6 +1081,11 @@ async function handleRun(
     case "ios":
       console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow("iOS")}\n`);
       await runIOS(actualPort);
+      break;
+
+    case "desktop":
+      console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow("Desktop")}\n`);
+      await runDesktop(actualPort);
       break;
   }
 

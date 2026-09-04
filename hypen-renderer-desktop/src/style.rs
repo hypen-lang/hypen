@@ -126,31 +126,30 @@ pub fn prop_f32(node: &Node, name: &str) -> Option<f32> {
 /// [`prop_f32`] with a viewport basis, so viewport-relative lengths
 /// resolve to logical px.
 pub fn prop_f32_in(node: &Node, name: &str, viewport: Option<Viewport>) -> Option<f32> {
-    let direct = node.props.get(name);
-    let dotted = node.props.get(&format!("{name}.0"));
-    let kebab_name = camel_to_kebab(name);
-    let kebab = if kebab_name != name {
-        node.props.get(&kebab_name)
-    } else {
-        None
-    };
-    direct
-        .or(dotted)
-        .or(kebab)
-        .and_then(|v| value_to_f32(v, viewport))
+    lookup_prop(node, name).and_then(|v| value_to_f32(v, viewport))
 }
 
 /// Read a string prop, same fallback chain as [`prop_f32`].
 pub fn prop_str<'a>(node: &'a Node, name: &str) -> Option<&'a str> {
-    let direct = node.props.get(name);
-    let dotted = node.props.get(&format!("{name}.0"));
-    let kebab_name = camel_to_kebab(name);
-    let kebab = if kebab_name != name {
-        node.props.get(&kebab_name)
-    } else {
-        None
-    };
-    direct.or(dotted).or(kebab).and_then(Value::as_str)
+    lookup_prop(node, name).and_then(Value::as_str)
+}
+
+/// Shared `direct → dotted (.0) → kebab` lookup chain. Lazy: the dotted
+/// key is only formatted when the direct key misses, and the kebab
+/// fallback is only built for camelCase names (a lowercase `name`
+/// kebab-cases to itself, so the third probe would be redundant).
+#[inline]
+fn lookup_prop<'a>(node: &'a Node, name: &str) -> Option<&'a Value> {
+    node.props
+        .get(name)
+        .or_else(|| node.props.get(&format!("{name}.0")))
+        .or_else(|| {
+            if name.bytes().any(|b| b.is_ascii_uppercase()) {
+                node.props.get(&camel_to_kebab(name))
+            } else {
+                None
+            }
+        })
 }
 
 /// The window's content box in **logical** (CSS) pixels.
@@ -295,6 +294,11 @@ pub fn is_layout_affecting_prop(base: &str) -> bool {
 /// node should bump the layout cache key.
 pub fn node_has_layout_state_variant(node: &Node) -> bool {
     node.props.keys().any(|key| {
+        // A state variant needs a `:state` marker; keys without a `:`
+        // can't parse to one, so skip the allocating parse for them.
+        if !key.as_bytes().contains(&b':') {
+            return false;
+        }
         let parsed = hypen_engine::portable::parse_prop_key(key);
         parsed.state.is_some() && is_layout_affecting_prop(&parsed.base)
     })
@@ -452,6 +456,12 @@ impl StateVariants {
 pub fn collect_color_variants(node: &Node, base: &str) -> Vec<VariantCandidate> {
     let mut out = Vec::new();
     for key in node.props.keys() {
+        // Only variant-decorated keys qualify below (`parsed.breakpoint`
+        // or `parsed.state` must be set), and both markers require a
+        // `@` / `:` byte — skip the allocating parse for plain keys.
+        if !key.as_bytes().iter().any(|&b| b == b'@' || b == b':') {
+            continue;
+        }
         let parsed = hypen_engine::portable::parse_prop_key(key);
         if parsed.base != base {
             continue;
@@ -526,6 +536,16 @@ fn is_disabled(node: &Node) -> bool {
 /// `.0` mismatch (the old hand-rolled `lookup_breakpoint` built
 /// `"padding@md"` and raw-`get`'d it, missing the real `"padding@md.0"`).
 fn pick_base(node: &Node, name: &str, viewport_w: f32, active_states: &[&str]) -> Option<String> {
+    // Fast path: a node with no variant-decorated key at all can only
+    // ever resolve to the plain base, which every caller treats the
+    // same as `None` (the `decorated != name` branch is skipped either
+    // way). Skipping the resolver here removes a per-lookup Vec
+    // collection + a `parse_prop_key` (three String allocations) for
+    // every prop key — the dominant cost of building a node's style,
+    // paid dozens of times per node per layout pass.
+    if !node.has_variant_prop_keys() {
+        return None;
+    }
     let candidate_keys: Vec<&str> = node.props.keys().map(String::as_str).collect();
     hypen_engine::portable::pick_variant_base(name, &candidate_keys, viewport_w, active_states)
 }
@@ -655,23 +675,23 @@ pub fn prop_color(node: &Node, name: &str) -> Option<Rgba> {
 ///    / `.paddingHorizontal(N)` → `paddingHorizontal.0` (left + right)
 /// 4. `.padding(N)` → `padding.0` (all sides)
 pub fn padding(node: &Node) -> Padding {
-    read_box_props(node, "padding")
+    read_box_props(node, &PADDING_KEYS)
 }
 
 /// Margin counterpart of [`padding`] — same precedence and key
 /// conventions, just with a `margin` prefix.
 pub fn margin(node: &Node) -> Padding {
-    read_box_props(node, "margin")
+    read_box_props(node, &MARGIN_KEYS)
 }
 
 /// Viewport-aware [`padding`] — honours `padding@md` etc. tw classes.
 pub fn padding_at(node: &Node, viewport: Viewport) -> Padding {
-    read_box_props_at(node, "padding", &VariantState::layout(viewport))
+    read_box_props_at(node, &PADDING_KEYS, &VariantState::layout(viewport))
 }
 
 /// Viewport-aware [`margin`].
 pub fn margin_at(node: &Node, viewport: Viewport) -> Padding {
-    read_box_props_at(node, "margin", &VariantState::layout(viewport))
+    read_box_props_at(node, &MARGIN_KEYS, &VariantState::layout(viewport))
 }
 
 /// Variant-aware [`padding`] — honours both `padding@md` breakpoints and
@@ -679,13 +699,59 @@ pub fn margin_at(node: &Node, viewport: Viewport) -> Padding {
 /// `vs`. The layout pass uses this so layout-affecting state variants
 /// reach Taffy.
 pub fn padding_with(node: &Node, vs: &VariantState) -> Padding {
-    read_box_props_at(node, "padding", vs)
+    read_box_props_at(node, &PADDING_KEYS, vs)
 }
 
 /// Variant-aware [`margin`] — see [`padding_with`].
 pub fn margin_with(node: &Node, vs: &VariantState) -> Padding {
-    read_box_props_at(node, "margin", vs)
+    read_box_props_at(node, &MARGIN_KEYS, vs)
 }
+
+/// Pre-built key set for one box-model prefix (`padding` / `margin`).
+/// The readers below run for every node on every style build — formatting
+/// `"{prefix}Top"` etc. on each call allocated ~12 short Strings per read,
+/// and the prefix only ever names one of two applicator families.
+struct BoxPropKeys {
+    base: &'static str,
+    horizontal: &'static str,
+    vertical: &'static str,
+    top: &'static str,
+    bottom: &'static str,
+    left: &'static str,
+    right: &'static str,
+    dot_top: &'static str,
+    dot_right: &'static str,
+    dot_bottom: &'static str,
+    dot_left: &'static str,
+}
+
+static PADDING_KEYS: BoxPropKeys = BoxPropKeys {
+    base: "padding",
+    horizontal: "paddingHorizontal",
+    vertical: "paddingVertical",
+    top: "paddingTop",
+    bottom: "paddingBottom",
+    left: "paddingLeft",
+    right: "paddingRight",
+    dot_top: "padding.top",
+    dot_right: "padding.right",
+    dot_bottom: "padding.bottom",
+    dot_left: "padding.left",
+};
+
+static MARGIN_KEYS: BoxPropKeys = BoxPropKeys {
+    base: "margin",
+    horizontal: "marginHorizontal",
+    vertical: "marginVertical",
+    top: "marginTop",
+    bottom: "marginBottom",
+    left: "marginLeft",
+    right: "marginRight",
+    dot_top: "margin.top",
+    dot_right: "margin.right",
+    dot_bottom: "margin.bottom",
+    dot_left: "margin.left",
+};
 
 /// Shared box-model reader for `padding` / `margin`. The Hypen DSL gives
 /// both shorthand and per-side applicators that all collapse to the same
@@ -706,135 +772,141 @@ pub fn margin_with(node: &Node, vs: &VariantState) -> Padding {
 /// Checks the same key space as [`read_box_props_at`].
 pub fn declares_padding(node: &Node, vs: &VariantState) -> bool {
     let viewport = Some(vs.viewport);
-    const SUFFIXES: &[&str] = &[
-        "", "Horizontal", "Vertical", "Top", "Bottom", "Left", "Right",
-    ];
-    if SUFFIXES
-        .iter()
-        .any(|suffix| prop_f32_with(node, &format!("padding{suffix}"), vs).is_some())
+    let k = &PADDING_KEYS;
+    if [
+        k.base,
+        k.horizontal,
+        k.vertical,
+        k.top,
+        k.bottom,
+        k.left,
+        k.right,
+    ]
+    .iter()
+    .any(|name| prop_f32_with(node, name, vs).is_some())
     {
         return true;
     }
-    ["padding.top", "padding.right", "padding.bottom", "padding.left"]
+    [k.dot_top, k.dot_right, k.dot_bottom, k.dot_left]
         .iter()
-        .any(|k| {
+        .any(|key| {
             node.props
-                .get(*k)
+                .get(*key)
                 .and_then(|v| value_to_f32(v, viewport))
                 .is_some()
         })
 }
 
-fn read_box_props_at(node: &Node, prefix: &str, vs: &VariantState) -> Padding {
+fn read_box_props_at(node: &Node, keys: &BoxPropKeys, vs: &VariantState) -> Padding {
     let viewport = Some(vs.viewport);
     let mut p = Padding::default();
-    if let Some(v) = prop_f32_with(node, prefix, vs) {
+    if let Some(v) = prop_f32_with(node, keys.base, vs) {
         p = Padding::uniform(v);
     }
-    if let Some(v) = prop_f32_with(node, &format!("{prefix}Horizontal"), vs) {
+    if let Some(v) = prop_f32_with(node, keys.horizontal, vs) {
         p.left = v;
         p.right = v;
     }
-    if let Some(v) = prop_f32_with(node, &format!("{prefix}Vertical"), vs) {
+    if let Some(v) = prop_f32_with(node, keys.vertical, vs) {
         p.top = v;
         p.bottom = v;
     }
     if let Some(v) = node
         .props
-        .get(&format!("{prefix}.top"))
+        .get(keys.dot_top)
         .and_then(|v| value_to_f32(v, viewport))
     {
         p.top = v;
     }
     if let Some(v) = node
         .props
-        .get(&format!("{prefix}.right"))
+        .get(keys.dot_right)
         .and_then(|v| value_to_f32(v, viewport))
     {
         p.right = v;
     }
     if let Some(v) = node
         .props
-        .get(&format!("{prefix}.bottom"))
+        .get(keys.dot_bottom)
         .and_then(|v| value_to_f32(v, viewport))
     {
         p.bottom = v;
     }
     if let Some(v) = node
         .props
-        .get(&format!("{prefix}.left"))
+        .get(keys.dot_left)
         .and_then(|v| value_to_f32(v, viewport))
     {
         p.left = v;
     }
-    if let Some(v) = prop_f32_with(node, &format!("{prefix}Top"), vs) {
+    if let Some(v) = prop_f32_with(node, keys.top, vs) {
         p.top = v;
     }
-    if let Some(v) = prop_f32_with(node, &format!("{prefix}Bottom"), vs) {
+    if let Some(v) = prop_f32_with(node, keys.bottom, vs) {
         p.bottom = v;
     }
-    if let Some(v) = prop_f32_with(node, &format!("{prefix}Left"), vs) {
+    if let Some(v) = prop_f32_with(node, keys.left, vs) {
         p.left = v;
     }
-    if let Some(v) = prop_f32_with(node, &format!("{prefix}Right"), vs) {
+    if let Some(v) = prop_f32_with(node, keys.right, vs) {
         p.right = v;
     }
     p
 }
 
-fn read_box_props(node: &Node, prefix: &str) -> Padding {
+fn read_box_props(node: &Node, keys: &BoxPropKeys) -> Padding {
     let viewport: Option<Viewport> = None;
     let mut p = Padding::default();
 
-    if let Some(v) = prop_f32(node, prefix) {
+    if let Some(v) = prop_f32(node, keys.base) {
         p = Padding::uniform(v);
     }
-    if let Some(v) = prop_f32(node, &format!("{prefix}Horizontal")) {
+    if let Some(v) = prop_f32(node, keys.horizontal) {
         p.left = v;
         p.right = v;
     }
-    if let Some(v) = prop_f32(node, &format!("{prefix}Vertical")) {
+    if let Some(v) = prop_f32(node, keys.vertical) {
         p.top = v;
         p.bottom = v;
     }
     if let Some(v) = node
         .props
-        .get(&format!("{prefix}.top"))
+        .get(keys.dot_top)
         .and_then(|v| value_to_f32(v, viewport))
     {
         p.top = v;
     }
     if let Some(v) = node
         .props
-        .get(&format!("{prefix}.right"))
+        .get(keys.dot_right)
         .and_then(|v| value_to_f32(v, viewport))
     {
         p.right = v;
     }
     if let Some(v) = node
         .props
-        .get(&format!("{prefix}.bottom"))
+        .get(keys.dot_bottom)
         .and_then(|v| value_to_f32(v, viewport))
     {
         p.bottom = v;
     }
     if let Some(v) = node
         .props
-        .get(&format!("{prefix}.left"))
+        .get(keys.dot_left)
         .and_then(|v| value_to_f32(v, viewport))
     {
         p.left = v;
     }
-    if let Some(v) = prop_f32(node, &format!("{prefix}Top")) {
+    if let Some(v) = prop_f32(node, keys.top) {
         p.top = v;
     }
-    if let Some(v) = prop_f32(node, &format!("{prefix}Bottom")) {
+    if let Some(v) = prop_f32(node, keys.bottom) {
         p.bottom = v;
     }
-    if let Some(v) = prop_f32(node, &format!("{prefix}Left")) {
+    if let Some(v) = prop_f32(node, keys.left) {
         p.left = v;
     }
-    if let Some(v) = prop_f32(node, &format!("{prefix}Right")) {
+    if let Some(v) = prop_f32(node, keys.right) {
         p.right = v;
     }
 

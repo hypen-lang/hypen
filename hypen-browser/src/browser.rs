@@ -193,6 +193,21 @@ impl BrowserModule {
         })
     }
 
+    /// Open `raw` in a fresh tab as if the user had typed it into the
+    /// address bar — used by the binary for a URL passed on the command
+    /// line (`hypen-browser ws://localhost:3000`, what `hypen run
+    /// desktop` invokes). Safe to call before the renderer wires
+    /// `on_patches`: shell patches buffer in `Inner::pending` until then.
+    pub fn open_url(&self, raw: &str) {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let url = crate::storage::normalize_url(trimmed);
+        let name = crate::storage::pretty_name(&url);
+        self.open_tab(url, name);
+    }
+
     /// Process every shell-emitted command after a dispatch. Called
     /// at the end of `dispatch_action` so the worker swap happens on
     /// the same tick the user's click came in.

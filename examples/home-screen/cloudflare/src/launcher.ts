@@ -30,7 +30,7 @@ export interface LauncherApp {
   resource: string;
   /** Glyph color. */
   iconColor: string;
-  /** Tailwind classes for the icon tile background. */
+  /** Layered CSS background for the icon tile. */
   tile: string;
   /** Translucent brand colour for the splash's breathing glow. */
   glow: string;
@@ -45,63 +45,63 @@ export const APPS: LauncherApp[] = [
     slug: "todo",
     name: "Todo",
     resource: "check-square",
-    iconColor: "#ffffff",
-    tile: "bg-gradient-to-br from-indigo-400 to-violet-600",
-    glow: "rgba(124, 58, 237, 0.45)",
+    iconColor: "#EFF6FF",
+    tile: "radial-gradient(circle at 24% 14%, rgba(255,255,255,0.48), transparent 29%), linear-gradient(145deg, #38BDF8 0%, #4F46E5 52%, #312E81 100%)",
+    glow: "rgba(79, 70, 229, 0.48)",
     url: "wss://hypen-todo.ian-dae.workers.dev/ws",
   },
   {
     slug: "calculator",
     name: "Calculator",
     resource: "calculator",
-    iconColor: "#ffffff",
-    tile: "bg-gradient-to-br from-slate-500 to-slate-800",
-    glow: "rgba(100, 116, 139, 0.40)",
+    iconColor: "#CFFAFE",
+    tile: "radial-gradient(circle at 72% 12%, rgba(34,211,238,0.38), transparent 32%), linear-gradient(145deg, #334155 0%, #172554 54%, #020617 100%)",
+    glow: "rgba(34, 211, 238, 0.30)",
     url: "wss://hypen-calculator.ian-dae.workers.dev/ws",
   },
   {
     slug: "calories",
     name: "Calories",
     resource: "activity",
-    iconColor: "#ffffff",
-    tile: "bg-gradient-to-br from-pink-400 to-rose-600",
-    glow: "rgba(225, 29, 72, 0.45)",
+    iconColor: "#FFF7ED",
+    tile: "radial-gradient(circle at 28% 12%, rgba(255,255,255,0.42), transparent 28%), linear-gradient(145deg, #FB7185 0%, #F43F5E 45%, #BE123C 100%)",
+    glow: "rgba(244, 63, 94, 0.48)",
     url: "wss://hypen-calorie-counter.ian-dae.workers.dev/ws",
   },
   {
     slug: "movies",
-    name: "Movies",
+    name: "MovieDB",
     resource: "film",
-    iconColor: "#ffffff",
-    tile: "bg-gradient-to-br from-amber-400 to-orange-600",
-    glow: "rgba(234, 88, 12, 0.45)",
+    iconColor: "#FFFBEB",
+    tile: "radial-gradient(circle at 28% 14%, rgba(255,255,255,0.46), transparent 27%), linear-gradient(145deg, #FDE047 0%, #F59E0B 46%, #C2410C 100%)",
+    glow: "rgba(245, 158, 11, 0.46)",
     url: "wss://hypen-movie-discovery.ian-dae.workers.dev/ws",
   },
   {
     slug: "food",
     name: "Food",
     resource: "utensils",
-    iconColor: "#ffffff",
-    tile: "bg-gradient-to-br from-emerald-400 to-green-600",
-    glow: "rgba(22, 163, 74, 0.45)",
+    iconColor: "#ECFDF5",
+    tile: "radial-gradient(circle at 27% 13%, rgba(255,255,255,0.44), transparent 28%), linear-gradient(145deg, #6EE7B7 0%, #10B981 45%, #047857 100%)",
+    glow: "rgba(16, 185, 129, 0.44)",
     url: "wss://hypen-food-ordering.ian-dae.workers.dev/ws",
   },
   {
     slug: "social",
     name: "Social",
     resource: "message-circle",
-    iconColor: "#ffffff",
-    tile: "bg-gradient-to-br from-fuchsia-400 to-purple-600",
-    glow: "rgba(147, 51, 234, 0.45)",
+    iconColor: "#F5F3FF",
+    tile: "radial-gradient(circle at 26% 13%, rgba(255,255,255,0.46), transparent 29%), linear-gradient(145deg, #818CF8 0%, #7C3AED 48%, #581C87 100%)",
+    glow: "rgba(124, 58, 237, 0.46)",
     url: "wss://hypen-social.ian-dae.workers.dev/ws",
   },
   {
     slug: "hypeflix",
     name: "Hypeflix",
     resource: "play-circle",
-    iconColor: "#ffffff",
-    tile: "bg-gradient-to-br from-red-500 to-rose-700",
-    glow: "rgba(225, 29, 72, 0.45)",
+    iconColor: "#FFF1F2",
+    tile: "radial-gradient(circle at 28% 14%, rgba(255,255,255,0.44), transparent 28%), linear-gradient(145deg, #FB7185 0%, #E11D48 48%, #881337 100%)",
+    glow: "rgba(225, 29, 72, 0.48)",
     url: "wss://hypen-hypeflix.ian-dae.workers.dev/ws",
   },
 ];
@@ -113,7 +113,11 @@ const stroke = (d: string) =>
   `<path d="${d}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
 
 export const resources: Record<string, string> = {
-  "activity": iconSvg(stroke("M22 12h-4l-3 9L9 3l-3 9H2")),
+  "activity": iconSvg(
+    stroke("M13.7 2.5c.35 2.8-1.15 4.35-2.65 5.9-1.55 1.6-3.05 3.15-3.05 5.7A4.35 4.35 0 0 0 12.35 18.5c2.6 0 4.65-1.95 4.65-4.65 0-1.8-.85-3.75-2.55-5.85.05 2.25-.8 3.55-2.2 4.65") +
+      stroke("M12.1 21.5c-4 0-7.1-2.85-7.1-6.75") +
+      stroke("M12 16c-1.2-.75-1.65-1.9-1.25-3.35"),
+  ),
   "battery": iconSvg(
     stroke("M17 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h13a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2") +
       stroke("M22 13v-2") +
@@ -146,35 +150,43 @@ export const resources: Record<string, string> = {
       stroke("M8 20h.01") + stroke("M12 21h.01") + stroke("M16 20h.01"),
   ),
   "calculator": iconSvg(
-    stroke("M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2") +
-      stroke("M8 6h8") +
-      stroke("M8 10h.01") +
-      stroke("M12 10h.01") +
-      stroke("M16 10h.01") +
-      stroke("M8 14h.01") +
-      stroke("M12 14h.01") +
-      stroke("M16 14h.01") +
-      stroke("M8 18h.01") +
-      stroke("M12 18h.01") +
-      stroke("M16 18h.01"),
+    stroke("M8.5 3h7A5.5 5.5 0 0 1 21 8.5v7a5.5 5.5 0 0 1-5.5 5.5h-7A5.5 5.5 0 0 1 3 15.5v-7A5.5 5.5 0 0 1 8.5 3Z") +
+      stroke("M7.5 6.5v4M5.5 8.5h4") +
+      stroke("M14.5 8.5h4") +
+      stroke("M5.8 15.8l3-3M8.8 15.8l-3-3") +
+      stroke("M14.5 13.5h4M14.5 16.5h4"),
   ),
-  "check-square": iconSvg(stroke("M9 11l3 3L22 4") + stroke("M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11")),
+  "check-square": iconSvg(
+    stroke("M9 3h6a6 6 0 0 1 6 6v6a6 6 0 0 1-6 6H9a6 6 0 0 1-6-6V9a6 6 0 0 1 6-6Z") +
+      `<path d="m7.5 12 3 3 6.5-7" fill="none" stroke="currentColor" stroke-width="2.35" stroke-linecap="round" stroke-linejoin="round"/>` +
+      stroke("M18.5 5.5h.01"),
+  ),
   "chevron-right": iconSvg(stroke("M9 18l6-6-6-6")),
   "film": iconSvg(
-    stroke("M4 3h16a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2") +
-      stroke("M8 3v18") +
-      stroke("M16 3v18") +
-      stroke("M2 9h20") +
-      stroke("M2 15h20"),
+    stroke("M8 6h8a5 5 0 0 1 5 5v5a5 5 0 0 1-5 5H8a5 5 0 0 1-5-5v-5a5 5 0 0 1 5-5Z") +
+      stroke("M10 10v7l6-3.5-6-3.5Z") +
+      `<path d="M5 3h14M7 3l2 3m3-3 2 3m3-3 2 3" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>`,
   ),
   "play-circle": iconSvg(
-    stroke("M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20") + stroke("M10 8l6 4-6 4V8"),
+    stroke("M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18") +
+      stroke("M10 8.25v7.5l6-3.75-6-3.75Z") +
+      stroke("M5 5l1.25 1.25M18 17.75 19.25 19"),
   ),
   "image": iconSvg(stroke("M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5") + stroke("M8 11l3 3 2-2 5 5") + stroke("M8.5 8.5h.01")),
-  "message-circle": iconSvg(stroke("M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5")),
+  "message-circle": iconSvg(
+    `<path d="M6 6a3 3 0 0 1 3-3h7a3 3 0 0 1 3 3v4a3 3 0 0 1-3 3h-4.5L7 16v-3.35A3 3 0 0 1 6 10V6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>` +
+      `<path d="M10 8h.01M13 8h.01M16 8h.01" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>` +
+      `<path d="M11 18h4l3.5 2.5V17a3 3 0 0 0 2-2.8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`,
+  ),
   "palette": iconSvg(stroke("M12 3a9 9 0 0 0 0 18h1.5a1.5 1.5 0 0 0 0-3H12a1.5 1.5 0 0 1 0-3h1a8 8 0 0 0 8-8.2C21 4.7 17 3 12 3") + stroke("M7.5 10.5h.01") + stroke("M10 7.5h.01") + stroke("M14 7.5h.01") + stroke("M16.5 10.5h.01")),
-  "settings": iconSvg(stroke("M12 15.5A3.5 3.5 0 1 0 12 8a3.5 3.5 0 0 0 0 7.5") + stroke("M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06A1.65 1.65 0 0 0 15 19.4a1.65 1.65 0 0 0-1 .6 1.65 1.65 0 0 0-.33 1.82V22a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 8.6 20a1.65 1.65 0 0 0-1.82-.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-.6-1 1.65 1.65 0 0 0-1.82-.33H2a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4 8.6a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 8.6 4.6a1.65 1.65 0 0 0 1-.6 1.65 1.65 0 0 0 .33-1.82V2a2 2 0 1 1 4 0v.09A1.65 1.65 0 0 0 15 4.6a1.65 1.65 0 0 0 1.82.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 8.6a1.65 1.65 0 0 0 .6 1 1.65 1.65 0 0 0 1.82.33H22a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.82.33 1.65 1.65 0 0 0-.69.74")),
-  "utensils": iconSvg(stroke("M4 3v8") + stroke("M8 3v8") + stroke("M4 7h4") + stroke("M6 11v10") + stroke("M16 3c2 1.5 3 4 3 7s-1 5.5-3 7V3") + stroke("M16 17v4")),
+  "settings": iconSvg(
+    stroke("M4 7h3M11 7h9M4 12h10M18 12h2M4 17h2M10 17h10") +
+      stroke("M9 5v4M16 10v4M8 15v4"),
+  ),
+  "utensils": iconSvg(
+    `<path d="M4 10h16a8 8 0 0 1-16 0Zm3 10h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>` +
+      `<path d="M8 7c0-1.6 1.2-1.9 1.2-3.5M12 7c0-1.6 1.2-1.9 1.2-3.5M16 7c0-1.6 1.2-1.9 1.2-3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`,
+  ),
 };
 
 // The Settings "app" lives on the grid like any other icon but routes into
@@ -183,8 +195,8 @@ const SETTINGS_ICON = {
   slug: "settings",
   name: "Settings",
   resource: "settings",
-  iconColor: "#ffffff",
-  tile: "bg-gradient-to-br from-gray-400 to-gray-600",
+  iconColor: "#F8FAFC",
+  tile: "radial-gradient(circle at 27% 13%, rgba(255,255,255,0.46), transparent 29%), linear-gradient(145deg, #CBD5E1 0%, #64748B 48%, #334155 100%)",
   route: "/settings",
 };
 
@@ -292,10 +304,11 @@ function appIcon(
             Column {
               Column {
                 Icon(@resources.${a.resource})
-                  .size({default: 29, md: 32})
+                  .size({default: 36, md: 40})
                   .color("${a.iconColor}")
               }
-              .tw("w-[60px] h-[60px] rounded-[19px] ${a.tile} items-center justify-center shadow-lg")
+              .tw("w-[60px] h-[60px] rounded-[19px] items-center justify-center border border-white/20 shadow-xl")
+              .background("${a.tile}")
               .width({default: 60, md: 66})
               .height({default: 60, md: 66})${
                 sharedKey
@@ -306,7 +319,7 @@ function appIcon(
               ${
                 label
                   ? `Text("${a.name}")
-                .tw("text-[11px] mt-1.5 font-medium")
+                .tw("text-[11px] mt-1.5 font-semibold tracking-[-0.01em]")
                 .color("#F3F4F6")`
                   : ""
               }
@@ -371,10 +384,11 @@ function appRoute(a: LauncherApp): string {
 
                   Column {
                     Icon(@resources.${a.resource})
-                      .size(32)
+                      .size(46)
                       .color("${a.iconColor}")
                   }
-                  .tw("w-[76px] h-[76px] rounded-[22px] ${a.tile} items-center justify-center shadow-2xl")
+                  .tw("w-[76px] h-[76px] rounded-[22px] items-center justify-center border border-white/20 shadow-2xl")
+                  .background("${a.tile}")
                   .sharedElement("app-${a.slug}", curve: spring, duration: 340)
 
                   Text("${a.name}")

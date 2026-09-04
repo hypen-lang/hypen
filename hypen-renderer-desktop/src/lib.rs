@@ -35,6 +35,8 @@ pub mod media;
 pub mod module;
 pub mod paint;
 pub mod painter;
+#[cfg(test)]
+mod perf_bench;
 pub mod remote;
 pub mod style;
 pub mod text;

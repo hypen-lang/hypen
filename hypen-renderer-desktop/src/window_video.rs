@@ -280,6 +280,19 @@ impl App {
     /// what tick this, and the 250 ms throttle keeps the state traffic
     /// bounded regardless of frame rate.
     pub(crate) fn sync_video_bind(&mut self) {
+        // Media-free tree (the common case): nothing can report, and
+        // `alive` would be empty — prune the side tables and skip the
+        // full node walk + detached-set build this runs on every flush.
+        if !self.has_media_nodes {
+            self.video_bind_reports.clear();
+            self.video_playback_applied.clear();
+            #[cfg(feature = "video")]
+            {
+                self.video_start_seeked.clear();
+                self.video_pending_bind_seeks.clear();
+            }
+            return;
+        }
         let viewport = self.logical_viewport();
         let now = std::time::Instant::now();
         let mut pending: Vec<(String, Vec<PlaybackFieldReport>, VideoPlayerState, f64, f64)> =
@@ -677,6 +690,9 @@ impl App {
     /// source configuration changes, not on unrelated prop updates").
     #[cfg(feature = "video")]
     pub(crate) fn apply_start_positions(&mut self) {
+        if !self.has_media_nodes {
+            return;
+        }
         let mut pending: Vec<(String, f64, String)> = Vec::new();
         let viewport = self.logical_viewport();
         for node in self.tree.nodes() {

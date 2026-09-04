@@ -6,11 +6,11 @@
       "name": "@hypen-space/cli",
       "dependencies": {
         "@babel/runtime": "^7.24.0",
-        "@hypen-space/core": "^0.4.947",
-        "@hypen-space/lsp": "^0.4.947",
-        "@hypen-space/server": "^0.4.947",
-        "@hypen-space/web": "^0.4.947",
-        "@hypen-space/web-engine": "^0.4.947",
+        "@hypen-space/core": "^0.6.2",
+        "@hypen-space/lsp": "^0.6.2",
+        "@hypen-space/server": "^0.6.2",
+        "@hypen-space/web": "^0.6.2",
+        "@hypen-space/web-engine": "^0.6.2",
         "@radix-ui/react-label": "^2.1.7",
         "@radix-ui/react-select": "^2.2.6",
         "@radix-ui/react-slot": "^1.2.3",
@@ -98,17 +98,17 @@
 
     "@floating-ui/utils": ["@floating-ui/utils@0.2.11", "", {}, "sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg=="],
 
-    "@hypen-space/core": ["@hypen-space/core@0.4.947", "", { "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-ad8aWeS8f9psLFXd9ncIq+KKd8tynD56y7k438mx/ueuEM7P7BwXySTclD09yO8vrtigTT/DYGWNvPo88ctIwg=="],
+    "@hypen-space/core": ["@hypen-space/core@0.6.3", "", { "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-zTiT9c8LuzcS96WEjTRhdv7V3PKNTPw4RPKLDAKajNDHZUf+CgBsp+TNXo7Or9a85n5SBBa7f+rUmLkQrj1T/Q=="],
 
     "@hypen-space/ios-streamer": ["@hypen-space/ios-streamer@0.1.1", "", { "os": "darwin", "bin": { "hypen-ios-streamer": "bin/ios-streamer.ts" } }, "sha512-PadAy+RoC4Pd1QYkxMj7HUK/pZGyvDL86aODEqDqSScfL6Rh2JuWpdSDQ7KzXT87kd5rzmvd+PTQBomCcEisFg=="],
 
-    "@hypen-space/lsp": ["@hypen-space/lsp@0.4.947", "", { "dependencies": { "vscode-languageclient": "^9.0.1", "vscode-languageserver": "^9.0.1", "vscode-languageserver-textdocument": "^1.0.11" } }, "sha512-+Ltp9ffhKgfXk+N/AjTOTmVP37B73Rtq3c7SdTWefDEXcPBi91Fl1tfwKwjrqpQrQRho6nZFpQf8lBeDu4c3yA=="],
+    "@hypen-space/lsp": ["@hypen-space/lsp@0.6.3", "", { "dependencies": { "vscode-languageclient": "^9.0.1", "vscode-languageserver": "^9.0.1", "vscode-languageserver-textdocument": "^1.0.11" } }, "sha512-WHzhIQk5dri1T5JVssGDcHmZqjwoQtg/kc2bthgAil6ozw+VUBmmrw310CtJUS8haMBAWBulkVr8LYC1smtW1Q=="],
 
-    "@hypen-space/server": ["@hypen-space/server@0.4.947", "", { "dependencies": { "@hypen-space/core": "^0.4.947" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-25nedWWDCulvhU5s/1/smZ3YPCavzCPwDUgV71CaRtOvmZXS9wC6aEyVTLHsQRatBc552whBXpE56yAvvneyJg=="],
+    "@hypen-space/server": ["@hypen-space/server@0.6.3", "", { "dependencies": { "@hypen-space/core": "^0.6.3" }, "peerDependencies": { "@hypen-space/web": ">=0.6.0", "typescript": "^5" }, "optionalPeers": ["@hypen-space/web", "typescript"] }, "sha512-KF2STSiOiFUndHLELL19stqg8Dau+6ZyTnSSKXuqM05gelHzsnK6EgZ/XmOp9Qq03AVbQYnC+9yQ03CxvPNTWQ=="],
 
-    "@hypen-space/web": ["@hypen-space/web@0.4.947", "", { "dependencies": { "@chenglou/pretext": "^0.0.3", "@hypen-space/core": "^0.4.947", "taffy-layout": "^2.0.3" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-bJUuQ+RDtgRqJHjdczWMAG2IeN9xrQCp6a7DL6K+kKLMo9zA0ZOKEqbMpuTHpjtW4TDxux6OcKGcpmZyGlqCFQ=="],
+    "@hypen-space/web": ["@hypen-space/web@0.6.3", "", { "dependencies": { "@chenglou/pretext": "^0.0.3", "@hypen-space/core": "^0.6.3", "taffy-layout": "^2.0.3" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-eQSkTc6cS7TnnLxGBqFA9qSKwDKBqWJwAgL9nxY3eHNcDLpes71UNwGQhFqdEcQTyjIe10FcSgnkjJ9hH0xzhQ=="],
 
-    "@hypen-space/web-engine": ["@hypen-space/web-engine@0.4.947", "", { "dependencies": { "@hypen-space/core": "^0.4.947", "@hypen-space/web": "^0.4.947" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-sdUis5OMAnDsibHtDrDqcSta4NrklXVnuuq6oHWaE3SAjQhQsFaMYykSXM9rkkfp7rPBrJ+4Z7TrbAZqkN7MMQ=="],
+    "@hypen-space/web-engine": ["@hypen-space/web-engine@0.6.3", "", { "dependencies": { "@hypen-space/core": "^0.6.3", "@hypen-space/web": "^0.6.3" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-V7itKACgjeW+zJjRjY2loSyUHr80qzKjBU5RSa6dCACW5y9iZ22x0aKDug38Mi0UEcFn7vjqiNGYWTMSGk44lQ=="],
 
     "@oven/bun-darwin-aarch64": ["@oven/bun-darwin-aarch64@1.3.8", "", { "os": "darwin", "cpu": "arm64" }, "sha512-hPERz4IgXCM6Y6GdEEsJAFceyJMt29f3HlFzsvE/k+TQjChRhar6S+JggL35b9VmFfsdxyCOOTPqgnSrdV0etA=="],
 

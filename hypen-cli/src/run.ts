@@ -3,6 +3,8 @@
  *
  * `hypen run android` - installs and launches the Hypen Runner APK via adb
  * `hypen run ios`     - installs and launches the Hypen Runner app on iOS Simulator via xcrun
+ * `hypen run desktop` - downloads and launches the Hypen Browser on this machine
+ *                       (macOS arm64/x86_64, Windows x64, Linux x64)
  */
 
 import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "fs";
@@ -22,15 +24,45 @@ export const RUNNER_URLS = {
   android: "https://red-water-3890.ian-dae.workers.dev/android/latest",
   ios: "https://red-water-3890.ian-dae.workers.dev/ios/latest",
   version: "https://red-water-3890.ian-dae.workers.dev/version",
+  // Bare-binary archives attached to hypen-engine-rs releases by the
+  // Desktop Installers workflow, under stable version-less names:
+  // hypen-browser-<rust-target>.tar.gz
+  desktop: "https://github.com/hypen-lang/hypen-engine-rs/releases/latest/download",
 } as const;
+
+const DESKTOP_BIN = process.platform === "win32" ? "hypen-browser.exe" : "hypen-browser";
 
 /** Local file paths for cached runners */
 export const RUNNER_PATHS = {
   android: join(RUNNERS_DIR, "hypen-gallery.apk"),
   ios: join(RUNNERS_DIR, "HypenGallery.app"),
   iosZip: join(RUNNERS_DIR, "HypenGallery.zip"),
+  desktop: join(RUNNERS_DIR, DESKTOP_BIN),
+  desktopTar: join(RUNNERS_DIR, "hypen-browser.tar.gz"),
   version: join(RUNNERS_DIR, "version.txt"),
 } as const;
+
+/**
+ * The Rust target triple for the desktop runner archive matching this
+ * machine, or null when no prebuilt exists (e.g. linux-arm64).
+ */
+export function desktopTarget(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch
+): string | null {
+  if (platform === "darwin") {
+    if (arch === "arm64") return "aarch64-apple-darwin";
+    if (arch === "x64") return "x86_64-apple-darwin";
+    return null;
+  }
+  if (platform === "win32") {
+    return arch === "x64" ? "x86_64-pc-windows-msvc" : null;
+  }
+  if (platform === "linux") {
+    return arch === "x64" ? "x86_64-unknown-linux-gnu" : null;
+  }
+  return null;
+}
 
 /** Android/iOS identifiers */
 const ANDROID_PACKAGE = "space.hypen.gallery";
@@ -228,7 +260,7 @@ export async function downloadFile(
 /**
  * Delete cached runners for a platform (or all platforms).
  */
-export function cleanRunners(platform?: "android" | "ios"): void {
+export function cleanRunners(platform?: "android" | "ios" | "desktop"): void {
   console.log(`  ${pink("Cleaning cached runners...")}`);
   if (!platform || platform === "android") {
     if (existsSync(RUNNER_PATHS.android)) rmSync(RUNNER_PATHS.android);
@@ -236,6 +268,10 @@ export function cleanRunners(platform?: "android" | "ios"): void {
   if (!platform || platform === "ios") {
     if (existsSync(RUNNER_PATHS.ios)) rmSync(RUNNER_PATHS.ios, { recursive: true });
     if (existsSync(RUNNER_PATHS.iosZip)) rmSync(RUNNER_PATHS.iosZip);
+  }
+  if (!platform || platform === "desktop") {
+    if (existsSync(RUNNER_PATHS.desktop)) rmSync(RUNNER_PATHS.desktop);
+    if (existsSync(RUNNER_PATHS.desktopTar)) rmSync(RUNNER_PATHS.desktopTar);
   }
   if (existsSync(RUNNER_PATHS.version)) rmSync(RUNNER_PATHS.version);
   console.log(`  ${dim("Cached runners removed.")}\n`);
@@ -318,6 +354,56 @@ export async function ensureIOSRunner(): Promise<boolean> {
     return true;
   }
   return false;
+}
+
+/**
+ * Download + extract the Hypen Browser bare binary for this machine.
+ * Cached at ~/.hypen/runners/hypen-browser; `--clean` forces a refresh.
+ */
+export async function ensureDesktopRunner(): Promise<boolean> {
+  ensureRunnersDir();
+  if (existsSync(RUNNER_PATHS.desktop)) {
+    return true;
+  }
+
+  const target = desktopTarget();
+  if (!target) {
+    console.error(
+      `\n  Error: no prebuilt Hypen Browser for ${process.platform}/${process.arch}.\n` +
+        `  Build from source instead: cargo run --release -p hypen-browser\n`
+    );
+    return false;
+  }
+
+  const url = `${RUNNER_URLS.desktop}/hypen-browser-${target}.tar.gz`;
+  console.log(`  ${pink("Downloading desktop runner...")}`);
+  console.log(`  ${dim("From:")} ${url}`);
+  const downloaded = await downloadFile(url, RUNNER_PATHS.desktopTar);
+  if (!downloaded) return false;
+
+  console.log(`  Extracting...`);
+  // tar handles .tar.gz on macOS, Linux, and Windows 10+ (bsdtar).
+  const { exitCode, stderr } = await exec([
+    "tar",
+    "-xzf",
+    RUNNER_PATHS.desktopTar,
+    "-C",
+    RUNNERS_DIR,
+  ]);
+  rmSync(RUNNER_PATHS.desktopTar, { force: true });
+  if (exitCode !== 0) {
+    console.error(`  Failed to extract: ${stderr}`);
+    return false;
+  }
+  if (!existsSync(RUNNER_PATHS.desktop)) {
+    console.error(`  Archive did not contain ${DESKTOP_BIN}`);
+    return false;
+  }
+  if (process.platform !== "win32") {
+    await exec(["chmod", "+x", RUNNER_PATHS.desktop]);
+  }
+  await fetchAndCacheVersion();
+  return true;
 }
 
 // ─── Device discovery ─────────────────────────────────────
@@ -621,6 +707,46 @@ export async function runIOS(port: number, overrideUrl?: string): Promise<void> 
   console.log(`  ${pink("Runner launched on")} ${yellow(sim.name)}\n`);
 }
 
+// ─── Desktop ──────────────────────────────────────────────
+
+/**
+ * Launch the Hypen Browser on this machine, pointed at the dev server.
+ * Works on macOS (arm64/x86_64), Windows (x64), and Linux (x64) — the
+ * platforms the Desktop Installers workflow publishes binaries for.
+ */
+export async function runDesktop(port: number, overrideUrl?: string): Promise<void> {
+  const hasRunner = await ensureDesktopRunner();
+  if (!hasRunner) {
+    console.error("\n  Error: Could not set up the desktop runner.\n");
+    process.exit(1);
+  }
+  const version = getCachedVersion();
+  console.log(`  ${pink("Ready.")} ${dim(`(runner v${version})`)}`);
+
+  const wsUrl = overrideUrl || `ws://localhost:${port}`;
+  console.log(`  ${dim("Launching with server:")} ${yellow(wsUrl)}`);
+
+  // Detach so the window has its own lifetime — closing the CLI's
+  // server just makes the browser show its reconnect state.
+  if (isBun) {
+    const proc = Bun.spawn([RUNNER_PATHS.desktop, wsUrl], {
+      stdout: "ignore",
+      stderr: "ignore",
+      stdin: "ignore",
+    });
+    proc.unref();
+  } else {
+    const { spawn } = await import("child_process");
+    const child = spawn(RUNNER_PATHS.desktop, [wsUrl], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
+  }
+
+  console.log(`  ${pink("Hypen Browser launched.")}\n`);
+}
+
 // ─── Help ─────────────────────────────────────────────────
 
 export const RUN_HELP = `
@@ -632,6 +758,7 @@ export const RUN_HELP = `
   ${boldYellow("Platforms:")}
     ${pink("android")}               Install and launch on Android device/emulator (via adb)
     ${pink("ios")}                   Install and launch on iOS Simulator (via xcrun simctl)
+    ${pink("desktop")}               Launch the Hypen Browser on this machine (macOS/Windows/Linux)
 
   ${boldYellow("Options:")}
     --port, -p <port>     Dev server port (default: 3000)
@@ -648,7 +775,8 @@ export const RUN_HELP = `
   ${boldYellow("Examples:")}
     ${dim("$")} hypen run android
     ${dim("$")} hypen run ios
+    ${dim("$")} hypen run desktop
     ${dim("$")} hypen run android --port 8080
-    ${dim("$")} hypen run android --url ws://localhost:3000
+    ${dim("$")} hypen run desktop --url ws://localhost:3000
     ${dim("$")} hypen run ios --clean
 `;

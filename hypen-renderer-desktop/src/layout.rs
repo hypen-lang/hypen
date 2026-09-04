@@ -674,6 +674,11 @@ pub struct TaffyState {
     /// restyle, patched content). Scroll-only frames leave it `false` so
     /// they keep the previous frame's widths and run a single layout.
     fit_pass_dirty: bool,
+    /// Physical viewport the root wrapper's style was last written for.
+    /// [`TaffyState::refresh_root_size`] runs on every compute; when the
+    /// viewport hasn't moved, re-writing the identical root style only
+    /// cleared the root's layout cache for nothing.
+    last_root_viewport: Option<(u32, u32)>,
 }
 
 impl TaffyState {
@@ -698,6 +703,7 @@ impl TaffyState {
             interaction_key: 0,
             fit_widths: HashMap::new(),
             fit_pass_dirty: true,
+            last_root_viewport: None,
         }
     }
 
@@ -753,9 +759,14 @@ impl TaffyState {
         viewport: Viewport,
     ) -> bool {
         let mut all_applied = true;
-        if !patches.is_empty() {
-            // Content changed, so every content-sized flex container's
-            // max-content width is potentially stale.
+        // The fit-content pre-pass re-runs only when the batch could
+        // actually change content sizing: structural patches, layout-
+        // affecting props, or text content. A paint-only batch (colour
+        // flips, opacity, transforms — the keystroke-adjacent frames)
+        // used to set this unconditionally, which made EVERY update
+        // frame pay `collect_fit_candidates`' full-tree walk — the
+        // dominant per-total-node frame tax on large trees.
+        if patches.iter().any(patch_affects_layout) {
             self.fit_pass_dirty = true;
         }
         for patch in patches {
@@ -793,10 +804,10 @@ impl TaffyState {
                     // long idle session that is an unbounded leak.
                     if let Some(old) = self.node_map.remove(id.as_ref()) {
                         if let Some(parent) = self.tree.parent(old) {
-                            let mut siblings: Vec<NodeId> =
-                                self.tree.children(parent).unwrap_or_default();
-                            siblings.retain(|c| *c != old);
-                            let _ = self.tree.set_children(parent, &siblings);
+                            // O(n) single-pass unlink that also marks the
+                            // parent dirty — no children-Vec clone +
+                            // set_children round trip.
+                            let _ = self.tree.remove_child(parent, old);
                         }
                         let _ = self.tree.remove(old);
                         self.renderer_for_taffy.remove(&old);
@@ -902,24 +913,19 @@ impl TaffyState {
                 id,
                 before_id,
             } => {
-                if let Some(&child) = self.node_map.get(id.as_ref()) {
-                    if let Some(old_parent) = self.tree.parent(child) {
-                        let mut old: Vec<NodeId> =
-                            self.tree.children(old_parent).unwrap_or_default();
-                        old.retain(|c| *c != child);
-                        let _ = self.tree.set_children(old_parent, &old);
-                    }
-                }
+                // `set_parent_children` unlinks from the old Taffy
+                // parent itself (via `remove_child`, which marks that
+                // parent dirty) before inserting under the new one.
                 self.set_parent_children(parent_id, id, before_id.as_deref(), tree);
                 true
             }
             Patch::Remove { id, .. } => {
                 if let Some(tid) = self.node_map.remove(id.as_ref()) {
                     if let Some(parent) = self.tree.parent(tid) {
-                        let mut children: Vec<NodeId> =
-                            self.tree.children(parent).unwrap_or_default();
-                        children.retain(|c| *c != tid);
-                        let _ = self.tree.set_children(parent, &children);
+                        // Single-pass unlink + dirty-mark; `tree.remove`
+                        // below would unlink too but does NOT mark the
+                        // parent dirty, so the explicit remove_child stays.
+                        let _ = self.tree.remove_child(parent, tid);
                     }
                     let _ = self.tree.remove(tid);
                     self.renderer_for_taffy.remove(&tid);
@@ -929,10 +935,7 @@ impl TaffyState {
             Patch::Detach { id } => {
                 if let Some(&tid) = self.node_map.get(id.as_ref()) {
                     if let Some(parent) = self.tree.parent(tid) {
-                        let mut children: Vec<NodeId> =
-                            self.tree.children(parent).unwrap_or_default();
-                        children.retain(|c| *c != tid);
-                        let _ = self.tree.set_children(parent, &children);
+                        let _ = self.tree.remove_child(parent, tid);
                     }
                 }
                 true
@@ -968,14 +971,30 @@ impl TaffyState {
         } else {
             return;
         };
-        let mut children: Vec<NodeId> = self.tree.children(parent_tid).unwrap_or_default();
-        children.retain(|c| *c != child_tid);
+        // Unlink from any current Taffy parent first (Move within or
+        // across parents, defensive re-Insert). `remove_child` marks
+        // the old parent dirty. The subsequent add/insert is O(1) /
+        // O(n_siblings) in place — the previous clone-children +
+        // retain + set_children round trip made a batch inserting N
+        // children under one parent O(N²).
+        if let Some(prev) = self.tree.parent(child_tid) {
+            let _ = self.tree.remove_child(prev, child_tid);
+        }
         let pos = before_id
             .and_then(|bid| self.node_map.get(bid))
-            .and_then(|t| children.iter().position(|c| c == t))
-            .unwrap_or(children.len());
-        children.insert(pos, child_tid);
-        let _ = self.tree.set_children(parent_tid, &children);
+            .and_then(|t| {
+                // Only anchored inserts pay the children() Vec clone;
+                // the common append (before_id = None) skips it.
+                self.tree
+                    .children(parent_tid)
+                    .ok()?
+                    .iter()
+                    .position(|c| c == t)
+            });
+        let _ = match pos {
+            Some(idx) => self.tree.insert_child_at_index(parent_tid, idx, child_tid),
+            None => self.tree.add_child(parent_tid, child_tid),
+        };
 
         // Stack: every child past the first picks up `position:
         // absolute` + margin → inset so it overlays the base. This
@@ -1137,6 +1156,7 @@ impl TaffyState {
         };
         let _ = self.tree.set_style(self.root, outer_style);
         self.root_initialised = true;
+        self.last_root_viewport = Some(viewport_px);
 
         // `node_style` is parent-agnostic, so it can't apply the
         // Stack-children-after-first-go-absolute overlay. Without
@@ -1194,6 +1214,13 @@ impl TaffyState {
         if !self.root_initialised {
             return;
         }
+        // Unchanged viewport → the root style would be byte-identical;
+        // skip the set_style so the root's layout cache survives and a
+        // clean frame's compute stays a cache walk.
+        if self.last_root_viewport == Some(viewport) {
+            return;
+        }
+        self.last_root_viewport = Some(viewport);
         // No implicit padding / gap on the synthetic outer wrapper.
         // iOS / Android / web all give the app's root component edge-
         // to-edge access to the viewport — implicit page chrome here
@@ -1453,6 +1480,7 @@ impl LayoutPass {
                 .expect("taffy root node");
             state.structure_key = key;
             state.root_initialised = true;
+            state.last_root_viewport = Some(viewport);
             state.needs_bulk_rebuild = false;
         } else if style_changed || interaction_changed || !state.root_initialised {
             // Viewport / scale changed, OR an interaction transition
@@ -1541,6 +1569,7 @@ impl LayoutPass {
             log::warn!("taffy layout failed: {e:?}");
         }
 
+
         // Content-sized flex containers (`alignSelf(center)` heroes and
         // friends) need a second pass — see `apply_fit_content_widths`
         // for why Taffy can't get their width right on its own. The
@@ -1622,9 +1651,13 @@ impl LayoutPass {
         // `effective_opacity` resolves them breakpoint-aware via
         // `prop_f32_at`, and an exact-key gate would leave a node styled
         // ONLY by a decorated key painting at full opacity.
-        let has_opacity = tree
-            .nodes()
-            .any(|n| n.props.keys().any(|k| k.starts_with("opacity")));
+        // O(1) post-pass gates: the Tree maintains live counters of
+        // opacity / transform prop keys (see `Tree::has_opacity_props`),
+        // replacing what used to be a full per-frame prop scan — ~1.4 ms
+        // on an 11k-node tree, the largest single per-total-node frame
+        // tax after the fit-pass gating.
+        let has_opacity = tree.has_opacity_props();
+        let has_transform = tree.has_transform_props();
         if has_opacity {
             let mut memo: HashMap<String, f32> = HashMap::new();
             for it in items.iter_mut() {
@@ -1637,9 +1670,8 @@ impl LayoutPass {
         // one resolution path) into a cumulative per-item affine. Runs
         // AFTER the page-scroll shift so transform origins (rect
         // centers) live in the same coordinate space as the emitted
-        // rects. Same gating shape as the opacity pass: a tree with no
-        // transform props pays one boolean scan.
-        compute_item_transforms(tree, &mut items, viewport_logical, scale);
+        // rects. Gated on the combined scan above.
+        compute_item_transforms_gated(tree, &mut items, viewport_logical, scale, has_transform);
 
         let mut by_node_id = HashMap::with_capacity(items.len());
         let mut actionable_ids = Vec::new();
@@ -1999,8 +2031,8 @@ fn is_definite_zero(dim: Dimension) -> bool {
 /// gets a definite cross size handed down rather than a content-derived
 /// one). `align-self` wins over the container's `align-items`; the CSS
 /// initial value for both is `stretch`.
-fn is_cross_stretched(parent_style: &Style, child_style: &Style) -> bool {
-    let align = child_style.align_self.or(parent_style.align_items);
+fn is_cross_stretched(parent_align_items: Option<AlignItems>, child_style: &Style) -> bool {
+    let align = child_style.align_self.or(parent_align_items);
     matches!(align, None | Some(AlignItems::Stretch))
 }
 
@@ -2180,24 +2212,36 @@ fn collect_fit_candidates(
     node: NodeId,
     out: &mut Vec<FitCandidate>,
 ) {
-    let Ok(parent_style) = taffy.style(node) else {
-        return;
+    // Copy out only the two fields the child check needs — cloning the
+    // whole `Style` (grid template Vecs included) for every node on
+    // every fit pass was pure allocation churn.
+    let (column_parent, parent_align_items) = {
+        let Ok(parent_style) = taffy.style(node) else {
+            return;
+        };
+        (
+            parent_style.display == Display::Flex
+                && matches!(
+                    parent_style.flex_direction,
+                    FlexDirection::Column | FlexDirection::ColumnReverse
+                ),
+            parent_style.align_items,
+        )
     };
-    let column_parent = parent_style.display == Display::Flex
-        && matches!(
-            parent_style.flex_direction,
-            FlexDirection::Column | FlexDirection::ColumnReverse
-        );
-    let parent_style = parent_style.clone();
-    let children = taffy.children(node).unwrap_or_default();
-    for child in &children {
-        let child = *child;
+    // Index-based iteration: `taffy.children()` clones a Vec per
+    // container, and this walk covers the whole tree every time the
+    // fit pass is dirty.
+    let n = taffy.child_count(node);
+    for idx in 0..n {
+        let Ok(child) = taffy.child_at_index(node, idx) else {
+            continue;
+        };
         if column_parent {
             if let Ok(child_style) = taffy.style(child) {
                 if child_style.display == Display::Flex
                     && child_style.position != Position::Absolute
                     && child_style.size.width.is_auto()
-                    && !is_cross_stretched(&parent_style, child_style)
+                    && !is_cross_stretched(parent_align_items, child_style)
                     && has_zero_basis_growable_row(taffy, child)
                 {
                     out.push(FitCandidate {
@@ -2224,10 +2268,11 @@ fn has_zero_basis_growable_row(taffy: &TaffyTree<NodeContext>, node: NodeId) -> 
             style.flex_direction,
             FlexDirection::Row | FlexDirection::RowReverse
         );
-    let Ok(children) = taffy.children(node) else {
-        return false;
-    };
-    children.into_iter().any(|child| {
+    let n = taffy.child_count(node);
+    (0..n).any(|idx| {
+        let Ok(child) = taffy.child_at_index(node, idx) else {
+            return false;
+        };
         if is_row
             && taffy.style(child).is_ok_and(|s| {
                 s.flex_grow > 0.0 && s.size.width.is_auto() && is_definite_zero(s.flex_basis)
@@ -2640,6 +2685,33 @@ fn build_subtree(
     }
 }
 
+/// True when `name` — a raw patch prop key, possibly variant/arg
+/// decorated (`padding@md.0`) — names a layout-affecting prop once
+/// stripped to its base, including the two structural-ish props the
+/// plain [`is_layout_prop`] list doesn't carry: `slot` (flips a Video
+/// child's visibility) and `scrollable` (changes overflow/clip
+/// structure). Shared by the painter-cache paint-only gate
+/// (`window::paint_only_affected_ids`) and the fit-pass dirty gate so
+/// the two can never disagree about what counts as layout-affecting.
+pub(crate) fn is_layout_prop_key(name: &str) -> bool {
+    let base = hypen_engine::portable::parse_prop_key(name).base;
+    is_layout_prop(&base) || matches!(base.as_str(), "slot" | "scrollable")
+}
+
+/// True when `patch` can change Taffy geometry or content sizing —
+/// the condition for re-running the fit-content pre-pass. Structural
+/// patches always can; prop writes only when the (decoration-
+/// stripped) prop is layout-affecting; semantics and batch-animation
+/// preludes never can.
+pub(crate) fn patch_affects_layout(patch: &hypen_engine::Patch) -> bool {
+    use hypen_engine::Patch;
+    match patch {
+        Patch::SetProp { name, .. } | Patch::RemoveProp { name, .. } => is_layout_prop_key(name),
+        Patch::SetSemantics { .. } | Patch::BatchAnimation { .. } => false,
+        _ => true,
+    }
+}
+
 /// Whether changing a prop with this name (or its kebab variant)
 /// requires Taffy to re-flow the layout. Appearance-only props
 /// (`color`, `backgroundColor`, `src`, icon paths, etc.) skip
@@ -2676,6 +2748,8 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
             | "font-size"
             | "fontweight"
             | "font-weight"
+            | "maxlines" // re-shapes wrap → measured height
+            | "max-lines"
             | "gap"
             | "flex"
             | "flexgrow"
@@ -4256,14 +4330,7 @@ fn effective_opacity(
 /// extras are outside the animation whitelist and stay desktop-ignored,
 /// a recorded narrowing).
 fn tree_has_transform_props(tree: &Tree) -> bool {
-    tree.nodes().any(|n| {
-        n.props.keys().any(|k| {
-            k.starts_with("translateX")
-                || k.starts_with("translateY")
-                || k.starts_with("scale")
-                || k.starts_with("rotate")
-        })
-    })
+    tree.has_transform_props()
 }
 
 /// Read a transform prop as f32. `prop_f32_at` handles numbers and
@@ -4350,7 +4417,20 @@ pub(crate) fn compute_item_transforms(
     viewport: Viewport,
     scale: f32,
 ) {
-    if !tree_has_transform_props(tree) {
+    compute_item_transforms_gated(tree, items, viewport, scale, tree_has_transform_props(tree));
+}
+
+/// [`compute_item_transforms`] with the transform-prop gate already
+/// answered, so `compute_inner_state`'s combined flag scan isn't
+/// repeated here.
+pub(crate) fn compute_item_transforms_gated(
+    tree: &Tree,
+    items: &mut [LayoutItem],
+    viewport: Viewport,
+    scale: f32,
+    has_transform: bool,
+) {
+    if !has_transform {
         for it in items.iter_mut() {
             it.transform = Affine2::IDENTITY;
         }

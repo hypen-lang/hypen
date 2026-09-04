@@ -38,6 +38,13 @@ pub struct TextEngine {
     /// loop again. This is the leaf-element layer cache — text nodes
     /// are by far the slowest single op in the paint loop.
     raster_cache: IndexMap<u64, Pixmap>,
+    /// GPU-side twin of `raster_cache` for the Vello path, same key.
+    /// `peniko::ImageData` shares its bytes via an `Arc`'d `Blob`, so a
+    /// hit in `draw_text_into_scene` is an Arc bump instead of the
+    /// multi-KB `tile.data().to_vec()` the pixmap→ImageData conversion
+    /// costs — which used to run for EVERY text draw on every subtree
+    /// re-encode.
+    scene_tile_cache: IndexMap<u64, vello::peniko::ImageData>,
 }
 
 impl TextEngine {
@@ -47,6 +54,7 @@ impl TextEngine {
             swash: SwashCache::new(),
             measure_cache: IndexMap::new(),
             raster_cache: IndexMap::new(),
+            scene_tile_cache: IndexMap::new(),
         }
     }
 
@@ -57,6 +65,7 @@ impl TextEngine {
     pub fn clear_measure_cache(&mut self) {
         self.measure_cache.clear();
         self.raster_cache.clear();
+        self.scene_tile_cache.clear();
     }
 
     /// Measure `text` at `font_size` (physical px). When `wrap_width` is
@@ -321,31 +330,49 @@ impl TextEngine {
         ch.hash(&mut hasher);
         let key = hasher.finish();
 
-        if !self.raster_cache.contains_key(&key) {
-            let mut tile = match Pixmap::new(cw, ch) {
-                Some(p) => p,
-                None => return,
+        // GPU tile cache first: a hit skips both the CPU raster AND
+        // the per-draw `to_vec` byte clone — the ImageData's Blob is
+        // Arc-shared, so replaying a text tile costs a refcount bump.
+        if !self.scene_tile_cache.contains_key(&key) {
+            let img = {
+                let tile = if let Some(t) = self.raster_cache.get(&key) {
+                    t
+                } else {
+                    let mut tile = match Pixmap::new(cw, ch) {
+                        Some(p) => p,
+                        None => return,
+                    };
+                    self.draw_text_weighted(
+                        &mut tile, text, 0.0, 0.0, font_size, color, wrap_width, weight,
+                    );
+                    if self.raster_cache.len() >= RASTER_CACHE_CAP {
+                        self.raster_cache.shift_remove_index(0);
+                    }
+                    self.raster_cache.insert(key, tile);
+                    self.raster_cache.get(&key).expect("inserted above")
+                };
+                // peniko::Image wraps the byte buffer in a
+                // Blob<Arc<Vec<u8>>>; the one-time `to_vec` here is the
+                // tile's bytes (~few KB for normal text spans).
+                let blob = vello::peniko::Blob::new(std::sync::Arc::new(tile.data().to_vec()));
+                vello::peniko::ImageData {
+                    data: blob,
+                    format: vello::peniko::ImageFormat::Rgba8,
+                    alpha_type: vello::peniko::ImageAlphaType::AlphaPremultiplied,
+                    width: tile.width(),
+                    height: tile.height(),
+                }
             };
-            self.draw_text_weighted(
-                &mut tile, text, 0.0, 0.0, font_size, color, wrap_width, weight,
-            );
-            if self.raster_cache.len() >= RASTER_CACHE_CAP {
-                self.raster_cache.shift_remove_index(0);
+            if self.scene_tile_cache.len() >= RASTER_CACHE_CAP {
+                self.scene_tile_cache.shift_remove_index(0);
             }
-            self.raster_cache.insert(key, tile);
+            self.scene_tile_cache.insert(key, img);
         }
-        let tile = self.raster_cache.get(&key).expect("inserted above");
-        // peniko::Image wraps the byte buffer in a Blob<Arc<Vec<u8>>>;
-        // the `to_vec` here is the tile's bytes (~few KB for normal
-        // text spans).
-        let blob = vello::peniko::Blob::new(std::sync::Arc::new(tile.data().to_vec()));
-        let img = vello::peniko::ImageData {
-            data: blob,
-            format: vello::peniko::ImageFormat::Rgba8,
-            alpha_type: vello::peniko::ImageAlphaType::AlphaPremultiplied,
-            width: tile.width(),
-            height: tile.height(),
-        };
+        let img = self
+            .scene_tile_cache
+            .get(&key)
+            .expect("inserted above")
+            .clone();
         // Pixmap is already physical-pixel sized and our translate is
         // integer-aligned (`x.round()`), so nearest-neighbor sampling
         // produces a 1:1 unblurred blit. Vello's default
