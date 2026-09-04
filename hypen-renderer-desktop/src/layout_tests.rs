@@ -2256,6 +2256,7 @@ fn actionable_clip_item(
         clip_to,
         subtree_root: None,
         background_gradient: None,
+        background_layers: None,
         background_image: None,
         state_variants: crate::style::StateVariants::default(),
         opacity: 1.0,
@@ -2275,6 +2276,7 @@ fn single_actionable_pass(item: LayoutItem) -> LayoutPass {
         scrollable_ids: vec![],
         hoverable_ids: vec![0],
         a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
     }
 }
 
@@ -2994,6 +2996,46 @@ fn single_argument_linear_gradient_keeps_rgba_stop_alpha() {
         .expect("rgba-stop gradient body must resolve");
     assert_eq!(g.stops.len(), 3);
     assert_eq!(g.stops[0].color.3, 97, "0.38 alpha should survive parsing");
+}
+
+#[test]
+fn layered_background_shorthand_reaches_the_item() {
+    // The home-screen launcher's icon tile:
+    // `.background("radial-gradient(<sheen>), linear-gradient(<brand>)")`
+    // — a two-layer CSS stack in the `background` shorthand. It used to
+    // reach the painter as nothing at all (no gradient, no image, no
+    // colour), leaving the tile an empty border over the wallpaper.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "tile",
+        "Column",
+        &[(
+            "background.0",
+            json!(
+                "radial-gradient(circle at 24% 14%, rgba(255,255,255,0.48), transparent 29%), \
+                 linear-gradient(145deg, #38BDF8 0%, #4F46E5 52%, #312E81 100%)"
+            ),
+        )],
+    ));
+    tree.apply(&insert_patch("root", "tile"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "tile");
+    let layers = item
+        .background_layers
+        .as_ref()
+        .expect("layered background must reach the item");
+    assert_eq!(layers.layers.len(), 2);
+    // Bottom-first: brand linear below, sheen radial on top.
+    assert!(matches!(
+        layers.layers[0],
+        crate::style::BackgroundLayer::Linear(_)
+    ));
+    assert!(matches!(
+        layers.layers[1],
+        crate::style::BackgroundLayer::Radial(_)
+    ));
 }
 
 #[test]
@@ -4494,4 +4536,739 @@ fn content_sized_button_wrapper_widens_its_stretched_inner_row() {
         title.x + title.w <= chev.x + 0.5,
         "title must not run under the trailing icon; title={title:?} chev={chev:?}"
     );
+}
+
+// ---------------------------------------------------------------
+// Cull buffer / re-emit threshold pairing
+// ---------------------------------------------------------------
+
+/// The emit window must span exactly the visible viewport plus
+/// `CULL_BUFFER_VH` viewports of slack on each side: rows inside it
+/// are emitted (so scroll-in is seamless), rows beyond it are culled
+/// (so frame cost stays bounded). Pins the constant's semantics so a
+/// future tuning change has to look at this math.
+#[test]
+fn cull_window_spans_viewport_plus_buffer_each_side() {
+    use crate::layout::CULL_BUFFER_VH;
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[]));
+    tree.apply(&insert_patch("root", "col"));
+    // 100 fixed-height rows of 100px → content 10,000px tall.
+    for i in 0..100 {
+        let id = format!("c{i}");
+        tree.apply(&create_patch(&id, "Container", &[("height", json!(100.0))]));
+        tree.apply(&insert_patch("col", &id));
+    }
+    let mut text = TextEngine::new();
+    let scrolls = std::collections::HashMap::new();
+    let (w, h) = (800u32, 600u32);
+    let scroll_y = 3000.0f32;
+    let pass = LayoutPass::compute_with_scrolls(&tree, &mut text, (w, h), 1.0, scroll_y, &scrolls);
+
+    let buffer = h as f32 * CULL_BUFFER_VH;
+    let lo = scroll_y - buffer; // rows whose bottom is above this are culled
+    let hi = scroll_y + h as f32 + buffer; // rows whose top is below this are culled
+    for i in 0..100 {
+        let (top, bottom) = (i as f32 * 100.0, i as f32 * 100.0 + 100.0);
+        let emitted = pass.item_by_id(&format!("c{i}")).is_some();
+        let expect = !(bottom < lo || top > hi);
+        assert_eq!(
+            emitted, expect,
+            "row c{i} (natural y {top}..{bottom}) vs window {lo}..{hi}"
+        );
+    }
+    // Anchors chosen to PIN the constant at 2.0, not just the cull
+    // shape (the loop above tracks whatever value the code uses, so
+    // it alone can't catch a retune). Window at 2.0 is [1800, 4800]:
+    // - c46 (top 4600) is emitted ONLY thanks to the full buffer — at
+    //   1.0 the window ends at 4200 and this assert fails.
+    // - c17 (bottom 1800) rides the window's top edge — any buffer
+    //   below 2.0 starts later and this assert fails.
+    // - c49 (top 4900) sits just past the window bottom, c16 (bottom
+    //   1700) just above its top — at 2.5 either assert fails.
+    assert!(pass.item_by_id("c46").is_some(), "inside the below-fold buffer");
+    assert!(pass.item_by_id("c17").is_some(), "on the window's top edge");
+    assert!(pass.item_by_id("c49").is_none(), "just past the window bottom");
+    assert!(pass.item_by_id("c16").is_none(), "just above the window top");
+}
+
+// ---------------------------------------------------------------
+// Phase B: paint-only relayout skip. `refresh_paint_only` must make
+// the cached pass indistinguishable from a from-scratch recompute for
+// every batch the paint-only classifier admits — these equivalence
+// tests are the drift tripwire between `refresh_item_paint` and the
+// `emit_items` arms it mirrors.
+// ---------------------------------------------------------------
+
+mod paint_refresh {
+    use super::*;
+
+    const VP: (u32, u32) = (800, 600);
+
+    fn set_prop(id: &str, name: &str, value: Value) -> Patch {
+        Patch::SetProp {
+            id: id.into(),
+            name: name.into(),
+            value,
+        }
+    }
+
+    fn remove_prop(id: &str, name: &str) -> Patch {
+        Patch::RemoveProp {
+            id: id.into(),
+            name: name.into(),
+        }
+    }
+
+    /// A fixture covering every non-media item kind: Texts, a Button,
+    /// an Image, an Input, an Icon, nested Containers with border +
+    /// background.
+    fn fixture() -> Tree {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "col",
+            "Column",
+            &[("backgroundColor", json!("#ffffff")), ("gap", json!(8.0))],
+        ));
+        tree.apply(&insert_patch("root", "col"));
+        add_text(&mut tree, "col", "title", "Feed");
+        tree.apply(&create_patch(
+            "card",
+            "Container",
+            &[
+                ("backgroundColor", json!("#f8fafc")),
+                ("borderWidth", json!(1.0)),
+                ("borderColor", json!("#e2e8f0")),
+                ("borderRadius", json!(8.0)),
+                ("padding", json!(12.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("col", "card"));
+        tree.apply(&create_patch(
+            "name",
+            "Text",
+            &[("0", json!("Ada Lovelace")), ("color", json!("#111827"))],
+        ));
+        tree.apply(&insert_patch("card", "name"));
+        tree.apply(&create_patch(
+            "btn",
+            "Button",
+            &[("onClick.0", json!("@actions.like"))],
+        ));
+        tree.apply(&insert_patch("card", "btn"));
+        tree.apply(&create_patch(
+            "avatar",
+            "Image",
+            &[
+                ("src", json!("/avatars/ada.png")),
+                ("objectFit", json!("cover")),
+                ("width", json!(48.0)),
+                ("height", json!(48.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("card", "avatar"));
+        tree.apply(&create_patch(
+            "field",
+            "Input",
+            &[("value", json!("hi")), ("placeholder", json!("Say something"))],
+        ));
+        tree.apply(&insert_patch("card", "field"));
+        tree.apply(&create_patch(
+            "icon",
+            "Icon",
+            &[
+                ("__iconPaths", json!(["M0 0L24 24"])),
+                ("__iconViewBox", json!("0 0 24 24")),
+                ("color", json!("#334155")),
+                ("size", json!(24.0)),
+            ],
+        ));
+        tree.apply(&insert_patch("col", "icon"));
+        tree
+    }
+
+    /// Ground-truth equivalence: compute a pass, mutate the tree with a
+    /// batch the classifier admits, refresh the old pass in place, and
+    /// demand it matches a from-scratch recompute item-for-item —
+    /// including the derived indexes and the a11y map.
+    fn assert_refresh_matches(mut tree: Tree, batch: &[Patch]) {
+        let mut text = TextEngine::new();
+        let mut refreshed = LayoutPass::compute(&tree, &mut text, VP, 1.0);
+        for p in batch {
+            tree.apply(p);
+        }
+        let affected =
+            crate::window::paint_only_affected_ids(batch, &[], &tree, false, false, false)
+                .expect("fixture batch must classify as paint-only");
+        refreshed.refresh_paint_only(
+            &tree,
+            &affected,
+            crate::style::Viewport::new(VP.0 as f32, VP.1 as f32),
+            1.0,
+        );
+        let fresh = LayoutPass::compute(&tree, &mut text, VP, 1.0);
+
+        assert_eq!(
+            refreshed.items.len(),
+            fresh.items.len(),
+            "item count must not change under a paint-only refresh"
+        );
+        for (a, b) in refreshed.items.iter().zip(fresh.items.iter()) {
+            assert_eq!(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "item `{}` diverged between in-place refresh and full recompute",
+                a.node_id
+            );
+        }
+        assert_eq!(refreshed.content_size, fresh.content_size);
+        assert_eq!(refreshed.by_node_id, fresh.by_node_id);
+        assert_eq!(refreshed.actionable_ids, fresh.actionable_ids, "actionable index");
+        assert_eq!(refreshed.focusable_ids, fresh.focusable_ids, "focusable index");
+        assert_eq!(refreshed.scrollable_ids, fresh.scrollable_ids, "scrollable index");
+        assert_eq!(refreshed.hoverable_ids, fresh.hoverable_ids, "hoverable index");
+        let mut a: Vec<String> = refreshed
+            .a11y
+            .iter()
+            .map(|(k, v)| format!("{k}={v:?}"))
+            .collect();
+        let mut b: Vec<String> = fresh
+            .a11y
+            .iter()
+            .map(|(k, v)| format!("{k}={v:?}"))
+            .collect();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b, "a11y semantics map");
+    }
+
+    #[test]
+    fn text_color_flip() {
+        assert_refresh_matches(fixture(), &[set_prop("name", "color", json!("#ff0000"))]);
+    }
+
+    #[test]
+    fn text_align_change() {
+        assert_refresh_matches(fixture(), &[set_prop("title", "textAlign", json!("center"))]);
+    }
+
+    #[test]
+    fn container_background_and_border_color() {
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("card", "backgroundColor", json!("#0ea5e9")),
+                set_prop("card", "borderColor", json!("#f43f5e")),
+            ],
+        );
+    }
+
+    #[test]
+    fn background_removed() {
+        assert_refresh_matches(fixture(), &[remove_prop("card", "backgroundColor")]);
+    }
+
+    #[test]
+    fn onclick_added_updates_action_and_indexes() {
+        // `title` becomes actionable AND focusable — the derived-index
+        // assertion is the point of this test.
+        assert_refresh_matches(
+            fixture(),
+            &[set_prop("title", "onClick.0", json!("@actions.open"))],
+        );
+    }
+
+    #[test]
+    fn onclick_removed_updates_action_and_indexes() {
+        assert_refresh_matches(fixture(), &[remove_prop("btn", "onClick.0")]);
+    }
+
+    #[test]
+    fn onhover_added_updates_hoverable_index() {
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("card", "onHover.0", json!("@actions.spotlight")),
+                set_prop("card", "onHover.postId", json!(42)),
+            ],
+        );
+    }
+
+    #[test]
+    fn input_value_placeholder_and_bind() {
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("field", "value", json!("hello world")),
+                set_prop("field", "placeholder", json!("Type here")),
+                set_prop("field", "bind", json!("form.message")),
+            ],
+        );
+    }
+
+    #[test]
+    fn input_color_and_background_defaults() {
+        // The Input arm's specializations: explicit backgroundColor
+        // replaces the default white fill; text colour re-resolves.
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("field", "color", json!("#7c3aed")),
+                set_prop("field", "backgroundColor", json!("#fef9c3")),
+            ],
+        );
+    }
+
+    #[test]
+    fn image_src_and_fit_change() {
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("avatar", "src", json!("/avatars/grace.png")),
+                set_prop("avatar", "objectFit", json!("contain")),
+            ],
+        );
+    }
+
+    #[test]
+    fn image_flips_to_icon_when_paths_arrive() {
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("avatar", "__iconPaths", json!(["M2 2L22 22"])),
+                set_prop("avatar", "__iconViewBox", json!("0 0 24 24")),
+            ],
+        );
+    }
+
+    #[test]
+    fn icon_tint_change_and_flip_to_image() {
+        assert_refresh_matches(fixture(), &[set_prop("icon", "color", json!("#dc2626"))]);
+        assert_refresh_matches(
+            fixture(),
+            &[
+                remove_prop("icon", "__iconPaths"),
+                set_prop("icon", "src", json!("/fallback.png")),
+            ],
+        );
+    }
+
+    #[test]
+    fn hover_variant_write() {
+        assert_refresh_matches(
+            fixture(),
+            &[set_prop("btn", "backgroundColor:hover", json!("#e0f2fe"))],
+        );
+    }
+
+    #[test]
+    fn state_variant_write() {
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("btn", "backgroundColor:focus", json!("#bae6fd")),
+                set_prop("btn", "borderColor:active", json!("#0284c7")),
+            ],
+        );
+    }
+
+    #[test]
+    fn opacity_set_propagates_to_descendants() {
+        // `card`'s opacity multiplies down into name/btn/avatar/field —
+        // the whole-items opacity post-pass is what keeps descendants
+        // honest.
+        assert_refresh_matches(fixture(), &[set_prop("card", "opacity", json!(0.5))]);
+    }
+
+    #[test]
+    fn opacity_removed_resets_to_default() {
+        let mut tree = fixture();
+        tree.apply(&set_prop("card", "opacity", json!(0.5)));
+        assert_refresh_matches(tree, &[remove_prop("card", "opacity")]);
+    }
+
+    #[test]
+    fn transform_write_and_removal() {
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("card", "translateY", json!(12.0)),
+                set_prop("card", "scale", json!(1.05)),
+            ],
+        );
+        let mut tree = fixture();
+        tree.apply(&set_prop("card", "translateY", json!(12.0)));
+        assert_refresh_matches(tree, &[remove_prop("card", "translateY")]);
+    }
+
+    #[test]
+    fn set_semantics_refreshes_a11y_map() {
+        let semantics: hypen_engine::ir::Semantics =
+            serde_json::from_value(json!({ "role": "button", "name": "Like this post" }))
+                .expect("valid semantics JSON");
+        assert_refresh_matches(
+            fixture(),
+            &[Patch::SetSemantics {
+                id: "btn".into(),
+                semantics: Some(semantics.clone()),
+            }],
+        );
+        // And alongside a paint prop in the same batch.
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("btn", "backgroundColor", json!("#eef2ff")),
+                Patch::SetSemantics {
+                    id: "name".into(),
+                    semantics: Some(semantics),
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn mixed_paint_only_batch() {
+        assert_refresh_matches(
+            fixture(),
+            &[
+                set_prop("name", "color", json!("#dc2626")),
+                set_prop("card", "backgroundColor", json!("#f0fdf4")),
+                set_prop("field", "value", json!("typed")),
+                set_prop("avatar", "src", json!("/b.png")),
+                set_prop("col", "opacity", json!(0.9)),
+                set_prop("title", "translateX", json!(4.0)),
+            ],
+        );
+    }
+
+    #[test]
+    fn affected_ids_without_items_are_skipped() {
+        // A culled node has no item — the refresh must skip it without
+        // panicking, and the full recompute at the same scroll agrees.
+        let mut tree = Tree::new();
+        tree.apply(&create_patch("col", "Column", &[]));
+        tree.apply(&insert_patch("root", "col"));
+        for i in 0..200 {
+            let id = format!("row{i}");
+            tree.apply(&create_patch(
+                &id,
+                "Text",
+                &[
+                    ("0", json!(format!("row {i}"))),
+                    ("height", json!(100.0)),
+                    ("color", json!("#0f172a")),
+                ],
+            ));
+            tree.apply(&insert_patch("col", &id));
+        }
+        let mut text = TextEngine::new();
+        let scrolls: HashMap<String, f32> = HashMap::new();
+        let mut refreshed =
+            LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        let batch = [set_prop("row150", "color", json!("#ff0000"))];
+        for p in &batch {
+            tree.apply(p);
+        }
+        assert!(
+            refreshed.item_by_id("row150").is_none(),
+            "precondition: row150 must be culled at scroll 0"
+        );
+        let affected =
+            crate::window::paint_only_affected_ids(&batch, &[], &tree, false, false, false).unwrap();
+        refreshed.refresh_paint_only(
+            &tree,
+            &affected,
+            crate::style::Viewport::new(VP.0 as f32, VP.1 as f32),
+            1.0,
+        );
+        let fresh = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        assert_eq!(refreshed.items.len(), fresh.items.len());
+        for (a, b) in refreshed.items.iter().zip(fresh.items.iter()) {
+            assert_eq!(format!("{a:?}"), format!("{b:?}"));
+        }
+    }
+}
+
+// ---------------------------------------------------------------
+// Review regressions (Phase B adversarial pass): the layout-prop
+// classifier must cover every prop `node_style_with`'s call graph
+// feeds into Taffy, and the Taffy restyle gate must accept the
+// decorated wire keys the engine actually emits.
+// ---------------------------------------------------------------
+
+#[test]
+fn layout_prop_classifier_covers_every_taffy_fed_prop() {
+    // Each of these reaches a Taffy style field (apply_position_props,
+    // apply_flex_props, apply_alignment_props, the Grid arm) — a
+    // paint-only classification for any of them would let the
+    // relayout-skip serve stale geometry.
+    for name in [
+        "inset",
+        "flexDirection",
+        "flex-direction",
+        "gridColumns",
+        "grid-columns",
+        "horizontalAlignment",
+        "verticalAlignment",
+        "alignContent", // was a dead camelCase arm in a lowercased match
+        "align-content",
+    ] {
+        assert!(
+            crate::layout::is_layout_prop_key(name),
+            "{name} feeds Taffy styles and must classify as layout"
+        );
+        let decorated = format!("{name}.0");
+        assert!(
+            crate::layout::is_layout_prop_key(&decorated),
+            "{decorated} (flattened wire form) must classify as layout"
+        );
+    }
+}
+
+#[test]
+fn taffy_restyle_fires_for_decorated_layout_keys() {
+    // The engine flattens `.width(160)` to `width.0` — the Taffy
+    // mirror's SetProp gate must restyle on the DECORATED key, or the
+    // solver keeps the stale dimension while the classifier correctly
+    // routes the batch through the full-relayout path.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "box",
+        "Container",
+        &[("width.0", json!(160.0)), ("height.0", json!(40.0))],
+    ));
+    tree.apply(&insert_patch("root", "box"));
+    let mut taffy = TaffyState::new();
+    if !taffy.apply_patches(
+        &[
+            create_patch("box", "Container", &[("width.0", json!(160.0)), ("height.0", json!(40.0))]),
+            insert_patch("root", "box"),
+        ],
+        &tree,
+        1.0,
+        crate::style::Viewport::new(800.0, 600.0),
+    ) {
+        taffy.mark_needs_rebuild();
+    }
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (800, 600), 1.0, 0.0, &scrolls, 0,
+    );
+    assert_eq!(find_item(&pass, "box").rect.w, 160.0);
+
+    let patch = Patch::SetProp {
+        id: "box".into(),
+        name: "width.0".into(),
+        value: json!(320.0),
+    };
+    tree.apply(&patch);
+    assert!(taffy.apply_patches(
+        std::slice::from_ref(&patch),
+        &tree,
+        1.0,
+        crate::style::Viewport::new(800.0, 600.0)
+    ));
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (800, 600), 1.0, 0.0, &scrolls, 1,
+    );
+    assert_eq!(
+        find_item(&pass, "box").rect.w,
+        320.0,
+        "width.0 SetProp must restyle the Taffy node, not just dirty the fit pass"
+    );
+}
+
+#[test]
+fn scroll_meta_bakes_the_emitting_offset() {
+    let tree = build_scrollable_column(30, "overflow");
+    let mut text = TextEngine::new();
+    let mut scrolls: HashMap<String, f32> = HashMap::new();
+    scrolls.insert("scroller".to_string(), 120.0);
+    let pass = LayoutPass::compute_with_scrolls(&tree, &mut text, (400, 600), 1.0, 0.0, &scrolls);
+    let meta = find_item(&pass, "scroller")
+        .scrollable
+        .expect("scroller emits ScrollMeta");
+    assert_eq!(
+        meta.baked_offset, 120.0,
+        "ScrollMeta must record the offset the descendants were emitted with"
+    );
+}
+
+// ---------------------------------------------------------------
+// Phase C: container-scroll fast path. `shift_container_scroll` must
+// be indistinguishable from a fresh emit at the new offset (within
+// the cull buffer), including nested-scrollable clips and transform
+// origins.
+// ---------------------------------------------------------------
+
+mod container_shift {
+    use super::*;
+
+    const VP: (u32, u32) = (800, 600);
+
+    /// Compare two passes item-for-item, normalizing the offset
+    /// bookkeeping a shift legitimately leaves different from a fresh
+    /// emit (`emitted_offset` anchors the re-emit threshold and is
+    /// NOT advanced by shifts).
+    fn assert_items_match(shifted: &LayoutPass, fresh: &LayoutPass) {
+        assert_eq!(shifted.items.len(), fresh.items.len(), "item membership");
+        for (a, b) in shifted.items.iter().zip(fresh.items.iter()) {
+            let (mut a, mut b) = (a.clone(), b.clone());
+            if let Some(m) = a.scrollable.as_mut() {
+                m.emitted_offset = m.baked_offset;
+            }
+            if let Some(m) = b.scrollable.as_mut() {
+                m.emitted_offset = m.baked_offset;
+            }
+            assert_eq!(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "item `{}` diverged between in-place shift and fresh emit",
+                a.node_id
+            );
+        }
+    }
+
+    /// Scroller (200px, overflow:scroll) with 8 fixed-height rows —
+    /// everything within the cull buffer at both offsets, so
+    /// membership is identical and the comparison is exhaustive. One
+    /// row carries a rotation so the transform post-pass (origins =
+    /// rect centers, which move under the shift) is exercised.
+    fn fixture() -> Tree {
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "scroller",
+            "Container",
+            &[("overflow", json!("scroll")), ("height", json!(200.0))],
+        ));
+        tree.apply(&insert_patch("root", "scroller"));
+        for i in 0..8 {
+            let id = format!("r{i}");
+            let mut props = vec![
+                ("0", json!(format!("row {i}"))),
+                ("height", json!(40.0)),
+            ];
+            if i == 3 {
+                props.push(("rotate", json!(15.0)));
+            }
+            tree.apply(&create_patch(&id, "Text", &props));
+            tree.apply(&insert_patch("scroller", &id));
+        }
+        tree
+    }
+
+    #[test]
+    fn shift_matches_fresh_emit_at_new_offset() {
+        let tree = fixture();
+        let mut text = TextEngine::new();
+        let mut scrolls: HashMap<String, f32> = HashMap::new();
+        let mut shifted =
+            LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        shifted.shift_container_scroll(
+            &tree,
+            "scroller",
+            40.0,
+            crate::style::Viewport::new(VP.0 as f32, VP.1 as f32),
+            1.0,
+        );
+        scrolls.insert("scroller".to_string(), 40.0);
+        let fresh = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        assert_items_match(&shifted, &fresh);
+        // The shift advanced the rect baseline but NOT the cull
+        // anchor; a fresh emit re-bases both.
+        let meta = shifted.item_by_id("scroller").unwrap().scrollable.unwrap();
+        assert_eq!(meta.baked_offset, 40.0);
+        assert_eq!(meta.emitted_offset, 0.0);
+        let meta = fresh.item_by_id("scroller").unwrap().scrollable.unwrap();
+        assert_eq!(meta.baked_offset, 40.0);
+        assert_eq!(meta.emitted_offset, 40.0);
+    }
+
+    #[test]
+    fn two_shifts_compose_like_one() {
+        let tree = fixture();
+        let mut text = TextEngine::new();
+        let mut scrolls: HashMap<String, f32> = HashMap::new();
+        let vp = crate::style::Viewport::new(VP.0 as f32, VP.1 as f32);
+        let mut shifted =
+            LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        shifted.shift_container_scroll(&tree, "scroller", 25.0, vp, 1.0);
+        shifted.shift_container_scroll(&tree, "scroller", 15.0, vp, 1.0);
+        scrolls.insert("scroller".to_string(), 40.0);
+        let fresh = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        assert_items_match(&shifted, &fresh);
+    }
+
+    #[test]
+    fn shift_leaves_container_row_and_siblings_alone() {
+        let mut tree = fixture();
+        add_text(&mut tree, "root", "outside", "not in the scroller");
+        let mut text = TextEngine::new();
+        let scrolls: HashMap<String, f32> = HashMap::new();
+        let mut pass = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        let container_before = pass.item_by_id("scroller").unwrap().rect;
+        let outside_before = pass.item_by_id("outside").unwrap().rect;
+        pass.shift_container_scroll(
+            &tree,
+            "scroller",
+            40.0,
+            crate::style::Viewport::new(VP.0 as f32, VP.1 as f32),
+            1.0,
+        );
+        assert_eq!(pass.item_by_id("scroller").unwrap().rect, container_before);
+        assert_eq!(pass.item_by_id("outside").unwrap().rect, outside_before);
+    }
+
+    #[test]
+    fn nested_scrollable_clips_shift_with_their_owner() {
+        // outer (scrollable, 400px) → filler rows + inner (scrollable,
+        // 150px) → rows. Scrolling the OUTER moves the inner container
+        // and its rows; the inner rows' clip (anchored to the inner
+        // container, which moved) must shift, while the direct
+        // children of the outer keep their clip (the outer's rect,
+        // which did not move).
+        let mut tree = Tree::new();
+        tree.apply(&create_patch(
+            "outer",
+            "Container",
+            &[("overflow", json!("scroll")), ("height", json!(400.0))],
+        ));
+        tree.apply(&insert_patch("root", "outer"));
+        for i in 0..3 {
+            let id = format!("f{i}");
+            tree.apply(&create_patch(&id, "Text", &[("0", json!("filler")), ("height", json!(40.0))]));
+            tree.apply(&insert_patch("outer", &id));
+        }
+        tree.apply(&create_patch(
+            "inner",
+            "Container",
+            &[("overflow", json!("scroll")), ("height", json!(150.0))],
+        ));
+        tree.apply(&insert_patch("outer", "inner"));
+        for i in 0..4 {
+            let id = format!("n{i}");
+            tree.apply(&create_patch(&id, "Text", &[("0", json!("nested")), ("height", json!(40.0))]));
+            tree.apply(&insert_patch("inner", &id));
+        }
+        let mut text = TextEngine::new();
+        let mut scrolls: HashMap<String, f32> = HashMap::new();
+        let vp = crate::style::Viewport::new(VP.0 as f32, VP.1 as f32);
+        let mut shifted =
+            LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        let filler_clip_before = shifted.item_by_id("f0").unwrap().clip_to;
+        let nested_clip_before = shifted.item_by_id("n0").unwrap().clip_to;
+        shifted.shift_container_scroll(&tree, "outer", 30.0, vp, 1.0);
+        // Direct child of the outer: clip anchored to the outer's
+        // (unmoved) rect stays put.
+        assert_eq!(shifted.item_by_id("f0").unwrap().clip_to, filler_clip_before);
+        // Nested row: clip anchored to the inner container, which
+        // moved up 30px.
+        let nested_clip_after = shifted.item_by_id("n0").unwrap().clip_to.unwrap();
+        assert_eq!(nested_clip_after.y, nested_clip_before.unwrap().y - 30.0);
+        // And the whole shifted pass matches a fresh emit.
+        scrolls.insert("outer".to_string(), 30.0);
+        let fresh = LayoutPass::compute_with_scrolls(&tree, &mut text, VP, 1.0, 0.0, &scrolls);
+        assert_items_match(&shifted, &fresh);
+    }
 }

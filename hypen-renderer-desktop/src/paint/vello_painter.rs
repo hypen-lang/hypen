@@ -69,6 +69,17 @@ struct CachedSubtree {
     /// paint-only patch batch drops exactly the entries whose id set
     /// intersects the affected nodes instead of the whole cache.
     item_ids: Vec<String>,
+    /// The first item's cumulative transform at encode time. The
+    /// splice-on-hit is a pure y-translate, which is only valid when
+    /// the CURRENT transform is that translate's conjugation of this
+    /// one — true for page scroll (everything shifts) and for
+    /// container scroll under translate-only ancestry, false the
+    /// moment a non-shifting ancestor (the scrolled container itself
+    /// included) carries `scale`/`rotate`, where content really moves
+    /// `s·dy`, not `dy`. The hit branch checks the conjugation and
+    /// misses (re-encodes) when it doesn't hold — self-validating,
+    /// instead of guessing from tree shape.
+    transform: crate::layout::Affine2,
 }
 
 pub struct VelloPainter {
@@ -345,12 +356,13 @@ impl VelloPainter {
     /// Paint a contiguous slice of items that share one `subtree_root`,
     /// going through the scene cache where possible.
     ///
-    /// **Cache key.** `(root_id, sorted ids of items with non-default
-    /// interaction state)`. Anything else that changes appearance
-    /// (props, layout) bumps `tree_generation`, which `App::redraw`
-    /// follows with `painter.invalidate_subtree_cache()`. So inside a
-    /// single tree generation, hover / press / focus transitions are
-    /// the only deltas the key needs to encode — the rest is implicit.
+    /// **Cache key.** `(root_id, item ids in order, per-item
+    /// interaction state)`. Membership is in the key because the cull
+    /// can emit a subtree partially (a card taller than the cull
+    /// buffer) — a fragment encoded from a partial slice must miss
+    /// once the culled descendants scroll back in. Anything else that
+    /// changes appearance (props, layout) bumps `tree_generation`,
+    /// which `App::redraw` follows with an invalidation.
     ///
     /// **Translation.** Cached fragments store the `rect.y` of their
     /// first item at encode time. On hit, `current_origin_y -
@@ -398,8 +410,19 @@ impl VelloPainter {
         // and break the disjointness). We inline the push/append/
         // pop here instead.
         if let Some(cached) = self.subtree_cache.get(&key) {
-            if cached.clip_to == outer_clip {
-                let dy = current_origin_y - cached.origin_y;
+            let dy = current_origin_y - cached.origin_y;
+            // Splice validity: the y-translate replay is exact iff the
+            // first item's current cumulative transform is the cached
+            // one conjugated by that translate (see
+            // `CachedSubtree::transform`). Non-shifting transformed
+            // ancestry — a scaled scrolled container, a rotated
+            // wrapper — fails this and re-encodes instead of
+            // mispainting. Identity (the overwhelming case) passes
+            // trivially: conjugating identity is identity.
+            let splice_valid = items[0]
+                .transform
+                .approx_eq(&cached.transform.conjugate_translate(0.0, dy), 1e-3);
+            if cached.clip_to == outer_clip && splice_valid {
                 // Split-borrow: `cached.scene` reads `self.subtree_cache`,
                 // `self.scene` is the disjoint mut target.
                 let pushed = push_outer_clip(&mut self.scene, outer_clip);
@@ -428,7 +451,10 @@ impl VelloPainter {
         }
         let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
 
-        if self.subtree_cache.len() >= SUBTREE_CACHE_CAP {
+        // A same-key miss (splice-invalid re-encode of an existing
+        // entry) replaces in place — evicting first would drop an
+        // innocent oldest entry and net `len = CAP − 1`.
+        if !self.subtree_cache.contains_key(&key) && self.subtree_cache.len() >= SUBTREE_CACHE_CAP {
             self.subtree_cache.shift_remove_index(0);
         }
         self.subtree_cache.insert(
@@ -438,6 +464,7 @@ impl VelloPainter {
                 origin_y: current_origin_y,
                 clip_to: outer_clip,
                 item_ids: items.iter().map(|it| it.node_id.clone()).collect(),
+                transform: items[0].transform,
             },
         );
         // Append the just-cached scene at identity translation. Same
@@ -634,7 +661,50 @@ impl VelloPainter {
         // CSS layer order for a `background` value: colour at the bottom,
         // then the image, then the gradient on top. The wallpaper is exactly
         // that stack — a darkening `linear-gradient(...)` over a photo.
-        if let Some(src) = item.background_image.as_deref() {
+        if let Some(pb) = item.background_layers.as_ref() {
+            // Fully layered stack (radial gradients, multi-layer
+            // `background` shorthand). The shorthand's own colour layer
+            // paints above the `backgroundColor` fill, below every
+            // image/gradient layer; the layers themselves are stored
+            // bottom-first, so painting in order stacks them like CSS.
+            if let Some(bg) = background {
+                fill_rect(&mut self.scene, item.rect, bg, radius);
+            }
+            if let Some(c) = pb.color {
+                fill_rect(&mut self.scene, item.rect, c, radius);
+            }
+            for layer in &pb.layers {
+                match layer {
+                    crate::style::BackgroundLayer::Image(src) => {
+                        self.draw_image(
+                            item.rect,
+                            Some(src),
+                            crate::layout::ObjectFit::Cover,
+                            radius,
+                        );
+                    }
+                    crate::style::BackgroundLayer::Linear(grad) => {
+                        fill_gradient_rect(&mut self.scene, item.rect, grad, radius);
+                    }
+                    crate::style::BackgroundLayer::Radial(grad) => {
+                        fill_radial_gradient_rect(
+                            &mut self.scene,
+                            item.rect,
+                            grad,
+                            radius,
+                            scale_factor,
+                        );
+                    }
+                }
+            }
+            // A `.linearGradient()` applicator or Tailwind
+            // `bg-gradient-to-*` arrives in a DIFFERENT prop than the
+            // `background` shorthand that built this stack; it painted
+            // on top before the layered path existed, so it still must.
+            if let Some(grad) = item.background_gradient.as_ref() {
+                fill_gradient_rect(&mut self.scene, item.rect, grad, radius);
+            }
+        } else if let Some(src) = item.background_image.as_deref() {
             if let Some(bg) = background {
                 fill_rect(&mut self.scene, item.rect, bg, radius);
             }
@@ -1243,6 +1313,83 @@ fn fill_gradient_rect(
     }
 }
 
+/// Paint a rounded (or square) rect filled with a radial gradient.
+/// The ending shape may be an ellipse (`radial-gradient(85% 60% at …)`),
+/// which Vello's circular `new_radial` can't express directly — so the
+/// gradient is built on a unit circle at the origin and stretched into
+/// place with a brush transform (translate to the centre, scale by the
+/// per-axis radii).
+fn fill_radial_gradient_rect(
+    scene: &mut Scene,
+    rect: LayoutRect,
+    grad: &crate::style::RadialGradient,
+    radius: f32,
+    scale: f32,
+) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || grad.stops.is_empty() {
+        return;
+    }
+    let cx = rect.x + grad.center.0 * rect.w;
+    let cy = rect.y + grad.center.1 * rect.h;
+    let (rx, ry) = grad.resolve_radii(rect.w, rect.h, scale);
+    if rx <= 0.0 || ry <= 0.0 {
+        // CSS's degenerate case (e.g. `closest-side` with the centre on
+        // a box edge): the ending shape is treated as vanishingly
+        // small, so every point sits past the last stop — a flat fill
+        // of the last stop's colour, not an invisible element.
+        if let Some(last) = grad.stops.last() {
+            fill_rect(scene, rect, last.color, radius);
+        }
+        return;
+    }
+    let mut gradient = vello::peniko::Gradient::new_radial(vello::kurbo::Point::new(0.0, 0.0), 1.0);
+    let stops = grad.resolved_offsets();
+    let color_stops: Vec<vello::peniko::ColorStop> = stops
+        .into_iter()
+        .map(|(off, c)| vello::peniko::ColorStop {
+            offset: off,
+            color: vello::peniko::color::DynamicColor::from_alpha_color(
+                vello::peniko::Color::from_rgba8(c.0, c.1, c.2, c.3),
+            ),
+        })
+        .collect();
+    gradient.stops = vello::peniko::ColorStops(color_stops.into());
+    let brush = Brush::Gradient(gradient);
+    let brush_transform =
+        Affine::translate((cx as f64, cy as f64)) * Affine::scale_non_uniform(rx as f64, ry as f64);
+    if radius > 0.0 {
+        let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
+        let kr = RoundedRect::new(
+            rect.x as f64,
+            rect.y as f64,
+            (rect.x + rect.w) as f64,
+            (rect.y + rect.h) as f64,
+            r as f64,
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &brush,
+            Some(brush_transform),
+            &kr,
+        );
+    } else {
+        let kr = KRect::new(
+            rect.x as f64,
+            rect.y as f64,
+            (rect.x + rect.w) as f64,
+            (rect.y + rect.h) as f64,
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &brush,
+            Some(brush_transform),
+            &kr,
+        );
+    }
+}
+
 fn fill_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32) {
     if rect.w <= 0.0 || rect.h <= 0.0 || color.3 == 0 {
         return;
@@ -1494,12 +1641,17 @@ fn subtree_cache_key(
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     root_id.hash(&mut h);
-    // Include only ids whose interaction state diverges from the
-    // default (no hover, no press, not focused). Idle scrolling
-    // through a feed of identical-default Posts thus produces the
-    // same key for every frame — maximum cache reuse.
+    // Membership matters, not just the root: `emit_items` culls per
+    // NODE, so a subtree whose root is on screen can be emitted with
+    // some of its own descendants culled (a card taller than the cull
+    // buffer). A fragment encoded from that partial slice must MISS
+    // once the missing descendants scroll back in — without the ids in
+    // the key it replayed the truncated encoding forever and the
+    // returning descendants never painted.
+    items.len().hash(&mut h);
     for item in items {
         let id = item.node_id.as_str();
+        id.hash(&mut h);
         let mut state: u8 = 0;
         if interaction.hovered.contains(id) {
             state |= 0b001;
@@ -1510,10 +1662,7 @@ fn subtree_cache_key(
         if interaction.focused.as_deref() == Some(id) {
             state |= 0b100;
         }
-        if state != 0 {
-            id.hash(&mut h);
-            state.hash(&mut h);
-        }
+        state.hash(&mut h);
     }
     h.finish()
 }
@@ -1880,6 +2029,7 @@ mod tests {
             clip_to: None,
             subtree_root: None,
             background_gradient: None,
+            background_layers: None,
             background_image: None,
             state_variants: crate::style::StateVariants::default(),
             opacity: 1.0,
@@ -1910,6 +2060,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         // Build is the side effect we're testing — just verify it
         // doesn't panic and produces a non-empty scene for visible
@@ -1944,6 +2095,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         }
     }
 
@@ -2023,6 +2175,132 @@ mod tests {
     }
 
     #[test]
+    fn subtree_cache_misses_when_membership_changes() {
+        // Regression for the partial-subtree replay bug: `emit_items`
+        // culls per node, so a subtree can be emitted with some of its
+        // descendants culled (a card taller than the cull buffer). A
+        // fragment encoded from that partial slice must MISS — not
+        // replay translated — once the missing descendants scroll back
+        // in, or they never paint again while the cache survives.
+        let mut painter = VelloPainter::new();
+        let clip = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 600.0,
+        };
+        let with_clip = |mut it: LayoutItem| {
+            it.clip_to = Some(clip);
+            it
+        };
+        let root = with_clip(item_in("post", "post", 0.0, 0.0, 400.0, 800.0));
+        let top = with_clip(item_in("post_top", "post", 0.0, 0.0, 400.0, 600.0));
+        let bot = with_clip(item_in("post_bot", "post", 0.0, 600.0, 400.0, 100.0));
+        let pass_for = |items: Vec<LayoutItem>| LayoutPass {
+            items,
+            content_size: (400.0, 800.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+
+        // Frame 1: the subtree is emitted partially (bot culled).
+        let partial = pass_for(vec![root.clone(), top.clone()]);
+        painter.build_scene(&partial, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 1);
+        // Same membership again: cache hit, as before.
+        painter.build_scene(&partial, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_hits(), 1);
+
+        // Frame 3: the culled descendant is back — membership changed,
+        // so the truncated fragment must NOT replay.
+        let full = pass_for(vec![root, top, bot]);
+        painter.build_scene(&full, (800, 600), 1.0, 0.0);
+        assert_eq!(
+            painter.subtree_cache_hits(),
+            1,
+            "partial fragment must not be replayed for the full subtree"
+        );
+        assert_eq!(painter.subtree_cache_misses(), 2);
+    }
+
+    /// Splice validity (adversarial-review finding): replaying a
+    /// cached fragment with a raw y-translate is only correct when the
+    /// item's cumulative transform is that translate's conjugation of
+    /// the encode-time one. Container scroll under a scaled container
+    /// violates that — content really moves `s·dy` — so the hit
+    /// branch must MISS and re-encode, not mispaint.
+    #[test]
+    fn subtree_cache_misses_when_shift_is_not_a_transform_conjugation() {
+        let clip = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 800.0,
+            h: 600.0,
+        };
+        // A fragment whose item carries a scale whose ORIGIN does not
+        // move with the item (a scaled scrolled container above it):
+        // simulate by keeping the transform fixed while the rect
+        // shifts — exactly what `shift_container_scroll`'s exact
+        // recompute produces when the scale lives on the (unmoving)
+        // container.
+        let fixed_scale = crate::layout::Affine2([1.5, 0.0, 0.0, 1.5, -40.0, -40.0]);
+        let mut a = item_in("row", "row", 0.0, 200.0, 400.0, 100.0);
+        a.clip_to = Some(clip);
+        a.transform = fixed_scale;
+        let pass_for = |it: LayoutItem| LayoutPass {
+            items: vec![it],
+            content_size: (400.0, 1000.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+        let mut painter = VelloPainter::new();
+        painter.build_scene(&pass_for(a.clone()), (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 1);
+
+        // Rect shifted by container scroll; transform UNCHANGED (its
+        // origin didn't move). The y-translate splice would paint the
+        // row 100px off (correct motion is 150px under scale 1.5) —
+        // the conjugation check must reject the hit.
+        let mut shifted = a.clone();
+        shifted.rect.y -= 100.0;
+        painter.build_scene(&pass_for(shifted), (800, 600), 1.0, 0.0);
+        assert_eq!(
+            painter.subtree_cache_hits(),
+            0,
+            "non-conjugate shift must not replay the cached fragment"
+        );
+        assert_eq!(painter.subtree_cache_misses(), 2);
+
+        // Positive control — the page-scroll analogue: rect shifted
+        // AND transform conjugated by the same translate (everything
+        // moved together). That splice is exact and must HIT.
+        let mut b = item_in("row2", "row2", 0.0, 200.0, 400.0, 100.0);
+        b.clip_to = Some(clip);
+        b.transform = fixed_scale;
+        let mut painter2 = VelloPainter::new();
+        painter2.build_scene(&pass_for(b.clone()), (800, 600), 1.0, 0.0);
+        let mut b_shifted = b.clone();
+        b_shifted.rect.y -= 100.0;
+        b_shifted.transform = b.transform.conjugate_translate(0.0, -100.0);
+        painter2.build_scene(&pass_for(b_shifted), (800, 600), 1.0, 0.0);
+        assert_eq!(
+            painter2.subtree_cache_hits(),
+            1,
+            "a true conjugate shift keeps the fast splice"
+        );
+    }
+
+    #[test]
     fn subtree_cache_clears_on_viewport_change() {
         let mut painter = VelloPainter::new();
         let layout = three_post_layout();
@@ -2050,10 +2328,11 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(scene.encoding().path_tags.len(), 0);
-        let _ = ScrollMeta { content_h: 0.0 }; // keep symbol referenced
+        let _ = ScrollMeta { content_h: 0.0, baked_offset: 0.0, emitted_offset: 0.0 }; // keep symbol referenced
     }
 
     #[test]
@@ -2090,6 +2369,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 200.0);
         // At least one path encoded (the on-screen item) — and the
@@ -2191,6 +2471,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert!(!scene.encoding().path_tags.is_empty(), "content encoded");
@@ -2226,6 +2507,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         // cos 90° = 0, sin 90° = 1 → matrix [0, 1, -1, 0].
@@ -2260,6 +2542,7 @@ mod tests {
                 scrollable_ids: vec![],
                 hoverable_ids: vec![],
                 a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
             };
             painter.build_scene(&layout, (800, 600), 1.0, 0.0).encoding().n_paths
         };
@@ -2283,6 +2566,7 @@ mod tests {
             scrollable_ids: vec![],
             hoverable_ids: vec![],
             a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
         };
         let scene = painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert!(

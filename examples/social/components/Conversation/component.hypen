@@ -1,0 +1,67 @@
+module Conversation {
+    Column {
+        Row {
+            Button {
+                Text("←")
+                    .tw("text-xl")
+            }
+            .onClick(@router.push, to: "/messages")
+            .tw("bg-transparent p-2")
+
+            Image(src: "@{state.peer.avatarUrl}")
+                .tw("size-8 rounded-full shrink-0")
+
+            Text("@{state.peer.username}")
+                .tw("text-base font-semibold flex-1 pl-3")
+
+            Column {}
+                .tw("w-10")
+        }
+        .tw("py-2 px-2 items-center bg-white border-b border-gray-200")
+
+        // Sent messages render as a right-aligned blue bubble, received ones
+        // as a left-aligned gray bubble with the sender's avatar.
+        List(@state.chatMessages, key: "id") {
+            If(condition: "@{item.isMine}") {
+                Row {
+                    Column {
+                        Text("@{item.text}")
+                            .tw("text-sm text-white")
+                    }
+                    .tw("bg-blue-500 rounded-2xl rounded-br-md py-2 px-3.5 max-w-[75%]")
+                }
+                .tw("w-full justify-end px-4 py-1")
+            }
+            If(condition: "@{!item.isMine}") {
+                Row {
+                    Image(src: "@{item.avatarUrl}")
+                        .tw("size-7 rounded-full shrink-0")
+
+                    Column {
+                        Text("@{item.text}")
+                            .tw("text-sm text-gray-900")
+                    }
+                    .tw("bg-gray-100 rounded-2xl rounded-bl-md py-2 px-3.5 ml-2 max-w-[75%]")
+                }
+                .tw("w-full justify-start items-end px-4 py-1")
+            }
+        }
+        .tw("flex-1 py-3")
+
+        Row {
+            Input(placeholder: "Message...")
+                .bind(@state.draft)
+                .onKey(@actions.sendMessage)
+                .tw("flex-1 bg-gray-100 rounded-full px-4 py-2 text-sm border-0")
+
+            Button {
+                Text("Send")
+                    .tw("text-sm font-semibold text-blue-500")
+            }
+            .tw("bg-transparent border-0 pl-3")
+            .onClick(@actions.sendMessage)
+        }
+        .tw("py-2 px-3 items-center bg-white border-t border-gray-200")
+    }
+    .tw("flex-1 w-full h-full min-h-0 bg-white md:max-w-[630px] md:mx-auto md:border-x md:border-gray-200")
+}

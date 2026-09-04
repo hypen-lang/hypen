@@ -1582,3 +1582,209 @@ fn test_conditional_reconciliation_tab_switch_reuses_structure() {
         "Column should be reused via reconciliation, not removed"
     );
 }
+
+// ============================================================================
+// Render-parent resolution for control flow nested directly under control
+// flow. Renderers treat __ForEach/__Conditional/__Router containers as
+// transparent: an Insert patch whose parent_id names one of them is dropped
+// on the floor. Every Insert must therefore target a node the renderer
+// actually knows — one introduced by a Create patch (or "root").
+// ============================================================================
+
+/// Every Insert/Instantiate parent in `patches` must be "root" or the id of
+/// a node the renderer knows: one introduced by a Create (or Instantiate) in
+/// `patches`, or pre-known via `known_ids` from earlier passes.
+fn assert_insert_parents_created(
+    patches: &[Patch],
+    known_ids: &mut std::collections::HashSet<String>,
+) {
+    for patch in patches {
+        match patch {
+            Patch::Create { id, .. } => {
+                known_ids.insert(id.to_string());
+            }
+            Patch::Instantiate { nodes, .. } => {
+                for id in nodes {
+                    known_ids.insert(id.to_string());
+                }
+            }
+            _ => {}
+        }
+    }
+    for patch in patches {
+        match patch {
+            Patch::Insert { parent_id, id, .. } => {
+                assert!(
+                    parent_id.as_ref() == "root" || known_ids.contains(parent_id.as_ref()),
+                    "Insert of {id} targets parent {parent_id}, which no Create patch \
+                     introduced — the renderer will drop this subtree",
+                );
+            }
+            Patch::Instantiate {
+                parent_id,
+                template_id,
+                ..
+            } => {
+                assert!(
+                    parent_id.as_ref() == "root" || known_ids.contains(parent_id.as_ref()),
+                    "Instantiate of template {template_id} targets parent {parent_id}, \
+                     which no Create patch introduced — the renderer will drop this row",
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Count renderer-visible instances of `element_type` produced by `patches`
+/// — plain Create patches plus Instantiate rows whose registered template
+/// root is that element type (the template fast path the keyed reconciler
+/// takes for plannable single-element templates).
+fn count_created(patches: &[Patch], element_type: &str) -> usize {
+    let template_ids: std::collections::HashSet<&str> = patches
+        .iter()
+        .filter_map(|p| match p {
+            Patch::RegisterTemplate { template_id, root } => {
+                (root.get("elementType").and_then(|v| v.as_str()) == Some(element_type))
+                    .then_some(template_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    patches
+        .iter()
+        .filter(|p| match p {
+            Patch::Create {
+                element_type: et, ..
+            } => et == element_type,
+            Patch::Instantiate { template_id, .. } => template_ids.contains(template_id.as_str()),
+            _ => false,
+        })
+        .count()
+}
+
+#[test]
+fn test_conditional_as_foreach_item_root_inserts_under_element_parent() {
+    let input = r#"
+        Column {
+            ForEach(items: @state.messages, key: "id") {
+                If(condition: "@{item.isMine}") {
+                    Text("@{item.text}")
+                }
+                If(condition: "@{!item.isMine}") {
+                    Text("@{item.text}")
+                }
+            }
+        }
+    "#;
+
+    let component = parse_component(input).unwrap();
+    let ir_node = ast_to_ir_node(&component);
+
+    let mut tree = InstanceTree::new();
+    let mut deps = DependencyGraph::new();
+    let state = json!({
+        "messages": [
+            {"id": "m1", "text": "hello", "isMine": true},
+            {"id": "m2", "text": "hi back", "isMine": false}
+        ]
+    });
+
+    let patches = reconcile_ir(&mut tree, &ir_node, None, &state, &mut deps);
+
+    // Both texts render (one per item, from the matching If branch)...
+    assert_eq!(
+        count_created(&patches, "Text"),
+        2,
+        "one Text per item should be created"
+    );
+
+    // ...and every Insert is addressed to a node the renderer knows about.
+    let mut known = std::collections::HashSet::new();
+    assert_insert_parents_created(&patches, &mut known);
+}
+
+#[test]
+fn test_conditional_as_foreach_item_root_update_path() {
+    let input = r#"
+        Column {
+            ForEach(items: @state.messages, key: "id") {
+                If(condition: "@{item.isMine}") {
+                    Text("@{item.text}")
+                }
+                If(condition: "@{!item.isMine}") {
+                    Text("@{item.text}")
+                }
+            }
+        }
+    "#;
+
+    let component = parse_component(input).unwrap();
+    let ir_node = ast_to_ir_node(&component);
+
+    let mut tree = InstanceTree::new();
+    let mut deps = DependencyGraph::new();
+    let state = json!({
+        "messages": [
+            {"id": "m1", "text": "hello", "isMine": true}
+        ]
+    });
+
+    let initial = reconcile_ir(&mut tree, &ir_node, None, &state, &mut deps);
+    let mut known = std::collections::HashSet::new();
+    assert_insert_parents_created(&initial, &mut known);
+
+    // A new message arrives (the sendMessage flow): the keyed update path
+    // must insert the new item's subtree under the real element too.
+    let new_state = json!({
+        "messages": [
+            {"id": "m1", "text": "hello", "isMine": true},
+            {"id": "m2", "text": "hi back", "isMine": false}
+        ]
+    });
+    let update = reconcile_ir(&mut tree, &ir_node, None, &new_state, &mut deps);
+
+    assert_eq!(
+        count_created(&update, "Text"),
+        1,
+        "the appended item's Text should be created"
+    );
+    assert_insert_parents_created(&update, &mut known);
+}
+
+#[test]
+fn test_foreach_nested_directly_under_conditional() {
+    let input = r#"
+        Column {
+            If(condition: "@{state.showList}") {
+                ForEach(items: @state.names, key: "id") {
+                    Text("@{item.name}")
+                }
+            }
+        }
+    "#;
+
+    let component = parse_component(input).unwrap();
+    let ir_node = ast_to_ir_node(&component);
+
+    let mut tree = InstanceTree::new();
+    let mut deps = DependencyGraph::new();
+    let state = json!({
+        "showList": true,
+        "names": [
+            {"id": "1", "name": "Alpha"},
+            {"id": "2", "name": "Beta"}
+        ]
+    });
+
+    let patches = reconcile_ir(&mut tree, &ir_node, None, &state, &mut deps);
+
+    assert_eq!(
+        count_created(&patches, "Text"),
+        2,
+        "both list rows should be created"
+    );
+
+    let mut known = std::collections::HashSet::new();
+    assert_insert_parents_created(&patches, &mut known);
+}

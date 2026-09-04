@@ -439,6 +439,10 @@ impl App {
                     self.focused = next;
                     // Keyboard-driven focus shows the ring (`:focus-visible`).
                     self.focus_visible = true;
+                    // Focus may land on an item outside the visible window
+                    // (culling only emits viewport ± buffer); bring it into
+                    // view so Tab never selects something invisible.
+                    self.scroll_focused_into_view();
                     return true;
                 }
                 false

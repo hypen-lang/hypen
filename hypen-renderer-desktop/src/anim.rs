@@ -997,6 +997,14 @@ pub struct IngestOutcome {
     /// state, exactly like [`TickOutcome::restyle`]. Without it Taffy
     /// keeps the mid-flight geometry until an unrelated restyle.
     pub restyle: Vec<String>,
+    /// End-of-batch work FINALIZED at least one in-flight exit — a
+    /// subtree left the tree even though the input batch may have
+    /// carried no structural patch at all (e.g. a paint-classified
+    /// `RemoveProp` of `__anim.motion` lifting the essential
+    /// exemption). The window's paint-only classifier must treat the
+    /// batch as structural: the finalized removals appear only in
+    /// `forwarded`, never in the input patches it inspects.
+    pub finalized_any: bool,
 }
 
 /// A naturally-settled animation's `.onAnimationComplete` dispatch,
@@ -1432,10 +1440,12 @@ impl DesktopAnimator {
         // reached the tree just now, after everything above — append
         // in that order so the caller's Taffy mirror replays exactly
         // what the tree saw.
+        let finalized_any = !flushed.finalized.is_empty();
         forwarded.append(&mut flushed.finalized);
         IngestOutcome {
             forwarded,
             restyle: flushed.restyle,
+            finalized_any,
         }
     }
 

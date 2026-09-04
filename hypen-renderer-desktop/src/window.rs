@@ -1175,37 +1175,61 @@ impl App {
         ) {
             self.ime_preedit = None;
         }
-        self.tree_generation = self.tree_generation.wrapping_add(1);
-        // Dropping the cached layout unconditionally on any non-empty
-        // batch is LOAD-BEARING for `.layout` FLIP correctness, not just a
-        // cache hygiene nicety: `play_pending_flips` (in `redraw`) needs a
-        // fresh cache-MISS so the post-batch `Last` rect is measured off
-        // newly-solved Taffy geometry rather than a stale cached pass. If a
-        // future change makes this conditional (e.g. keep the layout when a
-        // batch "looks" paint-only), the First/Last delta collapses to zero
-        // and every Move/removal-sibling FLIP silently stops inverting.
-        self.layout = None;
-        // Patches changed something somewhere in the tree, so the
-        // painter's subtree scene cache is potentially stale. For a
-        // batch made ENTIRELY of paint-only prop writes (no structural
-        // patch, no layout-affecting prop, no essential-snap restyles,
-        // no media nodes, no scrub-owned nodes) the stale set is
-        // provably just the cached fragments containing an affected
-        // node — paint props feed neither Taffy styles nor item rects,
-        // so every retained fragment re-emits byte-identical items.
-        // Typing, a counter tick, or a colour flip then re-encodes ONE
-        // subtree instead of every visible one. Anything else keeps
-        // the wholesale drop: the next paint pass rebuilds fragments
-        // for whatever is still visible.
+        // Batch-scoped invalidation. A batch made ENTIRELY of
+        // paint-only prop writes (no structural patch, no layout-
+        // affecting prop, no essential-snap restyles, no media nodes,
+        // no scrub-owned nodes) provably cannot change geometry: paint
+        // props feed neither Taffy styles nor item rects, so a full
+        // relayout would re-emit byte-identical rects for every item.
+        // Skip it — keep `tree_generation` and the cached LayoutPass,
+        // re-resolve the affected items' paint fields in place
+        // (`refresh_paint_only` also re-runs the opacity/transform
+        // post-passes and rebuilds the derived indexes + a11y map),
+        // and drop only the painter fragments containing an affected
+        // node. Typing, a counter tick, or a colour flip then costs
+        // one in-place item refresh + one subtree re-encode instead of
+        // Taffy + emit + full-cache rebuild.
+        //
+        // Anything else takes the wholesale path: generation bump,
+        // layout drop, full painter-cache drop. Dropping the cached
+        // layout on such batches is LOAD-BEARING for `.layout` FLIP
+        // correctness, not just cache hygiene: `play_pending_flips`
+        // (in `redraw`) needs a fresh cache-MISS so the post-batch
+        // `Last` rect is measured off newly-solved Taffy geometry
+        // rather than a stale cached pass. The paint-only branch is
+        // safe from that trap because the classifier admits no
+        // Move / Remove / Detach / structural patch — `prepare_moves`
+        // and `prepare_shared` above snapshot nothing for a qualifying
+        // batch, so no FLIP is pending a Last measurement.
         match paint_only_affected_ids(
             &patches,
             &outcome.restyle,
             &self.tree,
             self.has_media_nodes,
             scrub_owns_any,
+            outcome.finalized_any,
         ) {
-            Some(affected) => self.painter.invalidate_subtrees_containing(&affected),
-            None => self.painter.invalidate_subtree_cache(),
+            Some(affected) => {
+                if let Some(pass) = self.layout.as_mut() {
+                    pass.refresh_paint_only(&self.tree, &affected, viewport, scale);
+                    // The refreshed pass can change everything the
+                    // AccessKit publish reads — action enable/disable,
+                    // Input value, Icon<->Image kind, static-transform
+                    // bounds, semantics — but with `tree_generation`
+                    // frozen the redraw takes the cache-HIT path and
+                    // `layout_generation` never moves, which is what
+                    // gates `publish_accessibility`. Bump it here so
+                    // the publish's fingerprint (cheap, O(visible))
+                    // decides whether AT actually needs a TreeUpdate.
+                    self.layout_generation = self.layout_generation.wrapping_add(1);
+                }
+                self.painter.invalidate_subtrees_containing(&affected);
+            }
+            None => {
+                self.tree_generation = self.tree_generation.wrapping_add(1);
+                self.layout = None;
+                self.painter.invalidate_subtree_cache();
+            }
         }
         // Rolling 1-second flush-rate counter. The engine sending
         // patches per-frame (suspected render loop) is the most
@@ -1464,19 +1488,10 @@ impl App {
         // painter's subtree scene cache; layout-affecting props also
         // restyle their Taffy nodes so Taffy re-solves.
         //
-        // PERF DEBT (bounded): every tick with a write drops the WHOLE
-        // painter subtree cache, even when the writes are paint-only
-        // (opacity/color) and confined to one subtree. Scoping the
-        // invalidation would need (a) `TickOutcome` to carry the ids it
-        // wrote, and (b) each cache entry to record its subtree root so
-        // "entry is on the same root-to-leaf path as a written id" can
-        // be answered (opacity inherits DOWNWARD, so an animating
-        // ancestor invalidates cached descendants too — containment
-        // alone is not enough). Neither exists today; a wrong retain
-        // here paints stale frames, the worst failure mode, so the
-        // wholesale drop stays until the cache records coverage. Cost
-        // is bounded: it only recurs while animations are in flight,
-        // and the next paint re-encodes only visible subtrees.
+        // Ticks whose writes are all paint-only (interpolated
+        // transform / opacity / colour) return `paint_only: Some` and
+        // take the scoped in-place repair below; anything structural
+        // or layout-affecting keeps the wholesale drop.
         let frame = drive_animation_frame(
             &mut self.animator,
             &mut self.tree,
@@ -1484,6 +1499,24 @@ impl App {
             scale,
             crate::layout::logical_viewport((w, h), scale),
         );
+        // #146 sibling-shift for flagged/exit removes: any exit that
+        // finalized in the tick above recorded its `.layout` siblings.
+        // Measure their First off the STILL-CURRENT pre-teardown layout
+        // and queue them, so the fresh-layout `play_pending_flips`
+        // slides them. Runs BEFORE the scrub tick below: a dirty scrub
+        // frame drops `self.layout`, and a candidate whose First can't
+        // be resolved is discarded (not deferred) — measuring first
+        // keeps an exit-finalize + scrub-write coincidence from
+        // silently killing the sibling FLIP.
+        {
+            let prev_layout = &self.layout;
+            self.animator.queue_removal_sibling_flips(|id| {
+                prev_layout
+                    .as_ref()
+                    .and_then(|l| l.item_by_id(id))
+                    .map(|it| (it.rect.x, it.rect.y))
+            });
+        }
         // Scrub source tick: advance any in-flight settle and fire elapsed
         // deadlines (the no-flash cleanup window, the scroll rest-debounce
         // write, the scroll-quiescence release). Writes land in the same
@@ -1499,25 +1532,34 @@ impl App {
             self.damage.add_full();
         }
         self.dispatch_scrub_binds();
-        // #146 sibling-shift for flagged/exit removes: any exit that
-        // finalized in the tick above recorded its `.layout` siblings.
-        // Measure their First off the STILL-CURRENT pre-teardown layout
-        // (dropped just below when `frame.invalidate` is set) and queue
-        // them, so the fresh-layout `play_pending_flips` slides them.
-        {
-            let prev_layout = &self.layout;
-            self.animator.queue_removal_sibling_flips(|id| {
-                prev_layout
-                    .as_ref()
-                    .and_then(|l| l.item_by_id(id))
-                    .map(|it| (it.rect.x, it.rect.y))
-            });
-        }
         if frame.invalidate {
-            self.tree_generation = self.tree_generation.wrapping_add(1);
-            self.layout = None;
-            self.painter.invalidate_subtree_cache();
-            self.damage.add_full();
+            // Animation ticks are overwhelmingly paint-only writes
+            // (interpolated transform / opacity / colour) — the same
+            // class of change the paint-only patch path repairs in
+            // place. When the tick classified as such (and the tree
+            // has no media nodes — same gate as the flush path),
+            // keep the layout and the unaffected painter fragments:
+            // refresh the affected items + post-passes, drop only the
+            // fragments containing an animated node. Anything else —
+            // finalized exits, layout-prop animation, media — keeps
+            // the wholesale drop.
+            match frame.paint_only.as_ref().filter(|_| !self.has_media_nodes) {
+                Some(affected) if self.layout.is_some() => {
+                    let vp_logical = crate::layout::logical_viewport((w, h), scale);
+                    if let Some(pass) = self.layout.as_mut() {
+                        pass.refresh_paint_only(&self.tree, affected, vp_logical, scale);
+                    }
+                    self.painter.invalidate_subtrees_containing(affected);
+                    self.layout_generation = self.layout_generation.wrapping_add(1);
+                    self.damage.add_full();
+                }
+                _ => {
+                    self.tree_generation = self.tree_generation.wrapping_add(1);
+                    self.layout = None;
+                    self.painter.invalidate_subtree_cache();
+                    self.damage.add_full();
+                }
+            }
         }
         let mut hovered_set: HashSet<String> = HashSet::new();
         if let Some(id) = self.hovered.clone() {
@@ -1584,25 +1626,65 @@ impl App {
         // bump the key and force a recompute.
         let key = self.layout_cache_key(w, h, scale);
         let key_match = self.last_layout_key == Some(key);
-        // The cull window the cached layout was emitted against
-        // is centred on `last_scroll_y_in_layout`. As page scroll
-        // moves further, eventually we need a fresh emit to
+        // The cull window the cached layout was emitted against is
+        // centred on the scroll position of the last emit. As page
+        // scroll moves further, eventually we need a fresh emit to
         // populate the items that have entered the cull buffer.
-        // Half a viewport-height of slack keeps the fast path
-        // running through normal wheel bursts and only forces a
-        // recompute on a meaningful scroll shift.
         // Threshold is measured against the scroll position at which
         // items were last *emitted* (cull-buffer origin), not against
         // the per-frame fast-path baseline — otherwise scrolling in
         // small increments never trips the recompute and items beyond
         // the original cull buffer never get walked.
-        // Buffer in `emit_items` is one viewport-height on each side;
-        // recompute threshold is half of that so we re-emit while a
-        // half-viewport of slack is still unconsumed (avoids the user
-        // ever scrolling into un-emitted territory).
-        let scroll_recompute_threshold = (h as f32) * 0.5;
-        let scroll_outside_buffer = !key_match
-            || (self.scroll_y - self.last_scroll_y_emitted).abs() > scroll_recompute_threshold;
+        // Buffer and threshold are paired constants in `layout.rs`
+        // (`CULL_BUFFER_VH` / `SCROLL_REEMIT_THRESHOLD_VH`, compile-
+        // time `buffer ≥ threshold` assert). The recompute this
+        // triggers happens in THIS frame, before paint — a wheel burst
+        // of any size lands on a freshly-emitted window, never on
+        // blank space.
+        let scroll_recompute_threshold =
+            (h as f32) * crate::layout::SCROLL_REEMIT_THRESHOLD_VH;
+        // Per-container offsets live outside the cache key (like page
+        // `scroll_y`): a wheel over a `.scrollable` no longer forces
+        // a full Taffy + emit per frame. Instead measure each emitted
+        // container's live offset against the cull window it was last
+        // emitted at — within the threshold the rects shift in place
+        // below; past it (any container) this frame recomputes, so
+        // shifted-in content always lands on emitted items
+        // (`CULL_BUFFER_VH ≥ SCROLL_REEMIT_THRESHOLD_VH`, the same
+        // pairing page scroll relies on).
+        let container_drifts = self
+            .layout
+            .as_ref()
+            .map(|l| container_scroll_drifts(l, &self.scrollables))
+            .unwrap_or_default();
+        // Multi-source drift bound: an item inside scrolled containers
+        // is displaced (relative to where its rects were emitted) by
+        // the PAGE drift plus the summed drift of every scrollable in
+        // its ancestor chain — and stale container drift persists
+        // against the emit anchor even after the in-place shift caught
+        // the rects up (`emitted_offset` only moves on a real emit).
+        // So the re-emit threshold is measured against the MAXIMUM
+        // combined displacement over all emitted scrollables, page
+        // included: total stays ≤ threshold ≤ CULL_BUFFER_VH at any
+        // nesting depth and under any interleaving of page and
+        // container scrolling, where per-source checks alone would
+        // stack to `(sources)·threshold` with zero margin.
+        // (Transformed ancestry needs no gate here: the painter's
+        // fragment splice is self-validating — see
+        // `CachedSubtree::transform` — and the in-place shift
+        // recomputes transforms exactly.)
+        let page_emit_drift = (self.scroll_y - self.last_scroll_y_emitted).abs();
+        let max_chain_drift = self
+            .layout
+            .as_ref()
+            .map(|l| {
+                l.scrollable_items()
+                    .map(|it| chain_emit_drift(l, &self.tree, &self.scrollables, &it.node_id))
+                    .fold(0.0f32, f32::max)
+            })
+            .unwrap_or(0.0);
+        let scroll_outside_buffer =
+            !key_match || page_emit_drift + max_chain_drift > scroll_recompute_threshold;
         let cache_miss = self.layout.is_none() || !key_match || scroll_outside_buffer;
         let mut flips_played = false;
         if cache_miss {
@@ -1664,37 +1746,62 @@ impl App {
                 self.painter.invalidate_subtree_cache();
                 self.damage.add_full();
             }
-        } else if (self.scroll_y - self.last_scroll_y_in_layout).abs() > f32::EPSILON {
-            // Scroll-only fast path: re-shift the cached items by the
-            // delta. Skips Taffy + cosmic-text + raster-cache key
-            // changes entirely. Page scroll is the dominant case
-            // where this kicks in — wheel events on a list of posts.
-            // `clip_to` shifts in lockstep with `rect`: both live in
-            // the post-page-scroll coord space, so a partial shift
-            // would drift the clip away from the item it clips and
-            // re-introduce the "input shows through grid gaps" bug
-            // on every scroll fast-path frame.
-            let delta = self.scroll_y - self.last_scroll_y_in_layout;
-            if let Some(layout) = self.layout.as_mut() {
-                for it in layout.items.iter_mut() {
-                    it.rect.y -= delta;
-                    if let Some(clip) = it.clip_to.as_mut() {
-                        clip.y -= delta;
-                    }
-                    // Cumulative transforms embed the emit-time rect
-                    // centers as origin terms; a uniform y-shift of
-                    // every rect conjugates every cumulative transform
-                    // by the same shift (exact — see
-                    // `Affine2::conjugate_translate`). Without this, a
-                    // scaled/rotated item would pivot about its stale
-                    // pre-scroll center on every fast-path frame.
-                    if !it.transform.is_identity() {
-                        it.transform = it.transform.conjugate_translate(0.0, -delta);
+        } else {
+            if (self.scroll_y - self.last_scroll_y_in_layout).abs() > f32::EPSILON {
+                // Scroll-only fast path: re-shift the cached items by the
+                // delta. Skips Taffy + cosmic-text + raster-cache key
+                // changes entirely. Page scroll is the dominant case
+                // where this kicks in — wheel events on a list of posts.
+                // `clip_to` shifts in lockstep with `rect`: both live in
+                // the post-page-scroll coord space, so a partial shift
+                // would drift the clip away from the item it clips and
+                // re-introduce the "input shows through grid gaps" bug
+                // on every scroll fast-path frame.
+                let delta = self.scroll_y - self.last_scroll_y_in_layout;
+                if let Some(layout) = self.layout.as_mut() {
+                    for it in layout.items.iter_mut() {
+                        it.rect.y -= delta;
+                        if let Some(clip) = it.clip_to.as_mut() {
+                            clip.y -= delta;
+                        }
+                        // Cumulative transforms embed the emit-time rect
+                        // centers as origin terms; a uniform y-shift of
+                        // every rect conjugates every cumulative transform
+                        // by the same shift (exact — see
+                        // `Affine2::conjugate_translate`). Without this, a
+                        // scaled/rotated item would pivot about its stale
+                        // pre-scroll center on every fast-path frame.
+                        if !it.transform.is_identity() {
+                            it.transform = it.transform.conjugate_translate(0.0, -delta);
+                        }
                     }
                 }
+                self.last_scroll_y_in_layout = self.scroll_y;
+                self.layout_generation = self.layout_generation.wrapping_add(1);
             }
-            self.last_scroll_y_in_layout = self.scroll_y;
-            self.layout_generation = self.layout_generation.wrapping_add(1);
+            // Container-scroll fast path: same idea per `.scrollable`
+            // container — shift its descendants' cached rects in place
+            // instead of recomputing Taffy + emit. All drifts here are
+            // within the re-emit threshold (checked above; any beyond
+            // took the cache-miss branch instead). Composes with the
+            // page shift: the page delta moved every rect uniformly,
+            // the container delta then moves only that container's
+            // content within it.
+            if !container_drifts.is_empty() {
+                let vp_logical = crate::layout::logical_viewport((w, h), scale);
+                if let Some(layout) = self.layout.as_mut() {
+                    for d in &container_drifts {
+                        layout.shift_container_scroll(
+                            &self.tree,
+                            &d.id,
+                            d.shift,
+                            vp_logical,
+                            scale,
+                        );
+                    }
+                }
+                self.layout_generation = self.layout_generation.wrapping_add(1);
+            }
         }
         // Route this frame's `.onAnimationComplete` dispatches to the module:
         // enter/exit/finite-preset/states settles from the tick above, plus
@@ -1815,7 +1922,6 @@ impl App {
             w,
             h,
             scale,
-            &self.scrollables,
             self.has_layout_state_variants,
             self.hovered.as_deref(),
             self.pressed.as_deref(),
@@ -1856,43 +1962,7 @@ impl App {
             .filter(|it| self.animator.is_exit_excluded(&self.tree, &it.node_id))
             .map(|it| it.node_id.clone())
             .collect();
-        // Fingerprint the layout's a11y-relevant shape so we skip the
-        // full TreeUpdate rebuild when nothing semantic changed (the
-        // common case during scroll / hover bursts). The fingerprint
-        // covers what `tree_update_for_layout` actually reads:
-        // node id, item kind discriminant, and rect bounds (rounded
-        // to 1px so subpixel jitter doesn't invalidate the cache).
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        layout.items.len().hash(&mut hasher);
-        for it in &layout.items {
-            it.node_id.hash(&mut hasher);
-            std::mem::discriminant(&it.kind).hash(&mut hasher);
-            // Fingerprint the VISUAL rect — the bounds AccessKit
-            // publishes. A transform-only change (mid-animation frame,
-            // static transform prop landing) must republish even when
-            // the Taffy rect is unchanged.
-            let rect = it.visual_rect();
-            (rect.x as i32).hash(&mut hasher);
-            (rect.y as i32).hash(&mut hasher);
-            (rect.w as i32).hash(&mut hasher);
-            (rect.h as i32).hash(&mut hasher);
-            it.action.hash(&mut hasher);
-            // `Text { content }` and `Input { value }` change the
-            // accessible label without changing rect; mix those in.
-            match &it.kind {
-                ItemKind::Text { content, .. } => content.hash(&mut hasher),
-                ItemKind::Input {
-                    value, placeholder, ..
-                } => {
-                    value.hash(&mut hasher);
-                    placeholder.hash(&mut hasher);
-                }
-                _ => {}
-            }
-        }
-        exit_excluded.hash(&mut hasher);
-        let fp = hasher.finish();
+        let fp = a11y_fingerprint(layout, &exit_excluded);
         if Some(fp) == self.last_a11y_fingerprint {
             return;
         }
@@ -2002,6 +2072,93 @@ impl App {
                 "__hypen_bind",
                 Some(json!({ "path": bind.path, "value": bind.value })),
             );
+        }
+    }
+
+    /// Bring the focused item into view after a keyboard / assistive-
+    /// tech focus move. Without this, Tab and screen readers could only
+    /// ever reach items inside the currently-emitted cull window — the
+    /// reveal scrolls the governing surface (nearest `.scrollable`
+    /// ancestor, else the page), which bumps the layout cache key, so
+    /// the next frame re-emits around the new position and the NEXT
+    /// Tab reaches further. Reachability becomes incremental instead
+    /// of capped at the window edge.
+    ///
+    /// V1 narrowing: adjusts one surface — the nearest scrollable
+    /// ancestor or the page, not both (nested reveals compose across
+    /// successive Tab presses since each re-emit re-runs this).
+    pub(crate) fn scroll_focused_into_view(&mut self) {
+        let Some(id) = self.focused.clone() else {
+            return;
+        };
+        let viewport = self.logical_viewport();
+        let viewport_h = self.gpu.as_ref().map(|g| g.size.1 as f32).unwrap_or(0.0);
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let Some(item) = layout.item_by_id(&id) else {
+            return;
+        };
+        let r = item.visual_rect();
+        let changed = match reveal_target_for(&self.tree, layout, &id, viewport) {
+            RevealTarget::Container(cid, crect, meta) => {
+                let cur = self.scrollables.get(&cid).copied().unwrap_or(0.0);
+                let max = (meta.content_h - crect.h).max(0.0);
+                // Descendant rects encode the offset the layout was
+                // EMITTED with (`meta.baked_offset`), not the live one
+                // — a wheel or a previous reveal can have advanced
+                // `scrollables` without a relayout in between. Shift
+                // the comparison window by that drift, same reason as
+                // the Page arm's `last_scroll_y_in_layout` correction.
+                // (Page-scroll drift needs no correction here: the
+                // container rect and its children carry the same stale
+                // page delta, so their relative positions hold.)
+                let drift = cur - meta.baked_offset;
+                match reveal_offset(
+                    r.y,
+                    r.y + r.h,
+                    crect.y + drift,
+                    crect.y + crect.h + drift,
+                    cur,
+                    max,
+                ) {
+                    Some(new) => {
+                        self.scrollables.insert(cid, new);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            RevealTarget::Page => {
+                let content_h = layout.content_size.1;
+                let max = (content_h - viewport_h).max(0.0);
+                // Item rects are screen-space *as of the layout's baked
+                // page scroll*; `scroll_y` may have drifted since (the
+                // painter shifts by the delta until the re-emit
+                // threshold forces a relayout). Shift the view window by
+                // that delta so the comparison happens in one space.
+                // Container reveals don't need this: the container rect
+                // and its children carry the same stale delta, so their
+                // relative positions are unaffected.
+                let drift = self.scroll_y - self.last_scroll_y_in_layout;
+                match reveal_offset(
+                    r.y,
+                    r.y + r.h,
+                    drift,
+                    drift + viewport_h,
+                    self.scroll_y,
+                    max,
+                ) {
+                    Some(new) => {
+                        self.scroll_y = new;
+                        true
+                    }
+                    None => false,
+                }
+            }
+        };
+        if changed {
+            self.request_redraw_full();
         }
     }
 
@@ -2124,6 +2281,11 @@ impl ApplicationHandler<AppEvent> for App {
                                         self.focused = Some(rid);
                                         // Assistive-tech focus shows the ring.
                                         self.focus_visible = true;
+                                        // AT can target any node in the
+                                        // accessibility tree, including ones
+                                        // scrolled outside the cull window —
+                                        // reveal them like Tab does.
+                                        self.scroll_focused_into_view();
                                         self.request_redraw_full();
                                     }
                                 }
@@ -2503,12 +2665,15 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                     if let Some(rect) = container_damage {
                         self.damage.add_region(rect);
-                        // Don't drop `self.layout` here — the per-container
-                        // scroll already bumped `layout_cache_key` (via the
-                        // `scrollables` map), so the next redraw will
-                        // recompute on its own. Throwing away the cached
-                        // layout strands the redraw-time clamp + scrollables
-                        // retain that read it on entry.
+                        // Don't drop `self.layout` here — the next redraw
+                        // detects the offset drift against the cached
+                        // pass's `ScrollMeta` (`container_scroll_drifts`)
+                        // and shifts the container's items in place, or
+                        // recomputes past the re-emit threshold. Throwing
+                        // away the cached layout would strand the
+                        // redraw-time clamp + scrollables retain that
+                        // read it on entry — and turn every container
+                        // wheel tick back into a full relayout.
                         if let Some(w) = self.window.as_ref() {
                             w.request_redraw();
                         }
@@ -2733,16 +2898,29 @@ impl ApplicationHandler<AppEvent> for App {
 /// see [`drive_animation_frame`] / [`drive_reduced_motion_toggle`].
 /// Extracted as data so the redraw glue is testable without a
 /// GPU-backed `App`.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub(crate) struct FrameAnim {
     /// The animator wrote into the tree / finalized removals: the
-    /// caller must bump the tree generation, drop the cached layout,
-    /// invalidate the painter subtree cache, and mark full damage.
+    /// caller must invalidate — wholesale (bump the tree generation,
+    /// drop the cached layout, drop the painter subtree cache) unless
+    /// `paint_only` is `Some`, in which case the scoped in-place
+    /// repair below suffices. Full damage either way.
     pub invalidate: bool,
     /// Animations remain in flight after this step: the caller must
     /// request another frame (the vsync re-arm). `false` on idle steps
     /// so the demand-driven loop stands down.
     pub rearm: bool,
+    /// `Some(affected)` when EVERY tree write this tick performed was
+    /// a paint-only prop (transform / opacity / colour interpolation —
+    /// the overwhelming animation-frame case) and nothing structural
+    /// happened (no finalized removals, no layout-affecting restyles).
+    /// `affected` is the written nodes plus their descendants
+    /// (transforms and opacity inherit downward), ready for
+    /// `LayoutPass::refresh_paint_only` +
+    /// `invalidate_subtrees_containing` — the same repair the
+    /// paint-only patch-batch path uses, skipping Taffy + emit + the
+    /// wholesale painter drop per animation tick. `None` = wholesale.
+    pub paint_only: Option<HashSet<String>>,
 }
 
 /// Mirror a [`TickOutcome`] into the retained Taffy state: finalized
@@ -2778,14 +2956,60 @@ pub(crate) fn drive_animation_frame(
     scale: f32,
     viewport: Viewport,
 ) -> FrameAnim {
+    // Bracket the tick with the tree's raw-write log: the animator
+    // has many write sites, and classifying the frame paint-only from
+    // the TREE's record can't miss one of them.
+    tree.begin_raw_write_log();
     let outcome = animator.tick(tree);
+    let (writes, structural_in_tick) = tree.end_raw_write_log();
     let invalidate = !outcome.is_empty();
     if invalidate {
         mirror_tick_outcome(&outcome, tree, taffy, scale, viewport);
     }
+    // Paint-only classification, mirroring `paint_only_affected_ids`
+    // for patch batches: no finalized removals (structural), no
+    // layout-affecting restyles, at least one write, and every
+    // written key paint-classified. The caller adds its own gates
+    // (media trees) exactly like the flush path does.
+    // Cap on the per-tick affected-set size: an animation anchored on
+    // a page-level container (a pulse on a route root) would walk and
+    // allocate its entire subtree every vsync, and the scoped painter
+    // invalidation would drop essentially every fragment anyway — at
+    // that scale the wholesale path is both cheaper and equivalent.
+    const PAINT_ONLY_TICK_CAP: usize = 512;
+    let paint_only = if invalidate
+        && !structural_in_tick
+        && outcome.finalized.is_empty()
+        && outcome.restyle.is_empty()
+        && !writes.is_empty()
+        && writes
+            .iter()
+            .all(|(_, key)| !crate::layout::is_layout_prop_key(key))
+    {
+        let mut affected: HashSet<String> = HashSet::new();
+        let mut capped = false;
+        // Writes repeat (one entry per prop per node per tick) —
+        // seed from the deduped id set before walking descendants.
+        'walk: for (id, _) in &writes {
+            let mut stack: Vec<&str> = vec![id.as_str()];
+            while let Some(cur) = stack.pop() {
+                if affected.insert(cur.to_string()) {
+                    if affected.len() > PAINT_ONLY_TICK_CAP {
+                        capped = true;
+                        break 'walk;
+                    }
+                    stack.extend(tree.children_of(cur).iter().map(String::as_str));
+                }
+            }
+        }
+        if capped { None } else { Some(affected) }
+    } else {
+        None
+    };
     FrameAnim {
         invalidate,
         rearm: animator.has_active(tree),
+        paint_only,
     }
 }
 
@@ -2811,6 +3035,9 @@ pub(crate) fn drive_reduced_motion_toggle(
     FrameAnim {
         invalidate,
         rearm: animator.has_active(tree),
+        // A motion-preference toggle snaps / restarts many nodes at
+        // once — rare and worth a clean slate, so always wholesale.
+        paint_only: None,
     }
 }
 
@@ -2953,8 +3180,19 @@ pub(crate) fn paint_only_affected_ids(
     tree: &Tree,
     has_media_nodes: bool,
     scrub_owns_any: bool,
+    ingest_finalized_any: bool,
 ) -> Option<HashSet<String>> {
-    if has_media_nodes || scrub_owns_any || !restyle.is_empty() {
+    // `ingest_finalized_any`: end-of-batch animator work finalized an
+    // in-flight exit — a subtree LEFT THE TREE even though the input
+    // batch may carry no structural patch (a paint-classified
+    // `RemoveProp` of `__anim.motion` lifting the essential exemption
+    // is enough). The finalized removals appear only in the ingest
+    // outcome's `forwarded`, never in `patches`, so without this flag
+    // the batch classifies paint-only and the torn-down subtree keeps
+    // painting, hit-testing, and publishing to AccessKit off the kept
+    // pass. Same hazard the tick-side classifier guards with
+    // `TickOutcome::finalized`.
+    if has_media_nodes || scrub_owns_any || ingest_finalized_any || !restyle.is_empty() {
         return None;
     }
     let mut affected: HashSet<String> = HashSet::new();
@@ -2980,11 +3218,217 @@ pub(crate) fn paint_only_affected_ids(
     Some(affected)
 }
 
+/// Fingerprint of a pass's a11y-relevant shape, so
+/// `publish_accessibility` can skip the full TreeUpdate rebuild when
+/// nothing semantic changed (the common case during scroll / hover
+/// bursts). Covers what `tree_update_for_layout` actually reads: node
+/// id, item kind discriminant, VISUAL rect bounds (rounded to 1px so
+/// subpixel jitter doesn't invalidate — visual, not Taffy rect, so a
+/// transform-only change republishes), action, the kind-carried labels
+/// (Text content, Input value/placeholder), the engine-derived
+/// semantics side-map (a `SetSemantics`-only batch changes role /
+/// name / hidden without touching any of the above), and the
+/// exit-excluded set. Pure — extracted from `App` so tests can pin
+/// that every field AccessKit publishes participates.
+pub(crate) fn a11y_fingerprint(layout: &crate::layout::LayoutPass, exit_excluded: &[String]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    layout.items.len().hash(&mut hasher);
+    for it in &layout.items {
+        it.node_id.hash(&mut hasher);
+        std::mem::discriminant(&it.kind).hash(&mut hasher);
+        let rect = it.visual_rect();
+        (rect.x as i32).hash(&mut hasher);
+        (rect.y as i32).hash(&mut hasher);
+        (rect.w as i32).hash(&mut hasher);
+        (rect.h as i32).hash(&mut hasher);
+        it.action.hash(&mut hasher);
+        match &it.kind {
+            ItemKind::Text { content, .. } => content.hash(&mut hasher),
+            ItemKind::Input {
+                value, placeholder, ..
+            } => {
+                value.hash(&mut hasher);
+                placeholder.hash(&mut hasher);
+            }
+            _ => {}
+        }
+    }
+    // Engine-derived semantics feed the accessible role / name /
+    // hidden directly (`tree_update_for_layout` reads `pass.a11y`) —
+    // without this a `SetSemantics`-only batch fingerprints identical
+    // and never republishes. Folded as the pass's precomputed content
+    // hash: this fingerprint runs on every scroll-shift frame, so it
+    // must not re-format semantics per item per frame.
+    layout.a11y_hash.hash(&mut hasher);
+    exit_excluded.hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Minimal scroll-offset change that brings `[item_top, item_bottom]`
+/// (screen coordinates, computed WITH `cur_offset` already applied)
+/// fully inside `[view_top, view_bottom]`. Increasing the offset moves
+/// content up on screen. An item taller than the view aligns its top
+/// edge. Returns `None` when the item is already fully visible or the
+/// clamped adjustment is a no-op.
+pub(crate) fn reveal_offset(
+    item_top: f32,
+    item_bottom: f32,
+    view_top: f32,
+    view_bottom: f32,
+    cur_offset: f32,
+    max_offset: f32,
+) -> Option<f32> {
+    let new = if item_top < view_top {
+        // Item (or its top) is above the view: scroll up.
+        cur_offset - (view_top - item_top)
+    } else if item_bottom > view_bottom {
+        // Below the view: scroll down, but never push the item's top
+        // past the view top (taller-than-view case aligns the top).
+        cur_offset + (item_bottom - view_bottom).min(item_top - view_top)
+    } else {
+        return None;
+    };
+    let new = new.clamp(0.0, max_offset.max(0.0));
+    if (new - cur_offset).abs() > f32::EPSILON {
+        Some(new)
+    } else {
+        None
+    }
+}
+
+/// Where a focus-driven reveal should scroll: the nearest `.scrollable`
+/// ancestor's offset, or the page.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum RevealTarget {
+    /// `(container node id, container rect, scroll metadata)`. The
+    /// `ScrollMeta` carries both the scrollable content height (for
+    /// the max-offset clamp) and the offset the layout was emitted
+    /// with (for live-vs-baked drift correction).
+    Container(String, crate::layout::Rect, crate::layout::ScrollMeta),
+    Page,
+}
+
+/// Find the scroll surface that governs `id`'s visibility: the nearest
+/// ancestor that is a `.scrollable(...)` container AND was emitted with
+/// `ScrollMeta` in the current layout; the page otherwise. Pure —
+/// keyboard-focus reveal is the caller, and headless tests exercise
+/// this directly since the App wiring needs a window.
+pub(crate) fn reveal_target_for(
+    tree: &Tree,
+    layout: &crate::layout::LayoutPass,
+    id: &str,
+    viewport: crate::style::Viewport,
+) -> RevealTarget {
+    let mut anc = tree.parent_of(id);
+    while let Some(a) = anc {
+        if a == crate::tree::ROOT_ID {
+            break;
+        }
+        if tree
+            .get(a)
+            .is_some_and(|n| crate::layout::is_scrollable_node(n, viewport))
+        {
+            if let Some(item) = layout.item_by_id(a) {
+                if let Some(meta) = item.scrollable {
+                    return RevealTarget::Container(a.to_string(), item.rect, meta);
+                }
+            }
+            // Scrollable in the tree but not emitted as such (e.g. its
+            // own row got culled) — nothing sane to adjust; fall back
+            // to the page rather than guessing.
+            break;
+        }
+        anc = tree.parent_of(a);
+    }
+    RevealTarget::Page
+}
+
 /// Clamp `y` into the legal scroll range for `content_h` content
 /// against a `viewport_h` viewport.
 pub(crate) fn clamp_scroll(y: f32, content_h: f32, viewport_h: f32) -> f32 {
     let max = (content_h - viewport_h).max(0.0);
     y.clamp(0.0, max)
+}
+
+/// One scrollable container whose live offset (`App::scrollables`)
+/// has moved away from what the cached layout reflects.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ContainerDrift {
+    pub(crate) id: String,
+    /// `live - baked_offset`: how far the cached rects must shift in
+    /// place this frame ([`crate::layout::LayoutPass::shift_container_scroll`]).
+    pub(crate) shift: f32,
+    /// `live - emitted_offset`: how far content has moved since this
+    /// container's items were last emitted — the value the re-emit
+    /// threshold is measured against (cull-buffer origin, NOT the
+    /// per-frame fast-path baseline, for the same reason page scroll
+    /// uses `last_scroll_y_emitted`: small increments must
+    /// accumulate toward the recompute).
+    pub(crate) emit_drift: f32,
+}
+
+/// Collect every emitted scrollable container whose live offset has
+/// drifted from the cached pass. Pure — `redraw` decides from this
+/// whether to shift in place (all `|emit_drift|` within the
+/// threshold) or force a full re-emit (any beyond). Containers with a
+/// live offset but no emitted item (culled off-page) are ignored:
+/// they're invisible, and the full recompute that re-emits them bakes
+/// the live offset anyway.
+pub(crate) fn container_scroll_drifts(
+    layout: &crate::layout::LayoutPass,
+    scrollables: &HashMap<String, f32>,
+) -> Vec<ContainerDrift> {
+    let mut out = Vec::new();
+    for item in layout.scrollable_items() {
+        let Some(meta) = item.scrollable else { continue };
+        let live = scrollables.get(&item.node_id).copied().unwrap_or(0.0);
+        let shift = live - meta.baked_offset;
+        let emit_drift = live - meta.emitted_offset;
+        if shift.abs() > f32::EPSILON {
+            out.push(ContainerDrift {
+                id: item.node_id.clone(),
+                shift,
+                emit_drift,
+            });
+        }
+    }
+    out
+}
+
+/// Summed emit-anchor drift along `id`'s scroll chain: its own
+/// `|live − emitted_offset|` plus the same for every scrollable
+/// ANCESTOR with an emitted `ScrollMeta`. An item inside `id` is
+/// displaced (relative to where its rect was emitted) by the page
+/// drift plus exactly this sum, so the re-emit threshold must be
+/// measured against it — per-container checks alone under-count at
+/// nesting depth ≥ 2.
+pub(crate) fn chain_emit_drift(
+    layout: &crate::layout::LayoutPass,
+    tree: &Tree,
+    scrollables: &HashMap<String, f32>,
+    id: &str,
+) -> f32 {
+    let drift_of = |node: &str| -> f32 {
+        layout
+            .item_by_id(node)
+            .and_then(|it| it.scrollable)
+            .map(|m| {
+                let live = scrollables.get(node).copied().unwrap_or(0.0);
+                (live - m.emitted_offset).abs()
+            })
+            .unwrap_or(0.0)
+    };
+    let mut sum = drift_of(id);
+    let mut anc = tree.parent_of(id);
+    while let Some(a) = anc {
+        if a == crate::tree::ROOT_ID {
+            break;
+        }
+        sum += drift_of(a);
+        anc = tree.parent_of(a);
+    }
+    sum
 }
 
 /// Pure layout-cache-key hash. Folds the live interaction state
@@ -3000,7 +3444,6 @@ pub(crate) fn layout_cache_key_inner(
     w: u32,
     h: u32,
     scale: f32,
-    scrollables: &HashMap<String, f32>,
     has_layout_state_variants: bool,
     hovered: Option<&str>,
     pressed: Option<&str>,
@@ -3013,14 +3456,13 @@ pub(crate) fn layout_cache_key_inner(
     w.hash(&mut h_hasher);
     h.hash(&mut h_hasher);
     scale.to_bits().hash(&mut h_hasher);
-    // Sorted iteration so two equivalent maps with different insertion
-    // order produce the same key.
-    let mut sorted: Vec<(&String, &f32)> = scrollables.iter().collect();
-    sorted.sort_by(|a, b| a.0.cmp(b.0));
-    for (id, off) in sorted {
-        id.hash(&mut h_hasher);
-        off.to_bits().hash(&mut h_hasher);
-    }
+    // Per-container scroll offsets are deliberately NOT in this key:
+    // a container wheel used to force a full Taffy + emit recompute
+    // per frame through a key mismatch. `redraw` now handles offset
+    // drift explicitly — shift-in-place within the re-emit threshold
+    // (`LayoutPass::shift_container_scroll`), full recompute past it
+    // (`container_drifts` + the threshold check) — mirroring how
+    // page `scroll_y` has always lived outside this key.
     // Interaction state participates ONLY when the tree has a layout-
     // affecting state variant. In the common case the branch is skipped
     // entirely, so the key is byte-identical to the pre-feature

@@ -771,6 +771,26 @@ pub(crate) fn create_ir_node_tree_impl(
     create_ir_node_tree_full(ctx, node, parent_id, parent_id, is_root)
 }
 
+/// Resolve the nearest ancestor a renderer actually knows about.
+///
+/// Control-flow containers (`__ForEach` / `__Conditional` / `__Router`)
+/// are transparent on the renderer side: they never receive a `Create`
+/// patch, so an `Insert`/`Move`/`Attach` whose parent names one is
+/// silently dropped. Walk up the instance tree from `start` (inclusive)
+/// until a non-control-flow node is found. `None` means the chain is all
+/// control flow up to the root — callers then address "root".
+fn nearest_render_parent(tree: &InstanceTree, start: Option<NodeId>) -> Option<NodeId> {
+    let mut current = start;
+    while let Some(id) = current {
+        match tree.get(id) {
+            Some(node) if node.control_flow.is_some() => current = node.parent,
+            Some(_) => return Some(id),
+            None => return None,
+        }
+    }
+    None
+}
+
 /// Create a tree from an IRNode with separate logical and render parents.
 ///
 /// `logical_parent` controls where the new node lives in the instance
@@ -791,9 +811,13 @@ pub(crate) fn create_ir_node_tree_full(
             create_element_node(ctx, element, logical_parent, render_parent, is_root)
         }
         IRNode::ForEach { .. } | IRNode::Conditional { .. } | IRNode::Router { .. } => {
-            // Control-flow containers always render under the logical
-            // parent — they don't take a render-parent split themselves.
-            create_control_flow_tree(ctx, node, logical_parent, is_root)
+            // Control-flow containers live under the logical parent in the
+            // tree, but their children's Insert patches must keep targeting
+            // the incoming render parent: collapsing the two would re-parent
+            // e.g. a ForEach item's subtree onto the ForEach container
+            // itself when the item root is another control-flow node (an If
+            // per item), and the renderer would drop it.
+            create_control_flow_tree(ctx, node, logical_parent, render_parent, is_root)
         }
     }
 }
@@ -803,10 +827,13 @@ fn create_control_flow_tree(
     ctx: &mut ReconcileCtx,
     node: &IRNode,
     parent_id: Option<NodeId>,
+    render_parent: Option<NodeId>,
     is_root: bool,
 ) -> NodeId {
     match node {
-        IRNode::ForEach { .. } => create_foreach_ir_tree(ctx, node, parent_id, is_root),
+        IRNode::ForEach { .. } => {
+            create_foreach_ir_tree(ctx, node, parent_id, render_parent, is_root)
+        }
         IRNode::Conditional {
             value,
             branches,
@@ -819,6 +846,7 @@ fn create_control_flow_tree(
             fallback.as_deref(),
             node,
             parent_id,
+            render_parent,
             is_root,
         ),
         IRNode::Router {
@@ -833,6 +861,7 @@ fn create_control_flow_tree(
             fallback.as_deref(),
             node,
             parent_id,
+            render_parent,
             is_root,
         ),
         IRNode::Element(_) => unreachable!("create_control_flow_tree called with Element"),
@@ -844,6 +873,7 @@ fn create_foreach_ir_tree(
     ctx: &mut ReconcileCtx,
     node: &IRNode,
     parent_id: Option<NodeId>,
+    render_parent_hint: Option<NodeId>,
     is_root: bool,
 ) -> NodeId {
     let (source, item_name, key_path, template, props, raw_scope) = match node {
@@ -892,7 +922,11 @@ fn create_foreach_ir_tree(
         ctx.tree.add_child(parent, node_id, None);
     }
 
-    let render_parent = parent_id;
+    // Items must be inserted under a node the renderer knows: the hint may
+    // itself be a control-flow container (this ForEach nested directly
+    // under an If, or handed a container by a rebuild path), so normalize
+    // to the nearest real element ancestor.
+    let render_parent = nearest_render_parent(ctx.tree, render_parent_hint.or(parent_id));
 
     if let Some(serde_json::Value::Array(items)) = array {
         let multi_template = template.len() > 1;
@@ -991,6 +1025,7 @@ fn create_foreach_ir_tree(
 }
 
 /// Create a Conditional (When/If) tree from IRNode::Conditional
+#[allow(clippy::too_many_arguments)]
 fn create_conditional_tree(
     ctx: &mut ReconcileCtx,
     value: &Value,
@@ -998,6 +1033,7 @@ fn create_conditional_tree(
     fallback: Option<&[IRNode]>,
     original_node: &IRNode,
     parent_id: Option<NodeId>,
+    render_parent_hint: Option<NodeId>,
     is_root: bool,
 ) -> NodeId {
     let raw_scope = match original_node {
@@ -1042,7 +1078,10 @@ fn create_conditional_tree(
         ctx.data_sources,
     );
 
-    let render_parent = parent_id;
+    // See create_foreach_ir_tree: branch children must render under the
+    // nearest real element, not a control-flow container (this If may be
+    // a ForEach item root, where the logical parent is the __ForEach).
+    let render_parent = nearest_render_parent(ctx.tree, render_parent_hint.or(parent_id));
 
     if let Some(children) = matched_children {
         for child in children {
@@ -1066,6 +1105,7 @@ fn create_conditional_tree(
 /// route, and renders only that route's children. The renderer never sees
 /// `Router` or `Route` element types — it just sees the matched children
 /// inserted under the Router's render parent.
+#[allow(clippy::too_many_arguments)]
 fn create_router_tree(
     ctx: &mut ReconcileCtx,
     location: &Value,
@@ -1073,6 +1113,7 @@ fn create_router_tree(
     fallback: Option<&[IRNode]>,
     original_node: &IRNode,
     parent_id: Option<NodeId>,
+    render_parent_hint: Option<NodeId>,
     is_root: bool,
 ) -> NodeId {
     let raw_scope = match original_node {
@@ -1129,7 +1170,9 @@ fn create_router_tree(
     // change, the Router reconciler will cache *these* NodeIds under
     // that key before swapping in new children.
     let matched = find_matching_route_with_key(&location_str, routes, fallback);
-    let render_parent = parent_id;
+    // See create_foreach_ir_tree: route children render under the nearest
+    // real element ancestor, never a control-flow container.
+    let render_parent = nearest_render_parent(ctx.tree, render_parent_hint.or(parent_id));
 
     if let Some((route_key, children)) = matched.as_ref() {
         for child in *children {
@@ -1265,13 +1308,16 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 };
                 // The ForEach container is transparent to renderers: items are
                 // LOGICAL children of `node_id` but their Insert/Move patches
-                // must target the ForEach's own parent (the RENDER parent).
+                // must target the nearest real ELEMENT ancestor (the RENDER
+                // parent) — the immediate parent may itself be a transparent
+                // control-flow container (ForEach directly inside an If).
                 // Collapsing the two orphans items under the grandparent and
                 // leaves `ForEach.children` empty — every later reconcile then
                 // sees a length mismatch and rebuilds forever. Both branches
                 // below keep the split; `create_foreach_ir_tree` is the
                 // reference for the create side.
-                let render_parent = existing_parent.unwrap_or(node_id);
+                let render_parent =
+                    nearest_render_parent(ctx.tree, existing_parent).unwrap_or(node_id);
 
                 // Fallback: keyed reconciliation reasons about the recorded
                 // children by identity, so it needs every one of them to still
@@ -1355,7 +1401,9 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 None => return,
             };
             let old_len = old_children.len();
-            let render_parent = existing_parent;
+            // Nearest real element — a Conditional that is a ForEach item
+            // root has the transparent __ForEach as its immediate parent.
+            let render_parent = nearest_render_parent(ctx.tree, existing_parent);
 
             if let Some(children) = matched_children {
                 let new_len = children.len();
@@ -1466,7 +1514,7 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 return;
             }
 
-            let render_parent = existing_parent;
+            let render_parent = nearest_render_parent(ctx.tree, existing_parent);
             let old_children: Vec<NodeId> = match ctx.tree.get(node_id) {
                 Some(n) => n.children.iter().copied().collect(),
                 None => return,

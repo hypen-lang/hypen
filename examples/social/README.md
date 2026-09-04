@@ -71,6 +71,13 @@ All servers manage the same state shape:
 - `stories` — story items with seen/unseen status
 - `selectedPostComments` — comments for selected post
 - `commentText` — current comment input
+- `messages` — DM inbox (conversation previews with unread markers)
+- `chatMessages` / `draft` — active DM thread (`/dm/:id`) and its composer input
+
+> DM threads (`Conversation` component + `conversations`/`messages` tables) are
+> fully implemented in the **TypeScript** server. The other language servers
+> still serve a mock conversation list; port the `Conversation` module to them
+> to enable the thread view there.
 
 ## Actions
 
@@ -80,3 +87,13 @@ All servers manage the same state shape:
 - `navigateBack` / `goBack` — pop back to `previousLocation`
 - `postComment` — add a comment
 - `openComments` — load comments for a post
+- `sendMessage` — send a DM in the active conversation
+
+## Desktop / Web
+
+The shared components are responsive via `md:` Tailwind variants: on ≥768px
+viewports each page renders as a centered, bordered column (Instagram-web
+style) instead of stretching edge-to-edge, feed and grid images become inset
+rounded cards, and stories render in a centered rounded phone frame.
+Press-and-hold any feed or grid image on desktop to smoothly zoom it to full
+size; releasing eases it back (`md:active:scale-*` + `transition-transform`).

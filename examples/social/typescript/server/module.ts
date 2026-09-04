@@ -7,6 +7,10 @@ import {
   getUserPosts,
   getStories,
   getComments,
+  getConversations,
+  getConversation,
+  getConversationMessages,
+  markConversationRead,
   formatUser,
 } from "./queries";
 
@@ -149,42 +153,6 @@ function getMockNotifications(currentUserId: string): Notification[] {
       postImageUrl: null,
       timeAgo: "2d",
       isRead: true,
-    },
-  ];
-}
-
-function getMockMessages(currentUserId: string): Conversation[] {
-  const users = db
-    .query("SELECT * FROM users WHERE id != ?")
-    .all(currentUserId) as any[];
-  return [
-    {
-      id: "m1",
-      user: { id: users[0].id, username: users[0].username, displayName: users[0].display_name, avatarUrl: users[0].avatar_url },
-      lastMessage: "That coffee spot was incredible!",
-      timeAgo: "2h",
-      isUnread: true,
-    },
-    {
-      id: "m2",
-      user: { id: users[1].id, username: users[1].username, displayName: users[1].display_name, avatarUrl: users[1].avatar_url },
-      lastMessage: "See you at the food festival 🍕",
-      timeAgo: "5h",
-      isUnread: true,
-    },
-    {
-      id: "m3",
-      user: { id: users[2].id, username: users[2].username, displayName: users[2].display_name, avatarUrl: users[2].avatar_url },
-      lastMessage: "Love the new designs!",
-      timeAgo: "1d",
-      isUnread: false,
-    },
-    {
-      id: "m4",
-      user: { id: users[3].id, username: users[3].username, displayName: users[3].display_name, avatarUrl: users[3].avatar_url },
-      lastMessage: "Want to join the next hike?",
-      timeAgo: "2d",
-      isUnread: false,
     },
   ];
 }
@@ -382,9 +350,77 @@ interface MessagesState {
 export const messagesModule = app
   .module("Messages")
   .defineState<MessagesState>({ currentUser: null, messages: [] })
-  .onCreated(async (state, context) => {
+  // onActivated (not onCreated) so the inbox re-reads unread markers and
+  // last-message previews every time the user navigates back to it.
+  .onActivated(async (state, context) => {
     state.currentUser = context ? currentUserFromApp(context) : null;
-    state.messages = getMockMessages(state.currentUser?.id ?? "u1");
+    state.messages = getConversations(state.currentUser?.id ?? "u1");
+  })
+  .build();
+
+// ---------------------------------------------------------------------------
+// Conversation — route "/dm/:id". A single DM thread: message history plus a
+// composer. onActivated re-reads the URL param so switching between threads
+// reuses the module instance but swaps the data.
+// ---------------------------------------------------------------------------
+
+interface ChatMessage {
+  id: string;
+  text: string;
+  isMine: boolean;
+  avatarUrl: string;
+  timeAgo: string;
+}
+
+interface ConversationState {
+  currentUser: User | null;
+  conversationId: string;
+  peer: Pick<User, "id" | "username" | "displayName" | "avatarUrl"> | null;
+  chatMessages: ChatMessage[];
+  draft: string;
+}
+
+export const conversationModule = app
+  .module("Conversation")
+  .defineState<ConversationState>({
+    currentUser: null,
+    conversationId: "",
+    peer: null,
+    chatMessages: [],
+    draft: "",
+  })
+  .onActivated(async (state, context) => {
+    if (!context?.router) return;
+    state.currentUser = currentUserFromApp(context);
+    const userId = state.currentUser?.id ?? "u1";
+    const path = context.router.getCurrentPath();
+    const match = context.router.matchPath("/dm/:id", path);
+    const id = match?.params.id ?? "";
+    state.conversationId = id;
+    state.draft = "";
+
+    const conversation = id ? getConversation(id, userId) : null;
+    state.peer = conversation?.user ?? null;
+    state.chatMessages = conversation ? getConversationMessages(id, userId) : [];
+    if (conversation) markConversationRead(id, userId);
+  })
+  .onAction("sendMessage", async ({ state }) => {
+    const text = state.draft.trim();
+    if (!text || !state.currentUser || !state.conversationId) return;
+
+    const id = `msg${Date.now()}`;
+    db.query(
+      "INSERT INTO messages (id, conversation_id, sender_id, text, is_read) VALUES (?, ?, ?, ?, 1)"
+    ).run(id, state.conversationId, state.currentUser.id, text);
+
+    state.chatMessages.push({
+      id,
+      text,
+      isMine: true,
+      avatarUrl: state.currentUser.avatarUrl,
+      timeAgo: "now",
+    });
+    state.draft = "";
   })
   .build();
 

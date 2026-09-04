@@ -1388,33 +1388,69 @@ impl LinearGradient {
     /// otherwise. Used by the painter when handing stops to Vello,
     /// which requires explicit offsets.
     pub fn resolved_offsets(&self) -> Vec<(f32, Rgba)> {
-        let n = self.stops.len();
-        if n == 0 {
-            return Vec::new();
-        }
-        if n == 1 {
-            // CSS treats a single stop as a flat fill — emit it at
-            // 0 and 1 so Vello has a valid gradient.
-            let s = self.stops[0];
-            let off = s.offset.unwrap_or(0.0);
-            return vec![(off, s.color), (1.0, s.color)];
-        }
-        let mut out: Vec<(f32, Rgba)> = Vec::with_capacity(n);
-        for (i, s) in self.stops.iter().enumerate() {
-            let off = match s.offset {
-                Some(o) => o,
-                None => i as f32 / (n - 1) as f32,
-            };
-            out.push((off, s.color));
-        }
-        // Ensure non-decreasing offsets (CSS clamps to previous max).
-        for i in 1..out.len() {
-            if out[i].0 < out[i - 1].0 {
-                out[i].0 = out[i - 1].0;
-            }
-        }
-        out
+        resolve_stop_offsets(&self.stops)
     }
+}
+
+/// Shared stop-offset resolution for linear AND radial gradients,
+/// following the CSS rules: an unspecified first/last stop defaults to
+/// 0/1, a specified offset below the running maximum is raised to it,
+/// and each RUN of unspecified stops is distributed evenly between its
+/// neighbouring specified stops — not across the whole gradient, which
+/// would collapse e.g. `red 50%, blue, green` into a hard edge at 50%
+/// instead of CSS's blue-at-75%.
+fn resolve_stop_offsets(stops: &[GradientStop]) -> Vec<(f32, Rgba)> {
+    let n = stops.len();
+    if n == 0 {
+        return Vec::new();
+    }
+    if n == 1 {
+        // CSS treats a single stop as a flat fill — emit it at
+        // 0 and 1 so Vello has a valid gradient.
+        let s = stops[0];
+        let off = s.offset.unwrap_or(0.0);
+        return vec![(off, s.color), (1.0, s.color)];
+    }
+    let mut offs: Vec<Option<f32>> = stops.iter().map(|s| s.offset).collect();
+    if offs[0].is_none() {
+        offs[0] = Some(0.0);
+    }
+    if offs[n - 1].is_none() {
+        offs[n - 1] = Some(1.0);
+    }
+    // Specified offsets are clamped non-decreasing first (CSS raises
+    // any position below the previous maximum), so the interpolation
+    // below always works with ordered anchors.
+    let mut max = offs[0].unwrap();
+    for off in offs.iter_mut().skip(1).flatten() {
+        if *off < max {
+            *off = max;
+        }
+        max = *off;
+    }
+    // Fill each run of unspecified stops evenly between its anchors.
+    let mut i = 1;
+    while i < n {
+        if offs[i].is_none() {
+            let start = offs[i - 1].unwrap();
+            let mut j = i;
+            while offs[j].is_none() {
+                j += 1;
+            }
+            let end = offs[j].unwrap();
+            let span = (j - i + 1) as f32;
+            for (k, slot) in offs[i..j].iter_mut().enumerate() {
+                *slot = Some(start + (end - start) * ((k + 1) as f32) / span);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    offs.into_iter()
+        .map(Option::unwrap)
+        .zip(stops.iter().map(|s| s.color))
+        .collect()
 }
 
 /// Parse a CSS `linear-gradient(<direction>, <stop>, <stop>, ...)` value.
@@ -1422,20 +1458,7 @@ impl LinearGradient {
 /// `url()`, malformed input). Whitespace-tolerant, case-insensitive on
 /// the `linear-gradient` keyword.
 pub fn parse_linear_gradient(s: &str) -> Option<LinearGradient> {
-    let s = s.trim();
-    let lower = s.to_ascii_lowercase();
-    let s = if let Some(rest) = lower.strip_prefix("linear-gradient(") {
-        // Recover the original-case args slice — `lower` was only for
-        // the prefix sniff. Length is the same; just use the same
-        // index into the original string.
-        let start = "linear-gradient(".len();
-        let inner_orig = &s[start..];
-        let inner_orig = inner_orig.strip_suffix(')')?;
-        let _ = rest; // keep `lower` from being flagged as unused
-        inner_orig
-    } else {
-        return None;
-    };
+    let s = gradient_body(s, "linear-gradient(")?;
 
     let parts = split_top_level_commas(s);
     if parts.is_empty() {
@@ -1458,6 +1481,39 @@ pub fn parse_linear_gradient(s: &str) -> Option<LinearGradient> {
         return None;
     }
     Some(LinearGradient { direction, stops })
+}
+
+/// Extract the argument body of a `<prefix>(...)` gradient call:
+/// case-insensitive on the prefix, and the closing paren must be the
+/// MATCHING one with nothing but whitespace after it. A bare
+/// `strip_suffix(')')` here mis-parsed a multi-layer value
+/// (`linear-gradient(a, b), linear-gradient(c, d)`) into one garbage
+/// gradient built from the first and last stops — a whole-value parser
+/// must reject layer lists and leave them to `parse_background_value`.
+fn gradient_body<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+    let s = s.trim();
+    if s.len() < prefix.len() || !s[..prefix.len()].eq_ignore_ascii_case(prefix) {
+        return None;
+    }
+    let start = prefix.len();
+    let mut depth = 1usize;
+    for (i, ch) in s[start..].char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = start + i;
+                    if !s[end + 1..].trim().is_empty() {
+                        return None;
+                    }
+                    return Some(&s[start..end]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Split `s` on commas at depth-0 only, so commas inside nested
@@ -1674,8 +1730,17 @@ fn split_top_level(value: &str) -> Vec<String> {
 
 /// `url('...')` / `url(...)` anywhere in a layer -> the bare URI.
 fn extract_url(layer: &str) -> Option<String> {
+    extract_url_span(layer).map(|(_, _, uri)| uri)
+}
+
+/// Locate the `url(...)` call in a layer: returns the byte range of the
+/// whole call (`url(` through the matching `)` inclusive) plus the bare
+/// URI, so callers can also inspect what surrounds the call — the CSS
+/// shorthand allows `<color> url(...) center / cover` in ONE layer.
+fn extract_url_span(layer: &str) -> Option<(usize, usize, String)> {
     let lower = layer.to_ascii_lowercase();
-    let start = lower.find("url(")? + 4;
+    let call_start = lower.find("url(")?;
+    let start = call_start + 4;
     let mut depth = 1usize;
     let mut end = start;
     for (i, ch) in layer[start..].char_indices() {
@@ -1698,8 +1763,37 @@ fn extract_url(layer: &str) -> Option<String> {
     if uri.is_empty() {
         None
     } else {
-        Some(uri.to_string())
+        Some((call_start, end + 1, uri.to_string()))
     }
+}
+
+/// Split on whitespace at paren depth 0, so `rgba(3, 7, 18, 0.6)`
+/// survives as one token. Used to fish a colour out of the non-`url`
+/// remainder of a shorthand layer.
+fn split_top_level_ws(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0usize;
+    let mut start: Option<usize> = None;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            c if c.is_whitespace() && depth == 0 => {
+                if let Some(st) = start.take() {
+                    out.push(&s[st..i]);
+                }
+                continue;
+            }
+            _ => {}
+        }
+        if start.is_none() {
+            start = Some(i);
+        }
+    }
+    if let Some(st) = start {
+        out.push(&s[st..]);
+    }
+    out
 }
 
 /// Parse the CSS `border` shorthand — `1px solid #333`, `2px #f00`,
@@ -1833,6 +1927,445 @@ pub fn substitute_tw_gradient_vars(node: &Node, raw: &str) -> String {
         }
     }
     s
+}
+
+// ---------------------------------------------------------------------------
+// Radial gradients + layered `background` shorthand
+//
+// Mirrors the layer model of `CssBackground.kt` / `CssBackground.swift`
+// in the mobile renderers: a `background` value is a comma-separated
+// stack of layers (gradients, `url(...)` images, at most one solid
+// colour), declared top-first. The home-screen icon tiles are exactly
+// this shape — `radial-gradient(<sheen>), linear-gradient(<brand>)` —
+// and used to paint nothing on desktop because only a lone
+// `linear-gradient` in `backgroundImage` was understood.
+// ---------------------------------------------------------------------------
+
+/// A radius component of an explicit radial-gradient size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RadialLen {
+    /// Logical pixels.
+    Px(f32),
+    /// Fraction of the box axis (percent / 100): `rx` resolves against
+    /// the width, `ry` against the height, per CSS.
+    Pct(f32),
+}
+
+impl RadialLen {
+    fn resolve(self, basis: f32) -> f32 {
+        match self {
+            RadialLen::Px(v) => v,
+            RadialLen::Pct(f) => f * basis,
+        }
+    }
+}
+
+/// The size of a radial gradient's ending shape.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum RadialExtent {
+    ClosestSide,
+    FarthestSide,
+    ClosestCorner,
+    /// The CSS default.
+    FarthestCorner,
+    /// Explicit radii: `radial-gradient(85% 60% at ..)` or a single
+    /// length for a circle.
+    Explicit {
+        rx: RadialLen,
+        ry: RadialLen,
+    },
+}
+
+/// Parsed CSS `radial-gradient(...)`, resolved against a rect at paint
+/// time (the extent keywords and percent radii all need the box size).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RadialGradient {
+    /// `circle` forces equal radii; `ellipse` (the CSS default) lets
+    /// them differ.
+    pub circle: bool,
+    pub extent: RadialExtent,
+    /// Centre as fractions of the box (`at 24% 14%` → `(0.24, 0.14)`).
+    /// Defaults to `(0.5, 0.5)`.
+    pub center: (f32, f32),
+    pub stops: Vec<GradientStop>,
+}
+
+impl RadialGradient {
+    /// Stops with explicit offsets, ready for Vello (see
+    /// [`LinearGradient::resolved_offsets`]).
+    pub fn resolved_offsets(&self) -> Vec<(f32, Rgba)> {
+        resolve_stop_offsets(&self.stops)
+    }
+
+    /// Resolve the ending-shape radii `(rx, ry)` for a `w`×`h` box in
+    /// the box's own (physical-pixel) space; `scale` is the display
+    /// scale factor, applied to explicit `Px` radii only — percent
+    /// radii and the extent keywords already resolve against the
+    /// physical box. Implements the CSS extent keywords; the corner
+    /// keywords use the spec's rule for ellipses (the same-closeness
+    /// side ellipse scaled by √2 so it passes through the corner).
+    pub fn resolve_radii(&self, w: f32, h: f32, scale: f32) -> (f32, f32) {
+        let cx = self.center.0 * w;
+        let cy = self.center.1 * h;
+        let (near_x, far_x) = (cx.min(w - cx).abs(), cx.max(w - cx).abs());
+        let (near_y, far_y) = (cy.min(h - cy).abs(), cy.max(h - cy).abs());
+        let (mut rx, mut ry) = match self.extent {
+            RadialExtent::Explicit { rx, ry } => {
+                let px_scale = |len: RadialLen, basis: f32| match len {
+                    RadialLen::Px(v) => v * scale,
+                    RadialLen::Pct(_) => len.resolve(basis),
+                };
+                (px_scale(rx, w), px_scale(ry, h))
+            }
+            RadialExtent::ClosestSide => (near_x, near_y),
+            RadialExtent::FarthestSide => (far_x, far_y),
+            RadialExtent::ClosestCorner => {
+                let side = (near_x, near_y);
+                (
+                    side.0 * std::f32::consts::SQRT_2,
+                    side.1 * std::f32::consts::SQRT_2,
+                )
+            }
+            RadialExtent::FarthestCorner => {
+                let side = (far_x, far_y);
+                (
+                    side.0 * std::f32::consts::SQRT_2,
+                    side.1 * std::f32::consts::SQRT_2,
+                )
+            }
+        };
+        if self.circle && !matches!(self.extent, RadialExtent::Explicit { .. }) {
+            // A circle's keyword extents measure straight-line
+            // distances, not per-axis ones.
+            let r = match self.extent {
+                RadialExtent::ClosestSide => near_x.min(near_y),
+                RadialExtent::FarthestSide => far_x.max(far_y),
+                RadialExtent::ClosestCorner => near_x.hypot(near_y),
+                RadialExtent::FarthestCorner => far_x.hypot(far_y),
+                RadialExtent::Explicit { .. } => unreachable!(),
+            };
+            rx = r;
+            ry = r;
+        }
+        (rx.max(0.0), ry.max(0.0))
+    }
+}
+
+/// Parse a CSS `radial-gradient(<shape/size/position>?, <stop>, ...)`
+/// value. Returns `None` for any other CSS value. Prelude support:
+/// `circle` / `ellipse`, the four extent keywords, explicit radii
+/// (`<len|pct>{1,2}`), and `at <position>` with percent or keyword
+/// components. A prelude it can't make sense of degrades to the CSS
+/// defaults (ellipse, farthest-corner, centred) rather than dropping
+/// the gradient.
+pub fn parse_radial_gradient(s: &str) -> Option<RadialGradient> {
+    let inner = gradient_body(s, "radial-gradient(")?;
+
+    let parts = split_top_level_commas(inner);
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut circle = false;
+    let mut extent = RadialExtent::FarthestCorner;
+    let mut center = (0.5f32, 0.5f32);
+    let first = parts[0].trim();
+    // A chunk that parses as a colour stop is never a prelude
+    // (`rgba(...)`, `red 10%`); anything else gets a prelude attempt.
+    let stops_start = if parse_stop(first).is_none() {
+        if let Some((c, e, ctr)) = parse_radial_prelude(first) {
+            circle = c;
+            extent = e;
+            center = ctr;
+        }
+        1
+    } else {
+        0
+    };
+
+    let stops: Vec<GradientStop> = parts[stops_start..]
+        .iter()
+        .filter_map(|p| parse_stop(p.trim()))
+        .collect();
+    if stops.is_empty() {
+        return None;
+    }
+    Some(RadialGradient {
+        circle,
+        extent,
+        center,
+        stops,
+    })
+}
+
+/// `circle at 24% 14%` / `85% 60% at 50% 38%` / `closest-side` →
+/// `(circle, extent, center)`. Returns `None` when nothing in the
+/// chunk is recognisable, letting the caller fall back to defaults.
+fn parse_radial_prelude(s: &str) -> Option<(bool, RadialExtent, (f32, f32))> {
+    let lower = s.to_ascii_lowercase();
+    let (shape_part, pos_part) = match lower.split_once(" at ") {
+        Some((a, b)) => (a.trim(), Some(b.trim())),
+        None => match lower.strip_prefix("at ") {
+            Some(rest) => ("", Some(rest.trim())),
+            None => (lower.as_str(), None),
+        },
+    };
+
+    let mut circle = false;
+    let mut ellipse = false;
+    let mut extent: Option<RadialExtent> = None;
+    let mut radii: Vec<RadialLen> = Vec::new();
+    let mut recognised = pos_part.is_some();
+    for tok in shape_part.split_whitespace() {
+        match tok {
+            "circle" => {
+                circle = true;
+                recognised = true;
+            }
+            "ellipse" => {
+                ellipse = true;
+                recognised = true;
+            }
+            "closest-side" => {
+                extent = Some(RadialExtent::ClosestSide);
+                recognised = true;
+            }
+            "farthest-side" => {
+                extent = Some(RadialExtent::FarthestSide);
+                recognised = true;
+            }
+            "closest-corner" => {
+                extent = Some(RadialExtent::ClosestCorner);
+                recognised = true;
+            }
+            "farthest-corner" => {
+                extent = Some(RadialExtent::FarthestCorner);
+                recognised = true;
+            }
+            _ => {
+                if let Some(len) = parse_radial_len(tok) {
+                    radii.push(len);
+                    recognised = true;
+                } else {
+                    return None;
+                }
+            }
+        }
+    }
+    if !recognised {
+        return None;
+    }
+
+    let extent = match (extent, radii.as_slice()) {
+        (Some(e), _) => e,
+        (None, [r]) => RadialExtent::Explicit { rx: *r, ry: *r },
+        (None, [rx, ry, ..]) => RadialExtent::Explicit { rx: *rx, ry: *ry },
+        (None, []) => RadialExtent::FarthestCorner,
+    };
+    // One radius means a circle unless `ellipse` was explicit; two
+    // radii force an ellipse per CSS.
+    let circle = if radii.len() >= 2 {
+        false
+    } else {
+        circle || (radii.len() == 1 && !ellipse)
+    };
+
+    let mut center = (0.5f32, 0.5f32);
+    if let Some(pos) = pos_part {
+        let pct = |tok: &str| {
+            tok.strip_suffix('%')
+                .and_then(|p| p.trim().parse::<f32>().ok())
+                .map(|v| v * 0.01)
+        };
+        let toks: Vec<&str> = pos.split_whitespace().collect();
+        let mut x: Option<f32> = None;
+        let mut y: Option<f32> = None;
+        let mut i = 0;
+        while i < toks.len() {
+            // CSS 4-value syntax pairs an edge keyword with an offset
+            // FROM that edge (`right 20%` → x = 1 − 0.2); a keyword
+            // alone is the edge itself; a bare percent fills the next
+            // positional axis (x, then y).
+            let offset = toks.get(i + 1).copied().and_then(pct);
+            let step = if offset.is_some() { 2 } else { 1 };
+            match toks[i] {
+                "left" => {
+                    x = Some(offset.unwrap_or(0.0));
+                    i += step;
+                }
+                "right" => {
+                    x = Some(1.0 - offset.unwrap_or(0.0));
+                    i += step;
+                }
+                "top" => {
+                    y = Some(offset.unwrap_or(0.0));
+                    i += step;
+                }
+                "bottom" => {
+                    y = Some(1.0 - offset.unwrap_or(0.0));
+                    i += step;
+                }
+                "center" => {
+                    // Consumes a positional slot: `at center 30%` puts
+                    // the 30% on the y axis.
+                    if x.is_none() {
+                        x = Some(0.5);
+                    } else if y.is_none() {
+                        y = Some(0.5);
+                    }
+                    i += 1;
+                }
+                tok => {
+                    if let Some(f) = pct(tok) {
+                        if x.is_none() {
+                            x = Some(f);
+                        } else if y.is_none() {
+                            y = Some(f);
+                        }
+                    }
+                    i += 1;
+                }
+            }
+        }
+        center = (x.unwrap_or(0.5), y.unwrap_or(0.5));
+    }
+    Some((circle, extent, center))
+}
+
+/// `85%` → `Pct(0.85)`, `120px` / `120` → `Px(120)`.
+fn parse_radial_len(tok: &str) -> Option<RadialLen> {
+    if let Some(p) = tok.strip_suffix('%') {
+        return p
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .map(|v| RadialLen::Pct(v * 0.01));
+    }
+    let num = tok.strip_suffix("px").unwrap_or(tok);
+    num.trim().parse::<f32>().ok().map(RadialLen::Px)
+}
+
+/// One paintable layer of a CSS `background` value.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BackgroundLayer {
+    /// `url(...)` — a `data:` or remote image URI, painted
+    /// `center / cover` like the shorthand's position/size keywords ask.
+    Image(String),
+    Linear(LinearGradient),
+    Radial(RadialGradient),
+}
+
+/// A parsed CSS `background` shorthand, decomposed for the painter.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ParsedBackground {
+    /// Solid colour layer — CSS paints it bottom-most.
+    pub color: Option<Rgba>,
+    /// Image/gradient layers in PAINT order (bottom first) — CSS
+    /// declaration order reversed. Kept as one interleaved list because
+    /// `url(…), linear-gradient(…)` and `linear-gradient(…), url(…)`
+    /// stack in opposite orders.
+    pub layers: Vec<BackgroundLayer>,
+}
+
+impl ParsedBackground {
+    pub fn is_empty(&self) -> bool {
+        self.color.is_none() && self.layers.is_empty()
+    }
+}
+
+/// Parse a full CSS `background` / `background-image` value into its
+/// layer stack. Unsupported layers (e.g. `conic-gradient`) are dropped
+/// individually rather than failing the whole value; returns `None`
+/// when nothing in it is expressible.
+pub fn parse_background_value(value: &str) -> Option<ParsedBackground> {
+    let mut out = ParsedBackground::default();
+    let mut declared: Vec<BackgroundLayer> = Vec::new();
+    for raw in split_top_level(value) {
+        let layer = raw.trim();
+        if layer.is_empty() {
+            continue;
+        }
+        let lower = layer.to_ascii_lowercase();
+        if lower.contains("url(") {
+            // `url('…') center / cover no-repeat` — the trailing
+            // position/size/repeat keywords aren't expressible;
+            // `cover` is what the painter does anyway. The classic
+            // single-layer shorthand also puts the colour here
+            // (`background: #030712 url(...) center / cover`), so scan
+            // the non-url remainder for one — it must not vanish just
+            // because it shares a layer with the image.
+            if let Some((call_start, call_end, uri)) = extract_url_span(layer) {
+                declared.push(BackgroundLayer::Image(uri));
+                if out.color.is_none() {
+                    let rest = format!("{} {}", &layer[..call_start], &layer[call_end..]);
+                    out.color = split_top_level_ws(&rest).into_iter().find_map(parse_color);
+                }
+            }
+        } else if lower.starts_with("linear-gradient(") {
+            if let Some(g) = parse_linear_gradient(layer) {
+                declared.push(BackgroundLayer::Linear(g));
+            }
+        } else if lower.starts_with("radial-gradient(") {
+            if let Some(g) = parse_radial_gradient(layer) {
+                declared.push(BackgroundLayer::Radial(g));
+            }
+        } else if lower == "none" {
+            continue;
+        } else if out.color.is_none() {
+            out.color = parse_color(layer);
+        }
+    }
+    declared.reverse();
+    out.layers = declared;
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+/// Read a node's layered background, the paths the single-gradient
+/// reader ([`prop_linear_gradient`]) can't express:
+///
+/// 1. The CSS `background` shorthand — `.background("radial-…, linear-…")`
+///    from the DSL. The whole stack is returned, colour included.
+/// 2. The first-class `.radialGradient("<body>")` applicator, mirroring
+///    the DOM renderer's lowering to `radial-gradient(<body>)`.
+/// 3. `backgroundImage` values the legacy path would drop: a
+///    `radial-gradient(...)` or a multi-layer list. A lone
+///    `linear-gradient(...)` (incl. the Tailwind `var(--tw-…)` form) and
+///    a lone `url(...)` stay `None` here so those tested paths keep
+///    handling them.
+///
+/// Returns `None` for the common solid-colour node so the painter's
+/// existing fast paths are undisturbed.
+pub fn prop_background_layers(node: &Node) -> Option<ParsedBackground> {
+    if let Some(raw) = prop_str(node, "background") {
+        if let Some(parsed) = parse_background_value(raw) {
+            return Some(parsed);
+        }
+    }
+    if let Some(body) = prop_str(node, "radialGradient") {
+        if let Some(g) = parse_radial_gradient(&format!("radial-gradient({})", body.trim())) {
+            return Some(ParsedBackground {
+                color: None,
+                layers: vec![BackgroundLayer::Radial(g)],
+            });
+        }
+    }
+    if let Some(raw) = prop_str(node, "backgroundImage") {
+        let resolved = substitute_tw_gradient_vars(node, raw);
+        if let Some(parsed) = parse_background_value(&resolved) {
+            let radial = parsed
+                .layers
+                .iter()
+                .any(|l| matches!(l, BackgroundLayer::Radial(_)));
+            if radial || parsed.layers.len() >= 2 {
+                return Some(parsed);
+            }
+        }
+    }
+    None
 }
 
 /// Read `name` (with viewport-aware tw breakpoint resolution) as a
@@ -2194,6 +2727,253 @@ mod tests {
         // Solid-colour node — gradient path is opt-in.
         let node = node_with(&[("background-color", Value::String("#ffffff".into()))]);
         assert!(prop_linear_gradient(&node, vp(800.0)).is_none());
+    }
+
+    // ----------------------------------------------------------------
+    // Radial gradients + layered `background` shorthand
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn parse_radial_gradient_circle_at_position() {
+        // The home-screen icon tiles' sheen layer.
+        let g = parse_radial_gradient(
+            "radial-gradient(circle at 24% 14%, rgba(255,255,255,0.48), transparent 29%)",
+        )
+        .expect("parses");
+        assert!(g.circle);
+        assert_eq!(g.extent, RadialExtent::FarthestCorner);
+        assert!((g.center.0 - 0.24).abs() < 1e-6);
+        assert!((g.center.1 - 0.14).abs() < 1e-6);
+        assert_eq!(g.stops.len(), 2);
+        assert_eq!(g.stops[1].color, Rgba::TRANSPARENT);
+        assert_eq!(g.stops[1].offset, Some(0.29));
+    }
+
+    #[test]
+    fn parse_radial_gradient_explicit_ellipse() {
+        // The app-splash glow: explicit percent radii + centre.
+        let g = parse_radial_gradient(
+            "radial-gradient(85% 60% at 50% 38%, rgba(79, 70, 229, 0.48) 0%, rgba(3, 7, 18, 0) 70%)",
+        )
+        .expect("parses");
+        assert!(!g.circle);
+        match g.extent {
+            RadialExtent::Explicit {
+                rx: RadialLen::Pct(rx),
+                ry: RadialLen::Pct(ry),
+            } => {
+                assert!((rx - 0.85).abs() < 1e-6);
+                assert!((ry - 0.60).abs() < 1e-6);
+            }
+            other => panic!("expected explicit percent radii, got {other:?}"),
+        }
+        assert!((g.center.0 - 0.5).abs() < 1e-6);
+        assert!((g.center.1 - 0.38).abs() < 1e-6);
+        // Explicit radii resolve against the box axes.
+        let (rx, ry) = g.resolve_radii(200.0, 100.0, 1.0);
+        assert!((rx - 170.0).abs() < 1e-3);
+        assert!((ry - 60.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn parse_radial_gradient_defaults_without_prelude() {
+        let g = parse_radial_gradient("radial-gradient(#ffffff, #000000)").expect("parses");
+        assert!(!g.circle);
+        assert_eq!(g.extent, RadialExtent::FarthestCorner);
+        assert_eq!(g.center, (0.5, 0.5));
+        assert_eq!(g.stops.len(), 2);
+        // Centred farthest-corner circle radius in a square box is the
+        // half-diagonal; the default ellipse's radii are the √2-scaled
+        // half-sides, which coincide with it there.
+        let (rx, ry) = g.resolve_radii(100.0, 100.0, 1.0);
+        assert!((rx - 70.7107).abs() < 1e-2);
+        assert!((ry - 70.7107).abs() < 1e-2);
+    }
+
+    #[test]
+    fn parse_radial_gradient_rejects_non_radial() {
+        assert!(parse_radial_gradient("linear-gradient(#fff, #000)").is_none());
+        assert!(parse_radial_gradient("#ff0000").is_none());
+    }
+
+    #[test]
+    fn parse_background_value_icon_tile_stack() {
+        // The launcher's icon tile: sheen radial OVER brand linear.
+        let pb = parse_background_value(
+            "radial-gradient(circle at 24% 14%, rgba(255,255,255,0.48), transparent 29%), \
+             linear-gradient(145deg, #38BDF8 0%, #4F46E5 52%, #312E81 100%)",
+        )
+        .expect("parses");
+        assert!(pb.color.is_none());
+        assert_eq!(pb.layers.len(), 2);
+        // Layers are stored bottom-first: the linear paints first, the
+        // radial sheen on top — CSS declaration order reversed.
+        assert!(matches!(pb.layers[0], BackgroundLayer::Linear(_)));
+        assert!(matches!(pb.layers[1], BackgroundLayer::Radial(_)));
+    }
+
+    #[test]
+    fn parse_background_value_wallpaper_stack() {
+        // Scrim gradient over a photo: image at the bottom, gradient on
+        // top, trailing position/size/repeat keywords ignored.
+        let pb = parse_background_value(
+            "linear-gradient(180deg, rgba(3, 7, 18, 0.08), rgba(3, 7, 18, 0.6)), \
+             url('data:image/jpeg;base64,AAAA') center / cover no-repeat",
+        )
+        .expect("parses");
+        assert_eq!(pb.layers.len(), 2);
+        match &pb.layers[0] {
+            BackgroundLayer::Image(uri) => assert_eq!(uri, "data:image/jpeg;base64,AAAA"),
+            other => panic!("expected image bottom-most, got {other:?}"),
+        }
+        assert!(matches!(pb.layers[1], BackgroundLayer::Linear(_)));
+    }
+
+    #[test]
+    fn resolved_offsets_interpolate_between_specified_neighbours() {
+        // CSS distributes unspecified stops between their neighbouring
+        // SPECIFIED stops, not across the whole gradient: in
+        // `red 50%, blue, green`, blue sits at 75% (midpoint of the
+        // 50%–100% span). Even whole-gradient distribution put blue at
+        // 0.5 — coincident with red — collapsing the ramp to an edge.
+        let g = parse_radial_gradient("radial-gradient(red 50%, blue, green)").expect("parses");
+        let res = g.resolved_offsets();
+        assert_eq!(res[0].0, 0.5);
+        assert_eq!(res[1].0, 0.75);
+        assert_eq!(res[2].0, 1.0);
+    }
+
+    #[test]
+    fn parse_radial_gradient_four_value_position() {
+        // CSS 4-value syntax: an edge keyword plus an offset FROM that
+        // edge — `right 20%` is x = 0.8, `bottom 10%` is y = 0.9.
+        let g =
+            parse_radial_gradient("radial-gradient(circle at right 20% bottom 10%, #fff, #000)")
+                .expect("parses");
+        assert!((g.center.0 - 0.8).abs() < 1e-6);
+        assert!((g.center.1 - 0.9).abs() < 1e-6);
+        // `center <pct>` consumes the horizontal slot.
+        let g =
+            parse_radial_gradient("radial-gradient(at center 30%, #fff, #000)").expect("parses");
+        assert!((g.center.0 - 0.5).abs() < 1e-6);
+        assert!((g.center.1 - 0.3).abs() < 1e-6);
+    }
+
+    #[test]
+    fn explicit_px_radii_scale_with_the_display_factor() {
+        // item rects are physical pixels, so a `120px` radius must be
+        // multiplied by the scale factor on HiDPI; percent radii
+        // already resolve against the physical box and must NOT be.
+        let g =
+            parse_radial_gradient("radial-gradient(120px at 50% 50%, red, blue)").expect("parses");
+        let (rx, ry) = g.resolve_radii(400.0, 400.0, 2.0);
+        assert_eq!((rx, ry), (240.0, 240.0));
+        let g =
+            parse_radial_gradient("radial-gradient(50% 50% at center, red, blue)").expect("parses");
+        let (rx, ry) = g.resolve_radii(400.0, 200.0, 2.0);
+        assert_eq!((rx, ry), (200.0, 100.0));
+    }
+
+    #[test]
+    fn closest_side_on_the_edge_resolves_to_zero_radius() {
+        // Centre sitting ON a box edge: the resolved radius is 0 and
+        // the painter degrades to a flat fill of the last stop (CSS's
+        // vanishingly-small ending shape), rather than painting
+        // nothing.
+        let g = parse_radial_gradient(
+            "radial-gradient(circle closest-side at left center, red, #4F46E5)",
+        )
+        .expect("parses");
+        let (rx, _) = g.resolve_radii(100.0, 100.0, 1.0);
+        assert_eq!(rx, 0.0);
+    }
+
+    #[test]
+    fn parse_linear_gradient_rejects_layer_lists() {
+        // A multi-layer value must not mis-parse as one garbage
+        // gradient assembled from the first and last stops; the layer
+        // list belongs to `parse_background_value`.
+        let layered = "linear-gradient(#111111, #222222), linear-gradient(#333333, #444444)";
+        assert!(parse_linear_gradient(layered).is_none());
+        let pb = parse_background_value(layered).expect("parses as layers");
+        assert_eq!(pb.layers.len(), 2);
+        assert!(pb
+            .layers
+            .iter()
+            .all(|l| matches!(l, BackgroundLayer::Linear(_))));
+    }
+
+    #[test]
+    fn single_layer_color_and_url_keeps_both() {
+        // The classic shorthand puts colour and image in ONE layer:
+        // `background: #030712 url(...) center / cover no-repeat`.
+        let pb = parse_background_value(
+            "#030712 url('data:image/png;base64,AA') center / cover no-repeat",
+        )
+        .expect("parses");
+        assert_eq!(pb.color, Some(Rgba(0x03, 0x07, 0x12, 0xff)));
+        assert_eq!(pb.layers.len(), 1);
+        assert!(matches!(pb.layers[0], BackgroundLayer::Image(_)));
+    }
+
+    #[test]
+    fn parse_background_value_solid_color_only() {
+        let pb = parse_background_value("#123456").expect("parses");
+        assert_eq!(pb.color, Some(Rgba(0x12, 0x34, 0x56, 0xff)));
+        assert!(pb.layers.is_empty());
+    }
+
+    #[test]
+    fn prop_background_layers_reads_background_shorthand() {
+        // `.background("...")` flattens to `background.0` on the wire.
+        let node = node_with(&[(
+            "background.0",
+            Value::String(
+                "radial-gradient(circle at 24% 14%, rgba(255,255,255,0.48), transparent 29%), \
+                 linear-gradient(145deg, #38BDF8 0%, #4F46E5 52%, #312E81 100%)"
+                    .into(),
+            ),
+        )]);
+        let pb = prop_background_layers(&node).expect("resolves");
+        assert_eq!(pb.layers.len(), 2);
+    }
+
+    #[test]
+    fn prop_background_layers_reads_radial_gradient_applicator() {
+        // `.radialGradient("<body>")` — the DOM renderer lowers this to
+        // `radial-gradient(<body>)`; desktop reads the flattened prop.
+        let node = node_with(&[(
+            "radialGradient.0",
+            Value::String("circle, #ffffff, #000000".into()),
+        )]);
+        let pb = prop_background_layers(&node).expect("resolves");
+        assert_eq!(pb.layers.len(), 1);
+        assert!(matches!(pb.layers[0], BackgroundLayer::Radial(_)));
+    }
+
+    #[test]
+    fn prop_background_layers_leaves_single_linear_to_legacy_path() {
+        // A lone linear-gradient in `backgroundImage` keeps flowing
+        // through `prop_linear_gradient` (incl. the tw var form), so
+        // the layered path must decline it.
+        let node = node_with(&[(
+            "backgroundImage.0",
+            Value::String("linear-gradient(to right, #fff, #000)".into()),
+        )]);
+        assert!(prop_background_layers(&node).is_none());
+        assert!(prop_linear_gradient(&node, vp(800.0)).is_some());
+    }
+
+    #[test]
+    fn prop_background_layers_takes_radial_background_image() {
+        // A radial in `backgroundImage` has no legacy path — the
+        // layered reader picks it up.
+        let node = node_with(&[(
+            "backgroundImage.0",
+            Value::String("radial-gradient(circle, #fff, #000)".into()),
+        )]);
+        let pb = prop_background_layers(&node).expect("resolves");
+        assert!(matches!(pb.layers[0], BackgroundLayer::Radial(_)));
     }
 
     #[test]

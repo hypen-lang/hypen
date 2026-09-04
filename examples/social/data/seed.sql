@@ -72,3 +72,29 @@ INSERT INTO likes (post_id, user_id) VALUES
 INSERT INTO saves (post_id, user_id) VALUES
 ('p3', 'u1'),
 ('p4', 'u1');
+
+-- Direct message conversations (alice + everyone)
+INSERT INTO conversations (id, user_a, user_b, created_at) VALUES
+('dm1', 'u1', 'u2', datetime('now', '-3 days')),
+('dm2', 'u1', 'u3', datetime('now', '-2 days')),
+('dm3', 'u1', 'u4', datetime('now', '-5 days')),
+('dm4', 'u1', 'u5', datetime('now', '-4 days'));
+
+INSERT INTO messages (id, conversation_id, sender_id, text, is_read, created_at) VALUES
+-- alice <-> bob (coffee)
+('msg1',  'dm1', 'u1', 'Hey Bob! Still up for that cupping session?', 1, datetime('now', '-1 day')),
+('msg2',  'dm1', 'u2', 'Absolutely, come by the roastery Saturday', 1, datetime('now', '-1 day')),
+('msg3',  'dm1', 'u1', 'Perfect, I''ll bring the Kyoto beans I told you about', 1, datetime('now', '-5 hours')),
+('msg4',  'dm1', 'u2', 'That coffee spot was incredible!', 0, datetime('now', '-2 hours')),
+-- alice <-> charlie (food)
+('msg5',  'dm2', 'u3', 'You have to try that new ramen place', 1, datetime('now', '-1 day')),
+('msg6',  'dm2', 'u1', 'The one in the East Village? Heard the broth is amazing', 1, datetime('now', '-1 day')),
+('msg7',  'dm2', 'u3', 'See you at the food festival 🍕', 0, datetime('now', '-5 hours')),
+-- alice <-> diana (design)
+('msg8',  'dm3', 'u1', 'The new icon set looks fantastic!', 1, datetime('now', '-2 days')),
+('msg9',  'dm3', 'u4', 'Thanks! 200 icons nearly broke me 😅', 1, datetime('now', '-2 days')),
+('msg10', 'dm3', 'u4', 'Love the new designs!', 1, datetime('now', '-1 day')),
+-- alice <-> eve (hiking)
+('msg11', 'dm4', 'u5', 'Rainier was brutal but amazing', 1, datetime('now', '-3 days')),
+('msg12', 'dm4', 'u1', 'Your summit photos are stunning!', 1, datetime('now', '-3 days')),
+('msg13', 'dm4', 'u5', 'Want to join the next hike?', 1, datetime('now', '-2 days'));

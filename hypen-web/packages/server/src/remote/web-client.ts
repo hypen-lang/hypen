@@ -106,8 +106,24 @@ async function loadOrBuildBundle(): Promise<string | null> {
     // API: inside `bun test` the in-process bundler inherits the test
     // runner's module resolution and mis-resolves package-relative
     // imports; a clean `bun build` child process is deterministic.
+    //
+    // `--conditions=bun` makes @hypen-space/* resolve through their `bun`
+    // export condition (`src/*.ts`, shipped in the published tarballs)
+    // instead of the `browser` condition's `dist/*` — dist is a build
+    // artifact that doesn't exist in a source checkout or CI, and this
+    // subprocess is always Bun, which bundles TS sources directly.
     const proc = Bun.spawn(
-      ["bun", "build", entry, "--target", "browser", "--format", "esm", "--minify"],
+      [
+        "bun",
+        "build",
+        entry,
+        "--target",
+        "browser",
+        "--conditions=bun",
+        "--format",
+        "esm",
+        "--minify",
+      ],
       { stdout: "pipe", stderr: "pipe" },
     );
     const [out, err, code] = await Promise.all([

@@ -262,9 +262,20 @@ fn feed_batch(posts: usize) -> Vec<Patch> {
     batch
 }
 
-/// This revision's flush-time painter invalidation for a one-patch
-/// batch. Kept as the single swap point for main-vs-branch runs.
-fn flush_invalidate(painter: &mut VelloPainter, patch: &Patch, tree: &Tree) {
+/// This revision's flush-time painter invalidation + relayout decision
+/// for a one-patch batch. Kept as the single swap point for
+/// main-vs-branch runs. Returns `Some(affected)` when this revision
+/// KEEPS the cached LayoutPass (paint-only batch: caller refreshes the
+/// pass in place instead of recomputing), `None` when the layout must
+/// be dropped for a full recompute. A main-side run swaps the recipe
+/// body for `painter.invalidate_subtree_cache(); None` (or that
+/// revision's scoped invalidation returning `None`) so the caller
+/// always recomputes, matching main's `flush_patches`.
+fn flush_invalidate(
+    painter: &mut VelloPainter,
+    patch: &Patch,
+    tree: &Tree,
+) -> Option<std::collections::HashSet<String>> {
     // ── invalidation recipe (matches this revision's flush_patches) ──
     match crate::window::paint_only_affected_ids(
         std::slice::from_ref(patch),
@@ -272,9 +283,16 @@ fn flush_invalidate(painter: &mut VelloPainter, patch: &Patch, tree: &Tree) {
         tree,
         false,
         false,
+        false,
     ) {
-        Some(affected) => painter.invalidate_subtrees_containing(&affected),
-        None => painter.invalidate_subtree_cache(),
+        Some(affected) => {
+            painter.invalidate_subtrees_containing(&affected);
+            Some(affected)
+        }
+        None => {
+            painter.invalidate_subtree_cache();
+            None
+        }
     }
     // ── end invalidation recipe ──
 }
@@ -379,7 +397,7 @@ fn perf_bench_scene_encode_and_one_prop_frame() {
     apply_all(&mut tree, &mut taffy, &batch);
     let mut painter = VelloPainter::new();
     let scrolls: HashMap<String, f32> = HashMap::new();
-    let pass = {
+    let mut pass = {
         let text = painter.text_engine_mut();
         LayoutPass::compute_with_state(
             &mut taffy, &tree, text, VIEWPORT, SCALE, 0.0, &scrolls, 0,
@@ -400,8 +418,9 @@ fn perf_bench_scene_encode_and_one_prop_frame() {
 
     // Flush-equivalent frame after ONE paint-prop change (a Text's
     // colour flips on one post): Tree + Taffy mirror, this revision's
-    // invalidation recipe, full layout recompute, scene encode. This is
-    // the "keystroke / counter tick" frame.
+    // invalidation recipe, then either the paint-only in-place refresh
+    // (this revision) or a full layout recompute (main), scene encode.
+    // This is the "keystroke / counter tick" frame.
     let mut generation = 1u64;
     let mut red = false;
     time_it("frame after 1 color SetProp (flush recipe)", 2, 10, || {
@@ -420,14 +439,18 @@ fn perf_bench_scene_encode_and_one_prop_frame() {
         ) {
             taffy.mark_needs_rebuild();
         }
-        flush_invalidate(&mut painter, &patch, &tree);
-        generation += 1;
-        let pass = {
-            let text = painter.text_engine_mut();
-            LayoutPass::compute_with_state(
-                &mut taffy, &tree, text, VIEWPORT, SCALE, 0.0, &scrolls, generation,
-            )
-        };
+        match flush_invalidate(&mut painter, &patch, &tree) {
+            Some(affected) => {
+                pass.refresh_paint_only(&tree, &affected, viewport_logical(), SCALE);
+            }
+            None => {
+                generation += 1;
+                let text = painter.text_engine_mut();
+                pass = LayoutPass::compute_with_state(
+                    &mut taffy, &tree, text, VIEWPORT, SCALE, 0.0, &scrolls, generation,
+                );
+            }
+        }
         std::hint::black_box(painter.build_scene(&pass, VIEWPORT, SCALE, 0.0));
     });
 }
@@ -458,21 +481,20 @@ fn run_frame_update(
     let mut painter = VelloPainter::new();
     let mut scrolls: HashMap<String, f32> = HashMap::new();
     let mut generation = 0u64;
-    let items = {
-        let pass = {
-            let text = painter.text_engine_mut();
-            LayoutPass::compute_with_state(
-                &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
-            )
-        };
-        let _ = painter.build_scene(&pass, viewport, scale, 0.0);
-        pass.items.len()
+    let mut pass = {
+        let text = painter.text_engine_mut();
+        LayoutPass::compute_with_state(
+            &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
+        )
     };
+    let _ = painter.build_scene(&pass, viewport, scale, 0.0);
+    let items = pass.items.len();
     let ctx = format!("{vname} | {tname} ({node_count} nodes, {items} items on screen)");
 
     // 1. State-update frame: one paint-prop SetProp lands (keystroke /
     //    counter tick). Tree + Taffy mirror + this revision's painter
-    //    invalidation + full layout recompute + scene encode.
+    //    invalidation + (paint-only in-place refresh | full layout
+    //    recompute, per the recipe's decision) + scene encode.
     let mut red = false;
     time_it(&format!("frame update | {ctx}"), 2, 10, || {
         red = !red;
@@ -485,25 +507,32 @@ fn run_frame_update(
         if !taffy.apply_patches(std::slice::from_ref(&patch), &tree, scale, vp_logical) {
             taffy.mark_needs_rebuild();
         }
-        flush_invalidate(&mut painter, &patch, &tree);
-        generation += 1;
-        let pass = {
-            let text = painter.text_engine_mut();
-            LayoutPass::compute_with_state(
-                &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
-            )
-        };
+        match flush_invalidate(&mut painter, &patch, &tree) {
+            Some(affected) => {
+                pass.refresh_paint_only(&tree, &affected, vp_logical, scale);
+            }
+            None => {
+                generation += 1;
+                let text = painter.text_engine_mut();
+                pass = LayoutPass::compute_with_state(
+                    &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
+                );
+            }
+        }
         std::hint::black_box(painter.build_scene(&pass, viewport, scale, 0.0));
     });
 
-    // 2. Scroll frame: the wheel moves a `.scrollable` container. In
-    //    the App this bumps the layout cache key (full recompute + emit
-    //    at the new offset) but does NOT invalidate the painter cache —
-    //    cached fragments replay with a y-translate. This is the
-    //    per-container scroll path; page scroll's shift-in-place fast
-    //    path is strictly cheaper than this.
+    // 2. Scroll frame: the wheel moves a `.scrollable` container.
+    //    This revision mirrors redraw's container fast path: shift
+    //    the container's cached items in place within the re-emit
+    //    threshold, full recompute past it — the oscillating offset
+    //    crosses the threshold periodically, so the timed
+    //    distribution mixes both, like a real fling. (A main-side
+    //    comparison run replaces this body with the unconditional
+    //    per-frame recompute main performs.)
     let mut off = 0.0f32;
     let mut dir = 1.0f32;
+    let reemit_threshold = (viewport.1 as f32) * crate::layout::SCROLL_REEMIT_THRESHOLD_VH;
     time_it(&format!("frame scroll | {ctx}"), 2, 10, || {
         off += dir * 60.0 * scale;
         if off > 600.0 * scale {
@@ -513,35 +542,57 @@ fn run_frame_update(
             dir = 1.0;
         }
         scrolls.insert("feed".to_string(), off);
-        generation += 1;
-        let pass = {
+        let meta = pass.item_by_id("feed").and_then(|it| it.scrollable);
+        let (shift, emit_drift) = meta
+            .map(|m| (off - m.baked_offset, off - m.emitted_offset))
+            .unwrap_or((0.0, 0.0));
+        if meta.is_none() || emit_drift.abs() > reemit_threshold {
+            generation += 1;
             let text = painter.text_engine_mut();
-            LayoutPass::compute_with_state(
+            pass = LayoutPass::compute_with_state(
                 &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
-            )
-        };
+            );
+        } else if shift.abs() > f32::EPSILON {
+            pass.shift_container_scroll(&tree, "feed", shift, vp_logical, scale);
+        }
         std::hint::black_box(painter.build_scene(&pass, viewport, scale, 0.0));
     });
     scrolls.clear();
 
+    // Re-bake a clean pass at offset 0 (the scroll section above left
+    // the outer pass shifted / re-emitted mid-oscillation).
+    generation += 1;
+    pass = {
+        let text = painter.text_engine_mut();
+        LayoutPass::compute_with_state(
+            &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
+        )
+    };
+
     // 3. Animation / transition frame: the animator wrote an
-    //    interpolated transform prop straight into the tree — the App
-    //    then drops the WHOLE painter cache (animation invalidation is
-    //    deliberately wholesale on every revision), recomputes layout
-    //    (transform post-pass now active) and re-encodes. This is the
-    //    per-tick cost of a `.transition` / enter/exit while it plays.
+    //    interpolated transform prop straight into the tree. This
+    //    revision classifies the tick paint-only (redraw's
+    //    `FrameAnim::paint_only`) and repairs the cached pass in place
+    //    + drops only the fragments containing the animated node —
+    //    main drops the whole painter cache and recomputes layout.
+    //    This is the per-tick cost of a `.transition` / enter/exit
+    //    while it plays.
     let mut ty = 0.0f32;
     time_it(&format!("frame anim   | {ctx}"), 2, 10, || {
         ty = if ty >= 24.0 { 0.0 } else { ty + 2.0 };
         tree.set_prop_raw("post5", "translateY", json!(ty));
-        painter.invalidate_subtree_cache();
-        generation += 1;
-        let pass = {
-            let text = painter.text_engine_mut();
-            LayoutPass::compute_with_state(
-                &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
-            )
-        };
+        // Affected = written node + descendants (transform inherits),
+        // exactly what drive_animation_frame derives from the tick's
+        // raw-write log.
+        let mut affected: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut stack: Vec<String> = vec!["post5".to_string()];
+        while let Some(cur) = stack.pop() {
+            if affected.insert(cur.clone()) {
+                stack.extend(tree.children_of(&cur).iter().cloned());
+            }
+        }
+        pass.refresh_paint_only(&tree, &affected, vp_logical, scale);
+        painter.invalidate_subtrees_containing(&affected);
         std::hint::black_box(painter.build_scene(&pass, viewport, scale, 0.0));
     });
     tree.remove_prop_raw("post5", "translateY");
@@ -597,16 +648,14 @@ fn measure_update_frame(
     let mut painter = VelloPainter::new();
     let scrolls: HashMap<String, f32> = HashMap::new();
     let mut generation = 0u64;
-    let items = {
-        let pass = {
-            let text = painter.text_engine_mut();
-            LayoutPass::compute_with_state(
-                &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
-            )
-        };
-        let _ = painter.build_scene(&pass, viewport, scale, 0.0);
-        pass.items.len()
+    let mut pass = {
+        let text = painter.text_engine_mut();
+        LayoutPass::compute_with_state(
+            &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
+        )
     };
+    let _ = painter.build_scene(&pass, viewport, scale, 0.0);
+    let items = pass.items.len();
     let mut red = false;
     let mut samples: Vec<Duration> = Vec::with_capacity(12);
     for run in 0..12 {
@@ -621,14 +670,18 @@ fn measure_update_frame(
         if !taffy.apply_patches(std::slice::from_ref(&patch), &tree, scale, vp_logical) {
             taffy.mark_needs_rebuild();
         }
-        flush_invalidate(&mut painter, &patch, &tree);
-        generation += 1;
-        let pass = {
-            let text = painter.text_engine_mut();
-            LayoutPass::compute_with_state(
-                &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
-            )
-        };
+        match flush_invalidate(&mut painter, &patch, &tree) {
+            Some(affected) => {
+                pass.refresh_paint_only(&tree, &affected, vp_logical, scale);
+            }
+            None => {
+                generation += 1;
+                let text = painter.text_engine_mut();
+                pass = LayoutPass::compute_with_state(
+                    &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
+                );
+            }
+        }
         std::hint::black_box(painter.build_scene(&pass, viewport, scale, 0.0));
         if run >= 2 {
             samples.push(t.elapsed());
@@ -664,7 +717,8 @@ fn perf_bench_scaling_resolution() {
 }
 
 /// Node sweep: fixed 1920×1080 @1x viewport, total posts grow. Past
-/// the cull window (~60 posts) visible items saturate, isolating the
+/// the cull window (1 + 2×CULL_BUFFER_VH viewports of content, ~60
+/// posts at the current 2.0) visible items saturate, isolating the
 /// per-total-node tax (Taffy re-solve + O(nodes) scans).
 #[test]
 #[ignore = "manual perf benchmark"]

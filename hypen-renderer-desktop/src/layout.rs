@@ -45,6 +45,53 @@ pub(crate) fn logical_viewport(viewport_px: (u32, u32), scale: f32) -> Viewport 
     }
 }
 
+/// Cull buffer for `emit_items`, in viewport-heights of slack on EACH
+/// side of the visible region. Every emitted item feeds paint,
+/// hit-testing, a11y and the per-item resolution work, so this is a
+/// direct multiplier on the frames that DO walk the items: the
+/// emitted window spans `1 + 2 × CULL_BUFFER_VH` viewports of
+/// content.
+///
+/// History: 2.0 originally, halved to 1.0 when full relayouts ran on
+/// every state-update frame (a 22–28% cut on heavy relayout frames),
+/// then restored to 2.0 once the paint-only / container-scroll /
+/// animation fast paths stopped re-walking the items on those frames
+/// entirely. At that point the halving's win had shrunk to the rare
+/// re-emit and the O(items) post-passes, while the larger buffer
+/// halves the re-emit RATE during sustained scrolling and quadruples
+/// the drift margin (`buffer − threshold`) that the combined
+/// multi-source drift bound leans on.
+///
+/// Must stay at least as large as [`SCROLL_REEMIT_THRESHOLD_VH`].
+/// The pairing is NOT about flings outrunning the window: when page
+/// scroll drifts past the threshold, `App::redraw` re-emits in that
+/// SAME frame (the `scroll_outside_buffer` branch feeds `cache_miss`
+/// before anything paints), so no frame can ever paint un-emitted
+/// space regardless of wheel delta. The invariant is only that
+/// fast-path frames — where drift stays ≤ threshold — keep the whole
+/// visible band inside the emitted window, which needs
+/// `buffer ≥ threshold`.
+pub(crate) const CULL_BUFFER_VH: f32 = 2.0;
+
+/// Page-scroll re-emit threshold for `App::redraw`'s layout cache, in
+/// viewport-heights: once `|scroll_y − last_scroll_y_emitted|` exceeds
+/// `viewport.h × this`, the next frame recomputes (same frame it's
+/// detected — see [`CULL_BUFFER_VH`]) instead of shifting cached
+/// items. Higher = fewer full re-emits during sustained scrolling;
+/// the only ceiling is the invariant below.
+pub(crate) const SCROLL_REEMIT_THRESHOLD_VH: f32 = 0.5;
+
+// Fast-path frames (drift ≤ threshold) must keep the visible band
+// inside the emitted window: `buffer ≥ threshold`. The threshold is
+// measured against an item's TOTAL displacement since its rects were
+// emitted — page drift PLUS the summed drift of every scrollable in
+// its ancestor chain (`window::chain_emit_drift`), so the bound holds
+// at any scroll-nesting depth; per-source checks alone would reach
+// `(depth+1) × threshold`. Both constants' only consumers are
+// `emit_items` below and `App::redraw` — keep it that way, or the
+// assert stops guarding anything.
+const _: () = assert!(CULL_BUFFER_VH >= SCROLL_REEMIT_THRESHOLD_VH);
+
 /// Default gap between flex children. Zero, matching CSS / iOS /
 /// Android — implicit chrome here turns every Column into a
 /// 8px-spaced stack regardless of what the layout actually asks
@@ -236,6 +283,19 @@ impl Affine2 {
             .mul(&Affine2::translate(-dx, -dy))
     }
 
+    /// Component-wise approximate equality. The painter's fragment-
+    /// splice validity check compares an independently RECOMPUTED
+    /// cumulative transform against a conjugation of the cached one —
+    /// two float paths to the same value — so exact `==` would force
+    /// spurious re-encodes on ulp noise. The tolerance is far below a
+    /// visible sub-pixel.
+    pub fn approx_eq(&self, other: &Affine2, eps: f32) -> bool {
+        self.0
+            .iter()
+            .zip(other.0.iter())
+            .all(|(a, b)| (a - b).abs() <= eps)
+    }
+
     /// Axis-aligned bounding box of `rect` under this transform — the
     /// item's VISUAL rect (AccessKit bounds, damage regions, paint
     /// culling all read this).
@@ -412,12 +472,33 @@ pub enum TextAlign {
 /// node has `overflow: scroll` / `overflowY: auto` etc. The App
 /// walks every item with `scrollable.is_some()` to route mouse-wheel
 /// events and clamp scroll offsets.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ScrollMeta {
     /// Total height of this scrollable's contents in physical pixels,
     /// measured from the inner top. Used to compute the maximum
     /// scroll offset (`max(0, content_h - rect.h)`).
     pub content_h: f32,
+    /// The scroll offset this container's descendant RECTS currently
+    /// reflect. Starts at the offset the layout was emitted with and
+    /// advances with every in-place container-scroll shift
+    /// (`LayoutPass::shift_container_scroll`). The live offset in
+    /// `App::scrollables` can run ahead of it between a wheel /
+    /// reveal write and the next redraw — consumers comparing item
+    /// rects against the live offset (focus reveal, the shift fast
+    /// path itself) must correct for `live - baked` drift, exactly
+    /// like the page-scroll drift correction against
+    /// `last_scroll_y_in_layout`.
+    pub baked_offset: f32,
+    /// The offset the cull window was last EMITTED against — the
+    /// container-scroll analogue of `last_scroll_y_emitted`. Set at
+    /// emit time, NOT advanced by in-place shifts, so
+    /// `|live - emitted_offset|` measures how far content has moved
+    /// since items were last walked; past
+    /// [`SCROLL_REEMIT_THRESHOLD_VH`] the window forces a fresh
+    /// emit (same buffer ≥ threshold pairing as page scroll: the
+    /// recompute lands in the same frame, so shifted-in content is
+    /// always emitted, never blank).
+    pub emitted_offset: f32,
 }
 
 /// Resolved `hover:` pseudo-state overrides (from tw `hover:bg-*` /
@@ -512,6 +593,14 @@ pub struct LayoutItem {
     /// shorthand's `url(...)` layer (`data:` or remote). CSS paints it above
     /// the solid colour and under the gradient. `None` for the common case.
     pub background_image: Option<String>,
+    /// Layered CSS `background` stack (solid colour + interleaved
+    /// image/gradient layers, radial gradients included) for values the
+    /// two single-layer fields above can't express — the home-screen
+    /// icon tiles' `radial-gradient(...), linear-gradient(...)` being
+    /// the canonical case. When `Some`, the painter uses this stack and
+    /// ignores `background_gradient` / `background_image`; `None` for
+    /// the common case keeps the existing fast paths untouched.
+    pub background_layers: Option<crate::style::ParsedBackground>,
     /// Paint-time state-variant colour overrides (hover/focus/active/
     /// disabled, optionally breakpoint-combined) for `backgroundColor`,
     /// `color`, and `borderColor`. Precomputed here (node + viewport in
@@ -570,6 +659,11 @@ pub struct LayoutPass {
     /// translation reads this for the accessible name/role/hidden of each
     /// item, falling back to layout heuristics when absent.
     pub(crate) a11y: std::collections::HashMap<String, hypen_engine::ir::Semantics>,
+    /// Content hash of `a11y` (in item order), precomputed by
+    /// `collect_item_semantics` so the per-frame accessibility
+    /// fingerprint folds in one u64 instead of re-formatting every
+    /// item's semantics on every scroll frame.
+    pub(crate) a11y_hash: u64,
     /// Indexes of items whose `hover_action` is `Some(_)`. Hover
     /// hit-testing (`hit_hoverable`) iterates this list in reverse —
     /// just like `actionable_ids` — to find the topmost subject under
@@ -836,7 +930,18 @@ impl TaffyState {
                 // becomes a no-op walk, and the painter picks up the
                 // new prop value on the next `emit_items` pass that
                 // re-reads from the renderer Tree directly.
-                if is_layout_prop(name) {
+                //
+                // `name` is the RAW wire key — the engine flattens
+                // applicators to decorated forms (`width.0`,
+                // `padding@md.0`), so the gate must be the
+                // decoration-stripping predicate. Plain
+                // `is_layout_prop` here silently skipped the restyle
+                // for every `.0`-flattened layout prop (`width.0`,
+                // `fontSize.0`, `gap.0`, …): Taffy kept solving off
+                // the stale style while the fit-pass gate
+                // (`patch_affects_layout`, same key) correctly
+                // flagged the batch layout-affecting.
+                if is_layout_prop_key(name) {
                     if let Some(node) = tree.get(id) {
                         let active_states = self.interaction.active_states_for(id, node);
                         let style = node_style_with(node, scale, viewport, &active_states);
@@ -1673,41 +1778,15 @@ impl LayoutPass {
         // rects. Gated on the combined scan above.
         compute_item_transforms_gated(tree, &mut items, viewport_logical, scale, has_transform);
 
-        let mut by_node_id = HashMap::with_capacity(items.len());
-        let mut actionable_ids = Vec::new();
-        let mut focusable_ids = Vec::new();
-        let mut scrollable_ids = Vec::new();
-        let mut hoverable_ids = Vec::new();
-        for (idx, it) in items.iter().enumerate() {
-            by_node_id.insert(it.node_id.clone(), idx);
-            // A `.videoIntent(...)` node is actionable for hit-testing
-            // purposes even with no `.onClick`: the renderer performs the
-            // intent locally, so the item still has to be findable under
-            // the pointer (and press/release-pairable) like any button.
-            if it.action.is_some() || it.video_intent.is_some() {
-                actionable_ids.push(idx);
-            }
-            if it.is_focusable() {
-                focusable_ids.push(idx);
-            }
-            if it.scrollable.is_some() {
-                scrollable_ids.push(idx);
-            }
-            if it.hover_action.is_some() {
-                hoverable_ids.push(idx);
-            }
-        }
-
-        // Collect engine-derived semantics for the items that have any, so the
-        // AccessKit translation can use them.
-        let mut a11y = HashMap::new();
-        for it in &items {
-            if let Some(node) = tree.get(&it.node_id) {
-                if let Some(sem) = node.semantics.as_ref() {
-                    a11y.insert(it.node_id.clone(), sem.clone());
-                }
-            }
-        }
+        let indexes = build_item_indexes(&items);
+        let (a11y, a11y_hash) = collect_item_semantics(tree, &items);
+        let ItemIndexes {
+            by_node_id,
+            actionable_ids,
+            focusable_ids,
+            scrollable_ids,
+            hoverable_ids,
+        } = indexes;
 
         Self {
             items,
@@ -1718,12 +1797,19 @@ impl LayoutPass {
             scrollable_ids,
             hoverable_ids,
             a11y,
+            a11y_hash,
         }
     }
 
     /// O(1) item lookup by renderer node id.
     pub fn item_by_id(&self, id: &str) -> Option<&LayoutItem> {
         self.by_node_id.get(id).map(|&i| &self.items[i])
+    }
+
+    /// The emitted scrollable-container items, in document order —
+    /// O(n_scrollables) via the side index, not a full item scan.
+    pub fn scrollable_items(&self) -> impl Iterator<Item = &LayoutItem> {
+        self.scrollable_ids.iter().map(move |&i| &self.items[i])
     }
 
     /// O(1) mutable item lookup by renderer node id. Used for in-place
@@ -1744,6 +1830,224 @@ impl LayoutPass {
     /// geometry is untouched by them).
     pub fn refresh_transforms(&mut self, tree: &Tree, viewport: Viewport, scale: f32) {
         compute_item_transforms(tree, &mut self.items, viewport, scale);
+    }
+
+    /// In-place paint refresh for a patch batch the window classified
+    /// as paint-only (`window::paint_only_affected_ids` returned
+    /// `Some`): re-resolve every affected item's paint fields from the
+    /// (already-mutated) tree, then re-run the opacity and transform
+    /// post-passes and rebuild the derived indexes — WITHOUT dropping
+    /// the pass or re-running Taffy / emit. Sound because the
+    /// classifier guarantees no patch in the batch could change
+    /// geometry: no structural patch, no layout-affecting prop (so
+    /// every `rect`, `clip_to`, `subtree_root`, `content_size` and the
+    /// item SET are byte-identical to what a full recompute would
+    /// produce), no essential-snap restyles, no media nodes, no
+    /// scrub-owned nodes.
+    ///
+    /// `affected` ids without an emitted item (culled / detached) are
+    /// skipped — the next full pass re-resolves them from the same
+    /// tree when they re-enter the window. The post-passes and index
+    /// rebuild run over ALL items (not just affected) because opacity
+    /// and transforms inherit downward and the indexes are positional;
+    /// both are O(items) with O(1) gates, the same cost every full
+    /// compute already pays.
+    ///
+    /// The a11y semantics map is rebuilt from the tree wholesale:
+    /// `SetSemantics` patches qualify as paint-only but do NOT
+    /// contribute ids to `affected`, so a per-id refresh would miss
+    /// them.
+    pub fn refresh_paint_only(
+        &mut self,
+        tree: &Tree,
+        affected: &std::collections::HashSet<String>,
+        viewport: Viewport,
+        scale: f32,
+    ) {
+        for id in affected {
+            let Some(&idx) = self.by_node_id.get(id) else {
+                continue;
+            };
+            let Some(node) = tree.get(id) else {
+                continue;
+            };
+            refresh_item_paint(&mut self.items[idx], node, tree, viewport);
+        }
+        // Same post-pass recipe as `compute_inner_state`, including the
+        // gate-closed reset: if the batch REMOVED the tree's last
+        // opacity / transform prop, stale non-default values must
+        // return to their defaults, exactly as a fresh emit would.
+        if tree.has_opacity_props() {
+            let mut memo: HashMap<String, f32> = HashMap::new();
+            for it in self.items.iter_mut() {
+                it.opacity = effective_opacity(tree, &it.node_id, viewport, &mut memo);
+            }
+        } else {
+            for it in self.items.iter_mut() {
+                it.opacity = 1.0;
+            }
+        }
+        compute_item_transforms_gated(
+            tree,
+            &mut self.items,
+            viewport,
+            scale,
+            tree.has_transform_props(),
+        );
+        // Paint-only writes can still flip derived-index membership
+        // (adding `onClick` makes an item actionable AND focusable;
+        // adding `.onHover` makes it hoverable), so rebuild them with
+        // the same shared helper `compute_inner_state` uses.
+        let indexes = build_item_indexes(&self.items);
+        self.by_node_id = indexes.by_node_id;
+        self.actionable_ids = indexes.actionable_ids;
+        self.focusable_ids = indexes.focusable_ids;
+        self.scrollable_ids = indexes.scrollable_ids;
+        self.hoverable_ids = indexes.hoverable_ids;
+        let (a11y, a11y_hash) = collect_item_semantics(tree, &self.items);
+        self.a11y = a11y;
+        self.a11y_hash = a11y_hash;
+    }
+
+    /// Container-scroll fast path: shift the emitted rects of
+    /// `container_id`'s descendants by `delta` (positive = scrolled
+    /// down = content moves up) IN PLACE, instead of re-running Taffy
+    /// + emit. The container-scroll analogue of `App::redraw`'s
+    /// page-scroll shift. Sound within the cull buffer: the caller
+    /// (redraw) forces a full re-emit once `|live - emitted_offset|`
+    /// exceeds [`SCROLL_REEMIT_THRESHOLD_VH`], and the emit walk
+    /// culls against the page viewport ± [`CULL_BUFFER_VH`], so
+    /// every rect this shift can move into view was emitted.
+    ///
+    /// What shifts and what doesn't:
+    /// - STRICT descendants of the container shift; the container's
+    ///   own row (bg / border / rect) does not move.
+    /// - `clip_to` shifts only when the clip's OWNER (the item's
+    ///   nearest scrollable ancestor) is itself a descendant of the
+    ///   scrolled container (nested scrollables) — clips anchored to
+    ///   the scrolled container itself stay put, that container
+    ///   isn't moving.
+    /// - Cumulative transforms are recomputed exactly against the
+    ///   shifted rects (gated O(1) when the tree has no transform
+    ///   props) rather than conjugated: ancestors ABOVE the
+    ///   container don't shift, so the page path's uniform
+    ///   conjugation identity doesn't hold here.
+    /// - `baked_offset` advances by `delta` so drift consumers
+    ///   (focus reveal, the next shift) stay calibrated;
+    ///   `emitted_offset` deliberately does NOT move — it anchors
+    ///   the re-emit threshold to the cull window's origin.
+    ///
+    /// `content_size`, membership, and every derived index are
+    /// untouched: a within-buffer container scroll changes only
+    /// where existing items sit.
+    pub fn shift_container_scroll(
+        &mut self,
+        tree: &Tree,
+        container_id: &str,
+        delta: f32,
+        viewport: Viewport,
+        scale: f32,
+    ) {
+        if delta == 0.0 {
+            return;
+        }
+        // Strict-descendant test, memoized per node id across the
+        // item loop (ancestor chains overlap heavily in a feed).
+        let mut desc_memo: HashMap<String, bool> = HashMap::new();
+        fn is_strict_descendant(
+            tree: &Tree,
+            id: &str,
+            container: &str,
+            memo: &mut HashMap<String, bool>,
+        ) -> bool {
+            if let Some(&v) = memo.get(id) {
+                return v;
+            }
+            let v = match tree.parent_of(id) {
+                Some(p) if p == container => true,
+                Some(p) if p == crate::tree::ROOT_ID => false,
+                Some(p) => {
+                    let p = p.to_string();
+                    is_strict_descendant(tree, &p, container, memo)
+                }
+                None => false,
+            };
+            memo.insert(id.to_string(), v);
+            v
+        }
+        // Nearest scrollable STRICT ancestor (the clip owner emit
+        // anchored `clip_to` to), memoized.
+        let mut owner_memo: HashMap<String, Option<String>> = HashMap::new();
+        fn clip_owner(
+            tree: &Tree,
+            id: &str,
+            viewport: Viewport,
+            memo: &mut HashMap<String, Option<String>>,
+        ) -> Option<String> {
+            if let Some(v) = memo.get(id) {
+                return v.clone();
+            }
+            let v = match tree.parent_of(id) {
+                Some(p) if p == crate::tree::ROOT_ID => None,
+                Some(p) => {
+                    if tree
+                        .get(p)
+                        .is_some_and(|n| is_scrollable_node(n, viewport))
+                    {
+                        Some(p.to_string())
+                    } else {
+                        let p = p.to_string();
+                        clip_owner(tree, &p, viewport, memo)
+                    }
+                }
+                None => None,
+            };
+            memo.insert(id.to_string(), v.clone());
+            v
+        }
+        let mut shifted_any = false;
+        for it in self.items.iter_mut() {
+            if !is_strict_descendant(tree, &it.node_id, container_id, &mut desc_memo) {
+                continue;
+            }
+            shifted_any = true;
+            it.rect.y -= delta;
+            if it.clip_to.is_some() {
+                let owner = clip_owner(tree, &it.node_id, viewport, &mut owner_memo);
+                let owner_shifts = owner.as_deref().is_some_and(|o| {
+                    o != container_id
+                        && is_strict_descendant(tree, o, container_id, &mut desc_memo)
+                });
+                if owner_shifts {
+                    if let Some(clip) = it.clip_to.as_mut() {
+                        clip.y -= delta;
+                    }
+                }
+            }
+        }
+        // Exact transform refresh against the shifted rects. Gated:
+        // the no-transform tree resets to identity in O(items).
+        compute_item_transforms_gated(
+            tree,
+            &mut self.items,
+            viewport,
+            scale,
+            tree.has_transform_props(),
+        );
+        // Advance the rect baseline ONLY when rects actually moved: a
+        // container with no emitted descendants (or one that left the
+        // tree while the pass stayed alive) must not desynchronise
+        // `baked_offset` from what the rects reflect — that would
+        // silently suppress every future shift for it. Leaving the
+        // anchor put re-detects the same drift next frame (a cheap
+        // no-op walk) until a real emit re-bases it.
+        if shifted_any {
+            if let Some(item) = self.item_by_id_mut(container_id) {
+                if let Some(meta) = item.scrollable.as_mut() {
+                    meta.baked_offset += delta;
+                }
+            }
+        }
     }
 
     pub fn hit(&self, x: f32, y: f32) -> Option<&LayoutItem> {
@@ -2762,13 +3066,25 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
             | "align-items"
             | "alignself"
             | "align-self"
-            | "alignContent"
+            | "aligncontent"
             | "align-content"
             | "justifycontent"
             | "justify-content"
             | "justifyself"
             | "justify-self"
+            // The DSL-level alignment applicators lower to
+            // justify_content / align_items exactly like the CSS
+            // spellings above (`apply_alignment_props`).
+            | "horizontalalignment"
+            | "horizontal-alignment"
+            | "verticalalignment"
+            | "vertical-alignment"
             | "display"
+            | "flexdirection"
+            | "flex-direction"
+            | "gridcolumns"
+            | "grid-columns"
+            | "inset"
             | "overflow"
             | "overflowx"
             | "overflow-x"
@@ -3741,22 +4057,15 @@ fn emit_items(
     natural_bounds.0 = natural_bounds.0.max(x + extent_w);
     natural_bounds.1 = natural_bounds.1.max(y_natural + extent_h);
 
-    // Viewport cull. When `cull_viewport` is `Some`, subtrees whose
-    // rect ends one full viewport above the visible region OR starts
-    // one full viewport below are skipped wholesale (no LayoutItem
-    // emit, no recursion). Buffer = one viewport-height of slack on
-    // each side so a partly-off-screen post that's about to scroll
-    // in stays in the layout. The synthetic outer wrapper has no
-    // renderer node — never cull it, otherwise the entire tree
-    // disappears for any page taller than the viewport.
+    // Viewport cull. When `cull_viewport` is `Some`, subtrees fully
+    // outside the visible region plus [`CULL_BUFFER_VH`] of slack on
+    // each side are skipped wholesale (no LayoutItem emit, no
+    // recursion). The synthetic outer wrapper has no renderer node —
+    // never cull it, otherwise the entire tree disappears for any
+    // page taller than the viewport.
     let renderer_id = renderer_for_taffy.get(&node_id).cloned();
     if let (Some(v), Some(_)) = (cull_viewport, renderer_id.as_deref()) {
-        // Two viewport-heights of slack on each side. Pairs with the
-        // half-viewport recompute threshold in `App::redraw`: gives
-        // the user 1.5 viewports of pre-emitted content to scroll
-        // through before the next emit lands, comfortably absorbing
-        // wheel bursts on fast trackpads.
-        let buffer = v.h * 2.0;
+        let buffer = v.h * CULL_BUFFER_VH;
         // Cull against the natural content extent, not the
         // constrained box: a parent whose children overflow past
         // its `size.height` still hosts visible content past that
@@ -3821,15 +4130,18 @@ fn emit_items(
             // The `url(...)` layer of the same value. Resolved once here
             // beside the gradient so every item kind carries it.
             let background_image = crate::style::prop_background_image_url(node);
+            // Layered `background` shorthand / radial gradients — the
+            // stacks the two single-layer reads above can't express.
+            let background_layers = crate::style::prop_background_layers(node);
             // Paint-time state-variant colour overrides (hover/focus/
             // active/disabled). Resolved once here for every item kind;
             // empty for the common plain-styled node so the painter's
             // fast path is undisturbed.
             let item_state_variants = crate::style::state_variants(node, viewport);
             let scrollable = is_scrollable_node(node, viewport);
+            let scroll_off = scrolls.get(rid).copied().unwrap_or(0.0);
             if scrollable {
-                let off = scrolls.get(rid).copied().unwrap_or(0.0);
-                child_scroll_shift_y = parent_scroll_shift_y + off;
+                child_scroll_shift_y = parent_scroll_shift_y + scroll_off;
                 // Anchor descendant clipping to this container's
                 // own rect. Even if the container itself is inside
                 // a larger scrollable, the painter clips to the
@@ -3897,6 +4209,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_layers: background_layers.clone(),
                         background_image: background_image.clone(),
                         state_variants: item_state_variants.clone(),
                         opacity: 1.0,
@@ -3950,6 +4263,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_layers: background_layers.clone(),
                         background_image: background_image.clone(),
                         state_variants: item_state_variants.clone(),
                         opacity: 1.0,
@@ -4003,7 +4317,8 @@ fn emit_items(
                             clip_to: parent_clip_to,
                             subtree_root: subtree_root.map(str::to_string),
                             background_gradient: background_gradient.clone(),
-                        background_image: background_image.clone(),
+                            background_layers: background_layers.clone(),
+                            background_image: background_image.clone(),
                             state_variants: item_state_variants.clone(),
                             opacity: 1.0,
                             transform: Affine2::IDENTITY,
@@ -4033,7 +4348,8 @@ fn emit_items(
                             clip_to: parent_clip_to,
                             subtree_root: subtree_root.map(str::to_string),
                             background_gradient: background_gradient.clone(),
-                        background_image: background_image.clone(),
+                            background_layers: background_layers.clone(),
+                            background_image: background_image.clone(),
                             state_variants: item_state_variants.clone(),
                             opacity: 1.0,
                             transform: Affine2::IDENTITY,
@@ -4067,6 +4383,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_layers: background_layers.clone(),
                         background_image: background_image.clone(),
                         state_variants: item_state_variants.clone(),
                         opacity: 1.0,
@@ -4116,6 +4433,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_layers: background_layers.clone(),
                         background_image: background_image.clone(),
                         state_variants: item_state_variants.clone(),
                         opacity: 1.0,
@@ -4142,6 +4460,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_layers: background_layers.clone(),
                         background_image: background_image.clone(),
                         state_variants: item_state_variants.clone(),
                         opacity: 1.0,
@@ -4168,7 +4487,11 @@ fn emit_items(
                         // placeholder of 0.0 means "not scrollable yet"
                         // — only the Container branch ever back-fills.
                         scrollable: if scrollable {
-                            Some(ScrollMeta { content_h: 0.0 })
+                            Some(ScrollMeta {
+                                content_h: 0.0,
+                                baked_offset: scroll_off,
+                                emitted_offset: scroll_off,
+                            })
                         } else {
                             None
                         },
@@ -4176,6 +4499,7 @@ fn emit_items(
                         clip_to: parent_clip_to,
                         subtree_root: subtree_root.map(str::to_string),
                         background_gradient: background_gradient.clone(),
+                        background_layers: background_layers.clone(),
                         background_image: background_image.clone(),
                         state_variants: item_state_variants,
                         opacity: 1.0,
@@ -4292,6 +4616,230 @@ fn emit_items(
             meta.content_h = content_h;
         }
     }
+}
+
+/// The positional side-indexes derived from an emitted item list.
+/// Built by [`build_item_indexes`] — the ONE place that decides
+/// membership — and consumed by both `compute_inner_state` (fresh
+/// pass) and [`LayoutPass::refresh_paint_only`] (in-place refresh), so
+/// the two paths can never disagree about what is actionable /
+/// focusable / scrollable / hoverable.
+pub(crate) struct ItemIndexes {
+    pub(crate) by_node_id: HashMap<String, usize>,
+    pub(crate) actionable_ids: Vec<usize>,
+    pub(crate) focusable_ids: Vec<usize>,
+    pub(crate) scrollable_ids: Vec<usize>,
+    pub(crate) hoverable_ids: Vec<usize>,
+}
+
+pub(crate) fn build_item_indexes(items: &[LayoutItem]) -> ItemIndexes {
+    let mut by_node_id = HashMap::with_capacity(items.len());
+    let mut actionable_ids = Vec::new();
+    let mut focusable_ids = Vec::new();
+    let mut scrollable_ids = Vec::new();
+    let mut hoverable_ids = Vec::new();
+    for (idx, it) in items.iter().enumerate() {
+        by_node_id.insert(it.node_id.clone(), idx);
+        // A `.videoIntent(...)` node is actionable for hit-testing
+        // purposes even with no `.onClick`: the renderer performs the
+        // intent locally, so the item still has to be findable under
+        // the pointer (and press/release-pairable) like any button.
+        if it.action.is_some() || it.video_intent.is_some() {
+            actionable_ids.push(idx);
+        }
+        if it.is_focusable() {
+            focusable_ids.push(idx);
+        }
+        if it.scrollable.is_some() {
+            scrollable_ids.push(idx);
+        }
+        if it.hover_action.is_some() {
+            hoverable_ids.push(idx);
+        }
+    }
+    ItemIndexes {
+        by_node_id,
+        actionable_ids,
+        focusable_ids,
+        scrollable_ids,
+        hoverable_ids,
+    }
+}
+
+/// Engine-derived semantics for the items that have any, keyed by node
+/// id, for the AccessKit translation — plus a content hash of the map
+/// in item order. Shared by `compute_inner_state` and
+/// [`LayoutPass::refresh_paint_only`]. The hash is computed HERE (runs
+/// only on full compute / paint-only refresh) so the per-frame a11y
+/// fingerprint (`window::a11y_fingerprint`, which runs on every
+/// scroll-shift frame) folds in one u64 instead of Debug-formatting
+/// every item's semantics per frame.
+pub(crate) fn collect_item_semantics(
+    tree: &Tree,
+    items: &[LayoutItem],
+) -> (HashMap<String, hypen_engine::ir::Semantics>, u64) {
+    use std::hash::{Hash, Hasher};
+    let mut a11y = HashMap::new();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for it in items {
+        if let Some(node) = tree.get(&it.node_id) {
+            if let Some(sem) = node.semantics.as_ref() {
+                it.node_id.hash(&mut hasher);
+                format!("{sem:?}").hash(&mut hasher);
+                a11y.insert(it.node_id.clone(), sem.clone());
+            }
+        }
+    }
+    (a11y, hasher.finish())
+}
+
+/// Re-resolve one item's PAINT fields from its (already-mutated) tree
+/// node, leaving geometry alone. This is `emit_items`'s per-node
+/// resolution minus everything the paint-only classifier
+/// (`is_layout_prop_key` + the structural gates) proves unchanged:
+/// `rect`, `clip_to`, `subtree_root`, `scrollable`, `font_weight`
+/// (`fontWeight` is a layout prop — it feeds text measurement), and
+/// the layout-derived members of each `ItemKind` (Text content /
+/// font size / max-lines / padding, Input font size). `opacity` and
+/// `transform` are the post-passes' job, run by the caller
+/// ([`LayoutPass::refresh_paint_only`]) over the whole item list since
+/// both inherit downward.
+///
+/// Kept adjacent in spirit to `emit_items`: any prop resolution added
+/// to an `emit_items` arm that is NOT layout-classified must be
+/// mirrored here (the `refresh_matches_full_recompute` equivalence
+/// tests in `layout_tests.rs` are the tripwire).
+pub(crate) fn refresh_item_paint(
+    item: &mut LayoutItem,
+    node: &crate::tree::Node,
+    tree: &Tree,
+    viewport: Viewport,
+) {
+    // Trees containing media nodes never qualify as paint-only
+    // (`has_media_nodes` gate) — player state transitions repaint on
+    // registry changes no batch describes, and the Video arm's action
+    // fallback (`onPlay`) is coupled to that machinery. The wholesale-
+    // drop path owns Video repaints.
+    if matches!(item.kind, ItemKind::Video { .. }) {
+        return;
+    }
+
+    let action = resolve_action(node);
+    let action_payload = action.as_ref().and_then(|_| resolve_action_payload(node));
+    item.video_intent = crate::video_v2::intent_for(tree, &item.node_id);
+    item.hover_action = resolve_hover_action(node);
+    item.hover_payload = item
+        .hover_action
+        .as_ref()
+        .and_then(|_| resolve_hover_payload(node));
+    let mut item_border = border_at(node, viewport);
+    let background_explicit = prop_color_at(node, "backgroundColor", viewport);
+    item.hover = HoverStyle {
+        background: prop_color_at(node, "backgroundColor:hover", viewport),
+        border_color: prop_color_at(node, "borderColor:hover", viewport),
+    };
+    item.background_gradient = crate::style::prop_linear_gradient(node, viewport);
+    item.background_image = crate::style::prop_background_image_url(node);
+    item.background_layers = crate::style::prop_background_layers(node);
+    item.state_variants = crate::style::state_variants(node, viewport);
+
+    // Kind-specific paint fields, mirroring the `emit_items` arms.
+    match &mut item.kind {
+        ItemKind::Input {
+            value,
+            placeholder,
+            bind_path,
+            color,
+            ..
+        } => {
+            *value = node
+                .props
+                .get("value")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            *placeholder = node
+                .props
+                .get("placeholder")
+                .or_else(|| node.props.get("placeholder.0"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            *bind_path = node
+                .props
+                .get("bind")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            *color = prop_color_at(node, "color", viewport).unwrap_or(Rgba::BLACK);
+        }
+        ItemKind::Text { color, align, .. } => {
+            *color = prop_color_at(node, "color", viewport).unwrap_or(Rgba::BLACK);
+            *align = parse_text_align(crate::style::prop_str_at(node, "textAlign", viewport));
+        }
+        ItemKind::Icon { .. } | ItemKind::Image { .. } => {
+            // Icon-vs-Image is prop-driven (`__iconPaths` presence),
+            // not element-type-driven, so a paint-only write can flip
+            // the kind — rebuild it wholesale exactly like emit does.
+            let icon_paths = node
+                .props
+                .get("__iconPaths")
+                .or_else(|| node.props.get("paths"))
+                .map(crate::paint::icon::parse_paths)
+                .unwrap_or_default();
+            item.kind = if !icon_paths.is_empty() {
+                let view_box_str = node
+                    .props
+                    .get("__iconViewBox")
+                    .and_then(|v| v.as_str())
+                    .or_else(|| node.props.get("viewBox").and_then(|v| v.as_str()));
+                ItemKind::Icon {
+                    paths: icon_paths,
+                    view_box: crate::paint::icon::parse_view_box(view_box_str),
+                    tint: prop_color_at(node, "color", viewport),
+                }
+            } else {
+                ItemKind::Image {
+                    src: crate::style::prop_str_at(node, "src", viewport).map(str::to_string),
+                    fit: parse_object_fit(crate::style::prop_str_at(node, "objectFit", viewport)),
+                }
+            };
+        }
+        ItemKind::Scrubber { preview, .. } => {
+            // `video_id` is structural (the enclosing-Video walk) —
+            // unchanged under a paint-only batch. The preview rides
+            // props, so refresh it.
+            *preview = crate::video_v2::scrub_preview(node);
+        }
+        ItemKind::Video { .. } => unreachable!("early-returned above"),
+        ItemKind::Button | ItemKind::Container => {}
+    }
+
+    // Per-kind action / background / border specializations, mirroring
+    // `emit_items`: Inputs and Scrubbers never carry the generic click
+    // action (Inputs edit, Scrubbers seek through their own commit
+    // path); Inputs default to a white fill and — absent an explicit
+    // border opt-out — the standard input frame.
+    let is_input = matches!(item.kind, ItemKind::Input { .. });
+    if is_input || matches!(item.kind, ItemKind::Scrubber { .. }) {
+        item.action = None;
+        item.action_payload = None;
+    } else {
+        item.action = action;
+        item.action_payload = action_payload;
+    }
+    if is_input {
+        item.background = background_explicit.or(Some(Rgba(0xff, 0xff, 0xff, 0xff)));
+        if !item_border.is_visible() && !has_explicit_border(node) {
+            item_border = Border {
+                width: 1.0,
+                color: Rgba(0xc4, 0xcc, 0xd8, 0xff),
+                radius: 8.0,
+                sides: crate::style::BORDER_SIDES_ALL,
+            };
+        }
+    } else {
+        item.background = background_explicit;
+    }
+    item.border = item_border;
 }
 
 /// Effective opacity for `id`: its own `opacity` prop (clamped to
@@ -4456,7 +5004,7 @@ pub(crate) fn compute_item_transforms_gated(
 ///   social example actually uses.
 /// - `overflow` / `overflowY` prop resolves to `"scroll"` / `"auto"`
 ///   (CSS-style fallback used by tw classes).
-fn is_scrollable_node(node: &crate::tree::Node, viewport: Viewport) -> bool {
+pub(crate) fn is_scrollable_node(node: &crate::tree::Node, viewport: Viewport) -> bool {
     if let Some(s) = crate::style::prop_str_at(node, "scrollable", viewport) {
         let lower = s.trim().to_ascii_lowercase();
         if matches!(

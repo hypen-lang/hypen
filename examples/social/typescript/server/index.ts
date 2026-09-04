@@ -11,6 +11,7 @@ import {
   searchModule,
   notificationsModule,
   messagesModule,
+  conversationModule,
   profileModule,
   userProfileModule,
   commentsModule,
@@ -24,6 +25,7 @@ void homePageModule;
 void searchModule;
 void notificationsModule;
 void messagesModule;
+void conversationModule;
 void profileModule;
 void userProfileModule;
 void commentsModule;

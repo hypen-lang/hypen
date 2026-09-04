@@ -25,10 +25,18 @@ Column {
     }
     .tw("py-2.5 px-4 flex-row items-center")
 
-    Image(src: "@{item.imageUrl}")
-        .width("100%")
-        .aspectRatio("1")
-        .objectFit("cover")
+    // Mobile: classic full-bleed square. md+: inset, centered, rounded card
+    // image. Press-and-hold anywhere on the image eases it up to full card
+    // width (the :active variant only engages while the pointer is held), and
+    // releasing eases it back — the 500ms transform transition plays both ways.
+    Column {
+        Image(src: "@{item.imageUrl}")
+            .width("100%")
+            .aspectRatio("1")
+            .objectFit("cover")
+            .tw("select-none md:rounded-xl transition-transform duration-500 ease-out md:active:scale-[1.08] md:active:z-10")
+    }
+    .tw("w-full md:px-6")
 
     Row {
         Row {
@@ -109,4 +117,4 @@ Column {
         .onClick(@router.push, to: "/comments/@{item.id}")
     }
 }
-.tw("bg-white border-b border-gray-100 mb-2")
+.tw("bg-white border-b border-gray-100 mb-2 md:mb-4 md:pb-2")

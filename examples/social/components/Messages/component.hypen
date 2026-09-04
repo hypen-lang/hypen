@@ -41,7 +41,8 @@ module Messages {
                 }
                 .tw("w-4 items-center")
             }
-            .tw("py-3 px-4 items-center cursor-pointer")
+            .tw("py-3 px-4 items-center cursor-pointer hover:bg-gray-50")
+            .onClick(@router.push, to: "/dm/@{item.id}")
         }
         .tw("flex-1")
     }

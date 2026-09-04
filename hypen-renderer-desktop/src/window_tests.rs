@@ -48,7 +48,7 @@ mod paint_only_gate {
     fn paint_only_props_scope_to_node_and_descendants() {
         let tree = gate_tree();
         let affected =
-            paint_only_affected_ids(&[set_prop("row", "backgroundColor")], &[], &tree, false, false)
+            paint_only_affected_ids(&[set_prop("row", "backgroundColor")], &[], &tree, false, false, false)
                 .expect("paint-only batch qualifies");
         assert!(affected.contains("row"), "patched node included");
         assert!(affected.contains("leaf"), "descendants included");
@@ -65,6 +65,7 @@ mod paint_only_gate {
             &[],
             &tree,
             false,
+            false,
             false
         )
         .is_some());
@@ -73,6 +74,7 @@ mod paint_only_gate {
             &[set_prop("text", "padding@md.0")],
             &[],
             &tree,
+            false,
             false,
             false
         )
@@ -84,7 +86,7 @@ mod paint_only_gate {
         let tree = gate_tree();
         for name in ["width", "padding", "fontSize", "0", "slot", "scrollable"] {
             assert!(
-                paint_only_affected_ids(&[set_prop("text", name)], &[], &tree, false, false)
+                paint_only_affected_ids(&[set_prop("text", name)], &[], &tree, false, false, false)
                     .is_none(),
                 "{name} must force the wholesale drop"
             );
@@ -93,7 +95,7 @@ mod paint_only_gate {
             id: "leaf".into(),
             transition: false,
         };
-        assert!(paint_only_affected_ids(&[structural], &[], &tree, false, false).is_none());
+        assert!(paint_only_affected_ids(&[structural], &[], &tree, false, false, false).is_none());
         // A mixed batch is disqualified by its structural member.
         let mixed = [
             set_prop("text", "color"),
@@ -103,7 +105,7 @@ mod paint_only_gate {
                 before_id: None,
             },
         ];
-        assert!(paint_only_affected_ids(&mixed, &[], &tree, false, false).is_none());
+        assert!(paint_only_affected_ids(&mixed, &[], &tree, false, false, false).is_none());
     }
 
     #[test]
@@ -111,18 +113,18 @@ mod paint_only_gate {
         let tree = gate_tree();
         let batch = [set_prop("text", "color")];
         assert!(
-            paint_only_affected_ids(&batch, &["text".to_string()], &tree, false, false).is_none(),
+            paint_only_affected_ids(&batch, &["text".to_string()], &tree, false, false, false).is_none(),
             "essential-snap restyles disqualify"
         );
         assert!(
-            paint_only_affected_ids(&batch, &[], &tree, true, false).is_none(),
+            paint_only_affected_ids(&batch, &[], &tree, true, false, false).is_none(),
             "media trees disqualify"
         );
         assert!(
-            paint_only_affected_ids(&batch, &[], &tree, false, true).is_none(),
+            paint_only_affected_ids(&batch, &[], &tree, false, true, false).is_none(),
             "scrub-owned nodes disqualify"
         );
-        assert!(paint_only_affected_ids(&batch, &[], &tree, false, false).is_some());
+        assert!(paint_only_affected_ids(&batch, &[], &tree, false, false, false).is_some());
     }
 
     #[test]
@@ -132,7 +134,7 @@ mod paint_only_gate {
             id: "text".into(),
             semantics: None,
         }];
-        let affected = paint_only_affected_ids(&batch, &[], &tree, false, false)
+        let affected = paint_only_affected_ids(&batch, &[], &tree, false, false, false)
             .expect("semantics-only batch qualifies");
         assert!(affected.is_empty(), "semantics repaint nothing");
     }
@@ -384,14 +386,13 @@ fn cache_key_ignores_hover_without_layout_state_variants() {
     // is identical regardless of hover / press / focus — so an
     // interaction transition never forces a relayout (no regression on
     // the common path).
-    let scrollables = HashMap::new();
-    let base = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, None, 0);
+    let base = layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, None, 0);
     let hovered =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, Some("btn"), None, None, 0);
+        layout_cache_key_inner(7, 800, 600, 1.0, false, Some("btn"), None, None, 0);
     let pressed =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, Some("btn"), None, 0);
+        layout_cache_key_inner(7, 800, 600, 1.0, false, None, Some("btn"), None, 0);
     let focused =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, Some("btn"), 0);
+        layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, Some("btn"), 0);
     assert_eq!(base, hovered);
     assert_eq!(base, pressed);
     assert_eq!(base, focused);
@@ -402,21 +403,20 @@ fn cache_key_changes_on_hover_with_layout_state_variants() {
     // (d) When the tree DOES carry a layout-affecting state variant, a
     // hover/press/focus transition bumps the key, forcing `redraw` to
     // recompute the LayoutPass with the new active states.
-    let scrollables = HashMap::new();
-    let none = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, None, None, 0);
+    let none = layout_cache_key_inner(7, 800, 600, 1.0, true, None, None, None, 0);
     let hovered =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, Some("btn"), None, None, 0);
+        layout_cache_key_inner(7, 800, 600, 1.0, true, Some("btn"), None, None, 0);
     assert_ne!(none, hovered, "hover must bump the key");
     // Hover moving to a different node also changes the key.
     let other =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, Some("other"), None, None, 0);
+        layout_cache_key_inner(7, 800, 600, 1.0, true, Some("other"), None, None, 0);
     assert_ne!(hovered, other);
     // Press / focus likewise.
     let pressed =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, Some("btn"), None, 0);
+        layout_cache_key_inner(7, 800, 600, 1.0, true, None, Some("btn"), None, 0);
     assert_ne!(none, pressed);
     let focused =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, true, None, None, Some("btn"), 0);
+        layout_cache_key_inner(7, 800, 600, 1.0, true, None, None, Some("btn"), 0);
     assert_ne!(none, focused);
 }
 
@@ -428,9 +428,8 @@ fn cache_key_with_variants_matches_baseline_when_no_interaction() {
     // what the disabled branch skips, but with no interaction the
     // resulting key still differs only by that — so we assert the
     // enabled-but-idle key is stable across calls).
-    let scrollables = HashMap::new();
-    let a = layout_cache_key_inner(3, 1024, 768, 2.0, &scrollables, true, None, None, None, 0);
-    let b = layout_cache_key_inner(3, 1024, 768, 2.0, &scrollables, true, None, None, None, 0);
+    let a = layout_cache_key_inner(3, 1024, 768, 2.0, true, None, None, None, 0);
+    let b = layout_cache_key_inner(3, 1024, 768, 2.0, true, None, None, None, 0);
     assert_eq!(a, b);
 }
 
@@ -1726,10 +1725,9 @@ fn player_state_transitions_bump_the_layout_cache_key() {
     // Slot visibility is derived from the registry, not from tree props,
     // so without folding the state into the key a play→pause would reuse
     // a cached layout and never show/hide the slots.
-    let scrollables = HashMap::new();
-    let idle = layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, None, 11);
+    let idle = layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, None, 11);
     let playing =
-        layout_cache_key_inner(7, 800, 600, 1.0, &scrollables, false, None, None, None, 22);
+        layout_cache_key_inner(7, 800, 600, 1.0, false, None, None, None, 22);
     assert_ne!(idle, playing);
 }
 
@@ -1812,4 +1810,958 @@ fn controls_slot_suppresses_the_builtin_tap_toggle() {
         before_id: None,
     });
     assert!(!tap_suppressed(&poster_only, "vid"));
+}
+
+// ---------------------------------------------------------------
+// Focus scroll-into-view (A2): `reveal_offset` picks the minimal
+// scroll adjustment; `reveal_target_for` picks which surface to
+// adjust (nearest emitted scrollable ancestor, else the page).
+// ---------------------------------------------------------------
+
+mod focus_reveal {
+    use super::*;
+    use crate::layout::LayoutPass;
+    use crate::text::TextEngine;
+    use serde_json::json;
+
+    // ── reveal_offset ──────────────────────────────────────────
+
+    #[test]
+    fn reveal_offset_noop_when_fully_visible() {
+        assert_eq!(reveal_offset(100.0, 200.0, 0.0, 600.0, 50.0, 1000.0), None);
+        // Edges touching the view bounds still count as visible.
+        assert_eq!(reveal_offset(0.0, 600.0, 0.0, 600.0, 50.0, 1000.0), None);
+    }
+
+    #[test]
+    fn reveal_offset_scrolls_up_to_align_top_edge() {
+        // Item top is 50px above the view: offset shrinks by exactly 50.
+        assert_eq!(
+            reveal_offset(-50.0, 30.0, 0.0, 600.0, 100.0, 1000.0),
+            Some(50.0)
+        );
+    }
+
+    #[test]
+    fn reveal_offset_scrolls_down_minimally_for_below_items() {
+        // Item bottom is 180px below the view: offset grows by exactly
+        // 180 — the item's bottom lands on the view bottom, not its top
+        // on the view top (that would over-scroll by 520px).
+        assert_eq!(
+            reveal_offset(700.0, 780.0, 0.0, 600.0, 0.0, 1000.0),
+            Some(180.0)
+        );
+    }
+
+    #[test]
+    fn reveal_offset_aligns_top_for_taller_than_view_items() {
+        // 800px item in a 600px view: bottom-alignment would push the
+        // item's top 200px above the view; the top-edge cap keeps the
+        // start of the item (where focus rings / headings live) visible.
+        assert_eq!(
+            reveal_offset(700.0, 1500.0, 0.0, 600.0, 0.0, 2000.0),
+            Some(700.0)
+        );
+    }
+
+    #[test]
+    fn reveal_offset_clamps_at_max_offset() {
+        assert_eq!(
+            reveal_offset(700.0, 780.0, 0.0, 600.0, 0.0, 100.0),
+            Some(100.0)
+        );
+    }
+
+    #[test]
+    fn reveal_offset_clamps_at_zero() {
+        // Item far above the view; the ideal offset is negative, so it
+        // clamps to 0 — still a change from the current 100.
+        assert_eq!(
+            reveal_offset(-500.0, -400.0, 0.0, 600.0, 100.0, 1000.0),
+            Some(0.0)
+        );
+    }
+
+    #[test]
+    fn reveal_offset_noop_when_clamp_lands_on_current() {
+        // Already at 0, item above: clamped target equals current → None,
+        // so callers don't loop on unreachable items.
+        assert_eq!(reveal_offset(-50.0, 30.0, 0.0, 600.0, 0.0, 1000.0), None);
+        // Already at max, item below: same.
+        assert_eq!(
+            reveal_offset(700.0, 780.0, 0.0, 600.0, 100.0, 100.0),
+            None
+        );
+    }
+
+    #[test]
+    fn reveal_offset_respects_shifted_view_window() {
+        // Page-scroll drift shifts the view window: an item at stored
+        // y 650 is *visible* when the view is [100, 700] even though it
+        // is below a [0, 600] window.
+        assert_eq!(
+            reveal_offset(650.0, 690.0, 100.0, 700.0, 150.0, 1000.0),
+            None
+        );
+        assert_eq!(
+            reveal_offset(650.0, 690.0, 0.0, 600.0, 150.0, 1000.0),
+            Some(240.0)
+        );
+    }
+
+    // ── reveal_target_for ──────────────────────────────────────
+
+    fn node(tree: &mut Tree, id: &str, et: &str, parent: &str, props: &[(&str, serde_json::Value)]) {
+        let map: indexmap::IndexMap<String, serde_json::Value> = props
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        tree.apply(&Patch::Create {
+            id: id.into(),
+            element_type: et.to_string(),
+            props: std::sync::Arc::new(map),
+            semantics: None,
+        });
+        tree.apply(&Patch::Insert {
+            parent_id: parent.into(),
+            id: id.into(),
+            before_id: None,
+        });
+    }
+
+    /// root → col → { plain text, scroller(overflow:scroll) → rows }.
+    fn reveal_tree(rows: usize) -> Tree {
+        let mut tree = Tree::new();
+        node(&mut tree, "col", "Column", "root", &[]);
+        node(&mut tree, "plain", "Text", "col", &[("text", json!("outside"))]);
+        node(
+            &mut tree,
+            "scroller",
+            "Container",
+            "col",
+            &[("overflow", json!("scroll")), ("height", json!(200))],
+        );
+        for i in 0..rows {
+            let id = format!("r{i}");
+            node(
+                &mut tree,
+                &id,
+                "Text",
+                "scroller",
+                &[("text", json!(format!("row {i}")))],
+            );
+        }
+        tree
+    }
+
+    #[test]
+    fn reveal_target_finds_nearest_scrollable_ancestor() {
+        let tree = reveal_tree(20);
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+        let vp = crate::style::Viewport::new(400.0, 600.0);
+        match reveal_target_for(&tree, &pass, "r5", vp) {
+            RevealTarget::Container(id, _rect, meta) => {
+                assert_eq!(id, "scroller");
+                assert!(meta.content_h > 0.0, "ScrollMeta content_h should be positive");
+                assert_eq!(meta.baked_offset, 0.0, "no scroll offset was baked in");
+            }
+            other => panic!("expected Container target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reveal_target_falls_back_to_page_without_scrollable_ancestor() {
+        let tree = reveal_tree(20);
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+        let vp = crate::style::Viewport::new(400.0, 600.0);
+        // `plain` sits outside the scroller; the scroller itself also
+        // scrolls with the page (it is not its own ancestor).
+        assert_eq!(reveal_target_for(&tree, &pass, "plain", vp), RevealTarget::Page);
+        assert_eq!(
+            reveal_target_for(&tree, &pass, "scroller", vp),
+            RevealTarget::Page
+        );
+    }
+
+    #[test]
+    fn reveal_target_prefers_inner_of_nested_scrollables() {
+        let mut tree = Tree::new();
+        node(
+            &mut tree,
+            "outer",
+            "Container",
+            "root",
+            &[("overflow", json!("scroll")), ("height", json!(400))],
+        );
+        node(
+            &mut tree,
+            "inner",
+            "Container",
+            "outer",
+            &[("overflow", json!("scroll")), ("height", json!(200))],
+        );
+        for i in 0..10 {
+            let id = format!("r{i}");
+            node(
+                &mut tree,
+                &id,
+                "Text",
+                "inner",
+                &[("text", json!(format!("row {i}")))],
+            );
+        }
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+        let vp = crate::style::Viewport::new(400.0, 600.0);
+        match reveal_target_for(&tree, &pass, "r3", vp) {
+            RevealTarget::Container(id, ..) => assert_eq!(id, "inner"),
+            other => panic!("expected inner Container, got {other:?}"),
+        }
+        // The inner scroller itself is governed by the outer one.
+        match reveal_target_for(&tree, &pass, "inner", vp) {
+            RevealTarget::Container(id, ..) => assert_eq!(id, "outer"),
+            other => panic!("expected outer Container, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reveal_target_page_fallback_when_scrollable_not_emitted() {
+        // Cull the scroller out of the emitted window: the ancestor is
+        // scrollable in the *tree* but has no layout item, so there is
+        // no ScrollMeta / rect to reveal against — the walk must fall
+        // back to Page instead of guessing.
+        let tree = reveal_tree(20);
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute_with_scrolls(
+            &tree,
+            &mut text,
+            (400, 600),
+            1.0,
+            1_000_000.0, // page-scrolled far past all content
+            &std::collections::HashMap::new(),
+        );
+        assert!(
+            pass.item_by_id("scroller").is_none(),
+            "precondition: scroller must be culled for this test"
+        );
+        let vp = crate::style::Viewport::new(400.0, 600.0);
+        assert_eq!(reveal_target_for(&tree, &pass, "r5", vp), RevealTarget::Page);
+    }
+}
+
+// ---------------------------------------------------------------
+// Review regressions (Phase B adversarial pass), window side.
+// ---------------------------------------------------------------
+
+mod review_regressions {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn taffy_fed_props_disqualify_paint_only() {
+        // Each of these reaches a Taffy style field — if the classifier
+        // admitted them, the relayout skip would serve stale geometry.
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "box".into(),
+            element_type: "Container".into(),
+            props: std::sync::Arc::new(indexmap::IndexMap::new()),
+            semantics: None,
+        });
+        tree.apply(&Patch::Insert {
+            parent_id: "root".into(),
+            id: "box".into(),
+            before_id: None,
+        });
+        for name in [
+            "inset",
+            "flexDirection.0",
+            "gridColumns.0",
+            "horizontalAlignment.0",
+            "verticalAlignment.0",
+            "alignContent",
+        ] {
+            let batch = [Patch::SetProp {
+                id: "box".into(),
+                name: name.into(),
+                value: json!("x"),
+            }];
+            assert!(
+                paint_only_affected_ids(&batch, &[], &tree, false, false, false).is_none(),
+                "{name} must force the wholesale relayout path"
+            );
+        }
+    }
+
+    /// The a11y fingerprint must cover the engine-derived semantics
+    /// side-map: a `SetSemantics`-only change republishes.
+    #[test]
+    fn a11y_fingerprint_covers_semantics_map() {
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "panel".into(),
+            element_type: "Container".into(),
+            props: std::sync::Arc::new(indexmap::IndexMap::new()),
+            semantics: None,
+        });
+        tree.apply(&Patch::Insert {
+            parent_id: "root".into(),
+            id: "panel".into(),
+            before_id: None,
+        });
+        let mut text = crate::text::TextEngine::new();
+        let before = crate::layout::LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let fp_before = a11y_fingerprint(&before, &[]);
+
+        let semantics: hypen_engine::ir::Semantics =
+            serde_json::from_value(json!({ "role": "button", "name": "Filters, 3 applied" }))
+                .expect("valid semantics");
+        tree.apply(&Patch::SetSemantics {
+            id: "panel".into(),
+            semantics: Some(semantics),
+        });
+        let after = crate::layout::LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        assert_ne!(
+            fp_before,
+            a11y_fingerprint(&after, &[]),
+            "a semantics-only change must alter the a11y fingerprint"
+        );
+        // And the in-place refresh produces the same fingerprint as the
+        // full recompute (Phase B keeps the pass instead of dropping it).
+        let mut refreshed = before;
+        let affected: std::collections::HashSet<String> = std::collections::HashSet::new();
+        refreshed.refresh_paint_only(
+            &tree,
+            &affected,
+            crate::style::Viewport::new(800.0, 600.0),
+            1.0,
+        );
+        assert_eq!(a11y_fingerprint(&refreshed, &[]), a11y_fingerprint(&after, &[]));
+    }
+
+    /// Stale-value guard for the other fingerprint fields the
+    /// paint-only path can now change without a relayout: action and
+    /// Input value.
+    #[test]
+    fn a11y_fingerprint_covers_action_and_input_value() {
+        let mut tree = Tree::new();
+        for (id, et, props) in [
+            ("card", "Container", vec![]),
+            ("field", "Input", vec![("value", json!("old"))]),
+        ] {
+            let map: indexmap::IndexMap<String, serde_json::Value> = props
+                .into_iter()
+                .map(|(k, v): (&str, serde_json::Value)| (k.to_string(), v))
+                .collect();
+            tree.apply(&Patch::Create {
+                id: id.into(),
+                element_type: et.into(),
+                props: std::sync::Arc::new(map),
+                semantics: None,
+            });
+            tree.apply(&Patch::Insert {
+                parent_id: "root".into(),
+                id: id.into(),
+                before_id: None,
+            });
+        }
+        let mut text = crate::text::TextEngine::new();
+        let base = crate::layout::LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let fp_base = a11y_fingerprint(&base, &[]);
+
+        tree.apply(&Patch::SetProp {
+            id: "card".into(),
+            name: "onClick.0".into(),
+            value: json!("@actions.open"),
+        });
+        let with_action = crate::layout::LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        assert_ne!(fp_base, a11y_fingerprint(&with_action, &[]), "action enable must republish");
+
+        tree.apply(&Patch::SetProp {
+            id: "field".into(),
+            name: "value".into(),
+            value: json!("new"),
+        });
+        let with_value = crate::layout::LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        assert_ne!(
+            a11y_fingerprint(&with_action, &[]),
+            a11y_fingerprint(&with_value, &[]),
+            "Input value change must republish"
+        );
+    }
+}
+
+// ---------------------------------------------------------------
+// Phase C: container-scroll drift detection (redraw's decision input).
+// ---------------------------------------------------------------
+
+mod container_drift {
+    use super::*;
+    use serde_json::json;
+
+    fn node(tree: &mut Tree, id: &str, et: &str, parent: &str, props: &[(&str, serde_json::Value)]) {
+        let map: indexmap::IndexMap<String, serde_json::Value> = props
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.clone()))
+            .collect();
+        tree.apply(&Patch::Create {
+            id: id.into(),
+            element_type: et.to_string(),
+            props: std::sync::Arc::new(map),
+            semantics: None,
+        });
+        tree.apply(&Patch::Insert {
+            parent_id: parent.into(),
+            id: id.into(),
+            before_id: None,
+        });
+    }
+
+    fn scroller_tree() -> Tree {
+        let mut tree = Tree::new();
+        node(
+            &mut tree,
+            "scroller",
+            "Container",
+            "root",
+            &[("overflow", json!("scroll")), ("height", json!(200.0))],
+        );
+        for i in 0..8 {
+            let id = format!("r{i}");
+            node(
+                &mut tree,
+                &id,
+                "Text",
+                "scroller",
+                &[("text", json!("row")), ("height", json!(40.0))],
+            );
+        }
+        tree
+    }
+
+    #[test]
+    fn drift_tracks_shift_vs_emit_anchors_independently() {
+        let tree = scroller_tree();
+        let mut text = crate::text::TextEngine::new();
+        let scrolls_at_emit: HashMap<String, f32> = HashMap::new();
+        let mut pass = crate::layout::LayoutPass::compute_with_scrolls(
+            &tree,
+            &mut text,
+            (800, 600),
+            1.0,
+            0.0,
+            &scrolls_at_emit,
+        );
+
+        // No live offset → no drift.
+        assert!(container_scroll_drifts(&pass, &HashMap::new()).is_empty());
+
+        // Live offset 60 against a pass baked at 0.
+        let mut live = HashMap::new();
+        live.insert("scroller".to_string(), 60.0f32);
+        let drifts = container_scroll_drifts(&pass, &live);
+        assert_eq!(drifts.len(), 1);
+        assert_eq!(drifts[0].id, "scroller");
+        assert_eq!(drifts[0].shift, 60.0);
+        assert_eq!(drifts[0].emit_drift, 60.0);
+
+        // After the in-place shift, the rect baseline caught up but
+        // the emit anchor didn't: a further wheel to 90 shifts by 30
+        // while the threshold is measured against the full 90.
+        pass.shift_container_scroll(
+            &tree,
+            "scroller",
+            60.0,
+            crate::style::Viewport::new(800.0, 600.0),
+            1.0,
+        );
+        assert!(container_scroll_drifts(&pass, &live).is_empty(), "caught up");
+        live.insert("scroller".to_string(), 90.0);
+        let drifts = container_scroll_drifts(&pass, &live);
+        assert_eq!(drifts.len(), 1);
+        assert_eq!(drifts[0].shift, 30.0);
+        assert_eq!(
+            drifts[0].emit_drift, 90.0,
+            "emit drift accumulates toward the re-emit threshold across shifts"
+        );
+    }
+
+    /// The re-emit threshold is measured against the SUMMED drift
+    /// along the scroll chain — per-container checks alone would let
+    /// nested scrolling displace content `(depth+1)·threshold` past
+    /// the cull anchors.
+    #[test]
+    fn chain_emit_drift_sums_nested_scroll_ancestors() {
+        let mut tree = Tree::new();
+        node(
+            &mut tree,
+            "outer",
+            "Container",
+            "root",
+            &[("overflow", json!("scroll")), ("height", json!(400.0))],
+        );
+        node(
+            &mut tree,
+            "inner",
+            "Container",
+            "outer",
+            &[("overflow", json!("scroll")), ("height", json!(150.0))],
+        );
+        for i in 0..6 {
+            let id = format!("n{i}");
+            node(
+                &mut tree,
+                &id,
+                "Text",
+                "inner",
+                &[("text", json!("row")), ("height", json!(40.0))],
+            );
+        }
+        let mut text = crate::text::TextEngine::new();
+        let pass = crate::layout::LayoutPass::compute_with_scrolls(
+            &tree,
+            &mut text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+        );
+        let mut live = HashMap::new();
+        live.insert("outer".to_string(), 50.0f32);
+        live.insert("inner".to_string(), 30.0f32);
+        // The inner container's chain sees its own drift PLUS the
+        // outer's; the outer sees only its own.
+        assert_eq!(chain_emit_drift(&pass, &tree, &live, "inner"), 80.0);
+        assert_eq!(chain_emit_drift(&pass, &tree, &live, "outer"), 50.0);
+        // Direction-independent: reversing the outer still adds.
+        live.insert("outer".to_string(), -20.0f32);
+        assert_eq!(chain_emit_drift(&pass, &tree, &live, "inner"), 50.0);
+    }
+}
+
+// ---------------------------------------------------------------
+// Phase D: paint-only animation ticks. `drive_animation_frame`
+// classifies each tick off the tree's raw-write log; a qualifying
+// tick repairs the cached pass in place instead of paying Taffy +
+// emit + a wholesale painter drop per frame.
+// ---------------------------------------------------------------
+
+mod anim_paint_only {
+    use super::*;
+
+    /// `col → icon (spin preset) → label`: the spin writes `rotate`
+    /// (paint-only) on `icon` every tick.
+    fn spin_fixture() -> (DesktopAnimator, Tree, TaffyState) {
+        let (mut animator, mut tree, mut taffy) = harness();
+        mirror_ingest(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            &[
+                wcreate(
+                    "icon",
+                    "Container",
+                    &[
+                        ("width.0", json!(200.0)),
+                        ("height.0", json!(20.0)),
+                        (
+                            "__anim.animate",
+                            json!({ "preset": "spin", "duration": 1000, "repeat": "loop", "curve": "linear" }),
+                        ),
+                    ],
+                ),
+                winsert("col", "icon"),
+                wcreate("label", "Text", &[("0", json!("spinning"))]),
+                winsert("icon", "label"),
+            ],
+        );
+        (animator, tree, taffy)
+    }
+
+    #[test]
+    fn transform_tick_classifies_paint_only_with_descendants() {
+        let (mut animator, mut tree, mut taffy) = spin_fixture();
+        animator.set_manual_time_ms(250.0);
+        let frame = drive_animation_frame(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            HARNESS_SCALE,
+            harness_viewport(),
+        );
+        assert!(frame.invalidate);
+        let affected = frame
+            .paint_only
+            .expect("a rotate-only tick must classify paint-only");
+        assert!(affected.contains("icon"), "written node included");
+        assert!(
+            affected.contains("label"),
+            "descendants included (transforms inherit downward)"
+        );
+        assert!(!affected.contains("col"), "ancestors excluded");
+    }
+
+    #[test]
+    fn layout_prop_tick_takes_wholesale_path() {
+        // `.transition` gliding `width.0` writes a LAYOUT prop per
+        // tick (and reports the id in `restyle`) — geometry moves, so
+        // the in-place repair is not sound and the classifier must
+        // refuse.
+        let (mut animator, mut tree, mut taffy) = harness();
+        mirror_ingest(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            &[
+                wcreate(
+                    "box",
+                    "Container",
+                    &[
+                        ("width.0", json!(100.0)),
+                        ("height.0", json!(40.0)),
+                        (
+                            "__anim.transition",
+                            json!({ "duration": 200, "curve": "linear" }),
+                        ),
+                    ],
+                ),
+                winsert("col", "box"),
+            ],
+        );
+        mirror_ingest(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            &[wset("box", "width.0", json!(200.0))],
+        );
+        animator.set_manual_time_ms(100.0);
+        let frame = drive_animation_frame(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            HARNESS_SCALE,
+            harness_viewport(),
+        );
+        assert!(frame.invalidate);
+        assert!(
+            frame.paint_only.is_none(),
+            "a width-animating tick must take the wholesale path"
+        );
+    }
+
+    #[test]
+    fn idle_tick_neither_invalidates_nor_classifies() {
+        let (mut animator, mut tree, mut taffy) = harness();
+        let frame = drive_animation_frame(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            HARNESS_SCALE,
+            harness_viewport(),
+        );
+        assert!(!frame.invalidate);
+        assert!(frame.paint_only.is_none());
+    }
+
+    /// End-to-end soundness: applying the paint-only repair to the
+    /// cached pass must be indistinguishable from the full recompute
+    /// the wholesale path would have produced.
+    #[test]
+    fn paint_only_tick_repair_matches_full_recompute() {
+        let (mut animator, mut tree, mut taffy) = spin_fixture();
+        let mut text = TextEngine::new();
+        let mut cached = harness_layout(&mut taffy, &tree, &mut text, 1);
+
+        animator.set_manual_time_ms(250.0);
+        let frame = drive_animation_frame(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            HARNESS_SCALE,
+            harness_viewport(),
+        );
+        let affected = frame.paint_only.expect("spin tick is paint-only");
+        cached.refresh_paint_only(&tree, &affected, harness_viewport(), HARNESS_SCALE);
+
+        let fresh = harness_layout(&mut taffy, &tree, &mut text, 2);
+        assert_eq!(cached.items.len(), fresh.items.len());
+        for (a, b) in cached.items.iter().zip(fresh.items.iter()) {
+            assert_eq!(
+                format!("{a:?}"),
+                format!("{b:?}"),
+                "item `{}` diverged between in-place repair and recompute",
+                a.node_id
+            );
+        }
+    }
+
+    /// Repetition: hundreds of in-place repairs must equal one
+    /// recompute — the repair is absolute (transforms recomputed from
+    /// current rects, not incrementally), so no drift can accumulate.
+    #[test]
+    fn repeated_repairs_match_single_recompute() {
+        let (mut animator, mut tree, mut taffy) = spin_fixture();
+        let mut text = TextEngine::new();
+        let mut cached = harness_layout(&mut taffy, &tree, &mut text, 1);
+        for i in 1..=50 {
+            animator.set_manual_time_ms(i as f64 * 16.0);
+            let frame = drive_animation_frame(
+                &mut animator,
+                &mut tree,
+                &mut taffy,
+                HARNESS_SCALE,
+                harness_viewport(),
+            );
+            let affected = frame.paint_only.expect("spin ticks stay paint-only");
+            cached.refresh_paint_only(&tree, &affected, harness_viewport(), HARNESS_SCALE);
+        }
+        let fresh = harness_layout(&mut taffy, &tree, &mut text, 2);
+        for (a, b) in cached.items.iter().zip(fresh.items.iter()) {
+            assert_eq!(format!("{a:?}"), format!("{b:?}"), "drift after 50 repairs");
+        }
+    }
+
+    /// Settle-to-identity: when the tick removes the tree's last
+    /// transform prop, the gated post-pass must reset every item to
+    /// identity rather than keeping the final animated pose.
+    #[test]
+    fn settle_removing_last_transform_resets_to_identity() {
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "n".into(),
+            element_type: "Container".into(),
+            props: std::sync::Arc::new(indexmap::IndexMap::from([
+                ("width.0".to_string(), json!(50.0)),
+                ("height.0".to_string(), json!(50.0)),
+            ])),
+            semantics: None,
+        });
+        tree.apply(&Patch::Insert {
+            parent_id: "root".into(),
+            id: "n".into(),
+            before_id: None,
+        });
+        let mut text = TextEngine::new();
+        tree.set_prop_raw("n", "translateY", json!(24.0));
+        let mut pass = crate::layout::LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        assert!(!pass.item_by_id("n").unwrap().transform.is_identity());
+        // Animator settle removes the originally-absent prop.
+        tree.remove_prop_raw("n", "translateY");
+        let affected: std::collections::HashSet<String> =
+            [String::from("n")].into_iter().collect();
+        pass.refresh_paint_only(
+            &tree,
+            &affected,
+            crate::style::Viewport::new(800.0, 600.0),
+            1.0,
+        );
+        assert!(
+            pass.item_by_id("n").unwrap().transform.is_identity(),
+            "gate-closed reset must clear the final pose"
+        );
+    }
+
+    /// The classification input: the tree's raw-write log records
+    /// exactly the bracketed writes.
+    #[test]
+    fn raw_write_log_brackets_exactly() {
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "n".into(),
+            element_type: "Container".into(),
+            props: std::sync::Arc::new(indexmap::IndexMap::new()),
+            semantics: None,
+        });
+        // Outside a bracket: nothing recorded.
+        tree.set_prop_raw("n", "rotate", json!(10.0));
+        tree.begin_raw_write_log();
+        tree.set_prop_raw("n", "rotate", json!(20.0));
+        tree.remove_prop_raw("n", "rotate");
+        let (writes, structural) = tree.end_raw_write_log();
+        assert_eq!(
+            writes,
+            vec![
+                ("n".to_string(), "rotate".to_string()),
+                ("n".to_string(), "rotate".to_string()),
+            ]
+        );
+        assert!(!structural, "prop writes alone are not structural");
+        // After the bracket closed: off again, and a fresh end
+        // returns empty rather than stale entries.
+        tree.set_prop_raw("n", "opacity", json!(0.5));
+        assert!(tree.end_raw_write_log().0.is_empty());
+    }
+
+    /// A structural `Tree::apply` inside the bracket poisons the
+    /// classification, even when the prop writes alone look
+    /// paint-only — the tripwire for any future tick-path structural
+    /// mutation (today's only one, exit finalize, is independently
+    /// rejected through `TickOutcome::finalized`).
+    #[test]
+    fn structural_apply_inside_bracket_poisons_classification() {
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "n".into(),
+            element_type: "Container".into(),
+            props: std::sync::Arc::new(indexmap::IndexMap::new()),
+            semantics: None,
+        });
+        tree.begin_raw_write_log();
+        tree.set_prop_raw("n", "rotate", json!(20.0));
+        tree.apply(&Patch::Remove {
+            id: "n".into(),
+            transition: false,
+        });
+        let (writes, structural) = tree.end_raw_write_log();
+        assert_eq!(writes.len(), 1);
+        assert!(structural, "apply inside the bracket must be flagged");
+        // And a fresh bracket starts clean.
+        tree.begin_raw_write_log();
+        let (_, structural) = tree.end_raw_write_log();
+        assert!(!structural);
+    }
+}
+
+// ---------------------------------------------------------------
+// Review regression (Phase D adversarial pass): the FLUSH-side
+// paint-only classifier must reject batches whose ingest finalized
+// an in-flight exit — the teardown appears only in the outcome's
+// `forwarded`, never in the input patches.
+// ---------------------------------------------------------------
+
+mod ingest_finalize_gate {
+    use super::*;
+
+    /// Reduced motion ON + `.motion(essential)` defers the exit past
+    /// the Remove; a later paint-classified `RemoveProp` of
+    /// `__anim.motion` lifts the exemption and ingest finalizes the
+    /// teardown at end-of-batch. Without the `finalized_any` gate the
+    /// batch classified paint-only and the dead subtree kept
+    /// painting, hit-testing, and publishing to AccessKit off the
+    /// kept pass.
+    #[test]
+    fn essential_exemption_lift_forces_wholesale() {
+        let (mut animator, mut tree, mut taffy) = harness();
+        let _ = animator.set_reduced_motion(true, &mut tree);
+        mirror_ingest(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            &[
+                wcreate(
+                    "card",
+                    "Container",
+                    &[
+                        ("width.0", json!(100.0)),
+                        ("height.0", json!(40.0)),
+                        (
+                            "__anim.exit",
+                            json!({ "presets": ["fade"], "duration": 150, "curve": "linear" }),
+                        ),
+                        ("__anim.motion", json!({ "essential": true })),
+                    ],
+                ),
+                winsert("col", "card"),
+                wcreate("kid", "Text", &[("0", json!("inside"))]),
+                winsert("card", "kid"),
+            ],
+        );
+        // Deferred exit: the flagged Remove is withheld.
+        let out = animator.ingest(
+            &[Patch::Remove {
+                id: "card".into(),
+                transition: true,
+            }],
+            &mut tree,
+        );
+        assert!(tree.get("card").is_some(), "essential exit defers teardown");
+        assert!(!out.finalized_any);
+
+        // Lifting the exemption finalizes the exit during ingest of a
+        // batch that carries NO structural patch.
+        let batch = [Patch::RemoveProp {
+            id: "card".into(),
+            name: "__anim.motion".into(),
+        }];
+        let out = animator.ingest(&batch, &mut tree);
+        assert!(
+            tree.get("card").is_none(),
+            "precondition: the exemption lift finalizes the teardown"
+        );
+        assert!(out.finalized_any, "ingest must report the finalize");
+        assert!(
+            paint_only_affected_ids(&batch, &out.restyle, &tree, false, false, out.finalized_any)
+                .is_none(),
+            "a batch whose ingest finalized an exit must take the wholesale path"
+        );
+    }
+
+    /// Tick-side counterpart: a tick that finalizes an exit while
+    /// also writing paint props on an unrelated node must classify
+    /// wholesale (`TickOutcome::finalized` gate).
+    #[test]
+    fn mixed_finalize_and_paint_tick_takes_wholesale_path() {
+        let (mut animator, mut tree, mut taffy) = harness();
+        mirror_ingest(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            &[
+                wcreate(
+                    "leaving",
+                    "Container",
+                    &[
+                        ("width.0", json!(50.0)),
+                        ("height.0", json!(50.0)),
+                        (
+                            "__anim.exit",
+                            json!({ "presets": ["fade"], "duration": 100, "curve": "linear" }),
+                        ),
+                    ],
+                ),
+                winsert("col", "leaving"),
+                wcreate(
+                    "spinner",
+                    "Container",
+                    &[
+                        ("width.0", json!(20.0)),
+                        ("height.0", json!(20.0)),
+                        (
+                            "__anim.animate",
+                            json!({ "preset": "spin", "duration": 1000, "repeat": "loop", "curve": "linear" }),
+                        ),
+                    ],
+                ),
+                winsert("col", "spinner"),
+            ],
+        );
+        mirror_ingest(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            &[Patch::Remove {
+                id: "leaving".into(),
+                transition: true,
+            }],
+        );
+        assert!(tree.get("leaving").is_some(), "exit playing");
+        // Past the exit's settle: this tick finalizes the teardown AND
+        // writes the spinner's rotate.
+        animator.set_manual_time_ms(150.0);
+        let frame = drive_animation_frame(
+            &mut animator,
+            &mut tree,
+            &mut taffy,
+            HARNESS_SCALE,
+            harness_viewport(),
+        );
+        assert!(frame.invalidate);
+        assert!(tree.get("leaving").is_none(), "exit finalized this tick");
+        assert!(
+            frame.paint_only.is_none(),
+            "a finalizing tick must take the wholesale path even with paint writes present"
+        );
+    }
 }

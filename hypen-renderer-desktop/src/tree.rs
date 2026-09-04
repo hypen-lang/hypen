@@ -99,6 +99,18 @@ pub struct Tree {
     /// Same, for the transform prop vocabulary (`translateX` /
     /// `translateY` / `scale` / `rotate`).
     transform_keys: usize,
+    /// `Some` while a raw-write bracket is open (see
+    /// [`Tree::begin_raw_write_log`]); collects `(id, key)` for every
+    /// `set_prop_raw` / `remove_prop_raw` inside it. `None` — the
+    /// steady state — makes logging a single branch.
+    raw_write_log: Option<Vec<(String, String)>>,
+    /// A STRUCTURAL mutation (`Tree::apply`) happened while the
+    /// bracket was open. Today the only tick-reachable `apply` is an
+    /// exit finalize, which the classifier already rejects through
+    /// `TickOutcome::finalized` — this flag exists so a future
+    /// `tree.apply` added inside the tick can never silently escape
+    /// the paint-only classification and leave a stale render.
+    raw_structural_seen: bool,
 }
 
 /// Which paint-gate counters a prop key belongs to:
@@ -127,6 +139,8 @@ impl Tree {
             detached: Vec::new(),
             opacity_keys: 0,
             transform_keys: 0,
+            raw_write_log: None,
+            raw_structural_seen: false,
         }
     }
 
@@ -207,6 +221,7 @@ impl Tree {
     /// entries layout, paint, and hit-testing read (design constraint
     /// #5: never a paint-only presentation layer).
     pub(crate) fn set_prop_raw(&mut self, id: &str, name: &str, value: Value) {
+        self.log_raw_write(id, name);
         let added = match self.nodes.get_mut(id) {
             Some(node) => node.props.insert(name.to_string(), value).is_none(),
             None => false,
@@ -219,12 +234,43 @@ impl Tree {
     /// Remove a prop directly (animator settle restoring an
     /// originally-absent prop). See [`Tree::set_prop_raw`].
     pub(crate) fn remove_prop_raw(&mut self, id: &str, name: &str) {
+        self.log_raw_write(id, name);
         let removed = match self.nodes.get_mut(id) {
             Some(node) => node.props.remove(name).is_some(),
             None => false,
         };
         if removed {
             self.count_key_removed(name);
+        }
+    }
+
+    /// Start recording every `set_prop_raw` / `remove_prop_raw`
+    /// `(id, key)` pair. The animation-frame driver brackets the
+    /// animator tick with this so it learns EXACTLY which nodes the
+    /// tick wrote — at the tree level, not by auditing the animator's
+    /// many write sites — and can classify the frame paint-only.
+    /// Logging is off outside the bracket, so raw writes elsewhere
+    /// (scrub ticks, tests) cost nothing and can't leak into a stale
+    /// log.
+    pub(crate) fn begin_raw_write_log(&mut self) {
+        self.raw_write_log = Some(Vec::new());
+        self.raw_structural_seen = false;
+    }
+
+    /// Stop recording. Returns the writes since
+    /// [`Tree::begin_raw_write_log`] in write order (duplicates
+    /// preserved), and whether any STRUCTURAL mutation (`Tree::apply`)
+    /// happened inside the bracket — a structural bracket must never
+    /// classify paint-only, whatever the prop writes look like.
+    pub(crate) fn end_raw_write_log(&mut self) -> (Vec<(String, String)>, bool) {
+        let structural = std::mem::take(&mut self.raw_structural_seen);
+        (self.raw_write_log.take().unwrap_or_default(), structural)
+    }
+
+    #[inline]
+    fn log_raw_write(&mut self, id: &str, name: &str) {
+        if let Some(log) = self.raw_write_log.as_mut() {
+            log.push((id.to_string(), name.to_string()));
         }
     }
 
@@ -244,6 +290,12 @@ impl Tree {
     /// directly (tests, headless tools) therefore snaps, which is the
     /// protocol's sanctioned degradation.
     pub fn apply(&mut self, patch: &Patch) {
+        // Inside a raw-write bracket (the animation tick), a
+        // structural apply must poison the paint-only classification
+        // — see `raw_structural_seen`.
+        if self.raw_write_log.is_some() {
+            self.raw_structural_seen = true;
+        }
         match patch {
             Patch::Create {
                 id,

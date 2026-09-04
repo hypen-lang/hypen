@@ -10,12 +10,12 @@
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #fafafa; }
     #app, #app * { font-family: inherit; }
     button, input, textarea, select { font: inherit; }
+    /* Full-bleed host: the Hypen components own responsive layout via md:
+       variants (centered capped column on desktop, edge-to-edge on mobile). */
     #app {
-      max-width: 470px;
-      margin: 0 auto;
+      width: 100%;
       height: 100vh;
       min-height: 0;
-      background: #fff;
       display: flex;
       flex-direction: column;
       overflow: hidden;
