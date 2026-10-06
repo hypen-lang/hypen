@@ -83,5 +83,5 @@ module Comments {
         .borderTop("1px solid #efefef")
         .verticalAlignment("center")
     }
-    .tw("flex-1 w-full bg-white")
+    .tw("flex-1 w-full bg-white md:max-w-[630px] md:mx-auto md:border-x md:border-gray-200")
 }

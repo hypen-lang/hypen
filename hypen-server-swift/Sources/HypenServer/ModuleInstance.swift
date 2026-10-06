@@ -41,6 +41,18 @@ public final class ModuleInstance: @unchecked Sendable {
     private var patchCallbacks: [([[String: Any]]) -> Void] = []
     private let log = HypenLoggers.module
 
+    // MARK: Device ownership (RFC 001 §2.7)
+
+    private static let deviceIds = DeviceInstanceCounter()
+    /// Stable per-instance owner id the connection's device broker keys
+    /// activation authority, sweeps and background pins by.
+    public let deviceInstanceId: String
+    /// Strictly increasing activation counter; with `deviceInstanceId` it
+    /// forms the owner authority of activation-owned device work.
+    private var activationId: UInt32 = 0
+    /// The connection's device plane, when one was negotiated.
+    private var devicePlane: DevicePlane?
+
     /// Create a module instance backed by an existing native engine.
     ///
     /// All action dispatch routes through `engine.dispatchAction(...)` and
@@ -53,6 +65,21 @@ public final class ModuleInstance: @unchecked Sendable {
     /// `engine.updateState(scope: definition.name, ...)` instead of the
     /// primary's empty-string scope.
     private let isNested: Bool
+
+    /// Scope name this instance registered under in the engine.
+    ///
+    /// The engine just needs *some* name for a module slot, so a definition
+    /// with no explicit name (e.g. an `AppBuilder` built without `.name(...)`)
+    /// falls back to "Module"; the value isn't surfaced to action handlers.
+    /// The engine lowercases it internally; we keep the declared spelling.
+    ///
+    /// Read back by the destroy path (see `ManagedRouter.executeUnmount`) so
+    /// it unregisters exactly the scope `init` registered, instead of
+    /// re-deriving the name from a route and risking drift.
+    internal var engineScope: String {
+        guard let name = definition.name, !name.isEmpty else { return "Module" }
+        return name
+    }
 
     public init(
         definition: ModuleDefinition,
@@ -68,6 +95,7 @@ public final class ModuleInstance: @unchecked Sendable {
         self.contextRouter = router
         self.isNested = asNested
         self.state = ObservableState(definition.initialState)
+        self.deviceInstanceId = "\(definition.name ?? "Module")#\(Self.deviceIds.next())"
         // Register the patch callback BEFORE the onCreated hook fires
         // — onCreated's state mutations flow through state.onChange →
         // engine.updateState → patchCallbacks synchronously. Registering
@@ -83,12 +111,7 @@ public final class ModuleInstance: @unchecked Sendable {
         // queue and fire. Hosts that pre-configure the engine (like
         // RemoteServer) can pass an engine that's already had setModule
         // called; setModule is idempotent on the FFI side.
-        //
-        // The default "Module" name is used when the definition has no
-        // explicit name (e.g. AppBuilder constructed without `.name(...)`).
-        // The engine just needs *some* name for the primary slot — the
-        // value isn't surfaced to action handlers.
-        let moduleName = definition.name ?? "Module"
+        let moduleName = self.engineScope
         let allActions = Array(Set(
             Array(definition.actionHandlers.keys) +
             Array(definition.asyncActionHandlers.keys) +
@@ -130,7 +153,7 @@ public final class ModuleInstance: @unchecked Sendable {
             // module's onCreated-loaded state (e.g. HomePage.posts)
             // would be written to the empty scope and never reach the
             // named-modules slot the Router IR subtree reads from.
-            let updateScope = self.isNested ? (self.definition.name ?? "Module") : ""
+            let updateScope = self.isNested ? self.engineScope : ""
             let patches = (try? self.engine.updateState(scope: updateScope, state: snapshot)) ?? []
             self.lock.lock()
             let stateCallbacks = self.stateChangeCallbacks
@@ -167,11 +190,12 @@ public final class ModuleInstance: @unchecked Sendable {
     /// engine via `engine.onAction(...)`. The engine will fire these from
     /// inside `processPendingActions()` when `dispatchAction` is called.
     private func registerActionHandlersWithEngine() {
+        let actionPrefix = "__hypen_scoped:\(isNested ? engineScope.lowercased() : ""):"
         // Sync handlers
         for (actionName, handler) in definition.actionHandlers {
             let name = actionName
             let h = handler
-            engine.onAction(name) { [weak self] _, payload in
+            engine.onAction(actionPrefix + name) { [weak self] _, payload in
                 guard let self = self else { return }
                 let destroyed = self.lock.withLock { self.isDestroyed }
                 if destroyed { return }
@@ -180,7 +204,8 @@ public final class ModuleInstance: @unchecked Sendable {
                     action: action,
                     state: self.state,
                     context: self.globalContext,
-                    router: self.contextRouter
+                    router: self.contextRouter,
+                    device: self.deviceContext()
                 )
                 self.callAction(name) { h(ctx) }
             }
@@ -189,27 +214,34 @@ public final class ModuleInstance: @unchecked Sendable {
         for (actionName, handler) in definition.asyncActionHandlers {
             let name = actionName
             let h = handler
-            engine.onAction(name) { [weak self] _, payload in
+            engine.onAction(actionPrefix + name) { [weak self] _, payload in
                 guard let self = self else { return }
                 let action = Action(name: name, payload: payload)
+                // Owner and provenance are fixed HERE, synchronously in the
+                // dispatch (RFC 001 §4/§7), before the handler task starts.
                 let ctx = ActionHandlerContext(
                     action: action,
                     state: self.state,
                     context: self.globalContext,
-                    router: self.contextRouter
+                    router: self.contextRouter,
+                    device: self.deviceContext()
                 )
                 Task { [weak self] in
                     guard let self = self else { return }
                     let destroyed = self.lock.withLock { self.isDestroyed }
                     if destroyed { return }
+                    // Handler scope (RFC 001 §2.4): unary device requests
+                    // still pending when the handler returns are cancelled.
+                    ctx.device.beginHandlerScope()
                     await h(ctx)
+                    ctx.device.endHandlerScope()
                 }
             }
         }
         // Two-way binding: writes a single state path. The mutation flows
         // through the same onChange → engine.updateState path as any
         // user-handler-driven mutation.
-        engine.onAction("__hypen_bind") { [weak self] _, payload in
+        engine.onAction(actionPrefix + "__hypen_bind") { [weak self] _, payload in
             guard let self = self,
                   let payloadDict = payload as? [String: Any],
                   let path = payloadDict["path"] as? String,
@@ -217,6 +249,126 @@ public final class ModuleInstance: @unchecked Sendable {
             let value = payloadDict["value"] as Any
             self.state.set(path, value)
         }
+        // Drag-and-drop outcome actions (hypen-web/docs/dnd.md). Both
+        // go through `self.state` — never the engine directly — so the
+        // onChange → engine.updateState wiring, persistence and the typed
+        // builder's re-encoding all see the write. Malformed payloads warn
+        // and degrade to a no-op; author input never throws.
+        //
+        engine.onAction(actionPrefix + HypenDnd.reorderAction) { [weak self] _, payload in
+            guard let self = self else { return }
+            let destroyed = self.lock.withLock { self.isDestroyed }
+            if destroyed { return }
+            self.handleReorder(payload)
+        }
+        engine.onAction(actionPrefix + HypenDnd.pinAction) { [weak self] _, payload in
+            guard let self = self else { return }
+            let destroyed = self.lock.withLock { self.isDestroyed }
+            if destroyed { return }
+            self.handlePin(payload)
+        }
+    }
+
+    // MARK: - Drag & Drop Reserved Actions
+
+    /// `__hypen_reorder {fromPath, from, toPath, to}` — `path` is accepted
+    /// as shorthand for `fromPath == toPath`. `to` is the moved item's FINAL
+    /// index; semantics are `portable::path_move` via
+    /// `ObservableState.move(fromPath:from:toPath:to:)`.
+    private func handleReorder(_ payload: Any?) {
+        guard let dict = payload as? [String: Any] else {
+            log.warn("\(HypenDnd.reorderAction): missing payload")
+            return
+        }
+        let fromPathField = Self.stringField(dict, "fromPath") ?? Self.stringField(dict, "path")
+        let toPathField = Self.stringField(dict, "toPath") ?? fromPathField
+        guard let fromPath = fromPathField,
+              let toPath = toPathField,
+              let from = Self.intField(dict, "from"),
+              let to = Self.intField(dict, "to") else {
+            log.warn("\(HypenDnd.reorderAction): malformed payload \(dict)")
+            return
+        }
+        if !state.move(fromPath: fromPath, from: from, toPath: toPath, to: to) {
+            log.warn(
+                "\(HypenDnd.reorderAction): no-op — \"\(fromPath)\"[\(from)] → \"\(toPath)\"[\(to)] "
+                    + "does not resolve to arrays / in-range index"
+            )
+        }
+    }
+
+    /// `__hypen_pin {path, x, y, xKey?, yKey?}` — two path sets
+    /// (`path.xKey`, `path.yKey`) issued as ONE `ObservableState.update(_:)`
+    /// so they reach the engine in a single batch. Missing intermediates
+    /// auto-vivify (`portable_path_set`), so the first pin of a
+    /// reserved-mode key creates `__dnd.<group>.<key>`.
+    private func handlePin(_ payload: Any?) {
+        guard let dict = payload as? [String: Any] else {
+            log.warn("\(HypenDnd.pinAction): missing payload")
+            return
+        }
+        guard let path = Self.stringField(dict, "path"), !path.isEmpty,
+              let x = Self.finiteNumberField(dict, "x"),
+              let y = Self.finiteNumberField(dict, "y") else {
+            log.warn("\(HypenDnd.pinAction): malformed payload \(dict)")
+            return
+        }
+        let xKey = Self.nonEmptyStringField(dict, "xKey") ?? "x"
+        let yKey = Self.nonEmptyStringField(dict, "yKey") ?? "y"
+        // Built imperatively rather than as a literal: a literal with two
+        // equal keys (xKey == yKey) would trap at runtime.
+        var writes: [String: Any] = [:]
+        writes["\(path).\(xKey)"] = x
+        writes["\(path).\(yKey)"] = y
+        state.update(writes)
+    }
+
+    private static func stringField(_ dict: [String: Any], _ key: String) -> String? {
+        return dict[key] as? String
+    }
+
+    private static func nonEmptyStringField(_ dict: [String: Any], _ key: String) -> String? {
+        guard let value = dict[key] as? String, !value.isEmpty else { return nil }
+        return value
+    }
+
+    /// A JSON number field. Rejects strings and booleans (JSONSerialization
+    /// surfaces `true`/`false` as `NSNumber` too, so the encoded type is what
+    /// tells them apart from `0`/`1`).
+    ///
+    /// Portable: no CoreFoundation symbols (plan §6.11 — `CFGetTypeID` /
+    /// `CFBooleanGetTypeID` do not resolve behind `import Foundation` on
+    /// Linux). A boolean `NSNumber` reports `objCType` `"c"` on Darwin
+    /// (`__NSCFBoolean`) and on swift-corelibs-foundation; `"B"` is the C99
+    /// `_Bool` encoding, accepted for completeness. JSONSerialization never
+    /// produces an `Int8` (`"c"`) number, so this cannot reject a real integer.
+    private static func numberField(_ dict: [String: Any], _ key: String) -> NSNumber? {
+        guard let raw = dict[key], !(raw is String), let number = raw as? NSNumber else {
+            return nil
+        }
+        if isBooleanNumber(number) { return nil }
+        return number
+    }
+
+    /// Whether `number` encodes a JSON boolean rather than a numeric value.
+    static func isBooleanNumber(_ number: NSNumber) -> Bool {
+        let encoding = String(cString: number.objCType)
+        return encoding == "c" || encoding == "B"
+    }
+
+    /// Integral JSON number (`3`, `3.0`); anything else → nil.
+    private static func intField(_ dict: [String: Any], _ key: String) -> Int? {
+        guard let number = numberField(dict, key) else { return nil }
+        let value = number.doubleValue
+        guard value.isFinite else { return nil }
+        return Int(exactly: value)
+    }
+
+    /// Finite JSON number, returned as the original `NSNumber` so an
+    /// integral coordinate round-trips as an integer like author state.
+    private static func finiteNumberField(_ dict: [String: Any], _ key: String) -> NSNumber? {
+        guard let number = numberField(dict, key), number.doubleValue.isFinite else { return nil }
+        return number
     }
 
     // MARK: - Action Dispatch
@@ -236,7 +388,11 @@ public final class ModuleInstance: @unchecked Sendable {
         lock.unlock()
 
         var payloadJson: String? = nil
+        // `isValidJSONObject` first: on Darwin `data(withJSONObject:)` raises
+        // an Objective-C exception (not a Swift error) for a non-collection
+        // top level or a NaN/infinite number, which `try?` cannot catch.
         if let p = payload,
+           JSONSerialization.isValidJSONObject(p),
            let data = try? JSONSerialization.data(withJSONObject: p),
            let str = String(data: data, encoding: .utf8) {
             payloadJson = str
@@ -269,9 +425,12 @@ public final class ModuleInstance: @unchecked Sendable {
                 action: action,
                 state: state,
                 context: globalContext,
-                router: contextRouter
+                router: contextRouter,
+                device: deviceContext()
             )
+            ctx.device.beginHandlerScope()
             await asyncHandler(ctx)
+            ctx.device.endHandlerScope()
             return
         }
 
@@ -319,9 +478,22 @@ public final class ModuleInstance: @unchecked Sendable {
     public func handleReconnect(session: SessionInfo, savedState: [String: Any]) {
         if let onReconnect = definition.onReconnect {
             var didRestore = false
+            let preserveReserved = definition.preservesReservedKeysOnRestore
             onReconnect(session) { [weak self] restoredState in
                 didRestore = true
-                self?.state.replace(restoredState)
+                guard let self = self else { return }
+                var next = restoredState
+                if preserveReserved {
+                    // A typed (`Codable`) restore cannot mention runtime-owned
+                    // keys such as `__dnd`; keep the live ones it omits so a
+                    // reconnect does not wipe reserved-mode pinboard positions
+                    // (plan §3 — same exemption as `encodeState`).
+                    for (key, value) in self.state.snapshot()
+                    where HypenDnd.isReservedKey(key) && next[key] == nil {
+                        next[key] = value
+                    }
+                }
+                self.state.replace(next)
             }
             // If the reconnect handler didn't explicitly restore, use the saved state
             if !didRestore {
@@ -352,10 +524,27 @@ public final class ModuleInstance: @unchecked Sendable {
             return
         }
         isActive = true
+        // Activation authority becomes available BEFORE onActivated runs
+        // (RFC 001 §2.7): a fresh activation id owns this activation's
+        // device work, registered with the connection's broker (which only
+        // admits requests for a module instance's live activation).
+        activationId &+= 1
+        let plane = devicePlane
+        let activation = activationId
         lock.unlock()
+        plane?.ownerActivated(deviceInstanceId, activationId: activation)
 
         if let handler = definition.onActivated {
             callLifecycle("activated") { handler(state) }
+        }
+        if let asyncHandler = definition.onActivatedAsync {
+            let device = deviceContext()
+            let state = self.state
+            Task {
+                device.beginHandlerScope()
+                await asyncHandler(state, device)
+                device.endHandlerScope()
+            }
         }
     }
 
@@ -372,7 +561,12 @@ public final class ModuleInstance: @unchecked Sendable {
             return
         }
         isActive = false
+        let plane = devicePlane
+        let activation = activationId
         lock.unlock()
+        // Authority is revoked BEFORE onDeactivated runs (RFC 001 §2.7):
+        // every device request owned by this exact activation is cancelled.
+        plane?.ownerDeactivated(deviceInstanceId, activationId: activation)
 
         if let handler = definition.onDeactivated {
             callLifecycle("deactivated") { handler(state) }
@@ -382,6 +576,74 @@ public final class ModuleInstance: @unchecked Sendable {
     /// Whether the module is currently the active route target.
     public var active: Bool {
         lock.withLock { isActive }
+    }
+
+    // MARK: - Device (RFC 001)
+
+    /// Bind this instance to a connection's device plane (or unbind with
+    /// nil). The broker is the connection's; the instance only contributes
+    /// ownership: a currently active instance registers its live activation
+    /// right away.
+    public func attachDevice(_ plane: DevicePlane?) {
+        lock.lock()
+        if isDestroyed { lock.unlock(); return }
+        devicePlane = plane
+        let register = plane != nil && isActive
+        let activation = activationId
+        lock.unlock()
+        if register { plane?.ownerActivated(deviceInstanceId, activationId: activation) }
+    }
+
+    /// Build the device surface for code running right now on behalf of this
+    /// module (handlers get it as `ctx.device`). Owner and provenance are
+    /// fixed at this moment: outside an activation (onCreated before the
+    /// first activation, deactivation/destroy handlers) every call returns
+    /// `unavailable` ("owner-inactive") instead of waiting; a context whose
+    /// activation has since ended cannot start new device work; a context
+    /// built inside `DeviceProvenance.$current.withValue(.replay)` refuses
+    /// every call (replay firewall, RFC 001 §1.7).
+    public func deviceContext() -> DeviceContext {
+        let provenance = DeviceProvenance.current
+        lock.lock()
+        let plane = devicePlane
+        let active = isActive && !isDestroyed
+        let activation = activationId
+        lock.unlock()
+        let owner = DeviceOwnerAuthority(moduleInstanceId: deviceInstanceId, activationId: activation)
+        guard let plane else {
+            return DeviceContext(plane: nil, owner: owner, provenance: provenance, blockedDetail: "device-disabled")
+        }
+        if !active {
+            return DeviceContext(plane: plane, owner: owner, provenance: provenance, blockedDetail: "owner-inactive")
+        }
+        return DeviceContext(plane: plane, owner: owner, provenance: provenance, ownerLive: { [weak self] in
+            guard let self else { return false }
+            return self.lock.withLock { !self.isDestroyed && self.isActive && self.activationId == activation }
+        })
+    }
+
+    /// Run `body` as a replayed / broadcast-derived dispatch: every handler
+    /// context built inside (and in tasks it spawns) carries replay
+    /// provenance, so its `ctx.device` refuses to open requests (RFC 001
+    /// §1.7) — even after `await`.
+    public func runReplayed<R>(_ body: () throws -> R) rethrows -> R {
+        try DeviceProvenance.$current.withValue(.replay) { try body() }
+    }
+
+    /// True while this instance owns live `background`-lifetime device work
+    /// (RFC 001 §2.7): the work survives deactivation and ends only when the
+    /// instance is destroyed. The pin cap (how many module instances one
+    /// connection may pin this way) is enforced by the Rust broker when the
+    /// work is opened — a background request from one module too many is
+    /// refused `throttled` (`DeviceServerOptions.maxBackgroundOwners`). The
+    /// Swift `ManagedRouter` never evicts persisted modules (its cache is
+    /// unbounded), so nothing here is consulted for eviction; a host with
+    /// its own module cache can use it to avoid destroying pinned work.
+    public var hasLiveBackgroundDeviceWork: Bool {
+        lock.lock()
+        let plane = isDestroyed ? nil : devicePlane
+        lock.unlock()
+        return plane?.hasBackgroundWork(deviceInstanceId) ?? false
     }
 
     // MARK: - Destroy
@@ -403,7 +665,12 @@ public final class ModuleInstance: @unchecked Sendable {
             return
         }
         isDestroyed = true
+        let plane = devicePlane
+        devicePlane = nil
         lock.unlock()
+        // All of this instance's device work (activation and background
+        // lifetimes) ends with it.
+        plane?.ownerDestroyed(deviceInstanceId)
 
         if let handler = definition.onDestroyed {
             callLifecycle("destroyed") { handler(state) }
@@ -462,4 +729,11 @@ public final class ModuleInstance: @unchecked Sendable {
             }
         }
     }
+}
+
+/// Process-wide counter behind `ModuleInstance.deviceInstanceId`.
+private final class DeviceInstanceCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var n: UInt64 = 0
+    func next() -> UInt64 { lock.lock(); defer { lock.unlock() }; n += 1; return n }
 }

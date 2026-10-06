@@ -1,0 +1,52 @@
+[
+  {
+    "client": "Desktop",
+    "server": "Kotlin",
+    "action": "record",
+    "durationMs": 3000,
+    "bytes": 96000,
+    "sha256": "9f83c5eafd401e781b3942253252ec78cf2caf70a09290fa6e4310052428b418",
+    "simulated": false,
+    "evidence": "Native rendered result observed via CUA, supported by server logs."
+  },
+  {
+    "client": "Desktop",
+    "server": "Go",
+    "action": "record",
+    "durationMs": 3000,
+    "bytes": 96000,
+    "sha256": "56802fd4e40a1b88be7039abf6c4cd9fc78268865e03f57e49e8308f2cd28ba1",
+    "simulated": false,
+    "evidence": "Native rendered result observed via CUA, supported by server logs."
+  },
+  {
+    "client": "Desktop",
+    "server": "Swift",
+    "action": "record",
+    "durationMs": 3000,
+    "bytes": 96000,
+    "sha256": "d9c7f3cd5fd4e462b32c2a1e5ce9b4c51171d2c47bacaf711465705631adeecb",
+    "simulated": false,
+    "evidence": "Native rendered result observed via CUA, supported by server logs."
+  },
+  {
+    "client": "Desktop",
+    "server": "TS",
+    "action": "record",
+    "durationMs": 3000,
+    "bytes": 96000,
+    "sha256": "1920ff34d1c0fcf6f80e98fe4a80522297af96bd5336c0cbb770cbf08825a96c",
+    "simulated": false,
+    "evidence": "Native rendered result observed via CUA, supported by server logs."
+  },
+  {
+    "client": "Desktop",
+    "server": "Rust",
+    "action": "record",
+    "durationMs": 3000,
+    "bytes": 96000,
+    "sha256": "b6b08f13705fdf0478c098e854068d85a08a1a8aa6e082479ae962d26795e970",
+    "simulated": false,
+    "evidence": "Native rendered result observed via CUA, supported by server logs."
+  }
+]

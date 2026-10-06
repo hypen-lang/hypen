@@ -2,7 +2,7 @@
  * Slider Component (Range Input)
  */
 
-import type { ComponentHandler } from "./index.js";
+import { hasProp, toBool, type ComponentHandler } from "./index.js";
 
 export const sliderHandler: ComponentHandler = {
   create(): HTMLElement {
@@ -36,8 +36,8 @@ export const sliderHandler: ComponentHandler = {
     }
 
     // Disabled
-    if (props.disabled !== undefined) {
-      input.disabled = Boolean(props.disabled);
+    if (hasProp(props, "disabled")) {
+      input.disabled = toBool(props.disabled);
     }
   },
 };

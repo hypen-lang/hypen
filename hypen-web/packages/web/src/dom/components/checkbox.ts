@@ -2,7 +2,7 @@
  * Checkbox Component
  */
 
-import type { ComponentHandler } from "./index.js";
+import { hasProp, toBool, type ComponentHandler } from "./index.js";
 
 export const checkboxHandler: ComponentHandler = {
   create(): HTMLElement {
@@ -12,28 +12,38 @@ export const checkboxHandler: ComponentHandler = {
     wrapper.style.alignItems = "center";
     wrapper.style.gap = "8px";
     wrapper.style.cursor = "pointer";
+    wrapper.style.minHeight = "20px";
 
     const input = document.createElement("input");
     input.type = "checkbox";
     input.dataset.hypenCheckbox = "true";
-    
+    // Normalize the visual and layout footprint instead of inheriting each
+    // browser's smaller checkbox size and default margins.
+    input.style.width = "20px";
+    input.style.height = "20px";
+    input.style.margin = "0";
+    input.style.flexShrink = "0";
+    input.style.accentColor = "#3b82f6";
+
     wrapper.appendChild(input);
-    
+
     return wrapper;
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    const input = el.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    // Match on the marker `create` stamps rather than on the tag+type pair:
+    // it is the same element, and it survives the `cloneNode` template path.
+    const input = el.querySelector('[data-hypen-checkbox="true"]') as HTMLInputElement;
     if (!input) return;
 
     // Checked state
-    if (props.checked !== undefined) {
-      input.checked = Boolean(props.checked);
+    if (hasProp(props, "checked")) {
+      input.checked = toBool(props.checked);
     }
 
     // Disabled
-    if (props.disabled !== undefined) {
-      input.disabled = Boolean(props.disabled);
+    if (hasProp(props, "disabled")) {
+      input.disabled = toBool(props.disabled);
     }
 
     // Label text
@@ -44,11 +54,10 @@ export const checkboxHandler: ComponentHandler = {
         node => node.nodeType === Node.TEXT_NODE
       );
       textNodes.forEach(node => node.remove());
-      
+
       // Add new label text
       el.appendChild(document.createTextNode(String(label)));
     }
   },
 };
-
 

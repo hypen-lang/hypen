@@ -23,6 +23,7 @@ package remote
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	core "github.com/hypen-space/core"
+	"github.com/hypen-space/core/device"
+	wire "github.com/hypen-space/core/remote/device"
 )
 
 // SessionTransport is the minimal seam a RemoteSession uses to reach its
@@ -52,6 +55,14 @@ type SessionAckMessage struct {
 	SessionID  string      `json:"sessionId"`
 	IsNew      bool        `json:"isNew"`
 	IsRestored bool        `json:"isRestored"`
+	// ResumeToken is the resume credential (RFC 001 §5), in every ack
+	// while the server's device plane is on (the default): fresh per
+	// acknowledged connection, required next to the session id to resume
+	// a session that negotiated a device plane. Treat it as a secret.
+	ResumeToken string `json:"resumeToken,omitempty"`
+	// Device is the negotiated sessionAck.device (RFC 001 §2.2); absent
+	// when the device plane is disabled for this connection.
+	Device json.RawMessage `json:"device,omitempty"`
 }
 
 // GetType reports this message's protocol type.
@@ -100,6 +111,25 @@ type sessionOptions struct {
 	clientID     string
 	helloGraceMs int // 0 means "use default"; -1 disables
 	socketHandle interface{}
+	// upgradeRequest is the HTTP upgrade request of the connection
+	// (WithUpgradeRequest); deviceAdmitted is CreateSession's admission
+	// verdict for it.
+	upgradeRequest *http.Request
+	deviceAdmitted bool
+}
+
+// WithUpgradeRequest passes the connection's HTTP upgrade request to
+// CreateSession. With connection admission configured (AllowedOrigins /
+// Authenticate) the server admits the device plane only for a session
+// whose upgrade request was admitted (RemoteServer.Admit, which the
+// Upgrader() origin check runs); without it the session is UI-only.
+func WithUpgradeRequest(r *http.Request) SessionOption {
+	return func(o *sessionOptions) { o.upgradeRequest = r }
+}
+
+// withDeviceAdmission records CreateSession's admission verdict.
+func withDeviceAdmission(admitted bool) SessionOption {
+	return func(o *sessionOptions) { o.deviceAdmitted = admitted }
 }
 
 // WithClientID overrides the auto-generated client id. Useful for tests.
@@ -112,6 +142,11 @@ func WithClientID(id string) SessionOption {
 // Pass 0 for the default (1000 ms); pass -1 to disable entirely (useful
 // for transports where the first message may be deliberately delayed,
 // e.g. SSE where the client hellos via a separate POST).
+//
+// The grace applies whether or not the device plane is on: a session the
+// grace timer initialises is UI-only (no device plane) unless the client
+// later sends a hello offering `device` (a late hello re-acks with the
+// selection without reinitialising app state).
 func WithHelloGraceMs(ms int) SessionOption {
 	return func(o *sessionOptions) { o.helloGraceMs = ms }
 }
@@ -144,9 +179,22 @@ type RemoteSession struct {
 	destroyed     bool
 	socketHandle  interface{}
 
+	// dispatchMu serialises action dispatches into this session's engine
+	// — a renderer click arriving via Receive and an attached agent
+	// arriving via DispatchExternal never interleave. It is deliberately
+	// NOT `mu`: a dispatch runs the module handler, which re-takes `mu`
+	// to snapshot/commit state, and the engine's patch callback takes
+	// `mu` under the engine mutex to bump the revision. Holding `mu`
+	// across a dispatch would deadlock; holding dispatchMu is safe
+	// because nothing on the dispatch path re-enters it. (Corollary: a
+	// module handler must not call DispatchExternal on its own session.)
+	dispatchMu sync.Mutex
+
 	// Lifecycle broadcast channels. `readyCh` is closed once the hello
-	// handshake + primary-module construction + initial render have all
-	// completed; `closedCh` is closed once Destroy has finished its
+	// handshake + primary-module construction + initial render + router
+	// auto-wiring (when enabled) have all completed — i.e. once every
+	// action the engine's guard authorises has its host handler
+	// installed; `closedCh` is closed once Destroy has finished its
 	// teardown. Both are closed exactly once (the Destroy path also
 	// closes readyCh defensively so a caller blocked on Ready() during
 	// an unhealthy session doesn't deadlock).
@@ -160,6 +208,11 @@ type RemoteSession struct {
 	// when no Routers live in the template, or when no registered
 	// module matched any route body. Torn down alongside the session.
 	autoManaged *core.ManagedRouter
+	// autoPrimary is the primary-module handle the auto-wire registered
+	// in globalCtx (and whose handlers it installed on the engine). A
+	// device plane attached after the auto-wire is bound to it (and to
+	// autoManaged) by attachDevice.
+	autoPrimary *core.ModuleInstance
 	// AutoRouterEnabled toggles the auto-wiring above. Flipped per
 	// session by `RemoteServer` depending on whether the host called
 	// `DisableAutoRouter()`.
@@ -174,6 +227,37 @@ type RemoteSession struct {
 	// build a fresh empty context and `GetModule("app")` / sibling
 	// reads from routed children would always return nil.
 	globalCtx *core.HypenGlobalContext
+
+	// ---- device plane (RFC 001) ----
+
+	// deviceCfg is the host's device settings (nil: the host's device
+	// plane is off — DisableDevice, an incompatible setting, or a host
+	// without one).
+	deviceCfg *deviceSettings
+	// upgradeAdmitted: the connection's upgrade passed the host's
+	// connection admission (or none is configured); without it no device
+	// plane is negotiated.
+	upgradeAdmitted bool
+	// dev is this connection's device plane (nil: disabled, not
+	// negotiated, or closed).
+	dev *sessionDevice
+	// dispatchQ runs the dispatches of a session with a negotiated device
+	// plane off the reader (nil until a plane attaches; UI-only sessions
+	// dispatch on the reader, serialised by dispatchMu). Read it with
+	// queue().
+	dispatchQ atomic.Pointer[dispatchQueue]
+	// curMu guards curDispatch, the dispatch holding the slot.
+	curMu       sync.Mutex
+	curDispatch *dispatchLease
+	// resumeToken is the credential issued in this connection's ack.
+	resumeToken string
+	// initializedByGrace / ackIsNew support a late device hello.
+	initializedByGrace bool
+	ackIsNew           bool
+	// owners are the device identities of the modules the session itself
+	// runs handlers for (the primary and the registered nested modules),
+	// keyed by lowercase module name ("" = primary).
+	owners map[string]device.Owner
 }
 
 // NewRemoteSession constructs a session and starts its hello grace timer.
@@ -208,9 +292,14 @@ func NewRemoteSession(host SessionHost, transport SessionTransport, opts ...Sess
 		closedCh:          make(chan struct{}),
 		AutoRouterEnabled: true,
 	}
+	if dh, ok := host.(deviceHost); ok {
+		s.deviceCfg = dh.deviceSettings()
+		s.upgradeAdmitted = options.deviceAdmitted
+	}
 
 	// Hello grace timer. Clients that don't hello within the window get
-	// auto-initialised as legacy (no sessionId, no props) connections.
+	// auto-initialised as legacy (no sessionId, no props) connections —
+	// with the device plane on or off; such a session has no device plane.
 	graceMs := options.helloGraceMs
 	switch {
 	case graceMs == 0:
@@ -219,6 +308,10 @@ func NewRemoteSession(host SessionHost, transport SessionTransport, opts ...Sess
 		graceMs = 0
 	}
 	if graceMs > 0 {
+		// Assign under s.mu: the callback (which clears helloTimeout under
+		// s.mu) can fire before AfterFunc returns when the grace is short,
+		// and an unguarded write here races with it.
+		s.mu.Lock()
 		s.helloTimeout = time.AfterFunc(time.Duration(graceMs)*time.Millisecond, func() {
 			s.mu.Lock()
 			if s.helloReceived || s.destroyed {
@@ -226,10 +319,12 @@ func NewRemoteSession(host SessionHost, transport SessionTransport, opts ...Sess
 				return
 			}
 			s.helloReceived = true
+			s.initializedByGrace = true
 			s.helloTimeout = nil
 			s.mu.Unlock()
-			s.initializeSession("", nil)
+			s.initializeSession("", nil, nil, "")
 		})
+		s.mu.Unlock()
 	}
 
 	return s
@@ -331,7 +426,35 @@ func (s *RemoteSession) Receive(data []byte) error {
 		s.mu.Unlock()
 		return nil
 	}
+	dev := s.dev
 	s.mu.Unlock()
+
+	// Device JSON limits start BEFORE parsing (RFC 001 §2.1): over-limit
+	// text announcing itself as a device message is dropped unparsed — a
+	// connection-level violation attributable to no request.
+	if dev != nil && len(data) > wire.MaxMessageBytes {
+		if over, err := dev.rt.IsOversizeText(data); err == nil && over {
+			dev.violation("device message over 1 MiB")
+			return nil
+		}
+	}
+
+	// Device messages go to the broker as raw text after reading only
+	// their `type`: the broker decodes them strictly (RFC 001 §2.1), and a
+	// lenient decode into RawMessage must never drop one it would have
+	// attributed to a live request (decision D8). That includes a client
+	// `deviceRequest`: only the server sends those, and one reusing a live
+	// id is a known-id wrong-direction message the broker terminates
+	// (cancel + invalidParams) — liveness before direction.
+	if dev != nil {
+		var head struct {
+			Type MessageType `json:"type"`
+		}
+		if json.Unmarshal(data, &head) == nil && isDeviceMessageType(head.Type) {
+			dev.onText(data)
+			return nil
+		}
+	}
 
 	var raw RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -342,7 +465,11 @@ func (s *RemoteSession) Receive(data []byte) error {
 	case MessageTypeHello:
 		s.mu.Lock()
 		if s.helloReceived {
+			late := s.initializedByGrace
 			s.mu.Unlock()
+			if late {
+				s.lateDeviceHello(data, raw.Device)
+			}
 			return nil
 		}
 		s.helloReceived = true
@@ -356,11 +483,27 @@ func (s *RemoteSession) Receive(data []byte) error {
 		if propsMap, ok := raw.Props.(map[string]any); ok {
 			helloProps = propsMap
 		}
-		s.initializeSession(raw.SessionID, helloProps)
+		s.initializeSession(raw.SessionID, helloProps, s.helloDevice(data, raw.Device), raw.ResumeToken)
 		return nil
 
 	case MessageTypeDispatchAction:
+		if s.deviceCfg != nil && !s.HelloReceived() {
+			// Security admission (RFC 001 §5): a socket that has not
+			// completed the hello handshake may not dispatch.
+			logServer.Warn("Session %s: dispatchAction before hello — rejected", s.ID)
+			return nil
+		}
 		s.handleDispatchAction(raw.Action, raw.Payload)
+		return nil
+
+	case "deviceRequest", "deviceResponse", "deviceEvent":
+		// Device plane (RFC 001): routed to the broker, never through the
+		// action/state path. The broker strictly decodes the raw text
+		// (the encoding/json parse above only read `type`); without a
+		// plane the message is dropped.
+		if dev != nil {
+			dev.onText(data)
+		}
 		return nil
 
 	default:
@@ -383,6 +526,8 @@ func (s *RemoteSession) Destroy() error {
 		s.helloTimeout.Stop()
 		s.helloTimeout = nil
 	}
+	dev := s.dev
+	s.dev = nil
 	sessionID := s.sessionID
 	engine := s.engine
 	s.engine = nil
@@ -391,6 +536,12 @@ func (s *RemoteSession) Destroy() error {
 		stateCopy[k] = v
 	}
 	s.mu.Unlock()
+
+	// The device plane dies with the connection: live requests settle
+	// connectionLost; app state may resume, device work never does.
+	if dev != nil {
+		dev.close()
+	}
 
 	sm := s.host.SessionManager()
 
@@ -422,6 +573,7 @@ func (s *RemoteSession) Destroy() error {
 	s.mu.Lock()
 	managed := s.autoManaged
 	s.autoManaged = nil
+	s.autoPrimary = nil
 	s.mu.Unlock()
 	if managed != nil {
 		managed.Stop()
@@ -469,11 +621,25 @@ func (s *RemoteSession) socketHandleOrSelf() interface{} {
 // initializeSession runs the hello → sessionAck → initialTree flow. Must
 // be called exactly once, either on receiving a hello or after the hello
 // grace timer fires.
-func (s *RemoteSession) initializeSession(requestedSessionID string, helloProps map[string]any) {
+func (s *RemoteSession) initializeSession(requestedSessionID string, helloProps map[string]any, helloDevice json.RawMessage, resumeToken string) {
 	sm := s.host.SessionManager()
 	if sm == nil {
 		logServer.Error("Session %s initializeSession with nil SessionManager", s.ID)
 		return
+	}
+
+	// Device handshake selection (RFC 001 §2.2) is pure and computed
+	// before any side effect: a failure only disables the device plane.
+	deviceAck := s.selectDevice(helloDevice)
+
+	// Resume credential (RFC 001 §5): the public session id alone never
+	// resumes a session that negotiated a device plane — the hello must
+	// also present the resume token issued with it. A missing or wrong
+	// token is a NEW session, never an error. A UI-only session keeps the
+	// legacy id-only resume.
+	if requestedSessionID != "" && sm.RequiresResumeToken(requestedSessionID) && !sm.VerifyResumeToken(requestedSessionID, resumeToken) {
+		logServer.Info("Session %s: resume of %s without a valid resume token — new session", s.ID, requestedSessionID)
+		requestedSessionID = ""
 	}
 
 	var session *core.Session
@@ -491,9 +657,26 @@ func (s *RemoteSession) initializeSession(requestedSessionID string, helloProps 
 	}
 	_, _ = sm.TrackConnection(session.ID(), s.socketHandleOrSelf())
 
+	token := ""
+	if s.deviceCfg != nil {
+		// Device plane on (the default): a fresh credential in every
+		// ack; the previous one stops working.
+		t, err := sm.IssueResumeToken(session.ID())
+		if err != nil {
+			logServer.Error("Session %s: resume token: %v", s.ID, err)
+		}
+		token = t
+	}
+
 	s.mu.Lock()
 	s.sessionID = session.ID()
+	s.resumeToken = token
+	s.ackIsNew = !isRestored
 	s.mu.Unlock()
+	if deviceAck != nil {
+		// From now on the session resumes only with its token.
+		sm.MarkDeviceSession(session.ID())
+	}
 
 	// onReconnect hook — user can opt to restore the saved state.
 	if isRestored && savedState != nil {
@@ -502,13 +685,22 @@ func (s *RemoteSession) initializeSession(requestedSessionID string, helloProps 
 
 	// Send sessionAck.
 	if err := s.Send(&SessionAckMessage{
-		Type:       MessageTypeSessionAck,
-		SessionID:  session.ID(),
-		IsNew:      !isRestored,
-		IsRestored: isRestored,
+		Type:        MessageTypeSessionAck,
+		SessionID:   session.ID(),
+		IsNew:       !isRestored,
+		IsRestored:  isRestored,
+		ResumeToken: token,
+		Device:      deviceAck,
 	}); err != nil {
 		logServer.Error("Failed to send sessionAck to %s: %v", s.ID, err)
 		return
+	}
+
+	// The device plane opens right after the ack: core.capabilities first,
+	// then the session's own module owners are activated — before any
+	// handler can run.
+	if deviceAck != nil {
+		s.attachDevice(deviceAck)
 	}
 
 	// Render initial tree via engine (if sourceDir is set), else empty.
@@ -530,17 +722,30 @@ func (s *RemoteSession) initializeSession(requestedSessionID string, helloProps 
 	}
 	logServer.Info("Sent initialTree to %s (%d patches)", s.ID, len(patches))
 
-	// Notify host → fires OnConnection callbacks.
-	s.host.OnSessionReady(s, &Client{ID: s.ID, ConnectedAt: s.ConnectedAt})
-	s.readyOnce.Do(func() { close(s.readyCh) })
-
 	// Auto-wire a ManagedRouter from the template's own `Router {}`
 	// blocks. Keeps the Social example free of routing ceremony —
 	// host code just registers modules and hands the template to
 	// `RemoteServer.UI(...)`. Opt out via `RemoteServer.DisableAutoRouter()`.
+	//
+	// This MUST run before readyCh closes and before OnConnection fires:
+	// the auto-wire is what installs the `router.*` host handlers that
+	// back hypen.navigate / hypen.back. Until then the engine's guard
+	// already authorises those built-ins (the template declares a
+	// Router) but the resolved router.push finds no handler, so an
+	// attached dispatch would return nil and emit a bare stateUpdate at
+	// the unchanged revision — a silently dropped navigation that no
+	// renderer click can ever produce (clicks arrive on this goroutine
+	// only after Receive(hello) returns). Ready() therefore means "the
+	// declared surface is fully backed", not just "initialTree sent".
 	if s.AutoRouterEnabled {
 		s.autoWireManagedRouter()
 	}
+
+	// Announce readiness, then notify the host → fires OnConnection
+	// callbacks. Ready closes first so an OnConnection callback that
+	// calls RemoteServer.Attach for this session finds it attachable.
+	s.readyOnce.Do(func() { close(s.readyCh) })
+	s.host.OnSessionReady(s, &Client{ID: s.ID, ConnectedAt: s.ConnectedAt})
 }
 
 // autoWireManagedRouter inspects the primary UI for `Router { Route ... }`
@@ -641,11 +846,23 @@ func (s *RemoteSession) autoWireManagedRouter() {
 		for k, v := range stateCopy {
 			defCopy.InitialState[k] = v
 		}
-		primaryInstance := core.NewModuleInstance(engine, &defCopy, core.AsAlreadyInEngine())
+		instanceOpts := []core.InstanceOption{core.AsAlreadyInEngine()}
+		if plane, owner, ok := s.planeFor(""); ok {
+			// The session owns the primary's activation; this handle only
+			// stamps it on the handlers it installs.
+			instanceOpts = append(instanceOpts, core.WithDeviceOwner(plane, owner))
+		}
+		primaryInstance := core.NewModuleInstance(engine, &defCopy, instanceOpts...)
 		globalContext.RegisterModule(primaryScope, primaryInstance)
+		s.mu.Lock()
+		s.autoPrimary = primaryInstance
+		s.mu.Unlock()
 	}
 
 	managed := core.NewManagedRouter(router, engine, core.App, globalContext)
+	if plane, _, ok := s.planeFor(""); ok {
+		managed.SetDevicePlane(plane)
+	}
 
 	added := 0
 	seenPaths := make(map[string]bool)
@@ -703,11 +920,17 @@ func (s *RemoteSession) autoWireManagedRouter() {
 }
 
 // Ready returns a channel that is closed once the hello handshake,
-// primary-module construction, and initial render have all completed.
-// After `<-session.Ready()` unblocks, `Engine()` is non-nil. Also
-// unblocks if Destroy runs before init — always pair with an isDestroyed
-// check (via `Engine() != nil` or a `select` on `Closed()`) before
-// touching session internals.
+// primary-module construction, initial render, and (unless the host
+// called DisableAutoRouter) the template's Router auto-wiring have all
+// completed. After `<-session.Ready()` unblocks, `Engine()` is non-nil
+// and every hypen.* built-in the guard authorises has its backing
+// `router.*` handler installed, so an attached DispatchExternal cannot
+// land in a window where the navigation is authorised but dropped.
+// Ready closes before OnConnection callbacks fire, so a callback may
+// Attach to the session it is being told about. Also unblocks if
+// Destroy runs before init — always pair with an isDestroyed check (via
+// `Engine() != nil` or a `select` on `Closed()`) before touching session
+// internals.
 func (s *RemoteSession) Ready() <-chan struct{} {
 	return s.readyCh
 }
@@ -852,63 +1075,79 @@ func (s *RemoteSession) registerActionHandlers(
 	moduleName string,
 	primaryDef *core.ModuleDefinition,
 ) {
-	onStateChange := func(change core.StateChange) {
-		patch := make(map[string]any, len(change.NewValues))
-		for path, val := range change.NewValues {
-			patch[string(path)] = val
-		}
-		engine.UpdateState(patch)
+	stateObserver := func(scope string) func(core.StateChange) {
+		return func(change core.StateChange) { engine.NotifyStateChange(scope, change.Paths, change.NewValues) }
 	}
+	onStateChange := stateObserver("")
 
 	if primaryDef != nil {
 		for actionName, handler := range primaryDef.Handlers.OnAction {
 			actionName := actionName
 			handler := handler
-			engine.OnAction(actionName, func(action core.Action) {
+			engine.OnAction("__hypen_scoped::"+actionName, func(action core.Action) {
 				s.mu.Lock()
 				currentState := s.stateCopyLocked()
 				s.mu.Unlock()
+				roots := newChangedRoots()
 				obs := core.NewObservableState(currentState, &core.StateObserverOptions{
-					OnChange: onStateChange,
+					OnChange: roots.track(onStateChange),
 				})
-				handler(core.ActionHandlerContext{
-					Action: core.ActionContext{
-						Name:    action.Name,
-						Payload: action.Payload,
-						Sender:  action.Sender,
-					},
-					State:   obs,
-					Context: s.globalCtx,
+				runScoped(s.bindDevice(""), func(dev *device.Device) {
+					handler(core.ActionHandlerContext{
+						Action: core.ActionContext{
+							Name:    actionName,
+							Payload: action.Payload,
+							Sender:  action.Sender,
+						},
+						State:   obs,
+						Context: s.globalCtx,
+					}.WithDevice(dev))
 				})
 				s.mu.Lock()
-				s.state = obs.Snapshot()
+				s.state = s.commitState(s.state, obs, roots)
 				s.mu.Unlock()
 			})
 		}
 	}
 
 	// Two-way binding.
-	engine.OnAction("__hypen_bind", func(action core.Action) {
-		payload, ok := action.Payload.(map[string]interface{})
-		if !ok {
-			return
+	registerReserved := func(scope, stateKey string) {
+		for _, actionName := range []string{"__hypen_bind", core.ReorderActionName, core.PinActionName} {
+			name := actionName
+			engine.OnAction("__hypen_scoped:"+strings.ToLower(scope)+":"+name, func(action core.Action) {
+				s.mu.Lock()
+				current := s.stateCopyLocked()
+				if scope != "" {
+					current = make(map[string]any)
+					for k, v := range s.nestedStates[stateKey] {
+						current[k] = v
+					}
+				}
+				s.mu.Unlock()
+				obs := core.NewObservableState(current, &core.StateObserverOptions{OnChange: stateObserver(scope)})
+				switch name {
+				case core.ReorderActionName:
+					core.ApplyReorderAction(obs, action.Payload)
+				case core.PinActionName:
+					core.ApplyPinAction(obs, action.Payload)
+				default:
+					if p, ok := action.Payload.(map[string]interface{}); ok {
+						if path, ok := p["path"].(string); ok && path != "" {
+							obs.Set(path, p["value"])
+						}
+					}
+				}
+				s.mu.Lock()
+				if scope == "" {
+					s.state = obs.Snapshot()
+				} else {
+					s.nestedStates[stateKey] = obs.Snapshot()
+				}
+				s.mu.Unlock()
+			})
 		}
-		path, ok := payload["path"].(string)
-		if !ok || path == "" {
-			return
-		}
-		value := payload["value"]
-		s.mu.Lock()
-		currentState := s.stateCopyLocked()
-		s.mu.Unlock()
-		obs := core.NewObservableState(currentState, &core.StateObserverOptions{
-			OnChange: onStateChange,
-		})
-		obs.Set(path, value)
-		s.mu.Lock()
-		s.state = obs.Snapshot()
-		s.mu.Unlock()
-	})
+	}
+	registerReserved("", "")
 
 	// Nested modules.
 	for _, name := range core.App.GetNames() {
@@ -919,11 +1158,12 @@ func (s *RemoteSession) registerActionHandlers(
 		if def == nil {
 			continue
 		}
+		registerReserved(name, name)
 		for actionName, handler := range def.Handlers.OnAction {
 			actionName := actionName
 			handler := handler
 			nestedName := name
-			engine.OnAction(actionName, func(action core.Action) {
+			engine.OnAction("__hypen_scoped:"+strings.ToLower(nestedName)+":"+actionName, func(action core.Action) {
 				s.mu.Lock()
 				currentState := s.nestedStates[nestedName]
 				if currentState == nil {
@@ -935,29 +1175,199 @@ func (s *RemoteSession) registerActionHandlers(
 					stateCopy[k] = v
 				}
 				s.mu.Unlock()
+				roots := newChangedRoots()
 				obs := core.NewObservableState(stateCopy, &core.StateObserverOptions{
-					OnChange: onStateChange,
+					OnChange: roots.track(stateObserver(nestedName)),
 				})
-				handler(core.ActionHandlerContext{
-					Action: core.ActionContext{
-						Name:    action.Name,
-						Payload: action.Payload,
-						Sender:  action.Sender,
-					},
-					State:   obs,
-					Context: s.globalCtx,
+				runScoped(s.bindDevice(strings.ToLower(nestedName)), func(dev *device.Device) {
+					handler(core.ActionHandlerContext{
+						Action: core.ActionContext{
+							Name:    actionName,
+							Payload: action.Payload,
+							Sender:  action.Sender,
+						},
+						State:   obs,
+						Context: s.globalCtx,
+					}.WithDevice(dev))
 				})
 				s.mu.Lock()
-				s.nestedStates[nestedName] = obs.Snapshot()
+				s.nestedStates[nestedName] = s.commitState(s.nestedStates[nestedName], obs, roots)
 				s.mu.Unlock()
 			})
 		}
 	}
 }
 
+// reservedAnimateKey is the cross-boundary payload key TypeScript renderers
+// use to carry an event applicator's `animate:` transaction-animation stamp
+// (Option D) across dispatchAction. It is a renderer→host directive, never
+// handler data: TS hosts lift it into a distinct Action field; the Go host
+// does not implement transaction stamping (its state-sync path has no
+// animation envelope), so the key is stripped here — module handlers must
+// never observe it either way.
+const reservedAnimateKey = "__hypenAnimate"
+
+// stripReservedAnimateKey removes the reserved transaction-animation stamp
+// from a decoded dispatch payload, if present. Non-map payloads pass through.
+func stripReservedAnimateKey(payload any) any {
+	if m, ok := payload.(map[string]any); ok {
+		delete(m, reservedAnimateKey)
+	}
+	return payload
+}
+
+// liveEngine snapshots the session's engine for a caller that is not the
+// renderer. Returns ErrSessionClosed once Destroy has run and ErrNoEngine
+// when the session never built one (no Source/UI configured, or hello has
+// not completed yet).
+func (s *RemoteSession) liveEngine() (*core.WasmEngine, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.destroyed {
+		return nil, ErrSessionClosed
+	}
+	if s.engine == nil {
+		return nil, ErrNoEngine
+	}
+	return s.engine, nil
+}
+
+// DispatchExternal dispatches an action into this session's engine on
+// behalf of a caller that is NOT the rendered UI — an attached agent, an
+// MCP server, an operator tool. It routes through the engine's guarded
+// `DispatchExternal`, so only what the developer declared is reachable:
+// `.OnAction()` handlers plus the hypen.navigate / hypen.back /
+// hypen.set_input built-ins when the app declares their backing surface.
+// Framework internals (`__hypen_bind`, `router.*`) are refused.
+//
+// On success the user's transport receives exactly what a renderer click
+// on this session produces: the engine's patch callback ships a `patch`
+// message with the bumped revision, followed by the same `stateUpdate`
+// tail `handleDispatchAction` emits. A guard refusal returns the engine's
+// error before anything runs — no handler, no traffic on the transport,
+// no revision change.
+//
+// Dispatches are serialised with renderer dispatches via dispatchMu, so
+// an agent and a click on the same session never interleave. The
+// session's own lifecycle is untouched: this never destroys, suspends,
+// or closes it. Do not call from inside a module handler of the same
+// session (dispatchMu is not re-entrant).
+func (s *RemoteSession) DispatchExternal(name string, payload any) error {
+	if q := s.queue(); q != nil {
+		// An agent is not this connection's user: its dispatch can never
+		// acquire device authority (replay firewall, RFC 001 §1.7).
+		var err error
+		q.runInline(true, func() { err = s.dispatchExternalNow(name, payload) })
+		return err
+	}
+	s.dispatchMu.Lock()
+	if q := s.queue(); q != nil {
+		// A device plane attached while this dispatch waited.
+		s.dispatchMu.Unlock()
+		var err error
+		q.runInline(true, func() { err = s.dispatchExternalNow(name, payload) })
+		return err
+	}
+	defer s.dispatchMu.Unlock()
+	return s.dispatchExternalNow(name, payload)
+}
+
+func (s *RemoteSession) dispatchExternalNow(name string, payload any) error {
+	engine, err := s.liveEngine()
+	if err != nil {
+		return err
+	}
+
+	// Keep the renderer-only animation stamp away from handlers on this
+	// path too, without mutating the caller's map.
+	if m, ok := payload.(map[string]any); ok {
+		if _, has := m[reservedAnimateKey]; has {
+			cp := make(map[string]any, len(m))
+			for k, v := range m {
+				cp[k] = v
+			}
+			payload = stripReservedAnimateKey(cp)
+		}
+	}
+
+	// The guard decides here. A refusal returns before any handler runs,
+	// so nothing below (and no patch callback) fires.
+	if err := engine.DispatchExternal(name, payload); err != nil {
+		return err
+	}
+
+	s.sendStateUpdate(s.host.ModuleName())
+	return nil
+}
+
+// sendStateUpdate ships the post-dispatch `stateUpdate` message carrying
+// the current primary-module state snapshot at the current wire revision.
+// Shared by the renderer dispatch path and DispatchExternal so both emit
+// the identical tail.
+func (s *RemoteSession) sendStateUpdate(moduleName string) {
+	s.mu.Lock()
+	rev := s.revision
+	state := s.stateCopyLocked()
+	s.mu.Unlock()
+	_ = s.Send(&StateUpdateMessage{
+		Type:     MessageTypeStateUpdate,
+		Module:   moduleName,
+		State:    state,
+		Revision: rev,
+	})
+}
+
 // handleDispatchAction routes a client dispatch into the engine (or, for
 // the legacy no-sourceDir path, the ModuleConfig.OnAction shim).
 func (s *RemoteSession) handleDispatchAction(actionName string, payload any) {
+	if q := s.queue(); q != nil {
+		// Device plane negotiated: run off the reader (see dispatchQueue).
+		q.enqueue(false, func() { s.dispatchNow(actionName, payload) })
+		return
+	}
+	// Serialise against attached-agent dispatches (see dispatchMu).
+	s.dispatchMu.Lock()
+	if q := s.queue(); q != nil {
+		// A device plane attached while this dispatch waited.
+		s.dispatchMu.Unlock()
+		q.enqueue(false, func() { s.dispatchNow(actionName, payload) })
+		return
+	}
+	defer s.dispatchMu.Unlock()
+	s.dispatchNow(actionName, payload)
+}
+
+// queue is the session's dispatch queue: non-nil once a device plane
+// attached (installQueue), nil for UI-only sessions.
+func (s *RemoteSession) queue() *dispatchQueue { return s.dispatchQ.Load() }
+
+// installQueue switches the session's dispatches to the off-reader queue
+// when its device plane attaches. Taking dispatchMu waits for an in-flight
+// reader/agent dispatch; dispatchers that were waiting for it re-check
+// queue() and move to the queue, so the two paths never interleave.
+func (s *RemoteSession) installQueue() {
+	if s.queue() != nil {
+		return
+	}
+	s.dispatchMu.Lock()
+	s.dispatchQ.CompareAndSwap(nil, newDispatchQueue(s.setCurrentDispatch))
+	s.dispatchMu.Unlock()
+}
+
+// dispatchNow runs one renderer dispatch (the caller serialises).
+func (s *RemoteSession) dispatchNow(actionName string, payload any) {
+	s.mu.Lock()
+	destroyed := s.destroyed
+	s.mu.Unlock()
+	if destroyed && s.queue() != nil {
+		return
+	}
+
+	// Strip the reserved transaction-animation stamp BEFORE either path —
+	// engine-routed handlers and the legacy OnAction shim both receive the
+	// payload from here.
+	payload = stripReservedAnimateKey(payload)
+
 	s.mu.Lock()
 	engine := s.engine
 	s.mu.Unlock()
@@ -968,16 +1378,7 @@ func (s *RemoteSession) handleDispatchAction(actionName string, payload any) {
 		if err := engine.DispatchAction(actionName, payload); err != nil {
 			logServer.Error("Engine DispatchAction failed: %v", err)
 		}
-		s.mu.Lock()
-		rev := s.revision
-		state := s.stateCopyLocked()
-		s.mu.Unlock()
-		_ = s.Send(&StateUpdateMessage{
-			Type:     MessageTypeStateUpdate,
-			Module:   moduleName,
-			State:    state,
-			Revision: rev,
-		})
+		s.sendStateUpdate(moduleName)
 		return
 	}
 
@@ -1113,6 +1514,21 @@ func (t *GorillaWebSocketTransport) Send(msg OutgoingMessage) error {
 	return t.Conn.WriteMessage(websocket.TextMessage, data)
 }
 
+// SendDeviceText writes one device JSON message as a text frame (the
+// device route, disjoint from OutgoingMessage — RFC 001 §5).
+func (t *GorillaWebSocketTransport) SendDeviceText(text []byte) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.Conn.WriteMessage(websocket.TextMessage, text)
+}
+
+// SendBinary writes one binary device frame.
+func (t *GorillaWebSocketTransport) SendBinary(frame []byte) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.Conn.WriteMessage(websocket.BinaryMessage, frame)
+}
+
 // Close writes a close frame and tears down the underlying connection.
 func (t *GorillaWebSocketTransport) Close(code int, reason string) error {
 	t.mu.Lock()
@@ -1177,4 +1593,16 @@ func (t *ChannelTransport) Close(code int, reason string) error {
 		close(t.out)
 	}
 	return nil
+}
+
+// isDeviceMessageType reports whether a client → server text message
+// belongs to the device plane (RFC 001 §2). Every one of them — including
+// the wrong-direction `deviceRequest` — goes to the broker, which alone
+// decides liveness, direction and validity (decision D8).
+func isDeviceMessageType(t MessageType) bool {
+	switch t {
+	case "deviceRequest", "deviceResponse", "deviceEvent":
+		return true
+	}
+	return false
 }

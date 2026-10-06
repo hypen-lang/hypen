@@ -1,0 +1,72 @@
+[
+  {
+    "client": "iOS",
+    "server": "TS",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790426129.0280695
+  },
+  {
+    "client": "iOS",
+    "server": "Go",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790426273.977051
+  },
+  {
+    "client": "iOS",
+    "server": "Kotlin",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790426027.819247
+  },
+  {
+    "client": "iOS",
+    "server": "Swift",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790426096.2113228
+  },
+  {
+    "client": "iOS",
+    "server": "Rust",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790426062.7582266
+  },
+  {
+    "client": "Android",
+    "server": "TS",
+    "source": "device-lab (8).txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  },
+  {
+    "client": "Android",
+    "server": "Go",
+    "source": "device-lab (9).txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  },
+  {
+    "client": "Android",
+    "server": "Kotlin",
+    "source": "device-lab (10).txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  },
+  {
+    "client": "Android",
+    "server": "Swift",
+    "source": "device-lab (11).txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  },
+  {
+    "client": "Android",
+    "server": "Rust",
+    "source": "device-lab-Rust (1).txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  }
+]

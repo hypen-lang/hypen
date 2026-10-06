@@ -85,10 +85,16 @@ public enum ColorParser {
         return Color(.sRGB, red: r, green: g, blue: b, opacity: alpha)
     }
 
+    // Compiled once; NSRegularExpression is immutable and thread-safe.
+    // Matches rgb(r, g, b) or rgba(r, g, b, a).
+    nonisolated(unsafe) private static let rgbRegex =
+        try? NSRegularExpression(pattern: #"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)"#)
+    // Matches hsl(h, s%, l%) or hsla(h, s%, l%, a).
+    nonisolated(unsafe) private static let hslRegex =
+        try? NSRegularExpression(pattern: #"hsla?\s*\(\s*(\d+)\s*,\s*(\d+)%?\s*,\s*(\d+)%?\s*(?:,\s*([\d.]+))?\s*\)"#)
+
     private static func parseRGBFunction(_ str: String) -> Color? {
-        // Extract values from rgb(r, g, b) or rgba(r, g, b, a)
-        let pattern = #"rgba?\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+))?\s*\)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
+        guard let regex = rgbRegex,
               let match = regex.firstMatch(in: str, range: NSRange(str.startIndex..., in: str)) else {
             return nil
         }
@@ -115,9 +121,7 @@ public enum ColorParser {
     }
 
     private static func parseHSLFunction(_ str: String) -> Color? {
-        // Extract values from hsl(h, s%, l%) or hsla(h, s%, l%, a)
-        let pattern = #"hsla?\s*\(\s*(\d+)\s*,\s*(\d+)%?\s*,\s*(\d+)%?\s*(?:,\s*([\d.]+))?\s*\)"#
-        guard let regex = try? NSRegularExpression(pattern: pattern),
+        guard let regex = hslRegex,
               let match = regex.firstMatch(in: str, range: NSRange(str.startIndex..., in: str)) else {
             return nil
         }

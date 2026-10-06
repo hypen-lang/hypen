@@ -34,6 +34,12 @@ enum class Breakpoint(val minWidthDp: Int) {
 }
 
 /**
+ * Breakpoints in ascending minWidthDp order, computed once — evaluated on
+ * every variant-modifier resolution.
+ */
+private val ORDERED_BREAKPOINTS: List<Breakpoint> = Breakpoint.entries.sortedBy { it.minWidthDp }
+
+/**
  * CSS-like pseudo-state variants.
  */
 enum class StateVariant {
@@ -79,25 +85,35 @@ data class VariantInfo(
  *   "background-color:hover" -> VariantInfo(baseName: "background-color", breakpoint: null, state: HOVER)
  */
 fun parseVariantName(name: String): VariantInfo {
-    // Check for responsive variant (@)
-    val atIndex = name.indexOf('@')
-    if (atIndex != -1) {
-        val baseName = name.substring(0, atIndex)
-        val breakpointStr = name.substring(atIndex + 1)
-        val breakpoint = Breakpoint.from(breakpointStr)
-        return VariantInfo(baseName = baseName, breakpoint = breakpoint)
-    }
+    // Canonical key order is `base@bp:state`; a key may carry the breakpoint
+    // marker, the state marker, BOTH (combined, e.g. "backgroundColor@md:hover"),
+    // or neither. Peel the state marker first, then the breakpoint marker, so a
+    // combined key resolves both halves instead of silently dropping the second.
+    // An unrecognised marker is left in the base name (so it never matches a real
+    // applicator), matching the engine + web parsers.
+    var base = name
+    var breakpoint: Breakpoint? = null
+    var state: StateVariant? = null
 
-    // Check for state variant (:)
-    val colonIndex = name.indexOf(':')
+    val colonIndex = base.indexOf(':')
     if (colonIndex != -1) {
-        val baseName = name.substring(0, colonIndex)
-        val stateStr = name.substring(colonIndex + 1)
-        val state = StateVariant.from(stateStr)
-        return VariantInfo(baseName = baseName, state = state)
+        val st = StateVariant.from(base.substring(colonIndex + 1))
+        if (st != null) {
+            state = st
+            base = base.substring(0, colonIndex)
+        }
     }
 
-    return VariantInfo(baseName = name)
+    val atIndex = base.indexOf('@')
+    if (atIndex != -1) {
+        val bp = Breakpoint.from(base.substring(atIndex + 1))
+        if (bp != null) {
+            breakpoint = bp
+            base = base.substring(0, atIndex)
+        }
+    }
+
+    return VariantInfo(baseName = base, breakpoint = breakpoint, state = state)
 }
 
 /**
@@ -106,11 +122,15 @@ fun parseVariantName(name: String): VariantInfo {
 data class ApplicatorResultWithVariants(
     val baseModifier: Modifier,
     val responsiveModifiers: Map<Breakpoint, Modifier>,
-    val stateModifiers: Map<StateVariant, Modifier>
+    val stateModifiers: Map<StateVariant, Modifier>,
+    /// Combined `@bp:state` overrides — applied only when BOTH the breakpoint is
+    /// active at the current width AND the state is active.
+    val combinedModifiers: Map<Pair<Breakpoint, StateVariant>, Modifier> = emptyMap()
 ) {
     val hasResponsiveVariants: Boolean get() = responsiveModifiers.isNotEmpty()
     val hasStateVariants: Boolean get() = stateModifiers.isNotEmpty()
-    val hasVariants: Boolean get() = hasResponsiveVariants || hasStateVariants
+    val hasCombinedVariants: Boolean get() = combinedModifiers.isNotEmpty()
+    val hasVariants: Boolean get() = hasResponsiveVariants || hasStateVariants || hasCombinedVariants
 
     /**
      * Get the effective modifier for a given screen width.
@@ -119,7 +139,7 @@ data class ApplicatorResultWithVariants(
         var result = baseModifier
 
         // Apply responsive modifiers from smallest to largest breakpoint
-        for (breakpoint in Breakpoint.entries.sortedBy { it.minWidthDp }) {
+        for (breakpoint in ORDERED_BREAKPOINTS) {
             if (screenWidthDp >= breakpoint.minWidthDp) {
                 responsiveModifiers[breakpoint]?.let { variantModifier ->
                     result = result.then(variantModifier)
@@ -161,32 +181,52 @@ fun rememberVariantModifier(
     val screenWidthDp = getScreenWidthDp()
     var modifier = result.getModifierForWidth(screenWidthDp)
 
-    // Track interaction states for state variants
-    if (result.hasStateVariants) {
+    // Track interaction states for state and combined variants
+    if (result.hasStateVariants || result.hasCombinedVariants) {
         val interactionSource = remember { MutableInteractionSource() }
         val isHovered by interactionSource.collectIsHoveredAsState()
         val isFocused by interactionSource.collectIsFocusedAsState()
         val isPressed by interactionSource.collectIsPressedAsState()
+
+        // Apply combined `@bp:state` overrides for `state` whose breakpoint is
+        // active at the current width, smallest→largest so a higher breakpoint
+        // wins the within-band tiebreak. Layered right after the plain state
+        // override so a combined `@md:hover` beats a plain `:hover`.
+        fun applyCombined(m: Modifier, state: StateVariant): Modifier {
+            if (!result.hasCombinedVariants) return m
+            var out = m
+            for (bp in ORDERED_BREAKPOINTS) {
+                if (screenWidthDp >= bp.minWidthDp) {
+                    result.combinedModifiers[bp to state]?.let { out = out.then(it) }
+                }
+            }
+            return out
+        }
 
         // Apply state modifiers in order of precedence (disabled < hover < focus < active)
         if (isDisabled) {
             result.stateModifiers[StateVariant.DISABLED]?.let {
                 modifier = modifier.then(it)
             }
+            modifier = applyCombined(modifier, StateVariant.DISABLED)
         }
 
         if (isHovered) {
             result.stateModifiers[StateVariant.HOVER]?.let {
                 modifier = modifier.then(it)
             }
+            modifier = applyCombined(modifier, StateVariant.HOVER)
         }
 
         if (isFocused) {
-            result.stateModifiers[StateVariant.FOCUS]?.let {
-                modifier = modifier.then(it)
-            }
-            result.stateModifiers[StateVariant.FOCUS_VISIBLE]?.let {
-                modifier = modifier.then(it)
+            // focus, focus-visible, and focus-within share the focus band (no
+            // keyboard-vs-pointer / descendant-focus distinction natively;
+            // matches the engine ranking all three at the focus slot).
+            for (st in listOf(StateVariant.FOCUS, StateVariant.FOCUS_VISIBLE, StateVariant.FOCUS_WITHIN)) {
+                result.stateModifiers[st]?.let {
+                    modifier = modifier.then(it)
+                }
+                modifier = applyCombined(modifier, st)
             }
         }
 
@@ -194,6 +234,7 @@ fun rememberVariantModifier(
             result.stateModifiers[StateVariant.ACTIVE]?.let {
                 modifier = modifier.then(it)
             }
+            modifier = applyCombined(modifier, StateVariant.ACTIVE)
         }
     }
 

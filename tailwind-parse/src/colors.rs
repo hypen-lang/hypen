@@ -312,29 +312,76 @@ fn get_color(name: &str) -> Option<&'static str> {
     })
 }
 
-/// Parse a color name that may include an opacity modifier (e.g., "red-500/50").
+/// Parse an opacity modifier: `50` (percent), `[0.35]` (raw alpha), `[55%]`.
+/// Returns alpha in 0.0..=1.0.
+pub(crate) fn parse_alpha_modifier(modifier: &str) -> Option<f64> {
+    let inner = modifier
+        .strip_prefix('[')
+        .and_then(|m| m.strip_suffix(']'))
+        .unwrap_or(modifier);
+    if let Some(pct) = inner.strip_suffix('%') {
+        let value: f64 = pct.parse().ok()?;
+        return (0.0..=100.0).contains(&value).then_some(value / 100.0);
+    }
+    if let Ok(percent) = inner.parse::<u32>() {
+        return (percent <= 100).then_some(percent as f64 / 100.0);
+    }
+    let alpha: f64 = inner.parse().ok()?;
+    (0.0..=1.0).contains(&alpha).then_some(alpha)
+}
+
+/// Apply an alpha channel to a color. Hex colors (#rgb / #rrggbb) become
+/// rgba(); other formats are returned unchanged since they can't be blended
+/// without full CSS color parsing.
+pub(crate) fn apply_alpha(color: &str, alpha: f64) -> String {
+    let Some(hex) = color.strip_prefix('#') else {
+        return color.to_string();
+    };
+    let rgb = match hex.len() {
+        3 => {
+            let digit = |i: usize| u8::from_str_radix(&hex[i..i + 1], 16).map(|d| d * 17);
+            digit(0).and_then(|r| digit(1).and_then(|g| digit(2).map(|b| (r, g, b))))
+        }
+        6 => u8::from_str_radix(&hex[0..2], 16).and_then(|r| {
+            u8::from_str_radix(&hex[2..4], 16)
+                .and_then(|g| u8::from_str_radix(&hex[4..6], 16).map(|b| (r, g, b)))
+        }),
+        _ => return color.to_string(),
+    };
+    match rgb {
+        Ok((r, g, b)) => format!("rgba({}, {}, {}, {})", r, g, b, alpha),
+        Err(_) => color.to_string(),
+    }
+}
+
+/// Parse a color name that may include an opacity modifier
+/// (e.g., "red-500/50", "black/[.35]").
 /// Returns the resolved color string (hex or rgba with opacity applied).
 fn resolve_color_with_opacity(name: &str) -> Option<String> {
-    if let Some(slash_pos) = name.rfind('/') {
-        let color_name = &name[..slash_pos];
-        let opacity_str = &name[slash_pos + 1..];
-        let opacity: u32 = opacity_str.parse().ok()?;
-        if opacity > 100 {
-            return None;
-        }
+    if let Some((color_name, modifier)) = name.rsplit_once('/') {
+        let alpha = parse_alpha_modifier(modifier)?;
         let color = get_color(color_name)?;
-        if color.starts_with('#') && color.len() == 7 {
-            let r = u8::from_str_radix(&color[1..3], 16).ok()?;
-            let g = u8::from_str_radix(&color[3..5], 16).ok()?;
-            let b = u8::from_str_radix(&color[5..7], 16).ok()?;
-            let alpha = opacity as f64 / 100.0;
-            Some(format!("rgba({}, {}, {}, {})", r, g, b, alpha))
-        } else {
-            Some(color.to_string())
-        }
+        Some(apply_alpha(color, alpha))
     } else {
         get_color(name).map(|s| s.to_string())
     }
+}
+
+/// Heuristic for arbitrary values: does this look like a CSS color?
+/// Used to disambiguate utilities that accept both colors and lengths,
+/// e.g. `border-[#f00]` (color) vs `border-[3px]` (width),
+/// `text-[#ff00ff]` (color) vs `text-[14px]` (font-size).
+pub fn is_color_like(value: &str) -> bool {
+    if value.starts_with('#') {
+        return true;
+    }
+    const COLOR_FUNCTIONS: &[&str] = &[
+        "rgb(", "rgba(", "hsl(", "hsla(", "hwb(", "oklch(", "oklab(", "lab(", "lch(", "color(",
+    ];
+    if COLOR_FUNCTIONS.iter().any(|f| value.starts_with(f)) {
+        return true;
+    }
+    matches!(value, "transparent" | "currentColor" | "currentcolor")
 }
 
 pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {

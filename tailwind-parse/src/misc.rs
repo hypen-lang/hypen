@@ -159,35 +159,8 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
         return Some(vec![CssProperty::new("stroke-width", value)]);
     }
 
-    // Screen reader
-    match utility {
-        "sr-only" => {
-            return Some(vec![
-                CssProperty::new("position", "absolute"),
-                CssProperty::new("width", "1px"),
-                CssProperty::new("height", "1px"),
-                CssProperty::new("padding", "0"),
-                CssProperty::new("margin", "-1px"),
-                CssProperty::new("overflow", "hidden"),
-                CssProperty::new("clip", "rect(0, 0, 0, 0)"),
-                CssProperty::new("white-space", "nowrap"),
-                CssProperty::new("border-width", "0"),
-            ])
-        }
-        "not-sr-only" => {
-            return Some(vec![
-                CssProperty::new("position", "static"),
-                CssProperty::new("width", "auto"),
-                CssProperty::new("height", "auto"),
-                CssProperty::new("padding", "0"),
-                CssProperty::new("margin", "0"),
-                CssProperty::new("overflow", "visible"),
-                CssProperty::new("clip", "auto"),
-                CssProperty::new("white-space", "normal"),
-            ])
-        }
-        _ => {}
-    }
+    // `sr-only` / `not-sr-only` are rejected in `parser::forbidden_utility_reason`
+    // (they rely on absolute positioning); use the VisuallyHidden component.
 
     // Antialiasing
     match utility {
@@ -246,12 +219,6 @@ mod tests {
         let props = parse("align-middle").unwrap();
         assert_eq!(props[0].property, "vertical-align");
         assert_eq!(props[0].value, "middle");
-    }
-
-    #[test]
-    fn test_sr_only() {
-        let props = parse("sr-only").unwrap();
-        assert!(props.len() > 5);
     }
 
     #[test]

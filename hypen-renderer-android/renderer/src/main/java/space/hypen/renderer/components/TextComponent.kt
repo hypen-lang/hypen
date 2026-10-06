@@ -1,10 +1,11 @@
 package space.hypen.renderer.components
 
-import android.util.Log
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material3.LocalContentColor
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
@@ -37,18 +38,21 @@ class TextComponent : ComponentHandler {
                 ?: element.textContent
                 ?: ""
 
-        Log.d("TextComponent", "Rendering Text id=${element.id}: '$text'")
-
-        // Apply all text styling via applicators
-        val textStyle = textApplicatorRegistry.applyAll(element.props)
+        // Apply all text styling via applicators, recomputed only when
+        // this element's props change
+        val textStyle = remember(element, element.propsRevision) {
+            textApplicatorRegistry.applyAll(element.props)
+        }
 
         // Apply text transform if set
         text = textStyle.applyTransform(text)
 
         // Build Compose TextStyle for fontFeatureSettings and fontFamily
-        val composeTextStyle = androidx.compose.ui.text.TextStyle(
-            fontFeatureSettings = textStyle.fontFeatureSettings,
-            fontFamily = textStyle.fontFamily,
+        val composeTextStyle = LocalTextStyle.current.merge(
+            androidx.compose.ui.text.TextStyle(
+                fontFeatureSettings = textStyle.fontFeatureSettings,
+                fontFamily = textStyle.fontFamily,
+            )
         )
 
         // For textAlign to work, Text needs to fill available width
@@ -59,9 +63,12 @@ class TextComponent : ComponentHandler {
             modifier
         }
 
-        // Use LocalContentColor if no explicit color is set (for color inheritance from parent)
+        // Prefer explicit text color, then inherited typography (for Heading),
+        // and finally the container content color (for Button/Stack/etc.).
         val textColor = if (textStyle.color != Color.Unspecified) {
             textStyle.color
+        } else if (LocalTextStyle.current.color != Color.Unspecified) {
+            LocalTextStyle.current.color
         } else {
             LocalContentColor.current
         }

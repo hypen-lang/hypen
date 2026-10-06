@@ -1,6 +1,9 @@
 import Foundation
 import Dispatch
+import NIOCore
+import NIOWebSocket
 import WebSocketKit
+@preconcurrency import HypenEngine
 
 // MARK: - Outgoing message types
 //
@@ -23,7 +26,10 @@ import WebSocketKit
 /// value in a bespoke `AnyCodable` shim (which would be a much bigger,
 /// more invasive change for zero runtime benefit).
 public enum OutgoingMessage: @unchecked Sendable {
-    case sessionAck(sessionId: String, isNew: Bool, isRestored: Bool)
+    /// `resumeToken` (RFC 001 §5) is issued in every ack; `device` (the
+    /// negotiated `sessionAck.device` selection as JSON text, from the Rust
+    /// `deviceHandshake`) is present only when a device plane was negotiated.
+    case sessionAck(sessionId: String, isNew: Bool, isRestored: Bool, resumeToken: String? = nil, device: String? = nil)
     case sessionExpired(sessionId: String, reason: String)
     case initialTree(module: String, state: [String: Any], patches: [[String: Any]], revision: Int)
     case patch(module: String, patches: [[String: Any]], revision: Int)
@@ -42,13 +48,19 @@ public enum OutgoingMessage: @unchecked Sendable {
     /// Raw dictionary representation (in case a transport wants MessagePack, protobuf, etc.).
     public func toDictionary() -> [String: Any] {
         switch self {
-        case let .sessionAck(sessionId, isNew, isRestored):
-            return [
+        case let .sessionAck(sessionId, isNew, isRestored, resumeToken, device):
+            var ack: [String: Any] = [
                 "type": "sessionAck",
                 "sessionId": sessionId,
                 "isNew": isNew,
                 "isRestored": isRestored,
             ]
+            if let resumeToken { ack["resumeToken"] = resumeToken }
+            if let device,
+               let value = try? JSONSerialization.jsonObject(with: Data(device.utf8)) {
+                ack["device"] = value
+            }
+            return ack
         case let .sessionExpired(sessionId, reason):
             return [
                 "type": "sessionExpired",
@@ -94,27 +106,173 @@ public protocol SessionTransport: AnyObject, Sendable {
     func close(code: UInt16, reason: String)
 }
 
-/// Wraps a `WebSocketKit` `WebSocket` as a `SessionTransport`. Encodes
-/// messages as JSON text frames. WebSocketKit already serialises writes
-/// internally on its event loop.
-public final class WebSocketKitTransport: SessionTransport, @unchecked Sendable {
+/// A transport that can also carry the Device Capability Protocol (RFC
+/// 001): device JSON text and binary frames on DEDICATED routes — never as
+/// an `OutgoingMessage`, so the device plane stays out of broadcasts and
+/// state fan-out — plus the transport's buffered byte count for the
+/// broker's bulk scheduling (§2.3). A session on a plain `SessionTransport`
+/// never negotiates a device plane.
+///
+/// The device plane calls these in broker order, but from several threads
+/// (the connection's event loop, the device clock's queue, handler tasks);
+/// an implementation must put messages and frames on the wire in exactly
+/// the order its methods were called — a download frame that overtakes an
+/// earlier one fails the transfer at the client.
+public protocol DeviceTransport: SessionTransport {
+    /// One server → client device JSON message.
+    func sendDeviceText(_ text: String)
+    /// Whether binary frames can be sent (downloads, e.g. `file.save`).
+    var carriesBinary: Bool { get }
+    /// One server → client binary frame.
+    func sendBinary(_ frame: Data)
+    /// Bytes accepted for sending but not yet written to the socket.
+    func bufferedAmount() -> Int
+}
+
+/// Wraps a `WebSocketKit` `WebSocket` as a `SessionTransport` (and a
+/// `DeviceTransport`). Encodes messages as JSON text frames.
+///
+/// Writes reach the socket in exactly the order `send` / `sendDeviceText` /
+/// `sendBinary` / `close` were called, whichever thread called them. That
+/// is not what a bare `ws.send` gives: NIO writes immediately when called
+/// on the channel's event loop, but from any other thread it queues the
+/// write with `eventLoop.execute`, so a frame sent on the loop can overtake
+/// frames still queued from another thread. The device plane sends from
+/// the loop (the pump after an incoming credit grant), from the clock's
+/// dispatch queue (bulk turns, timers) and from handler tasks, all in broker
+/// order under its lock — and a download whose frames arrive out of order
+/// fails at the client (`download seq N, expected M`). So every write goes
+/// through one FIFO outbox drained on the event loop: a caller on the loop
+/// drains inline (after anything queued before it), any other caller
+/// schedules a drain.
+///
+/// Every write's size is counted from the moment it is accepted until its
+/// write promise completes; that is the buffered amount the device broker
+/// schedules bulk frames against.
+public final class WebSocketKitTransport: DeviceTransport, @unchecked Sendable {
     public let ws: WebSocket
+    private let lock = NSLock()
+    private var buffered = 0
+
+    private enum Outbound {
+        case text(String)
+        case binary(Data)
+        case close(UInt16)
+    }
+
+    /// Accepted but not yet handed to the socket, in call order.
+    private var outbox: [(item: Outbound, size: Int)] = []
+    /// A drain is scheduled on the event loop and has not taken the outbox yet.
+    private var drainScheduled = false
+    /// A drain is running on the event loop (guards re-entrant sends made
+    /// from inside a write, which must queue behind the current batch).
+    private var draining = false
+
     public init(_ ws: WebSocket) { self.ws = ws }
 
     public func send(_ message: OutgoingMessage) throws {
-        ws.send(message.toJSONString())
+        sendText(message.toJSONString())
+    }
+
+    public func sendDeviceText(_ text: String) {
+        sendText(text)
+    }
+
+    public var carriesBinary: Bool { true }
+
+    public func sendBinary(_ frame: Data) {
+        enqueue(.binary(frame), size: frame.count)
+    }
+
+    public func bufferedAmount() -> Int {
+        lock.lock(); defer { lock.unlock() }
+        return buffered
     }
 
     public func close(code: UInt16, reason: String) {
-        // WebSocketKit's close takes a `WebSocketErrorCode`; we always use
-        // the "normal closure" variant for policy-driven disconnects.
-        // Close reasons aren't surfaced over the WebSocket close frame
-        // here — callers should prefer pushing an in-band
-        // `sessionExpired` message first (RemoteSession.expireAndClose
-        // does this).
-        _ = code
+        // The close code reaches the client (e.g. 1012 when the device
+        // plane resets, so it reconnects with a full advertisement). Close
+        // reasons aren't surfaced over the WebSocket close frame here —
+        // callers should prefer pushing an in-band `sessionExpired` message
+        // first (RemoteSession.expireAndClose does this). The close is
+        // ordered after every frame sent before it.
         _ = reason
-        _ = ws.close()
+        enqueue(.close(code), size: 0)
+    }
+
+    private func sendText(_ text: String) {
+        enqueue(.text(text), size: text.utf8.count)
+    }
+
+    private func enqueue(_ item: Outbound, size: Int) {
+        let onLoop = ws.eventLoop.inEventLoop
+        lock.lock()
+        outbox.append((item, size))
+        buffered += size
+        // On the loop: drain inline unless a drain is already running
+        // further up this stack (it picks the new entry up after its batch).
+        let drainNow = onLoop && !draining
+        if drainNow { draining = true }
+        let schedule = !onLoop && !drainScheduled
+        if schedule { drainScheduled = true }
+        lock.unlock()
+
+        if drainNow {
+            drainLoop()
+        } else if schedule {
+            ws.eventLoop.execute { [self] in
+                lock.lock()
+                // Scheduled drains never run concurrently with an inline
+                // one (both are on the loop), but one may be running
+                // re-entrantly further up the stack: leave it to that one.
+                let run = !draining
+                if run { draining = true }
+                lock.unlock()
+                if run { drainLoop() }
+            }
+        }
+    }
+
+    /// Hand the outbox to the socket in order. On the event loop, with
+    /// `draining` set by the caller.
+    private func drainLoop() {
+        while true {
+            lock.lock()
+            let batch = outbox
+            outbox.removeAll(keepingCapacity: true)
+            drainScheduled = false
+            if batch.isEmpty {
+                draining = false
+                lock.unlock()
+                return
+            }
+            lock.unlock()
+            for entry in batch {
+                write(entry.item, size: entry.size)
+            }
+        }
+    }
+
+    private func write(_ item: Outbound, size: Int) {
+        switch item {
+        case .text(let text):
+            ws.send(text, promise: track(size))
+        case .binary(let frame):
+            ws.send(raw: frame, opcode: .binary, promise: track(size))
+        case .close(let code):
+            _ = ws.close(code: WebSocketErrorCode(codeNumber: Int(code)))
+        }
+    }
+
+    private func track(_ size: Int) -> EventLoopPromise<Void> {
+        let promise = ws.eventLoop.makePromise(of: Void.self)
+        promise.futureResult.whenComplete { [weak self] _ in
+            guard let self else { return }
+            self.lock.lock()
+            self.buffered -= size
+            self.lock.unlock()
+        }
+        return promise
     }
 }
 
@@ -192,6 +350,127 @@ public protocol SessionHost: AnyObject, Sendable {
 
     /// Fired at the end of `session.destroy()`.
     func onSessionDestroyed(_ session: RemoteSession, client: ClientInfo)
+
+    /// Device Capability Protocol settings (RFC 001). The device plane is on
+    /// by default (the default implementation returns the default options);
+    /// nil = the host opted out and no session negotiates a device plane.
+    var deviceOptions: DeviceServerOptions? { get }
+
+    /// The process-wide retained-bytes pool every connection's broker
+    /// shares (nil = per-connection budgets only).
+    var deviceRetainedBytesPool: DeviceRetainedBytesPool? { get }
+}
+
+extension SessionHost {
+    public var deviceOptions: DeviceServerOptions? { DeviceServerOptions() }
+    public var deviceRetainedBytesPool: DeviceRetainedBytesPool? { nil }
+}
+
+/// Device Capability Protocol settings of a server (RFC 001); the defaults
+/// apply unless `RemoteServer.configureDevice(_:)` supplies others.
+public struct DeviceServerOptions: Sendable {
+    /// Per-connection retained-bytes budget (uploads buffered for handlers);
+    /// smaller than the default also caps every revision's item size.
+    public var maxRetainedBytes: UInt64?
+    /// Lifetime of the connection-owned `core.capabilities` stream before
+    /// its planned reopen.
+    public var controlStreamTimeoutMs: UInt64?
+    /// How long a device-capable connection (a `DeviceTransport`) without a
+    /// hello grace may take to send its `hello` before it is closed (1008).
+    public var helloTimeoutMs: Int
+    /// Monotonic clock + timers driving the broker (inject a manual clock
+    /// in tests).
+    public var clock: DeviceClock
+    /// Registry revision replacements for this server's brokers — e.g. a
+    /// revision that also allows the `background` lifetime (RFC 001 §2.7).
+    public var revisionOverrides: [DeviceRevisionOverride]
+    /// Module instances one connection may pin with live `background` work
+    /// (the broker's pin cap; default `DeviceProtocol.maxBackgroundPinnedModules`).
+    /// A background request from a further module is refused `throttled`.
+    public var maxBackgroundOwners: Int?
+
+    public init(
+        maxRetainedBytes: UInt64? = nil,
+        controlStreamTimeoutMs: UInt64? = nil,
+        helloTimeoutMs: Int = 30_000,
+        clock: DeviceClock = SystemDeviceClock(),
+        revisionOverrides: [DeviceRevisionOverride] = [],
+        maxBackgroundOwners: Int? = nil
+    ) {
+        self.maxRetainedBytes = maxRetainedBytes
+        self.controlStreamTimeoutMs = controlStreamTimeoutMs
+        self.helloTimeoutMs = helloTimeoutMs
+        self.clock = clock
+        self.revisionOverrides = revisionOverrides
+        self.maxBackgroundOwners = maxBackgroundOwners
+    }
+}
+
+extension DeviceServerOptions {
+    /// The Rust broker configuration (`device_binding` "Config JSON") for a
+    /// connection that negotiated `ack`.
+    func brokerConfigJSON(ack: String) throws -> String {
+        var config = "{\"ack\":\(ack)"
+        if let budget = maxRetainedBytes {
+            config += ",\"maxRetainedBytes\":\(budget)"
+            // Advertise only limits the host can honor (§2.4): a smaller
+            // retained budget also caps every revision's item size.
+            config += ",\"maxItemBytes\":\(budget)"
+        }
+        if let t = controlStreamTimeoutMs { config += ",\"controlStreamTimeoutMs\":\(t)" }
+        if let n = maxBackgroundOwners { config += ",\"maxBackgroundOwners\":\(max(0, n))" }
+        if !revisionOverrides.isEmpty {
+            config += ",\"revisionOverrides\":" + (try DeviceBrokerJSON.encode(revisionOverrides))
+        }
+        return config + "}"
+    }
+
+    /// Build a broker with these options for the full server advertisement,
+    /// so a misconfiguration passed to `configureDevice` (an override of an
+    /// unknown revision, a limit the broker rejects) fails
+    /// `RemoteServer.prepare()` instead of disabling the device plane on
+    /// every connection.
+    func validateAgainstBroker() throws {
+        let hello = "{\"protocolVersions\":[\(DeviceProtocol.version)],\"binary\":true,\"capabilities\":"
+            + deviceServerAdvertisementJson() + "}"
+        guard let ack = deviceNegotiate(helloJson: hello, binaryRoute: true) else {
+            throw RemoteServerError.invalidDeviceOptions("the server advertisement does not negotiate")
+        }
+        do {
+            let broker = try DeviceBroker(configJson: try brokerConfigJSON(ack: ack), pool: nil, nowMs: 0)
+            try broker.close(code: DeviceErrorCode.connectionLost.rawValue)
+        } catch let error as RemoteServerError {
+            throw error
+        } catch {
+            throw RemoteServerError.invalidDeviceOptions("\(error)")
+        }
+    }
+}
+
+// MARK: - Reserved dispatch payload keys
+
+/// The cross-boundary payload key TypeScript renderers use to carry an
+/// event applicator's `animate:` transaction-animation stamp (Option D)
+/// across `dispatchAction`. It is a renderer→host directive, never handler
+/// data: TS hosts lift it into a distinct Action field; the Swift host does
+/// not implement transaction stamping, so the key is stripped here —
+/// module handlers must never observe it either way.
+///
+/// Mirrors `reservedAnimateKey` (`hypen-golang/remote/session.go`) and
+/// `RESERVED_ANIMATE_KEY` (`hypen-kotlin/.../core/HypenServer.kt`).
+let reservedAnimateKey = "__hypenAnimate"
+
+/// Removes the reserved transaction-animation stamp from a decoded dispatch
+/// payload, if present. Non-dictionary payloads (including `nil`) pass
+/// through untouched, and so does a plain user-data `animate` key — only the
+/// reserved key is a directive.
+func stripReservedAnimateKey(_ payload: Any?) -> Any? {
+    guard var dict = payload as? [String: Any],
+          dict.keys.contains(reservedAnimateKey) else {
+        return payload
+    }
+    dict.removeValue(forKey: reservedAnimateKey)
+    return dict
 }
 
 // MARK: - RemoteSession
@@ -221,6 +500,12 @@ public final class RemoteSession: @unchecked Sendable {
     private var sessionID: String? = nil
     private var revision: Int = 0
     private var helloReceived = false
+    /// True once the hello → sessionAck → initialTree flow has completed
+    /// and the engine's declaration tables (actions, routes, bindings)
+    /// are populated by the initial render. `sessionID` is assigned
+    /// earlier in that flow, so `attach` gates on this rather than on
+    /// the id alone.
+    private var ready = false
     private var helloTimeoutWork: DispatchWorkItem? = nil
     private var moduleInstance: ModuleInstance? = nil
     private var engine: NativeEngine? = nil
@@ -233,6 +518,10 @@ public final class RemoteSession: @unchecked Sendable {
     /// Toggled by `RemoteServer.disableAutoRouter()` when the host
     /// wants to wire a ManagedRouter by hand via `onSessionCreate`.
     var autoRouterEnabled: Bool = true
+    /// The connection's device plane (RFC 001), once negotiated.
+    private var devicePlane: DevicePlane? = nil
+    /// The resume credential issued in this connection's `sessionAck`.
+    private var issuedResumeToken: String? = nil
 
     private static let counter = Counter()
     private final class Counter: @unchecked Sendable {
@@ -252,8 +541,10 @@ public final class RemoteSession: @unchecked Sendable {
     ///     connection. `nil` disables the auto-init entirely — useful
     ///     for transports where the first message may be deliberately
     ///     delayed (e.g. SSE: the client hellos via a separate POST).
-    ///     Defaults to `nil` to preserve existing `RemoteServer` behaviour;
-    ///     the WebSocket adapter passes a grace window explicitly.
+    ///     Applies whether or not the host has the device plane on; a
+    ///     grace-initialised session has no device plane. Without a grace
+    ///     window, a `DeviceTransport` connection on a device-capable host
+    ///     is closed (1008) after `DeviceServerOptions.helloTimeoutMs`.
     public init(
         host: SessionHost,
         transport: SessionTransport,
@@ -275,7 +566,29 @@ public final class RemoteSession: @unchecked Sendable {
             HypenLoggers.server.error("Failed to build engine for %@: %@", self.id, "\(error)")
         }
 
-        if let ms = helloGraceMs, ms > 0 {
+        // Hello grace applies regardless of the device plane: a legacy
+        // client that never sends `hello` is auto-initialised after the
+        // grace period, and a session initialised by grace simply has no
+        // device plane (its first message was not a hello offering
+        // `device`). Without a grace window, a device-capable connection is
+        // bounded by the handshake timeout instead (RFC 001 §2.2).
+        let graceMs = (helloGraceMs ?? 0) > 0 ? helloGraceMs : nil
+        if graceMs == nil, transport is DeviceTransport,
+           let opts = sessionDeviceOptions, opts.helloTimeoutMs > 0 {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self = self else { return }
+                self.lock.lock()
+                let waiting = !self.helloReceived && !self.destroyed
+                self.lock.unlock()
+                if waiting { self.transport.close(code: 1008, reason: "hello timeout") }
+            }
+            lock.lock()
+            helloTimeoutWork = work
+            lock.unlock()
+            DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(opts.helloTimeoutMs), execute: work)
+        }
+
+        if let ms = graceMs {
             let work = DispatchWorkItem { [weak self] in
                 guard let self = self else { return }
                 self.lock.lock()
@@ -293,6 +606,15 @@ public final class RemoteSession: @unchecked Sendable {
         }
     }
 
+    /// The host's device options for this session, or nil when the device
+    /// plane is off: the host opted out, or its concurrent-session policy
+    /// fans one session out to several connections (`.allowMultiple`),
+    /// which a per-connection device plane cannot follow.
+    private var sessionDeviceOptions: DeviceServerOptions? {
+        guard host.sessionManager.config.concurrent != .allowMultiple else { return nil }
+        return host.deviceOptions
+    }
+
     // MARK: - Public accessors
 
     /// The Hypen session id, once hello has completed. Empty before then.
@@ -303,6 +625,17 @@ public final class RemoteSession: @unchecked Sendable {
     /// Whether the client has completed its handshake.
     public var helloIsReceived: Bool {
         lock.lock(); defer { lock.unlock() }; return helloReceived
+    }
+
+    /// Whether hello → sessionAck → initialTree has fully completed, so
+    /// the session id is assigned *and* the initial render has populated
+    /// the engine's declaration tables. This — not `currentSessionID`
+    /// alone — is what `RemoteServer.attach(_:)` requires: before the
+    /// initial render `listActions()` would be empty and every external
+    /// dispatch refused. Never flips back to false; pair with
+    /// `isDestroyed` for liveness.
+    public var isReady: Bool {
+        lock.lock(); defer { lock.unlock() }; return ready
     }
 
     /// Current render revision for this session.
@@ -379,16 +712,53 @@ public final class RemoteSession: @unchecked Sendable {
 
     // MARK: - Protocol entry points
 
+    /// The top-level `type`s of the Device Capability Protocol (RFC 001
+    /// §2.1). A client text announcing any of them goes to the connection's
+    /// broker as its exact text, never to the UI dispatch path.
+    static let deviceMessageTypes: Set<String> = ["deviceRequest", "deviceResponse", "deviceEvent"]
+
     /// Feed a raw client → server text message into this session.
     public func receive(_ text: String) {
         lock.lock()
         let destroyedLocal = destroyed
+        let plane = devicePlane
         lock.unlock()
         if destroyedLocal { return }
 
+        // Device JSON limits start BEFORE parsing (RFC 001 §2.1, D4): an
+        // over-limit text announcing itself as a device message is dropped
+        // unparsed — a connection-level violation, attributable to no
+        // request.
+        if let plane, deviceIsOversizeText(text: text) {
+            plane.reportViolation("device message over 1 MiB")
+            return
+        }
+
+        // Route by the top-level `type` member alone, resolved as
+        // `JSON.parse` resolves it (the last `type` wins) and nothing else
+        // validated: device messages go to the broker as their exact text,
+        // which strictly decodes them. Malformed device JSON — a duplicated
+        // `type` or `id`, number spellings, depth, even text that is not
+        // JSON after its `type` — therefore reaches the broker and counts
+        // against the connection's violation budget (D3/D4/D8), exactly as
+        // on the TypeScript server; it is never dropped on the way.
+        //
+        // EVERY device message type is routed — including a client-sent
+        // `deviceRequest`, which only the server may send: the broker judges
+        // it (liveness before direction, D8): on a live id it is a
+        // wrong-direction violation that terminates that request
+        // (`invalidParams`, `cancel` sent); on an unknown/retired id it is
+        // ignored. Dropping it here would hide the violation.
+        let routedType = deviceMessageType(text)
+        if let routedType, RemoteSession.deviceMessageTypes.contains(routedType) {
+            // Absent broker ⇒ device plane disabled ⇒ drop.
+            plane?.receiveText(text)
+            return
+        }
+
         guard let data = text.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let type = json["type"] as? String else {
+              let type = routedType ?? (json["type"] as? String) else {
             return
         }
 
@@ -396,9 +766,24 @@ public final class RemoteSession: @unchecked Sendable {
         case "hello":
             let requestedSessionId = json["sessionId"] as? String
             let props = (json["props"] as? [String: Any]) ?? [:]
-            initializeSession(requestedSessionId: requestedSessionId, props: props)
+            // The device advertisement is read from the hello's exact text
+            // (the `device` member's raw span), never from the
+            // JSONSerialization value, which collapses duplicate keys.
+            var deviceHello: String? = nil
+            if sessionDeviceOptions != nil, case .found(let raw) = deviceFindTopLevelMember(text, "device") {
+                deviceHello = raw
+            }
+            initializeSession(
+                requestedSessionId: (requestedSessionId?.isEmpty ?? true) ? nil : requestedSessionId,
+                props: props,
+                deviceHello: deviceHello,
+                resumeToken: json["resumeToken"] as? String
+            )
 
         case "dispatchAction", "action":
+            // Security admission (RFC 001 §5): a socket that has not
+            // completed the hello handshake may not dispatch.
+            if !helloIsReceived { return }
             let name = (json["action"] as? String) ?? (json["name"] as? String) ?? ""
             let payload = json["payload"]
             handleDispatchAction(actionName: name, payload: payload)
@@ -406,6 +791,30 @@ public final class RemoteSession: @unchecked Sendable {
         default:
             // Unknown — ignore for forward compatibility.
             break
+        }
+    }
+
+    /// Feed one client → server binary WebSocket frame (a device data-plane
+    /// frame, RFC 001 §2.3). Dropped when no device plane is negotiated.
+    public func receiveBinary(_ frame: Data) {
+        lock.lock()
+        let plane = destroyed ? nil : devicePlane
+        lock.unlock()
+        plane?.receiveFrame(frame)
+    }
+
+    /// The connection's device plane, when one was negotiated (RFC 001).
+    public var device: DevicePlane? {
+        lock.lock(); defer { lock.unlock() }; return devicePlane
+    }
+
+    /// Dispatch an action on this session as a replayed / broadcast-derived
+    /// dispatch (RFC 001 §1.7): its handlers run normally, but every device
+    /// call they make fails `unavailable` — replay cannot initiate device
+    /// work on this connection.
+    public func dispatchReplayed(_ name: String, payload: Any? = nil) {
+        DeviceProvenance.$current.withValue(.replay) {
+            handleDispatchAction(actionName: name, payload: payload)
         }
     }
 
@@ -434,7 +843,18 @@ public final class RemoteSession: @unchecked Sendable {
         let sid = sessionID
         let mi = moduleInstance
         let savedState = mi?.getState() ?? [:]
+        let plane = devicePlane
+        devicePlane = nil
         lock.unlock()
+
+        // Device broker teardown BEFORE module teardown: loss of broker state
+        // is a connection reset (RFC 001 §2.5). Every in-flight device call
+        // settles locally with connectionLost; nothing is sent (the socket
+        // is going). Resuming app state never resumes device operations.
+        if let plane {
+            plane.close(.connectionLost)
+            for instance in liveModuleInstances() { instance.attachDevice(nil) }
+        }
 
         let sm = host.sessionManager
         if let sid = sid, let session = sm.getActiveSession(sid) {
@@ -557,7 +977,12 @@ public final class RemoteSession: @unchecked Sendable {
 
     /// Run hello → sessionAck → initialTree.
     /// Safe to call at most once per session.
-    private func initializeSession(requestedSessionId: String?, props: [String: Any]) {
+    private func initializeSession(
+        requestedSessionId: String?,
+        props: [String: Any],
+        deviceHello: String? = nil,
+        resumeToken: String? = nil
+    ) {
         lock.lock()
         if helloReceived || destroyed {
             lock.unlock()
@@ -569,9 +994,44 @@ public final class RemoteSession: @unchecked Sendable {
         let mi = moduleInstance
         lock.unlock()
 
+        // Device handshake selection (RFC 001 §2.2) is pure and computed
+        // before any side effect: the Rust `deviceHandshake` strictly
+        // validates the advertisement (D7) and intersects it with what this
+        // broker-backed server consumes (the same selection as
+        // `deviceNegotiate`); no ack disables the device plane (UI-only
+        // operation continues) and comes with the reason, for the log only.
+        var deviceAck: String? = nil
+        if sessionDeviceOptions != nil, let hello = deviceHello, let dt = transport as? DeviceTransport {
+            let handshake: DeviceHandshake?
+            do {
+                handshake = try deviceHandshake(helloJson: hello, binaryRoute: dt.carriesBinary, serverCapabilitiesJson: nil)
+            } catch {
+                // Only a malformed server advertisement throws (none is passed).
+                handshake = nil
+                HypenLoggers.server.error("Session %@: device handshake failed: %@", id, "\(error)")
+            }
+            deviceAck = handshake?.ackJson
+            if deviceAck == nil {
+                HypenLoggers.server.warning(
+                    "Session %@: device plane disabled — %@", id,
+                    handshake?.reason ?? "invalid or non-mutual hello.device")
+            }
+        }
+
         let sm = host.sessionManager
         var session: Session
         var isRestored = false
+
+        // Resume credential (RFC 001 §5): a session that has had a
+        // negotiated device plane is never resumed by its public id alone —
+        // the hello must also present the server-issued resume token; a
+        // missing or mismatched token is a NEW session, never an error or a
+        // hijack. A UI-only session keeps the legacy id-only resume.
+        var requestedSessionId = requestedSessionId
+        if let rid = requestedSessionId, sm.resumeRequiresToken(rid), !sm.verifyResumeToken(rid, resumeToken) {
+            HypenLoggers.server.info("Session %@: resume of %@ without a valid resume token — new session", id, rid)
+            requestedSessionId = nil
+        }
 
         if let id = requestedSessionId, let pending = sm.resumeSession(id) {
             session = pending.session
@@ -587,8 +1047,14 @@ public final class RemoteSession: @unchecked Sendable {
             session = sm.createSession(props: props)
         }
 
+        // A fresh resume credential per acknowledged connection (rotated on
+        // every resume; the previous one stops working), on every server. A
+        // negotiated device plane makes it required for this session's
+        // resumes from now on.
+        let token = sm.issueResumeToken(session.id, devicePlane: deviceAck != nil)
         lock.lock()
         sessionID = session.id
+        issuedResumeToken = token
         lock.unlock()
         _ = sm.trackConnection(session.id, connectionId: ObjectIdentifier(self))
 
@@ -596,8 +1062,15 @@ public final class RemoteSession: @unchecked Sendable {
         send(.sessionAck(
             sessionId: session.id,
             isNew: !isRestored,
-            isRestored: isRestored
+            isRestored: isRestored,
+            resumeToken: token,
+            device: deviceAck
         ))
+
+        // The broker exists (and its connection-owned core.capabilities
+        // stream is open) before any module callback can request device
+        // work.
+        if let ack = deviceAck { attachDevice(ack: ack) }
 
         // initialTree. Render once up front; subsequent patches stream
         // through the onPatches callback installed in
@@ -625,7 +1098,19 @@ public final class RemoteSession: @unchecked Sendable {
             revision: 0
         ))
 
+        // Declaration tables are populated now; the session may be
+        // attached to (`RemoteServer.attach(_:)`) from here on.
+        lock.lock()
+        ready = true
+        lock.unlock()
+
         host.onSessionReady(self, client: ClientInfo(id: id, connectedAt: connectedAt))
+
+        // Activate the primary module so single-screen apps have a live
+        // activation authority for device work (RFC 001 §2.7), as every
+        // Hypen server SDK does. Under ManagedRouter, route modules are
+        // activated by the router as usual.
+        mi?.activate()
 
         // Auto-wire a ManagedRouter from the template's own `Router {}`
         // blocks. Host code just registers modules + the template; the
@@ -778,10 +1263,100 @@ public final class RemoteSession: @unchecked Sendable {
             }
         }
 
-        managed.start()
+        // Route modules own device work too: bind them to the connection's
+        // plane before the initial route mounts (and activates).
+        managed.attachDevice(device)
         lock.lock()
         autoManagedRouter = managed
         lock.unlock()
+        managed.start()
+    }
+
+    // MARK: - Device plane (RFC 001)
+
+    /// Every live module instance on this connection: the primary plus the
+    /// auto-wired router's active and persisted route modules.
+    private func liveModuleInstances() -> [ModuleInstance] {
+        lock.lock()
+        let primary = moduleInstance
+        let managed = autoManagedRouter
+        lock.unlock()
+        var out: [ModuleInstance] = []
+        if let primary { out.append(primary) }
+        for instance in managed?.liveInstances() ?? [] where !out.contains(where: { $0 === instance }) {
+            out.append(instance)
+        }
+        return out
+    }
+
+    /// Create the connection's broker (the Rust `DeviceBroker`), start it —
+    /// which opens the connection-owned `core.capabilities` stream — and
+    /// bind every live module instance to it.
+    private func attachDevice(ack: String) {
+        guard let opts = sessionDeviceOptions, let dt = transport as? DeviceTransport else { return }
+        let config: String
+        do {
+            config = try opts.brokerConfigJSON(ack: ack)
+        } catch {
+            HypenLoggers.server.error("Session %@: device options not encodable — device plane disabled: %@", id, "\(error)")
+            return
+        }
+        let sessionRef = WeakSession(self)
+        let sendText: @Sendable (String) -> Void = { text in
+            guard let s = sessionRef.value, !s.isDestroyed else { return }
+            dt.sendDeviceText(text)
+        }
+        var sendFrame: (@Sendable (Data) -> Void)? = nil
+        if dt.carriesBinary {
+            sendFrame = { frame in
+                guard let s = sessionRef.value, !s.isDestroyed else { return }
+                dt.sendBinary(frame)
+            }
+        }
+        let closeConnection: @Sendable (UInt16, String) -> Void = { code, reason in
+            HypenLoggers.server.warning("Device plane closed: %@", reason)
+            sessionRef.value?.closeDevicePlane(reason: reason, code: code)
+        }
+        let sink = DevicePlaneSink(
+            sendText: sendText,
+            sendFrame: sendFrame,
+            bufferedAmount: { dt.bufferedAmount() },
+            closeConnection: closeConnection
+        )
+        let plane: DevicePlane
+        do {
+            plane = try DevicePlane(
+                configJSON: config, pool: host.deviceRetainedBytesPool, sink: sink,
+                clock: opts.clock, binary: dt.carriesBinary,
+                onError: { HypenLoggers.server.error("Device plane: %@", $0) })
+        } catch {
+            HypenLoggers.server.error("Session %@: device broker creation failed — device plane disabled: %@", id, "\(error)")
+            return
+        }
+        lock.lock()
+        if destroyed || devicePlane != nil { lock.unlock(); plane.close(); return }
+        devicePlane = plane
+        lock.unlock()
+        if !plane.start() {
+            closeDevicePlane(reason: "device plane closed: core.capabilities unavailable", code: 1012)
+            return
+        }
+        for instance in liveModuleInstances() { instance.attachDevice(plane) }
+    }
+
+    /// Close the device connection (RFC 001 §2.2/§2.5): reject all live
+    /// device work, detach every module instance, and reset the socket
+    /// (1012) — a socket with a device plane never survives without its broker,
+    /// and the client reconnects with a full advertisement.
+    private func closeDevicePlane(reason: String, code: UInt16) {
+        lock.lock()
+        let plane = devicePlane
+        devicePlane = nil
+        lock.unlock()
+        guard let plane else { return }
+        plane.close(.connectionLost)
+        for instance in liveModuleInstances() { instance.attachDevice(nil) }
+        transport.close(code: code, reason: String(reason.prefix(120)))
     }
 
     private func engineRef() -> NativeEngine? {
@@ -793,6 +1368,11 @@ public final class RemoteSession: @unchecked Sendable {
     /// for client-side inspection; patches flow through the onPatches
     /// callback installed in buildEngineAndModuleInstance.
     private func handleDispatchAction(actionName: String, payload: Any?) {
+        // Strip the reserved transaction-animation stamp BEFORE either
+        // dispatch path — the typed ModuleInstance route and the legacy
+        // untyped shim both take their payload from here.
+        let sanitizedPayload = stripReservedAnimateKey(payload)
+
         lock.lock()
         let mi = moduleInstance
         lock.unlock()
@@ -805,14 +1385,23 @@ public final class RemoteSession: @unchecked Sendable {
         // through ModuleInstance wins.
         if let shim = host.legacyActionHandler {
             let currentState = mi.state.snapshot()
-            if let newState = shim(actionName, payload, currentState) {
+            if let newState = shim(actionName, sanitizedPayload, currentState) {
                 mi.state.replace(newState)
             }
         } else {
-            mi.dispatchAction(actionName, payload: payload)
+            mi.dispatchAction(actionName, payload: sanitizedPayload)
         }
 
-        // Send a stateUpdate message for client-side state inspection.
+        emitStateUpdate(mi)
+    }
+
+    /// The `stateUpdate` tail every dispatch ends with — the renderer's
+    /// click path (`handleDispatchAction`) and the agent surface's
+    /// `dispatchExternal` share it so an attached dispatch is
+    /// wire-identical to a click: patches have already streamed through
+    /// the `onPatches` callback at revision N; this stamps N+1 on the
+    /// explicit snapshot for client-side state inspection.
+    private func emitStateUpdate(_ mi: ModuleInstance) {
         let updatedState = mi.state.snapshot()
         lock.lock()
         revision += 1
@@ -824,4 +1413,73 @@ public final class RemoteSession: @unchecked Sendable {
             revision: rev
         ))
     }
+
+    // MARK: - Agent surface
+
+    /// Dispatch on behalf of a caller that is NOT the rendered UI — the
+    /// agent surface (`AgentHandle`), an MCP server, a REST handler.
+    ///
+    /// Goes through the engine's guarded `dispatchExternal`, never the
+    /// renderer's permissive `dispatchAction`, so only what the app
+    /// declares (`.onAction()`, `Router { Route }`, `.bind()`) is
+    /// reachable. On acceptance the resulting handler runs on *this*
+    /// session's engine, so this session's transport receives exactly
+    /// what a click would have produced: a `patch` message from the
+    /// `onPatches` callback at the next revision, then the same
+    /// `stateUpdate` tail as `handleDispatchAction`.
+    ///
+    /// A guard refusal throws before anything is queued: no handler
+    /// runs, nothing is sent on the transport, and the revision does not
+    /// move.
+    ///
+    /// Locking: the session's `NSLock` is non-recursive and the
+    /// `onPatches` callback re-takes it while a handler mutates state, so
+    /// the engine / module-instance references are snapshotted under the
+    /// lock and the lock is released *before* the engine is touched.
+    ///
+    /// Only the typed `module(_:_:)` path registers action handlers with
+    /// the engine; the legacy `withState(_:_:)` + `onAction(_:)` shim is
+    /// consulted by `handleDispatchAction` alone and declares no actions,
+    /// so under that configuration the guard refuses every name.
+    ///
+    /// - Throws: `AgentHandleError.sessionGone` once `destroy()` has run,
+    ///   `AgentHandleError.noEngine` when the engine failed to build, or
+    ///   the engine's `HypenError.ActionError` refusal.
+    public func dispatchExternal(_ name: String, payload: [String: Any]? = nil) throws {
+        // Same directive-stripping as the click path, so a module handler
+        // never observes the reserved transaction-animation stamp
+        // whichever way the dispatch arrived.
+        let sanitizedPayload = stripReservedAnimateKey(payload) as? [String: Any]
+
+        lock.lock()
+        let destroyedLocal = destroyed
+        let engine = self.engine
+        let mi = moduleInstance
+        let sid = sessionID
+        lock.unlock()
+
+        if destroyedLocal {
+            throw AgentHandleError.sessionGone(sessionID: sid ?? id)
+        }
+        guard let engine = engine, let mi = mi else {
+            throw AgentHandleError.noEngine(sessionID: sid ?? id)
+        }
+
+        // Guard first. A throw here leaves the pending-action queue,
+        // the transport, and the revision untouched.
+        try engine.dispatchExternal(name, payload: sanitizedPayload)
+        // `dispatchExternal` only queues the resolved action (exactly like
+        // `dispatchAction`); draining fires the handler, whose state
+        // mutations stream a `patch` through `onPatches`.
+        engine.processPendingActions()
+
+        emitStateUpdate(mi)
+    }
+}
+
+/// A weak session reference the device sink closures capture (the plane is
+/// owned by the session; the sink must not keep the session alive).
+private final class WeakSession: @unchecked Sendable {
+    weak var value: RemoteSession?
+    init(_ value: RemoteSession) { self.value = value }
 }

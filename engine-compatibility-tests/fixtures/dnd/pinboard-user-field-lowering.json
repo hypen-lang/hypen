@@ -1,0 +1,51 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "pinboard-user-field-lowering",
+  "description": "User-field pinboard (bind prop present): .pinboard lowers to __dnd.pin with the author's x/y keys and grid, group may stay null, and the ordinary bind prop names the list to write. Nothing is injected — the author binds translateX/translateY to item fields themselves and NO __dnd.pinGroup is propagated. The row's draggable still gets __dnd.key",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Stack { ForEach(items: @state.seats, key: \"id\") { Seat().translateX(@item.x).translateY(@item.y).draggable() } }.pinboard(x: \"x\", y: \"y\", grid: 8).bind(@state.seats)",
+    "initialState": {
+      "seats": [{ "id": "s1", "x": 10, "y": 20 }]
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["seats"]
+    }
+  },
+
+  "expected": {
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Stack",
+        "props": {
+          "__dnd.pin": {
+            "group": null,
+            "xKey": "x",
+            "yKey": "y",
+            "grid": 8,
+            "bounds": "clamp",
+            "units": "px"
+          },
+          "bind": "seats"
+        },
+        "absentProps": ["pinboard.0", "pinboard.x", "pinboard.y", "pinboard.grid", "__dnd.pinGroup"]
+      },
+      {
+        "type": "create",
+        "elementType": "Seat",
+        "props": {
+          "__dnd.key": "s1",
+          "__dnd.source": { "group": null, "handle": false, "activation": "auto" },
+          "translateX.0": 10,
+          "translateY.0": 20
+        },
+        "absentProps": ["__dnd.pinGroup"]
+      }
+    ]
+  }
+}

@@ -4,6 +4,10 @@
 
 import type { ApplicatorHandler } from "./types.js";
 import { toCssLength } from "./size.js";
+import {
+  recordHorizontalFlexDemand,
+  releaseAutomaticStretchOwnership,
+} from "../cross-axis-width.js";
 
 /**
  * Maps Hypen alignment values to CSS flexbox values.
@@ -41,18 +45,50 @@ export function mapAlignmentValue(value: string): string {
   }
 }
 
+/**
+ * Grid hosts (Stack/Grid) place children with `justify-items` /
+ * `align-items`, and the *grid* keywords are `start`/`end` — `flex-start` /
+ * `flex-end` are only guaranteed for flex containers, and browsers reject
+ * `justify-items: flex-end` on a grid, silently leaving the stylesheet's
+ * `start`. (That is why a `Stack.horizontalAlignment("end")` badge stayed
+ * bottom-left on the web while Android put it bottom-right.)
+ */
+function gridAlignmentValue(mapped: string): string {
+  if (mapped === "flex-start") return "start";
+  if (mapped === "flex-end") return "end";
+  return mapped;
+}
+
+function isGridAlignmentHost(el: HTMLElement): boolean {
+  const type = el.dataset.hypenType?.toLowerCase();
+  if (type === "stack" || type === "grid") return true;
+  const display = el.style.display || getComputedStyle(el).display;
+  return display === "grid";
+}
+
 export const layoutHandlers: Record<string, ApplicatorHandler> = {
+  alignment: (el, value) => {
+    const val = mapAlignmentValue(String(value));
+    if (isGridAlignmentHost(el)) {
+      el.style.justifyItems = gridAlignmentValue(val);
+      el.style.alignItems = gridAlignmentValue(val);
+    } else {
+      el.style.justifyContent = val;
+      el.style.alignItems = val;
+    }
+  },
   // Unified alignment API - works for both Column and Row
   verticalAlignment: (el, value) => {
     const val = mapAlignmentValue(String(value));
-    // Check display and flex-direction to determine which CSS property to set
-    const display = el.style.display || getComputedStyle(el).display;
-    const flexDirection = el.style.flexDirection || getComputedStyle(el).flexDirection;
 
-    if (display === "grid") {
+    if (isGridAlignmentHost(el)) {
       // For Grid (Stack): use align-items to align children vertically
-      el.style.alignItems = val;
-    } else if (flexDirection === "column" || flexDirection === "column-reverse") {
+      el.style.alignItems = gridAlignmentValue(val);
+      return;
+    }
+    // Check flex-direction to determine which CSS property to set
+    const flexDirection = el.style.flexDirection || getComputedStyle(el).flexDirection;
+    if (flexDirection === "column" || flexDirection === "column-reverse") {
       // For column: vertical is the main axis (justify-content)
       el.style.justifyContent = val;
     } else {
@@ -62,26 +98,35 @@ export const layoutHandlers: Record<string, ApplicatorHandler> = {
   },
 
   horizontalAlignment: (el, value) => {
+    if (value === null || value === undefined) {
+      const flexDirection = el.style.flexDirection || getComputedStyle(el).flexDirection;
+      if (flexDirection === "column" || flexDirection === "column-reverse") {
+        const type = el.dataset.hypenType?.toLowerCase();
+        if (type === "column" || type === "list") el.style.alignItems = "flex-start";
+        else el.style.removeProperty("align-items");
+      } else {
+        el.style.removeProperty("justify-content");
+      }
+      return;
+    }
     const val = mapAlignmentValue(String(value));
-    // Check display and flex-direction to determine which CSS property to set
-    const display = el.style.display || getComputedStyle(el).display;
-    const flexDirection = el.style.flexDirection || getComputedStyle(el).flexDirection;
 
-    if (display === "grid") {
+    if (isGridAlignmentHost(el)) {
       // For Grid (Stack): use justify-items to align children horizontally
-      el.style.justifyItems = val;
-    } else if (flexDirection === "column" || flexDirection === "column-reverse") {
+      el.style.justifyItems = gridAlignmentValue(val);
+      return;
+    }
+    // Check flex-direction to determine which CSS property to set
+    const flexDirection = el.style.flexDirection || getComputedStyle(el).flexDirection;
+    if (flexDirection === "column" || flexDirection === "column-reverse") {
       // For column: horizontal is the cross axis (align-items)
       el.style.alignItems = val;
     } else if (flexDirection === "row" || flexDirection === "row-reverse") {
       // For row: horizontal is the main axis (justify-content)
       el.style.justifyContent = val;
-      // For arrangement to have visible effect, Row needs to fill available width
-      // (matching iOS/Android behavior where non-start alignment auto-expands)
-      // Only auto-expand if not scrollable
-      if (val !== "flex-start" && el.style.overflow !== "auto" && el.style.overflowX !== "auto") {
-        el.style.width = "100%";
-      }
+      // Actual Rows with non-start arrangement carry horizontal demand via
+      // the renderer reconciler. Badge/Button are row-direction flex hosts
+      // too, but remain intrinsic because the reconciler keys on type=row.
     } else {
       // Fallback for other display types
       el.style.justifyContent = val;
@@ -90,11 +135,19 @@ export const layoutHandlers: Record<string, ApplicatorHandler> = {
 
   // Legacy aliases (kept for backward compatibility)
   horizontalAlign: (el, value) => {
-    el.style.justifyContent = mapAlignmentValue(String(value));
+    if (value === null || value === undefined) el.style.removeProperty("justify-content");
+    else el.style.justifyContent = mapAlignmentValue(String(value));
   },
 
   verticalAlign: (el, value) => {
     el.style.alignItems = mapAlignmentValue(String(value));
+  },
+
+  // Direct flexbox spelling. Row demand is still type-gated by the
+  // reconciler, so setting this on Button/Badge does not make them greedy.
+  justifyContent: (el, value) => {
+    if (value === null || value === undefined) el.style.removeProperty("justify-content");
+    else el.style.justifyContent = mapAlignmentValue(String(value));
   },
 
   gap: (el, value) => {
@@ -114,7 +167,7 @@ export const layoutHandlers: Record<string, ApplicatorHandler> = {
     // applicator runs after `weight`/`flex`).
     if (!el.style.minWidth) el.style.minWidth = "0";
     if (!el.style.minHeight) el.style.minHeight = "0";
-    el.dataset.hypenFlex = "true";
+    recordHorizontalFlexDemand(el, value);
   },
 
   // flex: CSS flex shorthand (kept for CSS compatibility)
@@ -123,15 +176,22 @@ export const layoutHandlers: Record<string, ApplicatorHandler> = {
     // See note on `weight` above — flex children need `min-*: 0` to shrink.
     if (!el.style.minWidth) el.style.minWidth = "0";
     if (!el.style.minHeight) el.style.minHeight = "0";
-    el.dataset.hypenFlex = "true";
+    recordHorizontalFlexDemand(el, value);
   },
 
   flexGrow: (el, value) => {
     el.style.flexGrow = String(value);
+    recordHorizontalFlexDemand(el, value);
   },
 
   flexShrink: (el, value) => {
     el.style.flexShrink = String(value);
+  },
+
+  alignSelf: (el, value) => {
+    releaseAutomaticStretchOwnership(el);
+    if (value === null || value === undefined) el.style.removeProperty("align-self");
+    else el.style.alignSelf = mapAlignmentValue(String(value));
   },
 
   cursor: (el, value) => {

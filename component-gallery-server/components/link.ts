@@ -65,6 +65,7 @@ Column {
       .paddingHorizontal(24)
       .cornerRadius(8)
     }
+    .textDecoration("none")
 
     Link(href: "https://example.com") {
       Row {

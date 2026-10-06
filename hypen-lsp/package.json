@@ -2,7 +2,7 @@
   "name": "@hypen-space/lsp",
   "displayName": "Hypen Language Support",
   "description": "Language Server Protocol support for the Hypen declarative UI language",
-  "version": "0.5.0",
+  "version": "0.6.5",
   "publisher": "hypen",
   "license": "MIT",
   "type": "module",
@@ -26,6 +26,8 @@
     "out",
     "syntaxes",
     "icons",
+    "wasm",
+    "wasm-engine",
     "language-configuration.json"
   ],
   "contributes": {
@@ -93,8 +95,8 @@
     "lint": "eslint ./src --ext .ts",
     "test": "node ./out/test/runTest.js",
     "package": "vsce package",
-    "build:wasm": "cd ../parser && ./build-wasm.sh",
-    "setup:wasm": "rm -rf wasm && ln -sf ../parser/pkg/nodejs wasm"
+    "build:wasm": "cd ../parser && ./build-wasm.sh && cd ../hypen-engine-rs && HYPEN_SKIP_BINDINGS=1 wasm-pack build --target nodejs --out-dir pkg/nodejs --features js",
+    "setup:wasm": "rm -rf wasm wasm-engine && ln -sf ../parser/pkg/nodejs wasm && ln -sf ../hypen-engine-rs/pkg/nodejs wasm-engine"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1",

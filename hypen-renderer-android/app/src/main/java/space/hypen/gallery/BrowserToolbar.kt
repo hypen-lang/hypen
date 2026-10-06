@@ -1,5 +1,6 @@
 package space.hypen.gallery
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -24,7 +25,11 @@ import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.foundation.border
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.TextRange
@@ -55,6 +60,12 @@ fun BrowserToolbar(
     // Do NOT key this on `currentUrl` — that would clobber user input while typing.
     var fieldValue by remember { mutableStateOf(TextFieldValue(currentUrl)) }
     var isEditing by remember { mutableStateOf(false) }
+    // Whether the URL field has actually taken focus during the current editing session.
+    // `Modifier.onFocusChanged` fires an initial `isFocused = false` event when its node
+    // attaches — i.e. on the very recomposition that first shows the field. Without this
+    // latch that spurious event is indistinguishable from a real focus loss and tears the
+    // field back down before `focusRequester.requestFocus()` ever gets to run.
+    var hasTakenFocus by remember { mutableStateOf(false) }
     val focusManager = LocalFocusManager.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusRequester = remember { FocusRequester() }
@@ -76,11 +87,13 @@ fun BrowserToolbar(
             text = currentUrl,
             selection = TextRange(0, currentUrl.length),
         )
+        hasTakenFocus = false
         isEditing = true
     }
 
     fun finishEditing(submit: Boolean) {
         val trimmed = fieldValue.text.trim()
+        hasTakenFocus = false
         isEditing = false
         keyboardController?.hide()
         focusManager.clearFocus()
@@ -93,6 +106,13 @@ fun BrowserToolbar(
                 selection = TextRange(currentUrl.length),
             )
         }
+    }
+
+    // Give edit mode a cancel path. The IME swallows the first back press to hide the
+    // keyboard; the next one lands here and restores the read-only pill. Registered after
+    // the screen-level BackHandler in GalleryBrowser, so it takes priority while editing.
+    BackHandler(enabled = isEditing) {
+        finishEditing(submit = false)
     }
 
     Surface(
@@ -191,10 +211,15 @@ fun BrowserToolbar(
                                 .weight(1f)
                                 .focusRequester(focusRequester)
                                 .onFocusChanged { state ->
-                                    // Exit editing only when focus is lost AFTER we've gained it.
+                                    // Exit editing only on a focus loss that follows a real focus
+                                    // gain — the attach-time `isFocused = false` event arrives
+                                    // before `requestFocus()` and must be ignored.
                                     // We don't reset `fieldValue` here — keeping the user's text
                                     // avoids clobbering input during transient focus events.
-                                    if (!state.isFocused && isEditing) {
+                                    if (state.isFocused) {
+                                        hasTakenFocus = true
+                                    } else if (hasTakenFocus && isEditing) {
+                                        hasTakenFocus = false
                                         isEditing = false
                                     }
                                 },
@@ -241,11 +266,12 @@ fun BrowserToolbar(
                         }
                     }
 
-                    // Request focus exactly once per editing session.
-                    LaunchedEffect(isEditing) {
-                        if (isEditing) {
-                            focusRequester.requestFocus()
-                        }
+                    // Request focus exactly once per editing session. This block only exists
+                    // while `isEditing`, so `Unit` is the correct key — re-keying on `isEditing`
+                    // would cancel and relaunch the effect on the same state change that
+                    // introduced it.
+                    LaunchedEffect(Unit) {
+                        focusRequester.requestFocus()
                     }
                 } else {
                     Row(
@@ -302,4 +328,73 @@ fun BrowserToolbar(
             }
         }
     }
+}
+
+
+/**
+ * Collapsed browser chrome: a small floating pill, roughly the width of an
+ * iPhone Dynamic Island, showing connection status + the current URL.
+ * Mirrors the collapsed "island" of the desktop `hypen-browser` shell
+ * (`hypen-browser/src/shell.rs`): dark chip, status dot, URL, chevron.
+ * Tapping expands back to the full [BrowserToolbar].
+ */
+@Composable
+fun CollapsedUrlPill(
+    currentUrl: String,
+    isConnected: Boolean,
+    isLoading: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val statusColor = when {
+        isLoading -> Color(0xFF8A8F98)
+        isConnected -> Color(0xFF22C55E)
+        else -> Color(0xFFEF4444)
+    }
+    Row(
+        modifier = modifier
+            .widthIn(min = 120.dp, max = 180.dp)
+            .height(32.dp)
+            .clip(CircleShape)
+            .background(Color(0xFF1F1F24))
+            .border(1.dp, Color(0xFF26262C), CircleShape)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = onClick,
+            )
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(7.dp)
+                .clip(CircleShape)
+                .background(statusColor)
+        )
+        Text(
+            text = displayHost(currentUrl),
+            style = TextStyle(color = Color(0xFFF4F4F5), fontSize = 12.sp),
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f, fill = false),
+        )
+        Text(
+            text = "\u25BE",
+            style = TextStyle(color = Color(0xFF8A8F98), fontSize = 10.sp),
+        )
+    }
+}
+
+/** `ws://10.0.2.2:3000/path` → `10.0.2.2:3000` — what fits in a pill. */
+internal fun displayHost(url: String): String {
+    var stripped = url
+    for (prefix in listOf("wss://", "ws://", "https://", "http://")) {
+        if (stripped.startsWith(prefix)) {
+            stripped = stripped.removePrefix(prefix)
+            break
+        }
+    }
+    return stripped.substringBefore('/').ifEmpty { url }
 }

@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "parse-bare", "description": "Bare base, no arg, no variant.", "function": "parse_prop_key", "input": { "key": "padding" }, "expected": { "base": "padding", "breakpoint": null, "state": null, "arg": null } }

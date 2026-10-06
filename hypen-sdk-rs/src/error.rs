@@ -21,6 +21,19 @@ pub enum SdkError {
     /// Component file I/O or resolution error.
     Component(String),
 
+    /// An [`AgentHandle`](crate::remote::AgentHandle) outlived the session it
+    /// was attached to. A handle only ever holds a `Weak` reference — the
+    /// host owns the session, and once the host drops it every call on the
+    /// handle returns this. Carries the session id the handle was bound to.
+    SessionGone(String),
+
+    /// [`SessionRegistry::register`](crate::remote::SessionRegistry::register)
+    /// refused to key a session under an id that a *different*, still-live
+    /// session already holds. The record and the session that owns it are
+    /// untouched; the caller's session is not registered. Carries the
+    /// contested id.
+    SessionIdTaken(String),
+
     /// Generic SDK error.
     Other(String),
 }
@@ -36,6 +49,10 @@ impl fmt::Display for SdkError {
             SdkError::StateSerde(msg) => write!(f, "State serialization error: {msg}"),
             SdkError::Route(msg) => write!(f, "Route error: {msg}"),
             SdkError::Component(msg) => write!(f, "Component error: {msg}"),
+            SdkError::SessionGone(id) => write!(f, "Session gone: {id}"),
+            SdkError::SessionIdTaken(id) => {
+                write!(f, "Session id already held by a live session: {id}")
+            }
             SdkError::Other(msg) => write!(f, "{msg}"),
         }
     }
@@ -91,6 +108,14 @@ mod tests {
             (
                 SdkError::Component("not found".into()),
                 "Component error: not found",
+            ),
+            (
+                SdkError::SessionGone("session_1".into()),
+                "Session gone: session_1",
+            ),
+            (
+                SdkError::SessionIdTaken("session_1".into()),
+                "Session id already held by a live session: session_1",
             ),
             (SdkError::Other("something".into()), "something"),
         ];

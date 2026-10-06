@@ -3,17 +3,29 @@ import SwiftUI
 // MARK: - Background Image Applicator
 
 /// Applicator for backgroundImage.
-/// Note: In SwiftUI, background images are typically handled differently
-/// (using ZStack with Image behind content).
-/// This applicator stores the URL for potential component-level handling.
+///
+/// Despite the name, CSS `background-image` is overwhelmingly a GRADIENT in
+/// practice — every Tailwind `bg-gradient-to-*` lowers to
+/// `linear-gradient(to bottom right, #a, #b)` and arrives here. This used to
+/// store the raw string as `backgroundImageUrl`, which a gradient is not, so
+/// every gradient tile in the home-screen example rendered flat.
+///
+/// Remote (`http`) URLs still only get recorded, not fetched: loading them
+/// needs an async image loader, and blocking rendering on the network is not
+/// an option. `data:` URIs are decoded and painted.
 public struct BackgroundImageApplicator: ApplicatorHandler {
     public let name = "backgroundImage"
 
     public init() {}
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
-        // Background images in SwiftUI are typically handled at component level
-        // using ZStack with Image. This stores the value for reference.
+        if let layers = CssBackground.parse(value) {
+            modifier.cssBackground = layers
+            // Kept for component-level handling of remote URLs.
+            modifier.backgroundImageUrl = layers.imageUri
+            return
+        }
+
         if let urlString = value as? String {
             modifier.backgroundImageUrl = urlString
         } else if let map = value as? [String: Any], let url = map["url"] as? String {

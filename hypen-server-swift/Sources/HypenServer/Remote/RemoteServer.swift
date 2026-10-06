@@ -4,6 +4,7 @@ import NIOPosix
 import NIOHTTP1
 import NIOWebSocket
 import WebSocketKit
+@preconcurrency import HypenEngine
 
 // NOTE: Per-client state used to live on a `ClientConnection` class in
 // this file. It has moved to `RemoteSession` (see RemoteSession.swift),
@@ -59,7 +60,7 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
     /// Manages session lifecycle (create / suspend / resume / expire) so
     /// briefly-disconnected clients can reconnect to their previous state
     /// within the TTL window. Default TTL is 1 hour (see SessionConfig).
-    public let sessionManager = SessionManager()
+    public let sessionManager: SessionManager
 
     var onConnectionCallbacks: [ConnectionCallback] = []
     var onDisconnectionCallbacks: [ConnectionCallback] = []
@@ -88,6 +89,21 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
     /// Set once `prepare()` has validated configuration. Idempotent.
     var prepared = false
 
+    /// Device Capability Protocol settings (RFC 001). The device plane is
+    /// on by default: these are the defaults until `configureDevice(_:)`.
+    var _deviceOptions = DeviceServerOptions()
+    /// True once `configureDevice(_:)` supplied options (they are validated
+    /// against the broker in `prepare()`; the defaults need no validation).
+    var _deviceConfigured = false
+    /// `disableDevice()` was called: the server is UI-only.
+    var _deviceDisabled = false
+    /// The process-wide retained-bytes budget all connections' brokers
+    /// share (default 1 GiB; `configureDevice(_:processRetainedBytes:)`).
+    var _devicePool: DeviceRetainedBytesPool? = nil
+    var _deviceProcessRetainedBytes: UInt64 = RemoteServer.defaultProcessRetainedBytes
+    /// Default process-wide retained-bytes budget of every broker (1 GiB).
+    public static let defaultProcessRetainedBytes: UInt64 = 1024 * 1024 * 1024
+
     var eventLoopGroup: EventLoopGroup?
     var serverChannel: Channel?
     var boundPort: Int?
@@ -100,7 +116,14 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
         var onAction: ActionHandler?
     }
 
-    public init() {}
+    /// - Parameter sessionConfig: session TTL, id generator and concurrent
+    ///   connection policy. `.allowMultiple` fans one session out to several
+    ///   connections, which the per-connection device plane cannot follow:
+    ///   the server then runs with the device plane off (one startup
+    ///   warning says so).
+    public init(sessionConfig: SessionConfig = SessionConfig()) {
+        self.sessionManager = SessionManager(config: sessionConfig)
+    }
 
     // MARK: - Builder API
 
@@ -282,6 +305,67 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
         return self
     }
 
+    /// Tune the Device Capability Protocol (RFC 001) plane. There is nothing
+    /// to enable: every session whose client offers `device` in its hello
+    /// gets a negotiated device plane backed by the Rust device broker, and
+    /// module handlers reach it through `ctx.device` (and
+    /// `onActivatedAsync`). Call this only to change the defaults (limits,
+    /// budgets, clock, revision overrides, pin cap); every connection's
+    /// broker shares one process-wide retained-bytes pool of
+    /// `processRetainedBytes` (default 1 GiB).
+    ///
+    /// Options the broker refuses (e.g. an override of a revision that does
+    /// not exist) are a programming error: `prepare()` throws
+    /// `RemoteServerError.invalidDeviceOptions`. `disableDevice()` wins
+    /// regardless of call order.
+    @discardableResult
+    public func configureDevice(
+        _ options: DeviceServerOptions = DeviceServerOptions(),
+        processRetainedBytes: UInt64 = RemoteServer.defaultProcessRetainedBytes
+    ) -> RemoteServer {
+        lock.lock()
+        defer { lock.unlock() }
+        _deviceOptions = options
+        _deviceConfigured = true
+        _deviceProcessRetainedBytes = processRetainedBytes
+        _devicePool = nil
+        return self
+    }
+
+    /// Opt out of the device plane: no session negotiates one (a client's
+    /// `hello.device` is ignored and `sessionAck` carries no `device`), so
+    /// the server behaves exactly like a UI-only server.
+    @discardableResult
+    public func disableDevice() -> RemoteServer {
+        lock.lock()
+        defer { lock.unlock() }
+        _deviceDisabled = true
+        return self
+    }
+
+    /// Whether sessions of this server negotiate a device plane: true unless
+    /// `disableDevice()` was called or a setting incompatible with the
+    /// device plane is in effect (see `deviceIncompatibility`). A status,
+    /// not a switch.
+    public var deviceEnabled: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return deviceOnLocked
+    }
+
+    /// The setting that keeps the device plane off even though
+    /// `disableDevice()` was not called, or nil. The only one on this
+    /// server is a `.allowMultiple` concurrent-session policy: one session
+    /// fanned out to several connections cannot share a per-connection
+    /// device plane. (This server never negotiates WebSocket compression
+    /// and has no `syncActions` mode, the other SDKs' incompatible settings.)
+    public var deviceIncompatibility: String? {
+        sessionManager.config.concurrent == .allowMultiple
+            ? "SessionConfig.concurrent = .allowMultiple (one session on several connections)"
+            : nil
+    }
+
+    private var deviceOnLocked: Bool { !_deviceDisabled && deviceIncompatibility == nil }
+
     /// Register a connection callback.
     @discardableResult
     public func onConnection(_ callback: @escaping ConnectionCallback) -> RemoteServer {
@@ -320,7 +404,26 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
         guard !uiTemplate.isEmpty else {
             throw RemoteServerError.uiNotSet
         }
+        // Device prerequisites never stop the server (RFC 001, always-on):
+        // an incompatible setting turns the device plane off with ONE
+        // warning. Only options the broker refuses — a programming error
+        // in `configureDevice` — throw.
+        if !_deviceDisabled {
+            if let reason = deviceIncompatibility {
+                log.warning("Device plane off for this server: %@ is incompatible with the device plane", reason)
+            } else if _deviceConfigured {
+                try _deviceOptions.validateAgainstBroker()
+            }
+        }
         prepared = true
+    }
+
+    /// The one startup warning of a server that admits every client: no
+    /// `allowedOrigins` and no `authenticate` configured. Nil when either is.
+    var admissionWarning: String? {
+        config.allowedOrigins.isEmpty && config.authenticate == nil
+            ? "no allowedOrigins/authenticate configured — any client can connect; set them in production"
+            : nil
     }
 
     /// Create a `RemoteSession` driven by the supplied transport.
@@ -395,7 +498,13 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
         lock.lock()
         let actualPort = port ?? config.port
         let hostname = config.hostname
+        let openAdmission = admissionWarning
+        let allowedOrigins: Set<String>? = config.allowedOrigins.isEmpty
+            ? nil : Set(config.allowedOrigins.map(DeviceAdmission.normalizeOrigin))
+        let authenticate = config.authenticate
         lock.unlock()
+        let admissionLog = log
+        if let openAdmission { log.warning("%@", openAdmission) }
 
         let elg = MultiThreadedEventLoopGroup(numberOfThreads: System.coreCount)
         self.eventLoopGroup = elg
@@ -407,16 +516,92 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
             .serverChannelOption(.backlog, value: 256)
             .serverChannelOption(.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
+                // Compression (RFC 7692 `permessage-deflate`) is deliberately
+                // NOT negotiated by this server. Other Hypen SDKs enable it by
+                // default; Swift is the exception, and it is the exception on
+                // purpose:
+                //
+                //   * SwiftNIO's `NIOWebSocketServerUpgrader` implements RFC
+                //     6455 only. It parses `Sec-WebSocket-Key` / `-Version`
+                //     and never reads or echoes `Sec-WebSocket-Extensions`;
+                //     extension negotiation is left entirely to the
+                //     `shouldUpgrade` callback below.
+                //   * WebSocketKit (the frame handler we install in
+                //     `upgradePipelineHandler`) has no compression support
+                //     either — vapor/websocket-kit#55 has been open since 2020.
+                //   * The maintained RFC 7692 implementation in the ecosystem
+                //     (`WSCompression` in hummingbird-project/swift-websocket,
+                //     built on compress-nio) is bound to that package's own
+                //     `WSCore` handler + upgrade stack; it negotiates via
+                //     `WebSocketServerConfiguration.extensions` and cannot be
+                //     spliced into a WebSocketKit pipeline. Adopting it means
+                //     replacing this transport wholesale. Kitura-WebSocket-
+                //     Compression does expose standalone NIO handlers, but
+                //     Kitura has been unmaintained since 2020.
+                //
+                // Hand-rolling RFC 7692 (per-connection sliding-window zlib
+                // contexts, `client_no_context_takeover` /
+                // `server_max_window_bits` parameter negotiation, RSV1
+                // framing) is not worth the risk for this change.
+                //
+                // The behaviour below is protocol-correct regardless: a client
+                // offering `Sec-WebSocket-Extensions: permessage-deflate` gets
+                // a 101 response that does NOT accept the extension (the empty
+                // `HTTPHeaders()` returned here are the ONLY headers added on
+                // top of Upgrade/Connection/Sec-WebSocket-Accept), so per RFC
+                // 7692 §5.1 the client must fall back to uncompressed frames.
+                // Compression is per-connection, so a compression-capable
+                // client interoperates with this server unchanged — the
+                // connection simply runs uncompressed. Never echo the
+                // extension header from `shouldUpgrade` without also
+                // installing the corresponding compressor/decompressor: an
+                // accepted-but-unimplemented extension breaks every client.
+                // Inbound size bounds (RFC 001 §2.1/§2.3). NIO's default
+                // `maxFrameSize` is 16 KiB, which would refuse a device
+                // binary frame (12-byte header + 64 KiB chunk = 65,548
+                // bytes) or a large `hello.device` at the transport, and
+                // WebSocketKit's frame aggregator is unbounded by default.
+                // Allow one frame / one aggregated message up to
+                // `DeviceProtocol.transportMaxInboundMessageBytes` (2 MiB:
+                // above the 1 MiB device text limit, so an oversize device
+                // message reaches the device layer as a counted violation)
+                // and refuse anything larger before it is buffered.
                 let upgrader = NIOWebSocketServerUpgrader(
+                    maxFrameSize: DeviceProtocol.transportMaxInboundMessageBytes,
                     shouldUpgrade: { channel, head in
-                        channel.eventLoop.makeSucceededFuture(HTTPHeaders())
+                        // Admission (RFC 001 §5, decision D1): the Origin
+                        // allowlist and the app authenticator, each enforced
+                        // exactly when configured; with neither, every
+                        // client is admitted (warned about at startup).
+                        // A refused upgrade falls through to HTTPHandler,
+                        // which answers 403. Empty headers => no extensions
+                        // accepted. See the compression note above before
+                        // changing this.
+                        let request = DeviceUpgradeRequest(
+                            uri: head.uri, headers: head.headers.map { (name: $0.name, value: $0.value) })
+                        let promise = channel.eventLoop.makePromise(of: HTTPHeaders?.self)
+                        Task {
+                            let refusal = await DeviceAdmission.refusal(
+                                for: request, allowedOrigins: allowedOrigins,
+                                authenticate: authenticate)
+                            if let refusal {
+                                admissionLog.warning("Rejected WebSocket upgrade: %@", refusal)
+                                promise.succeed(nil)
+                            } else {
+                                promise.succeed(HTTPHeaders())
+                            }
+                        }
+                        return promise.futureResult
                     },
                     upgradePipelineHandler: { channel, req in
                         // WebSocketKit installs its handlers on `channel`
                         // as a side effect and returns an EventLoopFuture
                         // we don't wait on — the HTTP upgrader's own
                         // completion future is what signals upgrade done.
-                        _ = WebSocket.server(on: channel) { ws in
+                        var wsConfig = WebSocket.Configuration()
+                        wsConfig.maxAccumulatedFrameSize = DeviceProtocol.transportMaxInboundMessageBytes
+                        wsConfig.maxAccumulatedFrameCount = DeviceProtocol.transportMaxInboundFragments
+                        _ = WebSocket.server(on: channel, config: wsConfig) { ws in
                             server.attachWebSocket(ws)
                         }
                         return channel.eventLoop.makeSucceededVoidFuture()
@@ -504,6 +689,40 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
         return Array(sessions.values)
     }
 
+    // MARK: - Agent surface (attach mode)
+
+    /// Bind the agent surface to an existing live user session.
+    ///
+    /// Returns an `AgentHandle` for the first session whose Hypen session
+    /// id (the value the client received in `sessionAck`) matches, has
+    /// completed hello → initialTree (`isReady`), is not destroyed, and
+    /// has an engine. Nil otherwise — an unknown id, a session that has
+    /// not finished its handshake, and a destroyed session are
+    /// indistinguishable to the caller on purpose.
+    ///
+    /// No authorization is performed here: whoever holds a `RemoteServer`
+    /// reference already holds every session on it, so the developer's
+    /// own handler (the caller) is the authorizer. The handle never owns
+    /// the session — see `AgentHandle`.
+    ///
+    /// Attach requires a typed module (`module(_:_:)`); under the legacy
+    /// `withState(_:_:)` + `onAction(_:)` shim no actions are declared
+    /// and every guarded dispatch is refused.
+    public func attach(_ sessionID: String) -> AgentHandle? {
+        // `allSessions()` releases the server lock before we touch any
+        // session accessor (each takes the session's own lock).
+        for session in allSessions() {
+            guard session.currentSessionID == sessionID,
+                  session.isReady,
+                  !session.isDestroyed,
+                  session.nativeEngine != nil else {
+                continue
+            }
+            return AgentHandle(session: session, sessionID: sessionID)
+        }
+        return nil
+    }
+
 
     // MARK: - Broadcast
 
@@ -524,6 +743,16 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
                 state: state,
                 revision: session.incrementRevision()
             ))
+        }
+    }
+
+    /// Dispatch an action on every ready session as a broadcast-derived
+    /// dispatch: handlers run on each session, but device calls they make
+    /// fail `unavailable` (RFC 001 §1.7 — replay and broadcast cannot
+    /// initiate device work on any connection).
+    public func broadcastAction(_ name: String, payload: Any? = nil) {
+        for session in allSessions() where session.isReady {
+            session.dispatchReplayed(name, payload: payload)
         }
     }
 
@@ -553,6 +782,11 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
             let session = try createSession(transport: transport)
             ws.onText { [weak session] _, text in
                 session?.receive(text)
+            }
+            // Device data-plane frames (RFC 001 §2.3); dropped by sessions
+            // without a negotiated device plane.
+            ws.onBinary { [weak session] _, buffer in
+                session?.receiveBinary(Data(buffer.readableBytesView))
             }
             ws.onClose.whenComplete { [weak session] _ in
                 session?.destroy()
@@ -620,6 +854,26 @@ extension RemoteServer {
         return moduleConfig?.onAction
     }
 
+    /// Device settings for new sessions: the defaults (or the
+    /// `configureDevice` options), nil only after `disableDevice()` or with
+    /// a setting incompatible with the device plane.
+    public var deviceOptions: DeviceServerOptions? {
+        lock.lock(); defer { lock.unlock() }
+        return deviceOnLocked ? _deviceOptions : nil
+    }
+
+    /// The process-wide retained-bytes pool shared by every broker (created
+    /// on first use, so a server whose clients never negotiate a device
+    /// plane never allocates it).
+    public var deviceRetainedBytesPool: DeviceRetainedBytesPool? {
+        lock.lock(); defer { lock.unlock() }
+        guard deviceOnLocked else { return nil }
+        if let pool = _devicePool { return pool }
+        let pool = DeviceRetainedBytesPool(limit: _deviceProcessRetainedBytes)
+        _devicePool = pool
+        return pool
+    }
+
     /// Fires server-level OnConnection callbacks.
     public func onSessionReady(_ session: RemoteSession, client: ClientInfo) {
         lock.lock()
@@ -645,6 +899,9 @@ public enum RemoteServerError: Error, CustomStringConvertible {
     case moduleNotSet
     case uiNotSet
     case invalidResourcesFile(String)
+    /// `configureDevice(_:)` options the Rust broker refuses (e.g. an
+    /// override of a revision that does not exist) — a programming error.
+    case invalidDeviceOptions(String)
 
     public var description: String {
         switch self {
@@ -654,6 +911,8 @@ public enum RemoteServerError: Error, CustomStringConvertible {
             return "UI not set. Call .ui() before .prepare()/.listen()"
         case .invalidResourcesFile(let path):
             return "Invalid resources file (expected JSON object of String → String): \(path)"
+        case .invalidDeviceOptions(let reason):
+            return "configureDevice(): the device broker refuses these DeviceServerOptions: \(reason)"
         }
     }
 }
@@ -687,13 +946,21 @@ private final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler,
             let body: String
             let status: HTTPResponseStatus
 
-            switch head.uri {
-            case "/health":
-                body = "OK"
-                status = .ok
-            default:
-                body = "Hypen Remote Server"
-                status = .ok
+            let isUpgrade = head.headers[canonicalForm: "upgrade"].contains { $0.lowercased() == "websocket" }
+            if isUpgrade {
+                // A WebSocket upgrade only reaches this handler when the
+                // upgrader declined it: admission refused (RFC 001 §5).
+                body = "Forbidden"
+                status = .forbidden
+            } else {
+                switch head.uri {
+                case "/health":
+                    body = "OK"
+                    status = .ok
+                default:
+                    body = "Hypen Remote Server"
+                    status = .ok
+                }
             }
 
             var headers = HTTPHeaders()
@@ -706,7 +973,15 @@ private final class HTTPHandler: ChannelInboundHandler, RemovableChannelHandler,
             var buffer = context.channel.allocator.buffer(capacity: body.utf8.count)
             buffer.writeString(body)
             context.write(wrapOutboundOut(.body(.byteBuffer(buffer))), promise: nil)
-            context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+            if status == .forbidden {
+                // A refused upgrade ends the connection after the answer.
+                let channel = context.channel
+                context.writeAndFlush(wrapOutboundOut(.end(nil))).whenComplete { _ in
+                    channel.close(promise: nil)
+                }
+            } else {
+                context.writeAndFlush(wrapOutboundOut(.end(nil)), promise: nil)
+            }
 
         case .body, .end:
             break

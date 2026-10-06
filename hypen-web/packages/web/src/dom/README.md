@@ -75,6 +75,9 @@ All components are registered by default:
 - **List** - Scrollable stack with gap
 - **Input** - Input field
 - **Canvas** - Canvas element
+- **Chart** - `<svg>` coordinate space; its marks (**Line**, **Area**, **Bars**,
+  **Points**, **Axis**, **Rule**, **Marker**, **Path**) are positioned in data
+  units and their events carry the datum (`components/chart.ts`)
 
 ### Custom Components
 

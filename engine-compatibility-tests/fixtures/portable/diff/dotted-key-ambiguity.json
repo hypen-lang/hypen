@@ -1,0 +1,31 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-dotted-key-ambiguity",
+  "description": "A literal dot inside an object key joins into the path exactly like a nesting separator would — path strings are ambiguous by design and hosts must not try to disambiguate.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "a.b": 1,
+      "a": {
+        "b": 1
+      }
+    },
+    "new": {
+      "a.b": 2,
+      "a": {
+        "b": 3
+      }
+    }
+  },
+  "expected": [
+    {
+      "path": "a.b",
+      "value": 3
+    },
+    {
+      "path": "a.b",
+      "value": 2
+    }
+  ]
+}

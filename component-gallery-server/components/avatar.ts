@@ -20,7 +20,7 @@ Column {
     .color("#666")
     .marginBottom(8)
 
-  Avatar(src: "https://i.pravatar.cc/100?1")
+  Avatar(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/avatar-1.png?platform=__HYPEN_GALLERY_PLATFORM__&example=avatar&generation=__HYPEN_GALLERY_GENERATION__")
     .marginBottom(24)
 
   Text("Avatar Sizes")
@@ -30,7 +30,7 @@ Column {
 
   Row {
     Column {
-      Avatar(src: "https://i.pravatar.cc/100?2")
+      Avatar(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/avatar-2.png?platform=__HYPEN_GALLERY_PLATFORM__&example=avatar&generation=__HYPEN_GALLERY_GENERATION__")
         .width(32)
         .height(32)
         .cornerRadius(16)
@@ -42,7 +42,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Avatar(src: "https://i.pravatar.cc/100?3")
+      Avatar(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/avatar-3.png?platform=__HYPEN_GALLERY_PLATFORM__&example=avatar&generation=__HYPEN_GALLERY_GENERATION__")
         .width(40)
         .height(40)
         .cornerRadius(20)
@@ -54,7 +54,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Avatar(src: "https://i.pravatar.cc/100?4")
+      Avatar(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/avatar-4.png?platform=__HYPEN_GALLERY_PLATFORM__&example=avatar&generation=__HYPEN_GALLERY_GENERATION__")
         .width(56)
         .height(56)
         .cornerRadius(28)
@@ -66,7 +66,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Avatar(src: "https://i.pravatar.cc/100?5")
+      Avatar(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/avatar-5.png?platform=__HYPEN_GALLERY_PLATFORM__&example=avatar&generation=__HYPEN_GALLERY_GENERATION__")
         .width(72)
         .height(72)
         .cornerRadius(36)
@@ -78,7 +78,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Avatar(src: "https://i.pravatar.cc/100?6")
+      Avatar(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/avatar-6.png?platform=__HYPEN_GALLERY_PLATFORM__&example=avatar&generation=__HYPEN_GALLERY_GENERATION__")
         .width(96)
         .height(96)
         .cornerRadius(48)
@@ -155,18 +155,18 @@ Column {
     .marginBottom(8)
 
   Row {
-    Avatar(src: "https://i.pravatar.cc/100?7")
+    Avatar(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/avatar-7.png?platform=__HYPEN_GALLERY_PLATFORM__&example=avatar&generation=__HYPEN_GALLERY_GENERATION__")
       .width(40)
       .height(40)
       .cornerRadius(20)
       .border({width: 2, color: "#fff"})
-    Avatar(src: "https://i.pravatar.cc/100?8")
+    Avatar(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/avatar-8.png?platform=__HYPEN_GALLERY_PLATFORM__&example=avatar&generation=__HYPEN_GALLERY_GENERATION__")
       .width(40)
       .height(40)
       .cornerRadius(20)
       .border({width: 2, color: "#fff"})
       .marginLeft(-12)
-    Avatar(src: "https://i.pravatar.cc/100?9")
+    Avatar(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/avatar-9.png?platform=__HYPEN_GALLERY_PLATFORM__&example=avatar&generation=__HYPEN_GALLERY_GENERATION__")
       .width(40)
       .height(40)
       .cornerRadius(20)

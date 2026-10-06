@@ -1,0 +1,123 @@
+Column {
+    Column {
+    Column {
+        Row {
+            Column {
+                Text("Crave Cart")
+                    .tw("text-[22px] md:text-3xl font-extrabold tracking-tight")
+                    .color("#EA580C")
+                Row {
+                    Icon(@resources.map-pin)
+                        .size(13)
+                        .color("#9CA3AF")
+                    Text("@{state.currentUser.address}")
+                        .tw("text-xs md:text-sm font-medium ml-1 truncate max-w-64 md:max-w-xl")
+                        .color("#6B7280")
+                }
+                .tw("items-center mt-1")
+            }
+            .tw("flex-1 min-w-0 items-start")
+
+            Row {
+                Button {
+                    Image(src: "@{state.currentUser.avatarUrl}")
+                        .tw("w-9 h-9 md:w-11 md:h-11 rounded-full bg-gray-100")
+                        .objectFit("cover")
+                }
+                .tw("bg-transparent border-0 p-0 shrink-0")
+                .opacity({ default: 1, active: 0.7 })
+                .transition(150, easeOut)
+                .onClick(@router.push, to: "/profile")
+            }
+            .tw("items-center")
+        }
+        .tw("items-center")
+
+        Button {
+            Row {
+                Icon(@resources.search)
+                    .size(17)
+                    .color("#9ca3af")
+                Text("Restaurants, dishes, cuisines…")
+                    .tw("text-sm text-gray-400 ml-2.5")
+            }
+            .tw("items-center")
+        }
+        .tw("bg-gray-100 rounded-full border-0 px-4 py-3 mt-3.5 w-full")
+        .opacity({ default: 1, active: 0.7 })
+        .transition(150, easeOut)
+        .onClick(@router.push, to: "/search")
+    }
+    .tw("px-5 md:px-10 pt-4 md:pt-7 pb-3 md:pb-5")
+    .fillMaxWidth(true)
+
+    Button {
+        Row {
+            Column {
+                Text("FREE DELIVERY THIS WEEK")
+                    .tw("text-[10px] font-bold tracking-widest text-left")
+                    .color("#EA580C")
+                Text("Dinner sorted in three taps")
+                    .tw("text-base md:text-xl font-bold mt-1 leading-tight tracking-tight text-left")
+                    .color("#111827")
+                Row {
+                    Text("Order now")
+                        .tw("text-[13px] font-semibold")
+                        .color("#EA580C")
+                    Icon(@resources.chevron-right)
+                        .size(14)
+                        .color("#EA580C")
+                }
+                .tw("items-center mt-2")
+            }
+            .tw("flex-1 min-w-0 pr-4 items-start")
+
+            Image(src: "https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=520&h=520&fit=crop")
+                .tw("w-[76px] h-[76px] md:w-24 md:h-24 rounded-xl shrink-0 bg-orange-100")
+                .objectFit("cover")
+        }
+        .tw("items-center w-full")
+    }
+    .tw("mx-5 md:mx-10 p-4 md:p-5 rounded-2xl bg-orange-50 border border-orange-100 items-center")
+    .opacity({ default: 1, active: 0.8 })
+    .transition(160, easeOut)
+    .enter(fade, duration: 320)
+    .onClick(@router.push, to: "/search")
+    .alignSelf("stretch")
+
+    Column {
+        Row {
+            ForEach(items: @state.categories, key: "id") {
+                CategoryChip()
+            }
+        }
+        .tw("flex-row gap-2 px-5 md:px-10 py-3")
+        .scrollable("horizontal")
+    }
+    .tw("pt-2")
+    .fillMaxWidth(true)
+
+    Row {
+        Text("Popular near you")
+            .tw("text-lg md:text-xl font-bold flex-1")
+            .color("#111827")
+        Text("@{state.restaurants.length} open now")
+            .tw("text-xs md:text-sm font-semibold")
+            .color("#EA580C")
+    }
+    .tw("px-5 md:px-10 pt-3 pb-3.5 items-center")
+    .fillMaxWidth(true)
+
+    Grid(@state.restaurants, key: "id") {
+        RestaurantCard()
+    }
+    .gridColumns({default: 1, sm: 2, md: 3, lg: 4, xl: 5})
+    .gap(18)
+    .tw("px-5 md:px-10 pb-8 md:pb-12 w-full")
+    .fillMaxWidth(true)
+    }
+    .tw("w-full xl:w-3/5")
+    .alignSelf("center")
+}
+.scrollable(true)
+.tw("flex-1 w-full bg-white")

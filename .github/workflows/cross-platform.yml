@@ -6,12 +6,60 @@ on:
     paths:
       - "hypen-golang/**"
       - "hypen-kotlin/**"
+      # Go and Kotlin device conformance runners replay the shared schemas,
+      # corpus and transcripts (RFC 001).
+      - "engine-compatibility-tests/schema/device/**"
+      - "engine-compatibility-tests/fixtures/device/**"
+      # The Go and Kotlin device broker binding tests drive the engine's
+      # broker and its WASI / UniFFI surfaces (RFC 001).
+      - "hypen-engine-rs/src/device/**"
+      - "hypen-engine-rs/src/serialize/device*/**"
+      - "hypen-engine-rs/src/serialize/device.rs"
+      - "hypen-engine-rs/src/wasm/**"
+      - "hypen-engine-rs/src/uniffi/**"
+      - "hypen-engine-rs/Cargo.toml"
+      - "hypen-engine-rs/copy-wasm-artifacts.sh"
+      - "Cargo.lock"
+      # The Swift server's device e2e (Linux) below.
+      - "hypen-server-swift/**"
+      # The Go and Kotlin device e2e tests drive the TypeScript web client
+      # against their servers (hypen-golang/remote/device_e2e_test.go,
+      # hypen-kotlin DeviceWebSocketE2ETest); the client imports core/src
+      # beyond remote/ (types, result, retry, logger).
+      - "hypen-web/packages/core/src/**"
+      - "hypen-web/packages/device-fake/**"
+      - "hypen-web/package.json"
+      - "hypen-web/bun.lock"
       - ".github/workflows/cross-platform.yml"
   pull_request:
     branches: [main, develop]
     paths:
       - "hypen-golang/**"
       - "hypen-kotlin/**"
+      # Go and Kotlin device conformance runners replay the shared schemas,
+      # corpus and transcripts (RFC 001).
+      - "engine-compatibility-tests/schema/device/**"
+      - "engine-compatibility-tests/fixtures/device/**"
+      # The Go and Kotlin device broker binding tests drive the engine's
+      # broker and its WASI / UniFFI surfaces (RFC 001).
+      - "hypen-engine-rs/src/device/**"
+      - "hypen-engine-rs/src/serialize/device*/**"
+      - "hypen-engine-rs/src/serialize/device.rs"
+      - "hypen-engine-rs/src/wasm/**"
+      - "hypen-engine-rs/src/uniffi/**"
+      - "hypen-engine-rs/Cargo.toml"
+      - "hypen-engine-rs/copy-wasm-artifacts.sh"
+      - "Cargo.lock"
+      # The Swift server's device e2e (Linux) below.
+      - "hypen-server-swift/**"
+      # The Go and Kotlin device e2e tests drive the TypeScript web client
+      # against their servers (hypen-golang/remote/device_e2e_test.go,
+      # hypen-kotlin DeviceWebSocketE2ETest); the client imports core/src
+      # beyond remote/ (types, result, retry, logger).
+      - "hypen-web/packages/core/src/**"
+      - "hypen-web/packages/device-fake/**"
+      - "hypen-web/package.json"
+      - "hypen-web/bun.lock"
       - ".github/workflows/cross-platform.yml"
 
 jobs:
@@ -21,9 +69,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The toolchain follows go.mod's `go` directive (>= 1.22; wazero
+      # releases raise it), so CI never builds with a Go older than the
+      # module requires.
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.21"
+          go-version-file: hypen-golang/go.mod
           cache-dependency-path: hypen-golang/go.sum
 
       # Go SDK uses wazero to run WASI WASM — build it first
@@ -38,16 +89,42 @@ jobs:
             tailwind-parse
             hypen-engine-rs
 
+      # The Go SDK embeds hypen-golang/hypen_engine.wasm (go:embed): build
+      # the module from this commit and install it there (the same copy
+      # step build-wasm.sh runs), so the Go tests and the device e2e drive
+      # the broker built from the source under test.
       - name: Build WASI WASM
         run: |
           cargo build --target wasm32-wasip1 --release --features wasi
           mkdir -p pkg/wasi
           cp ../target/wasm32-wasip1/release/hypen_engine.wasm pkg/wasi/
+          bash copy-wasm-artifacts.sh
         working-directory: hypen-engine-rs
 
+      # The cross-language device e2e (remote/device_e2e_test.go) runs the
+      # real TypeScript web client (RemoteEngine + FakeDeviceHost, under
+      # bun) against the Go server over a real WebSocket. It needs bun and
+      # hypen-web's dependencies; HYPEN_E2E_REQUIRE=1 turns a missing
+      # toolchain into a failure instead of a skip.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install hypen-web dependencies (TS device client for the e2e)
+        run: bun install
+        working-directory: hypen-web
+
       - name: Run Go tests
-        run: go test -v ./...
+        run: go test -race -v ./...
         working-directory: hypen-golang
+        env:
+          HYPEN_E2E_REQUIRE: "1"
+
+      - name: Cross-language device e2e (Go server vs TypeScript client)
+        run: go test ./remote -run 'TestDeviceE2ETypeScriptClient' -count=1 -v
+        working-directory: hypen-golang
+        env:
+          HYPEN_E2E_REQUIRE: "1"
 
   kotlin:
     name: Kotlin Tests
@@ -76,3 +153,59 @@ jobs:
       - name: Run Kotlin tests
         run: ./gradlew test
         working-directory: hypen-kotlin
+
+      # The cross-language device e2e (DeviceWebSocketE2ETest, JUnit tag
+      # `e2e`, excluded from `test`) runs the real TypeScript web client
+      # (RemoteEngine + FakeDeviceHost / DeviceClient, under bun) against
+      # HypenServer over a real WebSocket (Netty) with the Rust broker via
+      # UniFFI. The `deviceE2eTest` task fails — never skips — when bun or
+      # hypen-web's node_modules are missing.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install hypen-web dependencies (TS device client for the e2e)
+        run: bun install
+        working-directory: hypen-web
+
+      - name: Cross-language device e2e (Kotlin server vs TypeScript client)
+        run: ./gradlew deviceE2eTest
+        working-directory: hypen-kotlin
+
+  swift-server-linux:
+    # The Swift server's cross-language device e2e (Tests/DeviceE2E) on
+    # Linux: the real TypeScript web client (RemoteEngine + FakeDeviceHost /
+    # DeviceClient, under bun) against HypenDeviceE2EServer (RemoteServer +
+    # the Rust device broker via UniFFI) over a real WebSocket. GitHub's
+    # Ubuntu images ship a Swift toolchain; the macOS runs live in
+    # swift-renderer-ci.yml and integration.yml. run.sh fails — never
+    # skips — when bun, hypen-web's node_modules or the engine library are
+    # missing.
+    name: Swift Server device e2e (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift toolchain
+        run: swift --version
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build native engine library (uniffi)
+        run: cargo build --release --features uniffi --manifest-path hypen-engine-rs/Cargo.toml
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install hypen-web dependencies (TS device client for the e2e)
+        run: bun install
+        working-directory: hypen-web
+
+      - name: Cross-language device e2e (Swift server vs TypeScript client)
+        run: Tests/DeviceE2E/run.sh
+        working-directory: hypen-server-swift
+        env:
+          HYPEN_ENGINE_LIB_DIR: ${{ github.workspace }}/target/release

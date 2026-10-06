@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use hypen_engine::{Engine, IRNode, Module, ModuleInstance, Patch};
+use hypen_engine::{Engine, IRNode, Module, ModuleInstance, Patch, TemplateExpander};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -55,6 +55,7 @@ struct Expected {
     patches: Option<Vec<ExpectedPatch>>,
     patch_count: Option<usize>,
     patch_types: Option<Vec<String>>,
+    strict_patch_order: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,11 +63,18 @@ struct Expected {
 struct Step {
     description: Option<String>,
     action: String,
+    source: Option<String>,
     state_change: Option<StateChange>,
     dispatch_action: Option<DispatchAction>,
+    /// Optional batch-animation context for this step's state update
+    /// (Option D): a spec object or bare curve string, forwarded to
+    /// `update_state_with_animation` so a changed-state render cycle is
+    /// prefixed with a `batchAnimation` prelude.
+    animation: Option<Value>,
     expected_patches: Option<Vec<ExpectedPatch>>,
     expected_patch_count: Option<usize>,
     expected_patch_types: Option<Vec<String>>,
+    strict_patch_order: Option<bool>,
     forbidden_patch_types: Option<Vec<String>>,
     expected_state: Option<Value>,
 }
@@ -93,10 +101,32 @@ struct ExpectedPatch {
     patch_type: String,
     element_type: Option<String>,
     props: Option<HashMap<String, Value>>,
+    /// Prop keys that must NOT be present on the matched patch's props.
+    /// Pins omission contracts (e.g. an invalid `.animate` preset must lower
+    /// to no `__anim.animate` prop AND leave no raw `animate.0` passthrough).
+    absent_props: Option<Vec<String>>,
     name: Option<String>,
     value: Option<Value>,
+    /// Requires the matched patch's `value` to be EXPLICIT JSON `null` on
+    /// the wire. Needed because `"value": null` in a fixture deserializes to
+    /// the same `None` as omitting the key entirely (which matches ANY
+    /// value) — null contracts (e.g. `__anim.states` nulling its label on
+    /// fallback) are otherwise unassertable.
+    value_is_null: Option<bool>,
     #[allow(dead_code)]
     text: Option<String>,
+    /// Accessibility semantics block on `create`/`setSemantics` patches.
+    /// Matched as a complete object (not partial) — the fixture pins the
+    /// exact wire format, so an extra or missing field is a mismatch.
+    semantics: Option<Value>,
+    /// Exit-animation flag on `remove` patches. `true` requires the flag on
+    /// the wire; `false` requires it absent or false (the flag is
+    /// skip-serialized when false, so absence is the non-animated wire form).
+    transition: Option<bool>,
+    /// Batch-animation spec on `batchAnimation` patches. Matched as a
+    /// complete object (exact equality) — the fixture pins the normalized
+    /// wire spec, so an extra or missing field is a mismatch.
+    spec: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,13 +160,24 @@ fn collect_fixtures(dir: &Path, results: &mut Vec<PathBuf>) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                // Skip `portable/` — different schema, separate runner
-                // (`tests/portable.rs`).
-                if path.file_name().map_or(false, |n| n == "portable") {
+                // Skip `portable/`, `variant/` and `device/` — different
+                // schemas with their own runners (`tests/portable.rs`,
+                // `tests/variant.rs`; the device corpus is replayed by the
+                // engine crate and every SDK's device suite).
+                if path
+                    .file_name()
+                    .map_or(false, |n| n == "portable" || n == "variant" || n == "device")
+                {
                     continue;
                 }
                 collect_fixtures(&path, results);
             } else if path.extension().map_or(false, |e| e == "json") {
+                // `dnd/path-move.json` is a state-transform fixture (see
+                // fixtures/dnd/README.md), not a test-case.schema.json case;
+                // it is replayed by the engine crate and the host SDKs.
+                if path.file_name().map_or(false, |n| n == "path-move.json") {
+                    continue;
+                }
                 results.push(path);
             }
         }
@@ -170,25 +211,14 @@ fn should_skip(tc: &TestCase) -> Option<String> {
     }
 
     // Per-fixture skips for known reconciliation strategy differences.
-    // The Rust engine rebuilds ForEach children on count change (correct but not minimal).
     // Conditional re-evaluation on state update uses a different dirty propagation strategy.
-    match tc.name.as_str() {
-        "foreach-dynamic-updates" => {
-            return Some(
-                "ForEach rebuilds all children on count change (8 patches vs expected 2)".into(),
-            );
-        }
-        "when-conditional-rendering" => {
-            return Some(
-                "Conditional dirty propagation: condition node re-evaluation pending".into(),
-            );
-        }
-        "keyed-list-add-remove" => {
-            return Some(
-                "ForEach rebuilds all children on count change (8 patches vs expected 2)".into(),
-            );
-        }
-        _ => {}
+    //
+    // NOTE: "foreach-dynamic-updates" and "keyed-list-add-remove" used to be
+    // skipped here because ForEach rebuilt every child on a count change
+    // (8 patches vs the expected 2). ForEach now goes through the same keyed
+    // reconciliation as iterable elements, so both fixtures run.
+    if tc.name.as_str() == "when-conditional-rendering" {
+        return Some("Conditional dirty propagation: condition node re-evaluation pending".into());
     }
 
     None
@@ -251,6 +281,15 @@ fn matches_expected_patch(actual: &Value, expected: &ExpectedPatch) -> bool {
         }
     }
 
+    if let Some(ref absent) = expected.absent_props {
+        let actual_props = actual.get("props");
+        for key in absent {
+            if actual_props.and_then(|p| p.get(key)).is_some() {
+                return false;
+            }
+        }
+    }
+
     if let Some(ref name) = expected.name {
         if actual.get("name").and_then(|v| v.as_str()) != Some(name) {
             return false;
@@ -264,7 +303,54 @@ fn matches_expected_patch(actual: &Value, expected: &ExpectedPatch) -> bool {
         }
     }
 
+    if expected.value_is_null == Some(true) {
+        // The key must be present AND carry explicit null — a missing key or
+        // any non-null value (e.g. a stale label object) is a mismatch.
+        match actual.get("value") {
+            Some(Value::Null) => {}
+            _ => return false,
+        }
+    }
+
+    if let Some(transition) = expected.transition {
+        let actual_flag = actual
+            .get("transition")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if actual_flag != transition {
+            return false;
+        }
+    }
+
+    if let Some(ref spec) = expected.spec {
+        // Exact object equality pins the complete normalized wire spec.
+        match actual.get("spec") {
+            Some(av) if json_values_equal(av, spec) => {}
+            _ => return false,
+        }
+    }
+
+    if let Some(ref semantics) = expected.semantics {
+        // Exact object equality (json_values_equal requires equal key sets)
+        // pins the complete semantics wire block, not a subset of it.
+        match actual.get("semantics") {
+            Some(av) if json_values_equal(av, semantics) => {}
+            _ => return false,
+        }
+    }
+
     true
+}
+
+/// Index-by-index match — for fixtures whose contract IS the emission order
+/// (e.g. flagged-root-first deferred removes), where the unordered
+/// structural match below cannot distinguish orderings.
+fn match_patches_sequence(actual_patches: &[Value], expected_patches: &[ExpectedPatch]) -> bool {
+    actual_patches.len() == expected_patches.len()
+        && actual_patches
+            .iter()
+            .zip(expected_patches)
+            .all(|(actual, expected)| matches_expected_patch(actual, expected))
 }
 
 fn match_patches_structural(actual_patches: &[Value], expected_patches: &[ExpectedPatch]) -> bool {
@@ -355,11 +441,16 @@ fn run_fixture(tc: &TestCase) {
         engine.set_module(engine_module);
     }
 
-    // Collect patches via callback
+    // Collect patches via callback. The raw stream carries template-shaped
+    // list rows as RegisterTemplate/Instantiate; fixtures assert the plain
+    // Create+Insert wire, so lower each batch through a session-lifetime
+    // expander before serializing.
     let collected_patches: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(vec![]));
     let patches_ref = collected_patches.clone();
+    let expander = Mutex::new(TemplateExpander::new());
     engine.set_render_callback(move |patches| {
-        let jsons: Vec<Value> = patches.iter().map(|p| patch_to_json(p)).collect();
+        let expanded = expander.lock().unwrap().expand(patches.to_vec());
+        let jsons: Vec<Value> = expanded.iter().map(patch_to_json).collect();
         patches_ref.lock().unwrap().extend(jsons);
     });
 
@@ -392,6 +483,7 @@ fn run_fixture(tc: &TestCase) {
                 expected.patch_count,
                 expected.patch_types.as_deref(),
                 expected.patches.as_deref(),
+                expected.strict_patch_order.unwrap_or(false),
                 None,
                 None,
             );
@@ -413,6 +505,16 @@ fn run_fixture(tc: &TestCase) {
                     let ir_node = parse_source_to_ir(&tc.name, &tc.input.source);
                     engine.render_ir_node(&ir_node);
                 }
+                "renderSource" => {
+                    // Re-render with replacement source — reconciled against
+                    // the existing tree, exercising subtree replacement /
+                    // teardown paths.
+                    let source = step.source.as_deref().unwrap_or_else(|| {
+                        panic!("[{}] renderSource step needs `source`", tc.name)
+                    });
+                    let ir_node = parse_source_to_ir(&tc.name, source);
+                    engine.render_ir_node(&ir_node);
+                }
                 "updateState" => {
                     if let Some(ref change) = step.state_change {
                         // Update our tracked state
@@ -423,8 +525,13 @@ fn run_fixture(tc: &TestCase) {
                         }
                         *state_cell.lock().unwrap() = current_state.clone();
 
-                        // Notify engine
-                        engine.update_state(None, change.new_values.clone());
+                        // Notify engine, forwarding the step's optional
+                        // batch-animation context (Option D).
+                        engine.update_state_with_animation(
+                            None,
+                            change.new_values.clone(),
+                            step.animation.clone(),
+                        );
                     }
                 }
                 "dispatchAction" => {
@@ -436,11 +543,17 @@ fn run_fixture(tc: &TestCase) {
                         };
                         let _ = engine.dispatch_action(engine_action);
 
-                        // After action, sync state back and update engine
+                        // After action, sync state back and update engine,
+                        // stamping the update with the step's optional
+                        // batch-animation context (Option D).
                         let handler_state = state_cell.lock().unwrap().clone();
                         if handler_state != current_state {
                             current_state = handler_state;
-                            engine.update_state(None, current_state.clone());
+                            engine.update_state_with_animation(
+                                None,
+                                current_state.clone(),
+                                step.animation.clone(),
+                            );
                         }
                     }
                 }
@@ -457,6 +570,7 @@ fn run_fixture(tc: &TestCase) {
                 step.expected_patch_count,
                 step.expected_patch_types.as_deref(),
                 step.expected_patches.as_deref(),
+                step.strict_patch_order.unwrap_or(false),
                 step.forbidden_patch_types.as_deref(),
                 step.expected_state.as_ref().map(|s| (&current_state, s)),
             );
@@ -464,6 +578,7 @@ fn run_fixture(tc: &TestCase) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assert_expected(
     test_name: &str,
     step: &str,
@@ -471,6 +586,7 @@ fn assert_expected(
     patch_count: Option<usize>,
     patch_types: Option<&[String]>,
     expected_patches: Option<&[ExpectedPatch]>,
+    strict_patch_order: bool,
     forbidden_types: Option<&[String]>,
     state_check: Option<(&Value, &Value)>,
 ) {
@@ -494,9 +610,19 @@ fn assert_expected(
     }
 
     if let Some(expected) = expected_patches {
+        let matched = if strict_patch_order {
+            match_patches_sequence(patches, expected)
+        } else {
+            match_patches_structural(patches, expected)
+        };
         assert!(
-            match_patches_structural(patches, expected),
-            "[{test_name}] {step}: patch structure mismatch.\nActual:   {:#?}\nExpected: {:#?}",
+            matched,
+            "[{test_name}] {step}: patch {} mismatch.\nActual:   {:#?}\nExpected: {:#?}",
+            if strict_patch_order {
+                "sequence"
+            } else {
+                "structure"
+            },
             patches,
             expected
         );

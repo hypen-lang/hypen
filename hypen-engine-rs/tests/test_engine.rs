@@ -805,3 +805,466 @@ fn test_set_context_invalidates_deep_data_source_bindings() {
         *captured
     );
 }
+
+// ========== Animation prop channel ==========
+
+#[test]
+fn test_render_carries_anim_transition_prop_on_create() {
+    // GIVEN: Engine and a parsed element with .transition(200, easeOut)
+    let mut engine = Engine::new();
+    let (patches, callback) = patch_capture();
+    engine.set_render_callback(callback);
+
+    let source = r#"Text("Score").transition(200, easeOut).fontSize(18)"#;
+    let component = hypen_parser::parse_component(source).expect("parse");
+    let ir_node = hypen_engine::ir::ast_to_ir_node(&component);
+
+    // WHEN: Render through the full pipeline
+    engine.render_ir_node(&ir_node);
+
+    // THEN: The Create patch carries the lowered "__anim.transition" object
+    //       (renderer-facing — must NOT be stripped as engine-internal) and
+    //       no legacy "transition.0" leftover.
+    let captured = patches.lock().unwrap();
+    let create = captured
+        .iter()
+        .find_map(|p| match p {
+            hypen_engine::reconcile::Patch::Create { props, .. } => Some(props),
+            _ => None,
+        })
+        .expect("Expected a Create patch");
+    assert_eq!(
+        create.get("__anim.transition"),
+        Some(&json!({"duration": 200, "curve": "easeOut"}))
+    );
+    assert!(create.get("transition.0").is_none());
+}
+
+// ========== .states end-to-end (Option C) ==========
+
+#[test]
+fn test_states_end_to_end_pose_flip() {
+    // GIVEN: A module whose state drives a .states pose switch. The block
+    // form isn't inline-parseable yet, so the applicator is assembled the
+    // way the parser's fold path represents it (states component →
+    // to_applicator, block children preserved).
+    let mut engine = Engine::new();
+    let module = ModuleInstance::new(Module::new("TestModule"), json!({"cardState": "collapsed"}));
+    engine.set_module(module);
+    let (patches, callback) = patch_capture();
+    engine.set_render_callback(callback);
+
+    let mut component =
+        hypen_parser::parse_component(r#"Box().width(100).cornerRadius(4)"#).unwrap();
+    component.applicators.push(
+        hypen_parser::parse_component(
+            r#"states(@state.cardState, transition: spring, duration: 250) {
+                onState(collapsed).cornerRadius(8).width(48).opacity(0.9)
+                onState(expanded).cornerRadius(16).width(240)
+            }"#,
+        )
+        .unwrap()
+        .to_applicator(),
+    );
+    let ir = hypen_engine::ast_to_ir_node(&component);
+
+    // WHEN: First render with cardState = "collapsed"
+    engine.render_ir_node(&ir);
+
+    // THEN: The Create patch resolves the collapsed pose to PLAIN JSON —
+    //       switched props, the synthesized transition, and the active-label
+    //       prop. No StateSwitch novelty ever reaches the wire.
+    {
+        let captured = patches.lock().unwrap();
+        let create = captured
+            .iter()
+            .find_map(|p| match p {
+                hypen_engine::reconcile::Patch::Create { props, .. } => Some(props.clone()),
+                _ => None,
+            })
+            .expect("Expected a Create patch");
+        assert_eq!(create.get("cornerRadius.0"), Some(&json!(8.0)));
+        assert_eq!(create.get("width.0"), Some(&json!(48.0)));
+        assert_eq!(create.get("opacity.0"), Some(&json!(0.9)));
+        assert_eq!(
+            create.get("__anim.states"),
+            Some(&json!({"label": "collapsed"}))
+        );
+        assert_eq!(
+            create.get("__anim.transition"),
+            Some(&json!({
+                "duration": 250,
+                "curve": "spring",
+                "props": ["cornerRadius", "width", "opacity"]
+            }))
+        );
+
+        let wire = serde_json::to_string(&*captured).unwrap();
+        assert!(
+            !wire.contains("StateSwitch"),
+            "StateSwitch is engine-internal and must never serialize to the wire: {wire}"
+        );
+    }
+    patches.lock().unwrap().clear();
+
+    // WHEN: State flips the pose
+    engine.update_state(None, json!({"cardState": "expanded"}));
+
+    // THEN: Ordinary SetProps for the switched props + the label prop, and a
+    //       RemoveProp for the pose-only prop with no case in "expanded"
+    //       (no base default → resolves to absent).
+    {
+        let captured = patches.lock().unwrap();
+        let set_props: Vec<(&str, &serde_json::Value)> = captured
+            .iter()
+            .filter_map(|p| match p {
+                hypen_engine::reconcile::Patch::SetProp { name, value, .. } => {
+                    Some((name.as_str(), value))
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            set_props.contains(&("cornerRadius.0", &json!(16.0))),
+            "{set_props:?}"
+        );
+        assert!(
+            set_props.contains(&("width.0", &json!(240.0))),
+            "{set_props:?}"
+        );
+        assert!(
+            set_props.contains(&("__anim.states", &json!({"label": "expanded"}))),
+            "{set_props:?}"
+        );
+        assert!(
+            captured.iter().any(|p| matches!(
+                p,
+                hypen_engine::reconcile::Patch::RemoveProp { name, .. } if name == "opacity.0"
+            )),
+            "pose-only prop with no case and no default must resolve to absent: {captured:?}"
+        );
+
+        let wire = serde_json::to_string(&*captured).unwrap();
+        assert!(!wire.contains("StateSwitch"), "wire novelty leaked: {wire}");
+    }
+    patches.lock().unwrap().clear();
+
+    // WHEN: State moves to a label no pose declares
+    engine.update_state(None, json!({"cardState": "mystery"}));
+
+    // THEN: Switched props fall back to their base defaults; the label prop
+    //       falls back to its explicit null default.
+    let captured = patches.lock().unwrap();
+    let set_props: Vec<(&str, &serde_json::Value)> = captured
+        .iter()
+        .filter_map(|p| match p {
+            hypen_engine::reconcile::Patch::SetProp { name, value, .. } => {
+                Some((name.as_str(), value))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        set_props.contains(&("cornerRadius.0", &json!(4.0))),
+        "{set_props:?}"
+    );
+    assert!(
+        set_props.contains(&("width.0", &json!(100.0))),
+        "{set_props:?}"
+    );
+    assert!(
+        set_props.contains(&("__anim.states", &json!(null))),
+        "{set_props:?}"
+    );
+}
+
+#[test]
+fn test_states_block_parses_inline_from_source() {
+    // GIVEN: The .states block written inline in REAL Hypen source. The
+    // grammar now attaches a children block directly to an applicator, so
+    // no AST-assembly workaround (parse "states(...)" as a component, then
+    // to_applicator) is needed — this pins the parser -> engine handoff.
+    let mut engine = Engine::new();
+    let module = ModuleInstance::new(Module::new("TestModule"), json!({"cardState": "collapsed"}));
+    engine.set_module(module);
+    let (patches, callback) = patch_capture();
+    engine.set_render_callback(callback);
+
+    let source = r#"
+        Box()
+            .width(100)
+            .states(@state.cardState, transition: spring) {
+                onState(collapsed).width(48)
+                onState(expanded).width(240)
+            }
+    "#;
+    let component = hypen_parser::parse_component(source).expect("inline .states block parses");
+    assert_eq!(component.applicators.len(), 2, "width + states");
+    assert_eq!(component.applicators[1].name, "states");
+    assert_eq!(component.applicators[1].children.len(), 2);
+
+    let ir = hypen_engine::ast_to_ir_node(&component);
+
+    // WHEN: First render with cardState = "collapsed"
+    engine.render_ir_node(&ir);
+
+    // THEN: The Create patch resolves the collapsed pose — switched prop,
+    //       active-label prop, and the synthesized transition spec.
+    {
+        let captured = patches.lock().unwrap();
+        let create = captured
+            .iter()
+            .find_map(|p| match p {
+                hypen_engine::reconcile::Patch::Create { props, .. } => Some(props.clone()),
+                _ => None,
+            })
+            .expect("Expected a Create patch");
+        assert_eq!(create.get("width.0"), Some(&json!(48.0)));
+        assert_eq!(
+            create.get("__anim.states"),
+            Some(&json!({"label": "collapsed"}))
+        );
+        assert_eq!(
+            create.get("__anim.transition"),
+            Some(&json!({
+                "duration": 250,
+                "curve": "spring",
+                "props": ["width"]
+            }))
+        );
+    }
+    patches.lock().unwrap().clear();
+
+    // WHEN: State flips the pose
+    engine.update_state(None, json!({"cardState": "expanded"}));
+
+    // THEN: An ordinary SetProp carries the expanded pose value + label.
+    let captured = patches.lock().unwrap();
+    let set_props: Vec<(&str, &serde_json::Value)> = captured
+        .iter()
+        .filter_map(|p| match p {
+            hypen_engine::reconcile::Patch::SetProp { name, value, .. } => {
+                Some((name.as_str(), value))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        set_props.contains(&("width.0", &json!(240.0))),
+        "{set_props:?}"
+    );
+    assert!(
+        set_props.contains(&("__anim.states", &json!({"label": "expanded"}))),
+        "{set_props:?}"
+    );
+}
+
+// ========== .scrub / .settle end-to-end (Option G) ==========
+
+#[test]
+fn test_scrub_end_to_end_create_props_and_state_flip() {
+    // GIVEN: A module-backed sheet written as REAL inline Hypen source — a
+    // .states block plus the .scrub/.settle pair. The scrub props must ride
+    // the Create patch alongside the untouched states machinery, and an
+    // ordinary state flip must keep working exactly as without scrub.
+    let mut engine = Engine::new();
+    let module = ModuleInstance::new(Module::new("TestModule"), json!({"sheetPhase": "closed"}));
+    engine.set_module(module);
+    let (patches, callback) = patch_capture();
+    engine.set_render_callback(callback);
+
+    let source = r#"
+        Box()
+            .translateY(400)
+            .scrub(from: closed, to: open, source: gesture, axis: y, over: [0, 400], rubberBand: 0.4)
+            .settle(curve: spring, duration: 300, bind: @state.sheetPhase)
+            .states(@state.sheetPhase, transition: spring, duration: 300) {
+                onState(closed).translateY(400)
+                onState(open).translateY(0)
+            }
+    "#;
+    let component = hypen_parser::parse_component(source).expect("inline scrub chain parses");
+    let ir = hypen_engine::ast_to_ir_node(&component);
+
+    // WHEN: First render with sheetPhase = "closed"
+    engine.render_ir_node(&ir);
+
+    // THEN: The Create patch carries all four scrub wire props (static
+    //       JSON — renderers own interpretation) PLUS the states machinery,
+    //       with no stripped-applicator leakage.
+    {
+        let captured = patches.lock().unwrap();
+        let create = captured
+            .iter()
+            .find_map(|p| match p {
+                hypen_engine::reconcile::Patch::Create { props, .. } => Some(props.clone()),
+                _ => None,
+            })
+            .expect("Expected a Create patch");
+        assert_eq!(
+            create.get("__anim.scrub"),
+            Some(&json!({
+                "from": "closed",
+                "to": "open",
+                "source": "gesture",
+                "axis": "y",
+                "over": [0, 400],
+                "rubberBand": 0.4
+            }))
+        );
+        assert_eq!(
+            create.get("__anim.scrubSettle"),
+            Some(&json!({"curve": "spring", "duration": 300}))
+        );
+        assert_eq!(create.get("__anim.scrubBind"), Some(&json!("sheetPhase")));
+        assert_eq!(
+            create.get("__anim.scrubPoses"),
+            Some(&json!({ "translateY.0": [400.0, 0.0] }))
+        );
+
+        // The states machinery rides along unchanged by scrub.
+        assert_eq!(create.get("translateY.0"), Some(&json!(400.0)));
+        assert_eq!(
+            create.get("__anim.states"),
+            Some(&json!({"label": "closed"}))
+        );
+        assert_eq!(
+            create.get("__anim.transition"),
+            Some(&json!({
+                "duration": 300,
+                "curve": "spring",
+                "props": ["translateY"]
+            }))
+        );
+
+        // Stripped applicators never leak as generic props.
+        for key in [
+            "scrub.0",
+            "scrub.from",
+            "settle.0",
+            "settle.curve",
+            "settle.bind",
+        ] {
+            assert!(create.get(key).is_none(), "leaked '{key}' on the wire");
+        }
+    }
+    patches.lock().unwrap().clear();
+
+    // WHEN: State flips the pose (e.g. the settle write landing)
+    engine.update_state(None, json!({"sheetPhase": "open"}));
+
+    // THEN: Ordinary SetProps for the switched prop + the active label —
+    //       the pose flip behaves exactly as plain .states.
+    let captured = patches.lock().unwrap();
+    let set_props: Vec<(&str, &serde_json::Value)> = captured
+        .iter()
+        .filter_map(|p| match p {
+            hypen_engine::reconcile::Patch::SetProp { name, value, .. } => {
+                Some((name.as_str(), value))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(
+        set_props.contains(&("translateY.0", &json!(0.0))),
+        "{set_props:?}"
+    );
+    assert!(
+        set_props.contains(&("__anim.states", &json!({"label": "open"}))),
+        "{set_props:?}"
+    );
+}
+
+#[test]
+fn test_non_states_applicator_block_children_dropped_with_warning() {
+    // GIVEN: The grammar accepts a children block on ANY applicator, but only
+    // .states consumes one. A SwiftUI-habit author writing the body AFTER the
+    // applicator chain gets the block attached to the applicator instead of
+    // the component. Pin the engine behavior: the applicator still lowers its
+    // arguments to props, the block children are dropped from the tree (a
+    // warning is logged via log_warn — not capturable natively), and nothing
+    // panics or leaks the block into the element's children.
+    let source = r#"Card().theme(dark) { Text("hi") }"#;
+    let component = hypen_parser::parse_component(source).expect("applicator block parses");
+    assert_eq!(component.name, "Card");
+    assert_eq!(
+        component.children.len(),
+        0,
+        "block belongs to the applicator"
+    );
+    assert_eq!(component.applicators.len(), 1);
+    assert_eq!(component.applicators[0].children.len(), 1);
+
+    let ir = hypen_engine::ast_to_ir_node(&component);
+    let hypen_engine::IRNode::Element(element) = &ir else {
+        panic!("expected an Element IR node");
+    };
+    assert_eq!(element.element_type, "Card");
+    // The applicator's arguments lower normally...
+    match element.props.get("theme.0") {
+        Some(hypen_engine::Value::Static(v)) => assert_eq!(v, &json!("dark")),
+        other => panic!("expected static theme.0 prop, got {other:?}"),
+    }
+    // ...but the unconsumed block never becomes children of the element.
+    assert!(
+        element.ir_children.is_empty(),
+        "unconsumed applicator block must not leak into element children"
+    );
+}
+
+#[test]
+fn test_shared_element_template_key_resolves_and_reresolves() {
+    // GIVEN: Engine with module state and a template .sharedElement key —
+    //        identity is data, so the key binds to state
+    let mut engine = Engine::new();
+    engine.set_module(ModuleInstance::new(
+        Module::new("Page"),
+        json!({"coverId": "list-7"}),
+    ));
+    let (patches, callback) = patch_capture();
+    engine.set_render_callback(callback);
+
+    let source = r#"Image(src: "cover.png").sharedElement("cover-@{state.coverId}", curve: spring, duration: 350)"#;
+    let component = hypen_parser::parse_component(source).expect("parse");
+    let ir_node = hypen_engine::ir::ast_to_ir_node(&component);
+
+    // WHEN: Render through the full pipeline
+    engine.render_ir_node(&ir_node);
+
+    // THEN: The Create patch carries the RESOLVED key plus the static timing
+    //       object, and no "sharedElement.0" leftover
+    {
+        let captured = patches.lock().unwrap();
+        let create = captured
+            .iter()
+            .find_map(|p| match p {
+                hypen_engine::reconcile::Patch::Create { props, .. } => Some(props),
+                _ => None,
+            })
+            .expect("Expected a Create patch");
+        assert_eq!(create.get("__anim.sharedKey"), Some(&json!("cover-list-7")));
+        assert_eq!(
+            create.get("__anim.shared"),
+            Some(&json!({"duration": 350, "curve": "spring"}))
+        );
+        assert!(create.get("sharedElement.0").is_none());
+    }
+
+    // WHEN: The bound state changes
+    patches.lock().unwrap().clear();
+    engine.update_state(None, json!({"coverId": "detail-7"}));
+
+    // THEN: The key re-resolves and flows as a SetProp on the same prop name
+    let captured = patches.lock().unwrap();
+    let saw_reresolved_key = captured.iter().any(|p| match p {
+        hypen_engine::reconcile::Patch::SetProp { name, value, .. } => {
+            name == "__anim.sharedKey" && value == &json!("cover-detail-7")
+        }
+        _ => false,
+    });
+    assert!(
+        saw_reresolved_key,
+        "Expected SetProp __anim.sharedKey = \"cover-detail-7\" after state change; got: {:?}",
+        *captured
+    );
+}

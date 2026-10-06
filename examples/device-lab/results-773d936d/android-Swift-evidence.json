@@ -1,0 +1,240 @@
+[
+  {
+    "step": "connected",
+    "text": [
+      "Device Lab \u00b7 Swift",
+      "Real host / real server \u00b7 run 0",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "Connected. Choose a check.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45104)",
+      "10.0.2.2:45104",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "query",
+    "text": [
+      "Device Lab \u00b7 Swift",
+      "Real host / real server \u00b7 run 1",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "query: completed",
+      "success(HypenServer.DeviceValue<HypenServer.PermissionResult>(value: HypenServer.PermissionResult(status: HypenServer.PermissionStatus.granted), simulated: false))",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45104)",
+      "10.0.2.2:45104",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "gallery-picker",
+    "text": [
+      "Downloads",
+      "Large files",
+      "This week",
+      "IMAGES IN DOWNLOADS",
+      "Downloads",
+      "superwall-benchmark",
+      "superwall-event-timelines",
+      "screenshots",
+      "device-lab.png",
+      "Sep 25",
+      "85.60 kB",
+      "PNG image"
+    ]
+  },
+  {
+    "step": "gallery-cancel",
+    "text": [
+      "Device Lab \u00b7 Swift",
+      "Real host / real server \u00b7 run 2",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "gallery: completed",
+      "cancelled: picker-dismissed",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45104)",
+      "10.0.2.2:45104",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "save-consent",
+    "text": [
+      "Device access",
+      "ws://10.0.2.2:45104 wants to save a .txt file (100 KB) to your device.\n\nDevelopment mode: this connection is not encrypted (ws://). Access granted here lasts only for this connection.",
+      "CANCEL",
+      "CONTINUE"
+    ]
+  },
+  {
+    "step": "save-picker",
+    "text": [
+      "Downloads",
+      "FILES IN DOWNLOADS",
+      "Downloads",
+      "superwall-benchmark",
+      "superwall-event-timelines",
+      "screenshots",
+      "device-lab (10).txt",
+      "2:34 PM",
+      "102 kB",
+      "TXT document",
+      "device-lab (9).txt",
+      "2:34 PM",
+      "102 kB",
+      "TXT document",
+      "device-lab (8).txt",
+      "2:33 PM",
+      "102 kB",
+      "TXT document",
+      "device-lab (7).txt",
+      "1:22 PM",
+      "102 kB",
+      "TXT document",
+      "device-lab-Rust.txt",
+      "1:21 PM",
+      "102 kB",
+      "TXT document",
+      "device-lab (6).txt",
+      "device-lab.txt",
+      "SAVE"
+    ]
+  },
+  {
+    "step": "save-result",
+    "text": [
+      "Device Lab \u00b7 Swift",
+      "Real host / real server \u00b7 run 3",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "save: completed",
+      "success(HypenServer.DeviceValue<HypenServer.FileSaveResult>(value: HypenServer.FileSaveResult(bytesWritten: 102000), simulated: false))",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45104)",
+      "10.0.2.2:45104",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "record-consent",
+    "text": [
+      "Device access",
+      "ws://10.0.2.2:45104 wants to record audio from your microphone (mono, 16000 Hz).\n\nDevelopment mode: this connection is not encrypted (ws://). Access granted here lasts only for this connection.",
+      "CANCEL",
+      "CONTINUE"
+    ]
+  },
+  {
+    "step": "record-started",
+    "text": [
+      "Device Lab \u00b7 Swift",
+      "Real host / real server \u00b7 run 4",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "record: running\u2026",
+      "Audio received: 76160",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45104)",
+      "Recording audio from your microphone for ws://10.0.2.2:45104",
+      "Stop",
+      "10.0.2.2:45104",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "record",
+    "text": [
+      "Device Lab \u00b7 Swift",
+      "Real host / real server \u00b7 run 4",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "record: completed",
+      "success(HypenServer.DeviceValue<HypenServer.MicRecordResult>(value: HypenServer.MicRecordResult(durationMs: 3000, item: HypenServer.BlobItem(channel: 0, contentType: \"audio/L16\", bytes: 96000, sha256: \"55873fecc61a79e87ca550c7072e38ccdd7ecb600ace286fe4717952a97c42b0\")), simulated: false))\nbytes=96000 SHA256=55873fecc61a79e87ca550c7072e38ccdd7ecb600ace286fe4717952a97c42b0",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45104)",
+      "10.0.2.2:45104",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "ping",
+    "text": [
+      "Device Lab \u00b7 Swift",
+      "Real host / real server \u00b7 run 5",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "ping: completed",
+      "UI remains responsive",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45104)",
+      "10.0.2.2:45104",
+      "\u25be"
+    ]
+  }
+]

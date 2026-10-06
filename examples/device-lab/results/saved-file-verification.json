@@ -1,0 +1,32 @@
+[
+  {
+    "file": "device-lab-Swift.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "matches_server_payload": true
+  },
+  {
+    "file": "device-lab-TS.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "matches_server_payload": true
+  },
+  {
+    "file": "device-lab-Go.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "matches_server_payload": true
+  },
+  {
+    "file": "device-lab-Kotlin.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "matches_server_payload": true
+  },
+  {
+    "file": "android-saved.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "matches_server_payload": true
+  }
+]

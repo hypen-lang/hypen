@@ -15,6 +15,16 @@
           "type": "object",
           "additionalProperties": true,
           "description": "Initial properties for the element"
+        },
+        "absentProps": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Fixture-assertion-only field (never on the wire): prop keys that must NOT be present on the matched patch's props. Pins omission contracts, e.g. an invalid .animate preset lowering to no __anim.animate prop and no raw animate.0 passthrough."
+        },
+        "semantics": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Accessibility semantics derived for this node (role, name, states, relationships). Omitted entirely when the node has no derivable semantics."
         }
       },
       "required": ["type", "id", "elementType"],
@@ -23,10 +33,28 @@
     {
       "type": "object",
       "properties": {
+        "type": { "const": "setSemantics" },
+        "id": { "type": "string", "description": "Element ID to update" },
+        "semantics": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "The complete re-resolved semantics block (not a field delta). Omitted when the node lost all derivable semantics — renderers must then clear everything."
+        }
+      },
+      "required": ["type", "id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
         "type": { "const": "setProp" },
         "id": { "type": "string", "description": "Element ID to update" },
         "name": { "type": "string", "description": "Property name" },
-        "value": { "description": "New property value" }
+        "value": { "description": "New property value" },
+        "valueIsNull": {
+          "type": "boolean",
+          "description": "Fixture-assertion-only field (never on the wire): requires the matched patch's value to be EXPLICIT JSON null. Needed because `\"value\": null` in a fixture is indistinguishable from omitting the key (which matches ANY value) once deserialized — null contracts (e.g. __anim.states nulling its label on fallback) are otherwise unassertable."
+        }
       },
       "required": ["type", "id", "name", "value"],
       "additionalProperties": false
@@ -67,9 +95,26 @@
       "type": "object",
       "properties": {
         "type": { "const": "remove" },
-        "id": { "type": "string", "description": "Element ID to remove" }
+        "id": { "type": "string", "description": "Element ID to remove" },
+        "transition": {
+          "type": "boolean",
+          "description": "When true, the removed subtree has an exit animation (`__anim.exit` on this root): the renderer may defer teardown until the animation settles. Emitted FIRST, before any descendant removes. Omitted entirely when false — the wire format is unchanged for non-animated removals."
+        }
       },
       "required": ["type", "id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "type": { "const": "batchAnimation" },
+        "spec": {
+          "type": "object",
+          "additionalProperties": true,
+          "description": "Batch-scoped animation spec (Option D transaction-scoped animation). Always a complete object by the time it reaches the wire — the engine normalizes a bare curve string into {curve, duration: 250} and fills a missing duration with 250; unknown fields pass through (renderers own interpretation). This patch is the FIRST entry of a render batch triggered by a state update that carried an animation context: renderers that understand it animate every prop change in the batch (precedence: batch spec > node .transition > none); renderers that don't know the type ignore it and snap. A cycle producing no patches emits no prelude either — no stamp without patches."
+        }
+      },
+      "required": ["type", "spec"],
       "additionalProperties": false
     },
     {

@@ -201,13 +201,14 @@ WebSocket Server ──► RemoteEngine ──► HypenRenderer ──► HypenV
 
 | Category | Components |
 |----------|------------|
-| **Layout** | Column, Row, Box, Container, Center, Spacer, Stack, List, Grid, ScrollView |
+| **Layout** | Column, Row, Box, Container, Center, Spacer, Stack, List, Grid |
 | **Content** | Text, Heading, Paragraph, Image, Divider |
 | **Interactive** | Button, Link |
 | **Form** | Input, TextArea, Checkbox, Switch, Slider, Select |
 | **UI** | Card, Spinner, ProgressBar, Badge, Avatar |
 | **Media** | Audio, Video |
 | **Router** | Router, Route |
+| **Accessibility** | VisuallyHidden |
 
 ### Supported Applicators
 
@@ -240,6 +241,37 @@ The engine receives these message types from the server:
 The engine sends these messages to the server:
 
 - **dispatchAction** - User interactions (button clicks, input changes, etc.)
+
+### Compression (`permessage-deflate`)
+
+Compression is **not configurable from this package**, and that is a platform
+constraint rather than a gap in HypenSwift. `RemoteEngineConfig` therefore has
+no `compression` option, where the other Hypen client SDKs do.
+
+`RemoteEngine` uses `URLSessionWebSocketTask`. URLSession offers
+`Sec-WebSocket-Extensions: permessage-deflate` in the opening handshake by
+itself and transparently inflates compressed frames when a server accepts.
+Apple provides no public API to enable, disable, or parameterise this — there
+is no property on the task, and the `Sec-*` handshake headers cannot be set on
+the `URLRequest`.
+
+What this means in practice:
+
+| Server | Result |
+|---|---|
+| Compression-enabled Hypen server (web / Go / Kotlin / Rust) | Compressed automatically. No client changes needed. |
+| `hypen-server-swift` | Uncompressed. That server declines the extension (SwiftNIO and WebSocketKit have no RFC 7692 support); negotiation is per-connection, so this is a clean fallback, not an error. |
+| Any server, if you want compression *off* | Not possible from the client. Disable it server-side. |
+
+Device access (a `DeviceHost`) works on compressed connections as long as each
+message is compressed on its own: the server's response must carry both
+`server_no_context_takeover` and `client_no_context_takeover`, which the Hypen
+TypeScript and Go servers (and the Kotlin example's `HypenDeflate`) negotiate by
+default. With compression that shares history across messages, the connection
+runs UI-only and logs a warning.
+
+Switching to a third-party WebSocket client (Starscream, libwebsockets) to gain
+control here is explicitly out of scope for this package.
 
 ### Action Dispatch
 
@@ -395,6 +427,9 @@ class MyTests: XCTestCase {
 
 - `listRowSeparator` requires macOS 13+
 - Some keyboard types only available on iOS
+- WebSocket compression cannot be enabled, disabled, or tuned — `URLSession`
+  negotiates `permessage-deflate` on its own with no public API to control it
+  (see [Compression](#compression-permessage-deflate))
 
 ## Troubleshooting
 
@@ -411,11 +446,56 @@ HypenView(url: "ws://localhost:8080/hypen")
 
 ### Debug Logging
 
-Enable logging in the config:
+Raise the global log level (default: `.error`):
 
 ```swift
-RemoteEngineConfig(enableLogging: true)
+setLogLevel(.debug)   // or setDebugMode(true)
 ```
+
+Per-connection transport logging lives on the engine config:
+
+```swift
+RemoteEngineConfig(debugLogging: true)
+```
+
+#### Routing logs into your own logger
+
+By default Hypen writes to `NSLog`. Install a handler to send the same
+messages anywhere — `os.Logger`, swift-log, analytics, an in-app console.
+The SDK still does the level filtering and formatting; the handler just
+receives the final tag and message:
+
+```swift
+import OSLog
+
+let osLogger = Logger(subsystem: "com.example.app", category: "Hypen")
+
+setLogHandler { level, tag, message in
+    switch level {
+    case .debug: osLogger.debug("[\(tag)] \(message)")
+    case .info:  osLogger.info("[\(tag)] \(message)")
+    case .warn:  osLogger.warning("[\(tag)] \(message)")
+    default:     osLogger.error("[\(tag)] \(message)")
+    }
+}
+```
+
+Or conform a type to `HypenLogHandler` for full control:
+
+```swift
+struct MyLogHandler: HypenLogHandler {
+    func debug(tag: String, message: String) { /* ... */ }
+    func info(tag: String, message: String)  { /* ... */ }
+    func warn(tag: String, message: String)  { /* ... */ }
+    func error(tag: String, message: String) { /* ... */ }
+}
+
+setLogHandler(MyLogHandler())
+setLogHandler(nil)   // back to NSLog
+```
+
+Set the handler **once at startup**, before any Hypen view starts logging —
+like `setLogLevel`, it is unsynchronised global configuration.
 
 ### Element Not Rendering
 

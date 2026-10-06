@@ -2,8 +2,10 @@ package space.hypen.renderer.applicators
 
 import androidx.compose.foundation.background
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.paint
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.painter.BitmapPainter
 import androidx.compose.ui.layout.ContentScale
 
 /**
@@ -21,75 +23,22 @@ class LinearGradientApplicator : ApplicatorHandler {
         value: Any?,
         context: ApplicatorContext,
     ): Modifier {
+        // The applicator takes the INNER form ("to right, #a, #b"); wrapping
+        // it into the CSS function reuses one parser for both this and the
+        // `background`/`backgroundImage` CSS strings, so they can't drift.
+        if (value is String) {
+            val layers = CssBackground.parse("linear-gradient($value)") ?: return modifier
+            return modifier.paintCssBackground(layers)
+        }
+
         val (colors, angle) = when (value) {
-            is String -> parseGradientString(value)
             is Map<*, *> -> parseGradientMap(value)
             else -> return modifier
         }
 
         if (colors.size < 2) return modifier
 
-        val brush = createBrushForAngle(colors, angle)
-        return modifier.background(brush)
-    }
-
-    /**
-     * Parse CSS-like gradient string format.
-     * Examples:
-     * - "to right, #3b82f6, #8b5cf6"
-     * - "to bottom, red, blue"
-     * - "135deg, #667eea, #764ba2"
-     * - "45deg, #f093fb, #f5576c"
-     */
-    private fun parseGradientString(value: String): Pair<List<Color>, Float> {
-        val parts = value.split(",").map { it.trim() }
-        if (parts.size < 2) return emptyList<Color>() to 0f
-
-        val firstPart = parts[0].lowercase()
-        val angle: Float
-        val colorStrings: List<String>
-
-        when {
-            firstPart.startsWith("to ") -> {
-                angle = parseDirectionToAngle(firstPart)
-                colorStrings = parts.drop(1)
-            }
-            firstPart.endsWith("deg") -> {
-                angle = firstPart.removeSuffix("deg").toFloatOrNull() ?: 0f
-                colorStrings = parts.drop(1)
-            }
-            else -> {
-                // No direction specified, assume all parts are colors
-                angle = 180f // default: top to bottom
-                colorStrings = parts
-            }
-        }
-
-        val colors = colorStrings.mapNotNull { ColorParser.parse(it.trim()) }
-        return colors to angle
-    }
-
-    /**
-     * Parse direction keywords to angle.
-     * CSS gradient directions:
-     * - "to top" = 0deg (bottom to top)
-     * - "to right" = 90deg (left to right)
-     * - "to bottom" = 180deg (top to bottom)
-     * - "to left" = 270deg (right to left)
-     * - "to top right" / "to bottom right" etc for diagonals
-     */
-    private fun parseDirectionToAngle(direction: String): Float {
-        return when (direction) {
-            "to top" -> 0f
-            "to right" -> 90f
-            "to bottom" -> 180f
-            "to left" -> 270f
-            "to top right", "to right top" -> 45f
-            "to bottom right", "to right bottom" -> 135f
-            "to bottom left", "to left bottom" -> 225f
-            "to top left", "to left top" -> 315f
-            else -> 180f // default: top to bottom
-        }
+        return modifier.background(CssBackground.brushForAngle(colors, angle))
     }
 
     private fun parseGradientMap(value: Map<*, *>): Pair<List<Color>, Float> {
@@ -99,61 +48,6 @@ class LinearGradientApplicator : ApplicatorHandler {
         return colors to angle
     }
 
-    private fun createBrushForAngle(colors: List<Color>, angle: Float): Brush {
-        // Normalize angle to 0-360
-        val normalizedAngle = ((angle % 360) + 360) % 360
-
-        return when {
-            normalizedAngle < 22.5f || normalizedAngle >= 337.5f -> {
-                // ~0deg: bottom to top
-                Brush.verticalGradient(colors.reversed())
-            }
-            normalizedAngle < 67.5f -> {
-                // ~45deg: bottom-left to top-right
-                Brush.linearGradient(
-                    colors = colors,
-                    start = androidx.compose.ui.geometry.Offset(0f, Float.POSITIVE_INFINITY),
-                    end = androidx.compose.ui.geometry.Offset(Float.POSITIVE_INFINITY, 0f)
-                )
-            }
-            normalizedAngle < 112.5f -> {
-                // ~90deg: left to right
-                Brush.horizontalGradient(colors)
-            }
-            normalizedAngle < 157.5f -> {
-                // ~135deg: top-left to bottom-right
-                Brush.linearGradient(
-                    colors = colors,
-                    start = androidx.compose.ui.geometry.Offset(0f, 0f),
-                    end = androidx.compose.ui.geometry.Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
-                )
-            }
-            normalizedAngle < 202.5f -> {
-                // ~180deg: top to bottom
-                Brush.verticalGradient(colors)
-            }
-            normalizedAngle < 247.5f -> {
-                // ~225deg: top-right to bottom-left
-                Brush.linearGradient(
-                    colors = colors,
-                    start = androidx.compose.ui.geometry.Offset(Float.POSITIVE_INFINITY, 0f),
-                    end = androidx.compose.ui.geometry.Offset(0f, Float.POSITIVE_INFINITY)
-                )
-            }
-            normalizedAngle < 292.5f -> {
-                // ~270deg: right to left
-                Brush.horizontalGradient(colors.reversed())
-            }
-            else -> {
-                // ~315deg: bottom-right to top-left
-                Brush.linearGradient(
-                    colors = colors,
-                    start = androidx.compose.ui.geometry.Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY),
-                    end = androidx.compose.ui.geometry.Offset(0f, 0f)
-                )
-            }
-        }
-    }
 }
 
 /**
@@ -242,9 +136,16 @@ class GradientApplicator : ApplicatorHandler {
 
 /**
  * Applicator for backgroundImage.
- * Note: In Compose, background images require AsyncImage or similar.
- * This is a placeholder that logs a warning - actual implementation
- * would need to be done at component level.
+ *
+ * Despite the name, CSS `background-image` is overwhelmingly a GRADIENT in
+ * practice — every Tailwind `bg-gradient-to-*` lowers to
+ * `linear-gradient(to bottom right, #a, #b)` and arrives here. This used to
+ * be a stub that logged a warning and dropped the value, which is why every
+ * gradient tile in the home-screen example rendered flat.
+ *
+ * Remote (`http`) image URLs still degrade to nothing: fetching needs an
+ * async loader at the component level, and blocking composition on the
+ * network is not an option. `data:` URIs are decoded and painted.
  */
 class BackgroundImageApplicator : ApplicatorHandler {
     override val name: String = "backgroundImage"
@@ -254,16 +155,39 @@ class BackgroundImageApplicator : ApplicatorHandler {
         value: Any?,
         context: ApplicatorContext,
     ): Modifier {
-        // Background images in Compose are typically handled differently
-        // (using Box with Image behind content, or custom Painter)
-        // This applicator logs a warning for now
-        android.util.Log.w(
-            "BackgroundImageApplicator",
-            "backgroundImage applicator is not fully supported in Compose. " +
-            "Consider using an Image component as a sibling in a Box/Stack."
-        )
-        return modifier
+        val layers = CssBackground.parse(value) ?: return modifier
+        return modifier.paintCssBackground(layers)
     }
+}
+
+/**
+ * Paint parsed CSS background layers, bottom-up.
+ *
+ * Modifier draw order is chain order, so the colour goes on first, then the
+ * image, then gradients — matching CSS, where the first-declared layer ends
+ * up on top.
+ */
+internal fun Modifier.paintCssBackground(layers: CssBackground.Layers): Modifier {
+    var result = this
+    layers.color?.let { result = result.background(it) }
+    // Bottom-first, so chain order matches CSS's first-declared-on-top.
+    // Images and gradients interleave here exactly as declared.
+    for (layer in layers.paintLayers) {
+        result = when (layer) {
+            is CssBackground.PaintLayer.Gradient -> result.background(layer.brush)
+            is CssBackground.PaintLayer.Image ->
+                CssBackground.decodeDataImage(layer.uri)?.let { bitmap ->
+                    result.paint(
+                        BitmapPainter(bitmap),
+                        // The layout is the element's own; a background must
+                        // never resize its host to the image's intrinsic size.
+                        sizeToIntrinsics = false,
+                        contentScale = ContentScale.Crop,
+                    )
+                } ?: result
+        }
+    }
+    return result
 }
 
 /**

@@ -1,0 +1,151 @@
+{
+  "name": "camera-capture-video-undeclared",
+  "description": "camera.capture@1 video with a maxDurationMs recording limit: a recording's size is unknown until it ends, so blobStart omits `bytes` and the encoder output streams under credit (overflow pause: the sender reports paused, waits for a grant, resumes). The user presses Stop before the limit; the single terminal item states the actual byte count and sha256.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "camera.capture",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 16,
+        "params": {
+          "mode": "video",
+          "facing": "front",
+          "maxDurationMs": 15000
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "progress",
+          "state": "pendingConsent"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "progress",
+          "state": "running"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "video/webm"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 2,
+          "seq": 0
+        },
+        "hex": "0100000002000000000000001a45dfa3687970656e2d63616d657261"
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "paused": true
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "grant": 64
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "paused": false
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 2,
+          "seq": 1
+        },
+        "hex": "0100000002000000010000002d7765626d2d766964656f2d636c7573746572"
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "items": [
+            {
+              "channel": 0,
+              "contentType": "video/webm",
+              "bytes": 35,
+              "sha256": "2c8efb22b15355817013dceb2478be00715a1ae2e7b9e6c311dc141ccad39ecf"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

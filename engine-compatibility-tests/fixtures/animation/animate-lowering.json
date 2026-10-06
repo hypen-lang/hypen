@@ -1,0 +1,60 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "animate-lowering",
+  "description": "The .animate(<preset>) applicator lowers into a single __anim.animate prop object: a bare preset gets the per-preset defaults (spin = {800, loop, linear}), named modifiers override them, and delay appears on the wire only when given",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Column { Text(\"Spinner\").animate(spin) Text(\"Pulser\").animate(pulse, duration: 800, repeat: 3, curve: easeInOut, delay: 100) }",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 6,
+    "patchTypes": ["create", "insert", "create", "insert", "create", "insert"],
+    "patches": [
+      { "type": "create", "elementType": "Column" },
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "Spinner",
+          "__anim.animate": {
+            "preset": "spin",
+            "duration": 800,
+            "repeat": "loop",
+            "curve": "linear"
+          }
+        }
+      },
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": {
+          "0": "Pulser",
+          "__anim.animate": {
+            "preset": "pulse",
+            "duration": 800,
+            "repeat": 3,
+            "curve": "easeInOut",
+            "delay": 100
+          }
+        }
+      },
+      { "type": "insert" },
+      { "type": "insert" },
+      { "type": "insert" }
+    ]
+  }
+}

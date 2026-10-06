@@ -10,6 +10,7 @@ import (
 func getWasmPath() string {
 	// Try relative path from hypen-golang directory
 	paths := []string{
+		"../target/wasm32-wasip1/release/hypen_engine.wasm",
 		"../hypen-engine-rs/target/wasm32-wasip1/release/hypen_engine.wasm",
 		"../../hypen-engine-rs/target/wasm32-wasip1/release/hypen_engine.wasm",
 	}

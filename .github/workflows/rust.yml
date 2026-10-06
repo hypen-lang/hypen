@@ -8,6 +8,8 @@ on:
       - "tailwind-parse/**"
       - "hypen-engine-rs/**"
       - "hypen-sdk-rs/**"
+      - "engine-compatibility-tests/schema/device/**"
+      - "engine-compatibility-tests/fixtures/device/**"
       - ".github/workflows/rust.yml"
   pull_request:
     branches: [main, develop]
@@ -16,6 +18,8 @@ on:
       - "tailwind-parse/**"
       - "hypen-engine-rs/**"
       - "hypen-sdk-rs/**"
+      - "engine-compatibility-tests/schema/device/**"
+      - "engine-compatibility-tests/fixtures/device/**"
       - ".github/workflows/rust.yml"
 
 env:
@@ -31,6 +35,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+          # The device broker binding surfaces (RFC 001) compile only for
+          # these targets (js_device.rs, wasi.rs) and are linted below.
+          targets: wasm32-unknown-unknown, wasm32-wasip1
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -66,10 +73,41 @@ jobs:
         working-directory: tailwind-parse
         continue-on-error: true
 
-      - name: Clippy engine
-        run: cargo clippy --all-targets
+      # Gating: errors fail the build. Warnings elsewhere in the engine are
+      # pre-existing, but none is tolerated in the Device Capability Protocol
+      # files (RFC 001, decision D9).
+      - name: Clippy engine (device files warning-free)
+        run: |
+          cargo clippy --all-targets --features schema-export --message-format=short 2>&1 | tee clippy.log
+          test "${PIPESTATUS[0]}" -eq 0
+          if grep -E '(src/serialize/device|tests/test_device_)[^:]*:[0-9]+:[0-9]+: (warning|error)' clippy.log; then
+            echo "::error::clippy warnings in device protocol files"
+            exit 1
+          fi
+        shell: bash
         working-directory: hypen-engine-rs
-        continue-on-error: true
+
+      # Gating: the device broker binding surfaces are feature- and
+      # target-gated, so the default clippy run above never sees them:
+      # src/uniffi/device.rs (`uniffi`), src/wasm/js_device.rs (wasm32 +
+      # `js,device-broker`), src/wasm/wasi.rs + wasi_device.rs (wasm32 +
+      # `wasi`). Each build must compile clippy-error-free, and none may
+      # warn in a device or binding file. The browser build (`js` alone,
+      # no broker) must stay warning-free in those files too.
+      - name: Clippy device broker bindings (uniffi, js, wasi)
+        run: |
+          set -o pipefail
+          : > clippy-bindings.log
+          cargo clippy --all-targets --features uniffi --message-format=short 2>&1 | tee -a clippy-bindings.log
+          cargo clippy --lib --target wasm32-unknown-unknown --features js,device-broker --message-format=short 2>&1 | tee -a clippy-bindings.log
+          cargo clippy --lib --target wasm32-unknown-unknown --features js --message-format=short 2>&1 | tee -a clippy-bindings.log
+          cargo clippy --lib --target wasm32-wasip1 --features wasi --message-format=short 2>&1 | tee -a clippy-bindings.log
+          if grep -E '(src/device/|src/serialize/device|src/wasm/(device_binding|js_device|wasi_device)|src/uniffi/device|tests/test_device_)[^:]*:[0-9]+:[0-9]+: (warning|error)' clippy-bindings.log; then
+            echo "::error::clippy warnings in device broker binding files"
+            exit 1
+          fi
+        shell: bash
+        working-directory: hypen-engine-rs
 
       - name: Clippy hypen-server
         run: cargo clippy --all-targets
@@ -91,10 +129,37 @@ jobs:
           cargo fmt --check --manifest-path hypen-engine-rs/Cargo.toml
           cargo fmt --check --manifest-path hypen-sdk-rs/Cargo.toml
         continue-on-error: true
+      # Device protocol files are held to rustfmt (decision D9): gating.
+      - name: Check formatting (device protocol, gating)
+        run: |
+          rustfmt --check --edition 2021 \
+            hypen-engine-rs/src/serialize/device.rs \
+            hypen-engine-rs/src/serialize/device/schema.rs \
+            hypen-engine-rs/tests/test_device_conformance.rs \
+            hypen-engine-rs/tests/test_device_schema_export.rs \
+            hypen-engine-rs/tests/test_device_transcripts.rs \
+            hypen-engine-rs/src/wasm/device_binding.rs \
+            hypen-engine-rs/src/wasm/js_device.rs \
+            hypen-engine-rs/src/wasm/wasi_device.rs \
+            hypen-engine-rs/src/uniffi/device.rs \
+            hypen-engine-rs/src/device/mod.rs \
+            hypen-engine-rs/src/device/broker.rs \
+            hypen-engine-rs/src/device/scheduler.rs \
+            hypen-engine-rs/tests/test_device_broker.rs \
+            hypen-engine-rs/tests/test_device_broker_data.rs \
+            hypen-engine-rs/tests/test_device_broker_transcripts.rs \
+            hypen-engine-rs/tests/device_broker_support/mod.rs
 
   test:
     name: Test
     runs-on: ubuntu-latest
+    # The job builds the engine several times (default, schema-export,
+    # uniffi) plus the SDK and the compatibility runner. Without debug info
+    # the target dir stays small enough for the runner's disk and for
+    # rust-cache's post-job save (which died after green tests otherwise).
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v4
 
@@ -107,6 +172,7 @@ jobs:
             tailwind-parse
             hypen-engine-rs
             hypen-sdk-rs
+            engine-compatibility-tests/runners/rust
 
       - name: Test parser
         run: cargo test
@@ -120,9 +186,61 @@ jobs:
         run: cargo test
         working-directory: hypen-engine-rs
 
+      # Device Capability Protocol (RFC 001): the `schema-export` feature
+      # compiles the schema/registry drift gate (test_device_schema_export)
+      # on top of every default target, including the stateful transcript
+      # runner and the shared conformance corpus. Fails when
+      # engine-compatibility-tests/schema/device/ is stale.
+      - name: Test engine with schema export (device drift gate)
+        run: cargo test --features schema-export
+        working-directory: hypen-engine-rs
+
+      # Device broker UniFFI surface (RFC 001): src/uniffi/device.rs and its
+      # tests compile only with the `uniffi` feature, so the default runs
+      # above skip them. `--lib` keeps this to the crate's unit tests (the
+      # integration tests already ran above and do not depend on uniffi).
+      - name: Test engine with uniffi (device broker bindings)
+        run: cargo test --features uniffi --lib
+        working-directory: hypen-engine-rs
+
       - name: Test hypen-server
         run: cargo test
         working-directory: hypen-sdk-rs
+
+      # Cross-SDK compatibility runner (Rust side): runs the variant, portable,
+      # and rendering/state fixtures through the engine's canonical Rust impls.
+      # Without this the Rust half of the cross-SDK contract is never enforced in
+      # CI (the TypeScript half already runs via `bun test`).
+      - name: Test compatibility runner (Rust)
+        run: cargo test
+        working-directory: engine-compatibility-tests/runners/rust
+
+      - name: Disk usage after tests
+        if: always()
+        run: df -h / && du -sh target */target 2>/dev/null || true
+
+  device-fixtures:
+    # Device Capability Protocol (RFC 001, decision D9): every fixture under
+    # engine-compatibility-tests/fixtures/device/ is generated. Re-run the
+    # generators and fail on any difference, including stale or new files.
+    name: Device fixtures are regenerated
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Re-run the fixture generators
+        run: |
+          python3 engine-compatibility-tests/fixtures/device/tools/gen_conformance.py
+          python3 engine-compatibility-tests/fixtures/device/tools/gen_selection.py
+          python3 engine-compatibility-tests/fixtures/device/tools/gen_transcripts.py
+          python3 engine-compatibility-tests/fixtures/device/tools/gen_frames.py
+      - name: Fail on generated drift
+        run: |
+          git status --porcelain -- engine-compatibility-tests/fixtures/device
+          git diff --exit-code -- engine-compatibility-tests/fixtures/device
+          test -z "$(git status --porcelain -- engine-compatibility-tests/fixtures/device)"
 
   wasm-build:
     name: WASM Build
@@ -144,16 +262,25 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      # Server JS builds carry the device broker (RFC 001); the browser build
+      # must not (see build-wasm.sh).
       - name: Build WASM (bundler)
-        run: wasm-pack build --target bundler --out-dir pkg/bundler --features js
+        run: wasm-pack build --target bundler --out-dir pkg/bundler --features js,device-broker
         working-directory: hypen-engine-rs
 
       - name: Build WASM (nodejs)
-        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
         working-directory: hypen-engine-rs
 
       - name: Build WASM (web)
-        run: wasm-pack build --target web --out-dir pkg/web --features js
+        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker
+        working-directory: hypen-engine-rs
+
+      - name: Build WASM (browser, no device broker)
+        run: |
+          wasm-pack build --target web --out-dir pkg/browser --features js
+          grep -q WasmDeviceBroker pkg/web/hypen_engine.d.ts
+          ! grep -q WasmDeviceBroker pkg/browser/hypen_engine.d.ts
         working-directory: hypen-engine-rs
 
       - name: Build WASI
@@ -168,4 +295,5 @@ jobs:
             hypen-engine-rs/pkg/bundler/
             hypen-engine-rs/pkg/nodejs/
             hypen-engine-rs/pkg/web/
+            hypen-engine-rs/pkg/browser/
           retention-days: 7

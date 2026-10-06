@@ -53,7 +53,7 @@ function refresh(state: ProfileState, user: User) {
     if (t.calories > 0) activeDays += 1;
     totalCalories += t.calories;
   }
-  state.streakLabel = `${activeDays} / 7 days logged this week`;
+  state.streakLabel = `${activeDays}/7 days logged`;
   state.avgCalories = Math.round(totalCalories / 7);
 }
 
@@ -61,7 +61,7 @@ export default app
   .module("Profile")
   .defineState<ProfileState>({
     user: BLANK_USER,
-    streakLabel: "0 / 7 days logged this week",
+    streakLabel: "0/7 days logged",
     avgCalories: 0,
     goals: goalsFor(BLANK_USER),
   })
@@ -75,29 +75,32 @@ export default app
       Column {
         Row {
           Button {
-            Text("‹")
-              .tw("text-lg md:text-xl")
-              .color("#374151")
+            Icon(@resources.chevron-left)
+              .size(19)
+              .color("#6B7280")
           }
           .tw("bg-transparent border-0 px-3 py-2")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(150, easeOut)
           .onClick(@router.push, to: "/")
 
           Text("Profile")
-            .tw("flex-1 text-base md:text-lg font-semibold")
+            .tw("flex-1 text-[15px] md:text-base font-semibold")
             .color("#111827")
 
           Button {
-            Text("⚙")
-              .tw("text-lg md:text-xl")
-              .color("#374151")
+            Icon(@resources.settings)
+              .size(19)
+              .color("#6B7280")
           }
           .tw("bg-transparent border-0 p-2")
         }
-        .tw("px-2 py-3 items-center border-b border-gray-100")
+        .tw("px-2 py-2.5 items-center border-b border-gray-100 bg-white")
 
         Column {
           Image(src: "@{state.user.avatarUrl}")
-            .tw("w-20 h-20 md:w-24 md:h-24 rounded-full")
+            .tw("w-20 h-20 md:w-24 md:h-24 rounded-full bg-gray-100 border border-gray-100")
+            .objectFit("cover")
           Text("@{state.user.displayName}")
             .tw("text-xl md:text-2xl font-bold mt-3")
             .color("#111827")
@@ -125,10 +128,11 @@ export default app
           .tw("flex-1 items-center")
         }
         .tw("mx-4 mb-4 bg-white rounded-2xl p-4 md:p-5 border border-gray-100 items-center")
+        .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
 
-        Text("Daily goals")
-          .tw("px-4 pt-2 pb-2 text-sm md:text-base font-medium")
-          .color("#374151")
+        Text("DAILY GOALS")
+          .tw("px-4 pt-4 pb-2 text-[11px] font-semibold tracking-widest")
+          .color("#9CA3AF")
 
         List(@state.goals) {
           Row {
@@ -142,8 +146,9 @@ export default app
           .tw("items-center px-4 py-3 border-b border-gray-100")
         }
         .tw("mx-4 bg-white rounded-2xl border border-gray-100 overflow-hidden")
+        .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
       }
       .scrollable(true)
-      .tw("flex-1 w-full bg-white")
+      .tw("flex-1 w-full bg-[#F8FAFC]")
     }
   `);

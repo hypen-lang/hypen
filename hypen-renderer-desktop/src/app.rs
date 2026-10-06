@@ -17,6 +17,7 @@ use crate::remote::RemoteModule;
 use crate::window::{App as WindowApp, AppEvent, PatchQueue};
 use hypen_server::app::HypenApp;
 use hypen_server::module::ModuleBuilder;
+use std::path::PathBuf;
 use std::sync::Arc;
 use winit::event_loop::{ControlFlow, EventLoop};
 
@@ -26,6 +27,12 @@ pub struct DesktopApp {
     module: Option<Arc<dyn HypenModule>>,
     shortcuts: Vec<crate::window::ShortcutBinding>,
     unified_titlebar: bool,
+    reduced_motion: Option<bool>,
+    window_icon: Option<winit::window::Icon>,
+    safe_area_insets: crate::layout::SafeAreaInsets,
+    #[cfg(feature = "dev-overlay")]
+    dev_overlay_top: f32,
+    screenshot_path: Option<PathBuf>,
 }
 
 impl DesktopApp {
@@ -36,7 +43,63 @@ impl DesktopApp {
             module: None,
             shortcuts: Vec::new(),
             unified_titlebar: false,
+            reduced_motion: None,
+            window_icon: None,
+            safe_area_insets: crate::layout::SafeAreaInsets::default(),
+            #[cfg(feature = "dev-overlay")]
+            dev_overlay_top: 8.0,
+            screenshot_path: None,
         }
+    }
+
+    /// Declare the window's safe-area insets, in logical px. `SafeArea`
+    /// containers pad themselves by these on whichever edges their
+    /// `edges` prop selects.
+    ///
+    /// Desktop's platform default is zero on every edge — a desktop
+    /// window has no notch or home indicator — with one exception:
+    /// under [`Self::unified_titlebar`] on macOS, the window-controls
+    /// bar (close / minimize / maximize) is drawn over the content, so
+    /// the renderer installs its height
+    /// ([`crate::layout::WINDOW_CONTROLS_BAR_HEIGHT`]) as the platform
+    /// top inset automatically. So by default a `SafeArea { ... }` lays
+    /// out exactly like a full-size `Column`, except that it clears the
+    /// controls bar when there is one. Overrides are per-edge and merge
+    /// over the platform values, so an embedder declares only the edges
+    /// it additionally covers:
+    ///
+    /// ```rust,ignore
+    /// use hypen_renderer_desktop::{DesktopApp, SafeAreaInsets};
+    /// DesktopApp::new()
+    ///     // Reserve a 40px bottom overlay HUD; top keeps the platform
+    ///     // value (the controls bar under a unified titlebar, else 0).
+    ///     .safe_area_insets(SafeAreaInsets::default().with_bottom(40.0))
+    ///     .run();
+    /// ```
+    pub fn safe_area_insets(mut self, insets: crate::layout::SafeAreaInsets) -> Self {
+        self.safe_area_insets = insets;
+        self
+    }
+
+    /// Place the opt-in native development HUD below embedder-owned chrome.
+    /// This API is compiled out together with the HUD in ordinary builds.
+    #[cfg(feature = "dev-overlay")]
+    pub fn dev_overlay_top(mut self, top: f32) -> Self {
+        self.dev_overlay_top = top.max(0.0);
+        self
+    }
+
+    /// Programmatically force reduced motion on or off for this window.
+    /// When unset, the renderer follows the `HYPEN_REDUCED_MOTION`
+    /// environment variable (`1`/`true`/`yes`/`on`), defaulting to
+    /// motion enabled. There is no reliable cross-platform OS
+    /// reduced-motion query in this stack, so configuration is the v1
+    /// gate (a recorded narrowing against the web renderers'
+    /// `prefers-reduced-motion` media query). Per-node
+    /// `.motion(essential)` opt-outs are honored either way.
+    pub fn reduced_motion(mut self, on: bool) -> Self {
+        self.reduced_motion = Some(on);
+        self
     }
 
     /// Register a keyboard shortcut. When the user presses the key
@@ -82,8 +145,10 @@ impl DesktopApp {
     /// and content extends full-height under it (`fullSizeContentView`)
     /// so the app draws edge-to-edge with the traffic lights floating
     /// over the top. The app is responsible for insetting its own
-    /// top-left content so nothing hides behind the traffic lights.
-    /// No-op on other platforms.
+    /// top-left content so nothing hides behind the traffic lights —
+    /// content inside a `SafeArea { ... }` gets that for free: the
+    /// controls bar becomes the window's platform safe-area top inset
+    /// (see [`Self::safe_area_insets`]). No-op on other platforms.
     pub fn unified_titlebar(mut self, on: bool) -> Self {
         self.unified_titlebar = on;
         self
@@ -94,6 +159,48 @@ impl DesktopApp {
         self
     }
 
+    /// Set the window / taskbar icon from raw RGBA pixels (row-major,
+    /// 4 bytes per pixel). Shows in the title bar + taskbar on Windows
+    /// and in X11 window switchers on Linux. macOS and Wayland ignore
+    /// per-window icons — there the icon comes from the packaged app
+    /// (.app bundle .icns / .desktop entry). Invalid data (length ≠
+    /// `w * h * 4`) is logged and skipped rather than aborting launch.
+    pub fn icon_rgba(mut self, rgba: Vec<u8>, w: u32, h: u32) -> Self {
+        match winit::window::Icon::from_rgba(rgba, w, h) {
+            Ok(icon) => self.window_icon = Some(icon),
+            Err(e) => log::warn!("window icon rejected: {e}"),
+        }
+        self
+    }
+
+    /// Set the window / taskbar icon from an encoded PNG (typically an
+    /// `include_bytes!` of a 256px asset). See [`Self::icon_rgba`] for
+    /// platform behaviour. A PNG that fails to decode is logged and
+    /// skipped rather than aborting launch.
+    pub fn icon_png(self, bytes: &[u8]) -> Self {
+        match image::load_from_memory_with_format(bytes, image::ImageFormat::Png) {
+            Ok(img) => {
+                let rgba = img.to_rgba8();
+                let (w, h) = rgba.dimensions();
+                self.icon_rgba(rgba.into_raw(), w, h)
+            }
+            Err(e) => {
+                log::warn!("window icon PNG failed to decode: {e}");
+                self
+            }
+        }
+    }
+
+    /// Save one settled renderer frame as a PNG and close the app.
+    ///
+    /// The exported image uses the logical dimensions configured by
+    /// [`Self::size`], so Retina and standard-density hosts produce the same
+    /// screenshot size. This is intended for gallery and visual-regression
+    /// capture; ordinary apps should omit it.
+    pub fn screenshot(mut self, path: impl Into<PathBuf>) -> Self {
+        self.screenshot_path = Some(path.into());
+        self
+    }
     /// Drive the window with a fully-built SDK module instance.
     ///
     /// ```rust,ignore
@@ -137,8 +244,36 @@ impl DesktopApp {
     ///     .connect("ws://localhost:3000", "Counter")
     ///     .run();
     /// ```
+    ///
+    /// The connection carries the desktop DeviceHost (RFC 001: `file.pick`,
+    /// `gallery.pick`, `file.save` behind native dialogs; camera,
+    /// microphone and Bluetooth behind host UI drawn in this window); use
+    /// [`Self::connect_with`] for upgrade headers (a device-enabled server
+    /// admits native clients only through its authenticator) or to connect
+    /// UI-only.
     pub fn connect(self, url: impl Into<String>, module_name: impl Into<String>) -> Self {
         let remote = RemoteModule::connect(url, module_name);
+        self.module(Arc::new(remote))
+    }
+
+    /// [`Self::connect`] with explicit [`crate::RemoteOptions`]:
+    ///
+    /// ```rust,ignore
+    /// DesktopApp::new()
+    ///     .connect_with(
+    ///         "wss://app.example.com/ws",
+    ///         "App",
+    ///         RemoteOptions::default().header("Authorization", "Bearer …"),
+    ///     )
+    ///     .run();
+    /// ```
+    pub fn connect_with(
+        self,
+        url: impl Into<String>,
+        module_name: impl Into<String>,
+        options: crate::RemoteOptions,
+    ) -> Self {
+        let remote = RemoteModule::connect_with(url, module_name, options);
         self.module(Arc::new(remote))
     }
 
@@ -173,6 +308,22 @@ impl DesktopApp {
         event_loop.set_control_flow(ControlFlow::Wait);
         let proxy = event_loop.create_proxy();
 
+        // Sample once per second without turning the demand-driven renderer
+        // into a permanent animation loop. The thread exits with the loop.
+        #[cfg(feature = "dev-overlay")]
+        {
+            let metrics_proxy = proxy.clone();
+            std::thread::Builder::new()
+                .name("hypen-dev-overlay".into())
+                .spawn(move || loop {
+                    std::thread::sleep(crate::dev_overlay::SAMPLE_INTERVAL);
+                    if metrics_proxy.send_event(AppEvent::DevOverlayTick).is_err() {
+                        break;
+                    }
+                })
+                .expect("spawn development overlay sampler");
+        }
+
         // Wire the patch callback BEFORE mount so the SDK's deferred
         // initial render lands in our queue. (See hypen-sdk-rs commit
         // that moved render_ir_node from new() to mount().) Patches
@@ -202,6 +353,10 @@ impl DesktopApp {
         // Background image-fetch worker uses the same proxy to wake
         // the renderer when an HTTP avatar finishes decoding.
         crate::paint::image::set_waker(proxy.clone());
+        // Feature `video`: playback pipelines wake the loop the same
+        // way — once per decoded frame and per EOS / error event.
+        #[cfg(feature = "video")]
+        crate::media::set_waker(proxy.clone());
         let mut app = WindowApp::new(
             self.title.clone(),
             self.size,
@@ -211,7 +366,18 @@ impl DesktopApp {
         );
         app.set_shortcuts(self.shortcuts.clone());
         app.set_unified_titlebar(self.unified_titlebar);
+        app.set_window_icon(self.window_icon.clone());
+        app.set_safe_area_insets(self.safe_area_insets);
+        #[cfg(feature = "dev-overlay")]
+        app.set_dev_overlay_top(self.dev_overlay_top);
+        if let Some(on) = self.reduced_motion {
+            app.set_reduced_motion(on);
+        }
+        app.set_screenshot_path(self.screenshot_path.clone());
         event_loop.run_app(&mut app).expect("event loop run");
+        if let Some(error) = app.take_screenshot_error() {
+            panic!("desktop screenshot failed: {error}");
+        }
     }
 }
 

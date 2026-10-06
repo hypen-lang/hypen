@@ -1,0 +1,306 @@
+=== rust-engine ===
+test result: ok. 646 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.28s
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.89s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 66 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 43 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 71 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.41s
+test result: ok. 47 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.04s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.83s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.07s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 32 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 82 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 26 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 28 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 39 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 6 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.44s
+
+=== rust-sdk ===
+test result: ok. 128 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+test result: ok. 4 passed; 0 failed; 24 ignored; 0 measured; 0 filtered out; finished in 1.40s
+
+=== desktop ===
+test result: ok. 808 passed; 0 failed; 13 ignored; 0 measured; 0 filtered out; finished in 12.22s
+
+=== web-rerun ===
+(skip) Canvas Events > dispatches click events
+(skip) Canvas Events > tracks hover state
+(skip) Canvas Events > manages focus
+(skip) ComponentResolver > defaultFetch (external network tests) > handles 404 errors
+(skip) ComponentResolver > defaultFetch (external network tests) > handles 500 errors
+(skip) Canvas Counter Example > creates engine and renderer without errors
+(skip) Canvas Counter Example > creates counter module without errors
+(skip) Canvas Counter Example > renders counter UI without errors
+(skip) Canvas Counter Example > handles state updates and re-renders
+(skip) Canvas Counter Example > computes layout for counter UI
+
+ 4385 pass
+ 38 skip
+ 0 fail
+ 65636 expect() calls
+Ran 4423 tests across 179 files. [53.53s]
+
+=== web-typecheck ===
+$ bun run typecheck:core && bun run typecheck:web && bun run typecheck:server && bun run typecheck:web-engine && bun run typecheck:cf && bun run typecheck:agent && bun run typecheck:device-web && bun run typecheck:device-fake
+$ cd packages/core && bunx tsc --noEmit
+$ cd packages/web && bunx tsc --noEmit
+$ cd packages/server && bunx tsc --noEmit
+$ cd packages/web-engine && bunx tsc --noEmit
+$ cd packages/cf && bunx tsc --noEmit
+$ cd packages/agent && bunx tsc --noEmit
+$ cd packages/device-web && bunx tsc --noEmit
+$ cd packages/device-fake && bunx tsc --noEmit
+
+=== browser-final ===
+(pass) real Chromium: gallery.pick through the host-owned consent control > dom: rendered action opens picker and verified upload updates rendered state [2695.27ms]
+(pass) real Chromium: gallery.pick through the host-owned consent control > canvas: rendered action opens picker and verified upload updates rendered state [2893.43ms]
+(pass) real Chromium: gallery.pick through the host-owned consent control > host Continue opens the real file picker; bytes round-trip and verify [2285.48ms]
+(pass) real Chromium: gallery.pick through the host-owned consent control > file.pick: host Continue opens the real multi-file picker; every file's bytes verify [2237.09ms]
+(pass) real Chromium: gallery.pick through the host-owned consent control > host Cancel is a denial; an immediate retry is throttled by cooldown [1661.70ms]
+(pass) real Chromium: host dialog input protection (review2 #6) > keystrokes typed into the app never reach the host's Continue (keyjacking) [2920.42ms]
+(pass) real Chromium: host dialog input protection (review2 #6) > a click landing on Continue as it appears is ignored; a deliberate click later works [1131.40ms]
+(pass) real Chromium: round-3 capture drivers end to end > camera.capture photo: host capture dialog with live preview → Capture → JPEG verified server-side [2212.71ms]
+(pass) real Chromium: round-3 capture drivers end to end > camera.capture video: Record → Stop streams MediaRecorder webm, undeclared, verified server-side [2169.66ms]
+(pass) real Chromium: round-3 capture drivers end to end > mic.record: consent → AudioWorklet PCM16 @16 kHz for 400 ms, streamed to onData, hash-verified [1745.75ms]
+(pass) real Chromium: round-3 capture drivers end to end > mic.record through the ScriptProcessor fallback (no AudioWorklet) yields the same exact-length PCM16 [1623.74ms]
+(pass) real Chromium: round-3 capture drivers end to end > mic.record stereo @48 kHz: the indicator's Stop ends it normally with what was captured [1767.00ms]
+(pass) real Chromium: round-3 capture drivers end to end > permission.query: the closed enum on a real browser (camera granted by the fake UI, photos granted, contacts unsupported) [268.91ms]
+(pass) real Chromium: round-3 capture drivers end to end > bluetooth.select: consent → real Web Bluetooth chooser (CDP BluetoothEmulation) → device identity [1181.54ms]
+ 14 pass
+ 0 fail
+Ran 14 tests across 1 file. [28.83s]
+
+=== go ===
+go: downloading github.com/tetratelabs/wazero v1.12.0
+go: downloading golang.org/x/sys v0.44.0
+ok  	github.com/hypen-space/core	186.944s
+ok  	github.com/hypen-space/core/device	15.796s
+ok  	github.com/hypen-space/core/remote	109.120s
+ok  	github.com/hypen-space/core/remote/device	72.506s
+
+=== kotlin-rerun ===
+    ts ok   lease-renewals
+    [INFO] [Server] Resume of 6f14f031-1de8-45af-bff3-6ab2d6d970e5 without a valid resume token — new session
+    [INFO] [Server] Session 3997461c-cb98-4322-8445-30094fead837: device plane enabled
+    ts ok   resume-wrong-token-new-session
+    [INFO] [Server] Auto-router: wired 1 routes for 3997461c-cb98-4322-8445-30094fead837
+    [INFO] [Server] Resumed session 6f14f031-1de8-45af-bff3-6ab2d6d970e5
+    [INFO] [Server] Session 6f14f031-1de8-45af-bff3-6ab2d6d970e5: device plane enabled
+    ts ok   resume-with-token
+    [INFO] [Server] Auto-router: wired 1 routes for 6f14f031-1de8-45af-bff3-6ab2d6d970e5
+    ts ok   resumed-plane-works
+    [INFO] [Server] HypenServer shut down
+
+DeviceWebSocketE2ETest > the TypeScript web client drives the Kotlin device plane over a real WebSocket() PASSED
+
+BUILD SUCCESSFUL in 20s
+5 actionable tasks: 2 executed, 3 up-to-date
+
+=== swift-server-rerun ===
+[HypenSession] DEBUG: Created session 218D8E02-2D5D-4485-A817-4A0440214857
+[HypenSession] DEBUG: Destroyed session 218D8E02-2D5D-4485-A817-4A0440214857
+[HypenSession] DEBUG: Created session B5659157-28AD-4775-9CAB-A7164742B3B1
+[HypenSession] DEBUG: Created session 1393B880-0DCB-4434-9D56-5B9A681DD643
+[HypenSession] DEBUG: Created session 0202AC59-7953-4B14-AC76-EC65570BCDD7
+[HypenSession] DEBUG: Suspended session 0202AC59-7953-4B14-AC76-EC65570BCDD7 with 1s TTL
+[HypenSession] INFO: Session 0202AC59-7953-4B14-AC76-EC65570BCDD7 expired after 1s TTL
+[HypenSession] DEBUG: Created session CCE23DB0-45CD-4AF6-9A42-E459951040DE
+[HypenSession] DEBUG: Created session 1C3B2291-6E80-465A-A527-187C22A28838
+[HypenSession] DEBUG: Created session 2F042A96-83E5-411C-99F3-3C8FD990D4BE
+[HypenSession] DEBUG: Suspended session 2F042A96-83E5-411C-99F3-3C8FD990D4BE with 60s TTL
+[HypenSession] DEBUG: Resumed session 2F042A96-83E5-411C-99F3-3C8FD990D4BE
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+
+=== swift-e2e ===
+(pass) download frame ordering over a real socket > concurrent downloads on 4 connections, 8 each, all arrive byte-exact [283.90ms]
+(pass) harness report stream > reports made while 4 threads flood the log all arrive, as whole lines [25.50ms]
+(pass) cancellation and leases > Swift Task cancellation cancels the request on the wire [336.87ms]
+(pass) cancellation and leases > leases are renewed every 5 s while a request is pending [6517.39ms]
+(pass) violations over a real socket (D3/D4/D8) > 40 device messages with a duplicated `type` use up the violation budget: the socket is reset 1012 [35.28ms]
+(pass) violations over a real socket (D3/D4/D8) > 40 device messages with a duplicated `id` use up the violation budget: the socket is reset 1012 [34.57ms]
+(pass) violations over a real socket (D3/D4/D8) > a client deviceRequest reaches the broker: ignored on an unknown id, ends a live id invalidParams [449.36ms]
+(pass) violations over a real socket (D3/D4/D8) > 40 frames with a bad header reset the socket 1012; short frames are only dropped [848.67ms]
+(pass) sessions and ownership > resumeToken resumes; a wrong token never does [463.91ms]
+(pass) sessions and ownership > replay firewall: a broadcast-derived dispatch gets unavailable, nothing is sent [124.60ms]
+(pass) sessions and ownership > module lifecycle: deactivation sweeps the activation's pending request [33.50ms]
+
+ 24 pass
+ 0 fail
+ 469 expect() calls
+Ran 24 tests across 1 file. [12.17s]
+
+=== swift-renderer ===
+✔ Test customVisualsWinIncludingExplicitSquareRadius() passed after 8.825 seconds.
+✔ Test customPaddingReplacesRatherThanAddsToDefault() passed after 8.825 seconds.
+✔ Test flexibleGridTracksProposeTheirFullCellWidth() passed after 8.822 seconds.
+✔ Test explicitImageWidthRemainsFixedInsideAWiderTrack() passed after 8.822 seconds.
+✔ Test boundedDynamicAndOverflowListsRetainScrolling() passed after 8.822 seconds.
+✔ Test rawGridUsesZeroGapAndTwoColumns() passed after 8.820 seconds.
+✔ Test staticListFillsWidthWithoutBecomingScrollable() passed after 8.822 seconds.
+✔ Test dividerBackgroundAndHeightControlItsStroke() passed after 8.820 seconds.
+✔ Test rawDividerUsesCanonicalDefaults() passed after 8.820 seconds.
+✔ Test gridPreservesExplicitColumnsAndGap() passed after 8.821 seconds.
+✔ Suite "Badge contract" passed after 8.843 seconds.
+✔ Suite "List and Grid rendered layout" passed after 8.843 seconds.
+✔ Suite "Avatar decoration" passed after 8.843 seconds.
+✔ Suite "Divider and Grid contracts" passed after 8.843 seconds.
+✔ Suite "Compound border styles" passed after 8.844 seconds.
+✔ Test run with 374 tests in 9 suites passed after 8.845 seconds.
+
+=== ios-test ===
+✔ Suite "Compound border styles" passed after 2.191 seconds.
+✔ Test fractionalWidthHonorsBorderBoxMinimumAndMaximum() passed after 1.184 seconds.
+✔ Suite "Divider and Grid contracts" passed after 1.972 seconds.
+✔ Suite "Border-box sizing" passed after 1.954 seconds.
+✔ Suite "Badge contract" passed after 2.193 seconds.
+✔ Test run with 361 tests in 9 suites passed after 2.193 seconds.
+2026-09-25 17:45:48.468 xcodebuild[79539:79700328] [MT] IDETestOperationsObserverDebug: 32.626 elapsed -- Testing started completed.
+2026-09-25 17:45:48.468 xcodebuild[79539:79700328] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-25 17:45:48.468 xcodebuild[79539:79700328] [MT] IDETestOperationsObserverDebug: 32.626 sec, +32.626 sec -- end
+
+Test session results, code coverage, and logs:
+	/tmp/hypen-device-audit/ios-build/Logs/Test/Test-HypenSwift-2026.09.25_17-44-46-+0200.xcresult
+
+** TEST SUCCEEDED **
+
+Testing started
+
+=== android-final ===
+> Task :renderer:packageDebugAndroidTest
+> Task :renderer:createDebugAndroidTestApkListingFileRedirect
+> Task :renderer:compileDebugUnitTestKotlin
+
+> Task :renderer:connectedDebugAndroidTest
+Starting 1 tests on Medium_Phone(AVD) - 11
+
+Finished 1 tests on Medium_Phone(AVD) - 11
+
+> Task :renderer:compileDebugUnitTestJavaWithJavac NO-SOURCE
+> Task :renderer:processDebugUnitTestJavaRes UP-TO-DATE
+OpenJDK 64-Bit Server VM warning: Sharing is only supported for boot loader classes because bootstrap classpath has been appended
+> Task :renderer:testDebugUnitTest
+
+BUILD SUCCESSFUL in 39s
+55 actionable tasks: 6 executed, 49 up-to-date
+
+=== android-native-final ===
+> Task :renderer:compileDebugAndroidTestKotlin UP-TO-DATE
+> Task :renderer:compileDebugAndroidTestJavaWithJavac NO-SOURCE
+> Task :renderer:processDebugAndroidTestJavaRes UP-TO-DATE
+> Task :renderer:mergeDebugAndroidTestJavaResource UP-TO-DATE
+> Task :renderer:dexBuilderDebugAndroidTest UP-TO-DATE
+> Task :renderer:mergeProjectDexDebugAndroidTest UP-TO-DATE
+> Task :renderer:packageDebugAndroidTest
+> Task :renderer:createDebugAndroidTestApkListingFileRedirect UP-TO-DATE
+
+> Task :renderer:connectedDebugAndroidTest
+Starting 1 tests on Medium_Phone(AVD) - 11
+
+Finished 1 tests on Medium_Phone(AVD) - 11
+
+BUILD SUCCESSFUL in 8s
+49 actionable tasks: 4 executed, 45 up-to-date
+
+=== ios-native-final ===
+Test Suite 'DeviceNativeSocketTests' passed at 2026-09-25 17:52:59.615.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.069 (0.070) seconds
+Test Suite 'HypenSwiftTests.xctest' passed at 2026-09-25 17:52:59.615.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.069 (0.070) seconds
+Test Suite 'Selected tests' passed at 2026-09-25 17:52:59.615.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.069 (0.071) seconds
+2026-09-25 17:52:59.905 xcodebuild[96094:79750973] [MT] IDETestOperationsObserverDebug: 5.629 elapsed -- Testing started completed.
+2026-09-25 17:52:59.905 xcodebuild[96094:79750973] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-09-25 17:52:59.905 xcodebuild[96094:79750973] [MT] IDETestOperationsObserverDebug: 5.629 sec, +5.629 sec -- end
+
+Test session results, code coverage, and logs:
+	/Users/ianrumac/Library/Developer/Xcode/DerivedData/hypen-renderer-swift-bzgfjkonppbedsfmnzhcrsddlrsc/Logs/Test/Test-HypenSwift-2026.09.25_17-52-53-+0200.xcresult
+
+** TEST EXECUTE SUCCEEDED **
+
+Testing started
+
+=== ios-advertisement-regression ===
+[5/7] Write Objects.LinkFileList
+[6/7] Linking HypenSwiftPackageTests
+Build complete! (3.48s)
+Test Suite 'Selected tests' started at 2026-09-25 17:55:16.000.
+Test Suite 'HypenSwiftPackageTests.xctest' started at 2026-09-25 17:55:16.007.
+Test Suite 'DeviceHostRound3RepairTests' started at 2026-09-25 17:55:16.007.
+Test Case '-[HypenSwiftTests.DeviceHostRound3RepairTests testMicRecordFailsUnavailableWithoutOpeningTheMicWhenTheOverlayCannotShow]' started.
+/Users/ianrumac/Workspace/Hypen/hypen-rs/hypen-renderer-swift/Tests/HypenSwiftTests/DeviceHostRound3RepairTests.swift:291: error: -[HypenSwiftTests.DeviceHostRound3RepairTests testMicRecordFailsUnavailableWithoutOpeningTheMicWhenTheOverlayCannotShow] : XCTAssertFalse failed - A host that cannot show its recording indicator must not advertise mic.record
+Test Case '-[HypenSwiftTests.DeviceHostRound3RepairTests testMicRecordFailsUnavailableWithoutOpeningTheMicWhenTheOverlayCannotShow]' failed (0.335 seconds).
+Test Suite 'DeviceHostRound3RepairTests' failed at 2026-09-25 17:55:16.342.
+	 Executed 1 test, with 1 failure (0 unexpected) in 0.335 (0.335) seconds
+Test Suite 'HypenSwiftPackageTests.xctest' failed at 2026-09-25 17:55:16.342.
+	 Executed 1 test, with 1 failure (0 unexpected) in 0.335 (0.335) seconds
+Test Suite 'Selected tests' failed at 2026-09-25 17:55:16.342.
+	 Executed 1 test, with 1 failure (0 unexpected) in 0.335 (0.342) seconds
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: arm64e-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+
+=== Physical iPhone attempt ===
+Resolved source packages:
+  HypenSwift: /Users/ianrumac/Workspace/Hypen/hypen-rs/hypen-renderer-swift
+
+2026-09-25 17:58:01.119 xcodebuild[4269:79766583] Writing error result bundle to /var/folders/z1/ghd85gbs2z194_v8xlv636980000gn/T/ResultBundle_2026-25-09_17-58-0001.xcresult
+xcodebuild: error: Timed out waiting for all destinations matching the provided destination specifier to become available
+
+
+	Available destinations for the "HypenSwift" scheme:
+		{ platform:iOS, arch:arm64, id:00008110-001948480E92601E, name:Ian’s iPhone, error:The developer disk image could not be mounted on this device. }

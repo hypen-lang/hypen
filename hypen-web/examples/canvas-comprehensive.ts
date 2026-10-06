@@ -412,7 +412,6 @@ async function main() {
     backgroundColor: "#ffffff",
     enableAccessibility: true,
     enableHitTesting: true,
-    enableInputOverlay: true,
     showLayoutBounds: false,
     logPerformance: true,
   });

@@ -1,0 +1,189 @@
+{
+  "name": "unknown-ids-ignored-in-any-direction",
+  "description": "Liveness is checked before direction (decision D8): a message for an id that is not live for its receiver is ignored whatever its direction or validity, never a violation. Wrong-direction messages (a client cancel, a server deviceResponse, a client deviceRequest, a server leaseAck, a client renewLease, a server capability event), a client grant, a frame, and a well-formed-JSON but schema-invalid message all target never-requested ids here and are dropped. The live request 2 is unaffected.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 99,
+        "control": {
+          "cancel": true
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceResponse",
+        "id": 99,
+        "result": {
+          "status": "granted"
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceRequest",
+        "id": 98,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 99,
+        "control": {
+          "leaseAck": 1
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 99,
+        "control": {
+          "renewLease": 1
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 99,
+        "event": {
+          "kind": "progress",
+          "state": "running"
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 99,
+        "control": {
+          "grant": 1
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 99,
+          "seq": 0
+        },
+        "hex": "01000000630000000000000068656c6c6f2d687970656e2d70686f746f"
+      },
+      "ignored": true
+    },
+    {
+      "dir": "s2c",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 99,
+          "seq": 0
+        },
+        "hex": "01000000630000000000000068656c6c6f2d687970656e2d70686f746f"
+      },
+      "ignored": true
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 99,
+        "control": {
+          "cancel": false
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 99,
+        "control": {
+          "grant": 0
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "status": "granted"
+        }
+      }
+    }
+  ]
+}

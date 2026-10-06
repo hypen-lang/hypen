@@ -1,7 +1,7 @@
 /**
  * HypenApp Component
  *
- * Embeds a remote Hypen app via WebSocket
+ * Embeds a remote Hypen app via WebSocket.
  *
  * Usage in Hypen DSL:
  * ```hypen
@@ -9,26 +9,205 @@
  *
  * // Or with named prop:
  * HypenApp(url: "ws://localhost:3000")
+ *
+ * // With custom loading / error UI via slot children:
+ * HypenApp("ws://localhost:3000") {
+ *     Column { Spinner() Text("Connecting to app...") }.slot("loading")
+ *     Column { Text("Couldn't reach the app") }.slot("error")
+ * }
  * ```
+ *
+ * Slot children are rendered by the *host* app (they're ordinary host
+ * nodes with full access to host state and actions); the handler only
+ * toggles their visibility as the connection moves through
+ * loading → connected / error. Children without a recognized slot render
+ * unconditionally. When a slot isn't provided, a built-in fallback is
+ * used ("Connecting..." text / red error message).
+ *
+ * The embedded app is rendered by a full `DOMRenderer` driven by its own
+ * `RemoteEngine` — the exact pairing the generic client uses at top level —
+ * so embedded apps get identical styling, event dispatch, router patch
+ * handling, and a11y behavior to a standalone page. (Route-change focus is
+ * disabled: the *host* app owns focus management; an embedded frame stealing
+ * focus on its internal navigations would fight it.) It renders into a
+ * dedicated content wrapper so slot toggling and error handling never
+ * touch host-owned slot children, and vice versa.
  */
 
 import type { ComponentHandler } from "./index.js";
 import { RemoteEngine } from "@hypen-space/core/remote/client";
 import type { Patch } from "@hypen-space/core/types";
+import { getElementDisposables } from "@hypen-space/core/disposable";
 import { frameworkLoggers } from "@hypen-space/core/logger";
+import { slotChildren, setVisible } from "../slots.js";
+import type { DOMRenderer } from "../renderer.js";
+import type { DeviceEndpoint } from "@hypen-space/core/remote/device";
 
 const log = frameworkLoggers.remote;
 
-// Store active HypenApp instances for cleanup
-const activeInstances = new WeakMap<
-  HTMLElement,
-  {
-    engine: RemoteEngine;
-    nodes: Map<string, HTMLElement>;
-  }
->();
+export const LOADING_SLOT = "loading";
+export const ERROR_SLOT = "error";
 
-export const hypenAppHandler: ComponentHandler = {
+type EmbedStatus = "loading" | "connected" | "error";
+
+interface HypenAppInstance {
+  engine: RemoteEngine | null;
+  renderer: DOMRenderer | null;
+  visibility: SlotVisibilityController;
+  url: string | null;
+  dispose(): void;
+}
+
+// Store active HypenApp instances for cleanup
+const activeInstances = new WeakMap<HTMLElement, HypenAppInstance>();
+
+/** Convert a remote-UI WebSocket endpoint into the origin for its media. */
+export function remoteAssetBaseUrl(remoteUrl: string): string | undefined {
+  try {
+    const base = new URL(remoteUrl);
+    if (base.protocol === "ws:") base.protocol = "http:";
+    else if (base.protocol === "wss:") base.protocol = "https:";
+    else if (base.protocol !== "http:" && base.protocol !== "https:") return undefined;
+    base.pathname = "/";
+    base.search = "";
+    base.hash = "";
+    return base.href;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Connection-state → visibility controller for one HypenApp container.
+ *
+ * Slot children arrive via Insert patches *after* the container's Create
+ * (and can arrive/leave any time under ForEach/When), so DOMRenderer
+ * synchronously refreshes this controller after child/slot changes.
+ */
+class SlotVisibilityController {
+  private status: EmbedStatus = "loading";
+  private errorMessage = "";
+  private defaultLoading: HTMLElement | null = null;
+  private defaultError: HTMLElement | null = null;
+  private observer: MutationObserver | null = null;
+
+  constructor(
+    private element: HTMLElement,
+    private contentHost: HTMLElement,
+  ) {
+    this.element.dataset.hypenAppStatus = this.status;
+    // DOMRenderer handles patch-driven changes synchronously. Keep an
+    // observer as a safety net for direct DOM manipulation by host code.
+    if (typeof MutationObserver !== "undefined") {
+      this.observer = new MutationObserver((mutations) => {
+        const directSlotChanged = mutations.some((mutation) => {
+          if (mutation.type === "childList") {
+            return mutation.target === element;
+          }
+          return (mutation.target as HTMLElement).parentElement === element;
+        });
+        if (directSlotChanged) this.refresh();
+      });
+      this.observer.observe(element, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["data-hypen-slot"],
+      });
+    }
+    this.refresh();
+  }
+
+  setStatus(status: EmbedStatus, errorMessage?: string): void {
+    this.status = status;
+    if (errorMessage !== undefined) this.errorMessage = errorMessage;
+    this.element.dataset.hypenAppStatus = status;
+    this.refresh();
+  }
+
+  /**
+   * Re-read host-owned children after an insert/remove/move or slot prop
+   * update. DOMRenderer calls this synchronously; MutationObserver remains a
+   * safety net for consumers that manipulate the element outside patches.
+   */
+  refresh(): void {
+    const showLoading = this.status === "loading";
+    const showError = this.status === "error";
+
+    const loadingSlots = slotChildren(this.element, LOADING_SLOT);
+    const errorSlots = slotChildren(this.element, ERROR_SLOT);
+
+    for (const el of loadingSlots) setVisible(el, showLoading);
+    for (const el of errorSlots) setVisible(el, showError);
+
+    // Built-in fallbacks only cover states the host didn't style.
+    this.toggleDefaultLoading(showLoading && loadingSlots.length === 0);
+    this.toggleDefaultError(showError && errorSlots.length === 0);
+
+    // Only show embedded content once the remote tree is actually connected.
+    // While loading or failed, the host-owned slots/fallbacks own the frame.
+    setVisible(this.contentHost, !showLoading && !showError);
+  }
+
+  private toggleDefaultLoading(show: boolean): void {
+    if (show && !this.defaultLoading) {
+      const el = document.createElement("div");
+      el.className = "hypen-app-loading";
+      el.textContent = "Connecting...";
+      this.defaultLoading = el;
+      this.element.appendChild(el);
+    } else if (!show && this.defaultLoading) {
+      this.defaultLoading.remove();
+      this.defaultLoading = null;
+    }
+  }
+
+  private toggleDefaultError(show: boolean): void {
+    if (show && !this.defaultError) {
+      const el = document.createElement("div");
+      el.className = "hypen-app-error";
+      el.style.color = "red";
+      this.defaultError = el;
+      this.element.appendChild(el);
+    }
+    if (this.defaultError) {
+      if (show) {
+        this.defaultError.textContent = this.errorMessage || "HypenApp: Connection failed";
+      } else {
+        this.defaultError.remove();
+        this.defaultError = null;
+      }
+    }
+  }
+
+  dispose(): void {
+    this.observer?.disconnect();
+    this.defaultLoading?.remove();
+    this.defaultError?.remove();
+    this.defaultLoading = null;
+    this.defaultError = null;
+  }
+}
+
+/**
+ * Supplies the device endpoint (normally a `WebDeviceHost` from
+ * `@hypen-space/device-web`) for one embedded app, keyed by its WebSocket
+ * URL — so the host's consent UI names the EMBEDDED app's origin, not the
+ * shell's. Return `undefined` to keep that embed UI-only.
+ */
+export type HypenAppDeviceFactory = (remoteUrl: string) => DeviceEndpoint | undefined;
+
+export interface HypenAppHandlerOptions {
+  /** Device plane for embedded apps (RFC 001). Absent ⇒ embeds are UI-only. */
+  device?: HypenAppDeviceFactory;
+}
+
+/**
+ * Build the `HypenApp` handler. The renderer registers one bound to its
+ * `hypenAppDevice` option; the default registration has no device plane.
+ */
+export function createHypenAppHandler(options: HypenAppHandlerOptions = {}): ComponentHandler {
+  return {
   create(): HTMLElement {
     const el = document.createElement("div");
     el.dataset.hypenType = "hypenapp";
@@ -40,57 +219,115 @@ export const hypenAppHandler: ComponentHandler = {
     // Get URL from props (can be positional "0" or named "url")
     const url = props["0"] || props.url;
 
-    if (!url || typeof url !== "string") {
-      log.error("HypenApp: URL is required");
-      element.innerHTML = '<div style="color: red;">HypenApp: URL required</div>';
-      return;
-    }
-
-    // Check if already connected
     const existing = activeInstances.get(element);
     if (existing) {
-      // Already connected, don't reconnect
+      if (existing.url === url) return; // Already connected to this app
+      // URL changed (or became invalid) — tear down and reconnect below.
+      existing.dispose();
+      activeInstances.delete(element);
+    }
+
+    // The nested renderer owns this wrapper; host-owned slot children are
+    // siblings of it, so neither side's cleanup can clobber the other.
+    const contentHost = document.createElement("div");
+    contentHost.className = "hypen-app-content";
+    contentHost.style.display = "contents";
+    element.appendChild(contentHost);
+
+    const visibility = new SlotVisibilityController(element, contentHost);
+
+    if (!url || typeof url !== "string") {
+      log.error("HypenApp: URL is required");
+      visibility.setStatus("error", "HypenApp: URL required");
+      activeInstances.set(element, {
+        engine: null,
+        renderer: null,
+        visibility,
+        url: null,
+        dispose() {
+          visibility.dispose();
+          contentHost.remove();
+        },
+      });
       return;
     }
 
-    // Create the remote engine
+    // Lazy-required to break the static cycle:
+    // renderer.ts → components/index.ts → hypenapp.ts → renderer.ts
+    const { DOMRenderer: Renderer } =
+      require("../renderer.js") as typeof import("../renderer.js");
+
+    let device: DeviceEndpoint | undefined;
+    try {
+      device = options.device?.(url);
+    } catch (error) {
+      log.error("HypenApp: device host factory failed; embed stays UI-only", error);
+    }
     const engine = new RemoteEngine(url, {
       autoReconnect: props.autoReconnect ?? true,
       reconnectInterval: props.reconnectInterval ?? 3000,
       maxReconnectAttempts: props.maxReconnectAttempts ?? 10,
+      ...(device ? { device } : {}),
     });
 
-    // Map to track created nodes
-    const nodes = new Map<string, HTMLElement>();
-    let rootId: string | null = null;
+    const renderer = new Renderer(contentHost, engine, undefined, {
+      routeFocus: "off",
+      assetBaseUrl: remoteAssetBaseUrl(url),
+      // Apps embedded inside this embed get their own hosts the same way.
+      ...(options.device ? { hypenAppDevice: options.device } : {}),
+    });
+    const instance: HypenAppInstance = {
+      engine,
+      renderer,
+      visibility,
+      url,
+      dispose() {
+        engine.disconnect();
+        visibility.dispose();
+        contentHost.remove();
+      },
+    };
+    activeInstances.set(element, instance);
 
-    // Store instance for cleanup
-    activeInstances.set(element, { engine, nodes });
-
-    // Set up patch handling
-    engine.onPatches((patches) => {
-      applyPatches(element, nodes, patches, engine, (id) => {
-        if (!rootId) rootId = id;
-      });
+    // Same replacement-root handling as the generic client: a fresh root
+    // insert after we've already rendered one means "replace the tree".
+    let hasRenderedRoot = false;
+    engine.onPatches((patches: Patch[]) => {
+      visibility.setStatus("connected");
+      const createdIds = new Set(
+        patches.filter((patch) => patch.type === "create").map((patch) => patch.id),
+      );
+      const hasReplacementRoot = patches.some(
+        (patch) =>
+          patch.type === "insert" &&
+          patch.parentId === "root" &&
+          createdIds.has(patch.id),
+      );
+      if (hasReplacementRoot && hasRenderedRoot) {
+        renderer.clear();
+      }
+      renderer.applyPatches(patches);
+      hasRenderedRoot = hasRenderedRoot || hasReplacementRoot;
     });
 
-    // Show loading state
-    element.innerHTML = '<div class="hypen-app-loading">Connecting...</div>';
-
-    // Connect
     engine
       .connect()
-      .then(() => {
-        // Clear loading state - patches will populate content
-        element.innerHTML = "";
+      .then((result: any) => {
+        if (result && result.ok === false) {
+          visibility.setStatus(
+            "error",
+            `HypenApp: Connection failed - ${result.error?.message ?? result.error}`,
+          );
+          log.error("HypenApp connection failed:", result.error);
+          return;
+        }
         log.debug(`HypenApp connected to ${url}`);
       })
-      .catch((error) => {
-        element.innerHTML = `<div style="color: red;">HypenApp: Connection failed - ${error.message}</div>`;
+      .catch((error: Error) => {
+        visibility.setStatus("error", `HypenApp: Connection failed - ${error.message}`);
         log.error("HypenApp connection failed:", error);
       });
 
-    // Handle disconnection
     engine.onDisconnect(() => {
       log.debug("HypenApp disconnected");
     });
@@ -99,243 +336,24 @@ export const hypenAppHandler: ComponentHandler = {
       log.error("HypenApp error:", error);
     });
 
-    // Cleanup on element removal
-    const observer = new MutationObserver((mutations) => {
-      for (const mutation of mutations) {
-        for (const removedNode of mutation.removedNodes) {
-          if (removedNode === element || (removedNode as Element).contains?.(element)) {
-            engine.disconnect();
-            activeInstances.delete(element);
-            observer.disconnect();
-            log.debug("HypenApp cleaned up");
-            return;
-          }
-        }
-      }
+    // Cleanup rides the renderer's element-disposal channel: the host
+    // DOMRenderer runs this on a real `remove` patch (and on `clear()`),
+    // but NOT on a Router `detach` — so a cached route keeps its live
+    // connection and re-attaches warm, while LRU eviction closes it.
+    getElementDisposables(element).addCallback(() => {
+      instance.dispose();
+      activeInstances.delete(element);
+      log.debug("HypenApp cleaned up");
     });
-
-    // Observe parent for removal
-    if (element.parentNode) {
-      observer.observe(element.parentNode, { childList: true, subtree: true });
-    }
   },
-};
 
-/**
- * Minimal patch application for HypenApp container
- */
-function applyPatches(
-  container: HTMLElement,
-  nodes: Map<string, HTMLElement>,
-  patches: Patch[],
-  engine: RemoteEngine,
-  onRoot: (id: string) => void
-): void {
-  for (const patch of patches) {
-    switch (patch.type) {
-      case "create": {
-        const el = createElement(patch.elementType!, patch.props || {});
-        el.dataset.hypenId = patch.id!;
-        (el as any).__hypenEngine = engine;
-        nodes.set(patch.id!, el);
-        break;
-      }
-
-      case "setProp": {
-        const el = nodes.get(patch.id!);
-        if (el) {
-          applyProp(el, patch.name!, patch.value);
-        }
-        break;
-      }
-
-      case "setText": {
-        const el = nodes.get(patch.id!);
-        if (el) {
-          el.textContent = patch.text!;
-        }
-        break;
-      }
-
-      case "insert": {
-        const parentId = patch.parentId!;
-        const parent = parentId === "root" ? container : nodes.get(parentId);
-        const child = nodes.get(patch.id!);
-        const beforeId = patch.beforeId;
-
-        if (parent && child) {
-          if (parentId === "root") {
-            onRoot(patch.id!);
-          }
-
-          if (beforeId) {
-            const before = nodes.get(beforeId);
-            if (before && before.parentNode === parent) {
-              parent.insertBefore(child, before);
-            } else if (!parent.contains(child)) {
-              parent.appendChild(child);
-            }
-          } else if (!parent.contains(child)) {
-            parent.appendChild(child);
-          }
-        }
-        break;
-      }
-
-      case "move": {
-        const parentId = patch.parentId!;
-        const parent = parentId === "root" ? container : nodes.get(parentId);
-        const child = nodes.get(patch.id!);
-        const beforeId = patch.beforeId;
-
-        if (parent && child) {
-          if (beforeId) {
-            const before = nodes.get(beforeId);
-            if (before && before.parentNode === parent) {
-              parent.insertBefore(child, before);
-            }
-          } else {
-            parent.appendChild(child);
-          }
-        }
-        break;
-      }
-
-      case "remove": {
-        const el = nodes.get(patch.id!);
-        if (el && el.parentNode) {
-          el.parentNode.removeChild(el);
-        }
-        nodes.delete(patch.id!);
-        break;
-      }
-    }
-  }
-}
-
-/**
- * Create element by type
- */
-function createElement(type: string, props: Record<string, any>): HTMLElement {
-  const normalizedType = type.toLowerCase();
-
-  // Map Hypen types to HTML elements
-  const tagMap: Record<string, string> = {
-    column: "div",
-    row: "div",
-    text: "span",
-    button: "button",
-    input: "input",
-    image: "img",
-    container: "div",
-    box: "div",
-    center: "div",
-    list: "div",
-    spacer: "div",
-    stack: "div",
-    divider: "hr",
-    grid: "div",
-    card: "div",
-    heading: "h2",
-    link: "a",
-    textarea: "textarea",
-    checkbox: "input",
-    select: "select",
-    slider: "input",
-    switch: "input",
-    spinner: "div",
-    badge: "span",
-    avatar: "img",
-    progressbar: "div",
-    video: "video",
-    audio: "audio",
+  onChildrenChanged(element: HTMLElement): void {
+    activeInstances.get(element)?.visibility.refresh();
+  },
   };
-
-  const tag = tagMap[normalizedType] || "div";
-  const el = document.createElement(tag);
-  el.dataset.hypenType = normalizedType;
-
-  // Apply basic styles
-  if (normalizedType === "column") {
-    el.style.display = "flex";
-    el.style.flexDirection = "column";
-  } else if (normalizedType === "row") {
-    el.style.display = "flex";
-    el.style.flexDirection = "row";
-  } else if (normalizedType === "center") {
-    el.style.display = "flex";
-    el.style.alignItems = "center";
-    el.style.justifyContent = "center";
-  } else if (normalizedType === "text") {
-    // Text content from props
-    if (props["0"]) {
-      el.textContent = String(props["0"]);
-    }
-  } else if (normalizedType === "button") {
-    el.style.cursor = "pointer";
-  } else if (normalizedType === "checkbox" || normalizedType === "switch") {
-    (el as HTMLInputElement).type = "checkbox";
-  } else if (normalizedType === "slider") {
-    (el as HTMLInputElement).type = "range";
-  }
-
-  return el;
 }
 
-/**
- * Apply a prop to an element
- */
-function applyProp(el: HTMLElement, name: string, value: any): void {
-  // Text content
-  if (name === "0" || name === "text") {
-    el.textContent = String(value);
-    return;
-  }
-
-  // Style props
-  const styleProps: Record<string, string> = {
-    padding: "padding",
-    margin: "margin",
-    backgroundColor: "backgroundColor",
-    background: "background",
-    color: "color",
-    fontSize: "fontSize",
-    fontWeight: "fontWeight",
-    width: "width",
-    height: "height",
-    minWidth: "minWidth",
-    minHeight: "minHeight",
-    maxWidth: "maxWidth",
-    maxHeight: "maxHeight",
-    borderRadius: "borderRadius",
-    border: "border",
-    gap: "gap",
-    flex: "flex",
-    opacity: "opacity",
-    overflow: "overflow",
-  };
-
-  if (styleProps[name]) {
-    const cssValue = typeof value === "number" ? `${value}px` : String(value);
-    (el.style as any)[styleProps[name]] = cssValue;
-    return;
-  }
-
-  // Event handlers
-  if (name === "onClick" || name === "onclick") {
-    el.onclick = () => {
-      const engine = (el as any).__hypenEngine as RemoteEngine;
-      if (engine && typeof value === "string" && value.startsWith("@actions.")) {
-        const action = value.replace("@actions.", "");
-        engine.dispatchAction(action);
-      }
-    };
-    return;
-  }
-
-  // Other attributes
-  el.setAttribute(name, String(value));
-}
+export const hypenAppHandler: ComponentHandler = createHypenAppHandler();
 
 /**
  * Disconnect a HypenApp instance
@@ -343,7 +361,7 @@ function applyProp(el: HTMLElement, name: string, value: any): void {
 export function disconnectHypenApp(element: HTMLElement): void {
   const instance = activeInstances.get(element);
   if (instance) {
-    instance.engine.disconnect();
+    instance.engine?.disconnect();
     activeInstances.delete(element);
   }
 }

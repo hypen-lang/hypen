@@ -1,0 +1,47 @@
+[
+  {
+    "server": "TS",
+    "query": "success, prompt",
+    "photoBytes": 85595,
+    "photoSha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "savedBytes": 102000,
+    "savedSha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "audio": "3000ms, 96000 bytes, success"
+  },
+  {
+    "server": "Go",
+    "query": "success, prompt",
+    "photoBytes": 85595,
+    "photoSha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "savedBytes": 102000,
+    "savedSha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "audio": "no-presenter; fresh-session retry streamed 36864 bytes, duration1152ms"
+  },
+  {
+    "server": "Kotlin",
+    "query": "success, prompt",
+    "photoBytes": 85595,
+    "photoSha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "savedBytes": 102000,
+    "savedSha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "audio": "streamed53590 bytes, duration1675ms; retry no-presenter"
+  },
+  {
+    "server": "Swift",
+    "query": "success, prompt",
+    "photoBytes": 85595,
+    "photoSha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "savedBytes": 102000,
+    "savedSha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "audio": "no-presenter, including fresh-session retry"
+  },
+  {
+    "server": "Rust",
+    "query": "success, prompt",
+    "photoBytes": 85595,
+    "photoSha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "savedBytes": 102000,
+    "savedSha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "audio": "3000ms, 96000 bytes, success"
+  }
+]

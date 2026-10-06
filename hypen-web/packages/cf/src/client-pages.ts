@@ -127,7 +127,11 @@ export function servePage(
 ): Response | null {
   if (request.method !== "GET") return null;
   const pathname = new URL(request.url).pathname;
-  const page = pages[pathname];
+  let page = pages[pathname];
+  if (!page) {
+    const acceptsHtml = request.headers.get("accept")?.includes("text/html") ?? false;
+    page = acceptsHtml ? pages["/"] : undefined;
+  }
   if (!page) return null;
   return new Response(page.body, {
     headers: {

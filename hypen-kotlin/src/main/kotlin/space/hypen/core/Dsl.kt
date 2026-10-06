@@ -2,6 +2,8 @@ package space.hypen.core
 
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.serializer
 import kotlin.reflect.KParameter
@@ -234,21 +236,23 @@ class TypedHypenModuleBuilder<S : Any> @PublishedApi internal constructor(
         val payloadType = typeOf<A>()
         val ser = stateSerializer
         actionHandlers[actionName] = ActionHandler.Suspend { ctx ->
-            val typedState = hypenJson.decodeFromJsonElement(ser, ctx.state.getAll().toJsonElement())
+            val snapshot = ctx.state.getAll().toJsonElement()
+            val typedState = hypenJson.decodeFromJsonElement(ser, snapshot)
             val typedAction: A = instance
                 ?: ctx.action.payload?.let { deserializePayload<A>(it, payloadType) }
                 ?: error("Action $actionName requires a payload")
             handler(typedAction, typedState, ctx.context)
-            syncBack(ser, typedState, ctx.state)
+            syncBack(ser, typedState, ctx.state, snapshot)
         }
     }
 
     fun onCreated(handler: (state: S, context: GlobalContext?) -> Unit) {
         val ser = stateSerializer
         onCreatedHandler = { observableState, context ->
-            val typed = hypenJson.decodeFromJsonElement(ser, observableState.getAll().toJsonElement())
+            val snapshot = observableState.getAll().toJsonElement()
+            val typed = hypenJson.decodeFromJsonElement(ser, snapshot)
             handler(typed, context)
-            syncBack(ser, typed, observableState)
+            syncBack(ser, typed, observableState, snapshot)
         }
     }
 
@@ -260,9 +264,10 @@ class TypedHypenModuleBuilder<S : Any> @PublishedApi internal constructor(
     fun onActivated(handler: (state: S, context: GlobalContext?) -> Unit) {
         val ser = stateSerializer
         onActivatedHandler = { observableState, context ->
-            val typed = hypenJson.decodeFromJsonElement(ser, observableState.getAll().toJsonElement())
+            val snapshot = observableState.getAll().toJsonElement()
+            val typed = hypenJson.decodeFromJsonElement(ser, snapshot)
             handler(typed, context)
-            syncBack(ser, typed, observableState)
+            syncBack(ser, typed, observableState, snapshot)
         }
     }
 
@@ -273,18 +278,20 @@ class TypedHypenModuleBuilder<S : Any> @PublishedApi internal constructor(
     fun onDeactivated(handler: (state: S, context: GlobalContext?) -> Unit) {
         val ser = stateSerializer
         onDeactivatedHandler = { observableState, context ->
-            val typed = hypenJson.decodeFromJsonElement(ser, observableState.getAll().toJsonElement())
+            val snapshot = observableState.getAll().toJsonElement()
+            val typed = hypenJson.decodeFromJsonElement(ser, snapshot)
             handler(typed, context)
-            syncBack(ser, typed, observableState)
+            syncBack(ser, typed, observableState, snapshot)
         }
     }
 
     fun onDestroyed(handler: (state: S, context: GlobalContext?) -> Unit) {
         val ser = stateSerializer
         onDestroyedHandler = { observableState, context ->
-            val typed = hypenJson.decodeFromJsonElement(ser, observableState.getAll().toJsonElement())
+            val snapshot = observableState.getAll().toJsonElement()
+            val typed = hypenJson.decodeFromJsonElement(ser, snapshot)
             handler(typed, context)
-            syncBack(ser, typed, observableState)
+            syncBack(ser, typed, observableState, snapshot)
         }
     }
 
@@ -320,12 +327,13 @@ class TypedHypenModuleBuilder<S : Any> @PublishedApi internal constructor(
         val payloadType = typeOf<A>()
         val ser = stateSerializer
         actionHandlers[actionName] = ActionHandler.Sync { ctx ->
-            val typedState = hypenJson.decodeFromJsonElement(ser, ctx.state.getAll().toJsonElement())
+            val snapshot = ctx.state.getAll().toJsonElement()
+            val typedState = hypenJson.decodeFromJsonElement(ser, snapshot)
             val typedAction: A = instance
                 ?: ctx.action.payload?.let { deserializePayload<A>(it, payloadType) }
                 ?: error("Action $actionName requires a payload")
             handler(typedAction, typedState, ctx.context)
-            syncBack(ser, typedState, ctx.state)
+            syncBack(ser, typedState, ctx.state, snapshot)
         }
     }
 
@@ -356,16 +364,83 @@ class TypedHypenModuleBuilder<S : Any> @PublishedApi internal constructor(
     }
 
     companion object {
-        /** Serialize the typed state back to the engine's ObservableState. */
+        private val log = HypenLoggers.state
+
+        /**
+         * Warn (once per path) when a typed round-trip drops a key that was
+         * present in the state map — the silent-wipe hazard of
+         * `ignoreUnknownKeys` (hypen-web/docs/dnd.md, SHOULD). Cheap: a single
+         * key walk over the snapshot the handler already took, skipped
+         * entirely when warnings are filtered out. Set to `false` to opt out.
+         */
+        @Volatile
+        var warnOnDroppedKeys: Boolean = true
+
+        /**
+         * Serialize the typed state back to the engine's ObservableState.
+         *
+         * The typed instance is a VIEW of the map, not the store: the encoding
+         * is merged key-by-key OVER the map ([ObservableState.update]) and
+         * never replaces it wholesale, so top-level keys the data class does
+         * not declare — in particular the runtime-owned `__`-prefixed keys
+         * such as `__dnd` (hypen-web/docs/dnd.md, design §6.6 MUST) —
+         * survive every handler untouched.
+         *
+         * Keys nested INSIDE a user-declared field cannot be preserved this
+         * way (the field is re-encoded as a whole), so when [previous] — the
+         * snapshot the handler decoded from — is supplied, any such key the
+         * encoding lost is reported through [warnOnDroppedKeys].
+         */
         @PublishedApi
         internal fun <S : Any> syncBack(
             ser: KSerializer<S>,
             typedState: S,
-            observableState: ObservableState<MutableMap<String, Any?>>
+            observableState: ObservableState<MutableMap<String, Any?>>,
+            previous: JsonElement? = null,
         ) {
             val newJson = hypenJson.encodeToJsonElement(ser, typedState)
             if (newJson is JsonObject) {
+                if (previous is JsonObject) warnDroppedKeys(previous, newJson)
                 observableState.update(newJson.mapValues { (_, v) -> v.toKotlinValue() })
+            }
+        }
+
+        private fun warnDroppedKeys(previous: JsonObject, encoded: JsonObject) {
+            if (!warnOnDroppedKeys) return
+            if (Logger.getLogLevel().priority > LogLevel.WARN.priority) return
+            for ((key, oldValue) in previous) {
+                // Top-level keys absent from the encoding are preserved by the
+                // merge; reserved `__` keys are expected to be absent (they
+                // belong to the runtime, not the data class), and other
+                // undeclared top-level keys are kept too — nothing to warn about.
+                val newValue = encoded[key] ?: continue
+                walkDroppedKeys(key, oldValue, newValue)
+            }
+        }
+
+        private fun walkDroppedKeys(path: String, oldValue: JsonElement, newValue: JsonElement) {
+            when {
+                oldValue is JsonObject && newValue is JsonObject -> {
+                    for ((key, child) in oldValue) {
+                        val childPath = "$path.$key"
+                        val encodedChild = newValue[key]
+                        if (encodedChild == null) {
+                            log.warnOnce(
+                                childPath,
+                                "typed state dropped `$childPath` — the typed state class does not declare it. " +
+                                    "Add a `var $key` field, use the default `__dnd` form (drop `.bind` on `.pinboard`), " +
+                                    "or handle `.onPin`/`.onDrop` and apply the write in your handler.",
+                            )
+                        } else {
+                            walkDroppedKeys(childPath, child, encodedChild)
+                        }
+                    }
+                }
+                oldValue is JsonArray && newValue is JsonArray -> {
+                    val n = minOf(oldValue.size, newValue.size)
+                    for (i in 0 until n) walkDroppedKeys("$path.$i", oldValue[i], newValue[i])
+                }
+                else -> {}
             }
         }
     }

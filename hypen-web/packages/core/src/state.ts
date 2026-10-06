@@ -6,6 +6,15 @@
  */
 
 import { portable } from "./portable";
+import {
+  diffJsonPaths,
+  diffJsonPathsAt,
+  compareCodePoints,
+  canonicalDiffJson,
+  diffOracleEnabled,
+  type DiffEntry,
+  type PathSlot,
+} from "./diff";
 
 // Symbol for proxy detection (more robust than string property)
 const IS_PROXY = Symbol.for('hypen.isProxy');
@@ -186,15 +195,226 @@ export function createObservableState<T extends object>(
   let batchDepth = 0;
   let pendingChange: StateChange | null = null;
 
+  // ── Dirty-root tracking ──────────────────────────────────────────
+  //
+  // The set/deleteProperty traps know exactly which path each write
+  // touched. Recording those paths lets the flush diff ONLY the
+  // touched subtrees against the snapshot instead of scanning the
+  // whole state — the diff's cost becomes proportional to the edit,
+  // not to how much data the app holds. The recorded paths are hints,
+  // not truth: the flush still verifies each root against the
+  // snapshot, so a stale or redundant root is a harmless no-op diff.
+  //
+  // `dirtyAll` falls back to the full-state diff for the cases path
+  // attribution can't represent: keys containing the path separator
+  // (dotted-path ambiguity), empty-string keys, or more distinct roots
+  // than MAX_DIRTY_ROOTS (a mass in-place mutation — one full JS diff
+  // is cheaper than quadratic subsumption bookkeeping).
+  let dirtyRoots: string[] = [];
+  let dirtyAll = false;
+  const MAX_DIRTY_ROOTS = 64;
+
+  function isAncestorPath(ancestor: string, path: string): boolean {
+    return (
+      path.length > ancestor.length &&
+      path.charCodeAt(ancestor.length) === 46 /* "." */ &&
+      path.startsWith(ancestor)
+    );
+  }
+
+  /** Record a changed path (absolute, i.e. including pathPrefix), with
+   * subsumption: an existing ancestor swallows it; recording a path
+   * drops any recorded descendants. */
+  function recordDirty(fullPath: string): void {
+    if (dirtyAll) return;
+    let path = fullPath;
+    if (pathPrefix) {
+      if (path === pathPrefix) {
+        dirtyAll = true;
+        return;
+      }
+      if (isAncestorPath(pathPrefix, path)) {
+        path = path.slice(pathPrefix.length + 1);
+      }
+    }
+    if (path === "") {
+      dirtyAll = true;
+      return;
+    }
+    let write = 0;
+    for (let i = 0; i < dirtyRoots.length; i++) {
+      const existing = dirtyRoots[i]!;
+      if (existing === path || isAncestorPath(existing, path)) return;
+      if (!isAncestorPath(path, existing)) dirtyRoots[write++] = existing;
+    }
+    dirtyRoots.length = write;
+    dirtyRoots.push(path);
+    if (dirtyRoots.length > MAX_DIRTY_ROOTS) {
+      dirtyAll = true;
+      dirtyRoots.length = 0;
+    }
+  }
+
+  function takeDirtyRoots(): { all: boolean; roots: string[] } {
+    const taken = { all: dirtyAll, roots: dirtyRoots };
+    dirtyAll = false;
+    dirtyRoots = [];
+    return taken;
+  }
+
+  /** Resolve `path` in a plain (non-proxy) tree without touching any
+   * traps. Splits on "." like every other path consumer in the system
+   * (dotted keys never reach here — recordDirty escalates them). */
+  function slotAt(tree: unknown, path: string): PathSlot {
+    let cur: any = tree;
+    let start = 0;
+    while (start <= path.length) {
+      if (cur === null || typeof cur !== "object") {
+        return { present: false, value: undefined };
+      }
+      const dot = path.indexOf(".", start);
+      const seg = dot === -1 ? path.slice(start) : path.slice(start, dot);
+      if (!Object.prototype.hasOwnProperty.call(cur, seg)) {
+        return { present: false, value: undefined };
+      }
+      cur = cur[seg];
+      if (dot === -1) return { present: true, value: cur };
+      start = dot + 1;
+    }
+    return { present: false, value: undefined };
+  }
+
+  /**
+   * Write the live value at each changed path into `lastSnapshot`,
+   * cloning only those subtrees. Paths come from `diffState`, so every
+   * parent container is guaranteed to exist in the snapshot: the diff
+   * only reports a granular child path when both sides have the same
+   * container there (container replacements arrive as one path for the
+   * container itself). A path whose live value is gone (deleted key)
+   * is deleted from the snapshot too — leaving a `null` behind would
+   * make the next diff re-report the deletion forever.
+   */
+  function updateSnapshotAtPaths(paths: StatePath[]): void {
+    const prefixLen = pathPrefix ? pathPrefix.length + 1 : 0;
+    for (const fullPath of paths) {
+      const segments = fullPath.slice(prefixLen).split(".");
+      const last = segments.pop()!;
+
+      // Walk both trees to the parent container (raw target, not the
+      // proxy — this is bookkeeping, not an observable read).
+      let src: any = initialState;
+      let dst: any = lastSnapshot;
+      let broken = false;
+      for (const seg of segments) {
+        src = src?.[seg];
+        dst = dst?.[seg];
+        if (src === null || typeof src !== "object" || dst === null || typeof dst !== "object") {
+          broken = true;
+          break;
+        }
+      }
+      if (broken || dst === null || typeof dst !== "object") {
+        // Structural surprise (shouldn't happen per the diff contract) —
+        // fall back to a full clone for correctness.
+        lastSnapshot = deepClone(state);
+        return;
+      }
+
+      const liveValue = src?.[last];
+      if (liveValue === undefined && !(src !== null && typeof src === "object" && last in src)) {
+        if (Array.isArray(dst) && Array.isArray(src)) {
+          // An index the live array no longer has is either beyond its
+          // new length (truncate) or an in-bounds hole (`delete arr[i]`,
+          // `reverse` over holes). Mirror the hole first, THEN sync the
+          // length: syncing length alone leaves the stale element in
+          // place for in-bounds holes, and a diverged snapshot makes a
+          // later scoped diff silently swallow or re-report changes.
+          delete dst[last as any];
+          dst.length = src.length;
+        } else {
+          delete dst[last];
+        }
+      } else {
+        dst[last] = deepClone(liveValue);
+      }
+    }
+  }
+
   function notifyChange() {
     if (batchDepth > 0) return;
 
-    // Compare current state with last snapshot
-    const change = diffState(lastSnapshot, state, pathPrefix);
+    // Diff only under the trap-recorded dirty roots — cost is
+    // proportional to what was touched, not to the state's size. The
+    // full-state diff remains as the fallback for writes that path
+    // attribution can't represent (see recordDirty).
+    const dirty = takeDirtyRoots();
+    let change: StateChange;
+    if (dirty.all) {
+      change = diffState(lastSnapshot, state, pathPrefix);
+    } else if (dirty.roots.length === 0) {
+      return;
+    } else {
+      const raw: any = (state as any)[RAW_TARGET] ?? state;
+      const entries: DiffEntry[] = [];
+      // Sorted roots keep the emission order deterministic (and close
+      // to the full diff's sorted-key order).
+      dirty.roots.sort(compareCodePoints);
+      for (const root of dirty.roots) {
+        entries.push(
+          ...diffJsonPathsAt(root, slotAt(lastSnapshot, root), slotAt(raw, root)),
+        );
+      }
+      const paths: StatePath[] = [];
+      const newValues: Record<StatePath, any> = {};
+      for (const e of entries) {
+        paths.push(e.path);
+        newValues[e.path] = e.value;
+      }
+      change = { paths, newValues };
+
+      // Scoping oracle (dev tool): the scoped result must equal the
+      // full-state diff. Divergence means a mutation escaped root
+      // recording — e.g. a write through a proxy captured before its
+      // object was moved to a different path.
+      if (diffOracleEnabled()) {
+        const full = diffJsonPaths(lastSnapshot, raw);
+        // A BigInt/cycle ANYWHERE empties the full diff (the old
+        // stringify-throws contract), while the scoped diff only
+        // suppresses the roots that contain it — the documented
+        // improvement, not a divergence.
+        const fullSuppressed =
+          full.length === 0 &&
+          entries.length > 0 &&
+          (() => {
+            try {
+              JSON.stringify(raw);
+              return false;
+            } catch {
+              return true;
+            }
+          })();
+        if (
+          !fullSuppressed &&
+          canonicalDiffJson(entries) !== canonicalDiffJson(full)
+        ) {
+          console.error(
+            "[hypen scoped-diff oracle] dirty-root scoped diff diverged from the full diff.",
+            "\n  roots: ", JSON.stringify(dirty.roots),
+            "\n  scoped:", canonicalDiffJson(entries),
+            "\n  full:  ", canonicalDiffJson(full),
+          );
+        }
+      }
+    }
 
     if (change.paths.length > 0) {
-      // Update snapshot
-      lastSnapshot = deepClone(state);
+      // Bring the snapshot up to date at exactly the paths the diff
+      // reported, instead of re-cloning the entire state tree. Unchanged
+      // subtrees are value-equal by the diff's own contract (and already
+      // decoupled from live state by the previous clone), so this is
+      // O(changed values), not O(state) — the difference between ~0ms and
+      // a full deep clone of a 1,000-row list on every mutation batch.
+      updateSnapshotAtPaths(change.paths);
 
       // Merge with pending changes if any
       if (pendingChange) {
@@ -211,12 +431,31 @@ export function createObservableState<T extends object>(
   // Track if we have a pending microtask notification
   let notificationPending = false;
 
+  /**
+   * Run the queued notification NOW (and neutralize the queued microtask).
+   * Exposed on the proxy as `__flushNow` so hosts can synchronously drain
+   * mutations that predate an event — e.g. the module runtime flushes
+   * pre-queued changes UNSTAMPED before arming a transaction-animation
+   * stamp for a dispatch (Option D). No-op when nothing is pending.
+   */
+  function flushNow() {
+    if (!notificationPending) return;
+    notificationPending = false;
+    if (batchDepth === 0) {
+      notifyChange();
+    }
+    // Inside a batch the batch's __endBatch performs the notify.
+  }
+
   function scheduleBatch() {
     if (batchDepth === 0) {
       // If not in a batch, schedule notification in next microtask to coalesce rapid changes
       if (!notificationPending) {
         notificationPending = true;
         queueMicrotask(() => {
+          // Already drained synchronously via __flushNow (or re-queued):
+          // this stale microtask stands down.
+          if (!notificationPending) return;
           notificationPending = false;
           if (batchDepth === 0) {
             notifyChange();
@@ -240,6 +479,49 @@ export function createObservableState<T extends object>(
     // Check cache first (handles circular references)
     const cached = proxyCache.get(target);
     if (cached) return cached;
+
+    // Canonical array index: the only string keys JSON serialization
+    // sees on an array.
+    function isArrayIndex(prop: string): boolean {
+      return (
+        (prop === "0" || /^[1-9][0-9]*$/.test(prop)) &&
+        Number(prop) <= 4294967294
+      );
+    }
+
+    // Map a trapped write to a dirty root. Returns false when the
+    // write is invisible to JSON (nothing to diff, nothing to
+    // schedule). Writes that dotted-path space cannot represent
+    // unambiguously escalate to the full diff.
+    function recordDirtyProp(obj: any, prop: string, prevLen: number): boolean {
+      if (Array.isArray(obj)) {
+        if (prop === "length") {
+          // pop/splice/truncation assign .length — the array itself is
+          // the changed unit (recordDirty("") escalates for a
+          // root-level array state).
+          recordDirty(basePath);
+          return true;
+        }
+        if (!isArrayIndex(prop)) {
+          // JSON.stringify serializes only index properties of an
+          // array — a named property write can never appear in a diff.
+          return false;
+        }
+        if (Number(prop) > prevLen) {
+          // Past-the-end write: indices prevLen..prop-1 become holes
+          // (null through the JSON lens) with no length trap firing —
+          // the array is the changed unit.
+          recordDirty(basePath);
+          return true;
+        }
+      } else if (prop === "" || prop.includes(".")) {
+        dirtyAll = true;
+        dirtyRoots.length = 0;
+        return true;
+      }
+      recordDirty(basePath === "" ? prop : basePath + "." + prop);
+      return true;
+    }
 
     const proxy = new Proxy(target, {
       get(obj, prop) {
@@ -266,6 +548,9 @@ export function createObservableState<T extends object>(
         }
         if (prop === "__getSnapshot") {
           return () => deepClone(obj);
+        }
+        if (prop === "__flushNow") {
+          return flushNow;
         }
 
         const value = obj[prop];
@@ -306,6 +591,7 @@ export function createObservableState<T extends object>(
 
       set(obj, prop, value) {
         const oldValue = obj[prop];
+        const prevLen = Array.isArray(obj) ? obj.length : -1;
 
         // If setting an object that's already a proxy, unwrap it first
         // to store the raw value (prevents proxy-wrapping-proxy)
@@ -317,7 +603,19 @@ export function createObservableState<T extends object>(
         obj[prop] = value;
 
         if (oldValue !== value) {
-          scheduleBatch();
+          // Symbol-keyed writes are invisible to JSON — the diff could
+          // never see them, so there is nothing to schedule.
+          if (typeof prop === "string" && recordDirtyProp(obj, prop, prevLen)) {
+            // Re-parent invalidation: the object stored here may have
+            // a cached proxy carrying the basePath it was FIRST
+            // reached under. Dropping the cache entry makes the next
+            // access re-proxy it under its new path, so later
+            // mutations record the right root.
+            if (value && typeof value === "object") {
+              proxyCache.delete(value);
+            }
+            scheduleBatch();
+          }
         }
 
         return true;
@@ -325,8 +623,13 @@ export function createObservableState<T extends object>(
 
       deleteProperty(obj, prop) {
         const existed = Object.prototype.hasOwnProperty.call(obj, prop);
+        const prevLen = Array.isArray(obj) ? obj.length : -1;
         const result = delete obj[prop];
-        if (existed) {
+        if (
+          existed &&
+          typeof prop === "string" &&
+          recordDirtyProp(obj, prop, prevLen)
+        ) {
           scheduleBatch();
         }
         return result;

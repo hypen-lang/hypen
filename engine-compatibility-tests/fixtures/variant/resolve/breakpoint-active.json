@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-breakpoint-active", "description": "md applies at width>=768.", "function": "resolve_variant", "input": { "base": "padding", "props": { "padding.0": 8, "padding@md.0": 16 }, "width": 800, "activeStates": [] }, "expected": 16 }

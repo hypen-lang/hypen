@@ -107,13 +107,14 @@ fn test_patch_matchers() {
 
     // GIVEN: Various patch types
     let create_patch = Patch::Create {
-        id: "node-1".to_string(),
+        id: "node-1".into(),
         element_type: "Text".to_string(),
         props: std::sync::Arc::new(indexmap::indexmap! {}),
+        semantics: None,
     };
 
     let set_prop_patch = Patch::SetProp {
-        id: "node-2".to_string(),
+        id: "node-2".into(),
         name: "color".to_string(),
         value: json!("red"),
     };

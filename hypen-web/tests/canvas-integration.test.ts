@@ -198,6 +198,44 @@ describe("Canvas Renderer Integration", () => {
     expect(node?.props.color).toBe("#ff0000");
   });
 
+  test("keeps slot applicators live across create, update, and removal", () => {
+    renderer.applyPatches([
+      {
+        type: "create",
+        id: "slot-child",
+        elementType: "column",
+        props: { "slot.0": "loading" },
+      } as any,
+    ]);
+
+    const node = renderer.getNode("slot-child");
+    expect(node?.props["slot.0"]).toBe("loading");
+    expect(node?.props.slot).toBe("loading");
+
+    renderer.applyPatches([
+      {
+        type: "setProp",
+        id: "slot-child",
+        name: "slot.0",
+        value: "error",
+      } as any,
+    ]);
+
+    expect(node?.props["slot.0"]).toBe("error");
+    expect(node?.props.slot).toBe("error");
+
+    renderer.applyPatches([
+      {
+        type: "removeProp",
+        id: "slot-child",
+        name: "slot.0",
+      } as any,
+    ]);
+
+    expect(node?.props["slot.0"]).toBeUndefined();
+    expect(node?.props.slot).toBeUndefined();
+  });
+
   test("handles setText patch", () => {
     const patches: Patch[] = [
       {
@@ -384,7 +422,6 @@ describe("Canvas Renderer Integration", () => {
     expect(renderer.getNode("node1")).toBeUndefined();
   });
 });
-
 
 
 

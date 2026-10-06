@@ -53,6 +53,8 @@ export function buildTsPackageJson(projectName: string): string {
       type: "module",
       scripts: {
         dev: "hypen dev",
+        studio: "hypen studio",
+        test: "hypen test",
         build: "hypen build",
         start: "node dist/main.js",
       },
@@ -114,17 +116,26 @@ function tsconfigJson(): string {
   );
 }
 
-function hypenConfig(): string {
-  return JSON.stringify(
-    {
-      components: "./src/components",
-      entry: "App",
-      port: 3000,
-      outDir: "dist",
-    },
-    null,
-    2,
-  ) + "\n";
+function hypenConfig(layout: ModuleLayout): string {
+  // File-based projects are driven by component discovery, so `entry` is a
+  // component name and `components` points at the discovery root. Server-based
+  // projects have no components directory at all — their modules register
+  // programmatically inside the entry *script*, so `entry` is a file path
+  // (the extension is how `hypen dev`/`hypen test` detect the layout).
+  const config =
+    layout === "server-based"
+      ? {
+          entry: "./src/app.ts",
+          port: 3000,
+          outDir: "dist",
+        }
+      : {
+          components: "./src/components",
+          entry: "App",
+          port: 3000,
+          outDir: "dist",
+        };
+  return JSON.stringify(config, null, 2) + "\n";
 }
 
 function gitignore(): string {
@@ -599,7 +610,8 @@ const server = await new RemoteServer()
   .config({ port })
   .listen();
 
-console.log(\`Server running at \${server.url}\`);
+console.log(\`Web client:    http://localhost:\${port}\`);
+console.log(\`Remote server: \${server.url}\`);
 `;
   write(projectDir, "src/app.ts", appEntry);
 }
@@ -612,7 +624,7 @@ export function generateTypescriptProject(opts: Options): void {
   const { projectDir, projectName, layout } = opts;
 
   write(projectDir, "package.json", packageJson(projectName));
-  write(projectDir, "hypen.json", hypenConfig());
+  write(projectDir, "hypen.json", hypenConfig(layout));
   write(projectDir, "tsconfig.json", tsconfigJson());
   write(projectDir, ".gitignore", gitignore());
 

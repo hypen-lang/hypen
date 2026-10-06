@@ -1,0 +1,57 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "shared-element-lowering",
+  "description": "The .sharedElement applicator lowers into TWO props: __anim.sharedKey (the identity key — bindings allowed, resolved per render and re-resolved as setProp on state change) and __anim.shared (static timing object with {350, spring} defaults); never a sharedElement.N prop",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Image(src: \"cover.png\").sharedElement(\"cover-@{state.coverId}\", curve: spring, duration: 350)",
+    "initialState": { "coverId": "list-7" },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["coverId"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render resolves the template key onto the Create patch alongside the static timing object",
+      "action": "initialRender",
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["create", "insert"],
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Image",
+          "props": {
+            "src": "cover.png",
+            "__anim.sharedKey": "cover-list-7",
+            "__anim.shared": { "curve": "spring", "duration": 350 }
+          },
+          "absentProps": ["sharedElement.0"]
+        },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "A state change re-resolves the identity key and flows as setProp",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["coverId"],
+        "newValues": { "coverId": "detail-7" }
+      },
+      "expectedPatchCount": 1,
+      "expectedPatchTypes": ["setProp"],
+      "expectedPatches": [
+        { "type": "setProp", "name": "__anim.sharedKey", "value": "cover-detail-7" }
+      ]
+    }
+  ]
+}

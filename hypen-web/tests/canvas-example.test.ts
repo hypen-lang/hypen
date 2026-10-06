@@ -45,7 +45,6 @@ describe.skip("Canvas Counter Example", () => {
       backgroundColor: "#ffffff",
       enableAccessibility: true,
       enableHitTesting: true,
-      enableInputOverlay: false, // Disable for testing
       showLayoutBounds: false,
       logPerformance: false,
     });
@@ -86,7 +85,6 @@ describe.skip("Canvas Counter Example", () => {
       backgroundColor: "#ffffff",
       enableAccessibility: false,
       enableHitTesting: true,
-      enableInputOverlay: false,
       showLayoutBounds: false,
       logPerformance: false,
     });
@@ -192,7 +190,6 @@ Column {
       backgroundColor: "#ffffff",
       enableAccessibility: false,
       enableHitTesting: true,
-      enableInputOverlay: false,
       showLayoutBounds: false,
       logPerformance: false,
     });
@@ -244,7 +241,6 @@ Column {
       backgroundColor: "#ffffff",
       enableAccessibility: false,
       enableHitTesting: true,
-      enableInputOverlay: false,
       showLayoutBounds: false,
       logPerformance: false,
     });

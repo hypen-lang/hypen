@@ -27,6 +27,9 @@ pub fn text_element(content: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -60,6 +63,9 @@ pub fn text_element_with_binding(path: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -71,6 +77,9 @@ pub fn column_with_children(children: Vec<Element>) -> Element {
         ir_children: children.into_iter().map(IRNode::Element).collect(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -82,6 +91,9 @@ pub fn row_with_children(children: Vec<Element>) -> Element {
         ir_children: children.into_iter().map(IRNode::Element).collect(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -95,6 +107,9 @@ pub fn image_element(url: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -108,6 +123,9 @@ pub fn button_element(text: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -122,6 +140,9 @@ pub fn button_with_action(text: &str, action: &str) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -135,6 +156,9 @@ pub fn keyed_text_element(content: &str, key: &str) -> Element {
         ir_children: Vec::new(),
         key: Some(key.to_string()),
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -146,6 +170,9 @@ pub fn element_with_props(element_type: &str, props: Props) -> Element {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -268,15 +295,20 @@ pub fn keyed_list(items: &[&str]) -> Vec<Element> {
 
 /// Creates a patch capture callback
 /// Returns (captured_patches, callback_function)
+///
+/// Captured batches are lowered through a [`TemplateExpander`] the way
+/// every plain-patch boundary does, so tests written against the
+/// pre-template `Create`/`Insert` wire keep asserting that shape. Tests
+/// that pin the collapsed (`RegisterTemplate`/`Instantiate`) wire itself
+/// use their own raw callback instead.
 #[allow(clippy::type_complexity)]
 pub fn patch_capture() -> (Arc<Mutex<Vec<Patch>>>, impl Fn(&[Patch])) {
     let patches = Arc::new(Mutex::new(Vec::new()));
     let patches_clone = patches.clone();
+    let expander = Mutex::new(hypen_engine::TemplateExpander::new());
     let callback = move |new_patches: &[Patch]| {
-        patches_clone
-            .lock()
-            .unwrap()
-            .extend(new_patches.iter().cloned());
+        let lowered = expander.lock().unwrap().expand(new_patches.to_vec());
+        patches_clone.lock().unwrap().extend(lowered);
     };
     (patches, callback)
 }

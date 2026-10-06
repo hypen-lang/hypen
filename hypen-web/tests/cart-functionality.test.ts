@@ -398,7 +398,7 @@ describe("Cart Integration with Module System", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     // Dispatch addToCart action to trigger state changes
-    const addToCartHandler = actionHandlers.get("addToCart");
+    const addToCartHandler = actionHandlers.get("__hypen_scoped::addToCart");
     expect(addToCartHandler).toBeDefined();
 
     await addToCartHandler!({

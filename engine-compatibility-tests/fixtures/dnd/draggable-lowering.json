@@ -1,0 +1,59 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "draggable-lowering",
+  "description": "The .draggable applicator lowers to ONE static __dnd.source object (group/handle/activation with defaults filled) plus split bindable pieces: __dnd.sourceEnabled re-resolves per render like any bound prop. No draggable.* junk props ever reach the wire, __dnd.sourcePayload is absent when payload: is not given, and __dnd.key is absent outside a ForEach (renderers fall back to the node id)",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Card(\"x\").draggable(group: \"cards\", handle: true, activation: press, enabled: @state.canDrag)",
+    "initialState": { "canDrag": true },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["canDrag"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render carries the static source spec and the resolved enabled flag",
+      "action": "initialRender",
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["create", "insert"],
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Card",
+          "props": {
+            "__dnd.source": { "group": "cards", "handle": true, "activation": "press" },
+            "__dnd.sourceEnabled": true
+          },
+          "absentProps": [
+            "draggable.0",
+            "draggable.group",
+            "draggable.handle",
+            "draggable.activation",
+            "draggable.enabled",
+            "__dnd.sourcePayload",
+            "__dnd.key",
+            "__dnd.pinGroup"
+          ]
+        },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Flipping the bound enabled flag re-resolves __dnd.sourceEnabled in place",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["canDrag"],
+        "newValues": { "canDrag": false }
+      },
+      "expectedPatches": [
+        { "type": "setProp", "name": "__dnd.sourceEnabled", "value": false }
+      ],
+      "forbiddenPatchTypes": ["create", "insert", "remove", "move", "setText", "detach", "attach"]
+    }
+  ]
+}

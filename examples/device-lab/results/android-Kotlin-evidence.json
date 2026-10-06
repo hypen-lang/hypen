@@ -1,0 +1,199 @@
+[
+  {
+    "step": "connected",
+    "text": [
+      "Device Lab \u00b7 Kotlin",
+      "Real host / real server \u00b7 run 0",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "Connected. Choose a check.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45103)",
+      "10.0.2.2:45103",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "query",
+    "text": [
+      "Device Lab \u00b7 Kotlin",
+      "Real host / real server \u00b7 run 0",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "Connected. Choose a check.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45103)",
+      "10.0.2.2:45103",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "gallery-picker",
+    "text": [
+      "Downloads",
+      "Large files",
+      "This week",
+      "IMAGES IN DOWNLOADS",
+      "Downloads",
+      "superwall-benchmark",
+      "superwall-event-timelines",
+      "screenshots",
+      "device-lab.png",
+      "5:30 PM",
+      "85.60 kB",
+      "PNG image"
+    ]
+  },
+  {
+    "step": "gallery-cancel",
+    "text": [
+      "Device Lab \u00b7 Kotlin",
+      "Real host / real server \u00b7 run 0",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "Connected. Choose a check.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45103)",
+      "10.0.2.2:45103",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "save-consent",
+    "text": [
+      "Device access",
+      "ws://10.0.2.2:45103 wants to save a .txt file (100 KB) to your device.\n\nDevelopment mode: this connection is not encrypted (ws://). Access granted here lasts only for this connection.",
+      "CANCEL",
+      "CONTINUE"
+    ]
+  },
+  {
+    "step": "save-picker",
+    "text": [
+      "Downloads",
+      "FILES IN DOWNLOADS",
+      "Downloads",
+      "superwall-benchmark",
+      "superwall-event-timelines",
+      "screenshots",
+      "device-lab (1).txt",
+      "9:33 PM",
+      "102 kB",
+      "TXT document",
+      "device-lab.txt",
+      "9:27 PM",
+      "102 kB",
+      "TXT document",
+      "device-lab-empty.txt",
+      "6:06 PM",
+      "0 B",
+      "TXT document",
+      "device-lab-sample.txt",
+      "6:06 PM",
+      "102 kB",
+      "TXT document",
+      "device-lab.png",
+      "5:30 PM",
+      "85.60 kB",
+      "PNG image",
+      "device-lab.txt",
+      "SAVE"
+    ]
+  },
+  {
+    "step": "save-result",
+    "text": [
+      "Device Lab \u00b7 Kotlin",
+      "Real host / real server \u00b7 run 0",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "Connected. Choose a check.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45103)",
+      "10.0.2.2:45103",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "record",
+    "text": [
+      "Device Lab \u00b7 Kotlin",
+      "Real host / real server \u00b7 run 0",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "Connected. Choose a check.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45103)",
+      "10.0.2.2:45103",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "ping",
+    "text": [
+      "Device Lab \u00b7 Kotlin",
+      "Real host / real server \u00b7 run 0",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "Connected. Choose a check.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45103)",
+      "10.0.2.2:45103",
+      "\u25be"
+    ]
+  }
+]

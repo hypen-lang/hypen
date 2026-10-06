@@ -4,6 +4,9 @@
  * Shared type definitions for the canvas renderer
  */
 
+import type { Semantics } from "@hypen-space/core/types";
+import type { SafeAreaInsets } from "../safe-area.js";
+
 export interface VirtualNode {
   id: string;
   type: string;
@@ -11,12 +14,25 @@ export interface VirtualNode {
   children: VirtualNode[];
   parent: VirtualNode | null;
 
+  /**
+   * Engine-derived accessibility semantics (role, name, hidden, …) carried
+   * from the Create patch. Drives the transparent accessibility overlay,
+   * since the canvas bitmap itself exposes nothing to assistive technology.
+   */
+  semantics?: Semantics;
+
   // Computed layout
   layout?: Layout;
 
   // Rendering state
   visible: boolean;
   opacity: number;
+
+  // Exit-animating subtree root (set by CanvasAnimator on a transition-
+  // flagged remove). The node stays in the tree — still painted — until the
+  // exit finalizes, but the whole subtree is excluded from hit-testing and
+  // scroll targeting immediately: engine-side the id is already dead.
+  exiting?: boolean;
 
   // Interaction state
   clickable: boolean;
@@ -27,6 +43,32 @@ export interface VirtualNode {
 
   // Scroll state (managed by ScrollManager, not serialised)
   scrollState?: ScrollState;
+
+  // Pointer-pressed (active) state, tracked by the event manager from
+  // mousedown/mouseup so `:active` paint variants can resolve.
+  pressed?: boolean;
+
+  // --- Drag-and-drop visual state (managed by CanvasDnd, never serialised) ---
+  // Renderer-local translation applied to this node's WHOLE subtree, on top
+  // of its author transform: the ghost's drag delta on the lifted item, the
+  // gap-opening shift on a sortable sibling, the held post-drop position.
+  // Paint applies it as an outer `ctx.translate`; hit-testing offsets the
+  // subtree by the same amount. Absent/undefined = no offset.
+  dndOffset?: { x: number; y: number };
+  // The lifted item: skipped by the in-tree paint pass and by hit-testing
+  // (the pointer must see what is UNDER the ghost), painted last by the
+  // renderer's ghost pass so it sits above every sibling.
+  dndGhost?: boolean;
+
+  // --- Variant resolution bookkeeping (managed by applyVariants) ---
+  // Set of applicator base names that have at least one `@bp`/`:state` variant
+  // key on this node. Computed lazily; null means "not yet scanned", an empty
+  // set means "scanned, no variants".
+  variantBases?: Set<string> | null;
+  // Snapshot of the node's original (variant-free) base values, captured the
+  // first time a variant override is applied so each frame resolves from the
+  // un-overridden base instead of compounding overrides.
+  variantOriginals?: Record<string, unknown>;
 }
 
 export interface Layout {
@@ -77,11 +119,18 @@ export interface FontStyle {
   fontSize: number;
   fontWeight: string | number;
   lineHeight?: number;
+  /**
+   * Extra tracking in px applied after every glyph (CSS `letter-spacing`,
+   * Tailwind `tracking-*`). Canvas 2D has no native letter-spacing on every
+   * engine, so measurement approximates it as `chars × spacing` — enough to
+   * keep a widely-tracked heading from being under-measured and clipped.
+   */
+  letterSpacing?: number;
 }
 
 export interface TextStyle extends FontStyle {
   color: string;
-  textAlign: "left" | "center" | "right";
+  textAlign: "left" | "center" | "right" | "justify";
   verticalAlign: "top" | "middle" | "bottom";
 }
 
@@ -98,9 +147,21 @@ export interface CanvasRendererOptions {
   backgroundColor?: string;
 
   // Features
+  //
+  // enableAccessibility also gates text-input editing and keyboard focus:
+  // the accessibility mirror (a transparent positioned overlay above the
+  // canvas) is the renderer's focus system, and Input/Textarea edit
+  // sessions start from mirror focus.
   enableAccessibility?: boolean;
   enableHitTesting?: boolean;
-  enableInputOverlay?: boolean;
+
+  /**
+   * Per-edge override for the insets the `SafeArea` component pads by, in
+   * CSS px. Each edge is optional and merges over the value probed from
+   * `env(safe-area-inset-*)` (0 outside a browser), so `{ bottom: 0 }`
+   * zeroes only the bottom edge.
+   */
+  safeAreaInsets?: Partial<SafeAreaInsets>;
 
   // Performance
   enableDirtyRects?: boolean;
@@ -150,7 +211,6 @@ export interface ScrollState {
 export interface DirtyRect extends Rectangle {
   frameId: number;
 }
-
 
 
 

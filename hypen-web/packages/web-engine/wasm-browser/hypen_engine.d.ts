@@ -60,6 +60,34 @@ export class WasmEngine {
     free(): void;
     [Symbol.dispose](): void;
     /**
+     * Kebab-case ids of every accessibility rule this engine build's
+     * conformance pass checks (from `ir::conformance::ALL_RULES`, so the
+     * list cannot drift from the `A11yRule` enum). Hosts compare it against
+     * the rule set they were built to expect: a prebuilt WASM that predates
+     * a rule still exposes `checkAccessibility` and looks current while
+     * silently never firing the newer rule.
+     */
+    a11yRules(): string[];
+    /**
+     * Run the dev-mode accessibility conformance pass over a DSL source and
+     * return any findings as
+     * `[{ rule, elementType, message, span?, line?, col?, suppressed? }]`.
+     * Hosts wire this into a dev console / editor diagnostics; an empty
+     * array means nothing actionable was found. Flags only un-derivable
+     * gaps (icon-only controls, missing alt, unleveled headings, nested
+     * interactives). `suppressed: true` marks findings matched by an inline
+     * `// hypen-a11y-ignore` directive (resolved by `locate_diagnostics`) —
+     * hosts count and report them but must not fail on or squiggle them.
+     *
+     * `span` is the offending element name token's byte range in `source`;
+     * `line`/`col` are its resolved position (1-based; `col` counts Unicode
+     * codepoints — the human/CLI convention). Resolution happens here, at
+     * the binding, so every host shares one byte→column rule. LSP-style
+     * consumers needing 0-based UTF-16 positions should resolve `span`
+     * themselves.
+     */
+    checkAccessibility(source: string): any;
+    /**
      * Clear resolved components and caches, preserving primitives and resolver.
      */
     clearResolvedComponents(): void;
@@ -89,9 +117,67 @@ export class WasmEngine {
      */
     dispatchAction(name: string, payload: any): void;
     /**
+     * Dispatch on behalf of an external caller.
+     *
+     * Authorises against exactly what `listActions` advertises, then routes
+     * through the same handler path a UI dispatch would take. Throws when
+     * the name is not externally dispatchable, when a built-in is used in an
+     * app that does not declare it, or when `set_input` names an undeclared
+     * field.
+     */
+    dispatchExternal(name: string, payload: any): void;
+    /**
+     * The built-in external action names, as
+     * `{ navigate, back, setInput, bindAction }`.
+     *
+     * Exported so SDKs bind to these rather than hardcoding the literals.
+     * They were hardcoded in four SDKs at once, which is why renaming
+     * `navigate` to `hypen.navigate` (to stop it colliding with `Link`'s own
+     * declared action) broke all four silently instead of at the call site.
+     */
+    externalBuiltinNames(): any;
+    /**
      * Get the current revision number.
      */
     getRevision(): bigint;
+    /**
+     * Read module state, whole or at a path.
+     *
+     * Pass `null`/`undefined` for `module` to read the primary module, or a
+     * registered module's name (case-insensitive). Returns `null` when the
+     * module is unknown or the path is absent.
+     */
+    getStateAt(module?: string | null, path?: string | null): any;
+    /**
+     * List every action an external caller may dispatch, as
+     * `[{ name, module, builtin }]`.
+     *
+     * Module-declared actions plus `navigate` / `back` / `set_input`, the
+     * last three only when the app declares the backing `Router` or
+     * `.bind()`. Framework internals never appear.
+     */
+    listActions(): any;
+    /**
+     * List `.bind()`-declared writable inputs as
+     * `[{ path, prop, elementType, moduleScope }]`, backing `set_input`'s
+     * argument schema. `prop` is `checked` / `on` for boolean controls.
+     */
+    listBindings(): any;
+    /**
+     * List the app's declared routes as `[{ path, params, moduleScope }]`,
+     * backing `navigate`'s argument schema.
+     */
+    listRoutes(): any;
+    /**
+     * The full MCP handshake for this app: `{ protocolVersion, instructions,
+     * tools, resources, resourceTemplates, degraded }`.
+     *
+     * Copy the fields straight into `initialize.instructions`, `tools/list`
+     * and `resources/list`. Composed in the engine so five SDKs transport
+     * bytes and hand-write no prose — re-deriving or re-describing any of it
+     * host-side is what the shape exists to prevent.
+     */
+    mcpManifest(): any;
     /**
      * Create a new engine instance with an empty tree and no module.
      *
@@ -159,6 +245,10 @@ export class WasmEngine {
      */
     reset(): void;
     /**
+     * Resolve session-local node identity before trusted server fan-out.
+     */
+    resolveUIAction(name: string, payload: any): any;
+    /**
      * Set the component resolver callback
      */
     setComponentResolver(resolver: Function): void;
@@ -179,18 +269,35 @@ export class WasmEngine {
      */
     treeSize(): number;
     /**
+     * Drop a module and every action it declared.
+     *
+     * **Call on destroy only**, never on unmount: under the default
+     * `persist: true` an off-screen module stays registered on purpose, so
+     * siblings can still read its state. The SDK's three destroy sites —
+     * full stop, `persist: false` unmount, LRU eviction — are the correct
+     * call sites.
+     */
+    unregisterModule(name: string): void;
+    /**
      * Apply a state patch and re-render affected nodes.
      *
      * `scope` selects the target module:
      * - empty string / null / undefined → primary module set via [`set_module`](Self::set_module)
      * - any other string → named module registered via [`register_module`] (lowercased)
+     *
+     * `animation` is the optional batch-animation context (Option D cheap
+     * subset): a spec object (`{curve: "spring", ...}`) or a bare curve
+     * string (`"spring"`). Omitted / `undefined` / `null` → unstamped
+     * update, byte-identical to the pre-animation wire format. When the
+     * update changes state and the render cycle emits patches, the batch is
+     * prefixed with a `{"type": "batchAnimation", "spec": {...}}` prelude.
      */
-    updateState(scope: string | null | undefined, state_patch: any): void;
+    updateState(scope: string | null | undefined, state_patch: any, animation?: any | null): void;
     /**
      * Apply a sparse state update using explicit path-value pairs.
-     * See [`update_state`] for `scope` semantics.
+     * See [`update_state`] for `scope` and `animation` semantics.
      */
-    updateStateSparse(scope: string | null | undefined, paths_js: any, values_js: any): void;
+    updateStateSparse(scope: string | null | undefined, paths_js: any, values_js: any, animation?: any | null): void;
     /**
      * Validate that the engine is in a consistent state.
      */
@@ -263,6 +370,13 @@ export function pathGet(value_json: string, path: string): string;
 export function pathHas(value_json: string, path: string): string;
 
 /**
+ * Move element `from` of the array at `from_path` to index `to` of the
+ * array at `to_path` (the `__hypen_reorder` primitive); returns JSON
+ * `{"json": <updated>, "moved": bool}`. See [`crate::portable::path_move`].
+ */
+export function pathMove(value_json: string, from_path: string, from: number, to_path: string, to: number): string;
+
+/**
  * Set `new_value_json` at `path` inside `value_json`; returns the
  * updated JSON string.
  */
@@ -294,15 +408,25 @@ export interface InitOutput {
     readonly pathDelete: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pathGet: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pathHas: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly pathMove: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly pathSet: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
     readonly sessionStep: (a: number, b: number, c: number, d: number) => [number, number, number, number];
+    readonly wasmengine_a11yRules: (a: number) => [number, number];
+    readonly wasmengine_checkAccessibility: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmengine_clearResolvedComponents: (a: number) => void;
     readonly wasmengine_clearTree: (a: number) => void;
     readonly wasmengine_currentState: (a: number) => any;
     readonly wasmengine_debugParseComponent: (a: number, b: number, c: number) => [number, number, number, number];
     readonly wasmengine_discoverRouters: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmengine_dispatchAction: (a: number, b: number, c: number, d: any) => [number, number];
+    readonly wasmengine_dispatchExternal: (a: number, b: number, c: number, d: any) => [number, number];
+    readonly wasmengine_externalBuiltinNames: (a: number) => any;
     readonly wasmengine_getRevision: (a: number) => bigint;
+    readonly wasmengine_getStateAt: (a: number, b: number, c: number, d: number, e: number) => any;
+    readonly wasmengine_listActions: (a: number) => any;
+    readonly wasmengine_listBindings: (a: number) => any;
+    readonly wasmengine_listRoutes: (a: number) => any;
+    readonly wasmengine_mcpManifest: (a: number) => any;
     readonly wasmengine_new: () => number;
     readonly wasmengine_onAction: (a: number, b: number, c: number, d: any) => void;
     readonly wasmengine_onDataSourceAction: (a: number, b: any) => void;
@@ -314,13 +438,15 @@ export interface InitOutput {
     readonly wasmengine_renderInto: (a: number, b: number, c: number, d: number, e: number, f: any) => [number, number];
     readonly wasmengine_renderLazyComponent: (a: number, b: number, c: number) => [number, number];
     readonly wasmengine_reset: (a: number) => void;
+    readonly wasmengine_resolveUIAction: (a: number, b: number, c: number, d: any) => [number, number, number];
     readonly wasmengine_setComponentResolver: (a: number, b: any) => void;
     readonly wasmengine_setContext: (a: number, b: number, c: number, d: any) => [number, number];
     readonly wasmengine_setModule: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => [number, number];
     readonly wasmengine_setRenderCallback: (a: number, b: any) => void;
     readonly wasmengine_treeSize: (a: number) => number;
-    readonly wasmengine_updateState: (a: number, b: number, c: number, d: any) => [number, number];
-    readonly wasmengine_updateStateSparse: (a: number, b: number, c: number, d: any, e: any) => [number, number];
+    readonly wasmengine_unregisterModule: (a: number, b: number, c: number) => void;
+    readonly wasmengine_updateState: (a: number, b: number, c: number, d: any, e: number) => [number, number];
+    readonly wasmengine_updateStateSparse: (a: number, b: number, c: number, d: any, e: any, f: number) => [number, number];
     readonly wasmengine_validate: (a: number) => any;
     readonly wasmengine_renderSource: (a: number, b: number, c: number) => [number, number];
     readonly __wbindgen_malloc: (a: number, b: number) => number;
@@ -330,6 +456,7 @@ export interface InitOutput {
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __externref_drop_slice: (a: number, b: number) => void;
     readonly __wbindgen_start: () => void;
 }
 

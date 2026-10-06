@@ -111,7 +111,7 @@ Column {
     }
     .horizontalAlignment("center")
   }
-  .gap(12)
+  .gap(8)
   .marginBottom(24)
 
   Text("With borders")
@@ -153,17 +153,17 @@ Column {
     .marginBottom(8)
 
   Row {
-    Image(src: "https://picsum.photos/80/80?1")
+    Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/rounded-image-1.png?platform=__HYPEN_GALLERY_PLATFORM__&example=borderRadius&generation=__HYPEN_GALLERY_GENERATION__")
       .width(80)
       .height(80)
       .borderRadius(0)
 
-    Image(src: "https://picsum.photos/80/80?2")
+    Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/rounded-image-2.png?platform=__HYPEN_GALLERY_PLATFORM__&example=borderRadius&generation=__HYPEN_GALLERY_GENERATION__")
       .width(80)
       .height(80)
       .borderRadius(12)
 
-    Image(src: "https://picsum.photos/80/80?3")
+    Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/rounded-image-3.png?platform=__HYPEN_GALLERY_PLATFORM__&example=borderRadius&generation=__HYPEN_GALLERY_GENERATION__")
       .width(80)
       .height(80)
       .borderRadius(40)

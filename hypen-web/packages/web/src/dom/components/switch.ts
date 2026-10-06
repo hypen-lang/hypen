@@ -2,7 +2,7 @@
  * Switch Component (Toggle)
  */
 
-import type { ComponentHandler } from "./index.js";
+import { hasProp, toBool, type ComponentHandler } from "./index.js";
 
 export const switchHandler: ComponentHandler = {
   create(): HTMLElement {
@@ -16,20 +16,22 @@ export const switchHandler: ComponentHandler = {
     const input = document.createElement("input");
     input.type = "checkbox";
     input.dataset.hypenSwitch = "true";
-    
+
     // Style the switch
     input.style.appearance = "none";
     input.style.width = "44px";
     input.style.height = "24px";
-    input.style.backgroundColor = "#ccc";
     input.style.borderRadius = "12px";
     input.style.position = "relative";
     input.style.cursor = "pointer";
     input.style.transition = "background-color 0.2s";
-    
+
     // Add pseudo-element styling via CSS
     const style = document.createElement("style");
     style.textContent = `
+      input[data-hypen-switch="true"] {
+        background-color: #ccc;
+      }
       input[data-hypen-switch="true"]::before {
         content: "";
         position: absolute;
@@ -50,22 +52,26 @@ export const switchHandler: ComponentHandler = {
     `;
     wrapper.appendChild(style);
     wrapper.appendChild(input);
-    
+
     return wrapper;
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    const input = el.querySelector('input[type="checkbox"]') as HTMLInputElement;
+    // Match on the marker `create` stamps rather than on the tag+type pair:
+    // it is the same element, and it survives the `cloneNode` template path.
+    const input = el.querySelector('[data-hypen-switch="true"]') as HTMLInputElement;
     if (!input) return;
 
-    // On state (checked)
-    if (props.on !== undefined) {
-      input.checked = Boolean(props.on);
+    // On state (checked). Any of the three spellings being *mentioned* is a
+    // write, so removing the one in play resets the toggle instead of
+    // leaving it stuck on.
+    if (hasProp(props, "checked") || hasProp(props, "on") || hasProp(props, "value")) {
+      input.checked = toBool(props.checked ?? props.on ?? props.value);
     }
 
     // Disabled
-    if (props.disabled !== undefined) {
-      input.disabled = Boolean(props.disabled);
+    if (hasProp(props, "disabled")) {
+      input.disabled = toBool(props.disabled);
     }
 
     // Label text
@@ -76,11 +82,9 @@ export const switchHandler: ComponentHandler = {
         node => node.nodeType === Node.TEXT_NODE
       );
       textNodes.forEach(node => node.remove());
-      
+
       // Add new label text
       el.appendChild(document.createTextNode(String(label)));
     }
   },
 };
-
-

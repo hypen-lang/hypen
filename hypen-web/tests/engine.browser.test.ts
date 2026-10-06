@@ -51,16 +51,21 @@ class FakeWasmEngine {
     this.renderLazySources.push(source);
   }
 
+  // The real WasmEngine deserializes each argument synchronously at the
+  // boundary (serde_wasm_bindgen::from_value) and retains no JS reference,
+  // which is why `unwrapForWasm` may pass already-plain values through by
+  // reference. Snapshot at receipt to mirror that: later caller-side
+  // mutations must not show up in what "crossed".
   renderInto(source: string, parentId: string, state: Record<string, unknown>) {
-    this.renderIntoCalls.push({ source, parentId, state });
+    this.renderIntoCalls.push({ source, parentId, state: structuredClone(state) });
   }
 
   updateState(_scope: string, state: Record<string, unknown>) {
-    this.updateStateCalls.push(state);
+    this.updateStateCalls.push(structuredClone(state));
   }
 
   updateStateSparse(_scope: string, _paths: string[], values: Record<string, unknown>) {
-    this.updateStateCalls.push(values);
+    this.updateStateCalls.push(structuredClone(values));
   }
 
   dispatchAction(name: string, payload: unknown) {

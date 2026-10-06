@@ -47,7 +47,7 @@ Column {
         .onChange("@actions.toggleWifi")
     }
     .padding(16)
-    .horizontalAlignment("center")
+    .verticalAlignment("center")
 
     Divider()
       .backgroundColor("#e5e7eb")
@@ -65,7 +65,7 @@ Column {
         .onChange("@actions.toggleBluetooth")
     }
     .padding(16)
-    .horizontalAlignment("center")
+    .verticalAlignment("center")
 
     Divider()
       .backgroundColor("#e5e7eb")
@@ -83,7 +83,7 @@ Column {
         .onChange("@actions.toggleNotifications")
     }
     .padding(16)
-    .horizontalAlignment("center")
+    .verticalAlignment("center")
   }
   .backgroundColor("#fff")
   .cornerRadius(12)

@@ -5,21 +5,26 @@ Column {
             .height(220)
             .objectFit("cover")
 
-        Button {
-            Icon(@resources.arrow-left)
-                .size(22)
-                .color("#111827")
-        }
-        .tw("absolute top-4 left-4 w-10 h-10 rounded-full bg-white items-center justify-center shadow")
-        .onClick(@router.push, to: "/")
+        SafeArea(edges: ["top", "left", "right"]) {
+            Row {
+                Button {
+                    Icon(@resources.arrow-left)
+                        .size(22)
+                        .color("#111827")
+                }
+                .tw("w-10 h-10 rounded-full bg-white items-center justify-center shadow")
+                .onClick(@router.push, to: "/")
 
-        Button {
-            Icon(@resources.heart)
-                .size(22)
-                .color("@{state.isFavorite ? '#ef4444' : '#111827'}")
+                Button {
+                    Icon(@resources.heart)
+                        .size(22)
+                        .color("@{state.isFavorite ? '#ef4444' : '#111827'}")
+                }
+                .tw("w-10 h-10 rounded-full bg-white items-center justify-center shadow")
+                .onClick(@actions.toggleFavorite)
+            }
+            .tw("w-full px-4 pt-4 items-center justify-between")
         }
-        .tw("absolute top-4 right-4 w-10 h-10 rounded-full bg-white items-center justify-center shadow")
-        .onClick(@actions.toggleFavorite)
     }
 
     Column {

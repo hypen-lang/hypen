@@ -217,7 +217,18 @@ private struct TextAreaViewWrapper: View {
     }
 
     var body: some View {
-        TextEditor(text: $text)
+        ZStack(alignment: .topLeading) {
+            if text.isEmpty && !placeholder.isEmpty {
+                Text(placeholder)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 8)
+                    .padding(.leading, 5)
+                    .allowsHitTesting(false)
+            }
+            TextEditor(text: $text)
+                .scrollContentBackgroundCompatHidden()
+                .background(Color.clear)
+        }
             .onChangeCompat(of: text) { newValue in
                 if isSyncingFromProps {
                     isSyncingFromProps = false
@@ -259,6 +270,17 @@ private struct TextAreaViewWrapper: View {
     }
 }
 
+private extension View {
+    @ViewBuilder
+    func scrollContentBackgroundCompatHidden() -> some View {
+        if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) {
+            self.scrollContentBackground(.hidden)
+        } else {
+            self
+        }
+    }
+}
+
 // MARK: - Checkbox Component
 
 public struct CheckboxComponent: ComponentHandler {
@@ -294,17 +316,19 @@ public struct CheckboxComponent: ComponentHandler {
 }
 
 /// Custom checkbox style that renders as a checkbox (not a switch) to match Android/Web
+internal let hypenCheckboxMetric: CGFloat = 20
+
 private struct CheckboxToggleStyle: ToggleStyle {
     func makeBody(configuration: Configuration) -> some View {
         HStack(spacing: 8) {
             // Checkbox box
             ZStack {
                 RoundedRectangle(cornerRadius: 4)
-                    .stroke(configuration.isOn ? Color.accentColor : Color.gray, lineWidth: 2)
-                    .frame(width: 20, height: 20)
+                    .stroke(configuration.isOn ? hypenCheckboxColor : Color.gray, lineWidth: 2)
+                    .frame(width: hypenCheckboxMetric, height: hypenCheckboxMetric)
                     .background(
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(configuration.isOn ? Color.accentColor : Color.clear)
+                            .fill(configuration.isOn ? hypenCheckboxColor : Color.clear)
                     )
 
                 if configuration.isOn {
@@ -322,6 +346,8 @@ private struct CheckboxToggleStyle: ToggleStyle {
         }
     }
 }
+
+private let hypenCheckboxColor = Color(red: 0.231, green: 0.510, blue: 0.965)
 
 private struct CheckboxViewWrapper: View {
     let initialChecked: Bool
@@ -407,7 +433,11 @@ public struct SwitchComponent: ComponentHandler {
         modifier: HypenModifier,
         children: @escaping () -> AnyView
     ) -> AnyView {
-        let initialOn = context.element.getBoolProp("on.0")
+        let initialOn = context.element.getBoolProp("checked")
+            ?? context.element.getBoolProp("checked.0")
+            ?? context.element.getBoolProp("on")
+            ?? context.element.getBoolProp("on.0")
+            ?? context.element.getBoolProp("value")
             ?? context.element.getBoolProp("value.0")
             ?? false
 
@@ -633,6 +663,20 @@ private struct SliderViewWrapper: View {
 
 // MARK: - Select Component
 
+func selectChildOptions(_ children: [HypenElement]) -> [[String: Any]] {
+    children.compactMap { child -> [String: Any]? in
+        guard child.elementType.lowercased() == "text",
+              let label = child.getStringProp("0") ?? child.getStringProp("text") else {
+            return nil
+        }
+        return ["label": label, "value": label]
+    }
+}
+
+func resolvedSelectInitialValue(_ authored: String?, options: [[String: Any]]) -> String? {
+    authored ?? options.first?["value"] as? String ?? options.first?["label"] as? String
+}
+
 public struct SelectComponent: ComponentHandler {
     public let typeName = "select"
 
@@ -643,12 +687,15 @@ public struct SelectComponent: ComponentHandler {
         modifier: HypenModifier,
         children: @escaping () -> AnyView
     ) -> AnyView {
-        let options = context.element.props["options.0"] as? [[String: Any]]
+        let explicitOptions = context.element.props["options.0"] as? [[String: Any]]
             ?? context.element.props["options"] as? [[String: Any]]
             ?? []
+        let childOptions = selectChildOptions(context.renderer.getChildren(of: context.element.id))
+        let options = explicitOptions.isEmpty ? childOptions : explicitOptions
 
-        let initialValue = context.element.getStringProp("value.0")
+        let authoredValue = context.element.getStringProp("value.0")
             ?? context.element.getStringProp("value")
+        let initialValue = resolvedSelectInitialValue(authoredValue, options: options)
 
         let onChange = ActionValue.from(context.element.props["onChange.0"])
         let disabled = context.element.getBoolProp("disabled.0") ?? false
@@ -706,7 +753,9 @@ private struct SelectViewWrapper: View {
 
     var body: some View {
         Picker(placeholder, selection: $selectedValue) {
-            Text(placeholder).tag("")
+            if selectedValue.isEmpty {
+                Text(placeholder).tag("")
+            }
             ForEach(options.indices, id: \.self) { index in
                 let option = options[index]
                 let value = option["value"] as? String ?? ""

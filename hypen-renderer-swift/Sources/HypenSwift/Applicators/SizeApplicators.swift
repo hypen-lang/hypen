@@ -10,7 +10,7 @@ import AppKit
  *
  * Cross-platform sizing value support:
  * - Numbers: treated as pt (platform default)
- * - "100px": absolute pixels (converted based on screen scale)
+ * - "100px": absolute pixels (1px = 1pt — logical, NOT device pixels)
  * - "100dp" / "100pt": density-independent points (equivalent)
  * - "50%": percentage of parent/available space
  * - "50vw" / "50vh": viewport width/height
@@ -94,9 +94,20 @@ public func parseSizeValue(_ value: Any?) -> SizeValue? {
 
     switch unit {
     case "px":
-        // Convert absolute pixels to points based on screen scale
-        let scale = getScreenScale()
-        return .fixed(CGFloat(num) / scale)
+        // CSS `px` is a LOGICAL pixel, so 1px = 1pt.
+        //
+        // This used to divide by `UIScreen.scale`, treating px as a PHYSICAL
+        // device pixel. That shrank every px-specified dimension by 2–3× on a
+        // Retina device — `max-w-[250px]` became an 83pt cap on a 3× iPhone,
+        // which is what collapsed the home-screen launcher's icon grid.
+        //
+        // The cross-renderer contract is stated in the DOM renderer's
+        // `parseSizeValue` header: "100px: absolute pixels (1px = 1px
+        // everywhere)". Web emits `${value}px` untouched and desktop
+        // (`style.rs` `parse_length`) strips the suffix and uses the number,
+        // so 1:1 is what the other two renderers already do. `dp`/`pt` remain
+        // the density-aware units.
+        return .fixed(CGFloat(num))
     case "dp", "sp", "":
         // dp / sp are 1 logical iOS point at standard density.
         // (`sp` does not yet scale with Dynamic Type — that's a
@@ -123,17 +134,6 @@ public func parseSizeValue(_ value: Any?) -> SizeValue? {
 
 /// Cached screen metrics to avoid MainActor isolation issues
 private enum ScreenMetrics {
-    /// Screen scale factor - cached on first access
-    nonisolated(unsafe) static var scale: CGFloat = {
-        #if canImport(UIKit)
-        return MainActor.assumeIsolated { UIScreen.main.scale }
-        #elseif canImport(AppKit)
-        return MainActor.assumeIsolated { NSScreen.main?.backingScaleFactor ?? 1.0 }
-        #else
-        return 1.0
-        #endif
-    }()
-
     /// Screen width - note: this may not update on rotation
     nonisolated(unsafe) static var width: CGFloat = {
         #if canImport(UIKit)
@@ -157,11 +157,6 @@ private enum ScreenMetrics {
     }()
 }
 
-/// Get the screen scale factor for px conversion
-private func getScreenScale() -> CGFloat {
-    ScreenMetrics.scale
-}
-
 /// Get the screen width in points
 public func getScreenWidth() -> CGFloat {
     ScreenMetrics.width
@@ -172,15 +167,20 @@ public func getScreenHeight() -> CGFloat {
     ScreenMetrics.height
 }
 
-/// Resolve a SizeValue to a fixed CGFloat (for viewport units only)
-public func resolveFixedSize(_ size: SizeValue) -> CGFloat? {
+/// Resolve a SizeValue to a fixed CGFloat (for viewport units only).
+///
+/// `viewport` is the area the Hypen root was actually given. A zero on an
+/// axis means "not measured" and falls back to the physical screen, which is
+/// the right answer for a full-screen host and the only answer available
+/// outside a rendered view (tests, previews).
+public func resolveFixedSize(_ size: SizeValue, viewport: CGSize = .zero) -> CGFloat? {
     switch size {
     case .fixed(let value):
         return value
     case .viewportWidth(let fraction):
-        return getScreenWidth() * fraction
+        return (viewport.width > 0 ? viewport.width : getScreenWidth()) * fraction
     case .viewportHeight(let fraction):
-        return getScreenHeight() * fraction
+        return (viewport.height > 0 ? viewport.height : getScreenHeight()) * fraction
     case .infinity:
         return .infinity
     case .percent, .fill, .wrap:
@@ -204,7 +204,7 @@ public struct WidthApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         guard let size = parseSizeValue(value) else { return }
-        applyWidthSize(size, to: &modifier)
+        applyWidthSize(size, to: &modifier, viewport: context.viewportSize)
     }
 }
 
@@ -217,7 +217,7 @@ public struct HeightApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         guard let size = parseSizeValue(value) else { return }
-        applyHeightSize(size, to: &modifier)
+        applyHeightSize(size, to: &modifier, viewport: context.viewportSize)
     }
 }
 
@@ -230,7 +230,7 @@ public struct MinWidthApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         guard let size = parseSizeValue(value),
-              let resolved = resolveFixedSize(size) else { return }
+              let resolved = resolveFixedSize(size, viewport: context.viewportSize) else { return }
         modifier.minWidth = resolved
     }
 }
@@ -242,7 +242,7 @@ public struct MaxWidthApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         guard let size = parseSizeValue(value),
-              let resolved = resolveFixedSize(size) else { return }
+              let resolved = resolveFixedSize(size, viewport: context.viewportSize) else { return }
         modifier.maxWidth = resolved
     }
 }
@@ -254,7 +254,7 @@ public struct MinHeightApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         guard let size = parseSizeValue(value),
-              let resolved = resolveFixedSize(size) else { return }
+              let resolved = resolveFixedSize(size, viewport: context.viewportSize) else { return }
         modifier.minHeight = resolved
     }
 }
@@ -266,7 +266,7 @@ public struct MaxHeightApplicator: ApplicatorHandler {
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         guard let size = parseSizeValue(value),
-              let resolved = resolveFixedSize(size) else { return }
+              let resolved = resolveFixedSize(size, viewport: context.viewportSize) else { return }
         modifier.maxHeight = resolved
     }
 }
@@ -281,14 +281,14 @@ public struct SizeApplicator: ApplicatorHandler {
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
         if let dict = value as? [String: Any] {
             if let widthSize = parseSizeValue(dict["width"]) {
-                applyWidthSize(widthSize, to: &modifier)
+                applyWidthSize(widthSize, to: &modifier, viewport: context.viewportSize)
             }
             if let heightSize = parseSizeValue(dict["height"]) {
-                applyHeightSize(heightSize, to: &modifier)
+                applyHeightSize(heightSize, to: &modifier, viewport: context.viewportSize)
             }
         } else if let size = parseSizeValue(value) {
-            applyWidthSize(size, to: &modifier)
-            applyHeightSize(size, to: &modifier)
+            applyWidthSize(size, to: &modifier, viewport: context.viewportSize)
+            applyHeightSize(size, to: &modifier, viewport: context.viewportSize)
         }
     }
 }
@@ -369,7 +369,7 @@ public struct AspectRatioApplicator: ApplicatorHandler {
 // MARK: - Helpers
 
 /// Apply a width SizeValue to a HypenModifier
-fileprivate func applyWidthSize(_ size: SizeValue, to modifier: inout HypenModifier) {
+fileprivate func applyWidthSize(_ size: SizeValue, to modifier: inout HypenModifier, viewport: CGSize = .zero) {
     switch size {
     case .fixed(let v):
         modifier.width = v
@@ -380,9 +380,9 @@ fileprivate func applyWidthSize(_ size: SizeValue, to modifier: inout HypenModif
         modifier.fillMaxWidth = true
         modifier.fillMaxWidthFraction = fraction
     case .viewportWidth(let fraction):
-        modifier.width = getScreenWidth() * fraction
+        modifier.width = (viewport.width > 0 ? viewport.width : getScreenWidth()) * fraction
     case .viewportHeight(let fraction):
-        modifier.width = getScreenHeight() * fraction
+        modifier.width = (viewport.height > 0 ? viewport.height : getScreenHeight()) * fraction
     case .wrap:
         modifier.width = nil // Let content determine size
     case .infinity:
@@ -392,7 +392,7 @@ fileprivate func applyWidthSize(_ size: SizeValue, to modifier: inout HypenModif
 }
 
 /// Apply a height SizeValue to a HypenModifier
-fileprivate func applyHeightSize(_ size: SizeValue, to modifier: inout HypenModifier) {
+fileprivate func applyHeightSize(_ size: SizeValue, to modifier: inout HypenModifier, viewport: CGSize = .zero) {
     switch size {
     case .fixed(let v):
         modifier.height = v
@@ -403,9 +403,9 @@ fileprivate func applyHeightSize(_ size: SizeValue, to modifier: inout HypenModi
         modifier.fillMaxHeight = true
         modifier.fillMaxHeightFraction = fraction
     case .viewportWidth(let fraction):
-        modifier.height = getScreenWidth() * fraction
+        modifier.height = (viewport.width > 0 ? viewport.width : getScreenWidth()) * fraction
     case .viewportHeight(let fraction):
-        modifier.height = getScreenHeight() * fraction
+        modifier.height = (viewport.height > 0 ? viewport.height : getScreenHeight()) * fraction
     case .wrap:
         modifier.height = nil // Let content determine size
     case .infinity:

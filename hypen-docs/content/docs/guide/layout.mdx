@@ -142,6 +142,11 @@ Useful for centering loading indicators, modals, or any content that needs to be
 
 Similar to Box, stacks children on the z-axis for overlapping layouts. Useful for creating layered UI elements like badges on cards.
 
+Hypen has **no CSS positioning** — `absolute`/`relative`/`top-*`/`inset-*`
+(and the `.position()` applicator) don't exist on native renderers, and the
+Tailwind parser rejects them with an error. Place overlaid children with the
+Stack's `.horizontalAlignment()` / `.verticalAlignment()` and margins instead:
+
 ```hypen
 Stack {
     Card {
@@ -149,26 +154,24 @@ Stack {
     }
 
     Badge("New")
-        .position("absolute")
-        .top(8)
-        .right(8)
+        .margin(8)
 }
+.horizontalAlignment("end")
+.verticalAlignment("start")
 ```
 
 **Platform Support:** Web, Android, iOS
 
 ## Grid
 
-Arranges children in a grid layout with specified columns.
+Arranges a bound collection in a grid. Like `List`, `Grid` is
+**data-driven**: pass an array binding and an item template, and one child is
+rendered per record. A static `Grid { ... }` with hand-written children
+renders an error — use nested `Row`s/`Column`s for fixed layouts.
 
 ```hypen
-Grid {
-    Card { Text("1") }
-    Card { Text("2") }
-    Card { Text("3") }
-    Card { Text("4") }
-    Card { Text("5") }
-    Card { Text("6") }
+Grid(@state.cells, key: "id") {
+    Card { Text("@{item.label}") }
 }
 .gridColumns(3)
 .gap(16)
@@ -178,18 +181,23 @@ Grid {
 
 ```hypen
 // Fixed number of columns
-Grid { }
+Grid(@state.cells, key: "id") {
+    Card { Text("@{item.label}") }
+}
 .gridColumns(2)
 
-// Custom column template (Web)
-Grid { }
-.gridTemplateColumns("1fr 2fr 1fr")
-
 // Separate row and column gaps
-Grid { }
+Grid(@state.cells, key: "id") {
+    Card { Text("@{item.label}") }
+}
 .rowGap(16)
 .columnGap(8)
 ```
+
+Items can span columns via `.gridColumn(...)` on the template — the value is
+bindable per record, e.g. `.gridColumn("@{item.span}")` with
+`span: "span 2"` in the data (see the calculator example's double-width
+`0` key).
 
 **Platform Support:** Web, Android, iOS
 
@@ -198,28 +206,37 @@ Grid { }
 A scrollable container optimized for displaying collections of items. On Android, uses virtualized rendering (LazyColumn) for performance with large lists.
 
 ```hypen
-List {
-    Text("Item 1")
-    Text("Item 2")
-    Text("Item 3")
+List(@state.items) {
+    Text("@{item.title}")
 }
 ```
+
+`List(@state.items)` is shorthand for
+`ForEach(items: @state.items, key: "id")` in a scrollable container — the
+array binding is required, and records need an `id` field (or pass `key:`
+explicitly).
 
 ### List Direction
 
 ```hypen
 // Vertical list (default)
-List { }
+List(@state.items) {
+    Text("@{item.title}")
+}
 
 // Horizontal list
-List { }
+List(@state.items) {
+    Text("@{item.title}")
+}
 .flexDirection("row")
 ```
 
 ### Scrolling
 
 ```hypen
-List { }
+List(@state.items) {
+    Text("@{item.title}")
+}
 .scrollable(true)
 .height(400)
 ```
@@ -265,6 +282,82 @@ Column {
 ```
 
 **Platform Support:** Web, Android, iOS
+
+## SafeArea
+
+A full-size vertical container whose content is padded by the device safe-area
+insets — the notch and status bar at the top, the home indicator at the bottom,
+and the cutout gutters at the sides. Use it as the outermost container of a
+screen so content never sits under system chrome.
+
+`SafeArea` fills its parent (100% width and height) and stacks children
+vertically, exactly like `Column`. The inset is padding on the container itself,
+so a background applied with applicators still runs full-bleed *under* the
+insets while the content stays inside them.
+
+```hypen
+SafeArea {
+    Row()
+        .padding(16)
+        .backgroundColor("#111827") {
+        Text("Header")
+    }
+
+    Column()
+        .flex(1) {
+        Text("Content")
+    }
+
+    Row()
+        .padding(16) {
+        Text("Bottom bar")
+    }
+}
+```
+
+### edges
+
+The optional `edges` prop selects which sides are inset. It takes a list of
+`"top"`, `"right"`, `"bottom"`, `"left"`. Omitting it (or passing an empty list)
+insets **all four** edges; unknown strings are ignored.
+
+```hypen
+SafeArea(edges: ["top", "bottom"]) {
+    Text("Horizontal edges run to the screen edge")
+}
+```
+
+Applicators apply as they do on any container, and safe-area padding combines
+additively with a user `.padding()`. Nesting `SafeArea`s simply applies the
+insets again on the inner one.
+
+### Overriding the insets
+
+The effective inset for an edge is the embedder-supplied value for that edge if
+one was given, otherwise the platform default. Overrides are **per-edge and
+merge over the defaults** — supplying only `bottom: 0` zeroes the bottom inset
+while top, left, and right keep their platform values.
+
+| Renderer | Default insets | Embedder override |
+|----------|----------------|-------------------|
+| Web DOM | `env(safe-area-inset-*, 0px)` | `safeAreaInsets` option on the DOM renderer options — a partial per-edge record of numbers (CSS px) or CSS length strings |
+| Web Canvas | probed once from `env(safe-area-inset-*)`; `0` where unsupported | `safeAreaInsets` option on the Canvas renderer options (numbers, CSS px) |
+| Android | `WindowInsets.safeDrawing` | `LocalHypenSafeAreaInsets` composition local, or the insets parameter on the `HypenApp` entry composable; `null` falls back to `safeDrawing` |
+| iOS / SwiftUI | the hosting view's real safe area | the `\.hypenSafeAreaInsets` environment value (`HypenSafeAreaInsets?`); `nil` falls back to the real safe area |
+| Desktop | zeros, except under the macOS unified titlebar, where the window-controls bar (close/minimize/maximize, 28 logical px) drawn over the content becomes the top inset | the `safe_area_insets` field on the renderer/app config struct |
+
+Values use each platform's logical unit: CSS px on web, dp on Android, points on
+iOS, logical px on desktop.
+
+**Web caveat — iOS Safari:** `env(safe-area-inset-*)` resolves to `0` unless the
+page opts into the full viewport. Without `viewport-fit=cover` in the viewport
+meta tag, `SafeArea` renders like a plain `Column` on the web:
+
+```html
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+```
+
+**Platform Support:** Web, Android, iOS, Desktop
 
 ## Size
 
@@ -390,7 +483,7 @@ Maintains a consistent width-to-height ratio regardless of container size. Usefu
 ```hypen
 // 16:9 widescreen ratio
 Image("photo.jpg")
-    .aspectRatio(16/9)
+    .aspectRatio("16/9")
 
 // Square
 Image("avatar.jpg")
@@ -467,19 +560,12 @@ Row {
 ### Card Grid
 
 ```hypen
-Grid {
+Grid(@state.products, key: "id") {
     Card {
         Column {
-            Image("product1.jpg")
-            Text("Product 1")
-            Text("$29.99")
-        }
-    }
-    Card {
-        Column {
-            Image("product2.jpg")
-            Text("Product 2")
-            Text("$39.99")
+            Image("@{item.image}")
+            Text("@{item.name}")
+            Text("@{item.price}")
         }
     }
 }

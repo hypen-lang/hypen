@@ -1,6 +1,14 @@
 import Foundation
 
-/// Configuration options for the RemoteEngine
+/// Configuration options for the RemoteEngine.
+///
+/// **No `compression` option.** Other Hypen client SDKs expose one to opt out
+/// of RFC 7692 `permessage-deflate`; this one deliberately does not, because
+/// Apple exposes no API to control it. `URLSessionWebSocketTask` offers the
+/// extension in its handshake automatically and inflates compressed frames
+/// transparently — it cannot be turned on, off, or tuned from here. Whether a
+/// given connection ends up compressed is decided entirely by the server.
+/// See `RemoteEngine.establishConnection()` for the details.
 public struct RemoteEngineConfig: Sendable {
     /// Whether to automatically reconnect on disconnect
     public let autoReconnect: Bool
@@ -26,6 +34,34 @@ public struct RemoteEngineConfig: Sendable {
     /// Enable debug logging
     public let debugLogging: Bool
 
+    /// Largest single WebSocket message accepted, in bytes.
+    ///
+    /// URLSession defaults this to 1 MiB, which a Hypen `initialTree` can
+    /// exceed on its own — any app embedding an asset in state (a base64
+    /// wallpaper, an inlined image) does. Exceeding it fails the receive and
+    /// closes the socket, which autoReconnect then retries forever.
+    public let maximumMessageSize: Int
+
+    /// Extra headers on the WebSocket upgrade request, e.g.
+    /// `["Authorization": "Bearer …"]`. Device-enabled servers admit a
+    /// client that sends no `Origin` only when their authenticator accepts
+    /// the upgrade request (RFC 001 §5, decision D1), so native clients
+    /// authenticate here. Handshake-owned headers (`Host`, `Upgrade`,
+    /// `Connection`, `Sec-WebSocket-*`, `Content-Length`) and `Origin` are
+    /// never taken from this dictionary.
+    public let upgradeHeaders: [String: String]
+
+    /// Called for every connection attempt (including reconnects) to supply
+    /// fresh upgrade headers, e.g. a short-lived token; merged over
+    /// `upgradeHeaders`.
+    public let upgradeHeaderProvider: (@Sendable (URL) -> [String: String])?
+
+    /// `Origin` header for the upgrade request. Nil (the default) sends none:
+    /// `Origin` is a browser-only CSWSH defence, and a native client is not a
+    /// browser (RFC 001 §5). Set it only for a server that admits this app by
+    /// an allowlisted origin.
+    public let origin: String?
+
     public init(
         autoReconnect: Bool = true,
         reconnectInterval: TimeInterval = 3.0,
@@ -34,7 +70,11 @@ public struct RemoteEngineConfig: Sendable {
         readTimeout: TimeInterval = 30.0,
         writeTimeout: TimeInterval = 10.0,
         pingInterval: TimeInterval = 30.0,
-        debugLogging: Bool = false
+        debugLogging: Bool = false,
+        maximumMessageSize: Int = 32 * 1024 * 1024,
+        upgradeHeaders: [String: String] = [:],
+        upgradeHeaderProvider: (@Sendable (URL) -> [String: String])? = nil,
+        origin: String? = nil
     ) {
         self.autoReconnect = autoReconnect
         self.reconnectInterval = reconnectInterval
@@ -44,6 +84,10 @@ public struct RemoteEngineConfig: Sendable {
         self.writeTimeout = writeTimeout
         self.pingInterval = pingInterval
         self.debugLogging = debugLogging
+        self.maximumMessageSize = maximumMessageSize
+        self.upgradeHeaders = upgradeHeaders
+        self.upgradeHeaderProvider = upgradeHeaderProvider
+        self.origin = origin
     }
 
     /// Default configuration

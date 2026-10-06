@@ -24,7 +24,9 @@
 //! bar again.
 
 pub mod browser;
+pub mod chrome;
 pub mod devlog;
+pub mod embed;
 pub mod shell;
 pub mod storage;
 

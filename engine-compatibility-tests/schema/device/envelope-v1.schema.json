@@ -1,0 +1,321 @@
+{
+  "$defs": {
+    "control": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "grant": {
+              "maximum": 8388608,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "grant"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "cancel": {
+              "const": true
+            }
+          },
+          "required": [
+            "cancel"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "renewLease": {
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "renewLease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "leaseAck": {
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "leaseAck"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "paused": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "paused"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "deviceEvent": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "control"
+            ]
+          },
+          "required": [
+            "event"
+          ]
+        },
+        {
+          "not": {
+            "required": [
+              "event"
+            ]
+          },
+          "required": [
+            "control"
+          ]
+        }
+      ],
+      "properties": {
+        "control": {
+          "$ref": "#/$defs/control"
+        },
+        "event": {
+          "type": "object"
+        },
+        "id": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "deviceEvent"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "type": "object"
+    },
+    "deviceRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "initialCredit": {
+          "maximum": 4194304,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "lifetime": {
+          "enum": [
+            "activation",
+            "background",
+            "connection"
+          ],
+          "type": "string"
+        },
+        "owner": {
+          "$ref": "#/$defs/owner"
+        },
+        "params": {
+          "type": "object"
+        },
+        "timeoutMs": {
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "type": {
+          "const": "deviceRequest"
+        },
+        "version": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "type",
+        "id",
+        "capability",
+        "version",
+        "owner",
+        "lifetime",
+        "timeoutMs",
+        "initialCredit",
+        "params"
+      ],
+      "type": "object"
+    },
+    "deviceResponse": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "not": {
+            "required": [
+              "error"
+            ]
+          },
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "not": {
+            "required": [
+              "result"
+            ]
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ],
+      "properties": {
+        "error": {
+          "$ref": "#/$defs/error"
+        },
+        "id": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "result": {
+          "type": "object"
+        },
+        "simulated": {
+          "const": true
+        },
+        "type": {
+          "const": "deviceResponse"
+        }
+      },
+      "required": [
+        "type",
+        "id"
+      ],
+      "type": "object"
+    },
+    "error": {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "unsupported",
+            "unavailable",
+            "denied",
+            "revoked",
+            "cancelled",
+            "timeout",
+            "throttled",
+            "connectionLost",
+            "invalidParams",
+            "internal"
+          ],
+          "type": "string"
+        },
+        "platformDetail": {
+          "maxLength": 512,
+          "type": "string"
+        }
+      },
+      "required": [
+        "code"
+      ],
+      "type": "object"
+    },
+    "owner": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "activationId": {
+              "maximum": 4294967295,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "moduleInstanceId": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "moduleInstanceId",
+            "activationId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "moduleInstanceId": {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "moduleInstanceId"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "connection": {
+              "const": true
+            }
+          },
+          "required": [
+            "connection"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "$id": "https://hypen.space/schemas/device/envelope-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "The three device messages. Capability params/results/events are validated separately against the selected capability revision schema. Not expressible here and enforced by every decoder: the owner shape must match the lifetime; the RFC 001 §2.1 JSON limits (at most 1048576 bytes of text, nesting depth at most 32 containers, integer tokens only with magnitude at most 2^53-1 and no -0, valid UTF-8 with no raw control characters or lone surrogate escapes, duplicate keys rejected at any depth) apply to the whole message including params/result/event; and re-encoding a decoded message must give back the input (no array for an object, no map for an enum).",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/deviceRequest"
+    },
+    {
+      "$ref": "#/$defs/deviceResponse"
+    },
+    {
+      "$ref": "#/$defs/deviceEvent"
+    }
+  ],
+  "title": "Device Capability Protocol envelope (protocol version 1)"
+}

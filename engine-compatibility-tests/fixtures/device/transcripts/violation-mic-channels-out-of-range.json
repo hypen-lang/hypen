@@ -1,0 +1,56 @@
+{
+  "name": "violation-mic-channels-out-of-range",
+  "description": "mic.record@1 `channels` is 1 or 2.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "mic.record",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 16,
+        "params": {
+          "sampleRate": 16000,
+          "format": "pcm16",
+          "channels": 3
+        }
+      },
+      "expectViolation": "invalidPayload"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "error": {
+          "code": "invalidParams"
+        }
+      },
+      "reaction": true
+    }
+  ]
+}

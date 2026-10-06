@@ -1,0 +1,76 @@
+{
+  "name": "violation-capability-not-selected",
+  "description": "file.save was not in the negotiated selection (mixed deployment: the old client lacks it), so a file.save request is refused with unsupported.",
+  "protocol": 1,
+  "ack": {
+    "protocolVersion": 1,
+    "binary": true,
+    "capabilities": [
+      {
+        "name": "core.capabilities",
+        "version": 1
+      },
+      {
+        "name": "gallery.pick",
+        "version": 1
+      },
+      {
+        "name": "permission.query",
+        "version": 1
+      }
+    ]
+  },
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "file.save",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 0,
+        "params": {
+          "channel": 0,
+          "name": "report.txt",
+          "contentType": "text/plain",
+          "bytes": 11,
+          "sha256": "835218591566a3364d9258fcbf2074d19415dacc756ad7fb707119069f07e1e5"
+        }
+      },
+      "expectViolation": "unsupported"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "error": {
+          "code": "unsupported"
+        }
+      },
+      "reaction": true
+    }
+  ]
+}

@@ -5,6 +5,8 @@ import (
 	"io"
 	"os"
 	"sync"
+
+	core "github.com/hypen-space/core"
 )
 
 // LogLevel represents the severity level for logging.
@@ -66,6 +68,23 @@ func (l *Logger) shouldLog(level LogLevel) bool {
 
 func (l *Logger) log(level LogLevel, levelStr string, format string, args ...any) {
 	if !l.shouldLog(level) {
+		return
+	}
+	// A core.LogHandler, when installed, also captures remote logs so a single
+	// handler covers the whole SDK. This package keeps its own level filter.
+	if h := core.GetLogHandler(); h != nil {
+		switch level {
+		case LogLevelDebug:
+			h.Debug(l.tag, format, args...)
+		case LogLevelInfo:
+			h.Info(l.tag, format, args...)
+		case LogLevelWarn:
+			h.Warn(l.tag, format, args...)
+		case LogLevelError:
+			h.Error(l.tag, format, args...)
+		case LogLevelNone:
+			// Never emitted: LogLevelNone is a filter threshold, not a message level.
+		}
 		return
 	}
 	globalMu.RLock()

@@ -1,0 +1,38 @@
+{"sequence":1,"at":"2026-09-26T11:05:07.786Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":2,"at":"2026-09-26T11:05:26.450Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":3,"at":"2026-09-26T11:06:15.001Z","action":"record","result":{"ok":true,"value":{"durationMs":3000,"item":{"bytes":96000,"channel":0,"contentType":"audio/L16","sha256":"55873fecc61a79e87ca550c7072e38ccdd7ecb600ace286fe4717952a97c42b0"}}}}
+{"sequence":4,"at":"2026-09-26T11:07:03.094Z","action":"save","result":{"ok":true,"value":{"bytesWritten":102000}}}
+{"sequence":5,"at":"2026-09-26T11:08:00.459Z","action":"camera","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/jpeg","bytes":{"bytes":45204,"sha256":"d45ecd3e38a918eb51f1a97d9f034b1a6ab2b4b75c833f324e19b13f6ed2ca9d"}}]}}}
+{"sequence":6,"at":"2026-09-26T11:08:24.065Z","action":"query","result":{"ok":false,"error":{"code":"unavailable","platformDetail":"device-disabled"}}}
+{"sequence":7,"at":"2026-09-26T11:08:26.592Z","action":"gallery","result":{"ok":false,"error":{"code":"unavailable","platformDetail":"device-disabled"}}}
+{"sequence":8,"at":"2026-09-26T11:08:43.439Z","action":"record","result":{"ok":true,"value":{"durationMs":3000,"item":{"bytes":96000,"channel":0,"contentType":"audio/L16","sha256":"54b2a3ef72482c5a30f1286d7ce1d9e6d1133978eeecbff04996f74befe74063"}}}}
+{"sequence":9,"at":"2026-09-26T11:10:31.078Z","action":"gallery","result":{"ok":false,"error":{"code":"timeout"}}}
+{"sequence":10,"at":"2026-09-26T11:11:41.921Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":11,"at":"2026-09-26T11:11:43.036Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":12,"at":"2026-09-26T11:12:48.541Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":13,"at":"2026-09-26T11:12:49.621Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":14,"at":"2026-09-26T11:22:06.887Z","action":"query","result":{"ok":true,"value":{"status":"granted"}}}
+{"sequence":15,"at":"2026-09-26T11:22:14.466Z","action":"gallery","result":{"ok":false,"error":{"code":"cancelled","platformDetail":"picker-dismissed"}}}
+{"sequence":16,"at":"2026-09-26T11:22:24.729Z","action":"save","result":{"ok":true,"value":{"bytesWritten":102000}}}
+{"sequence":17,"at":"2026-09-26T11:22:34.419Z","action":"record","result":{"ok":true,"value":{"durationMs":3000,"item":{"bytes":96000,"channel":0,"contentType":"audio/L16","sha256":"55873fecc61a79e87ca550c7072e38ccdd7ecb600ace286fe4717952a97c42b0"}}}}
+{"sequence":18,"at":"2026-09-26T11:22:40.538Z","action":"ping","result":{"ok":true,"value":"UI remains responsive"}}
+{"sequence":1,"at":"2026-09-26T11:25:19.783Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":2,"at":"2026-09-26T11:25:25.705Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":3,"at":"2026-09-26T11:25:36.147Z","action":"save","result":{"ok":true,"value":{"bytesWritten":102000}}}
+{"sequence":4,"at":"2026-09-26T11:25:43.878Z","action":"record","result":{"ok":true,"value":{"durationMs":3000,"item":{"bytes":96000,"channel":0,"contentType":"audio/L16","sha256":"ef61799e39810812d0e5c2eda5a5a1d77b79a9dac7a4c02db21e88291f865c60"}}}}
+{"sequence":5,"at":"2026-09-26T11:25:45.978Z","action":"ping","result":{"ok":true,"value":"UI remains responsive"}}
+{"sequence":1,"at":"2026-09-26T12:33:20.130Z","action":"query","result":{"ok":true,"value":{"status":"granted"}}}
+{"sequence":2,"at":"2026-09-26T12:33:27.237Z","action":"gallery","result":{"ok":false,"error":{"code":"cancelled","platformDetail":"picker-dismissed"}}}
+{"sequence":3,"at":"2026-09-26T12:33:37.541Z","action":"save","result":{"ok":true,"value":{"bytesWritten":102000}}}
+{"sequence":4,"at":"2026-09-26T12:33:47.443Z","action":"record","result":{"ok":true,"value":{"durationMs":3000,"item":{"bytes":96000,"channel":0,"contentType":"audio/L16","sha256":"55873fecc61a79e87ca550c7072e38ccdd7ecb600ace286fe4717952a97c42b0"}}}}
+{"sequence":5,"at":"2026-09-26T12:33:54.977Z","action":"ping","result":{"ok":true,"value":"UI remains responsive"}}
+{"sequence":6,"at":"2026-09-26T12:35:12.397Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":7,"at":"2026-09-26T12:35:18.480Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":8,"at":"2026-09-26T12:35:29.030Z","action":"save","result":{"ok":true,"value":{"bytesWritten":102000}}}
+{"sequence":9,"at":"2026-09-26T12:35:36.724Z","action":"record","result":{"ok":true,"value":{"durationMs":3000,"item":{"bytes":96000,"channel":0,"contentType":"audio/L16","sha256":"a9f9e68b5f81c1e6bb4dca5aa42662fdd3eaa9f80ff17cae784dc5d8c790ae03"}}}}
+{"sequence":10,"at":"2026-09-26T12:35:38.829Z","action":"ping","result":{"ok":true,"value":"UI remains responsive"}}
+{"sequence":11,"at":"2026-09-26T12:38:45.160Z","action":"record","result":{"ok":true,"value":{"durationMs":3000,"item":{"bytes":96000,"channel":0,"contentType":"audio/L16","sha256":"1920ff34d1c0fcf6f80e98fe4a80522297af96bd5336c0cbb770cbf08825a96c"}}}}
+{"sequence":12,"at":"2026-09-26T12:40:01.352Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":13,"at":"2026-09-26T12:40:13.000Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":14,"at":"2026-09-26T12:41:07.691Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":15,"at":"2026-09-26T12:41:08.774Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}

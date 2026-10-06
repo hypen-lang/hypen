@@ -73,7 +73,10 @@ function refreshModeTabs(state: StatsState) {
 }
 
 function buildWeeklyView(state: StatsState, user: User, week: WeekSummary, today: string) {
-  const maxEaten = Math.max(1, ...week.days.map((d) => d.caloriesEaten));
+  // Scale against the goal as well as the biggest day (plus 8% headroom) so
+  // the dashed goal line sits inside the chart instead of pinned to its top
+  // edge on weeks where nobody hit the goal.
+  const maxEaten = Math.max(1, week.calorieGoal, ...week.days.map((d) => d.caloriesEaten)) * 1.08;
   state.bars = week.days.map((d) => {
     const pct = Math.round((d.caloriesEaten / maxEaten) * 100);
     // Pin empty days at a small visible height so the chart still
@@ -118,7 +121,7 @@ function buildWeeklyView(state: StatsState, user: User, week: WeekSummary, today
 
 function buildDailyView(state: StatsState, user: User, date: string) {
   const summary = getDaySummary(user, date);
-  const maxEaten = Math.max(1, summary.calorieGoal, summary.caloriesEaten);
+  const maxEaten = Math.max(1, summary.calorieGoal, summary.caloriesEaten) * 1.08;
   const pct = Math.round((summary.caloriesEaten / maxEaten) * 100);
   state.bars = [
     {
@@ -211,15 +214,17 @@ export default app
         // ----- Top bar -----
         Row {
           Button {
-            Text("‹")
-              .tw("text-2xl md:text-3xl font-bold")
-              .color("#374151")
+            Icon(@resources.chevron-left)
+              .size(19)
+              .color("#6B7280")
           }
           .tw("bg-transparent border-0 p-2")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(150, easeOut)
           .onClick(@router.push, to: "/")
 
           Text("Nutrition")
-            .tw("flex-1 text-base md:text-lg font-semibold ml-2")
+            .tw("flex-1 text-[15px] md:text-base font-semibold ml-1")
             .color("#111827")
 
           List(@state.modes) {
@@ -228,22 +233,25 @@ export default app
                 .tw("text-xs md:text-sm font-semibold")
                 .color("@{item.active ? '#FFFFFF' : '#6B7280'}")
             }
-            .tw("px-3 py-1.5 rounded-full border-0")
+            .tw("px-3.5 py-1.5 rounded-full border-0")
             .backgroundColor("@{item.active ? '#EC4899' : 'transparent'}")
+            .transition(220, easeOut, props: [backgroundColor])
             .onClick(@actions.selectMode, mode: "@{item.id}")
           }
-          .tw("flex flex-row bg-pink-100 rounded-full p-1")
+          .tw("flex flex-row bg-gray-100 rounded-full p-1")
         }
-        .tw("px-3 py-3 items-center border-b border-gray-100")
+        .tw("px-3 py-2.5 items-center border-b border-gray-100 bg-white")
 
         // ----- Period navigator -----
         Row {
           Button {
-            Text("‹")
-              .tw("text-lg md:text-xl")
-              .color("#374151")
+            Icon(@resources.chevron-left)
+              .size(17)
+              .color("#6B7280")
           }
-          .tw("bg-transparent border-0 px-3 py-2")
+          .tw("bg-transparent border-0 px-3.5 py-2.5")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(150, easeOut)
           .onClick(@actions.shiftPeriod, direction: "prev")
 
           Text("@{state.rangeLabel}")
@@ -251,19 +259,22 @@ export default app
             .color("#111827")
 
           Button {
-            Text("›")
-              .tw("text-lg md:text-xl")
-              .color("#374151")
+            Icon(@resources.chevron-right)
+              .size(17)
+              .color("#6B7280")
           }
-          .tw("bg-transparent border-0 px-3 py-2")
+          .tw("bg-transparent border-0 px-3.5 py-2.5")
+          .opacity({ default: 1, active: 0.6 })
+          .transition(150, easeOut)
           .onClick(@actions.shiftPeriod, direction: "next")
         }
-        .tw("mx-4 my-3 bg-gray-50 rounded-2xl items-center")
+        .tw("mx-4 my-3 bg-white border border-gray-100 rounded-2xl items-center")
+        .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
 
         // ----- Calorie bar chart -----
-        Text("Calorie (kcal)")
-          .tw("px-4 pt-2 text-sm md:text-base font-medium")
-          .color("#374151")
+        Text("CALORIES (KCAL)")
+          .tw("px-4 pt-2 text-[11px] font-semibold tracking-widest")
+          .color("#9CA3AF")
 
         Row {
           Row {
@@ -276,7 +287,7 @@ export default app
           .tw("items-center mr-4")
           Row {
             Box {}
-              .tw("w-2 h-2 rounded-full bg-yellow-400 mr-1")
+              .tw("w-2 h-2 rounded-full bg-amber-400 mr-1")
             Text("Goal")
               .tw("text-xs md:text-sm")
               .color("#6B7280")
@@ -286,9 +297,19 @@ export default app
         .tw("px-4 py-2 items-center")
 
         Box {
-          Box {}
-            .tw("absolute left-2 right-2 border-t-2 border-dashed border-yellow-400 opacity-80")
-            .bottom("@{state.goalLineHeight}")
+          // Stack overlays the goal line on the bars: a full-size Column
+          // pinned to the bottom holds the dashed rule above a spacer whose
+          // height is the goal percentage, so the line sits at goal height
+          // without any CSS positioning.
+          Stack {
+          Column {
+            Box {}
+              .tw("w-full border-t-2 border-dashed border-amber-400 opacity-70")
+            Box {}
+              .tw("w-full")
+              .height("@{state.goalLineHeight}")
+          }
+          .tw("w-full h-full justify-end px-2")
 
           List(@state.bars) {
             Column {
@@ -304,9 +325,10 @@ export default app
               // column's natural content height.
               Column {
                 Box {}
-                  .tw("w-6 md:w-8 rounded-t-lg")
+                  .tw("w-6 md:w-8 rounded-t-md")
                   .backgroundColor("@{item.isActive ? '#EC4899' : '#FBCFE8'}")
                   .height("@{item.barHeight}")
+                  .transition(500, easeOut, props: [height])
               }
               .tw("flex-1 w-full justify-end items-center")
 
@@ -316,14 +338,17 @@ export default app
             }
             .tw("flex-1 h-full items-center")
           }
-          .tw("flex flex-row h-full items-stretch")
+          .tw("flex flex-row w-full h-full items-stretch")
+          }
+          .tw("w-full h-full")
         }
-        .tw("mx-4 h-56 md:h-72 bg-white rounded-2xl p-3 md:p-4 relative")
+        .tw("mx-4 h-56 md:h-72 bg-white border border-gray-100 rounded-2xl p-3 md:p-4")
+        .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
 
         // ----- Nutrition % section -----
-        Text("Nutrition (%)")
-          .tw("px-4 pt-4 pb-2 text-sm md:text-base font-medium")
-          .color("#374151")
+        Text("NUTRITION (%)")
+          .tw("px-4 pt-5 pb-2 text-[11px] font-semibold tracking-widest")
+          .color("#9CA3AF")
 
         Row {
           Row {
@@ -333,13 +358,13 @@ export default app
               .color("#6B7280")
           }.tw("items-center")
           Row {
-            Box {}.tw("w-2 h-2 rounded-full bg-yellow-400 mr-1")
+            Box {}.tw("w-2 h-2 rounded-full bg-amber-400 mr-1")
             Text("Protein")
               .tw("text-xs md:text-sm mr-3")
               .color("#6B7280")
           }.tw("items-center")
           Row {
-            Box {}.tw("w-2 h-2 rounded-full bg-pink-300 mr-1")
+            Box {}.tw("w-2 h-2 rounded-full bg-violet-400 mr-1")
             Text("Fat")
               .tw("text-xs md:text-sm")
               .color("#6B7280")
@@ -356,12 +381,15 @@ export default app
               Box {}
                 .tw("h-6 md:h-8 bg-pink-500")
                 .width("@{state.primary.carbsWidth}")
+                .transition(450, easeOut, props: [width])
               Box {}
-                .tw("h-6 md:h-8 bg-yellow-400")
+                .tw("h-6 md:h-8 bg-amber-400")
                 .width("@{state.primary.proteinWidth}")
+                .transition(450, easeOut, props: [width])
               Box {}
-                .tw("h-6 md:h-8 bg-pink-300")
+                .tw("h-6 md:h-8 bg-violet-400")
                 .width("@{state.primary.fatWidth}")
+                .transition(450, easeOut, props: [width])
             }
             .tw("flex-1 rounded-full overflow-hidden")
           }
@@ -377,10 +405,10 @@ export default app
                   .tw("h-6 md:h-8 bg-pink-500")
                   .width("@{state.goal.carbsWidth}")
                 Box {}
-                  .tw("h-6 md:h-8 bg-yellow-400")
+                  .tw("h-6 md:h-8 bg-amber-400")
                   .width("@{state.goal.proteinWidth}")
                 Box {}
-                  .tw("h-6 md:h-8 bg-pink-300")
+                  .tw("h-6 md:h-8 bg-violet-400")
                   .width("@{state.goal.fatWidth}")
               }
               .tw("flex-1 rounded-full overflow-hidden")
@@ -389,8 +417,9 @@ export default app
           }
         }
         .tw("mx-4 mb-4 bg-white rounded-2xl p-4 md:p-5 border border-gray-100")
+        .boxShadow("0 1px 3px rgba(17, 24, 39, 0.04)")
       }
       .scrollable(true)
-      .tw("flex-1 w-full bg-white")
+      .tw("flex-1 w-full bg-[#F8FAFC]")
     }
   `);

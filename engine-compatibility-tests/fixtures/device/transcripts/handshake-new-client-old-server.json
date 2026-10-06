@@ -1,0 +1,77 @@
+{
+  "name": "handshake-new-client-old-server",
+  "description": "Newer client offers gallery.pick and permission.query revisions 1 and 2, plus a capability the old server lacks. Selection pins revision 1 and drops the unknown name. The server lacks the binary profile, so binary is false for both sides and binary-plane revisions (gallery.pick) are not selectable (RFC 001 \u00a72.2 rule c): supports(\"gallery.pick\") is false on this connection.",
+  "hello": {
+    "protocolVersions": [
+      1,
+      2
+    ],
+    "binary": true,
+    "capabilities": [
+      {
+        "name": "core.capabilities",
+        "versions": [
+          1
+        ]
+      },
+      {
+        "name": "gallery.pick",
+        "versions": [
+          1,
+          2
+        ]
+      },
+      {
+        "name": "file.save",
+        "versions": [
+          1
+        ]
+      },
+      {
+        "name": "permission.query",
+        "versions": [
+          1,
+          2
+        ]
+      }
+    ]
+  },
+  "serverProtocolVersions": [
+    1
+  ],
+  "serverBinary": false,
+  "serverCapabilities": [
+    {
+      "name": "core.capabilities",
+      "versions": [
+        1
+      ]
+    },
+    {
+      "name": "gallery.pick",
+      "versions": [
+        1
+      ]
+    },
+    {
+      "name": "permission.query",
+      "versions": [
+        1
+      ]
+    }
+  ],
+  "expectAck": {
+    "protocolVersion": 1,
+    "binary": false,
+    "capabilities": [
+      {
+        "name": "core.capabilities",
+        "version": 1
+      },
+      {
+        "name": "permission.query",
+        "version": 1
+      }
+    ]
+  }
+}

@@ -35,6 +35,10 @@ pub struct GlobalContext {
 
     /// Router (set externally when routing is configured).
     router: Mutex<Option<Arc<crate::router::HypenRouter>>>,
+
+    /// Device access of the invocation currently running (innermost last).
+    /// Set by the remote session around each handler; empty elsewhere.
+    device_scope: Mutex<Vec<crate::device::Device>>,
 }
 
 impl GlobalContext {
@@ -43,6 +47,7 @@ impl GlobalContext {
             module_states: Mutex::new(HashMap::new()),
             events: EventEmitter::new(),
             router: Mutex::new(None),
+            device_scope: Mutex::new(Vec::new()),
         }
     }
 
@@ -103,6 +108,40 @@ impl GlobalContext {
     /// Get the router, if one has been configured.
     pub fn router(&self) -> Option<Arc<crate::router::HypenRouter>> {
         self.router.lock().unwrap().clone()
+    }
+
+    // ---- Device (RFC 001) ----
+
+    /// Device access for the handler invocation that is running: requests
+    /// carry that module instance's live activation and the dispatch's
+    /// provenance (see [`crate::device`]). The returned handle keeps that
+    /// authority, so it may be moved into a callback or another thread.
+    ///
+    /// Outside a remote session's handler — in-process
+    /// [`ModuleInstance`](crate::module::ModuleInstance)s, UI-only
+    /// connections, a device plane that was never negotiated — it is
+    /// [`Device::disabled`](crate::device::Device::disabled): every call
+    /// fails `unavailable` (`device-disabled`) and `supports()` is false.
+    pub fn device(&self) -> crate::device::Device {
+        self.device_scope
+            .lock()
+            .unwrap()
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Run `f` with `device` as the current invocation's device access.
+    pub(crate) fn with_device<R>(&self, device: crate::device::Device, f: impl FnOnce() -> R) -> R {
+        struct Pop<'a>(&'a Mutex<Vec<crate::device::Device>>);
+        impl Drop for Pop<'_> {
+            fn drop(&mut self) {
+                self.0.lock().unwrap().pop();
+            }
+        }
+        self.device_scope.lock().unwrap().push(device);
+        let _pop = Pop(&self.device_scope);
+        f()
     }
 }
 

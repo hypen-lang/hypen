@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-hypeflix",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/dist/client/*.js", "../../../../hypen-web/packages/cf/dist/client/*.js"], "fallthrough": true }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "HYPEFLIX_DO", "class_name": "HypeflixDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["HypeflixDO"] }],
+  "observability": { "enabled": true }
+}

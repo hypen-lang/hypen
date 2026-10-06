@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- HypenDeviceFileProvider (camera.capture, RFC 001): only the capture temp
+     directory is shareable, and only with the capture app a single intent
+     grants write access to. -->
+<paths>
+    <cache-path name="hypen_device_capture" path="hypen-device-capture/" />
+</paths>

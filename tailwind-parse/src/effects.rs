@@ -253,11 +253,13 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
     None
 }
 
-/// Parse arbitrary effect values like `opacity-[0.5]`, `z-[999]`
+/// Parse arbitrary effect values like `opacity-[0.5]`, `z-[999]`,
+/// `shadow-[0_1px_2px_rgba(0,0,0,0.5)]` (underscores already normalized to spaces)
 pub fn parse_arbitrary(prefix: &str, value: &str) -> Option<Vec<CssProperty>> {
     match prefix {
         "opacity" => Some(vec![CssProperty::new("opacity", value)]),
         "z" => Some(vec![CssProperty::new("z-index", value)]),
+        "shadow" => Some(vec![CssProperty::new("box-shadow", value)]),
         "blur" => Some(vec![CssProperty::new(
             "filter",
             &format_filter_value("blur", value),

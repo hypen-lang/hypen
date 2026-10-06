@@ -1,0 +1,126 @@
+Application, 0x114e08280, pid: 53567, label: 'HypenGallery' <App element pid: 53567>
+  Window (Main), 0x114e09b80, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4347758592.3>
+    Other, 0x114e09180, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4405095424.4>
+      Other, 0x114e09040, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4406118272.5>
+        Other, 0x114e08f00, {{-402.0, -874.0}, {1206.0, 2622.0}} <AX element pid: 53567, elementOrHash.elementID: 4615686656.37>
+        Other, 0x114e08500, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4347757568.6>
+          Other, 0x114e08780, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4404020992.7>
+            StaticText, 0x114e088c0, {{18.0, 110.0}, {157.0, 26.3}}, label: 'Device Lab · Go' <AX element pid: 53567, elementOrHash.elementID: 4349132800.8>
+            StaticText, 0x114e08c80, {{18.0, 146.3}, {162.0, 14.3}}, label: 'Real host / real server · run 2' <AX element pid: 53567, elementOrHash.elementID: 4349138624.9>
+            StaticText, 0x114e08000, {{26.0, 178.7}, {49.0, 20.3}}, label: 'Status' <AX element pid: 53567, elementOrHash.elementID: 4349049728.10>
+            StaticText, 0x114e08640, {{97.0, 178.7}, {107.7, 20.3}}, label: 'Query camera' <AX element pid: 53567, elementOrHash.elementID: 4349339712.11>
+            StaticText, 0x114e08140, {{226.7, 178.7}, {60.0, 20.3}}, label: 'Ask mic' <AX element pid: 53567, elementOrHash.elementID: 4349055360.12>
+            StaticText, 0x114e08b40, {{26.0, 225.0}, {81.0, 20.3}}, label: 'Pick photo' <AX element pid: 53567, elementOrHash.elementID: 4349065664.13>
+            StaticText, 0x114e08a00, {{129.0, 225.0}, {59.3, 20.3}}, label: 'Pick file' <AX element pid: 53567, elementOrHash.elementID: 4349233344.14>
+            StaticText, 0x114e08dc0, {{210.3, 225.0}, {72.7, 20.3}}, label: 'Save 96K' <AX element pid: 53567, elementOrHash.elementID: 4349237824.15>
+            StaticText, 0x114e083c0, {{26.0, 271.3}, {59.3, 20.3}}, label: 'Camera' <AX element pid: 53567, elementOrHash.elementID: 4349240512.16>
+            StaticText, 0x114e23480, {{107.3, 271.3}, {77.3, 20.3}}, label: 'Record 3s' <AX element pid: 53567, elementOrHash.elementID: 4349282944.17>
+            StaticText, 0x114e03980, {{206.7, 271.3}, {61.0, 20.3}}, label: 'Scan 3s' <AX element pid: 53567, elementOrHash.elementID: 4349286528.18>
+            StaticText, 0x114cb0000, {{26.0, 317.7}, {73.7, 20.3}}, label: 'Bluetooth' <AX element pid: 53567, elementOrHash.elementID: 4349289216.19>
+            StaticText, 0x114cb0140, {{121.7, 317.7}, {52.7, 20.3}}, label: 'Cancel' <AX element pid: 53567, elementOrHash.elementID: 4349295936.20>
+            StaticText, 0x114cb0280, {{196.3, 317.7}, {54.0, 20.3}}, label: 'UI ping' <AX element pid: 53567, elementOrHash.elementID: 4349478656.21>
+            StaticText, 0x114cb03c0, {{18.0, 356.0}, {310.3, 17.0}}, label: 'gallery: device: unavailable (presentation-failed)' <AX element pid: 53567, elementOrHash.elementID: 4349480000.22>
+            StaticText, 0x114cb0500, {{18.0, 383.0}, {18.7, 13.3}}, label: 'null' <AX element pid: 53567, elementOrHash.elementID: 4349480896.23>
+            StaticText, 0x114cb0640, {{18.0, 406.3}, {253.0, 39.7}}, label: 'gallery: device: unavailable (presentation-failed)
+query: OK
+' <AX element pid: 53567, elementOrHash.elementID: 4349481792.24>
+            Other, 0x114cb0780, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4349484032.25>
+            Button, 0x114cb08c0, {{154.7, 76.8}, {89.7, 14.3}}, label: 'Browser chrome, collapsed. 127.0.0.1:45102' <AX element pid: 53567, elementOrHash.elementID: 4404029056.32>
+            Button, 0x114cb0a00, {{251.3, 81.7}, {8.0, 4.7}}, identifier: 'chevron.down', label: 'Browser chrome, collapsed. 127.0.0.1:45102' <AX element pid: 53567, elementOrHash.elementID: 4404033536.33>
+    Other, 0x114cb0b40, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4578510848.34>
+      Other, 0x114cb0c80, {{-402.0, -874.0}, {1206.0, 2622.0}} <AX element pid: 53567, elementOrHash.elementID: 4615687296.35>
+      Other, 0x114cb0dc0, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4615684096.36>
+        Other, 0x114cb0f00, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4349492096.38>
+          Other, 0x114cb1040, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4404106048.39>
+            Other, 0x114cb1180, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4404540544.40>
+              Other, 0x114cb12c0, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4349485824.41>
+                Other, 0x114cb1400, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4615686016.42>
+                  Other, 0x114cb1540, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 4578520064.43>
+                    Other, 0x114cb1680, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53567, elementOrHash.elementID: 8271770040409578767.9999>
+                      Other, 0x114cb17c0, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 53760, elementOrHash.elementID: 4467419648.5>
+                        Other, 0x114cb1900, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4468720256.6>
+                          Image, 0x114cb1a40, {{-150.0, -78.0}, {702.0, 1102.0}} <AX element pid: 53760, elementOrHash.elementID: 4468720896.7>
+                          Other, 0x114cb1b80, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4467459840.8>
+                            Other, 0x114cb1cc0, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4467460288.9>
+                              Other, 0x114cb1e00, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4467458496.10>
+                                Other, 0x114cb1f40, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4467462528.11>
+                                  Other, 0x114cb2080, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4399021376.12>
+                                    Other, 0x114cb21c0, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4398926912.13>
+                                      Other, 0x114cb2300, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4398927808.14>
+                                        Other, 0x114cb2440, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4476679936.16>
+                                          Other, 0x114cb2580, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4398935872.18>
+                                            NavigationBar, 0x114cb26c0, {{0.0, 88.0}, {402.0, 62.0}}, identifier: 'Photos' <AX element pid: 53760, elementOrHash.elementID: 4470088704.19>
+                                              Button, 0x114cb2800, {{20.0, 92.0}, {36.0, 36.0}}, identifier: 'Cancel', label: 'Cancel' <AX element pid: 53760, elementOrHash.elementID: 4679254016.88>
+                                              SegmentedControl, 0x114cb2940, {{106.0, 86.0}, {190.0, 48.0}}, label: 'Photos' <AX element pid: 53760, elementOrHash.elementID: 4470079488.23>
+                                                Button, 0x114cb2a80, {{106.0, 86.0}, {95.0, 48.0}}, label: 'Photos', Selected <AX element pid: 53760, elementOrHash.elementID: 4470081024.26>
+                                                Button, 0x114cb2bc0, {{201.0, 86.0}, {95.0, 48.0}}, label: 'Collections' <AX element pid: 53760, elementOrHash.elementID: 4470080256.27>
+                                            Other, 0x114cb2d00, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4399581376.20>
+                                              Other, 0x114cb2e40, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4399646912.24>
+                                                Other, 0x114cb2f80, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4399585408.28>
+                                                  Other, 0x114cb30c0, {{0.0, 72.0}, {402.0, 802.0}}, label: 'Photos' <AX element pid: 53760, elementOrHash.elementID: 4467466560.30>
+                                                    Other, 0x114cb3200, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4470082560.32>
+                                                      ScrollView, 0x114cb3340, {{0.0, 72.0}, {402.0, 802.0}}, identifier: 'photosView_content_scroll_view' <AX element pid: 53760, elementOrHash.elementID: 4397531136.35>
+                                                        Other, 0x114cb3480, {{0.0, 150.0}, {402.0, 564.3}}, identifier: 'photos_layout' <AX element pid: 53760, elementOrHash.elementID: 4478193328.38>
+                                                          Other, 0x114cb35c0, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4467468352.44>
+                                                          Other, 0x114cb3700, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4397192192.45>
+                                                          Other, 0x114cb3840, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4467467904.46>
+                                                          Other, 0x114cb3980, {{0.0, 150.0}, {402.0, 162.0}}, identifier: 'PXGSingleViewLayout-Group' <AX element pid: 53760, elementOrHash.elementID: 4478196128.47>
+                                                            Other, 0x114cb3ac0, {{0.0, 150.0}, {402.0, 162.0}}, identifier: 'PXGSingleViewContainerView_AX', label: 'Private Access to Photos, Your photo library is shown here, but “HypenGallery” can only access the items you select.' <AX element pid: 53760, elementOrHash.elementID: 4644193088.55>
+                                                              Image, 0x114cb3c00, {{32.0, 160.0}, {38.0, 38.0}}, identifier: 'PickerOnboardingHeaderViewIcon' <AX element pid: 53760, elementOrHash.elementID: 4644132864.56>
+                                                              Button, 0x114cb3d40, {{350.0, 158.0}, {30.0, 22.0}}, label: 'Close' <AX element pid: 53760, elementOrHash.elementID: 4470093312.57>
+                                                              Button, 0x114cb3e80, {{82.0, 267.7}, {99.7, 20.3}}, label: 'Learn More…' <AX element pid: 53760, elementOrHash.elementID: 4470094080.58>
+                                                                StaticText, 0x114e3c000, {{82.0, 267.7}, {99.7, 20.3}}, label: 'Learn More…' <AX element pid: 53760, elementOrHash.elementID: 4399200256.65>
+                                                          Other, 0x114e3c140, {{0.0, 150.0}, {402.0, 162.0}}, label: 'Private Access to Photos, Your photo library is shown here, but “HypenGallery” can only access the items you select.' <AX element pid: 53760, elementOrHash.elementID: 4644142592.48>
+                                                            Image, 0x114e3c280, {{32.0, 160.0}, {38.0, 38.0}}, identifier: 'PickerOnboardingHeaderViewIcon' <AX element pid: 53760, elementOrHash.elementID: 4644132864.56>
+                                                            Button, 0x114e3c3c0, {{350.0, 158.0}, {30.0, 22.0}}, label: 'Close' <AX element pid: 53760, elementOrHash.elementID: 4470093312.57>
+                                                            Button, 0x114e3c500, {{82.0, 267.7}, {99.7, 20.3}}, label: 'Learn More…' <AX element pid: 53760, elementOrHash.elementID: 4470094080.58>
+                                                              StaticText, 0x114e3c640, {{82.0, 267.7}, {99.7, 20.3}}, label: 'Learn More…' <AX element pid: 53760, elementOrHash.elementID: 4399200256.65>
+                                                          Other, 0x114e3c780, {{0.0, 312.0}, {402.0, 402.3}}, identifier: 'photos_sectioned_layout' <AX element pid: 53760, elementOrHash.elementID: 4478204928.49>
+                                                            Other, 0x114e3c8c0, {{0.0, 312.0}, {402.0, 402.3}}, identifier: 'PXAssetsSectionLayout-Group' <AX element pid: 53760, elementOrHash.elementID: 4479139376.59>
+                                                              Other, 0x114e3ca00, {{0.0, 312.0}, {402.0, 402.3}}, identifier: 'PXZoomablePhotosLayout-Group' <AX element pid: 53760, elementOrHash.elementID: 4479129776.66>
+                                                                Other, 0x114e3cb40, {{0.0, 312.0}, {402.0, 402.3}}, identifier: 'PXGZoomLayout-Group' <AX element pid: 53760, elementOrHash.elementID: 4479129616.72>
+                                                                  Other, 0x114e3cc80, {{0.0, 312.0}, {402.0, 402.3}}, identifier: 'PXGDecoratingLayout-Group' <AX element pid: 53760, elementOrHash.elementID: 4479131056.77>
+                                                                    Other, 0x114e3cdc0, {{0.0, 312.0}, {402.0, 402.3}}, identifier: 'PXGGridLayout-Group', label: 'Photo, September 25, 17:30, Photo, 30 March 2018, 21:14, Photo, 08 August 2012, 23:55, Photo, 08 August 2012, 23:29, Photo, 08 August 2012, 20:52, Photo, 13 March 2011, 01:17, Photo, 09 October 2009, 23:09' <AX element pid: 53760, elementOrHash.elementID: 4479138896.79>
+                                                                      Image, 0x114e3cf00, {{0.0, 312.0}, {132.9, 133.0}}, identifier: 'PXGGridLayout-Info', label: 'Photo, September 25, 17:30', Selected <AX element pid: 53760, elementOrHash.elementID: 4644198912.81>
+                                                                      Image, 0x114e3d040, {{134.6, 312.0}, {132.9, 133.0}}, identifier: 'PXGGridLayout-Info', label: 'Photo, 30 March 2018, 21:14' <AX element pid: 53760, elementOrHash.elementID: 4644198720.82>
+                                                                      Image, 0x114e3d180, {{269.1, 312.0}, {132.9, 133.0}}, identifier: 'PXGGridLayout-Info', label: 'Photo, 08 August 2012, 23:55' <AX element pid: 53760, elementOrHash.elementID: 4644199296.83>
+                                                                      Image, 0x114e3d2c0, {{0.0, 446.7}, {132.9, 133.0}}, identifier: 'PXGGridLayout-Info', label: 'Photo, 08 August 2012, 23:29' <AX element pid: 53760, elementOrHash.elementID: 4644197760.84>
+                                                                      Image, 0x114e3d400, {{134.6, 446.7}, {132.9, 133.0}}, identifier: 'PXGGridLayout-Info', label: 'Photo, 08 August 2012, 20:52' <AX element pid: 53760, elementOrHash.elementID: 4644198016.85>
+                                                                      Image, 0x114e3d540, {{269.1, 446.7}, {132.9, 133.0}}, identifier: 'PXGGridLayout-Info', label: 'Photo, 13 March 2011, 01:17' <AX element pid: 53760, elementOrHash.elementID: 4644197696.86>
+                                                                      Image, 0x114e3d680, {{0.0, 581.3}, {132.9, 133.0}}, identifier: 'PXGGridLayout-Info', label: 'Photo, 09 October 2009, 23:09' <AX element pid: 53760, elementOrHash.elementID: 4644199360.87>
+                                                                Other, 0x114e3d7c0, {{0.0, 312.0}, {402.0, 0.0}}, identifier: 'PXZoomableInlineHeadersLayout-Group' <AX element pid: 53760, elementOrHash.elementID: 4479128656.73>
+                                                          Other, 0x114e3d900, {{369.0, 150.0}, {30.0, 638.0}}, label: 'Vertical scroll bar, 1 page', value: 0% <AX element pid: 53760, elementOrHash.elementID: 4476277248.39>
+                                                            Other, 0x114e3da40, {{396.0, 226.7}, {3.0, 558.3}} <AX element pid: 53760, elementOrHash.elementID: 4399649152.50>
+                                                          Other, 0x114e3db80, {{56.0, 755.0}, {290.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0% <AX element pid: 53760, elementOrHash.elementID: 4478152704.40>
+                                                            Other, 0x114e3dcc0, {{59.0, 782.0}, {284.0, 3.0}} <AX element pid: 53760, elementOrHash.elementID: 4399648256.51>
+                                                        Other, 0x114e3de00, {{369.0, 150.0}, {30.0, 638.0}}, label: 'Vertical scroll bar, 1 page', value: 0% <AX element pid: 53760, elementOrHash.elementID: 4476277248.39>
+                                                          Other, 0x114e3df40, {{396.0, 226.7}, {3.0, 558.3}} <AX element pid: 53760, elementOrHash.elementID: 4399649152.50>
+                                                        Other, 0x114e3e080, {{56.0, 755.0}, {290.0, 30.0}}, label: 'Horizontal scroll bar, 1 page', value: 0% <AX element pid: 53760, elementOrHash.elementID: 4478152704.40>
+                                                          Other, 0x114e3e1c0, {{59.0, 782.0}, {284.0, 3.0}} <AX element pid: 53760, elementOrHash.elementID: 4399648256.51>
+                                            Other, 0x114e3e300, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4476288512.21>
+                                              Other, 0x114e3e440, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4478141952.25>
+                                                Toolbar, 0x114e3e580, {{0.0, 788.0}, {402.0, 86.0}}, identifier: 'Toolbar', label: 'Toolbar' <AX element pid: 53760, elementOrHash.elementID: 4399656768.29>
+                                                  Other, 0x114e3e6c0, {{28.0, 798.0}, {346.0, 48.0}} <AX element pid: 53760, elementOrHash.elementID: 4399657216.31>
+                                                    Other, 0x114e3e800, {{28.0, 798.0}, {346.0, 48.0}} <AX element pid: 53760, elementOrHash.elementID: 4399657664.33>
+                                                      Other, 0x114e3e940, {{28.0, 798.0}, {0.0, 0.0}} <AX element pid: 53760, elementOrHash.elementID: 4399658112.36>
+                                                        Other, 0x114e3ea80, {{28.0, 798.0}, {48.0, 48.0}} <AX element pid: 53760, elementOrHash.elementID: 4399796608.89>
+                                                          Other, 0x114e3ebc0, {{28.0, 798.0}, {48.0, 48.0}} <AX element pid: 53760, elementOrHash.elementID: 4399799744.92>
+                                                            Other, 0x114e3ed00, {{33.0, 803.0}, {38.0, 38.0}} <AX element pid: 53760, elementOrHash.elementID: 4478097664.60>
+                                                              Other, 0x114e3ee40, {{33.0, 803.0}, {38.0, 38.0}} <AX element pid: 53760, elementOrHash.elementID: 4476274176.67>
+                                                                Button, 0x114e3ef80, {{33.0, 803.0}, {38.0, 38.0}}, identifier: 'Sort and Filter', label: 'Sort and Filter' <AX element pid: 53760, elementOrHash.elementID: 4478094464.74>
+                                                        Other, 0x114e3f0c0, {{326.0, 798.0}, {48.0, 48.0}} <AX element pid: 53760, elementOrHash.elementID: 4399797056.90>
+                                                          Other, 0x114e3f200, {{326.0, 798.0}, {48.0, 48.0}} <AX element pid: 53760, elementOrHash.elementID: 4399800192.93>
+                                                            Other, 0x114e3f340, {{331.0, 803.0}, {38.0, 38.0}} <AX element pid: 53760, elementOrHash.elementID: 4478099584.61>
+                                                              Other, 0x114e3f480, {{331.0, 803.0}, {38.0, 38.0}} <AX element pid: 53760, elementOrHash.elementID: 4644127232.68>
+                                                                Button, 0x114e3f5c0, {{331.0, 803.0}, {38.0, 38.0}}, label: 'Search' <AX element pid: 53760, elementOrHash.elementID: 4478098944.75>
+                                                    Other, 0x114e3f700, {{28.0, 798.0}, {346.0, 48.0}} <AX element pid: 53760, elementOrHash.elementID: 4399693824.34>
+                                                      Other, 0x114e3f840, {{28.0, 798.0}, {0.0, 0.0}} <AX element pid: 53760, elementOrHash.elementID: 4399694272.37>
+                                                        Other, 0x114e3f980, {{115.7, 798.0}, {171.0, 48.0}} <AX element pid: 53760, elementOrHash.elementID: 4399798848.91>
+                                                          Other, 0x114e3fac0, {{115.7, 798.0}, {171.0, 48.0}} <AX element pid: 53760, elementOrHash.elementID: 4399800640.94>
+                                                            Other, 0x114e3fc00, {{120.7, 813.0}, {161.0, 18.0}} <AX element pid: 53760, elementOrHash.elementID: 4478095104.95>
+                                                              Other, 0x114e3fd40, {{120.7, 813.0}, {161.0, 18.0}} <AX element pid: 53760, elementOrHash.elementID: 4677562368.96>
+                                                                Other, 0x114e3fe80, {{120.7, 813.0}, {161.0, 18.0}} <AX element pid: 53760, elementOrHash.elementID: 4397196288.76>
+                                                                  Other, 0x114e68000, {{120.7, 813.0}, {161.0, 18.0}} <AX element pid: 53760, elementOrHash.elementID: 4399801984.97>
+                                                                    StaticText, 0x114e68140, {{120.7, 813.0}, {161.0, 18.0}}, label: ' Location Is Included' <AX element pid: 53760, elementOrHash.elementID: 4399801536.98>
+                                      Other, 0x114e68280, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4398930048.15>
+                                        Other, 0x114e683c0, {{0.0, 72.0}, {402.0, 802.0}} <AX element pid: 53760, elementOrHash.elementID: 4398934080.17>

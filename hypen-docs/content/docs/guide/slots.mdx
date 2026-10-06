@@ -1,0 +1,172 @@
+---
+title: Child Slots
+description: Build reusable components that accept and place children with Children() and named slots
+---
+
+# Child Slots
+
+Slots let a reusable component accept children from its call site and render
+them in specific places inside its own template. A component marks each
+insertion point with the `Children()` placeholder. You can have a single
+**default slot** or several **named slots**.
+
+Slots are how you build wrappers like cards, dialogs, and layouts that stay
+declarative — the component owns the chrome, the caller owns the content.
+
+## The default slot
+
+Put `Children()` anywhere in a component's template to mark where the caller's
+children should render.
+
+```hypen
+// Card.hypen — a reusable component
+Column {
+    Column {
+        Text("Card")
+            .fontWeight("bold")
+    }
+    .padding(16)
+    .backgroundColor("#f0f0f0")
+
+    Column {
+        Children()
+    }
+    .padding(16)
+}
+```
+
+Everything you nest inside `Card` at the call site is inserted where
+`Children()` sits:
+
+```hypen
+Card {
+    Text("Card content goes here")
+    Button { Text("Toggle") }
+        .onClick(@actions.toggle)
+}
+```
+
+If a component is used with no children, the `Children()` placeholder simply
+renders nothing — surrounding template content stays put.
+
+## Named slots
+
+For components with more than one insertion point, give each `Children()`
+placeholder a name with the `.slot("name")` applicator:
+
+```hypen
+// CardWithSlots.hypen
+Column {
+    Column {
+        Children().slot("header")
+    }
+    .padding(16)
+    .backgroundColor("#2196F3")
+    .color("white")
+
+    Column {
+        Children().slot("body")
+    }
+    .padding(24)
+
+    Column {
+        Children().slot("footer")
+    }
+    .padding(16)
+    .backgroundColor("#f5f5f5")
+}
+```
+
+At the call site, tag each child with the matching `.slot("name")` to route it
+to that placeholder:
+
+```hypen
+CardWithSlots {
+    Column {
+        Text("@{state.title}")
+    }.slot("header")
+
+    Column {
+        Text("This is the main content area")
+        Text("You can add multiple elements here")
+    }.slot("body")
+
+    Row {
+        Button { Text("Highlight") }
+            .onClick(@actions.toggleHighlight)
+    }.slot("footer")
+}
+```
+
+Each named placeholder collects **only** the children whose `.slot()` name
+matches it, preserving their call-site order.
+
+## Combining default and named slots
+
+A component can mix a default slot with named slots. Any child that has **no**
+`.slot()` applicator falls into the default slot; children with a `.slot()`
+name go to the matching named slot.
+
+```hypen
+// Panel.hypen
+Column {
+    Column {
+        Children().slot("header")
+    }
+    .padding(16)
+
+    Column {
+        Children()   // default slot — everything without a .slot()
+    }
+    .padding(16)
+}
+```
+
+```hypen
+Panel {
+    Text("Panel Header").slot("header")
+
+    // These have no .slot(), so they land in the default slot
+    Text("Default content 1")
+    Text("Default content 2")
+}
+```
+
+## Behavior details
+
+- **Multiple children per slot** — a slot collects every matching child, in
+  order. A `Children().slot("actions")` placeholder happily holds several
+  buttons.
+- **Nesting** — components with slots compose. A slotted component can be
+  passed as a child to another slotted component, and each expands
+  independently.
+- **Deep placement** — `Children()` can sit anywhere in the template tree, not
+  just at the top level. It's replaced wherever it appears.
+- **Control-flow children** — `ForEach`, `When`, and `If` blocks passed as
+  children always go to the **default** slot (they don't carry a `.slot()`
+  name).
+- **Unmatched slots** — a child tagged `.slot("x")` when the component has no
+  `Children().slot("x")` placeholder is dropped, and an empty slot renders
+  nothing. Match names carefully.
+
+## Registering slot components
+
+A slot component is an ordinary Hypen component — a `.hypen` template with no
+required state. Register it the same way as any other component: place the
+template in your components directory (folder, sibling, or index pattern) and
+it's picked up by discovery as a stateless component.
+
+```
+src/components/
+  Card/
+    component.hypen    # template with Children() — no .ts needed
+```
+
+See **[TypeScript Server → Component Patterns](/docs/servers/typescript)** for
+the full set of file layouts and how discovery loads templates.
+
+## Next Steps
+
+- [Components](/docs/guide/components) — Reference of all built-in components
+- [Control Flow](/docs/guide/control-flow) — ForEach, When, If in depth
+- [Layout](/docs/guide/layout) — Arranging content with Column, Row, and friends

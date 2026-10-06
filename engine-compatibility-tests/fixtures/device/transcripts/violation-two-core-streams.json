@@ -1,0 +1,57 @@
+{
+  "name": "violation-two-core-streams",
+  "description": "A second core.capabilities stream while the first is live: a planned reopen retires the old stream first (core-capabilities-reopen). The broken control stream closes the device connection.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 1,
+        "params": {}
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 1,
+        "event": {
+          "capabilities": [
+            {
+              "name": "core.capabilities",
+              "versions": [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 1,
+        "params": {}
+      },
+      "expectViolation": "connection"
+    }
+  ]
+}

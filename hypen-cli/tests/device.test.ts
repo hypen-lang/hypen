@@ -7,6 +7,7 @@ import {
   getServerUrl,
   getLocalIP,
   promptChoice,
+  desktopTarget,
   RUNNER_URLS,
   RUNNER_PATHS,
   RUN_HELP,
@@ -55,6 +56,7 @@ describe("CLI run command", () => {
       expect(result.stdout).toContain("hypen run");
       expect(result.stdout).toContain("android");
       expect(result.stdout).toContain("ios");
+      expect(result.stdout).toContain("desktop");
       expect(result.exitCode).toBe(0);
     });
 
@@ -72,6 +74,27 @@ describe("CLI run command", () => {
 
       expect(result.stderr).toContain("Unknown platform");
       expect(result.exitCode).toBe(1);
+    });
+  });
+
+  describe("desktop target mapping", () => {
+    test("maps supported platform/arch pairs to rust targets", () => {
+      expect(desktopTarget("darwin", "arm64")).toBe("aarch64-apple-darwin");
+      expect(desktopTarget("darwin", "x64")).toBe("x86_64-apple-darwin");
+      expect(desktopTarget("win32", "x64")).toBe("x86_64-pc-windows-msvc");
+      expect(desktopTarget("linux", "x64")).toBe("x86_64-unknown-linux-gnu");
+    });
+
+    test("returns null for unsupported combinations", () => {
+      expect(desktopTarget("linux", "arm64")).toBeNull();
+      expect(desktopTarget("win32", "arm64")).toBeNull();
+      expect(desktopTarget("freebsd" as NodeJS.Platform, "x64")).toBeNull();
+    });
+
+    test("desktop runner constants are wired", () => {
+      expect(RUNNER_URLS.desktop).toContain("releases/latest/download");
+      expect(RUNNER_PATHS.desktop).toContain("hypen-browser");
+      expect(RUN_HELP).toContain("desktop");
     });
   });
 

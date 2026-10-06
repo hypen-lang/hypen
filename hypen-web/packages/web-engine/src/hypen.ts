@@ -435,21 +435,27 @@ export class Hypen {
   }
 
   /**
-   * Get merged state from all module instances
+   * Get merged state from all module instances.
+   *
+   * Reads the LIVE observable state rather than `getState()` snapshots:
+   * every consumer (renderer text interpolation, `engine.renderInto`
+   * serialization) only reads values, and a snapshot is a full deep clone
+   * of every module's state — this runs on EVERY state change, so with a
+   * 1,000-row list that was a 1,000-row clone per keystroke. Top-level
+   * entries still land in a fresh object; nested values are the live
+   * proxies, which interpolation reads straight through.
    */
   private getMergedState(): Record<string, any> {
     const merged: Record<string, any> = {};
 
     // Include main module state
     if (this.moduleInstance) {
-      const mainState = this.moduleInstance.getState();
-      Object.assign(merged, mainState);
+      Object.assign(merged, this.moduleInstance.getLiveState());
     }
 
     // Include all nested component states
-    for (const [name, instance] of this.moduleInstances.entries()) {
-      const nestedState = instance.getState();
-      Object.assign(merged, nestedState);
+    for (const [, instance] of this.moduleInstances.entries()) {
+      Object.assign(merged, instance.getLiveState());
     }
 
     return merged;
@@ -461,22 +467,57 @@ export class Hypen {
   private setupComponentResolver(): void {
     if (!this.engine) return;
 
-    // List of built-in DOM elements that should NOT be resolved
+    // List of built-in DOM elements that should NOT be resolved.
+    // Kept in sync with the engine's DEFAULT_PRIMITIVES
+    // (hypen-engine-rs/src/ir/component.rs), plus the web-only Canvas host
+    // this renderer handles natively. `tests/builtin-primitives.test.ts`
+    // asserts the two lists agree -- they had drifted apart by SafeArea and
+    // Scrubber, which the engine pre-registers itself so the omission never
+    // surfaced.
     const builtInElements = new Set([
+      "Text",
       "Column",
       "Row",
-      "Text",
       "Button",
-      "Image",
       "Input",
+      "Textarea",
+      "Image",
       "Container",
       "Box",
       "Center",
       "List",
-      "Canvas",
       "Spacer",
+      "Stack",
       "Divider",
-      "ScrollView",
+      "Grid",
+      "Card",
+      "Heading",
+      "Checkbox",
+      "Select",
+      "Switch",
+      "Slider",
+      "Spinner",
+      "Badge",
+      "Avatar",
+      "ProgressBar",
+      "Video",
+      "Audio",
+      "Paragraph",
+      "Icon",
+      "SafeArea",
+      "Scrubber",
+      // Web-only primitives (not in the engine list)
+      "Canvas",
+      // Chart family (see packages/web/src/dom/components/chart.ts)
+      "Chart",
+      "Axis",
+      "Line",
+      "Area",
+      "Bars",
+      "Points",
+      "Rule",
+      "Marker",
+      "Path",
     ]);
 
     this.engine.setComponentResolver(

@@ -32,10 +32,11 @@ Column {
       }
       .backgroundColor("#e0e7ff")
       .padding(8)
-      .width(100)
+      .width(80)
       .height(60)
       .overflow("visible")
     }
+    .width(80)
 
     Column {
       Text("hidden")
@@ -48,10 +49,11 @@ Column {
       }
       .backgroundColor("#dcfce7")
       .padding(8)
-      .width(100)
+      .width(80)
       .height(60)
       .overflow("hidden")
     }
+    .width(80)
 
     Column {
       Text("scroll")
@@ -64,10 +66,11 @@ Column {
       }
       .backgroundColor("#fef3c7")
       .padding(8)
-      .width(100)
+      .width(80)
       .height(60)
       .overflow("scroll")
     }
+    .width(80)
 
     Column {
       Text("auto")
@@ -80,12 +83,13 @@ Column {
       }
       .backgroundColor("#fee2e2")
       .padding(8)
-      .width(100)
+      .width(80)
       .height(60)
       .overflow("auto")
     }
+    .width(80)
   }
-  .gap(16)
+  .gap(8)
   .marginBottom(32)
 
   Text("Scrollable content")
@@ -148,7 +152,7 @@ Column {
     .marginBottom(8)
 
   Stack {
-    Image(src: "https://picsum.photos/300/200")
+    Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/image-300x200.png?platform=__HYPEN_GALLERY_PLATFORM__&example=overflow&generation=__HYPEN_GALLERY_GENERATION__")
       .width(300)
       .height(200)
   }

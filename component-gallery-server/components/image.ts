@@ -20,7 +20,7 @@ Column {
     .color("#666")
     .marginBottom(8)
 
-  Image(src: "https://picsum.photos/200/150")
+  Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/image-200x150.png?platform=__HYPEN_GALLERY_PLATFORM__&example=image&generation=__HYPEN_GALLERY_GENERATION__")
     .marginBottom(24)
 
   Text("Styled Images")
@@ -30,7 +30,7 @@ Column {
 
   Row {
     Column {
-      Image(src: "https://picsum.photos/100/100")
+      Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/image-square-1.png?platform=__HYPEN_GALLERY_PLATFORM__&example=image&generation=__HYPEN_GALLERY_GENERATION__")
         .width(100)
         .height(100)
         .cornerRadius(8)
@@ -42,7 +42,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Image(src: "https://picsum.photos/101/101")
+      Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/image-square-2.png?platform=__HYPEN_GALLERY_PLATFORM__&example=image&generation=__HYPEN_GALLERY_GENERATION__")
         .width(100)
         .height(100)
         .cornerRadius(50)
@@ -54,7 +54,7 @@ Column {
     .horizontalAlignment("center")
 
     Column {
-      Image(src: "https://picsum.photos/102/102")
+      Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/image-square-3.png?platform=__HYPEN_GALLERY_PLATFORM__&example=image&generation=__HYPEN_GALLERY_GENERATION__")
         .width(100)
         .height(100)
         .border({width: 3, color: "#3b82f6"})
@@ -74,7 +74,7 @@ Column {
     .color("#666")
     .marginBottom(8)
 
-  Image(src: "https://picsum.photos/300/200")
+  Image(src: "__HYPEN_GALLERY_FIXTURE_BASE__/fixtures/image-300x200.png?platform=__HYPEN_GALLERY_PLATFORM__&example=image&generation=__HYPEN_GALLERY_GENERATION__")
     .width(300)
     .height(200)
     .cornerRadius(12)

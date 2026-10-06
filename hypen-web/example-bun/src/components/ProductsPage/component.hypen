@@ -8,7 +8,7 @@ module Column {
     .textAlign("center")
 
   Column {
-    List(@state.products) {
+    Grid(@state.products, key: "id") {
       Column {
         Column {
           Image("@{item.images.0}")
@@ -48,18 +48,17 @@ module Column {
           .borderRadius(8)
           .cursor("pointer")
           .width("100%")
-          .transition("all 0.3s ease")
+          .transition(300, easeOut)
         }
         .backgroundColor("#1a1a1a")
         .borderRadius(16)
         .padding(20)
         .border("1px solid #2a2a2a")
         .width(320)
-        .transition("all 0.3s ease")
+        .transition(300, easeOut)
       }
     }
-    .display("grid")
-    .gridTemplateColumns("repeat(auto-fill, minmax(320px, 1fr))")
+    .gridColumns(3)
     .gap(24)
     .width("100%")
   }

@@ -1,0 +1,75 @@
+{
+  "name": "capabilities-replacement",
+  "description": "Connection-owned core.capabilities stream: opened once after selection, before module callbacks can request device work. Every event is a complete replacement advertisement; existing requests keep their pinned revision.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 6,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 6,
+        "event": {
+          "capabilities": [
+            {
+              "name": "core.capabilities",
+              "versions": [
+                1
+              ]
+            },
+            {
+              "name": "gallery.pick",
+              "versions": [
+                1
+              ]
+            },
+            {
+              "name": "bluetooth.scan",
+              "versions": [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 6,
+        "event": {
+          "capabilities": [
+            {
+              "name": "core.capabilities",
+              "versions": [
+                1
+              ]
+            },
+            {
+              "name": "gallery.pick",
+              "versions": [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

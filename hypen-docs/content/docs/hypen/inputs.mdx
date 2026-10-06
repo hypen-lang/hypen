@@ -30,7 +30,7 @@ Input(placeholder: "Enter text").bind(@state.text)
 
 // Manual binding
 Input(placeholder: "Enter text")
-    .value(@{state.text})
+    .value(@state.text)
     .onInput(@actions.updateText)
 ```
 
@@ -67,7 +67,7 @@ Checkbox {}.bind(@state.agreed)
 
 // Manual binding
 Checkbox {}
-    .checked(@{state.agreed})
+    .checked(@state.agreed)
     .onChange(@actions.toggleAgreed)
 ```
 
@@ -86,7 +86,7 @@ Switch {}.bind(@state.enabled)
 
 // Manual binding
 Switch {}
-    .checked(@{state.enabled})
+    .checked(@state.enabled)
     .onChange(@actions.toggleEnabled)
 ```
 
@@ -102,7 +102,7 @@ Select {}.bind(@state.selected)
 
 // Manual binding
 Select {}
-    .value(@{state.selected})
+    .value(@state.selected)
     .onChange(@actions.updateSelected)
 ```
 
@@ -117,7 +117,7 @@ Range slider.
 
 ```hypen
 Slider {}
-    .value(@{state.volume})
+    .value(@state.volume)
     .onChange(@actions.updateVolume)
 ```
 

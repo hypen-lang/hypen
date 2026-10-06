@@ -69,7 +69,7 @@ final class WebSocketServer: @unchecked Sendable {
             "Text", "Column", "Row", "Box", "Stack", "Button", "Image",
             "Input", "Textarea", "Checkbox", "Switch", "Select", "Option",
             "Slider", "Divider", "Spacer", "Card", "Badge", "Avatar",
-            "Spinner", "Icon", "Link", "ScrollView", "LazyColumn", "LazyRow",
+            "Spinner", "Icon", "Link", "LazyColumn", "LazyRow",
             "Grid", "List", "Video", "Audio", "Canvas", "WebView",
             "Router", "Route", "Modal", "Sheet", "Dialog", "Tooltip",
             "Popover", "Menu", "MenuItem", "Tab", "TabBar", "TabView",

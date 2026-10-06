@@ -1,0 +1,45 @@
+{"sequence":1,"at":"2026-09-25T16:05:32.645Z","action":"status","result":{"ok":true,"value":{"gallery.pick":true,"file.pick":true,"file.save":true,"camera.capture":true,"mic.record":true,"bluetooth.select":true,"bluetooth.scan":false,"permission.query":true,"permission.request":true}}}
+{"sequence":2,"at":"2026-09-25T16:05:36.468Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":1,"at":"2026-09-25T17:08:36.609Z","action":"status","result":{"ok":true,"value":{"gallery.pick":true,"file.pick":true,"file.save":true,"camera.capture":true,"mic.record":true,"bluetooth.select":true,"bluetooth.scan":true,"permission.query":true,"permission.request":true}}}
+{"sequence":1,"at":"2026-09-25T17:09:35.778Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":2,"at":"2026-09-25T17:09:57.759Z","action":"gallery","result":{"ok":false,"error":{"code":"connectionLost"}}}
+{"sequence":3,"at":"2026-09-25T17:23:50.445Z","action":"file","result":{"ok":false,"error":{"code":"timeout"}}}
+{"sequence":4,"at":"2026-09-25T19:13:48.132Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":5,"at":"2026-09-25T19:15:27.711Z","action":"gallery","result":{"ok":false,"error":{"code":"timeout"}}}
+{"sequence":6,"at":"2026-09-25T19:17:42.846Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":7,"at":"2026-09-25T19:17:50.293Z","action":"gallery","result":{"ok":false,"error":{"code":"connectionLost"}}}
+{"sequence":8,"at":"2026-09-25T19:18:41.491Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":9,"at":"2026-09-25T19:18:53.904Z","action":"gallery","result":{"ok":false,"error":{"code":"connectionLost"}}}
+{"sequence":10,"at":"2026-09-25T19:19:42.652Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":11,"at":"2026-09-25T19:19:51.866Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":12,"at":"2026-09-25T19:21:05.279Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":13,"at":"2026-09-25T19:21:14.378Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":14,"at":"2026-09-25T19:21:22.250Z","action":"save","result":{"ok":false,"error":{"code":"connectionLost"}}}
+{"sequence":15,"at":"2026-09-25T19:21:35.887Z","action":"gallery","result":{"ok":false,"error":{"code":"timeout"}}}
+{"sequence":16,"at":"2026-09-25T19:22:03.900Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":17,"at":"2026-09-25T19:22:13.035Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":18,"at":"2026-09-25T19:22:19.829Z","action":"save","result":{"ok":false,"error":{"code":"connectionLost"}}}
+{"sequence":19,"at":"2026-09-25T19:23:27.329Z","action":"gallery","result":{"ok":false,"error":{"code":"timeout"}}}
+{"sequence":20,"at":"2026-09-25T19:25:12.927Z","action":"record","result":{"ok":false,"error":{"code":"unsupported","platformDetail":"mic.record@1 is not in the negotiated selection"}}}
+{"sequence":21,"at":"2026-09-25T19:25:34.023Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":22,"at":"2026-09-25T19:25:39.942Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":23,"at":"2026-09-25T19:25:48.171Z","action":"save","result":{"ok":true,"value":{"bytesWritten":102000}}}
+{"sequence":24,"at":"2026-09-25T19:25:55.340Z","action":"record","result":{"ok":true,"value":{"durationMs":3000,"item":{"bytes":96000,"channel":0,"contentType":"audio/L16","sha256":"fe9fa92be89065dad2c2aa5596093b71c1b032a2629c5baa95a2a202ebc8c7af"}}}}
+{"sequence":25,"at":"2026-09-25T19:25:56.481Z","action":"ping","result":{"ok":true,"value":"UI remains responsive"}}
+{"sequence":26,"at":"2026-09-25T19:27:46.536Z","action":"save","result":{"ok":true,"value":{"bytesWritten":102000}}}
+{"sequence":27,"at":"2026-09-25T19:29:27.728Z","action":"file","result":{"ok":false,"error":{"code":"timeout"}}}
+{"sequence":28,"at":"2026-09-25T19:30:10.692Z","action":"file","result":{"ok":true,"value":{"items":[{"channel":0,"name":"sample.txt","contentType":"text/plain","bytes":{"bytes":102000,"sha256":"ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"}}]}}}
+{"sequence":29,"at":"2026-09-25T19:41:42.171Z","action":"query","result":{"ok":false,"error":{"code":"unavailable","platformDetail":"device-disabled"}}}
+{"sequence":30,"at":"2026-09-25T19:41:51.760Z","action":"gallery","result":{"ok":false,"error":{"code":"unavailable","platformDetail":"device-disabled"}}}
+{"sequence":31,"at":"2026-09-25T19:42:13.707Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":32,"at":"2026-09-25T19:42:14.946Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":33,"at":"2026-09-25T19:44:45.273Z","action":"record","result":{"ok":false,"error":{"code":"timeout"}}}
+{"sequence":34,"at":"2026-09-25T19:48:24.617Z","action":"status","result":{"ok":true,"value":{"gallery.pick":true,"file.pick":true,"file.save":true,"camera.capture":true,"mic.record":true,"bluetooth.select":true,"bluetooth.scan":true,"permission.query":true,"permission.request":true}}}
+{"sequence":35,"at":"2026-09-25T19:48:40.593Z","action":"record","result":{"ok":false,"error":{"code":"unsupported","platformDetail":"mic.record@1 is not in the negotiated selection"}}}
+{"sequence":36,"at":"2026-09-25T19:49:46.995Z","action":"gallery","result":{"ok":false,"error":{"code":"timeout"}}}
+{"sequence":37,"at":"2026-09-25T19:50:50.342Z","action":"camera","result":{"ok":false,"error":{"code":"internal","platformDetail":"driver-failure"}}}
+{"sequence":38,"at":"2026-09-25T19:53:24.086Z","action":"query","result":{"ok":true,"value":{"status":"prompt"}}}
+{"sequence":39,"at":"2026-09-25T19:53:30.314Z","action":"gallery","result":{"ok":true,"value":{"items":[{"channel":0,"contentType":"image/png","bytes":{"bytes":85595,"sha256":"6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"}}]}}}
+{"sequence":40,"at":"2026-09-25T19:53:40.988Z","action":"save","result":{"ok":true,"value":{"bytesWritten":102000}}}
+{"sequence":41,"at":"2026-09-25T19:53:48.698Z","action":"record","result":{"ok":true,"value":{"durationMs":3000,"item":{"bytes":96000,"channel":0,"contentType":"audio/L16","sha256":"4eeb2758ee6b47971c4d6daa3dfdbaacfd3d420e0f7c97b9a7c7d9d422de40ca"}}}}
+{"sequence":42,"at":"2026-09-25T19:53:50.905Z","action":"ping","result":{"ok":true,"value":"UI remains responsive"}}

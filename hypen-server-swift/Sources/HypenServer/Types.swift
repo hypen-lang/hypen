@@ -87,10 +87,28 @@ public struct Action: @unchecked Sendable {
 public struct ServerConfig: Sendable {
     public var port: Int
     public var hostname: String
+    /// Browser origins allowed to open a WebSocket (RFC 001 §5, decision
+    /// D1): when set, a request carrying an `Origin` header must name one of
+    /// these (compared as `scheme://host[:port]`, lowercased), else 403, and
+    /// an Origin-less request needs `authenticate`. Empty = no allowlist.
+    /// With neither this nor `authenticate` every client is admitted and the
+    /// server logs one startup warning — set them in production.
+    public var allowedOrigins: [String]
+    /// App-supplied connection authenticator (bearer token, cookie, …):
+    /// when set it runs for every upgrade that passed the Origin check —
+    /// the only admission for clients without an `Origin` (native apps).
+    public var authenticate: DeviceAuthenticator?
 
-    public init(port: Int = 3000, hostname: String = "0.0.0.0") {
+    public init(
+        port: Int = 3000,
+        hostname: String = "0.0.0.0",
+        allowedOrigins: [String] = [],
+        authenticate: DeviceAuthenticator? = nil
+    ) {
         self.port = port
         self.hostname = hostname
+        self.allowedOrigins = allowedOrigins
+        self.authenticate = authenticate
     }
 }
 

@@ -17,10 +17,11 @@ use std::sync::{Arc, Mutex};
 use futures_util::{SinkExt, StreamExt};
 use hypen_server::app::HypenApp;
 use hypen_server::discovery::ComponentRegistry;
-use hypen_server::remote::{ModuleSessionConfig, RemoteSession};
+use hypen_server::remote::{ModuleSessionConfig, OutboundSink, RemoteSession, SessionRegistry};
 use rusqlite::{params, Connection};
 use serde_json::Value;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
 use db::init_database;
@@ -579,6 +580,14 @@ async fn main() {
 
     println!("Instagram server (Rust) running on ws://localhost:{port}");
 
+    // Attach mode. Every live session registers here once its hello has
+    // completed, so an agent the *developer* has authorised can do
+    // `registry.attach(&session_id)` and drive that user's screen through
+    // the guarded surface (`AgentHandle::dispatch` / `get_state`). The
+    // registry holds `Weak` references only: it never keeps a session
+    // alive and a handle can never close one.
+    let registry = Arc::new(SessionRegistry::new());
+
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(v) => v,
@@ -590,6 +599,7 @@ async fn main() {
 
         let db = db.clone();
         let all_explore_posts = all_explore_posts.clone();
+        let registry = Arc::clone(&registry);
 
         tokio::spawn(async move {
             let ws_stream = match tokio_tungstenite::accept_async(stream).await {
@@ -611,22 +621,86 @@ async fn main() {
                 return;
             }
 
-            let session = build_session(db, all_explore_posts, components, current_user);
+            let session = Arc::new(build_session(
+                db,
+                all_explore_posts,
+                components,
+                current_user,
+            ));
+
+            // Single-writer, single-queue rule: everything bound for this
+            // socket — replies to the client's own messages *and*
+            // agent-originated messages from the sink — goes through one
+            // unbounded channel, and this task is the only thing that
+            // drains it onto the socket. Both producers enqueue while the
+            // session lock is held (`handle_message_with` and
+            // `AgentHandle::dispatch` guarantee that), so the queue order is
+            // the revision order and the client never sees revision N+1
+            // before N.
+            let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+            let sink: OutboundSink = {
+                let tx = tx.clone();
+                Arc::new(move |msg: String| {
+                    // A closed receiver means this connection is gone; the
+                    // message is simply dropped, same as a write to a dead
+                    // socket would be.
+                    let _ = tx.send(msg);
+                })
+            };
+            // The id this session is registered under, once hello has
+            // completed and the id is ours to hold.
+            let mut registered: Option<String> = None;
+            let mut warned_taken = false;
 
             let (mut sender, mut receiver) = ws_stream.split();
-            while let Some(Ok(msg)) = receiver.next().await {
-                match msg {
-                    Message::Text(text) => {
-                        for resp in session.handle_message(&text) {
-                            if sender.send(Message::Text(resp)).await.is_err() {
-                                return;
+            'conn: loop {
+                tokio::select! {
+                    inbound = receiver.next() => {
+                        let Some(Ok(msg)) = inbound else { break 'conn };
+                        match msg {
+                            Message::Text(text) => {
+                                session.handle_message_with(&text, |resp| {
+                                    let _ = tx.send(resp.to_string());
+                                });
+                                // `register` is `Ok(None)` until the hello
+                                // handshake has run. The client chooses the
+                                // id it presents in hello (that is how
+                                // resume works), so if a *different* live
+                                // session already holds it the registry
+                                // refuses rather than letting this one
+                                // displace it; we simply try again on the
+                                // next message, which succeeds once the
+                                // stale connection's task has gone.
+                                if registered.as_deref() != session.acked_session_id().as_deref() {
+                                    match registry.register(&session, Arc::clone(&sink)) {
+                                        Ok(id) => registered = id,
+                                        Err(e) => {
+                                            if !warned_taken {
+                                                eprintln!("Client {peer}: not attachable yet: {e}");
+                                                warned_taken = true;
+                                            }
+                                        }
+                                    }
+                                }
                             }
+                            Message::Close(_) => break 'conn,
+                            _ => {}
                         }
                     }
-                    Message::Close(_) => break,
-                    _ => {}
+                    outbound = rx.recv() => {
+                        let Some(text) = outbound else { break 'conn };
+                        if sender.send(Message::Text(text)).await.is_err() {
+                            break 'conn;
+                        }
+                    }
                 }
             }
+
+            // Drop this session's record only — never a peer's that happens
+            // to share the id. The session itself goes with this task when
+            // the `Arc` is released; any handle still held elsewhere starts
+            // returning `SdkError::SessionGone`.
+            registry.unregister(&session);
         });
     }
 }

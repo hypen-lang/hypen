@@ -38,6 +38,19 @@ export class SessionManager {
   /** Maps session ID to connected WebSocket(s) for concurrent handling */
   private sessionConnections = new Map<string, Set<unknown>>();
 
+  /**
+   * Current resume credential per session id (RFC 001 §5 / Phase S). Kept
+   * here, never on the `Session` object handed to user hooks.
+   */
+  private resumeTokens = new Map<string, string>();
+
+  /**
+   * Session ids that negotiated a device plane on some connection. Resuming
+   * one of these requires its resume token; every other session keeps the
+   * legacy id-only resume (RFC 001 §5).
+   */
+  private deviceSessions = new Set<string>();
+
   /** Resolved configuration with defaults */
   private config: Required<SessionConfig>;
 
@@ -77,6 +90,75 @@ export class SessionManager {
     };
     this.activeSessions.set(session.id, session);
     return session;
+  }
+
+  /**
+   * Re-adopt a session id supplied by a trusted transport recovery channel.
+   *
+   * This is intentionally separate from `createSession`: ordinary client
+   * hello messages must not be allowed to choose their own id. Cloudflare's
+   * hibernation API, however, stores the server-issued id on the accepted
+   * socket and needs to reconstruct the in-memory SessionManager after the
+   * Durable Object itself has been evicted.
+   */
+  recoverSession(id: string, props?: Record<string, any>): Session {
+    const now = new Date();
+    const session: Session = {
+      id,
+      ttl: this.config.ttl,
+      createdAt: now,
+      lastConnectedAt: now,
+      props,
+    };
+    this.activeSessions.set(id, session);
+    return session;
+  }
+
+  /**
+   * Issue (rotate) the resume credential for `sessionId`: 256 random bits,
+   * base64url. The previous token for that session stops working.
+   */
+  issueResumeToken(sessionId: string): string {
+    const bytes = new Uint8Array(32);
+    crypto.getRandomValues(bytes);
+    let bin = "";
+    for (const b of bytes) bin += String.fromCharCode(b);
+    const token = btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+    this.resumeTokens.set(sessionId, token);
+    return token;
+  }
+
+  /**
+   * Record that `sessionId` negotiated a device plane: from now on only its
+   * current resume token resumes (or takes over) it. Sticky for the life of
+   * the session.
+   */
+  markDeviceSession(sessionId: string): void {
+    this.deviceSessions.add(sessionId);
+  }
+
+  /**
+   * Whether resuming `sessionId` requires a valid resume token — true only
+   * for a session that negotiated a device plane.
+   */
+  requiresResumeToken(sessionId: string): boolean {
+    return this.deviceSessions.has(sessionId);
+  }
+
+  /**
+   * Whether `token` is the current resume credential for `sessionId`.
+   * Constant-time over the token contents.
+   */
+  verifyResumeToken(sessionId: string, token: string | undefined): boolean {
+    const expected = this.resumeTokens.get(sessionId);
+    if (expected === undefined || typeof token !== "string") return false;
+    // Token length is fixed and public; only the contents are secret.
+    if (token.length !== expected.length) return false;
+    let diff = 0;
+    for (let i = 0; i < expected.length; i++) {
+      diff |= expected.charCodeAt(i) ^ token.charCodeAt(i);
+    }
+    return diff === 0;
   }
 
   /**
@@ -124,6 +206,8 @@ export class SessionManager {
       const pending = this.pendingSessions.get(sessionId);
       if (pending) {
         this.pendingSessions.delete(sessionId);
+        this.resumeTokens.delete(sessionId);
+        this.deviceSessions.delete(sessionId);
         await onExpire(pending.session);
       }
     }, session.ttl * 1000);
@@ -169,6 +253,8 @@ export class SessionManager {
    */
   destroySession(sessionId: string): void {
     this.activeSessions.delete(sessionId);
+    this.resumeTokens.delete(sessionId);
+    this.deviceSessions.delete(sessionId);
 
     const pending = this.pendingSessions.get(sessionId);
     if (pending) {
@@ -252,5 +338,7 @@ export class SessionManager {
     this.activeSessions.clear();
     this.pendingSessions.clear();
     this.sessionConnections.clear();
+    this.resumeTokens.clear();
+    this.deviceSessions.clear();
   }
 }

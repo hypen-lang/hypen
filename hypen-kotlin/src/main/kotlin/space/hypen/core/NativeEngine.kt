@@ -13,6 +13,7 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.encodeToString
 
 /**
@@ -317,8 +318,7 @@ class NativeEngine : IEngine, AutoCloseable {
     }
 
     override fun triggerAction(name: String, payload: Any?) {
-        val action = Action(name, payload?.toJsonElement())
-        actionHandlers[name]?.invoke(action)
+        dispatchAction(name, payload)
     }
 
     /**
@@ -340,6 +340,120 @@ class NativeEngine : IEngine, AutoCloseable {
                 handler(Action(action.name, payloadElement))
             }
         }
+    }
+
+    // ── External capability surface ─────────────────────────────────────
+    //
+    // For callers that are NOT the rendered UI — MCP servers, REST
+    // handlers, CLIs, agents. [dispatchAction] above reaches every
+    // registered handler because the renderer needs that; these entry
+    // points accept only what the app declares. The allowlist itself is
+    // computed inside the Rust engine (`agent_core::resolve_external`),
+    // shared by every SDK, so the rule cannot drift per binding — this
+    // layer only relays JSON and types the result. See ExternalSurface.kt.
+
+    /**
+     * Every action an external caller may dispatch right now: the modules'
+     * declared actions, plus `navigate` / `back` when the app declares a
+     * `Router`, plus `set_input` when it declares any `.bind()`.
+     */
+    fun listActions(): List<AgentAction> =
+        externalSurfaceJson.decodeFromString(native.listExternalActions())
+
+    /**
+     * Every route the app declares, in declaration order — the argument
+     * schema for the `navigate` built-in.
+     */
+    fun listRoutes(): List<AgentRoute> =
+        externalSurfaceJson.decodeFromString(native.listRoutes())
+
+    /**
+     * Every `.bind()`-declared writable input — the argument schema for the
+     * `set_input` built-in.
+     */
+    fun listBindings(): List<BoundInput> =
+        externalSurfaceJson.decodeFromString(native.listBindings())
+
+    /**
+     * Dispatch on behalf of a caller that is not the rendered UI.
+     *
+     * Authorises against exactly what [listActions] advertises, then runs
+     * the resolved internal action through the same pending-action pump a
+     * UI dispatch uses — so `navigate` arrives at the handler as
+     * `router.push`, and `set_input` as `__hypen_bind` with a payload the
+     * engine built, never one the caller supplied.
+     *
+     * @throws EngineError.ActionNotFound if the name is not externally
+     *   dispatchable, if a built-in is used in an app that does not declare
+     *   the backing surface, or if `set_input` names an undeclared field.
+     */
+    fun dispatchExternal(name: String, payload: Any? = null) {
+        val payloadJson = payload?.let {
+            when (it) {
+                is JsonElement -> it.toString()
+                else -> it.toJsonElement().toString()
+            }
+        }
+        try {
+            native.dispatchExternal(name, payloadJson)
+        } catch (e: HypenException.ActionException) {
+            // The native side collapses every refusal — unlisted name,
+            // undeclared bind field, malformed payload — into one error
+            // variant, so the detail only survives on the cause.
+            throw EngineError.ActionNotFound(name, e)
+        }
+        processPendingActions()
+    }
+
+    /**
+     * Read module state, whole or at a dotted path.
+     *
+     * @param module `null` for the primary module (set via [setModule]), or
+     *   a registered module's name (matched case-insensitively).
+     * @param path `null` for the module's whole state tree.
+     * @return `null` when the module is unknown *or* the path is absent —
+     *   deliberately not distinguished, so a caller cannot probe for state
+     *   it is not being shown.
+     */
+    fun getStateAt(module: String? = null, path: String? = null): JsonElement? {
+        val raw = native.getStateAt(module, path) ?: return null
+        return try {
+            Json.decodeFromString<JsonElement>(raw)
+        } catch (e: Exception) {
+            JsonPrimitive(raw)
+        }
+    }
+
+    /**
+     * The MCP handshake for this app, composed by the engine from the same
+     * declaration tables [listActions] reads — `tools`, `resources`,
+     * `instructions`, all MCP-shaped and camelCase already.
+     *
+     * Returned as the JSON string the engine produced. A host forwards it
+     * verbatim; paraphrasing it here would be hand-writing protocol prose
+     * again, which composing it in the engine exists to remove.
+     */
+    fun mcpManifest(): String = native.mcpManifest()
+
+    /**
+     * The built-in action names as the engine spells them, keyed
+     * `navigate` / `back` / `setInput` / `bindAction`.
+     *
+     * [ExternalActions] is the compile-time copy; this is the source. A
+     * test pins the two together so a rename upstream is caught here.
+     */
+    fun externalBuiltinNames(): Map<String, String> {
+        val obj = Json.decodeFromString<JsonObject>(native.externalBuiltinNames())
+        return obj.mapValues { (_, v) -> v.jsonPrimitive.content }
+    }
+
+    /**
+     * Drop a module and every action it declared from the engine.
+     *
+     * **Destroy sites only** — see [IEngine.unregisterModule].
+     */
+    override fun unregisterModule(name: String) {
+        native.unregisterModule(name)
     }
 
     override fun close() {
@@ -423,6 +537,16 @@ private fun NativePatch.toPatch(): Patch {
             // (`ComposeRenderer.onDetach` / `onAttach`).
             NativePatchType.DETACH -> PatchType.DETACH
             NativePatchType.ATTACH -> PatchType.ATTACH
+            // Reactive accessibility re-emit — see the Rust engine's
+            // `Patch::SetSemantics` (`reconcile/patch.rs`). The updated
+            // block rides `semanticsJson` → `Patch.semantics`.
+            NativePatchType.SET_SEMANTICS -> PatchType.SET_SEMANTICS
+            // Animation transaction prelude — see the Rust engine's
+            // `Patch::BatchAnimation` (`reconcile/patch.rs`). The spec
+            // rides `specJson` → `Patch.spec`; renderers honor it at
+            // batch index 0 only (protocol invariant 3, see
+            // `hypen-web/docs/animation.md`).
+            NativePatchType.BATCH_ANIMATION -> PatchType.BATCH_ANIMATION
         },
         id = id,
         elementType = elementType,
@@ -443,6 +567,25 @@ private fun NativePatch.toPatch(): Patch {
         },
         text = text,
         parentId = parentId,
-        beforeId = beforeId
+        beforeId = beforeId,
+        semantics = semanticsJson?.let {
+            try {
+                Json.decodeFromString<JsonElement>(it)
+            } catch (e: Exception) {
+                null
+            }
+        },
+        // Animation protocol: the exit flag on a `remove` and the
+        // batch-animation prelude's spec. Both must survive this relay or
+        // a Kotlin-hosted app cannot animate exits/transactions on ANY
+        // client — including browser clients served over Remote UI.
+        transition = transition,
+        spec = specJson?.let {
+            try {
+                Json.decodeFromString<JsonElement>(it)
+            } catch (e: Exception) {
+                null
+            }
+        }
     )
 }

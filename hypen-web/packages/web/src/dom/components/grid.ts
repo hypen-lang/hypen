@@ -5,6 +5,7 @@
  */
 
 import type { ComponentHandler } from "./index.js";
+import { trackCount } from "../../grid-tracks.js";
 
 // Inject global styles for grid children
 let gridStylesInjected = false;
@@ -30,26 +31,15 @@ export const gridHandler: ComponentHandler = {
 
     const el = document.createElement("div");
     el.style.display = "grid";
+    el.style.gap = "0px";
     el.dataset.hypenType = "grid";
     return el;
   },
 
   applyProps(el: HTMLElement, props: Record<string, any>): void {
-    // Columns
-    if (props.columns !== undefined) {
-      const columns = typeof props.columns === "number"
-        ? `repeat(${props.columns}, 1fr)`
-        : String(props.columns);
-      el.style.gridTemplateColumns = columns;
-    }
-
-    // Rows
-    if (props.rows !== undefined) {
-      const rows = typeof props.rows === "number"
-        ? `repeat(${props.rows}, 1fr)`
-        : String(props.rows);
-      el.style.gridTemplateRows = rows;
-    }
+    // Columns: a count only (see grid-tracks.ts).
+    const columns = trackCount(props.columns);
+    if (columns !== null) el.style.gridTemplateColumns = `repeat(${columns}, 1fr)`;
 
     // Gap
     if (props.gap !== undefined) {
@@ -58,5 +48,4 @@ export const gridHandler: ComponentHandler = {
     }
   },
 };
-
 

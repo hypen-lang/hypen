@@ -8,15 +8,47 @@ module Search {
         }
         .tw("px-4 py-2 bg-white border-b border-gray-200")
 
-        Grid(@state.explorePosts, key: "id") {
-            Image(src: "@{item.imageUrl}")
-                .objectFit("cover")
-                .tw("aspect-square w-full")
+        // Empty result set: shimmering placeholders instead of a blank screen.
+        // The grid is wrapped in the complementary `If` below so its `flex-1`
+        // doesn't sit under the skeletons and push them off-screen.
+        If(condition: "@{state.explorePosts.length == 0}") {
+            Column {
+                Text("No posts match that search")
+                    .tw("text-sm text-gray-500 text-center pb-4")
+
+                Row {
+                    Column {}
+                        .tw("flex-1 aspect-square bg-gray-100 rounded-md")
+                        .animate(shimmer)
+                    Column {}
+                        .tw("flex-1 aspect-square bg-gray-100 rounded-md")
+                        .animate(shimmer)
+                    Column {}
+                        .tw("flex-1 aspect-square bg-gray-100 rounded-md")
+                        .animate(shimmer)
+                }
+                .tw("flex-row gap-1 w-full")
+            }
+            .tw("shrink-0 px-4 pt-8 items-center")
+            .enter(fade, duration: 200)
         }
-        .gridColumns(3)
-        .gap(4)
-        .scrollable(true)
-        .tw("flex-1")
+
+        // Typing filters the grid: survivors reflow into new cells (`.layout`
+        // FLIPs them from their old positions) and cleared queries re-add tiles
+        // (`.enter(fade)`), so the explore grid rearranges instead of blinking.
+        If(condition: "@{state.explorePosts.length > 0}") {
+            Grid(@state.explorePosts, key: "id") {
+                Image(src: "@{item.imageUrl}")
+                    .objectFit("cover")
+                    .tw("aspect-square w-full")
+                    .enter(fade, duration: 220)
+                    .layout(duration: 320, curve: spring)
+            }
+            .gridColumns(3)
+            .gap(4)
+            .scrollable(true)
+            .tw("flex-1")
+        }
     }
     .tw("flex-1 w-full bg-white")
 }

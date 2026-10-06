@@ -216,7 +216,7 @@ final class MultiModuleIntegrationTests: XCTestCase {
                 if let def = testApp.get(name) {
                     // This simulates: engine.registerModule(name: name, initialState: def.initialState)
                     autoDiscoveredModules.append(name)
-                    XCTAssertFalse(def.initialState.isEmpty || def.actionHandlers.isEmpty && def.asyncActionHandlers.isEmpty,
+                    XCTAssertFalse(def.initialState.isEmpty && def.actionHandlers.isEmpty && def.asyncActionHandlers.isEmpty,
                                    "Auto-discovered module '\(name)' should have state or handlers")
                 }
             }

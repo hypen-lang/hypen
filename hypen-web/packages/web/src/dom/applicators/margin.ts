@@ -4,6 +4,7 @@
 
 import type { ApplicatorHandler } from "./types.js";
 import { toCssLength as toCssLengthShared } from "./size.js";
+import { hasSpacingNamedKey, resolveSpacingKeys } from "./spacing-keys.js";
 
 // See `padding.ts#toCssLength` — shared helper normalises `dp` / `sp` / `pt`
 // (which CSS doesn't understand) to `px`, and passes `rem` / `em` / `%`
@@ -34,17 +35,21 @@ export const marginHandler: ApplicatorHandler = (el, value) => {
     return;
   }
 
-  // Named-keys form: { top, right, bottom, left }
-  if (
-    value.left !== undefined ||
-    value.right !== undefined ||
-    value.top !== undefined ||
-    value.bottom !== undefined
-  ) {
-    if (value.left !== undefined) el.style.marginLeft = toCssLength(value.left);
-    if (value.right !== undefined) el.style.marginRight = toCssLength(value.right);
-    if (value.top !== undefined) el.style.marginTop = toCssLength(value.top);
-    if (value.bottom !== undefined) el.style.marginBottom = toCssLength(value.bottom);
+  // Named-keys form: physical edges, the horizontal/vertical axes, and the
+  // direction-aware start/end pair.
+  if (hasSpacingNamedKey(value)) {
+    const edges = resolveSpacingKeys(value);
+    if (edges.top !== undefined) el.style.marginTop = toCssLength(edges.top);
+    if (edges.bottom !== undefined) el.style.marginBottom = toCssLength(edges.bottom);
+    if (edges.left !== undefined) el.style.marginLeft = toCssLength(edges.left);
+    if (edges.right !== undefined) el.style.marginRight = toCssLength(edges.right);
+    // Written after the physical edges so a logical key wins the cascade.
+    if (edges.inlineStart !== undefined) {
+      el.style.setProperty("margin-inline-start", toCssLength(edges.inlineStart));
+    }
+    if (edges.inlineEnd !== undefined) {
+      el.style.setProperty("margin-inline-end", toCssLength(edges.inlineEnd));
+    }
     return;
   }
 

@@ -1,0 +1,152 @@
+---
+title: Agent actions and state
+description: Expose a running Hypen app through guarded actions, state reads, MCP, and REST.
+---
+
+Hypen derives an external interface from your module code and templates. You do not add an `expose` flag or maintain a separate tool registry. The host decides whether to serve that interface to an agent, CLI, or other external caller.
+
+## Declare the interface
+
+| Developer declaration | External capability |
+| --- | --- |
+| `.onAction("submit", handler)` | A callable action, even without a visible button; `_name` actions stay private |
+| `Router { Route(path: "/orders") { ... } }` | Navigation to declared routes |
+| `Input(...).bind(@state.query)` | Write that input through `hypen.set_input` |
+| `Text("@{state.result}")` | Read that state path |
+
+For example, pair this module with its template:
+
+```typescript
+import { app } from "@hypen-space/core";
+
+export default app
+  .defineState({ query: "", result: "", privateToken: "" }, { name: "Search" })
+  .onAction("search", async ({ state }) => {
+    state.result = `Results for ${state.query}`;
+  })
+  .build();
+```
+
+```hypen
+module Search {
+  Column {
+    Input(placeholder: "Search query").bind(@state.query)
+    Button("Search").onClick(@actions.search)
+    Text("@{state.result}")
+  }
+}
+```
+
+The agent can set `query`, call `search`, and read `query` and `result`. `privateToken` is absent from the read surface. A whole-module read projects only declared paths. Referencing a whole object exposes its descendants, so reference individual fields when the object also contains private data.
+
+These are **template declarations**, not a snapshot of currently visible controls. Inactive routes, conditional branches, and retained module instances can contribute capabilities. Hiding or disabling a button does not revoke its action. Prefix an action name with `_` (for example, `.onAction("_deleteAccount", handler)`) to keep it callable only from the UI. Check authorization and business rules inside your handlers. Guarded calls carry `action.sender = "external"` unless their host supplies a more specific sender.
+
+## Use the guarded engine API
+
+Once the app is rendered and its modules are ready, the TypeScript engine provides:
+
+```typescript
+engine.listActions();
+engine.listRoutes();
+engine.listBindings();
+engine.mcpManifest();
+
+engine.dispatchExternal("hypen.set_input", {
+  module: "search", field: "query", value: "Hypen",
+});
+engine.dispatchExternal("search");
+engine.getStateAt("search", "result");
+```
+
+Named modules use their lowercase registration name. The primary module installed through `setModule` uses `null` for reads and an omitted or `null` module for input writes. Use the manifest's `dev.hypen/module` and `dev.hypen/statePath` metadata to obtain exact read addresses; resource URIs are opaque identifiers, not paths to parse.
+
+External adapters must call `dispatchExternal`, never the renderer's `dispatchAction`. The guard excludes `__*`, `router.*`, `hypen.*`, and `hypen_*` module action names. The framework supplies `hypen.navigate`, `hypen.back`, and `hypen.set_input` only when their supporting declarations exist. MCP spells those tools `hypen_navigate`, `hypen_back`, and `hypen_set_input`.
+
+## Serve MCP
+
+Add `@hypen-space/agent` alongside the server SDK. After your host boots and renders the app, pass its engine to the stdio transport:
+
+```typescript
+import { serveStdio } from "@hypen-space/agent";
+
+await serveStdio({
+  engine,
+  serverInfo: { name: "my-app", version: "1.0.0" },
+  pollIntervalMs: 1000,
+});
+```
+
+The MCP client launches this entry script. Keep application diagnostics on stderr: stdout contains only protocol messages. `HypenMcpServer` also provides a transport-independent `handle(message)` method for hosts supplying their own framing.
+
+MCP tool calls acknowledge **delivery**, not completion or a handler return value. Read resources afterward to observe state changes; asynchronous work may still be pending. Responses include a revision cursor when the engine provides one. Compare it only within the same session: a higher revision means a subsequent render, not completion of all asynchronous work. State changes do not necessarily change the tool list.
+
+The engine must include the manifest binding. In this repository, rebuild it with `cd hypen-engine-rs && ./build-wasm.sh` when updating engine source or stale artifacts.
+
+## Serve REST or attach to a person’s session
+
+The TypeScript `RemoteServer` enables REST explicitly:
+
+```typescript
+import { RemoteServer } from "@hypen-space/server";
+
+const server = new RemoteServer()
+  .app(myApp)
+  .agent({
+    token: agentToken,
+    authorize: (request, sessionId) => canOperateSession(request, sessionId),
+  })
+  .listen(3000);
+```
+
+Here `agentToken` is a configured non-empty secret; every REST request must send `Authorization: Bearer <token>`. `canOperateSession` is your application's session-ownership check.
+
+| Method and path | Purpose |
+| --- | --- |
+| `GET /__hypen__/agent/manifest` | Engine-derived tools and resources |
+| `GET /__hypen__/agent/openapi.json` | REST description |
+| `POST /__hypen__/agent/sessions` | Create a headless session |
+| `POST /__hypen__/agent/sessions` with `{ "sessionId": "..." }` | Attach to an existing ready user session |
+| `POST /__hypen__/agent/sessions/:id/dispatch` | Send `{ name, payload? }` using external engine names |
+| `GET /__hypen__/agent/sessions/:id/state?module=search&path=result` | Read declared state |
+
+A headless session has its own engine; it still runs your real handlers and can perform their external side effects. An attached session operates the user's engine and streams changes to their UI. Attachment returns a fresh agent session ID for subsequent requests.
+
+`authorize` gates **attachment only**. It does not authenticate manifest reads, headless creation, or subsequent requests carrying the agent session ID. Set `.agent({ token })` to protect the entire HTTP surface, or authenticate it in your host/gateway. Without a token or host authentication it is open. Treat session IDs as credentials. Without `authorize`, HTTP attachment is refused.
+
+For in-process attachment, authenticate first and call `server.attach(sessionId)`. It returns `null` for an unavailable session and performs no authorization itself. Pass `handle.engine` to `new HypenMcpServer({ engine: handle.engine })` to serve MCP over that live session. A handle does not own the session, becomes unusable after disconnect, and follows the server's `syncActions` behavior when enabled.
+
+## Discover and act on list rows
+
+A state-backed list publishes a collection resource containing only directly referenced row fields and row fields passed to public actions:
+
+```hypen
+List(@state.products, as: product) {
+  Text("@{product.title}")
+  Button("Add").onClick(@actions.addToCart, sku: @product.sku)
+}
+```
+
+For a row holding `{ title: "Hat", sku: "HAT", supplierCost: 12 }`, a `products` resource read returns `[{ title: "Hat", sku: "HAT" }]`. The action schema names `sku`, so the caller can select a row and send `{ sku: "HAT" }`. Manifest metadata identifies action collections with `dev.hypen/rows` and projected resource fields with `dev.hypen/rowFields`. `supplierCost` remains unreadable, including through direct indexed reads.
+
+Nested lists preserve their array structure and lexical aliases. Empty declared collections read as `[]`, and their resource address remains stable as rows arrive or move. Iteration alone does not expose a collection. State-only action arguments and row arguments used exclusively by `_private` actions do not grant reads. A direct `@item` binding intentionally exposes the entire row, just as referencing a whole state object exposes its descendants.
+
+## Other SDKs
+
+The Rust engine shares the capability guard with JS/WASM, WASI, and UniFFI bindings. Go, Kotlin, Swift, and Rust SDKs provide guarded reads and dispatch plus live-session attachment; the bundled MCP and REST transports are TypeScript packages.
+
+| SDK | Attach entry point |
+| --- | --- |
+| TypeScript | `RemoteServer.attach(sessionId)` |
+| Kotlin | `HypenServer.attach(sessionId)` |
+| Swift | `RemoteServer.attach(sessionId)` |
+| Go | `RemoteServer.Attach(sessionID)` |
+| Rust | Register live sessions and outbound sinks in `SessionRegistry`, then call `attach` |
+
+Consult each SDK's README for its lifecycle and transport wiring. The Go handle currently lacks a manifest method and the WASI binding has no manifest export.
+
+## Current limits
+
+- Action payload schemas are inferred from template call sites and initial state, not TypeScript generics or handler signatures. They are advisory: validate payloads in handlers. Actions with no call site have little schema information.
+- Row discovery supports direct field references in state-backed lists, including custom aliases and nested lists. Computed row expressions and data-source-backed collections do not automatically grant state reads.
+- Conditional expressions and bound props contribute state references even when they do not display literal text. Action-only argument references and synthesized router location do not grant reads.
+- Invalid MCP action names are reported in `manifest.degraded`; inspect it when tools are missing. Actions beginning with `_` are private and omitted from the external interface.

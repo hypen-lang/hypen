@@ -1,7 +1,10 @@
 use super::conditionals::{evaluate_value, find_matching_branch, find_matching_route_with_key};
 use super::item_bindings::replace_ir_node_item_bindings;
-use super::keyed::{generate_item_key, reconcile_iterable_children};
-use super::resolve::{evaluate_binding, resolve_props_full};
+use super::keyed::{
+    generate_item_key, iterable_child_key, reconcile_iterable_children,
+    reconcile_iterable_children_full,
+};
+use super::resolve::{evaluate_binding_ref, resolve_props_full};
 use super::tree::DEFAULT_ROUTER_CACHE_SIZE;
 use super::{ControlFlowKind, InstanceTree, Patch};
 use crate::ir::{Element, IRNode, NodeId, Props, RouterRoute, Value};
@@ -13,6 +16,48 @@ type DataSources = indexmap::IndexMap<String, serde_json::Value>;
 
 /// Module instances map type alias
 type Modules = indexmap::IndexMap<String, crate::lifecycle::ModuleInstance>;
+
+/// Resolve a node's derive-time (base) semantics against resolved props —
+/// templated accessible names and bound self-state/checked fold in exactly
+/// as at the Create sites. The single resolution rule shared by initial
+/// create and the reactive [`Patch::SetSemantics`] delta paths.
+pub(crate) fn resolve_semantics(
+    base: Option<&crate::ir::Semantics>,
+    resolved_props: &impl crate::ir::semantics::PropLookup,
+) -> Option<crate::ir::Semantics> {
+    base.map(|s| {
+        s.clone()
+            .with_resolved_name(resolved_props)
+            .with_resolved_state(resolved_props)
+    })
+}
+
+/// Compare a node's freshly-resolved semantics against the block last sent
+/// to the renderer and emit a [`Patch::SetSemantics`] when they differ,
+/// recording the new block as last-sent. No-op for nodes whose semantics
+/// never had bindings (resolution is then a fixed point, so the comparison
+/// stays equal and static trees pay nothing beyond the `PartialEq`).
+pub(crate) fn emit_semantics_delta(
+    tree: &mut InstanceTree,
+    node_id: NodeId,
+    patches: &mut Vec<Patch>,
+) {
+    let Some(node) = tree.get(node_id) else {
+        return;
+    };
+    // Fast path: a node that never carried semantics can't gain any —
+    // derivation happens at expand, not reconcile.
+    if node.semantics.is_none() && node.last_semantics.is_none() {
+        return;
+    }
+    let new_semantics = resolve_semantics(node.semantics.as_deref(), &node.props);
+    if new_semantics.as_ref() != node.last_semantics.as_deref() {
+        patches.push(Patch::set_semantics(node_id, new_semantics.clone()));
+        if let Some(node) = tree.get_mut(node_id) {
+            node.last_semantics = new_semantics.map(Box::new);
+        }
+    }
+}
 
 /// Shared mutable context threaded through the recursive tree-building and
 /// reconciliation helpers.  Grouping these fields removes the repetitive
@@ -34,7 +79,7 @@ impl<'a> ReconcileCtx<'a> {
     /// (e.g. the legacy "wrap your primary module's DSL in `module App { ... }`"
     /// pattern), this returns `None` so dependency registration falls back to
     /// raw paths and state lookup falls back to the primary module's state.
-    fn effective_scope<'s>(&self, raw: Option<&'s str>) -> Option<&'s str> {
+    pub(crate) fn effective_scope<'s>(&self, raw: Option<&'s str>) -> Option<&'s str> {
         raw.filter(|scope| {
             self.modules
                 .map(|m| m.contains_key(*scope))
@@ -46,7 +91,7 @@ impl<'a> ReconcileCtx<'a> {
     ///
     /// Returns the named module's state when `effective_scope` matches a
     /// registered module, otherwise the primary state from the context.
-    fn effective_state(&self, raw_scope: Option<&str>) -> &'a serde_json::Value {
+    pub(crate) fn effective_state(&self, raw_scope: Option<&str>) -> &'a serde_json::Value {
         match self.effective_scope(raw_scope) {
             Some(scope) => self
                 .modules
@@ -163,6 +208,16 @@ fn create_element_node(
                         .add_dependency(node_id, binding, module_scope_ref);
                 }
             }
+            Value::StateSwitch { path, .. } => {
+                // `.states` driving path registers exactly like a Binding —
+                // state changes dirty the node and pose flips flow out as
+                // ordinary SetProp/RemoveProp.
+                ctx.dependencies.add_dependency(
+                    node_id,
+                    &state_switch_binding(path),
+                    module_scope_ref,
+                );
+            }
             _ => {}
         }
     }
@@ -179,10 +234,11 @@ fn create_element_node(
         })
         .unwrap_or(false);
 
+    // A just-created node has nothing layered, so this is an `Arc::clone`.
     let mut props = ctx
         .tree
         .get(node_id)
-        .map(|n| n.props.clone())
+        .map(|n| n.props.to_flat())
         .unwrap_or_else(|| std::sync::Arc::new(indexmap::IndexMap::new()));
     if is_lazy && !element.ir_children.is_empty() {
         if let Some(IRNode::Element(first_child)) = element.ir_children.first() {
@@ -194,8 +250,20 @@ fn create_element_node(
             );
         }
     }
-    ctx.patches
-        .push(Patch::create(node_id, element.element_type.clone(), props));
+    // Resolve any deferred (templated) accessible name from the now-resolved
+    // props before emitting the Create patch, and remember the resolved
+    // block so later dirty re-renders can diff against it (SetSemantics).
+    let semantics = resolve_semantics(element.semantics.as_ref(), &props);
+    if let Some(node) = ctx.tree.get_mut(node_id) {
+        node.last_semantics = semantics.clone().map(Box::new);
+    }
+    strip_engine_internal_props(&mut props);
+    ctx.patches.push(Patch::create(
+        node_id,
+        element.element_type.clone(),
+        props,
+        semantics,
+    ));
 
     // Tree-side: hang the node off its logical parent.
     if let Some(parent) = logical_parent {
@@ -231,6 +299,34 @@ fn create_element_node(
     node_id
 }
 
+/// Substitution-path creation of one list row — the fallback when no row
+/// prototype applies (unplannable template). Identical to the historical
+/// per-row body: substitute, create, collapse the run into an Instantiate
+/// when the plan allows.
+#[allow(clippy::too_many_arguments)]
+fn create_list_row_slow(
+    ctx: &mut ReconcileCtx,
+    child_ir: &IRNode,
+    item: &serde_json::Value,
+    index: usize,
+    item_key: &str,
+    node_id: NodeId,
+    instantiation_plans: &Option<Vec<Option<crate::reconcile::binding_map::InstantiationPlan>>>,
+    template_idx: usize,
+) -> NodeId {
+    let child_with_item = replace_ir_node_item_bindings(child_ir, item, index, "item", item_key);
+    let mark = ctx.patches.len();
+    let child_id = create_ir_node_tree_impl(ctx, &child_with_item, Some(node_id), false);
+    crate::reconcile::binding_map::emit_row_as_instantiate(
+        ctx,
+        instantiation_plans,
+        template_idx,
+        mark,
+        node_id,
+    );
+    child_id
+}
+
 /// Create an iterable element (List, Grid, etc.) that iterates over an array in state
 fn create_list_tree_impl(
     ctx: &mut ReconcileCtx,
@@ -241,11 +337,13 @@ fn create_list_tree_impl(
     let module_scope_ref = ctx.effective_scope(element.module_scope.as_deref());
     let effective_state = ctx.effective_state(element.module_scope.as_deref());
 
-    // Get the array binding from first prop (prop "0")
-    let array = if let Some(Value::Binding(binding)) = element.props.get("0") {
-        evaluate_binding(binding, effective_state).unwrap_or(serde_json::Value::Array(vec![]))
-    } else {
-        serde_json::Value::Array(vec![])
+    // Get the array binding from first prop (prop "0"). Borrowed straight
+    // out of state — `state` and `tree` are disjoint borrows in
+    // `ReconcileCtx`, so there is no reason to deep-copy the whole bound
+    // array just to iterate it once.
+    let array: Option<&serde_json::Value> = match element.props.get("0") {
+        Some(Value::Binding(binding)) => evaluate_binding_ref(binding, effective_state),
+        _ => None,
     };
 
     // Create a container element - use the original element type (List, Grid, etc.)
@@ -269,17 +367,20 @@ fn create_list_tree_impl(
 
     // Store the original element template for re-reconciliation
     if let Some(node) = ctx.tree.get_mut(node_id) {
-        node.raw_props = element.props.clone();
+        node.raw_props = super::tree::NodeRawProps::from(element.props.clone());
         node.element_template = Some(std::sync::Arc::new(element.clone()));
     }
 
     // Generate Create patch for container
     let node = ctx.tree.get(node_id).unwrap();
-    ctx.patches.push(Patch::create(
-        node_id,
-        node.element_type.clone(),
-        node.props.clone(),
-    ));
+    let semantics = resolve_semantics(node.semantics.as_deref(), &node.props);
+    let (element_type, mut props) = (node.element_type.clone(), node.props.to_flat());
+    if let Some(node) = ctx.tree.get_mut(node_id) {
+        node.last_semantics = semantics.clone().map(Box::new);
+    }
+    strip_engine_internal_props(&mut props);
+    ctx.patches
+        .push(Patch::create(node_id, element_type, props, semantics));
 
     // Insert container
     if let Some(parent) = parent_id {
@@ -292,15 +393,32 @@ fn create_list_tree_impl(
     // Create children for each item in the array. Stamp every per-template
     // child with a key so the next reconcile can match by identity instead
     // of position.
-    if let serde_json::Value::Array(items) = &array {
+    if let Some(serde_json::Value::Array(items)) = array {
         let key_path = element.props.get("key.0").and_then(|v| match v {
             Value::Static(serde_json::Value::String(s)) => Some(s.as_str()),
             _ => None,
         });
         let multi_template = element.ir_children.len() > 1;
+        // Warm the iterable memo at creation (see create_foreach_ir_tree):
+        // the first re-reconcile then skips unchanged items outright.
+        let templates_hash = crate::reconcile::keyed::templates_fingerprint(&element.ir_children);
+        // This node's stored template IS this element — warm the cache so
+        // the first update pass skips the serialization.
+        if let Some(node) = ctx.tree.get_mut(node_id) {
+            node.iter_fp_cache = Some(templates_hash);
+        }
+        let instantiation_plans = Some(crate::reconcile::binding_map::plan_templates_for_emission(
+            &element.ir_children,
+        ));
+        // Row prototypes, built lazily on the first row that can use one:
+        // static + state-bound props resolve once here, and each row is an
+        // Arc-clone + item overlay instead of substitution + full resolve.
+        let mut row_protos: Vec<Option<Option<crate::reconcile::binding_map::RowPrototype>>> =
+            (0..element.ir_children.len()).map(|_| None).collect();
 
         for (index, item) in items.iter().enumerate() {
             let item_key = generate_item_key(item, key_path, "item", index);
+            let item_hash = crate::reconcile::keyed::item_fingerprint(item);
 
             for (template_idx, child_ir) in element.ir_children.iter().enumerate() {
                 let child_key = if multi_template {
@@ -308,13 +426,48 @@ fn create_list_tree_impl(
                 } else {
                     item_key.clone()
                 };
-                let child_with_item =
-                    replace_ir_node_item_bindings(child_ir, item, index, "item", &item_key);
-                let child_id =
-                    create_ir_node_tree_impl(ctx, &child_with_item, Some(node_id), false);
+                let plan = instantiation_plans
+                    .as_ref()
+                    .and_then(|plans| plans.get(template_idx))
+                    .and_then(Option::as_ref);
+                let child_id = if let Some(plan) = plan {
+                    if row_protos[template_idx].is_none() {
+                        row_protos[template_idx] =
+                            Some(crate::reconcile::binding_map::build_row_prototype(
+                                ctx, child_ir, "item",
+                            ));
+                    }
+                    match row_protos[template_idx].as_ref().and_then(Option::as_ref) {
+                        Some(proto) => crate::reconcile::binding_map::instantiate_row_from_proto(
+                            ctx, proto, plan, item, "item", node_id, node_id,
+                        ),
+                        None => create_list_row_slow(
+                            ctx,
+                            child_ir,
+                            item,
+                            index,
+                            &item_key,
+                            node_id,
+                            &instantiation_plans,
+                            template_idx,
+                        ),
+                    }
+                } else {
+                    create_list_row_slow(
+                        ctx,
+                        child_ir,
+                        item,
+                        index,
+                        &item_key,
+                        node_id,
+                        &instantiation_plans,
+                        template_idx,
+                    )
+                };
                 if let Some(child_node) = ctx.tree.get_mut(child_id) {
                     child_node.key = Some(child_key);
                 }
+                crate::reconcile::keyed::stamp_iter_memo(ctx, child_id, item_hash, templates_hash);
             }
         }
     }
@@ -328,10 +481,14 @@ fn create_list_tree_impl(
 /// is no public Element-only entry point any more, so this stays private
 /// and lives next to the IR dispatcher that calls it.
 fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Element) {
-    let node = match ctx.tree.get(node_id).cloned() {
-        Some(n) => n,
-        None => return,
-    };
+    // Existence check only — the fields this function needs are read one at
+    // a time below. Cloning the whole `InstanceNode` up front cost 4-8
+    // allocations (element_type String, semantics, boxed caches) per
+    // reconciled node, and `reconcile_ir_node_impl` had already paid for
+    // one clone before calling in here.
+    if ctx.tree.get(node_id).is_none() {
+        return;
+    }
 
     let effective_state = ctx.effective_state(element.module_scope.as_deref());
     let module_scope_ref = element.module_scope.as_deref();
@@ -342,13 +499,13 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
     let is_iterable = element.props.get("0").is_some() && !element.ir_children.is_empty();
 
     if is_iterable {
-        let array = if let Some(Value::Binding(binding)) = element.props.get("0") {
-            evaluate_binding(binding, effective_state).unwrap_or(serde_json::Value::Array(vec![]))
-        } else {
-            serde_json::Value::Array(vec![])
+        // Borrowed, not cloned: see `create_list_tree_impl`.
+        let array: Option<&serde_json::Value> = match element.props.get("0") {
+            Some(Value::Binding(binding)) => evaluate_binding_ref(binding, effective_state),
+            _ => None,
         };
 
-        if let serde_json::Value::Array(items) = &array {
+        if let Some(serde_json::Value::Array(items)) = array {
             // Look for an explicit `key:` prop on the iterable element so
             // `Grid(@items, key: "uuid")` overrides the default id auto-detect.
             let key_path = element.props.get("key.0").and_then(|v| match v {
@@ -363,6 +520,9 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
                 "item",
                 key_path,
                 &element.ir_children,
+                // Incoming IR — nested lists arrive freshly substituted, so
+                // the fingerprint cache must not be consulted.
+                false,
             );
         }
 
@@ -370,8 +530,13 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
     }
 
     // If element type changed, replace the entire subtree.
-    if node.element_type != element.element_type {
-        replace_subtree_impl(ctx, node_id, &node, element);
+    let type_changed = ctx
+        .tree
+        .get(node_id)
+        .is_some_and(|n| n.element_type != element.element_type);
+    if type_changed {
+        let parent_id = ctx.tree.get(node_id).and_then(|n| n.parent);
+        replace_subtree_impl(ctx, node_id, parent_id, element);
         return;
     }
 
@@ -388,19 +553,36 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
                         .add_dependency(node_id, binding, module_scope_ref);
                 }
             }
+            Value::StateSwitch { path, .. } => {
+                ctx.dependencies.add_dependency(
+                    node_id,
+                    &state_switch_binding(path),
+                    module_scope_ref,
+                );
+            }
             _ => {}
         }
     }
 
-    // Diff and apply prop changes.
+    // Diff and apply prop changes. The old props are read straight off the
+    // node (`tree` and `patches` are disjoint fields of the context, so the
+    // shared borrow and the patch push coexist).
     let new_props = resolve_props_full(&element.props, effective_state, None, ctx.data_sources);
-    let prop_patches = diff_props(node_id, &node.props, &new_props);
-    ctx.patches.extend(prop_patches);
+    if let Some(node) = ctx.tree.get(node_id) {
+        let prop_patches = diff_props_layered(node_id, &node.props, &new_props);
+        ctx.patches.extend(prop_patches);
+    }
 
     if let Some(node) = ctx.tree.get_mut(node_id) {
-        node.props = new_props; // move the Arc directly — no extra clone
-        node.raw_props = element.props.clone();
+        // Move the Arc directly — no extra clone. The fresh map replaces
+        // whatever was layered before.
+        node.props = super::tree::NodeProps::flat(new_props);
+        node.raw_props = super::tree::NodeRawProps::from(element.props.clone());
     }
+
+    // Re-resolve semantics against the fresh props; emit SetSemantics when
+    // the block a renderer holds went stale (templated name, bound state).
+    emit_semantics_delta(ctx.tree, node_id, ctx.patches);
 
     // Reconcile children (skip when this element is lazy — the renderer
     // hasn't asked for the subtree yet).
@@ -414,7 +596,11 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
         .unwrap_or(false);
 
     if !is_lazy {
-        let old_children = node.children.clone();
+        // `im::Vector` clone is a refcount bump, not a copy.
+        let old_children = match ctx.tree.get(node_id) {
+            Some(node) => node.children.clone(),
+            None => return,
+        };
         let new_children = &element.ir_children;
 
         for (i, new_child_ir) in new_children.iter().enumerate() {
@@ -426,14 +612,19 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
         }
 
         if old_children.len() > new_children.len() {
-            for old_child_id in old_children.iter().skip(new_children.len()).copied() {
-                let subtree_ids = collect_subtree_ids(ctx.tree, old_child_id);
-                for &id in &subtree_ids {
-                    ctx.patches.push(Patch::remove(id));
-                    ctx.dependencies.remove_node(id);
-                }
-                ctx.tree.remove_child(node_id, old_child_id);
-                ctx.tree.remove(old_child_id);
+            let doomed: Vec<NodeId> = old_children
+                .iter()
+                .skip(new_children.len())
+                .copied()
+                .collect();
+            for &old_child_id in &doomed {
+                remove_subtree(ctx.tree, old_child_id, ctx.patches, ctx.dependencies);
+            }
+            // Unlink all of them in ONE pass over the parent's child vector.
+            // `InstanceTree::remove_child` rebuilds the whole `im::Vector`,
+            // so calling it per doomed child made this loop O(n²).
+            if let Some(parent) = ctx.tree.get_mut(node_id) {
+                parent.children.retain(|id| !doomed.contains(id));
             }
         }
     }
@@ -443,11 +634,9 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
 fn replace_subtree_impl(
     ctx: &mut ReconcileCtx,
     old_node_id: NodeId,
-    old_node: &super::InstanceNode,
+    parent_id: Option<NodeId>,
     new_element: &Element,
 ) {
-    let parent_id = old_node.parent;
-
     let old_position = if let Some(pid) = parent_id {
         ctx.tree
             .get(pid)
@@ -456,25 +645,20 @@ fn replace_subtree_impl(
         None
     };
 
-    let ids_to_remove = collect_subtree_ids(ctx.tree, old_node_id);
+    emit_subtree_removal(ctx.tree, old_node_id, ctx.patches);
 
-    for &id in &ids_to_remove {
-        ctx.patches.push(Patch::remove(id));
-        ctx.dependencies.remove_node(id);
-    }
-
-    if let Some(pid) = parent_id {
+    // Unlink by index — the old filter-collect rebuilt the parent's entire
+    // child vector to drop a single entry.
+    if let (Some(pid), Some(pos)) = (parent_id, old_position) {
         if let Some(parent) = ctx.tree.get_mut(pid) {
-            parent.children = parent
-                .children
-                .iter()
-                .filter(|&&id| id != old_node_id)
-                .copied()
-                .collect();
+            if parent.children.get(pos) == Some(&old_node_id) {
+                parent.children.remove(pos);
+            }
         }
     }
 
-    ctx.tree.remove(old_node_id);
+    ctx.tree
+        .remove_subtree_with(old_node_id, |id| ctx.dependencies.remove_node(id));
 
     let is_root = parent_id.is_none();
     let new_node_id = create_element_node(ctx, new_element, parent_id, parent_id, is_root);
@@ -518,23 +702,83 @@ fn collect_subtree_ids(tree: &InstanceTree, root_id: NodeId) -> Vec<NodeId> {
     result
 }
 
+/// The state `Binding` equivalent of a `Value::StateSwitch` driving path,
+/// so `.states` nodes register in the dependency graph exactly like a
+/// `@{state.<path>}` binding (including module-scope namespacing).
+pub(crate) fn state_switch_binding(path: &str) -> crate::reactive::Binding {
+    crate::reactive::Binding::state(path.split('.').map(str::to_string).collect())
+}
+
+/// Engine-internal carrier props: kept in `InstanceNode` resolved props so
+/// `resolve_semantics` and dependency-driven re-renders can read them, but
+/// never emitted to renderers — their payload already reaches every renderer
+/// as the typed `Semantics` block on `Create`/`SetSemantics`.
+pub(crate) fn is_engine_internal_prop(key: &str) -> bool {
+    key == "__a11yName"
+}
+
+/// Copy-on-write strip of engine-internal props before a `Patch::Create`:
+/// clones the shared map only when such a key is actually present, so the
+/// common no-hoist case stays an `Arc::clone`. Must run *after*
+/// `resolve_semantics`, which reads the carrier props.
+fn strip_engine_internal_props(props: &mut super::tree::ResolvedProps) {
+    if props.keys().any(|k| is_engine_internal_prop(k)) {
+        std::sync::Arc::make_mut(props).retain(|k, _| !is_engine_internal_prop(k));
+    }
+}
+
 /// Diff two sets of props and generate SetProp/RemoveProp patches
 pub fn diff_props(
     node_id: NodeId,
     old_props: &IndexMap<String, serde_json::Value>,
     new_props: &IndexMap<String, serde_json::Value>,
 ) -> Vec<Patch> {
+    diff_props_with(
+        node_id,
+        |key| old_props.get(key),
+        old_props.keys().map(String::as_str),
+        new_props,
+    )
+}
+
+/// [`diff_props`] with the old side read from an instance node's layered
+/// props — same patches, same order, no flattening.
+pub(crate) fn diff_props_layered(
+    node_id: NodeId,
+    old_props: &super::tree::NodeProps,
+    new_props: &IndexMap<String, serde_json::Value>,
+) -> Vec<Patch> {
+    diff_props_with(
+        node_id,
+        |key| old_props.get(key),
+        old_props.keys(),
+        new_props,
+    )
+}
+
+fn diff_props_with<'a>(
+    node_id: NodeId,
+    old_get: impl Fn(&str) -> Option<&'a serde_json::Value>,
+    old_keys: impl Iterator<Item = &'a str>,
+    new_props: &IndexMap<String, serde_json::Value>,
+) -> Vec<Patch> {
     let mut patches = Vec::new();
 
     for (key, new_value) in new_props {
-        if old_props.get(key) != Some(new_value) {
+        if is_engine_internal_prop(key) {
+            continue;
+        }
+        if old_get(key) != Some(new_value) {
             patches.push(Patch::set_prop(node_id, key.clone(), new_value.clone()));
         }
     }
 
-    for key in old_props.keys() {
+    for key in old_keys {
+        if is_engine_internal_prop(key) {
+            continue;
+        }
         if !new_props.contains_key(key) {
-            patches.push(Patch::remove_prop(node_id, key.clone()));
+            patches.push(Patch::remove_prop(node_id, key.to_string()));
         }
     }
 
@@ -558,6 +802,26 @@ pub(crate) fn create_ir_node_tree_impl(
     create_ir_node_tree_full(ctx, node, parent_id, parent_id, is_root)
 }
 
+/// Resolve the nearest ancestor a renderer actually knows about.
+///
+/// Control-flow containers (`__ForEach` / `__Conditional` / `__Router`)
+/// are transparent on the renderer side: they never receive a `Create`
+/// patch, so an `Insert`/`Move`/`Attach` whose parent names one is
+/// silently dropped. Walk up the instance tree from `start` (inclusive)
+/// until a non-control-flow node is found. `None` means the chain is all
+/// control flow up to the root — callers then address "root".
+fn nearest_render_parent(tree: &InstanceTree, start: Option<NodeId>) -> Option<NodeId> {
+    let mut current = start;
+    while let Some(id) = current {
+        match tree.get(id) {
+            Some(node) if node.control_flow.is_some() => current = node.parent,
+            Some(_) => return Some(id),
+            None => return None,
+        }
+    }
+    None
+}
+
 /// Create a tree from an IRNode with separate logical and render parents.
 ///
 /// `logical_parent` controls where the new node lives in the instance
@@ -566,7 +830,7 @@ pub(crate) fn create_ir_node_tree_impl(
 /// is logically owned by the ForEach container, but its `Insert` patch
 /// targets the ForEach's grandparent because the renderer treats the
 /// container as transparent.
-fn create_ir_node_tree_full(
+pub(crate) fn create_ir_node_tree_full(
     ctx: &mut ReconcileCtx,
     node: &IRNode,
     logical_parent: Option<NodeId>,
@@ -578,9 +842,13 @@ fn create_ir_node_tree_full(
             create_element_node(ctx, element, logical_parent, render_parent, is_root)
         }
         IRNode::ForEach { .. } | IRNode::Conditional { .. } | IRNode::Router { .. } => {
-            // Control-flow containers always render under the logical
-            // parent — they don't take a render-parent split themselves.
-            create_control_flow_tree(ctx, node, logical_parent, is_root)
+            // Control-flow containers live under the logical parent in the
+            // tree, but their children's Insert patches must keep targeting
+            // the incoming render parent: collapsing the two would re-parent
+            // e.g. a ForEach item's subtree onto the ForEach container
+            // itself when the item root is another control-flow node (an If
+            // per item), and the renderer would drop it.
+            create_control_flow_tree(ctx, node, logical_parent, render_parent, is_root)
         }
     }
 }
@@ -590,10 +858,13 @@ fn create_control_flow_tree(
     ctx: &mut ReconcileCtx,
     node: &IRNode,
     parent_id: Option<NodeId>,
+    render_parent: Option<NodeId>,
     is_root: bool,
 ) -> NodeId {
     match node {
-        IRNode::ForEach { .. } => create_foreach_ir_tree(ctx, node, parent_id, is_root),
+        IRNode::ForEach { .. } => {
+            create_foreach_ir_tree(ctx, node, parent_id, render_parent, is_root)
+        }
         IRNode::Conditional {
             value,
             branches,
@@ -606,6 +877,7 @@ fn create_control_flow_tree(
             fallback.as_deref(),
             node,
             parent_id,
+            render_parent,
             is_root,
         ),
         IRNode::Router {
@@ -620,6 +892,7 @@ fn create_control_flow_tree(
             fallback.as_deref(),
             node,
             parent_id,
+            render_parent,
             is_root,
         ),
         IRNode::Element(_) => unreachable!("create_control_flow_tree called with Element"),
@@ -631,6 +904,7 @@ fn create_foreach_ir_tree(
     ctx: &mut ReconcileCtx,
     node: &IRNode,
     parent_id: Option<NodeId>,
+    render_parent_hint: Option<NodeId>,
     is_root: bool,
 ) -> NodeId {
     let (source, item_name, key_path, template, props, raw_scope) = match node {
@@ -656,8 +930,8 @@ fn create_foreach_ir_tree(
     let module_scope_ref = ctx.effective_scope(raw_scope);
     let effective_state = ctx.effective_state(raw_scope);
 
-    let array =
-        evaluate_binding(source, effective_state).unwrap_or(serde_json::Value::Array(vec![]));
+    // Borrowed out of state, not cloned — the array is only iterated here.
+    let array = evaluate_binding_ref(source, effective_state);
 
     let resolved_props = resolve_props_full(props, effective_state, None, ctx.data_sources);
 
@@ -679,13 +953,67 @@ fn create_foreach_ir_tree(
         ctx.tree.add_child(parent, node_id, None);
     }
 
-    let render_parent = parent_id;
+    // Items must be inserted under a node the renderer knows: the hint may
+    // itself be a control-flow container (this ForEach nested directly
+    // under an If, or handed a container by a rebuild path), so normalize
+    // to the nearest real element ancestor.
+    let render_parent = nearest_render_parent(ctx.tree, render_parent_hint.or(parent_id));
 
-    if let serde_json::Value::Array(items) = &array {
+    if let Some(serde_json::Value::Array(items)) = array {
+        let multi_template = template.len() > 1;
+        // Same fingerprint the keyed reconciler will compute for this
+        // template list — stamping it here means the FIRST re-reconcile
+        // already memo-skips unchanged items instead of paying one full
+        // substitution pass to warm the memo.
+        let templates_hash = crate::reconcile::keyed::templates_fingerprint(template);
+        if let Some(node) = ctx.tree.get_mut(node_id) {
+            node.iter_fp_cache = Some(templates_hash);
+        }
+        // Template emission needs a concrete render parent to address the
+        // Instantiate at; a root-level ForEach falls back to plain patches.
+        let instantiation_plans = render_parent
+            .map(|_| crate::reconcile::binding_map::plan_templates_for_emission(template));
+        let mut row_protos: Vec<Option<Option<crate::reconcile::binding_map::RowPrototype>>> =
+            (0..template.len()).map(|_| None).collect();
+
         for (index, item) in items.iter().enumerate() {
             let item_key = generate_item_key(item, key_path, item_name, index);
+            let item_hash = crate::reconcile::keyed::item_fingerprint(item);
 
-            for child_template in template {
+            for (template_idx, child_template) in template.iter().enumerate() {
+                let plan = render_parent.and(
+                    instantiation_plans
+                        .as_ref()
+                        .and_then(|plans| plans.get(template_idx))
+                        .and_then(Option::as_ref),
+                );
+                if let (Some(plan), Some(rp)) = (plan, render_parent) {
+                    if row_protos[template_idx].is_none() {
+                        row_protos[template_idx] =
+                            Some(crate::reconcile::binding_map::build_row_prototype(
+                                ctx,
+                                child_template,
+                                item_name,
+                            ));
+                    }
+                    if let Some(proto) = row_protos[template_idx].as_ref().and_then(Option::as_ref)
+                    {
+                        let child_id = crate::reconcile::binding_map::instantiate_row_from_proto(
+                            ctx, proto, plan, item, item_name, node_id, rp,
+                        );
+                        if let Some(child_node) = ctx.tree.get_mut(child_id) {
+                            child_node.key =
+                                Some(iterable_child_key(&item_key, template_idx, multi_template));
+                        }
+                        crate::reconcile::keyed::stamp_iter_memo(
+                            ctx,
+                            child_id,
+                            item_hash,
+                            templates_hash,
+                        );
+                        continue;
+                    }
+                }
                 let child_with_item = replace_ir_node_item_bindings(
                     child_template,
                     item,
@@ -693,13 +1021,33 @@ fn create_foreach_ir_tree(
                     item_name,
                     &item_key,
                 );
-                create_ir_node_tree_full(
+                let mark = ctx.patches.len();
+                let child_id = create_ir_node_tree_full(
                     ctx,
                     &child_with_item,
                     Some(node_id),
                     render_parent,
                     is_root && render_parent.is_none(),
                 );
+                if let Some(rp) = render_parent {
+                    crate::reconcile::binding_map::emit_row_as_instantiate(
+                        ctx,
+                        &instantiation_plans,
+                        template_idx,
+                        mark,
+                        rp,
+                    );
+                }
+                // Stamp the same per-child key the keyed reconciler derives so
+                // the FIRST update already matches by identity. Element
+                // templates get `element.key` from replace_ir_node_item_bindings
+                // for free, but control-flow templates (and every template
+                // beyond the first, which needs the `#idx` suffix) do not.
+                if let Some(child_node) = ctx.tree.get_mut(child_id) {
+                    child_node.key =
+                        Some(iterable_child_key(&item_key, template_idx, multi_template));
+                }
+                crate::reconcile::keyed::stamp_iter_memo(ctx, child_id, item_hash, templates_hash);
             }
         }
     }
@@ -708,6 +1056,7 @@ fn create_foreach_ir_tree(
 }
 
 /// Create a Conditional (When/If) tree from IRNode::Conditional
+#[allow(clippy::too_many_arguments)]
 fn create_conditional_tree(
     ctx: &mut ReconcileCtx,
     value: &Value,
@@ -715,6 +1064,7 @@ fn create_conditional_tree(
     fallback: Option<&[IRNode]>,
     original_node: &IRNode,
     parent_id: Option<NodeId>,
+    render_parent_hint: Option<NodeId>,
     is_root: bool,
 ) -> NodeId {
     let raw_scope = match original_node {
@@ -759,7 +1109,10 @@ fn create_conditional_tree(
         ctx.data_sources,
     );
 
-    let render_parent = parent_id;
+    // See create_foreach_ir_tree: branch children must render under the
+    // nearest real element, not a control-flow container (this If may be
+    // a ForEach item root, where the logical parent is the __ForEach).
+    let render_parent = nearest_render_parent(ctx.tree, render_parent_hint.or(parent_id));
 
     if let Some(children) = matched_children {
         for child in children {
@@ -783,6 +1136,7 @@ fn create_conditional_tree(
 /// route, and renders only that route's children. The renderer never sees
 /// `Router` or `Route` element types — it just sees the matched children
 /// inserted under the Router's render parent.
+#[allow(clippy::too_many_arguments)]
 fn create_router_tree(
     ctx: &mut ReconcileCtx,
     location: &Value,
@@ -790,6 +1144,7 @@ fn create_router_tree(
     fallback: Option<&[IRNode]>,
     original_node: &IRNode,
     parent_id: Option<NodeId>,
+    render_parent_hint: Option<NodeId>,
     is_root: bool,
 ) -> NodeId {
     let raw_scope = match original_node {
@@ -846,7 +1201,9 @@ fn create_router_tree(
     // change, the Router reconciler will cache *these* NodeIds under
     // that key before swapping in new children.
     let matched = find_matching_route_with_key(&location_str, routes, fallback);
-    let render_parent = parent_id;
+    // See create_foreach_ir_tree: route children render under the nearest
+    // real element ancestor, never a control-flow container.
+    let render_parent = nearest_render_parent(ctx.tree, render_parent_hint.or(parent_id));
 
     if let Some((route_key, children)) = matched.as_ref() {
         for child in *children {
@@ -864,7 +1221,7 @@ fn create_router_tree(
         if let Some(router_node) = ctx.tree.get_mut(node_id) {
             if let Some(ControlFlowKind::Router {
                 current_route_key, ..
-            }) = router_node.control_flow.as_mut()
+            }) = router_node.control_flow.as_deref_mut()
             {
                 *current_route_key = Some(route_key.clone());
             }
@@ -874,13 +1231,70 @@ fn create_router_tree(
     node_id
 }
 
+/// Tear down every child of a ForEach container and rebuild the list from
+/// scratch.
+///
+/// This is the historical ForEach update strategy and is now only the
+/// **fallback** for state the keyed reconciler can't match by identity (see
+/// the `children_intact` guard in [`reconcile_ir_node_impl`]). It is correct
+/// but not minimal: O(n) Removes + O(n) Creates for an O(1) change, which
+/// destroys renderer-side state (focus, scroll, input values, media playback)
+/// inside every row and, with animations, plays every row's exit alongside
+/// every row's enter.
+///
+/// Keeps the logical-vs-render parent split: children are created under the
+/// ForEach container (`node_id`) while their Insert patches address
+/// `render_parent`.
+#[allow(clippy::too_many_arguments)]
+fn rebuild_foreach_children(
+    ctx: &mut ReconcileCtx,
+    node_id: NodeId,
+    render_parent: NodeId,
+    old_children: &[NodeId],
+    items: &[serde_json::Value],
+    item_name: &str,
+    key_path: Option<&str>,
+    template: &[IRNode],
+) {
+    for &old_child_id in old_children {
+        remove_child_subtree(ctx, old_child_id);
+    }
+
+    if let Some(node) = ctx.tree.get_mut(node_id) {
+        node.children.clear();
+    }
+
+    let multi_template = template.len() > 1;
+    for (index, item) in items.iter().enumerate() {
+        let item_key = generate_item_key(item, key_path, item_name, index);
+
+        for (template_idx, child_template) in template.iter().enumerate() {
+            let child_with_item =
+                replace_ir_node_item_bindings(child_template, item, index, item_name, &item_key);
+            let child_id = create_ir_node_tree_full(
+                ctx,
+                &child_with_item,
+                Some(node_id),
+                Some(render_parent),
+                false,
+            );
+            if let Some(child_node) = ctx.tree.get_mut(child_id) {
+                child_node.key = Some(iterable_child_key(&item_key, template_idx, multi_template));
+            }
+        }
+    }
+}
+
 /// Reconcile an existing tree against a new IRNode using a `ReconcileCtx`.
 pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, node: &IRNode) {
-    let existing_node = ctx.tree.get(node_id).cloned();
-    if existing_node.is_none() {
+    // Existence check only. Each arm reads the handful of fields it needs
+    // straight off the node — cloning the whole `InstanceNode` here (and
+    // then AGAIN inside `reconcile_element_node`) was the single most
+    // frequent allocation in a reconcile pass, and the Element arm never
+    // touched the clone at all.
+    if ctx.tree.get(node_id).is_none() {
         return;
     }
-    let existing = existing_node.unwrap();
 
     match node {
         IRNode::Element(element) => {
@@ -894,8 +1308,13 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             props: _,
             module_scope,
         } => {
-            if !existing.is_foreach() {
-                let parent_id = existing.parent;
+            let (is_foreach, existing_parent) = match ctx.tree.get(node_id) {
+                Some(n) => (n.is_foreach(), n.parent),
+                None => return,
+            };
+
+            if !is_foreach {
+                let parent_id = existing_parent;
                 remove_subtree(ctx.tree, node_id, ctx.patches, ctx.dependencies);
                 create_ir_node_tree_impl(ctx, node, parent_id, parent_id.is_none());
                 return;
@@ -907,75 +1326,60 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             ctx.dependencies
                 .add_dependency(node_id, source, module_scope_ref);
 
-            let array = evaluate_binding(source, effective_state)
-                .unwrap_or(serde_json::Value::Array(vec![]));
+            // Borrowed out of state — see `create_foreach_ir_tree`.
+            let array = evaluate_binding_ref(source, effective_state);
 
-            if let serde_json::Value::Array(items) = &array {
-                let old_children = existing.children.clone();
-                let expected_children_count = items.len() * template.len();
-                let render_parent = existing.parent.unwrap_or(node_id);
+            if let Some(serde_json::Value::Array(items)) = array {
+                let old_children: Vec<NodeId> = match ctx.tree.get(node_id) {
+                    Some(n) => n.children.iter().copied().collect(),
+                    None => return,
+                };
+                // The ForEach container is transparent to renderers: items are
+                // LOGICAL children of `node_id` but their Insert/Move patches
+                // must target the nearest real ELEMENT ancestor (the RENDER
+                // parent) — the immediate parent may itself be a transparent
+                // control-flow container (ForEach directly inside an If).
+                // Collapsing the two orphans items under the grandparent and
+                // leaves `ForEach.children` empty — every later reconcile then
+                // sees a length mismatch and rebuilds forever. Both branches
+                // below keep the split; `create_foreach_ir_tree` is the
+                // reference for the create side.
+                let render_parent =
+                    nearest_render_parent(ctx.tree, existing_parent).unwrap_or(node_id);
 
-                if old_children.len() != expected_children_count {
-                    for &old_child_id in &old_children {
-                        ctx.patches.push(Patch::remove(old_child_id));
-                    }
+                // Fallback: keyed reconciliation reasons about the recorded
+                // children by identity, so it needs every one of them to still
+                // resolve in the tree. A dangling id means the container's
+                // bookkeeping is out of sync with the arena (nothing in-tree
+                // produces that today, but a stale `children` entry used to be
+                // possible) — rebuild from scratch instead of matching against
+                // ghosts. Correct but O(n), so it stays the exception.
+                let children_intact = old_children.iter().all(|&id| ctx.tree.get(id).is_some());
 
-                    if let Some(node) = ctx.tree.get_mut(node_id) {
-                        node.children.clear();
-                    }
-
-                    for (index, item) in items.iter().enumerate() {
-                        let item_key =
-                            generate_item_key(item, key_path.as_deref(), item_name, index);
-
-                        for child_template in template {
-                            let child_with_item = replace_ir_node_item_bindings(
-                                child_template,
-                                item,
-                                index,
-                                item_name,
-                                &item_key,
-                            );
-                            // Mirror the initial-create path in
-                            // `create_foreach_ir_tree` (diff.rs ~line 708-714):
-                            // items must be LOGICAL children of the ForEach
-                            // container while their Insert patch targets the
-                            // render parent. Collapsing the two (what
-                            // `create_ir_node_tree_impl` does) orphans items
-                            // under the grandparent and leaves
-                            // `ForEach.children` empty — every subsequent
-                            // reconcile then sees a length mismatch, hits this
-                            // rebuild branch again, and emits 0 Removes + N
-                            // Creates indefinitely.
-                            create_ir_node_tree_full(
-                                ctx,
-                                &child_with_item,
-                                Some(node_id),
-                                Some(render_parent),
-                                false,
-                            );
-                        }
-                    }
+                if children_intact {
+                    reconcile_iterable_children_full(
+                        ctx,
+                        node_id,
+                        render_parent,
+                        items,
+                        item_name,
+                        key_path.as_deref(),
+                        template,
+                        // The incoming node may be an outer row's substituted
+                        // copy — recompute rather than trust the cache.
+                        false,
+                    );
                 } else {
-                    let mut child_index = 0;
-                    for (item_index, item) in items.iter().enumerate() {
-                        let item_key =
-                            generate_item_key(item, key_path.as_deref(), item_name, item_index);
-
-                        for child_template in template {
-                            if let Some(&old_child_id) = old_children.get(child_index) {
-                                let child_with_item = replace_ir_node_item_bindings(
-                                    child_template,
-                                    item,
-                                    item_index,
-                                    item_name,
-                                    &item_key,
-                                );
-                                reconcile_ir_node_impl(ctx, old_child_id, &child_with_item);
-                            }
-                            child_index += 1;
-                        }
-                    }
+                    rebuild_foreach_children(
+                        ctx,
+                        node_id,
+                        render_parent,
+                        &old_children,
+                        items,
+                        item_name,
+                        key_path.as_deref(),
+                        template,
+                    );
                 }
             }
         }
@@ -985,8 +1389,13 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             fallback,
             module_scope,
         } => {
-            if !existing.is_conditional() {
-                let parent_id = existing.parent;
+            let (is_conditional, existing_parent) = match ctx.tree.get(node_id) {
+                Some(n) => (n.is_conditional(), n.parent),
+                None => return,
+            };
+
+            if !is_conditional {
+                let parent_id = existing_parent;
                 remove_subtree(ctx.tree, node_id, ctx.patches, ctx.dependencies);
                 create_ir_node_tree_impl(ctx, node, parent_id, parent_id.is_none());
                 return;
@@ -1014,9 +1423,15 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 ctx.data_sources,
             );
 
-            let old_children = existing.children.clone();
+            // `im::Vector` clone is a refcount bump, not a copy.
+            let old_children = match ctx.tree.get(node_id) {
+                Some(n) => n.children.clone(),
+                None => return,
+            };
             let old_len = old_children.len();
-            let render_parent = existing.parent;
+            // Nearest real element — a Conditional that is a ForEach item
+            // root has the transparent __ForEach as its immediate parent.
+            let render_parent = nearest_render_parent(ctx.tree, existing_parent);
 
             if let Some(children) = matched_children {
                 let new_len = children.len();
@@ -1028,17 +1443,16 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                     }
                 }
 
-                for i in common..old_len {
-                    if let Some(&old_child_id) = old_children.get(i) {
+                if common < old_len {
+                    let doomed: Vec<NodeId> = old_children.iter().skip(common).copied().collect();
+                    for &old_child_id in &doomed {
                         remove_subtree(ctx.tree, old_child_id, ctx.patches, ctx.dependencies);
-                        if let Some(cond_node) = ctx.tree.get_mut(node_id) {
-                            cond_node.children = cond_node
-                                .children
-                                .iter()
-                                .filter(|&&id| id != old_child_id)
-                                .copied()
-                                .collect();
-                        }
+                    }
+                    // One rebuild of the container's child vector for the
+                    // whole tail — the old filter-collect ran once per
+                    // removed child, making a full branch swap O(n²).
+                    if let Some(cond_node) = ctx.tree.get_mut(node_id) {
+                        cond_node.children.retain(|id| !doomed.contains(id));
                     }
                 }
 
@@ -1068,9 +1482,14 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             fallback,
             module_scope,
         } => {
+            let (is_router, existing_parent) = match ctx.tree.get(node_id) {
+                Some(n) => (n.is_router(), n.parent),
+                None => return,
+            };
+
             // If the existing node isn't a Router, replace it wholesale.
-            if !existing.is_router() {
-                let parent_id = existing.parent;
+            if !is_router {
+                let parent_id = existing_parent;
                 remove_subtree(ctx.tree, node_id, ctx.patches, ctx.dependencies);
                 create_ir_node_tree_impl(ctx, node, parent_id, parent_id.is_none());
                 return;
@@ -1100,7 +1519,11 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             // Read the current cache state out of the existing node. Each
             // Router instance carries its own detached-subtree cache keyed
             // by route pattern (see ControlFlowKind::Router).
-            let (mut cache, prev_route_key, max_cache_size) = match existing.control_flow.as_ref() {
+            let (mut cache, prev_route_key, max_cache_size) = match ctx
+                .tree
+                .get(node_id)
+                .and_then(|n| n.control_flow.as_deref())
+            {
                 Some(ControlFlowKind::Router {
                     cache,
                     current_route_key,
@@ -1119,8 +1542,11 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 return;
             }
 
-            let render_parent = existing.parent;
-            let old_children: Vec<NodeId> = existing.children.iter().copied().collect();
+            let render_parent = nearest_render_parent(ctx.tree, existing_parent);
+            let old_children: Vec<NodeId> = match ctx.tree.get(node_id) {
+                Some(n) => n.children.iter().copied().collect(),
+                None => return,
+            };
 
             // Step 1: take the currently-rendered children off the Router.
             //   - If we have a prev_route_key → detach them and stash under
@@ -1217,11 +1643,83 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             // fallback) we keep the cache but clear current_route_key
             // so the next reconcile treats this as a fresh state.
             if let Some(router_node) = ctx.tree.get_mut(node_id) {
-                router_node.control_flow = Some(ControlFlowKind::Router {
+                router_node.control_flow = Some(Box::new(ControlFlowKind::Router {
                     cache,
                     current_route_key: new_route_key,
                     max_cache_size,
-                });
+                }));
+            }
+        }
+    }
+}
+
+/// Build the root `Remove` patch for `id`, flagged with `transition: true`
+/// when the node's resolved props carry an `"__anim.exit"` spec. Must be
+/// called BEFORE the node is removed from `tree` — afterwards the props
+/// (and the spec) are gone and the removal silently loses its animation.
+///
+/// A flagged root also leaves an exit tombstone
+/// ([`InstanceTree::record_exit_tombstone`]): its `.exit` completion arrives
+/// from the renderer after this Remove, addressed to this id, and the
+/// tombstone is what lets UI routing still find the owning module.
+pub(crate) fn root_remove_patch(tree: &mut InstanceTree, id: NodeId) -> Patch {
+    let exits = tree
+        .get(id)
+        .is_some_and(|node| node.props.contains_key(crate::ir::anim::ANIM_EXIT_PROP));
+    if exits {
+        tree.record_exit_tombstone(id);
+        Patch::remove_with_transition(id)
+    } else {
+        Patch::remove(id)
+    }
+}
+
+/// Tear down one iterable child (keyed / ForEach-rebuild paths): a single
+/// root Remove goes over the wire, and the whole subtree leaves the tree and
+/// the dependency graph. The exit spec must be read (`root_remove_patch`)
+/// before the removal drops the node's props.
+pub(crate) fn remove_child_subtree(ctx: &mut ReconcileCtx, child_id: NodeId) {
+    let patch = root_remove_patch(ctx.tree, child_id);
+    ctx.tree
+        .remove_subtree_with(child_id, |id| ctx.dependencies.remove_node(id));
+    ctx.patches.push(patch);
+}
+
+/// Emit the Remove patches for the subtree rooted at `root_id` without
+/// changing the tree's structure — callers unlink and remove afterwards, so
+/// the removal root's `"__anim.exit"` spec is read before any mutation. (The
+/// only write is the exit tombstone side table.) Dependency registrations are dropped by
+/// the removal itself (`InstanceTree::remove_subtree_with`).
+///
+/// Ordering (the contract documented on [`Patch::Remove`]):
+/// - root has an exit spec → flagged root Remove FIRST, then descendants as
+///   plain Removes (post-order among themselves). Descendants are plain even
+///   when they carry their own exit specs — parent-remove-wins falls out
+///   structurally because only the removal root is consulted. The animated
+///   path keeps the per-descendant Removes because a renderer deferring the
+///   root's teardown must still be told which descendants are going away.
+/// - no exit spec → a SINGLE Remove for the subtree root. Renderers own
+///   descendant teardown on this path (the keyed and ForEach-rebuild paths
+///   have always emitted root-only Removes — see `root_remove_patch`'s
+///   callers in `keyed.rs` and `rebuild_foreach_children` — and the DOM
+///   renderer's `sweepDetachedDescendants` exists exactly for it). Emitting
+///   one patch per descendant meant ~17k patches to clear a 1,000-row list
+///   that the renderer discards in a single subtree unlink.
+fn emit_subtree_removal(tree: &mut InstanceTree, root_id: NodeId, patches: &mut Vec<Patch>) {
+    let root_patch = root_remove_patch(tree, root_id);
+    let animated = matches!(
+        root_patch,
+        Patch::Remove {
+            transition: true,
+            ..
+        }
+    );
+
+    patches.push(root_patch);
+    if animated {
+        for id in collect_subtree_ids(&*tree, root_id) {
+            if id != root_id {
+                patches.push(Patch::remove(id));
             }
         }
     }
@@ -1234,12 +1732,8 @@ fn remove_subtree(
     patches: &mut Vec<Patch>,
     dependencies: &mut DependencyGraph,
 ) {
-    let ids = collect_subtree_ids(tree, node_id);
-    for &id in &ids {
-        patches.push(Patch::remove(id));
-        dependencies.remove_node(id);
-    }
-    tree.remove(node_id);
+    emit_subtree_removal(tree, node_id, patches);
+    tree.remove_subtree_with(node_id, |id| dependencies.remove_node(id));
 }
 
 #[cfg(test)]
@@ -1277,8 +1771,96 @@ mod tests {
         // Verify root insert patch exists
         let root_insert = patches
             .iter()
-            .find(|p| matches!(p, Patch::Insert { parent_id, .. } if parent_id == "root"));
+            .find(|p| matches!(p, Patch::Insert { parent_id, .. } if parent_id.as_ref() == "root"));
         assert!(root_insert.is_some(), "Root insert patch should exist");
+    }
+
+    /// Keyed removal used to unregister only the removed row's ROOT from
+    /// the dependency graph; a `@{state.*}` binding on any descendant kept
+    /// its dead NodeId registered for the life of the engine, so every
+    /// replace/clear grew the set that each later state change walked.
+    #[test]
+    fn keyed_row_removal_unregisters_descendant_dependencies() {
+        use crate::reactive::DependencyGraph;
+
+        let component = hypen_parser::parse_component(
+            r#"Column {
+                List(@state.rows, key: "id") {
+                    Row { Text("@{state.label} @{item.name}") }
+                }
+            }"#,
+        )
+        .expect("parse");
+        let ir = crate::ir::ast_to_ir_node(&component);
+
+        let rows = |n: usize| {
+            json!({
+                "label": "L",
+                "rows": (0..n).map(|i| json!({ "id": i, "name": format!("r{i}") })).collect::<Vec<_>>(),
+            })
+        };
+        let mut tree = InstanceTree::new();
+        let mut dependencies = DependencyGraph::new();
+
+        let state = rows(3);
+        let mut patches = Vec::new();
+        let root = {
+            let mut ctx = ReconcileCtx {
+                tree: &mut tree,
+                state: &state,
+                patches: &mut patches,
+                dependencies: &mut dependencies,
+                data_sources: None,
+                modules: None,
+            };
+            create_ir_node_tree_full(&mut ctx, &ir, None, None, true)
+        };
+        assert_eq!(
+            dependencies
+                .get_dependent_nodes("label")
+                .map_or(0, |s| s.len()),
+            3,
+            "each row's Text registers its state binding"
+        );
+
+        let state = rows(1);
+        let mut patches = Vec::new();
+        {
+            let mut ctx = ReconcileCtx {
+                tree: &mut tree,
+                state: &state,
+                patches: &mut patches,
+                dependencies: &mut dependencies,
+                data_sources: None,
+                modules: None,
+            };
+            reconcile_ir_node_impl(&mut ctx, root, &ir);
+        }
+        assert_eq!(
+            patches
+                .iter()
+                .filter(|p| matches!(p, Patch::Remove { .. }))
+                .count(),
+            2
+        );
+
+        let live: Vec<NodeId> = dependencies
+            .get_dependent_nodes("label")
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "removed rows' descendants must leave the graph"
+        );
+        for id in live {
+            assert!(
+                tree.get(id).is_some(),
+                "registered node {id:?} is not in the tree"
+            );
+        }
     }
 
     #[test]

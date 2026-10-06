@@ -67,3 +67,19 @@ public final class MockActionDispatcher: ActionDispatcher, @unchecked Sendable {
         _dispatchedActions.removeAll()
     }
 }
+
+/// Associates component actions with a live engine node. The engine resolves
+/// the module; no caller-provided module name is used as routing authority.
+public struct NodeActionDispatcher: ActionDispatcher {
+    public let base: ActionDispatcher
+    public let node: String
+
+    public init(base: ActionDispatcher, node: String) { self.base = base; self.node = node }
+
+    public func dispatch(action: String, payload: [String: Any]?) {
+        if action == "__hypen_dispatch" { base.dispatch(action: action, payload: payload); return }
+        base.dispatch(action: "__hypen_dispatch", payload: [
+            "node": node, "action": action, "payload": payload ?? [:],
+        ])
+    }
+}

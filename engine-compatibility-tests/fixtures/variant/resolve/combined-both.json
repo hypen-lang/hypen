@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-combined-both", "description": "Combined @md:hover applies when BOTH hold.", "function": "resolve_variant", "input": { "base": "padding", "props": { "padding.0": 8, "padding@md:hover.0": 24 }, "width": 800, "activeStates": ["hover"] }, "expected": 24 }

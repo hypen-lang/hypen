@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Breaking:** `parse_classes` / `parse_class` now return `Result<_, TailwindError>`.
+  CSS positioning utilities (`static`, `fixed`, `absolute`, `relative`, `sticky`),
+  inset utilities (`top-*`, `right-*`, `bottom-*`, `left-*`, `inset-*`, `start-*`,
+  `end-*`, including negative and arbitrary forms) and `sr-only`/`not-sr-only` are
+  now hard errors instead of mapping to `position`/inset CSS. Hypen has no CSS
+  positioning model — overlay with `Stack { ... }` + alignment, and use
+  `VisuallyHidden` instead of `sr-only`.
+- New `forbidden_utility_reason(utility)` helper exposes the check for tooling (LSP).
+
 ## [0.4.32] - 2026-02-19
 
 ### Added

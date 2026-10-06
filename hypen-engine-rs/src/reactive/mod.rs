@@ -13,8 +13,8 @@ pub mod scheduler;
 
 pub use binding::{parse_binding, Binding, BindingSource};
 pub use expression::{
-    build_evaluator, build_expression_context, evaluate_expression, evaluate_template_string,
-    extract_bindings_from_expression,
+    build_evaluator, build_expression_context, evaluate_context_free_template, evaluate_expression,
+    evaluate_template_string, extract_bindings_from_expression,
 };
 #[doc(hidden)]
 pub use graph::DependencyGraph;

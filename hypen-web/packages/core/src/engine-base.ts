@@ -15,11 +15,11 @@
  *      explicit `wasm_init(url)` call before any `new WasmEngine()`.
  *
  *   2. How host state is *unwrapped* before it crosses the WASM boundary.
- *      Node can use `structuredClone` (with a `__getSnapshot` fast path for
- *      Hypen's proxy-backed state); the browser path does a
- *      `JSON.parse(JSON.stringify())` round-trip plus a Map-to-Object
- *      conversion for the native Map values that the wasm-bindgen browser
- *      target returns in action payloads.
+ *      Node uses `structuredClone` (with a `__getSnapshot` fast path for
+ *      Hypen's proxy-backed state); the browser path uses the
+ *      copy-on-write [`normalizeForWasm`] walk defined below, plus a
+ *      Map-to-Object conversion for the native Map values that the
+ *      wasm-bindgen browser target returns in action payloads.
  *
  * Everything else — method wrappers, error classification, callback wiring,
  * revision plumbing — is identical between the two. That shared surface
@@ -36,13 +36,18 @@
 
 import { frameworkLoggers } from "./logger.js";
 import { classifyEngineError } from "./result.js";
+import { unwrapProxy } from "./state.js";
 import type {
   Patch,
   Action,
+  AgentAction,
+  AgentRoute,
+  BoundInput,
   RenderCallback,
   ActionHandler,
   ComponentResolver,
 } from "./types.js";
+import { ACTION_ANIMATE_KEY } from "./types.js";
 
 const log = frameworkLoggers.engine;
 
@@ -73,6 +78,170 @@ function mapToPlainObject(value: any): any {
     return obj;
   }
   return value;
+}
+
+/**
+ * Copy-on-write JSON normalization for values crossing into WASM.
+ *
+ * The wasm-bindgen entry points deserialize every `JsValue` argument
+ * synchronously (`serde_wasm_bindgen::from_value`) and retain no JS
+ * reference afterwards, so a defensive deep clone buys nothing. What the
+ * boundary does require is:
+ *
+ *   - no Hypen state proxies (their `get` traps allocate nested proxies
+ *     mid-serialization), and
+ *   - JSON-shaped data, matching the "engine sees state as JSON"
+ *     contract the old `JSON.parse(JSON.stringify())` round-trip
+ *     enforced: `toJSON` honoured (Date → ISO string), `undefined` /
+ *     functions dropped from objects and nulled in arrays, non-finite
+ *     numbers → null, and non-plain objects (Map, Set, class instances)
+ *     reduced to their own enumerable properties.
+ *
+ * Subtrees already in normal form are returned by reference, so the hot
+ * sparse-update path — values just parsed out of the engine's own diff
+ * output — costs one read-only traversal and zero allocation instead of
+ * a full serialize/parse of the changed values on every mutation flush.
+ *
+ * Throws `TypeError` on circular structures and BigInt, as
+ * `JSON.stringify` does.
+ */
+export function normalizeForWasm(value: unknown): unknown {
+  return normalize(value, null, 0);
+}
+
+/**
+ * Depth at which cycle tracking starts. A circular structure recurses
+ * without bound, so it is guaranteed to cross this depth and get caught;
+ * tracking only from here on keeps the common shallow path free of
+ * WeakSet bookkeeping (state trees deeper than this are pathological).
+ */
+const CYCLE_CHECK_DEPTH = 64;
+
+function normalize(
+  value: any,
+  ancestors: WeakSet<object> | null,
+  depth: number,
+): any {
+  switch (typeof value) {
+    case "string":
+    case "boolean":
+      return value;
+    case "number":
+      return Number.isFinite(value) ? value : null;
+    case "bigint":
+      throw new TypeError("Do not know how to serialize a BigInt");
+    case "object":
+      break;
+    default:
+      // undefined / function / symbol: not representable in JSON. The
+      // containing object drops the key; the containing array stores null.
+      return undefined;
+  }
+  if (value === null) return null;
+
+  const raw = unwrapProxy(value);
+  if (typeof raw.toJSON === "function") {
+    return normalize(raw.toJSON(), ancestors, depth);
+  }
+  if (depth < CYCLE_CHECK_DEPTH) {
+    return Array.isArray(raw)
+      ? normalizeArray(raw, ancestors, depth)
+      : normalizeObject(raw, ancestors, depth);
+  }
+  if (ancestors === null) ancestors = new WeakSet();
+  else if (ancestors.has(raw)) {
+    throw new TypeError("Converting circular structure to JSON");
+  }
+  ancestors.add(raw);
+  try {
+    return Array.isArray(raw)
+      ? normalizeArray(raw, ancestors, depth)
+      : normalizeObject(raw, ancestors, depth);
+  } finally {
+    ancestors.delete(raw);
+  }
+}
+
+function normalizeArray(
+  raw: any[],
+  ancestors: WeakSet<object> | null,
+  depth: number,
+): any[] {
+  let out: any[] | null = null;
+  for (let i = 0; i < raw.length; i++) {
+    const child = raw[i];
+    let normalized = normalize(child, ancestors, depth + 1);
+    if (normalized === undefined) normalized = null;
+    if (out !== null) {
+      out.push(normalized);
+    } else if (normalized !== child) {
+      out = raw.slice(0, i);
+      out.push(normalized);
+    }
+  }
+  return out ?? raw;
+}
+
+function normalizeObject(
+  raw: any,
+  ancestors: WeakSet<object> | null,
+  depth: number,
+): Record<string, any> {
+  const keys = Object.keys(raw);
+
+  // A non-plain object (Map, Set, RegExp, class instance) reduces to its
+  // own enumerable properties — its JSON form — and must always be copied
+  // into a plain object: handed over as-is, serde would see the exotic
+  // type itself (e.g. a Map's entries) where JSON semantics say only the
+  // own properties exist.
+  const proto = Object.getPrototypeOf(raw);
+  if (proto !== Object.prototype && proto !== null) {
+    const out: Record<string, any> = {};
+    for (const key of keys) {
+      const normalized = normalize(raw[key], ancestors, depth + 1);
+      if (normalized !== undefined) out[key] = normalized;
+    }
+    return out;
+  }
+
+  let out: Record<string, any> | null = null;
+  for (let i = 0; i < keys.length; i++) {
+    const key = keys[i]!;
+    const child = raw[key];
+    const normalized = normalize(child, ancestors, depth + 1);
+    if (out !== null) {
+      if (normalized !== undefined) out[key] = normalized;
+    } else if (normalized !== child || normalized === undefined) {
+      out = {};
+      for (let j = 0; j < i; j++) out[keys[j]!] = raw[keys[j]!];
+      if (normalized !== undefined) out[key] = normalized;
+    }
+  }
+  return out ?? raw;
+}
+
+/**
+ * Accept either wire spelling of the agent structs multi-word fields.
+ *
+ * The engine now emits camelCase, so on a current artifact this is a
+ * no-op. It stays because the structs shipped briefly without
+ * `#[serde(rename_all = "camelCase")]`, and a host pinned to such an
+ * artifact would otherwise read `undefined` from a scoped binding with no
+ * error at all — the same tolerance `discoverRouters` keeps, for the same
+ * reason.
+ */
+function camelizeAgentKeys<T>(value: unknown): T {
+  const row = mapToPlainObject(value) as Record<string, unknown>;
+  if (!row || typeof row !== "object") return row as T;
+  const { module_scope, element_type, ...rest } = row;
+  const out: Record<string, unknown> = { ...rest };
+  if (module_scope !== undefined && out.moduleScope === undefined) {
+    out.moduleScope = module_scope;
+  }
+  if (element_type !== undefined && out.elementType === undefined) {
+    out.elementType = element_type;
+  }
+  return out as T;
 }
 
 /**
@@ -127,11 +296,17 @@ export abstract class BaseEngine {
 
   /**
    * Set the render callback that receives patches.
+   *
+   * The WASM engine hands the batch over as a single JSON string (one
+   * boundary crossing + native `JSON.parse`, instead of a per-field
+   * `TextDecoder` pass while materializing thousands of JS objects).
+   * Parse it here so every consumer keeps receiving a `Patch[]`. An
+   * array payload (older engine artifacts) passes through unchanged.
    */
   setRenderCallback(callback: RenderCallback): void {
     const engine = this.ensureInitialized();
-    engine.setRenderCallback((patches: Patch[]) => {
-      callback(patches);
+    engine.setRenderCallback((patches: Patch[] | string) => {
+      callback(typeof patches === "string" ? JSON.parse(patches) : patches);
     });
   }
 
@@ -226,12 +401,19 @@ export abstract class BaseEngine {
    *               target the primary module set via `setModule`.
    * @param paths  Changed state paths (relative to the targeted module).
    * @param values Map of `path -> new value`.
+   * @param animation Optional transaction-scoped animation context (Option D
+   *               cheap subset): a spec object (`{ curve, duration?, ... }`)
+   *               or a bare curve token string — the engine normalizes
+   *               either. When the update dirties nodes, the resulting patch
+   *               batch is stamped with a leading `batchAnimation` patch
+   *               carrying the normalized spec. Omitted/null = unstamped.
    * @throws {StateError} if the state patch is invalid
    */
   updateStateSparse(
     scope: string | null,
     paths: string[],
     values: Record<string, any>,
+    animation?: unknown,
   ): void {
     const engine = this.ensureInitialized();
 
@@ -240,7 +422,12 @@ export abstract class BaseEngine {
     }
 
     try {
-      engine.updateStateSparse(scope ?? "", paths, this.unwrapForWasm(values));
+      engine.updateStateSparse(
+        scope ?? "",
+        paths,
+        this.unwrapForWasm(values),
+        animation == null ? null : this.unwrapForWasm(animation),
+      );
     } catch (err) {
       throw classifyEngineError(err);
     }
@@ -248,18 +435,43 @@ export abstract class BaseEngine {
   }
 
   /**
-   * Apply a full-state patch. See [updateStateSparse] for `scope` semantics.
-   * Prefer the sparse form when only a few paths changed.
+   * Apply a full-state patch. See [updateStateSparse] for `scope` and
+   * `animation` semantics. Prefer the sparse form when only a few paths
+   * changed.
    */
-  updateState(scope: string | null, statePatch: Record<string, any>): void {
+  updateState(
+    scope: string | null,
+    statePatch: Record<string, any>,
+    animation?: unknown,
+  ): void {
+    if (scope !== null && typeof scope !== "string") {
+      // Legacy single-arg callers pass the state object as `scope`; letting it
+      // through corrupts WASM memory instead of failing (out-of-bounds in
+      // passStringToWasm0, hard tab crash in Chromium).
+      throw new TypeError(
+        "updateState(scope, statePatch): scope must be a string or null. " +
+          "The single-argument updateState(state) form was removed — pass null as the first argument.",
+      );
+    }
     const engine = this.ensureInitialized();
-    engine.updateState(scope ?? "", this.unwrapForWasm(statePatch));
+    engine.updateState(
+      scope ?? "",
+      this.unwrapForWasm(statePatch),
+      animation == null ? null : this.unwrapForWasm(animation),
+    );
   }
 
   /**
    * Dispatch an action.
    * @throws {HypenError} if the action dispatch fails
    */
+  /** Resolve live UI identity once before broadcasting to another engine. */
+  resolveUIAction(name: string, payload?: unknown): { name: string; payload?: unknown } {
+    const engine = this.ensureInitialized();
+    if (typeof engine.resolveUIAction !== "function") throw new Error("Scoped UI actions require a rebuilt Hypen engine");
+    return mapToPlainObject(engine.resolveUIAction(name, payload ?? null));
+  }
+
   dispatchAction(name: string, payload?: any): void {
     const engine = this.ensureInitialized();
     try {
@@ -281,11 +493,37 @@ export abstract class BaseEngine {
   onAction(actionName: string, handler: ActionHandler): void {
     const engine = this.ensureInitialized();
     engine.onAction(actionName, (action: Action) => {
-      const normalized = this.normalizeAction(action);
+      const normalized = this.extractAnimate(this.normalizeAction(action));
       Promise.resolve(handler(normalized)).catch((err) => {
         log.error("Action handler error:", err);
       });
     });
+  }
+
+  /**
+   * Lift a transaction-animation stamp out of the payload (Option D cheap
+   * subset). Renderers carry the event applicator's `animate:` argument
+   * across the WASM dispatch boundary under the reserved
+   * {@link ACTION_ANIMATE_KEY} payload key (the only channel through
+   * `dispatchAction(name, payload)`); here it becomes the distinct
+   * `Action.animate` field and is REMOVED from the payload, so module
+   * handlers never observe the reserved key. Runs after `normalizeAction`,
+   * so the payload is already a plain object on every target.
+   */
+  private extractAnimate(action: Action): Action {
+    const payload = action.payload;
+    if (
+      !payload ||
+      typeof payload !== "object" ||
+      !(ACTION_ANIMATE_KEY in payload)
+    ) {
+      return action;
+    }
+    const { [ACTION_ANIMATE_KEY]: animate, ...rest } = payload as Record<
+      string,
+      unknown
+    >;
+    return { ...action, payload: rest, animate };
   }
 
   /**
@@ -398,6 +636,150 @@ export abstract class BaseEngine {
       stateKeys,
       this.unwrapForWasm(initialState),
     );
+  }
+
+  // ── External capability surface ──────────────────────────────────────
+  //
+  // For callers that are NOT the rendered UI: MCP servers, REST APIs,
+  // CLIs, agents. `dispatchAction` reaches every registered handler —
+  // including `__hypen_bind`, which writes an arbitrary state path — so
+  // external callers get these guarded entry points instead. The guard is
+  // the engine's (`hypen-engine-rs/src/agent.rs`), shared by every SDK
+  // through `agent_core`; these wrappers only marshal, never decide.
+  //
+  // Each read tolerates a WASM artifact predating the binding by reporting
+  // an empty surface — the fail-closed direction, and the same tolerance
+  // `discoverRouters` / `checkAccessibility` already have. `dispatchExternal`
+  // throws instead of falling back to `dispatchAction`: falling back would
+  // route an unauthorized name straight past the guard.
+
+  /**
+   * Every action an external caller may dispatch right now, as
+   * `[{ name, module, builtin }]`.
+   *
+   * Module-declared actions plus the `hypen.navigate` / `hypen.back` /
+   * `hypen.set_input` built-ins, the last three only when the app declares
+   * the backing `Router` or `.bind()`. Framework internals never appear.
+   */
+  listActions(): AgentAction[] {
+    const engine = this.ensureInitialized();
+    const raw = engine.listActions?.();
+    if (!raw) return [];
+    return (raw as unknown[]).map((a) => camelizeAgentKeys<AgentAction>(a));
+  }
+
+  /**
+   * The MCP handshake for this app, composed by the engine.
+   *
+   * Returned as the engine hands it over — `McpManifest`'s serde encoding,
+   * already camelCase with `_meta` verbatim — because every transport is
+   * meant to forward it byte-for-byte rather than paraphrase it. `null`
+   * when the WASM artifact predates the manifest, so a host can degrade
+   * loudly instead of publishing an empty tool list.
+   */
+  mcpManifest(): unknown | null {
+    const engine = this.ensureInitialized();
+    return engine.mcpManifest?.() ?? null;
+  }
+
+  /**
+   * The app's declared routes, in declaration order — the argument schema
+   * behind `hypen.navigate`.
+   *
+   * Read from the declared route table rather than the rendered route, so
+   * every route lists even though only one can be on screen.
+   */
+  listRoutes(): AgentRoute[] {
+    const engine = this.ensureInitialized();
+    const raw = engine.listRoutes?.();
+    if (!raw) return [];
+    return (raw as unknown[]).map((r) => camelizeAgentKeys<AgentRoute>(r));
+  }
+
+  /**
+   * Every `.bind()`-declared writable input — the argument schema behind
+   * `hypen.set_input`. `prop` is `checked` / `on` for boolean controls.
+   */
+  listBindings(): BoundInput[] {
+    const engine = this.ensureInitialized();
+    const raw = engine.listBindings?.();
+    if (!raw) return [];
+    return (raw as unknown[]).map((b) => camelizeAgentKeys<BoundInput>(b));
+  }
+
+  /**
+   * Dispatch on behalf of a caller that is not the rendered UI.
+   *
+   * Authorises against exactly what `listActions` advertises, then routes
+   * through the same handler path a UI dispatch would take.
+   *
+   * @throws {HypenError} when the name is not externally dispatchable,
+   * when a built-in is used in an app that does not declare the backing
+   * `Router` / `.bind()`, or when `hypen.set_input` names an undeclared
+   * field.
+   */
+  dispatchExternal(name: string, payload?: unknown): void {
+    const engine = this.ensureInitialized();
+    if (typeof engine.dispatchExternal !== "function") {
+      throw new Error(
+        "dispatchExternal is not available in this WASM build. Rebuild the " +
+          "engine (`bun run build:wasm`) — falling back to dispatchAction " +
+          "would bypass the external capability guard.",
+      );
+    }
+    try {
+      engine.dispatchExternal(
+        name,
+        payload == null ? null : this.unwrapForWasm(payload),
+      );
+    } catch (err) {
+      throw classifyEngineError(err);
+    }
+  }
+
+  /**
+   * Read module state, whole or at a path.
+   *
+   * @param module Lowercase name of a module registered via
+   *               `registerModule` (matched case-insensitively), or `null`
+   *               for the primary module set via `setModule`.
+   * @param path   Dotted state path, or `null` for the whole state object.
+   *
+   * Returns `undefined` when the module is unknown or the path is absent —
+   * the engine deliberately does not distinguish the two, so a caller
+   * cannot probe for state it is not being shown.
+   */
+  getStateAt(module: string | null, path: string | null): unknown {
+    const engine = this.ensureInitialized();
+    const state = engine.getStateAt?.(module ?? undefined, path ?? undefined);
+    return state == null ? undefined : mapToPlainObject(state);
+  }
+
+  /**
+   * Drop a module and every action it declared, so a destroyed module's
+   * actions stop being externally reachable.
+   *
+   * **Call on destroy only, never on unmount.** Under `ManagedRouter`'s
+   * default `persist: true` an off-screen module stays registered on
+   * purpose, so siblings can still read its state; unregistering it there
+   * would break the persist cache and cross-module reads. The three
+   * correct call sites are `ManagedRouter`'s destroy paths — full `stop()`,
+   * `persist: false` unmount, and LRU eviction.
+   */
+  unregisterModule(name: string): void {
+    const engine = this.ensureInitialized();
+    if (typeof engine.unregisterModule !== "function") {
+      // Fails open: the destroyed module's actions stay externally
+      // dispatchable until the WASM artifact is rebuilt. Loud, because
+      // that is a capability leak rather than a missing convenience.
+      log.warn(
+        `unregisterModule("${name}") is not available in this WASM build — ` +
+          `the module's actions remain externally dispatchable. ` +
+          `Rebuild the engine with \`bun run build:wasm\`.`,
+      );
+      return;
+    }
+    engine.unregisterModule(name);
   }
 
   /**

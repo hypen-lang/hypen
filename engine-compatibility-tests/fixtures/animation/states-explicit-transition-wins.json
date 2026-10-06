@@ -1,0 +1,40 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "states-explicit-transition-wins",
+  "description": "An explicit .transition on the same node beats the __anim.transition that .states would synthesize: the create carries EXACTLY the explicit spec (linear/500, no props scoping, no trace of the header's spring/250). Pose switching itself is unaffected — the matching pose's props and the __anim.states label still resolve",
+  "category": "animation",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "golang: animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Box().width(100).transition(duration: 500, curve: linear).states(@state.cardState, transition: spring, duration: 250) {\n    onState(collapsed).width(48)\n    onState(expanded).width(240)\n}",
+    "initialState": { "cardState": "collapsed" },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["cardState"]
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Box",
+        "props": {
+          "width.0": 48,
+          "__anim.states": { "label": "collapsed" },
+          "__anim.transition": { "curve": "linear", "duration": 500 }
+        },
+        "absentProps": ["states.0", "onState.0", "transition.0"]
+      },
+      { "type": "insert" }
+    ]
+  }
+}

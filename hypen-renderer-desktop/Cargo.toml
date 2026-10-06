@@ -11,33 +11,57 @@ categories = ["gui", "rendering"]
 readme = "README.md"
 
 [features]
-default = []
+# Device capabilities (RFC 001) with real hardware backends. On by default so
+# a desktop client offers camera / microphone / Bluetooth out of the box;
+# each can be compiled out (`default-features = false`), and the host then
+# stops advertising it. System build packages per OS: see README "Device
+# capabilities".
+default = ["camera", "mic", "bluetooth"]
+# `camera.capture`: nokhwa (V4L2 / AVFoundation / Media Foundation) frames,
+# photos as JPEG through `image`, video as fragmented H.264 MP4 through
+# OpenH264 (built from its bundled source) and the crate's own muxer.
+camera = ["dep:nokhwa", "dep:openh264"]
+# `mic.record`: cpal capture (ALSA / CoreAudio / WASAPI), converted to the
+# requested PCM16 rate and channel count.
+mic = ["dep:cpal"]
+# `bluetooth.scan` / `bluetooth.select`: btleplug (BlueZ over D-Bus /
+# CoreBluetooth / WinRT).
+bluetooth = ["dep:btleplug"]
 # Enable to re-export `mimalloc::MiMalloc` from `hypen_renderer_desktop`.
 # Wire it in your binary as:
 #   #[global_allocator]
 #   static GLOBAL: hypen_renderer_desktop::MiMalloc = hypen_renderer_desktop::MiMalloc;
 # Typical RSS reduction: 20-40 MB versus system malloc.
 mimalloc = ["dep:mimalloc"]
+# Inline video playback (GStreamer). Off by default so the base crate
+# builds without media system libs (libgstreamer1.0-dev + plugin
+# packages). With the feature on, `Video` elements decode and play
+# progressive MP4/WebM streams inline via a playbin → RGBA appsink
+# pipeline (see `src/media/`); without it the renderer keeps the
+# poster + play-glyph presentation byte-for-byte.
+video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+# Native development HUD showing presented FPS plus this process's CPU and
+# resident-memory usage. Entirely compiled out of production builds.
+dev-overlay = ["dep:sysinfo"]
 
 [dependencies]
-hypen-engine = { version = "0.5.0", path = "../hypen-engine-rs" }
-hypen-parser = { version = "0.5.0", path = "../parser" }
-hypen-server = { version = "0.5.0", path = "../hypen-sdk-rs" }
+hypen-engine = { version = "0.6.5", path = "../hypen-engine-rs" }
+hypen-parser = { version = "0.6.5", path = "../parser" }
+hypen-server = { version = "0.6.5", path = "../hypen-sdk-rs" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Phase 1: windowing + GPU surface + GPU raster + text
 winit = "0.30.13"
-# Pinned to 28 to match Vello 0.8's pinned wgpu. When Vello 0.9+
-# (which targets wgpu 29 / 30) lands as stable, bump both.
-wgpu = "28"
+# Keep this aligned with Vello so both crates share the same GPU types.
+wgpu = "29"
 # Kept for the rounded-rect / icon mask + the image render cache's
 # off-screen tiles. The on-screen scene goes through Vello.
 tiny-skia = "0.12.0"
-# Vello 0.8 — GPU compute-shader 2D rasteriser. Replaces the CPU
-# blit pipeline for the on-screen surface.
-vello = "0.8"
+# Vello 0.10 preserves image-atlas residency across renders, avoiding
+# repeated uploads of already-cached images during scrolling.
+vello = "0.10"
 cosmic-text = "0.19.0"
 taffy = "0.10.1"
 
@@ -56,6 +80,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 # only `ws://` works.
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+
+# Device Capability Protocol (RFC 001) host: native file dialogs are the
+# consent gate of `file.pick` / `gallery.pick` / `file.save` (XDG desktop
+# portal on Linux — no GTK build dependency —, NSOpenPanel/NSSavePanel on
+# macOS, the common item dialogs on Windows), and SHA-256 over uploaded and
+# downloaded bytes (already in the build through hypen-engine).
+rfd = "0.17"
+sha2 = "0.10"
 
 # Phase 13: Image / Icon element decoding. PNG + JPEG cover the
 # example apps; everything else is a placeholder until we wire HTTP.
@@ -85,6 +117,24 @@ bytemuck = { version = "1.16", features = ["derive"] }
 # Insertion-ordered map for the image render-tile cache (FIFO eviction).
 indexmap = "2.0"
 
+# Fast hasher for `tree::PropMap`. `style::node_style_with` probes far
+# more applicator names against a node than any node carries, so most
+# lookups are misses that cost a hash and nothing else — SipHash was
+# ~42% of the instructions retired in a style build.
+#
+# `FxRandomState` (the `rand` feature), not the deterministic
+# `FxBuildHasher`: these keys are NOT all authored locally. The renderer
+# applies `Patch` streams from a RemoteServer over a WebSocket, and their
+# prop keys reach `PropMap` unvalidated and uncapped, so an unseeded
+# multiplicative hash is offline-constructible — a hand-rolled version of
+# this made a 20k-key map ~24x slower to fill than the SipHash it
+# replaced. Per-process seeding removes the precomputation entirely and
+# keeps the speed.
+#
+# Costs nothing to add: rustc-hash 2.x is already in the build via
+# cosmic-text, and it wants the `rand 0.8` this crate already has.
+rustc-hash = { version = "2", features = ["rand"] }
+
 # Cross-platform cache directory for the on-disk wgpu pipeline cache
 # (~/Library/Caches on macOS, $XDG_CACHE_HOME on Linux, %LOCALAPPDATA%
 # on Windows). Tiny crate, stable, no transitive heavyweights.
@@ -100,12 +150,36 @@ fontdb = "0.23"
 # text 0.19; pinned here for direct use.
 sys-locale = "0.3"
 
+# Process CPU/RSS sampling for the opt-in development HUD. Keep only the
+# system feature: disk, network, users, and hardware sensors are irrelevant.
+sysinfo = { version = "0.38.3", optional = true, default-features = false, features = ["system"] }
+
 # Faster heap allocator opt-in. Library can't set the global allocator
 # itself (only the final binary can); we re-export the type behind the
 # `mimalloc` feature so downstream binaries can wire it with a single
 # `#[global_allocator]` line. Off by default — apps that don't enable
 # it pay zero binary cost.
 mimalloc = { version = "0.1", optional = true, default-features = false }
+
+# Feature `camera`: camera frames without nokhwa's `decoding` feature (no
+# mozjpeg C build) — MJPEG / YUYV / NV12 are converted with `image` and our
+# own code — and the OpenH264 encoder, built from the bundled source (the
+# crate's default `source` feature; needs a C/C++ compiler, no system lib).
+nokhwa = { version = "0.10.11", optional = true, default-features = false, features = ["input-native"] }
+openh264 = { version = "0.9.8", optional = true }
+# Feature `mic`: cross-platform audio input (ALSA needs libasound2-dev).
+cpal = { version = "0.18.2", optional = true }
+# Feature `bluetooth`: BLE central (BlueZ over D-Bus needs libdbus-1-dev).
+btleplug = { version = "0.13.2", optional = true }
+
+# Feature `video`: GStreamer bindings for inline Video playback.
+# playbin handles demux + decode + HTTP streaming + A/V sync; an
+# RGBA appsink hands decoded frames to the painters. Requires the
+# GStreamer dev packages at build time and the plugin packages
+# (good/bad/libav) at runtime — which is exactly why this is opt-in.
+gstreamer = { version = "0.25", optional = true }
+gstreamer-app = { version = "0.25", optional = true }
+gstreamer-video = { version = "0.25", optional = true }
 
 # macOS-only: reach into the CAMetalLayer wgpu/raw-window-metal create
 # under the NSView so we can set `presentsWithTransaction = YES`. That
@@ -116,11 +190,17 @@ mimalloc = { version = "0.1", optional = true, default-features = false }
 # window size. wgpu-hal-metal reads this flag but never sets it.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
-objc2-foundation = { version = "0.2", features = ["NSString", "NSArray"] }
+objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSGeometry"] }
 objc2-quartz-core = { version = "0.2", features = ["all"] }
+# Device host: `completionHandler:` blocks of the TCC permission requests
+# (`permission.request` for camera / microphone). Same version objc2 0.5 uses.
+block2 = "0.5"
 
 [dev-dependencies]
 env_logger = "0.11"
+# Device e2e tests run a real Rust SDK server / a hostile server over a
+# real WebSocket in-process.
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "sync", "time"] }
 indexmap = { version = "2.0", features = ["serde"] }
 
 [[example]]

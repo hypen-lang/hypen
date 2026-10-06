@@ -1,0 +1,136 @@
+{
+  "$defs": {
+    "capabilitiesEvent": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/capabilityOffer"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": [
+        "capabilities"
+      ],
+      "type": "object"
+    },
+    "capabilityOffer": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "versions": {
+          "items": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 32,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "name",
+        "versions"
+      ],
+      "type": "object"
+    },
+    "deviceAck": {
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "maxLength": 128,
+                "minLength": 1,
+                "type": "string"
+              },
+              "version": {
+                "maximum": 4294967295,
+                "minimum": 1,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "name",
+              "version"
+            ],
+            "type": "object"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "protocolVersion": {
+          "maximum": 4294967295,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "protocolVersion",
+        "binary",
+        "capabilities"
+      ],
+      "type": "object"
+    },
+    "deviceHello": {
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "type": "boolean"
+        },
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/capabilityOffer"
+          },
+          "maxItems": 64,
+          "type": "array"
+        },
+        "protocolVersions": {
+          "items": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 8,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "protocolVersions",
+        "binary",
+        "capabilities"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://hypen.space/schemas/device/handshake-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Bootstrap advertisement/selection shapes. Fixed: incompatible bootstrap changes require a separate extension. Not expressible here and enforced by every decoder: capability names are unique within one advertisement or selection (compared by exact code points), and the RFC 001 §2.1 JSON limits apply. A hello.device failing this schema disables device access.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/deviceHello"
+    },
+    {
+      "$ref": "#/$defs/deviceAck"
+    },
+    {
+      "$ref": "#/$defs/capabilitiesEvent"
+    }
+  ],
+  "title": "Device handshake extension (protocol version 1)"
+}

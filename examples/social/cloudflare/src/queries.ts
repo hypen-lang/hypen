@@ -64,11 +64,77 @@ export function getComments(postId: string) {
   }));
 }
 
+export function getConversations(currentUserId: string) {
+  const rows = db.query(
+    `SELECT c.id,
+            u.id as other_id, u.username, u.display_name, u.avatar_url,
+            m.text as last_message, m.created_at as last_at,
+            (SELECT COUNT(*) FROM messages
+              WHERE conversation_id = c.id AND sender_id != ? AND is_read = 0) as unread_count
+     FROM conversations c
+     JOIN users u ON u.id = CASE WHEN c.user_a = ? THEN c.user_b ELSE c.user_a END
+     LEFT JOIN messages m ON m.id = (
+       SELECT id FROM messages WHERE conversation_id = c.id
+       ORDER BY created_at DESC, id DESC LIMIT 1
+     )
+     WHERE c.user_a = ? OR c.user_b = ?
+     ORDER BY m.created_at DESC`
+  ).all(currentUserId, currentUserId, currentUserId, currentUserId) as any[];
+
+  return rows.map((r) => ({
+    id: r.id,
+    user: { id: r.other_id, username: r.username, displayName: r.display_name, avatarUrl: r.avatar_url },
+    lastMessage: r.last_message ?? "",
+    timeAgo: r.last_at ? formatTimeAgo(r.last_at) : "",
+    isUnread: r.unread_count > 0,
+  }));
+}
+
+export function getConversation(conversationId: string, currentUserId: string) {
+  const row = db.query(
+    `SELECT c.id, u.id as other_id, u.username, u.display_name, u.avatar_url
+     FROM conversations c
+     JOIN users u ON u.id = CASE WHEN c.user_a = ? THEN c.user_b ELSE c.user_a END
+     WHERE c.id = ? AND (c.user_a = ? OR c.user_b = ?)`
+  ).get(currentUserId, conversationId, currentUserId, currentUserId) as any;
+  if (!row) return null;
+  return {
+    id: row.id,
+    user: { id: row.other_id, username: row.username, displayName: row.display_name, avatarUrl: row.avatar_url },
+  };
+}
+
+export function getConversationMessages(conversationId: string, currentUserId: string) {
+  const rows = db.query(
+    `SELECT m.*, u.avatar_url FROM messages m
+     JOIN users u ON u.id = m.sender_id
+     WHERE m.conversation_id = ?
+     ORDER BY m.created_at ASC, m.id ASC`
+  ).all(conversationId) as any[];
+
+  return rows.map((m) => ({
+    id: m.id,
+    text: m.text,
+    isMine: m.sender_id === currentUserId,
+    avatarUrl: m.avatar_url,
+    timeAgo: formatTimeAgo(m.created_at),
+  }));
+}
+
+export function markConversationRead(conversationId: string, currentUserId: string) {
+  db.query(
+    "UPDATE messages SET is_read = 1 WHERE conversation_id = ? AND sender_id != ?"
+  ).run(conversationId, currentUserId);
+}
+
 export function formatTimeAgo(dateStr: string): string {
   const now = Date.now();
-  const then = new Date(dateStr).getTime();
+  // SQLite's CURRENT_TIMESTAMP is UTC with no zone marker ("2026-09-27 10:00:00").
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(dateStr) ? `${dateStr.replace(" ", "T")}Z` : dateStr;
+  const then = new Date(iso).getTime();
   const diffMs = now - then;
   const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "now";
   if (diffMin < 60) return `${diffMin}m`;
   const diffH = Math.floor(diffMin / 60);
   if (diffH < 24) return `${diffH}h`;

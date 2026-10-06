@@ -1,0 +1,6 @@
+{
+  "components": "./src/components",
+  "entry": "App",
+  "port": 3000,
+  "outDir": "dist"
+}

@@ -12,8 +12,42 @@ use common::*;
 use hypen_engine::ir::{Element, IRNode, Props, Value};
 use hypen_engine::lifecycle::{Module, ModuleInstance};
 use hypen_engine::reactive::{Binding, DependencyGraph, Scheduler};
-use hypen_engine::reconcile::{reconcile_ir, InstanceTree, Patch};
-use hypen_engine::render::render_dirty_nodes_with_deps;
+use hypen_engine::reconcile::{InstanceTree, Patch};
+
+thread_local! {
+    // One expander per test thread (libtest runs each test on its own
+    // thread): registrations persist across a test's successive batches,
+    // exactly like a boundary's session-lifetime expander.
+    static EXPANDER: std::cell::RefCell<hypen_engine::TemplateExpander> =
+        std::cell::RefCell::new(hypen_engine::TemplateExpander::new());
+}
+
+/// [`hypen_engine::reconcile::reconcile_ir`], lowered: the golden
+/// assertions pin the pre-template Create/Insert wire, so every batch
+/// goes through the expander the way every plain-patch boundary does.
+fn reconcile_ir(
+    tree: &mut InstanceTree,
+    node: &IRNode,
+    parent_id: Option<hypen_engine::ir::NodeId>,
+    state: &serde_json::Value,
+    dependencies: &mut DependencyGraph,
+) -> Vec<Patch> {
+    let patches = hypen_engine::reconcile::reconcile_ir(tree, node, parent_id, state, dependencies);
+    EXPANDER.with(|e| e.borrow_mut().expand(patches))
+}
+
+/// [`hypen_engine::render::render_dirty_nodes_with_deps`], lowered through
+/// the same per-thread expander (list rebuilds emit Instantiate here too).
+fn render_dirty_nodes_with_deps(
+    scheduler: &mut Scheduler,
+    tree: &mut InstanceTree,
+    module: Option<&ModuleInstance>,
+    dependencies: &mut DependencyGraph,
+) -> Vec<Patch> {
+    let patches =
+        hypen_engine::render::render_dirty_nodes_with_deps(scheduler, tree, module, dependencies);
+    EXPANDER.with(|e| e.borrow_mut().expand(patches))
+}
 use indexmap::indexmap;
 use serde_json::json;
 use std::time::Instant;
@@ -35,6 +69,9 @@ fn list_with_complex_template(array_path: &str, template_children: Vec<Element>)
         ir_children: template_children.into_iter().map(IRNode::Element).collect(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -65,6 +102,9 @@ fn product_card_template() -> Element {
                 ir_children: Vec::new(),
                 key: None,
                 module_scope: None,
+                semantics: None,
+                span: None,
+                expr_span: None,
             }),
             // Product description
             IRNode::Element(Element {
@@ -76,6 +116,9 @@ fn product_card_template() -> Element {
                 ir_children: Vec::new(),
                 key: None,
                 module_scope: None,
+                semantics: None,
+                span: None,
+                expr_span: None,
             }),
             // Price with conditional styling
             IRNode::Element(Element {
@@ -93,6 +136,9 @@ fn product_card_template() -> Element {
                 ir_children: Vec::new(),
                 key: None,
                 module_scope: None,
+                semantics: None,
+                span: None,
+                expr_span: None,
             }),
             // Stock status
             IRNode::Element(Element {
@@ -106,10 +152,16 @@ fn product_card_template() -> Element {
                 ir_children: Vec::new(),
                 key: None,
                 module_scope: None,
+                semantics: None,
+                span: None,
+                expr_span: None,
             }),
         ],
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }
 }
 
@@ -266,6 +318,9 @@ fn golden_list_partial_update_changes_one_item() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let initial_state = json!({
@@ -362,6 +417,9 @@ fn golden_list_add_one_item_to_end() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let initial_state = json!({
@@ -450,6 +508,9 @@ fn golden_list_reorder_items() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None, // Note: key would come from item.id in optimized version
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let initial_state = json!({
@@ -541,6 +602,9 @@ fn golden_list_reverse_order() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let initial_state = json!({
@@ -698,6 +762,9 @@ fn golden_dependency_graph_cleared_on_render() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     };
 
     let initial_state = json!({"counter": 0});
@@ -767,6 +834,9 @@ fn golden_dependency_multi_binding_tracking() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     };
 
     let state = json!({"firstName": "John", "lastName": "Doe"});
@@ -830,6 +900,9 @@ fn golden_correctness_item_binding_substitution() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let state = json!({
@@ -909,6 +982,9 @@ fn golden_correctness_ternary_evaluation() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let state = json!({
@@ -981,6 +1057,9 @@ fn golden_correctness_nested_path_resolution() {
         ir_children: Vec::new(),
         key: None,
         module_scope: None,
+        semantics: None,
+        span: None,
+        expr_span: None,
     }));
 
     let state = json!({

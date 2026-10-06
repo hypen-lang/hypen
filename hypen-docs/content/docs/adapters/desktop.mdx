@@ -1,0 +1,217 @@
+---
+title: Desktop Adapter
+description: Native desktop renderer for Hypen on macOS, Linux, and Windows
+---
+
+# Desktop Adapter
+
+The desktop adapter (`hypen-renderer-desktop`) renders Hypen applications to a
+real native window on macOS, Linux, and Windows. There is no WebView and no
+Electron — the renderer owns its own window, GPU surface, layout pass, and text
+shaping.
+
+The stack:
+
+- **winit** — windowing and event loop
+- **wgpu** + **Vello** — GPU surface and compute-shader 2D rasterisation
+- **tiny-skia** — CPU raster for rounded-rect / icon masks and off-screen tiles
+- **cosmic-text** — font shaping and glyph rasterisation
+- **Taffy** — flexbox layout
+- **AccessKit** — accessibility (VoiceOver, NVDA, Orca)
+
+## Installation
+
+```bash
+cargo add hypen-renderer-desktop
+```
+
+Or in `Cargo.toml`:
+
+```toml
+[dependencies]
+hypen-renderer-desktop = "0.6.2"
+hypen-server = "0.6.2"
+```
+
+## Quick Start
+
+The shortest possible app — a template and nothing else:
+
+```rust
+use hypen_renderer_desktop::DesktopApp;
+
+fn main() {
+    DesktopApp::new()
+        .source(r#"Text("Hello from Hypen Desktop")"#)
+        .title("Hypen Desktop — Hello")
+        .run();
+}
+```
+
+## Local Mode
+
+Drive a real [Rust SDK](/docs/adapters/rust) module. The renderer runs the
+standard lifecycle — `instantiate` → `mount` → click → `dispatch_action` →
+patches → repaint.
+
+```rust
+use hypen_renderer_desktop::DesktopApp;
+use hypen_server::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+struct CounterState {
+    count: i32,
+}
+
+fn main() {
+    let app = HypenApp::default();
+    let def = HypenApp::module::<CounterState>("Counter")
+        .state(CounterState::default())
+        .ui(r##"
+            Column {
+                Text("Count: @{state.count}")
+                    .fontSize(48)
+                    .color("#3554d1")
+                Button("@actions.increment")
+                    .backgroundColor("#e7f6ec")
+                    .borderRadius(10)
+                    .padding(14) {
+                        Text("+").fontSize(22)
+                    }
+            }.gap(16)
+        "##)
+        .on_action::<()>("increment", |state, _payload, _ctx| {
+            state.count += 1;
+        })
+        .build();
+
+    let instance = app
+        .instantiate(Arc::new(def))
+        .expect("instantiate counter module");
+
+    DesktopApp::new()
+        .title("Hypen Desktop — Counter")
+        .size(560, 420)
+        .module(Arc::new(instance))
+        .run();
+}
+```
+
+## Remote Mode
+
+Point the same renderer at a running [`RemoteServer`](/docs/servers) and it
+streams the UI over a WebSocket. Paint, layout, hit-testing, accessibility, and
+IME all behave identically — only the source of the patches changes.
+
+```rust
+use hypen_renderer_desktop::DesktopApp;
+
+fn main() {
+    DesktopApp::new()
+        .title("Hypen Desktop")
+        .size(960, 720)
+        .connect("ws://localhost:3000", "App")
+        .run();
+}
+```
+
+The connection reconnects with exponential backoff (1s → 2s → 4s → … capped at
+30s). The `sessionId` from `SessionAck` is captured and replayed on the next
+`Hello`, so a server restart resumes the session rather than minting a fresh
+one. `wss://` URLs are supported via rustls.
+
+> **Note.** The desktop client does not offer WebSocket `permessage-deflate`
+> compression — no published `tokio-tungstenite` release exposes it. This is
+> interoperable either way: compression is negotiated per connection and
+> optional under RFC 7692, so a compression-enabled Hypen server simply serves
+> this client uncompressed. The cost is bandwidth, not correctness.
+
+## Builder API
+
+| Method | Effect |
+|--------|--------|
+| `.title(t)` | Window title |
+| `.size(w, h)` | Initial window size in logical pixels |
+| `.unified_titlebar(bool)` | Merge the titlebar into the content area |
+| `.module(Arc<dyn HypenModule>)` | Drive a local SDK module instance |
+| `.connect(url, module_name)` | Drive a remote server over WebSocket |
+| `.source(template)` | Render a bare template with no module |
+| `.shortcut(..)` | Register a keyboard shortcut |
+| `.reduced_motion(bool)` | Disable animation (also honours the OS setting) |
+| `.run()` | Open the window and enter the event loop |
+
+## What's Supported
+
+**Layout & styling** — Taffy flexbox across `Column`, `Row`, `Container`,
+`Text`, `Button`, `Input`, `Image`, `Icon`. Style applicators for padding,
+margin, gap, font size, colours, borders, and radii. Colours accept CSS hex
+(`#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa`) and named colours. Tailwind
+breakpoints (`padding@md`, `backgroundColor@lg`) resolve against the live
+window width, largest-active-breakpoint-wins.
+
+**Text input** — `Input` with two-way binding via `.bind(@state.x)`, caret
+movement, selection (click, drag, Shift+arrows, Home/End), system clipboard
+(Cmd/Ctrl + A/C/X/V), and full IME composition with an inline preedit
+underline.
+
+**Interaction** — hover and press states, Tab focus traversal across Buttons
+and Inputs, Enter/Space activation, and native button semantics (releasing
+outside the target cancels).
+
+**Scrolling** — mouse wheel and trackpad (line and pixel deltas), with a
+proportional indicator bar that hides when content fits.
+
+**Images & icons** — local and remote (HTTP/HTTPS) image loading on a dedicated
+worker thread with a `Loading | Loaded | Failed` state machine, 10s timeout and
+20MB body cap. SVG `Icon(@resources.foo)` rasterisation with per-path fill and
+stroke, and `.color(...)` as a global tint.
+
+**Animation** — full parity with the DOM renderer across the `__anim.*`
+channel: transitions, enter/exit, FLIP layout, presets, states, shared
+elements, scrub/settle, and completion events.
+
+**Accessibility** — AccessKit exposes the tree to VoiceOver, NVDA, and Orca.
+
+## Performance Notes
+
+Enable the `mimalloc` feature and wire the allocator in your binary for a
+typical 20–40 MB RSS reduction:
+
+```toml
+hypen-renderer-desktop = { version = "0.6.2", features = ["mimalloc"] }
+```
+
+```rust
+#[global_allocator]
+static GLOBAL: hypen_renderer_desktop::MiMalloc = hypen_renderer_desktop::MiMalloc;
+```
+
+On macOS the renderer sets `presentsWithTransaction` on the `CAMetalLayer`,
+which eliminates the live-resize flash that comes from a fire-and-forget
+`present`.
+
+The compiled wgpu pipeline cache is stored in the platform cache directory
+(`~/Library/Caches` on macOS, `$XDG_CACHE_HOME` on Linux, `%LOCALAPPDATA%` on
+Windows) so subsequent launches skip shader compilation.
+
+## Examples
+
+The crate ships runnable examples:
+
+```bash
+cargo run -p hypen-renderer-desktop --example hello
+cargo run -p hypen-renderer-desktop --example counter
+cargo run -p hypen-renderer-desktop --example input
+cargo run -p hypen-renderer-desktop --example scroll
+cargo run -p hypen-renderer-desktop --example remote -- ws://localhost:3000 App
+```
+
+## See Also
+
+- [Platforms Overview](/docs/adapters) — every adapter and how they compare
+- [Rust Adapter](/docs/adapters/rust) — the `hypen-server` SDK this renderer drives
+- [Server SDKs](/docs/servers) — running the engine server-side for remote mode
+- [Animation](/docs/guide/animation) — the animation model shared with the DOM renderer
+- [Accessibility](/docs/guide/accessibility) — accessibility across adapters

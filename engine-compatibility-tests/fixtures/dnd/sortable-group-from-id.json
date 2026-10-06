@@ -1,0 +1,30 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "sortable-group-from-id",
+  "description": "A .sortable without an explicit group defaults its group to the node's STATIC id — here set by an .id(...) applicator that comes AFTER .sortable in the chain (group defaulting runs once all applicators have lowered). axis defaults to y",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Column { Text(\"a\") }.sortable().id(\"todo\")",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Column",
+        "props": {
+          "__dnd.sort": { "group": "todo", "axis": "y" }
+        },
+        "absentProps": ["sortable.0", "bind"]
+      }
+    ]
+  }
+}

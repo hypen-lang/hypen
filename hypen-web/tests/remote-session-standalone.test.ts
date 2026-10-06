@@ -1,3 +1,4 @@
+import { app } from "../packages/core/src/app";
 import { describe, it, expect } from "bun:test";
 import {
   RemoteSession,
@@ -150,6 +151,83 @@ function makeInlineRouterHost(engine: BaseEngine): SessionHost {
   };
 }
 
+/**
+ * initialTree accumulation must DROP `batchAnimation` preludes: the stamp's
+ * wire contract scopes it to exactly ONE batch (first patch), and the
+ * session concatenates every pre-ready render batch (initial tree + any
+ * onCreated re-render) into a single initialTree array — a surviving
+ * prelude would over-scope onto patches from other batches.
+ */
+class StampingFakeEngine extends BaseEngine {
+  private renderCb: ((patches: unknown[]) => void) | null = null;
+
+  async init(): Promise<void> {
+    const self = this;
+    this.wasmEngine = new Proxy(
+      {},
+      {
+        get(_t, prop: string) {
+          if (prop === "setRenderCallback") {
+            return (cb: (patches: unknown[]) => void) => {
+              self.renderCb = cb;
+            };
+          }
+          if (prop === "renderSource") {
+            return () => {
+              // Two stamped batches accumulate into one initialTree array.
+              self.renderCb?.([
+                { type: "batchAnimation", spec: { curve: "spring", duration: 250 } },
+                { type: "create", id: "n1", elementType: "Text", props: {} },
+                { type: "insert", parentId: "root", id: "n1" },
+              ]);
+              self.renderCb?.([
+                { type: "batchAnimation", spec: { curve: "linear", duration: 100 } },
+                { type: "setProp", id: "n1", name: "opacity", value: 1 },
+              ]);
+            };
+          }
+          if (prop === "discoverRouters") {
+            return () => [];
+          }
+          return () => undefined;
+        },
+      }
+    );
+    this.initialized = true;
+  }
+  protected unwrapForWasm<T>(value: T): T {
+    return value;
+  }
+}
+
+describe("RemoteSession initialTree accumulation", () => {
+  it("strips batchAnimation preludes from accumulated initial batches", async () => {
+    const engine = new StampingFakeEngine();
+    const host = makeInlineRouterHost(engine);
+    host.ui = 'Text("hi")';
+    const transport = new AsyncQueueTransport();
+    const session = new RemoteSession(host, transport, { helloGraceMs: null });
+
+    await session.receive({ type: "hello" } as never);
+    await session.ready;
+
+    // Drain the outgoing queue and find initialTree.
+    const messages: any[] = [];
+    transport.close();
+    for await (const msg of transport.stream()) {
+      messages.push(msg);
+    }
+    const initial = messages.find((m) => m.type === "initialTree");
+    expect(initial).toBeDefined();
+
+    const types = initial.patches.map((p: any) => p.type);
+    // The real content of BOTH batches survived…
+    expect(types).toEqual(["create", "insert", "setProp"]);
+    // …but no prelude did (mid-array stamps are contract violations).
+    expect(types.includes("batchAnimation")).toBe(false);
+  });
+});
+
 describe("RemoteSession inline router (no app registry)", () => {
   it("installs @router.push for an inline Router even with app:null", async () => {
     const engine = new RouterFakeEngine();
@@ -164,5 +242,32 @@ describe("RemoteSession inline router (no app registry)", () => {
 
     // The router action handlers must be installed despite app:null.
     expect(engine.actions.has("router.push")).toBe(true);
+  });
+});
+
+describe("scoped UI action fan-out", () => {
+  it("resolves session-local node identity once before forwarding", async () => {
+    class RoutingEngine extends FakeEngine {
+      calls: Array<{ name: string; payload: unknown }> = [];
+      resolved: unknown[] = [];
+      override resolveUIAction(name: string, payload: unknown) {
+        this.resolved.push({ name, payload });
+        return { name: "__hypen_scoped:board:__hypen_pin", payload: { path: "__dnd.board.a", x: .5, y: .25 } };
+      }
+      override dispatchAction(name: string, payload: unknown) { this.calls.push({ name, payload }); }
+    }
+    const aEngine = new RoutingEngine(), bEngine = new RoutingEngine();
+    let count = 0;
+    const sessions: RemoteSession[] = [];
+    const host = makeHost(() => count++ === 0 ? aEngine : bEngine);
+    Object.assign(host, { module: app.defineState({}).build(), syncActions: true, otherSessions: (current: RemoteSession) => sessions.filter(s => s !== current) });
+    for (let i = 0; i < 2; i++) sessions.push(new RemoteSession(host, new AsyncQueueTransport(), { helloGraceMs: null }));
+    await Promise.all(sessions.map(async s => { await s.receive({ type: "hello" } as never); await s.ready; }));
+    await sessions[0]!.receive({ type: "dispatchAction", module: "Board", action: "__hypen_dispatch", payload: { node: "source-session-only", action: "__hypen_pin", payload: { path: "__dnd.board.a", x: .5, y: .25 } } });
+    expect(aEngine.resolved).toHaveLength(1);
+    expect(bEngine.resolved).toHaveLength(0);
+    expect(aEngine.calls).toEqual(bEngine.calls);
+    expect(bEngine.calls).toEqual([{ name: "__hypen_scoped:board:__hypen_pin", payload: { path: "__dnd.board.a", x: .5, y: .25 } }]);
+    await Promise.all(sessions.map(s => s.destroy()));
   });
 });

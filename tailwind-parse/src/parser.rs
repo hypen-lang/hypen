@@ -125,12 +125,75 @@ impl TailwindOutput {
     }
 }
 
-/// Parse a string of space-separated Tailwind classes
-pub fn parse_classes(input: &str) -> TailwindOutput {
+/// A class that Hypen refuses to compile.
+///
+/// Unknown classes are silently dropped (Tailwind has thousands of utilities
+/// and most map to nothing on native renderers), but a handful are actively
+/// *wrong* for Hypen — CSS positioning has no equivalent on iOS/Android/desktop
+/// and silently producing broken layouts is worse than failing loudly.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TailwindError {
+    /// The offending class exactly as written (including any variant prefix).
+    pub class: String,
+    /// Human-readable explanation and the Hypen-native alternative.
+    pub message: String,
+}
+
+impl std::fmt::Display for TailwindError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "`{}`: {}", self.class, self.message)
+    }
+}
+
+impl std::error::Error for TailwindError {}
+
+/// Returns the reason a (variant-stripped) utility is forbidden, if it is.
+///
+/// Hypen deliberately has no CSS positioning model: `absolute`/`relative`/
+/// `fixed`/`sticky` and the inset utilities (`top-*`, `inset-*`, …) only make
+/// sense on the web, and every native renderer would have to ignore them.
+/// Overlays are expressed with `Stack { ... }` plus alignment/margins instead.
+pub fn forbidden_utility_reason(utility: &str) -> Option<&'static str> {
+    let bare = utility.strip_prefix('-').unwrap_or(utility);
+
+    if matches!(bare, "static" | "fixed" | "absolute" | "relative" | "sticky") {
+        return Some(
+            "Hypen has no CSS positioning. Overlay children with `Stack { ... }` \
+             and place them with .horizontalAlignment(...)/.verticalAlignment(...) \
+             on the Stack, or margins/padding on the child",
+        );
+    }
+
+    const INSET_PREFIXES: [&str; 9] = [
+        "inset-", "inset-x-", "inset-y-", "top-", "right-", "bottom-", "left-", "start-", "end-",
+    ];
+    if INSET_PREFIXES.iter().any(|p| bare.starts_with(p)) {
+        return Some(
+            "inset utilities (top/right/bottom/left/inset) require CSS positioning, which \
+             Hypen does not support. Overlay children with `Stack { ... }` and place them \
+             with .horizontalAlignment(...)/.verticalAlignment(...) or margins",
+        );
+    }
+
+    if matches!(bare, "sr-only" | "not-sr-only") {
+        return Some(
+            "`sr-only` is implemented with absolute positioning, which Hypen does not \
+             support. Use the `VisuallyHidden { ... }` component instead",
+        );
+    }
+
+    None
+}
+
+/// Parse a string of space-separated Tailwind classes.
+///
+/// Unknown classes are dropped; forbidden ones (see [`forbidden_utility_reason`])
+/// abort the whole parse with a [`TailwindError`] naming the first offender.
+pub fn parse_classes(input: &str) -> Result<TailwindOutput, TailwindError> {
     let mut output = TailwindOutput::new();
 
     for class in input.split_whitespace() {
-        if let Some((variant, properties)) = parse_class(class) {
+        if let Some((variant, properties)) = parse_class(class)? {
             for prop in properties {
                 output.add(variant.clone(), prop);
             }
@@ -139,7 +202,7 @@ pub fn parse_classes(input: &str) -> TailwindOutput {
 
     resolve_gradient_groups(&mut output);
 
-    output
+    Ok(output)
 }
 
 fn resolve_gradient_groups(output: &mut TailwindOutput) {
@@ -193,21 +256,38 @@ fn gradient_direction(value: &str) -> &str {
 }
 
 /// Parse a single Tailwind class
-/// Returns the variant and list of CSS properties
-pub fn parse_class(class: &str) -> Option<(Variant, Vec<CssProperty>)> {
+/// Returns the variant and list of CSS properties.
+/// Classes with unknown variants return `Ok(None)` (dropped) — applying them
+/// unconditionally would be wrong (e.g. `motion-reduce:hidden` must not
+/// hide the element for everyone). Forbidden utilities (positioning) are a
+/// hard error regardless of variant.
+pub fn parse_class(class: &str) -> Result<Option<(Variant, Vec<CssProperty>)>, TailwindError> {
     // Extract variant prefix(es): "md:hover:bg-blue-500" -> (Combined[Responsive(md), State(hover)], "bg-blue-500")
-    let (variant, utility) = extract_variant(class);
+    let Some((variant, utility)) = extract_variant(class) else {
+        return Ok(None);
+    };
+
+    // The important modifier (`!p-4`) isn't representable in the flat props
+    // map, so strip it and apply the utility at normal priority.
+    let utility = utility.strip_prefix('!').unwrap_or(utility);
+
+    if let Some(reason) = forbidden_utility_reason(utility) {
+        return Err(TailwindError {
+            class: class.to_string(),
+            message: reason.to_string(),
+        });
+    }
 
     // Parse the utility class
-    let properties = parse_utility(utility)?;
-
-    Some((variant, properties))
+    Ok(parse_utility(utility).map(|properties| (variant, properties)))
 }
 
 /// Extract variant prefix from class.
 /// Only splits on ':' at bracket depth 0, so that arbitrary values
 /// like `bg-[url(data:image/svg+xml;...)]` are kept intact.
-fn extract_variant(class: &str) -> (Variant, &str) {
+/// Returns None if any variant is unrecognized — the class is dropped
+/// rather than applied unconditionally.
+fn extract_variant(class: &str) -> Option<(Variant, &str)> {
     // Split on ':' only when not inside brackets
     let mut parts: Vec<&str> = Vec::new();
     let mut start = 0;
@@ -226,34 +306,24 @@ fn extract_variant(class: &str) -> (Variant, &str) {
     parts.push(&class[start..]);
 
     if parts.len() == 1 {
-        return (Variant::None, class);
+        return Some((Variant::None, class));
     }
 
     let utility = parts.last().unwrap();
-    let variant_parts = &parts[..parts.len() - 1];
+    let mut variants = Vec::with_capacity(parts.len() - 1);
+    for part in &parts[..parts.len() - 1] {
+        variants.push(parse_variant_name(part)?);
+    }
 
-    if variant_parts.len() == 1 {
-        let v = parse_variant_name(variant_parts[0]);
-        (v, utility)
+    if variants.len() == 1 {
+        Some((variants.into_iter().next().unwrap(), utility))
     } else {
-        let variants: Vec<Variant> = variant_parts
-            .iter()
-            .map(|p| parse_variant_name(p))
-            .filter(|v| !v.is_none())
-            .collect();
-
-        if variants.is_empty() {
-            (Variant::None, utility)
-        } else if variants.len() == 1 {
-            (variants.into_iter().next().unwrap(), utility)
-        } else {
-            (Variant::Combined(variants), utility)
-        }
+        Some((Variant::Combined(variants), utility))
     }
 }
 
-fn parse_variant_name(name: &str) -> Variant {
-    match name {
+fn parse_variant_name(name: &str) -> Option<Variant> {
+    let variant = match name {
         // Responsive
         "sm" => Variant::Responsive("sm".to_string()),
         "md" => Variant::Responsive("md".to_string()),
@@ -284,8 +354,9 @@ fn parse_variant_name(name: &str) -> Variant {
         "group-focus" => Variant::State("group-focus".to_string()),
         // Dark mode
         "dark" => Variant::Dark,
-        _ => Variant::None,
-    }
+        _ => return None,
+    };
+    Some(variant)
 }
 
 /// Parse a utility class (without variant prefix) into CSS properties
@@ -306,20 +377,133 @@ fn parse_utility(utility: &str) -> Option<Vec<CssProperty>> {
         .or_else(|| parse_arbitrary(utility))
 }
 
-/// Parse arbitrary value syntax like `p-[32px]`, `w-[200px]`, `text-[#ff00ff]`
+/// Normalize an arbitrary value per Tailwind's rules: underscores become
+/// spaces (`shadow-[0_1px_2px]` → `0 1px 2px`), `\_` stays a literal
+/// underscore, and `url(...)` values are left untouched.
+fn normalize_arbitrary_value(value: &str) -> String {
+    if value.starts_with("url(") {
+        return value.to_string();
+    }
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\\' if chars.peek() == Some(&'_') => {
+                out.push('_');
+                chars.next();
+            }
+            '_' => out.push(' '),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Type hints that disambiguate arbitrary values: `bg-[color:var(--c)]`,
+/// `text-[length:var(--s)]`. Without the hint, `var(...)` values would be
+/// ambiguous between color and dimension.
+const TYPE_HINTS: &[&str] = &[
+    "color",
+    "length",
+    "size",
+    "image",
+    "url",
+    "position",
+    "family-name",
+    "number",
+    "angle",
+    "percentage",
+];
+
+fn hinted_properties(prefix: &str, hint: &str) -> Option<&'static [&'static str]> {
+    let props: &'static [&'static str] = match (prefix, hint) {
+        ("bg", "color") => &["background-color"],
+        ("bg", "image") | ("bg", "url") => &["background-image"],
+        ("bg", "length") | ("bg", "size") => &["background-size"],
+        ("bg", "position") => &["background-position"],
+        ("text", "color") => &["color"],
+        ("text", "length") | ("text", "percentage") => &["font-size"],
+        ("text", "family-name") => &["font-family"],
+        ("border", "color") => &["border-color"],
+        ("border", "length") => &["border-width"],
+        _ => return None,
+    };
+    Some(props)
+}
+
+/// Split a trailing opacity modifier off an arbitrary-value utility:
+/// `bg-[#fff]/50` → ("bg-[#fff]", Some(0.5)), also `/[.35]` and `/[55%]`.
+fn split_alpha_modifier(utility: &str) -> (&str, Option<f64>) {
+    if let Some(slash) = utility.rfind('/') {
+        if utility[..slash].ends_with(']') {
+            if let Some(alpha) = colors::parse_alpha_modifier(&utility[slash + 1..]) {
+                return (&utility[..slash], Some(alpha));
+            }
+        }
+    }
+    (utility, None)
+}
+
+fn apply_alpha_to_colors(props: &mut [CssProperty], alpha: Option<f64>) {
+    let Some(alpha) = alpha else { return };
+    for prop in props {
+        if prop.property.ends_with("color") {
+            prop.value = colors::apply_alpha(&prop.value, alpha);
+        }
+    }
+}
+
+/// Parse arbitrary value syntax like `p-[32px]`, `w-[200px]`, `text-[#ff00ff]`,
+/// plus arbitrary properties (`[display:grid]`) and opacity modifiers
+/// (`bg-[#fff]/50`).
 fn parse_arbitrary(utility: &str) -> Option<Vec<CssProperty>> {
+    // Arbitrary property syntax: [display:grid], [mask-type:luminance]
+    if let Some(inner) = utility.strip_prefix('[') {
+        let inner = inner.strip_suffix(']')?;
+        let (prop, val) = inner.split_once(':')?;
+        if prop.is_empty()
+            || val.is_empty()
+            || !prop.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        {
+            return None;
+        }
+        return Some(vec![CssProperty::new(
+            prop,
+            &normalize_arbitrary_value(val),
+        )]);
+    }
+
+    let (utility, alpha) = split_alpha_modifier(utility);
+
     // Match pattern: prefix-[value]
     let bracket_start = utility.find('[')?;
     if !utility.ends_with(']') {
         return None;
     }
-    let value = &utility[bracket_start + 1..utility.len() - 1];
-    if value.is_empty() {
+    let raw_value = &utility[bracket_start + 1..utility.len() - 1];
+    if raw_value.is_empty() {
         return None;
     }
+    let normalized = normalize_arbitrary_value(raw_value);
+    let mut value = normalized.as_str();
     let prefix = &utility[..bracket_start.checked_sub(1)?]; // strip trailing '-'
     if utility.as_bytes()[bracket_start - 1] != b'-' {
         return None;
+    }
+
+    // Type hints: bg-[color:var(--c)] → background-color, etc.
+    if let Some((hint, rest)) = value.split_once(':') {
+        if TYPE_HINTS.contains(&hint) {
+            if let Some(props) = hinted_properties(prefix, hint) {
+                let mut result: Vec<CssProperty> =
+                    props.iter().map(|p| CssProperty::new(p, rest)).collect();
+                apply_alpha_to_colors(&mut result, alpha);
+                return Some(result);
+            }
+            // Unrecognized prefix/hint combo: strip the hint so it never
+            // leaks into the CSS value (e.g. "length:var(--x)").
+            value = rest;
+        }
     }
 
     // Normalize negative prefix for categories that support negation.
@@ -336,9 +520,10 @@ fn parse_arbitrary(utility: &str) -> Option<Vec<CssProperty>> {
 
     // Delegate to category modules:
     // - spacing handles negation internally, receives original prefix/value
-    // - layout and effects support negative values (top, inset, z-index)
-    // - sizing, typography, borders do NOT support negation — skip if negative
-    None.or_else(|| spacing::parse_arbitrary(prefix, value))
+    // - layout, effects, and transforms support negative values
+    // - sizing, typography, borders, backgrounds do NOT support negation — skip if negative
+    let mut props = None
+        .or_else(|| spacing::parse_arbitrary(prefix, value))
         .or_else(|| {
             if is_negative {
                 None
@@ -353,7 +538,6 @@ fn parse_arbitrary(utility: &str) -> Option<Vec<CssProperty>> {
                 typography::parse_arbitrary(prefix, value)
             }
         })
-        .or_else(|| layout::parse_arbitrary(bare_prefix, neg_val))
         .or_else(|| {
             if is_negative {
                 None
@@ -362,6 +546,17 @@ fn parse_arbitrary(utility: &str) -> Option<Vec<CssProperty>> {
             }
         })
         .or_else(|| effects::parse_arbitrary(bare_prefix, neg_val))
+        .or_else(|| transforms::parse_arbitrary(bare_prefix, neg_val))
+        .or_else(|| {
+            if is_negative {
+                None
+            } else {
+                backgrounds::parse_arbitrary(prefix, value)
+            }
+        })?;
+
+    apply_alpha_to_colors(&mut props, alpha);
+    Some(props)
 }
 
 #[cfg(test)]
@@ -370,7 +565,7 @@ mod tests {
 
     #[test]
     fn test_parse_simple_class() {
-        let output = parse_classes("p-4");
+        let output = parse_classes("p-4").unwrap();
         assert_eq!(output.base.len(), 1);
         assert_eq!(output.base[0].property, "padding");
         assert_eq!(output.base[0].value, "1rem");
@@ -378,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_parse_with_variant() {
-        let output = parse_classes("md:p-4");
+        let output = parse_classes("md:p-4").unwrap();
         assert!(output.base.is_empty());
         assert!(output.variants.contains_key("@md"));
         let md_props = output.variants.get("@md").unwrap();
@@ -387,28 +582,243 @@ mod tests {
 
     #[test]
     fn test_parse_multiple_classes() {
-        let output = parse_classes("p-4 m-2 text-blue-500");
+        let output = parse_classes("p-4 m-2 text-blue-500").unwrap();
         assert_eq!(output.base.len(), 3);
     }
 
     #[test]
     fn test_parse_hover_variant() {
-        let output = parse_classes("hover:bg-white");
+        let output = parse_classes("hover:bg-white").unwrap();
         assert!(output.variants.contains_key(":hover"));
     }
 
     #[test]
     fn test_to_props() {
-        let output = parse_classes("p-4 md:p-8");
+        let output = parse_classes("p-4 md:p-8").unwrap();
         let props = output.to_props();
         assert_eq!(props.get("padding"), Some(&"1rem".to_string()));
         assert_eq!(props.get("padding@md"), Some(&"2rem".to_string()));
     }
 
     #[test]
+    fn test_arbitrary_bg_color() {
+        let output = parse_classes("bg-[#FCFCFC]").unwrap();
+        assert_eq!(output.base.len(), 1);
+        assert_eq!(output.base[0].property, "background-color");
+        assert_eq!(output.base[0].value, "#FCFCFC");
+    }
+
+    #[test]
+    fn test_arbitrary_bg_color_with_variant() {
+        let output = parse_classes("hover:bg-[#FCFCFC]").unwrap();
+        let props = output.variants.get(":hover").unwrap();
+        assert_eq!(props[0].property, "background-color");
+        assert_eq!(props[0].value, "#FCFCFC");
+    }
+
+    #[test]
+    fn test_arbitrary_gradient_stops_resolve() {
+        let output = parse_classes("bg-gradient-to-r from-[#112233] to-[#445566]").unwrap();
+        let props = output.to_props();
+        assert_eq!(
+            props.get("background-image"),
+            Some(&"linear-gradient(to right, #112233, #445566)".to_string())
+        );
+    }
+
+    #[test]
+    fn test_arbitrary_border_color_vs_width() {
+        let output = parse_classes("border-[#f00]").unwrap();
+        assert_eq!(output.base[0].property, "border-color");
+        assert_eq!(output.base[0].value, "#f00");
+
+        let output = parse_classes("border-[3px]").unwrap();
+        assert_eq!(output.base[0].property, "border-width");
+        assert_eq!(output.base[0].value, "3px");
+    }
+
+    #[test]
+    fn test_arbitrary_border_side() {
+        let output = parse_classes("border-t-[2px]").unwrap();
+        assert_eq!(output.base[0].property, "border-top-width");
+        assert_eq!(output.base[0].value, "2px");
+
+        let output = parse_classes("border-b-[rgba(0,0,0,0.1)]").unwrap();
+        assert_eq!(output.base[0].property, "border-bottom-color");
+        assert_eq!(output.base[0].value, "rgba(0,0,0,0.1)");
+    }
+
+    #[test]
+    fn test_arbitrary_rounded_side() {
+        let output = parse_classes("rounded-t-[12px]").unwrap();
+        assert_eq!(output.base.len(), 2);
+        assert_eq!(output.base[0].property, "border-top-left-radius");
+        assert_eq!(output.base[1].property, "border-top-right-radius");
+        assert_eq!(output.base[0].value, "12px");
+    }
+
+    #[test]
+    fn test_arbitrary_text_color_vs_size() {
+        let output = parse_classes("text-[#ff00ff]").unwrap();
+        assert_eq!(output.base[0].property, "color");
+        assert_eq!(output.base[0].value, "#ff00ff");
+
+        let output = parse_classes("text-[14px]").unwrap();
+        assert_eq!(output.base[0].property, "font-size");
+        assert_eq!(output.base[0].value, "14px");
+    }
+
+    #[test]
+    fn test_arbitrary_shadow_with_underscores() {
+        let output = parse_classes("shadow-[0_1px_2px_rgba(0,0,0,0.5)]").unwrap();
+        assert_eq!(output.base[0].property, "box-shadow");
+        assert_eq!(output.base[0].value, "0 1px 2px rgba(0,0,0,0.5)");
+    }
+
+    #[test]
+    fn test_arbitrary_underscore_escape_and_url() {
+        let output = parse_classes("bg-[url(/img/with_underscore.png)]").unwrap();
+        assert_eq!(output.base[0].property, "background-image");
+        assert_eq!(output.base[0].value, "url(/img/with_underscore.png)");
+    }
+
+    #[test]
+    fn test_arbitrary_transforms() {
+        let output = parse_classes("rotate-[17deg]").unwrap();
+        assert_eq!(output.base[0].property, "transform");
+        assert_eq!(output.base[0].value, "rotate(17deg)");
+
+        let output = parse_classes("-translate-x-[10px]").unwrap();
+        assert_eq!(output.base[0].property, "transform");
+        assert_eq!(output.base[0].value, "translateX(-10px)");
+
+        let output = parse_classes("scale-[1.15]").unwrap();
+        assert_eq!(output.base[0].value, "scale(1.15)");
+    }
+
+    #[test]
+    fn test_arbitrary_tracking() {
+        let output = parse_classes("tracking-[0.2em]").unwrap();
+        assert_eq!(output.base[0].property, "letter-spacing");
+        assert_eq!(output.base[0].value, "0.2em");
+    }
+
+    #[test]
+    fn test_unknown_variant_drops_class() {
+        // An unknown variant must drop the class, not apply it unconditionally:
+        // motion-reduce:hidden applied as base would hide the element for everyone.
+        assert!(parse_classes("max-sm:p-4").unwrap().base.is_empty());
+        assert!(parse_classes("motion-reduce:hidden").unwrap().base.is_empty());
+        assert!(parse_classes("peer-checked:bg-white").unwrap().base.is_empty());
+        // Unknown variant stacked with a known one still drops the class
+        let output = parse_classes("md:motion-reduce:p-4").unwrap();
+        assert!(output.base.is_empty());
+        assert!(output.variants.is_empty());
+    }
+
+    #[test]
+    fn test_important_modifier_stripped() {
+        let output = parse_classes("!bg-red-500").unwrap();
+        assert_eq!(output.base[0].property, "background-color");
+        assert_eq!(output.base[0].value, "#ef4444");
+
+        let output = parse_classes("hover:!p-4").unwrap();
+        assert!(output.variants.contains_key(":hover"));
+    }
+
+    #[test]
+    fn test_arbitrary_color_with_alpha_modifier() {
+        let output = parse_classes("bg-[#FCFCFC]/50").unwrap();
+        assert_eq!(output.base[0].property, "background-color");
+        assert_eq!(output.base[0].value, "rgba(252, 252, 252, 0.5)");
+
+        // Non-color arbitrary values are unaffected by a stray modifier parse
+        let output = parse_classes("border-[#f00]/25").unwrap();
+        assert_eq!(output.base[0].property, "border-color");
+        assert_eq!(output.base[0].value, "rgba(255, 0, 0, 0.25)");
+    }
+
+    #[test]
+    fn test_named_color_with_arbitrary_alpha() {
+        let output = parse_classes("bg-black/[.35]").unwrap();
+        assert_eq!(output.base[0].property, "background-color");
+        assert_eq!(output.base[0].value, "rgba(0, 0, 0, 0.35)");
+
+        let output = parse_classes("text-red-500/[0.5]").unwrap();
+        assert_eq!(output.base[0].property, "color");
+        assert_eq!(output.base[0].value, "rgba(239, 68, 68, 0.5)");
+    }
+
+    #[test]
+    fn test_type_hints() {
+        let output = parse_classes("bg-[color:var(--c)]").unwrap();
+        assert_eq!(output.base[0].property, "background-color");
+        assert_eq!(output.base[0].value, "var(--c)");
+
+        let output = parse_classes("text-[length:var(--s)]").unwrap();
+        assert_eq!(output.base[0].property, "font-size");
+        assert_eq!(output.base[0].value, "var(--s)");
+
+        let output = parse_classes("border-[color:var(--b)]").unwrap();
+        assert_eq!(output.base[0].property, "border-color");
+        assert_eq!(output.base[0].value, "var(--b)");
+
+        // Unrecognized combo: hint stripped, never leaks into the value
+        let output = parse_classes("w-[length:var(--w)]").unwrap();
+        assert_eq!(output.base[0].property, "width");
+        assert_eq!(output.base[0].value, "var(--w)");
+    }
+
+    #[test]
+    fn test_arbitrary_property_syntax() {
+        let output = parse_classes("[display:grid]").unwrap();
+        assert_eq!(output.base[0].property, "display");
+        assert_eq!(output.base[0].value, "grid");
+
+        let output = parse_classes("hover:[mask-type:luminance]").unwrap();
+        let props = output.variants.get(":hover").unwrap();
+        assert_eq!(props[0].property, "mask-type");
+        assert_eq!(props[0].value, "luminance");
+
+        let output = parse_classes("[grid-template-columns:repeat(2,minmax(0,1fr))]").unwrap();
+        assert_eq!(output.base[0].property, "grid-template-columns");
+        assert_eq!(output.base[0].value, "repeat(2,minmax(0,1fr))");
+    }
+
+    #[test]
+    fn test_arbitrary_ring_and_outline() {
+        let output = parse_classes("ring-[3px]").unwrap();
+        assert_eq!(output.base[0].property, "box-shadow");
+        assert_eq!(output.base[0].value, "0 0 0 3px");
+
+        let output = parse_classes("outline-[2px]").unwrap();
+        assert_eq!(output.base[0].property, "outline-width");
+
+        let output = parse_classes("outline-[#f00]").unwrap();
+        assert_eq!(output.base[0].property, "outline-color");
+    }
+
+    #[test]
+    fn test_border_x_y() {
+        let output = parse_classes("border-x-2").unwrap();
+        assert_eq!(output.base.len(), 2);
+        assert_eq!(output.base[0].property, "border-left-width");
+        assert_eq!(output.base[1].property, "border-right-width");
+        assert_eq!(output.base[0].value, "2px");
+
+        let output = parse_classes("border-y").unwrap();
+        assert_eq!(output.base[0].property, "border-top-width");
+        assert_eq!(output.base[0].value, "1px");
+
+        let output = parse_classes("border-y-[3px]").unwrap();
+        assert_eq!(output.base[0].property, "border-top-width");
+        assert_eq!(output.base[0].value, "3px");
+    }
+
+    #[test]
     fn test_resolves_gradient_stops_to_concrete_background_image() {
         let output =
-            parse_classes("bg-gradient-to-br from-indigo-950 via-slate-900 to-fuchsia-950");
+            parse_classes("bg-gradient-to-br from-indigo-950 via-slate-900 to-fuchsia-950").unwrap();
         let props = output.to_props();
 
         assert_eq!(
@@ -422,12 +832,34 @@ mod tests {
 
     #[test]
     fn test_resolves_two_stop_gradient_to_concrete_background_image() {
-        let output = parse_classes("bg-gradient-to-b from-slate-950 via-indigo-950 to-slate-950");
+        let output = parse_classes("bg-gradient-to-b from-slate-950 via-indigo-950 to-slate-950").unwrap();
         let props = output.to_props();
 
         assert_eq!(
             props.get("background-image"),
             Some(&"linear-gradient(to bottom, #020617, #1e1b4b, #020617)".to_string())
         );
+    }
+
+    #[test]
+    fn test_positioning_classes_are_hard_errors() {
+        for class in [
+            "absolute", "relative", "fixed", "sticky", "static",
+            "top-0", "right-2", "bottom-1/2", "left-[10px]", "-top-1", "inset-0", "inset-x-4",
+            "md:absolute", "hover:relative", "!absolute", "sr-only",
+        ] {
+            let err = parse_classes(&format!("p-4 {class} m-2"))
+                .expect_err(&format!("{class} must be rejected"));
+            assert_eq!(err.class, class);
+            assert!(err.message.contains("Stack") || err.message.contains("VisuallyHidden"), "{}", err);
+        }
+    }
+
+    #[test]
+    fn test_positioning_error_does_not_swallow_valid_output_shape() {
+        // A clean class list still parses; only the offender aborts.
+        assert!(parse_classes("p-4 m-2 z-10").is_ok());
+        assert_eq!(parse_class("absolute").unwrap_err().class, "absolute");
+        assert!(parse_class("unknown-class").unwrap().is_none());
     }
 }

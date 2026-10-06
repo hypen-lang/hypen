@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "parse-invalid-state", "description": "Unknown state token stays attached to the base (never matches).", "function": "parse_prop_key", "input": { "key": "color:bogus.0" }, "expected": { "base": "color:bogus", "breakpoint": null, "state": null, "arg": "0" } }

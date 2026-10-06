@@ -1,0 +1,101 @@
+---
+title: Multi-Platform
+description: What Hypen shares across platforms, and what stays platform-specific
+---
+
+# Multi-Platform
+
+Hypen splits an application into three layers. Two of them are shared across
+every platform you ship to; only the third is platform-specific — and you
+usually don't write it.
+
+```
+┌─────────────────────────────────────────────┐
+│  Template (.hypen)     — shared, 100%       │
+│  Module (state/actions) — shared, 100%      │
+├─────────────────────────────────────────────┤
+│  Adapter                — per platform      │
+│  (you pick one; you don't write it)         │
+└─────────────────────────────────────────────┘
+```
+
+## What's Shared
+
+**The template.** One `.hypen` file describes the UI for every platform. Layout
+(`Column`, `Row`, `Grid`), components, styling applicators, and Tailwind
+classes all mean the same thing everywhere.
+
+**The module.** State, actions, and lifecycle hooks are written once, in
+[TypeScript, Go, Kotlin, Swift, or Rust](/docs/servers). The engine drives them
+identically regardless of what's rendering.
+
+**Routing.** The same `Router { Route ... }` block works on web, desktop,
+mobile, and remote sessions. Renderers never see routing logic — just patches.
+See [Routing](/docs/guide/routing).
+
+**Animation.** The `__anim.*` channel — transitions, enter/exit, FLIP layout,
+presets, states, shared elements, scrub/settle — is implemented to parity
+across renderers. See [Animation](/docs/guide/animation).
+
+## What's Platform-Specific
+
+**The adapter.** You choose one and it's ~one line. See
+[Platforms](/docs/adapters).
+
+**Native look and feel.** By design — see
+[Native Rendering](/docs/concepts/native-rendering). A SwiftUI button looks
+like a SwiftUI button.
+
+**Component parity.** Not every component is implemented on every platform yet.
+The [component gallery](/docs/comparison) is the authoritative, regenerated
+matrix — check it before depending on a component in production.
+
+**Renderer narrowings.** Individual adapters record deliberate limitations —
+the desktop renderer, for instance, doesn't negotiate WebSocket compression.
+These are documented on each adapter's page.
+
+## Adapting Within One Template
+
+Sharing a template doesn't mean an identical layout on a phone and a 27" monitor.
+Tailwind breakpoints resolve against the live viewport, largest-active
+breakpoint wins:
+
+```hypen
+Column {
+    Text("Responsive")
+}
+    .tw("p-4 md:p-8 lg:p-12")
+    .padding(8)
+    .padding@md(16)
+```
+
+The desktop renderer threads window width through every prop read, so
+breakpoints re-resolve live as the window resizes — the same way they do in a
+browser.
+
+## Local or Remote — Also Shared
+
+The local/remote split is orthogonal to the platform split. Every adapter runs
+either way, with the same module and the same template:
+
+- **Local** — the engine runs on the device, in-process.
+- **Remote** — the engine runs on your server and streams patches. See
+  [Remote UI](/docs/concepts/remote-ui).
+
+Moving between them is a deployment decision, not a rewrite.
+
+## A Realistic Expectation
+
+"Write once, run everywhere" is true of your *template and logic*. It is not a
+promise that you will never think about platforms again: you'll still check
+component parity, still tune layout for small screens, and still test on each
+target. What Hypen removes is maintaining four separate UI codebases that drift
+apart.
+
+## See Also
+
+- [Platforms Overview](/docs/adapters) — every adapter and how to choose
+- [Native Rendering](/docs/concepts/native-rendering) — why native, not WebView
+- [Remote UI](/docs/concepts/remote-ui) — server-driven UI across all clients
+- [Component Gallery](/docs/comparison) — per-platform parity matrix
+- [Server SDKs](/docs/servers) — writing modules in five languages

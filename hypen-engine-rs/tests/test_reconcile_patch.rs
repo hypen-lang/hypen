@@ -27,7 +27,7 @@ fn test_create_patch_basic() {
     };
 
     // WHEN: Create patch
-    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props.clone()));
+    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props.clone()), None);
 
     // THEN: Create patch with correct structure
     match patch {
@@ -35,6 +35,7 @@ fn test_create_patch_basic() {
             id,
             element_type,
             props: patch_props,
+            ..
         } => {
             assert!(!id.is_empty());
             assert_eq!(element_type, "Text");
@@ -146,7 +147,7 @@ fn test_insert_root_patch() {
             id,
             before_id,
         } => {
-            assert_eq!(parent_id, "root");
+            assert_eq!(parent_id.as_ref(), "root");
             assert!(!id.is_empty());
             assert_eq!(before_id, None);
         }
@@ -191,10 +192,11 @@ fn test_remove_patch() {
     // WHEN: Create Remove patch
     let patch = Patch::remove(node_id);
 
-    // THEN: Remove patch with correct structure
+    // THEN: Remove patch with correct structure, unflagged by default
     match patch {
-        Patch::Remove { id } => {
+        Patch::Remove { id, transition } => {
             assert!(!id.is_empty());
+            assert!(!transition);
         }
         _ => panic!("Expected Remove patch"),
     }
@@ -225,7 +227,7 @@ fn test_create_patch_with_empty_props() {
     let props = indexmap! {};
 
     // WHEN: Create patch
-    let patch = Patch::create(node_id, "EmptyElement".to_string(), Arc::new(props));
+    let patch = Patch::create(node_id, "EmptyElement".to_string(), Arc::new(props), None);
 
     // THEN: Handles empty props
     match patch {
@@ -252,7 +254,7 @@ fn test_serialize_create_patch() {
     let props = indexmap! {
         "text".to_string() => json!("Hello"),
     };
-    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props));
+    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props), None);
 
     // WHEN: Serialize to JSON
     let json = serde_json::to_value(&patch).unwrap();
@@ -312,12 +314,39 @@ fn test_deserialize_patch() {
     // WHEN: Deserialize from JSON
     let patch: Patch = serde_json::from_value(json).unwrap();
 
-    // THEN: Correct patch variant
+    // THEN: Correct patch variant; absent `transition` defaults to false
     match patch {
-        Patch::Remove { id } => {
-            assert_eq!(id, "42");
+        Patch::Remove { id, transition } => {
+            assert_eq!(id.as_ref(), "42");
+            assert!(!transition);
         }
         _ => panic!("Expected Remove patch"),
+    }
+}
+
+#[test]
+fn test_batch_animation_patch_serde_round_trip() {
+    // GIVEN: the batch-scoped animation prelude (Option D cheap subset)
+    let spec = json!({"curve": "spring", "duration": 250, "custom": "passes-through"});
+    let patch = Patch::batch_animation(spec.clone());
+
+    // WHEN: Serialize to JSON
+    let serialized = serde_json::to_value(&patch).unwrap();
+
+    // THEN: exact wire shape — {"type": "batchAnimation", "spec": {...}}
+    assert_eq!(
+        serialized,
+        json!({
+            "type": "batchAnimation",
+            "spec": {"curve": "spring", "duration": 250, "custom": "passes-through"}
+        })
+    );
+
+    // AND: it deserializes back to the same variant with the same spec
+    let round_tripped: Patch = serde_json::from_value(serialized).unwrap();
+    match round_tripped {
+        Patch::BatchAnimation { spec: s } => assert_eq!(s, spec),
+        other => panic!("Expected BatchAnimation patch, got {other:?}"),
     }
 }
 
@@ -369,7 +398,7 @@ fn test_deserialize_remove_prop_patch() {
     // THEN: Correct patch variant
     match patch {
         Patch::RemoveProp { id, name } => {
-            assert_eq!(id, "99");
+            assert_eq!(id.as_ref(), "99");
             assert_eq!(name, "color");
         }
         _ => panic!("Expected RemoveProp patch"),
@@ -391,7 +420,7 @@ fn test_create_patch_wire_format_unchanged_by_arc_wrap() {
         "text".to_string() => json!("Hello"),
         "color".to_string() => json!("red"),
     };
-    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props));
+    let patch = Patch::create(node_id, "Text".to_string(), Arc::new(props), None);
 
     let json_str = serde_json::to_string(&patch).unwrap();
     let json_val: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -424,7 +453,7 @@ fn test_create_patch_serde_roundtrip() {
         "flag".to_string() => json!(true),
         "nested".to_string() => json!({"inner": [1, 2, 3]}),
     };
-    let original = Patch::create(node_id, "Text".to_string(), Arc::new(props));
+    let original = Patch::create(node_id, "Text".to_string(), Arc::new(props), None);
 
     let json_str = serde_json::to_string(&original).unwrap();
     let restored: Patch = serde_json::from_str(&json_str).unwrap();
@@ -464,7 +493,7 @@ fn test_create_patch_exact_json_bytes() {
     let props = indexmap! {
         "text".to_string() => json!("Hi"),
     };
-    let patch = Patch::create(id, "Text".to_string(), Arc::new(props));
+    let patch = Patch::create(id, "Text".to_string(), Arc::new(props), None);
 
     // Build the expected shape manually from primitives so the assertion
     // doesn't lean on Patch's own serialization.
@@ -505,10 +534,88 @@ fn test_node_id_str_stable_and_unique() {
     }
 
     // Distinct NodeIds → distinct strings.
-    let seen: HashSet<String> = ids.iter().copied().map(node_id_str).collect();
+    let seen: HashSet<std::sync::Arc<str>> = ids.iter().copied().map(node_id_str).collect();
     assert_eq!(
         seen.len(),
         ids.len(),
         "different NodeIds collided to the same string"
     );
+}
+
+// ============================================================================
+// Deferred remove protocol (`transition` flag)
+// ============================================================================
+
+#[test]
+fn test_remove_with_transition_constructor() {
+    // GIVEN: Node ID of an exiting subtree root
+    let node_id = test_node_id();
+
+    // WHEN: Create flagged Remove patch
+    let patch = Patch::remove_with_transition(node_id);
+
+    // THEN: Remove patch with the transition flag set
+    match patch {
+        Patch::Remove { id, transition } => {
+            assert!(!id.is_empty());
+            assert!(transition);
+        }
+        _ => panic!("Expected Remove patch"),
+    }
+}
+
+#[test]
+fn test_serialize_unflagged_remove_omits_transition() {
+    // GIVEN: Plain Remove patch
+    let patch = Patch::remove(test_node_id());
+
+    // WHEN: Serialize to JSON
+    let json = serde_json::to_value(&patch).unwrap();
+
+    // THEN: Wire format is byte-identical to the pre-flag protocol —
+    // exactly {"type":"remove","id":"..."} with no `transition` key.
+    assert_eq!(json["type"], "remove");
+    assert!(json.get("transition").is_none());
+    assert_eq!(json.as_object().unwrap().len(), 2);
+}
+
+#[test]
+fn test_serialize_flagged_remove_carries_transition() {
+    // GIVEN: Flagged Remove patch
+    let patch = Patch::remove_with_transition(test_node_id());
+
+    // WHEN: Serialize to JSON
+    let json = serde_json::to_value(&patch).unwrap();
+
+    // THEN: {"type":"remove","id":"...","transition":true}
+    assert_eq!(json["type"], "remove");
+    assert_eq!(json["transition"], true);
+}
+
+#[test]
+fn test_remove_transition_serde_roundtrip() {
+    // GIVEN: One flagged and one plain Remove
+    let flagged = Patch::remove_with_transition(test_node_id());
+    let plain = Patch::remove(test_node_id());
+
+    // WHEN: Round-trip both through JSON
+    let flagged_back: Patch =
+        serde_json::from_str(&serde_json::to_string(&flagged).unwrap()).unwrap();
+    let plain_back: Patch = serde_json::from_str(&serde_json::to_string(&plain).unwrap()).unwrap();
+
+    // THEN: The flag survives, and its absence deserializes to false
+    assert!(matches!(
+        flagged_back,
+        Patch::Remove {
+            transition: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        plain_back,
+        Patch::Remove {
+            transition: false,
+            ..
+        }
+    ));
 }

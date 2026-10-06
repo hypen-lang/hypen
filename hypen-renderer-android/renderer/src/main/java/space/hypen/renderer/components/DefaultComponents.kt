@@ -17,6 +17,7 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     register(SpacerComponent())
     register(StackComponent())
     register(GridComponent())
+    register(SafeAreaComponent())
 
     // Content components
     register(TextComponent())
@@ -28,6 +29,9 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     register(AudioComponent())
     register(DividerComponent())
 
+    // Screen-reader-only wrapper: paints nothing, occupies no space
+    register(VisuallyHiddenComponent())
+
     // Form components
     register(InputComponent())
     register(TextAreaComponent())
@@ -35,6 +39,9 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     register(SelectComponent())
     register(SliderComponent())
     register(SwitchComponent())
+
+    // Media timeline for a Video `controls` slot (inert outside a Video)
+    register(ScrubberComponent())
 
     // UI components
     register(CardComponent())
@@ -50,6 +57,17 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
 
     // Icon component (renders server-resolved SVG path data)
     register(IconComponent())
+
+    // Chart family. The Chart owns the coordinate space and draws every mark
+    // itself; the mark handlers exist so Line/Bars/… are known types rather
+    // than unknown-type fallbacks, and paint nothing of their own.
+    register(ChartComponent())
+    for (kind in ChartMarkKind.entries) {
+        register(ChartMarkComponent(kind))
+    }
+
+    // Embedded remote app (HypenApp("ws://...")) with loading/error slots
+    register(HypenAppComponent())
 
     return this
 }

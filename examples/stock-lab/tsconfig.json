@@ -1,0 +1,35 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "noEmit": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@hypen-space/core": [
+        "../../hypen-web/packages/core/src/index.ts"
+      ],
+      "@hypen-space/core/*": [
+        "../../hypen-web/packages/core/src/*"
+      ],
+      "@hypen-space/server": [
+        "../../hypen-web/packages/server/src/index.ts"
+      ],
+      "@hypen-space/server/*": [
+        "../../hypen-web/packages/server/src/*"
+      ],
+      "@hypen-space/web": [
+        "../../hypen-web/packages/web/src/index.ts"
+      ],
+      "@hypen-space/web/*": [
+        "../../hypen-web/packages/web/src/*"
+      ]
+    }
+  },
+  "include": [
+    "*.ts",
+    "web/*.ts"
+  ]
+}

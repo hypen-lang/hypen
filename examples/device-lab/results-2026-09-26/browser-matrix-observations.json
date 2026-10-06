@@ -1,0 +1,92 @@
+[
+  {
+    "renderer": "DOM",
+    "server": "TS",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  },
+  {
+    "renderer": "DOM",
+    "server": "Go",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  },
+  {
+    "renderer": "DOM",
+    "server": "Kotlin",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  },
+  {
+    "renderer": "DOM",
+    "server": "Swift",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  },
+  {
+    "renderer": "DOM",
+    "server": "Rust",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  },
+  {
+    "renderer": "Canvas",
+    "server": "TS",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  },
+  {
+    "renderer": "Canvas",
+    "server": "Go",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  },
+  {
+    "renderer": "Canvas",
+    "server": "Kotlin",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  },
+  {
+    "renderer": "Canvas",
+    "server": "Swift",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  },
+  {
+    "renderer": "Canvas",
+    "server": "Rust",
+    "query": "success, status=prompt",
+    "gallery": "success, real browser file chooser",
+    "receivedBytes": 85595,
+    "sha256": "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe",
+    "evidence": "Observed rendered accessibility tree via CUA during live run; server action logs retained where available."
+  }
+]

@@ -1,0 +1,201 @@
+{
+  "description": "Golden binary frame headers (12-byte little-endian). Per-SDK native codecs must reproduce these bytes exactly; the Rust reference codec in hypen-engine-rs/src/serialize/device.rs generated them. The header-only goldens are codec vectors: on the wire a frame with a zero-length payload is always a receiver-side `blob` violation (a zero-byte item sends no frames, decision D2). `invalid` frames: `shortHeader` (under 12 bytes) is dropped without effect; `violation-*` (unknown version or nonzero flags) is a connection-level `malformed` violation: discarded and counted, never terminating the request its untrusted header names (decision D3).",
+  "frames": [
+    {
+      "header": {
+        "version": 1,
+        "flags": 0,
+        "channel": 0,
+        "requestId": 1,
+        "seq": 0
+      },
+      "hex": "010000000100000000000000"
+    },
+    {
+      "header": {
+        "version": 1,
+        "flags": 0,
+        "channel": 3,
+        "requestId": 17,
+        "seq": 2
+      },
+      "hex": "010003001100000002000000"
+    },
+    {
+      "header": {
+        "version": 1,
+        "flags": 0,
+        "channel": 65535,
+        "requestId": 4294967295,
+        "seq": 4294967295
+      },
+      "hex": "0100ffffffffffffffffffff"
+    },
+    {
+      "header": {
+        "version": 1,
+        "flags": 0,
+        "channel": 0,
+        "requestId": 1,
+        "seq": 0
+      },
+      "hex": "01000000010000000000000068656c6c6f2d687970656e2d70686f746f",
+      "payloadHex": "68656c6c6f2d687970656e2d70686f746f"
+    }
+  ],
+  "invalid": [
+    {
+      "reason": "shortHeader",
+      "hex": "0100000001000000000000"
+    },
+    {
+      "reason": "violation-version",
+      "hex": "090000000100000000000000"
+    },
+    {
+      "reason": "violation-flags",
+      "hex": "010100000100000000000000"
+    },
+    {
+      "reason": "shortHeader",
+      "hex": ""
+    },
+    {
+      "reason": "shortHeader",
+      "hex": "01"
+    },
+    {
+      "reason": "violation-version",
+      "hex": "000000000100000000000000"
+    },
+    {
+      "reason": "violation-version",
+      "hex": "020000000100000000000000"
+    },
+    {
+      "reason": "violation-flags",
+      "hex": "01ff00000100000000000000"
+    },
+    {
+      "reason": "violation-version",
+      "hex": "ff0000000100000000000000deadbeef"
+    }
+  ],
+  "sequences": {
+    "description": "Receiver-side per-(requestId, channel) sequence rule (RFC 001 §2.3), independent of the stateless header codec. Feed `seqs` in order to a fresh channel tracker for a revision with the given `overflow` policy; `valid` says whether every seq is accepted (false: the last one is the violation). seq starts at 0 and advances for every produced chunk, including dropped ones: `pause` (lossless) requires exactly the next seq; `dropOldest` permits forward gaps. Repeats, decreases and any wrap past 2^32-1 are violations. (A lossless channel cannot reach 2^32-1 from a fresh tracker here; the Rust unit test lossless_sequence_up_to_u32_max_and_no_wrap pins that boundary.)",
+    "cases": [
+      {
+        "name": "contiguous-from-zero",
+        "overflow": "pause",
+        "seqs": [
+          0,
+          1,
+          2
+        ],
+        "valid": true
+      },
+      {
+        "name": "not-starting-at-zero-lossless",
+        "overflow": "pause",
+        "seqs": [
+          1
+        ],
+        "valid": false
+      },
+      {
+        "name": "gap-on-lossless",
+        "overflow": "pause",
+        "seqs": [
+          0,
+          2
+        ],
+        "valid": false
+      },
+      {
+        "name": "repeat-on-lossless",
+        "overflow": "pause",
+        "seqs": [
+          0,
+          1,
+          1
+        ],
+        "valid": false
+      },
+      {
+        "name": "decrease-on-lossless",
+        "overflow": "pause",
+        "seqs": [
+          0,
+          1,
+          0
+        ],
+        "valid": false
+      },
+      {
+        "name": "gap-on-drop-oldest",
+        "overflow": "dropOldest",
+        "seqs": [
+          0,
+          3,
+          4
+        ],
+        "valid": true
+      },
+      {
+        "name": "drop-oldest-first-chunks-dropped",
+        "overflow": "dropOldest",
+        "seqs": [
+          2,
+          3
+        ],
+        "valid": true
+      },
+      {
+        "name": "repeat-on-drop-oldest",
+        "overflow": "dropOldest",
+        "seqs": [
+          0,
+          0
+        ],
+        "valid": false
+      },
+      {
+        "name": "decrease-on-drop-oldest",
+        "overflow": "dropOldest",
+        "seqs": [
+          0,
+          5,
+          4
+        ],
+        "valid": false
+      },
+      {
+        "name": "reaches-u32-max",
+        "overflow": "dropOldest",
+        "seqs": [
+          4294967294,
+          4294967295
+        ],
+        "valid": true
+      },
+      {
+        "name": "wrap-after-u32-max",
+        "overflow": "dropOldest",
+        "seqs": [
+          4294967295,
+          0
+        ],
+        "valid": false
+      },
+      {
+        "name": "any-seq-after-u32-max",
+        "overflow": "dropOldest",
+        "seqs": [
+          4294967295,
+          4294967295
+        ],
+        "valid": false
+      }
+    ]
+  }
+}

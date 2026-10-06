@@ -11,6 +11,11 @@
 
 import { BaseEngine } from "@hypen-space/core/engine-base";
 import { setPortableImpl, type PortableImpl } from "@hypen-space/core/portable";
+import {
+  diffStateJs,
+  diffOracleEnabled,
+  checkDiffOracle,
+} from "@hypen-space/core/diff";
 
 /**
  * The web-target wasm-bindgen exports CFEngine + the portable installer use,
@@ -34,25 +39,18 @@ export interface CFWasmExports {
 /** Build a `PortableImpl` backed by the web-target WASM's free functions. */
 export function makeCFPortableImpl(wasm: CFWasmExports): PortableImpl {
   return {
-    diffState(oldState: any, newState: any, _basePath?: string) {
-      let oldJson: string, newJson: string;
-      try {
-        oldJson = JSON.stringify(oldState ?? null);
-        newJson = JSON.stringify(newState ?? null);
-      } catch {
-        return { paths: [], newValues: {} };
+    // `diffState` is the one portable helper NOT routed through WASM —
+    // it runs per mutation flush and the whole-state stringify round
+    // trip was Θ(|state|) each time. `diffStateJs` is the TS port of
+    // the canonical algorithm (pinned by the cross-SDK fixtures and
+    // the differential fuzz suite); __HYPEN_DIFF_ORACLE__ cross-checks
+    // it against the WASM implementation at runtime.
+    diffState(oldState: any, newState: any, basePath?: string) {
+      const change = diffStateJs(oldState, newState, basePath);
+      if (diffOracleEnabled()) {
+        checkDiffOracle(change, oldState, newState, wasm.diffPaths);
       }
-      const entries = JSON.parse(wasm.diffPaths(oldJson, newJson)) as Array<{
-        path: string;
-        value: any;
-      }>;
-      const paths: string[] = [];
-      const newValues: Record<string, any> = {};
-      for (const e of entries) {
-        paths.push(e.path);
-        newValues[e.path] = e.value;
-      }
-      return { paths, newValues };
+      return change;
     },
     matchPath(pattern: string, path: string) {
       const parsed = JSON.parse(wasm.matchPath(pattern, path)) as {

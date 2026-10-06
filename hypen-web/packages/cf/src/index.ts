@@ -12,6 +12,10 @@ export {
   HypenDurableObject,
   CFTransport,
   mergeComponentTemplates,
+  DEVICE_BROKER_LOST_CODE,
+  DEVICE_BROKER_LOST_REASON,
+  DO_DEVICE_MAX_RETAINED_BYTES,
+  type HibernationAttachment,
   type HypenDurableObjectConfig,
   type DurableObjectState,
 } from "./durable-object.js";
@@ -21,6 +25,11 @@ export {
   makeCFPortableImpl,
   type CFWasmExports,
 } from "./engine.js";
+export {
+  createCFDeviceBrokerFactory,
+  hasDeviceBroker,
+  type CFDeviceWasmExports,
+} from "./device-broker.js";
 export {
   defineHypenWorker,
   type DefineHypenWorkerOptions,

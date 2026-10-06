@@ -7,12 +7,14 @@ Button {
                 .objectFit("cover")
                 .tw("rounded-lg bg-gray-100")
 
+            // Stack aligns content top-start by default; a margin nudges the
+            // badge off the image corner.
             If(condition: "@{!item.isOpen}") {
                 Column {
                     Text("Closed")
                         .tw("text-[10px] font-bold text-white px-1.5 py-0.5 bg-gray-800 rounded")
                 }
-                .tw("absolute top-1 left-1")
+                .tw("m-1")
             }
         }
 

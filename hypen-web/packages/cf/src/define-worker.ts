@@ -32,6 +32,7 @@
 import type { HypenApp, HypenModuleDefinition } from "@hypen-space/core/app";
 import { HypenDurableObject, type HypenDurableObjectConfig, type DurableObjectState } from "./durable-object.js";
 import { createCFEngine, type CFWasmExports } from "./engine.js";
+import { hasDeviceBroker } from "./device-broker.js";
 import type { DurableObjectStorage } from "./durable-object-store.js";
 import { createWorkerHandler } from "./worker.js";
 import {
@@ -56,8 +57,28 @@ export interface DefineHypenWorkerOptions {
   componentTemplates?: Record<string, string>;
   /** SVG resource bundle for `Icon(@resources.foo)`. */
   resources?: Record<string, string>;
-  /** Mirror actions/state across sockets sharing a DO (default false). */
+  /**
+   * Mirror actions/state across sockets sharing a DO (default false). The
+   * device plane stays on; mirrored dispatches cannot start device work.
+   */
   syncActions?: boolean;
+  /**
+   * Device Capability Protocol (RFC 001). On by default — the broker is the
+   * Rust one in the `wasm` glue passed below, wired automatically. `false`
+   * opts out. See `HypenDurableObjectConfig.device`.
+   */
+  device?: boolean;
+  /**
+   * Declare the Worker's `web_socket_compression` compatibility flag. It
+   * never turns the device plane off: each socket keeps it only if its
+   * permessage-deflate has no context takeover in both directions (RFC 001
+   * §2.3). See `HypenDurableObjectConfig.webSocketCompression`.
+   */
+  webSocketCompression?: boolean;
+  /** Browser `Origin` allowlist for the WebSocket upgrade (RFC 001 §5). */
+  allowedOrigins?: string[];
+  /** Connection authenticator for the WebSocket upgrade (RFC 001 §5). */
+  authenticate?: (request: Request) => boolean | Promise<boolean>;
 
   /** web-target wasm exports (`import * as wasm from "hypen-engine"`). */
   wasm: CFWasmExports;
@@ -128,6 +149,16 @@ export function defineHypenWorker(opts: DefineHypenWorkerOptions): WorkerExports
       : {}),
     ...(opts.resources !== undefined ? { resources: opts.resources } : {}),
     ...(opts.syncActions !== undefined ? { syncActions: opts.syncActions } : {}),
+    ...(opts.device !== undefined ? { device: opts.device } : {}),
+    // The device broker is the Rust one in the same web-target wasm glue
+    // (built with `js,device-broker`) — supplied automatically. A glue
+    // without it leaves the device plane off, with one warning from the DO.
+    ...(opts.device !== false && hasDeviceBroker(opts.wasm) ? { deviceWasm: opts.wasm } : {}),
+    ...(opts.webSocketCompression !== undefined
+      ? { webSocketCompression: opts.webSocketCompression }
+      : {}),
+    ...(opts.allowedOrigins !== undefined ? { allowedOrigins: opts.allowedOrigins } : {}),
+    ...(opts.authenticate !== undefined ? { authenticate: opts.authenticate } : {}),
   };
 
   const Engine = createCFEngine(opts.wasm, opts.wasmModule);

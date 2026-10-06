@@ -133,7 +133,9 @@ class VariantSupportTest {
     fun `parseVariantName invalid breakpoint`() {
         val result = parseVariantName("padding@invalid")
 
-        assertEquals("padding", result.baseName)
+        // An unrecognised marker is left as part of the base name (so it never
+        // matches a real applicator), matching the engine + web parsers.
+        assertEquals("padding@invalid", result.baseName)
         assertNull(result.breakpoint) // Invalid breakpoint becomes null
         assertNull(result.state)
     }
@@ -142,9 +144,27 @@ class VariantSupportTest {
     fun `parseVariantName invalid state`() {
         val result = parseVariantName("padding:invalid")
 
-        assertEquals("padding", result.baseName)
+        assertEquals("padding:invalid", result.baseName)
         assertNull(result.breakpoint)
         assertNull(result.state) // Invalid state becomes null
+    }
+
+    @Test
+    fun `parseVariantName combined breakpoint and state`() {
+        // Combined `@bp:state` must resolve BOTH halves (previously the state was
+        // silently dropped). Mirrors the cross-SDK `parse-combined` fixture.
+        val result = parseVariantName("backgroundColor@md:hover")
+        assertEquals("backgroundColor", result.baseName)
+        assertEquals(Breakpoint.MD, result.breakpoint)
+        assertEquals(StateVariant.HOVER, result.state)
+        assertTrue(result.isVariant)
+        assertTrue(result.isResponsive)
+        assertTrue(result.isStateful)
+
+        val hyphenated = parseVariantName("background-color@2xl:focus-within")
+        assertEquals("background-color", hyphenated.baseName)
+        assertEquals(Breakpoint.XXL, hyphenated.breakpoint)
+        assertEquals(StateVariant.FOCUS_WITHIN, hyphenated.state)
     }
 
     @Test

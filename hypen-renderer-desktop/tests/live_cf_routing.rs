@@ -30,10 +30,7 @@ fn count_patches_for_url(url: &str) -> (Vec<usize>, Vec<usize>) {
     module.mount();
     std::thread::sleep(Duration::from_millis(3000));
     let before = frames.lock().unwrap().clone();
-    module.dispatch_action(
-        "router.push",
-        Some(serde_json::json!({"to": "/profile"})),
-    );
+    module.dispatch_action("router.push", Some(serde_json::json!({"to": "/profile"})));
     std::thread::sleep(Duration::from_millis(2500));
     let all = frames.lock().unwrap().clone();
     let after = all[before.len()..].to_vec();
@@ -42,12 +39,9 @@ fn count_patches_for_url(url: &str) -> (Vec<usize>, Vec<usize>) {
 
 /// Collect the actual patches that arrived after a `router.push` so we
 /// can diff them between servers, not just count them.
-fn collect_post_push_patches(
-    url: &str,
-) -> Vec<hypen_engine::Patch> {
+fn collect_post_push_patches(url: &str) -> Vec<hypen_engine::Patch> {
     let module = RemoteModule::connect(url, "App");
-    let collected: Arc<Mutex<Vec<hypen_engine::Patch>>> =
-        Arc::new(Mutex::new(Vec::new()));
+    let collected: Arc<Mutex<Vec<hypen_engine::Patch>>> = Arc::new(Mutex::new(Vec::new()));
     let collected_for_cb = Arc::clone(&collected);
     // Capture only frames AFTER the push.
     let pushed: Arc<Mutex<bool>> = Arc::new(Mutex::new(false));
@@ -60,10 +54,7 @@ fn collect_post_push_patches(
     module.mount();
     std::thread::sleep(Duration::from_millis(3000));
     *pushed.lock().unwrap() = true;
-    module.dispatch_action(
-        "router.push",
-        Some(serde_json::json!({"to": "/profile"})),
-    );
+    module.dispatch_action("router.push", Some(serde_json::json!({"to": "/profile"})));
     std::thread::sleep(Duration::from_millis(2500));
     let out = collected.lock().unwrap().clone();
     out
@@ -77,10 +68,7 @@ fn router_push_against_live_cf_deploy_delivers_swap_patches() {
         .is_test(true)
         .try_init();
 
-    let module = RemoteModule::connect(
-        "wss://hypen-calorie-counter.ian-dae.workers.dev/ws",
-        "App",
-    );
+    let module = RemoteModule::connect("wss://hypen-calorie-counter.ian-dae.workers.dev/ws", "App");
 
     // Bucket received patches by call. Each `on_patches` invocation is one
     // server-side `InitialTree` or `Patch` frame.
@@ -106,10 +94,7 @@ fn router_push_against_live_cf_deploy_delivers_swap_patches() {
     );
 
     // Dispatch router.push exactly the way the click path would.
-    module.dispatch_action(
-        "router.push",
-        Some(serde_json::json!({"to": "/profile"})),
-    );
+    module.dispatch_action("router.push", Some(serde_json::json!({"to": "/profile"})));
 
     // Wait for the route swap + Profile onActivated to settle.
     std::thread::sleep(Duration::from_millis(2500));
@@ -147,9 +132,8 @@ fn local_vs_deploy_patch_counts_match() {
     let (local_before, local_after) = count_patches_for_url("ws://localhost:8821/ws");
     println!("LOCAL  before={local_before:?} after={local_after:?}");
 
-    let (cf_before, cf_after) = count_patches_for_url(
-        "wss://hypen-calorie-counter.ian-dae.workers.dev/ws",
-    );
+    let (cf_before, cf_after) =
+        count_patches_for_url("wss://hypen-calorie-counter.ian-dae.workers.dev/ws");
     println!("DEPLOY before={cf_before:?} after={cf_after:?}");
 
     let local_after_total: usize = local_after.iter().sum();
@@ -180,15 +164,15 @@ fn local_vs_deploy_patches_are_structurally_identical() {
         .try_init();
 
     let local = collect_post_push_patches("ws://localhost:8821/ws");
-    let cf = collect_post_push_patches(
-        "wss://hypen-calorie-counter.ian-dae.workers.dev/ws",
-    );
+    let cf = collect_post_push_patches("wss://hypen-calorie-counter.ian-dae.workers.dev/ws");
 
     println!("local post-push patches: {}", local.len());
     println!("cf    post-push patches: {}", cf.len());
 
     // Compare every variant by tag-counting first — quickest discriminator.
-    fn tag_counts(patches: &[hypen_engine::Patch]) -> std::collections::BTreeMap<&'static str, usize> {
+    fn tag_counts(
+        patches: &[hypen_engine::Patch],
+    ) -> std::collections::BTreeMap<&'static str, usize> {
         let mut counts = std::collections::BTreeMap::new();
         for p in patches {
             let tag = match p {
@@ -201,6 +185,10 @@ fn local_vs_deploy_patches_are_structurally_identical() {
                 hypen_engine::Patch::Remove { .. } => "Remove",
                 hypen_engine::Patch::Detach { .. } => "Detach",
                 hypen_engine::Patch::Attach { .. } => "Attach",
+                hypen_engine::Patch::SetSemantics { .. } => "SetSemantics",
+                hypen_engine::Patch::BatchAnimation { .. } => "BatchAnimation",
+                hypen_engine::Patch::RegisterTemplate { .. } => "RegisterTemplate",
+                hypen_engine::Patch::Instantiate { .. } => "Instantiate",
             };
             *counts.entry(tag).or_insert(0) += 1;
         }

@@ -1,0 +1,109 @@
+{
+  "name": "violation-camera-content-type-does-not-fit-mode",
+  "description": "camera.capture@1 metadata must fit the request (RFC 001 \u00a72.4 disallowed metadata): a photo request announcing a video/mp4 item is a blob violation, and a content type outside the camera set (image/png) fails the event schema.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "camera.capture",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 65536,
+        "params": {
+          "mode": "photo"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "video/mp4"
+        }
+      },
+      "expectViolation": "blob"
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "cancel": true
+        }
+      },
+      "reaction": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 3,
+        "capability": "camera.capture",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 65536,
+        "params": {
+          "mode": "video"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 3,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "image/png"
+        }
+      },
+      "expectViolation": "invalidPayload"
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 3,
+        "control": {
+          "cancel": true
+        }
+      },
+      "reaction": true
+    }
+  ]
+}

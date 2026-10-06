@@ -63,6 +63,9 @@ public final class ManagedRouter: @unchecked Sendable {
     private var activeRoute: RouteDefinition?
     private var unsubscribe: (() -> Void)?
     private var persistedModules: [String: ModuleInstance] = [:]
+    /// The connection's device plane (RFC 001), bound to every route module
+    /// this router mounts so their activations own device work.
+    private var devicePlane: DevicePlane?
     private let log = HypenLoggers.router
 
     public init(
@@ -122,7 +125,7 @@ public final class ManagedRouter: @unchecked Sendable {
         // the engine's action-dispatch call stack so we don't re-enter
         // the WASM state proxy (same reason the TS SDK queues a
         // microtask and the Go SDK uses `go func`).
-        let defer_ = { (work: @escaping () -> Void) in
+        let defer_ = { (work: @escaping @Sendable () -> Void) in
             DispatchQueue.global().async(execute: work)
         }
         let readTo: (Any?) -> String? = { payload in
@@ -166,7 +169,31 @@ public final class ManagedRouter: @unchecked Sendable {
         for (moduleId, instance) in persisted {
             instance.destroy()
             globalContext.unregisterModule(moduleId)
+            // Full stop: these are gone for good, so drop them from the
+            // engine too. See `executeUnmount` for why this call belongs on
+            // the destroy path and nowhere else.
+            instance.engine.unregisterModule(instance.engineScope)
         }
+    }
+
+    /// Bind (or unbind, with nil) the connection's device plane: the active
+    /// and persisted route modules are attached now, every module mounted
+    /// later before it activates.
+    public func attachDevice(_ plane: DevicePlane?) {
+        lock.lock()
+        devicePlane = plane
+        lock.unlock()
+        for instance in liveInstances() { instance.attachDevice(plane) }
+    }
+
+    /// The active route module plus every persisted (cached) one.
+    public func liveInstances() -> [ModuleInstance] {
+        lock.lock()
+        defer { lock.unlock() }
+        var out: [ModuleInstance] = []
+        if let active = activeModule { out.append(active) }
+        out.append(contentsOf: persistedModules.values)
+        return out
     }
 
     /// Get the currently active module instance.
@@ -276,7 +303,11 @@ public final class ManagedRouter: @unchecked Sendable {
         lock.lock()
         activeModule = instance
         activeRoute = matched
+        let plane = devicePlane
         lock.unlock()
+        // Bound before activation, so the first activation is registered
+        // with the connection's broker.
+        instance.attachDevice(plane)
 
         // Fire onActivated after construction (onCreated has already run
         // in the instance's init block).
@@ -344,9 +375,21 @@ public final class ManagedRouter: @unchecked Sendable {
             lock.lock()
             persistedModules[info.moduleId] = info.module
             lock.unlock()
+            // Deliberately still registered in the engine (and in
+            // GlobalContext). An off-screen module keeps its state and actions
+            // so siblings can read it and so returning to the route doesn't
+            // replay `onCreated`. Unregistering here would take both away and
+            // break the persist cache — which is why
+            // `NativeEngine.unregisterModule` is a destroy-path call only.
         } else {
             info.module.destroy()
             globalContext.unregisterModule(info.moduleId)
+            // Destroyed, not persisted — so its actions must stop being
+            // externally dispatchable too. Unregister by the instance's own
+            // engine scope rather than `moduleId`: the two agree for every
+            // named module, but a route carrying an unnamed inline definition
+            // registers under the engine's "Module" fallback.
+            info.module.engine.unregisterModule(info.module.engineScope)
             log.debug("Unmounted module: %@", info.moduleId)
         }
     }

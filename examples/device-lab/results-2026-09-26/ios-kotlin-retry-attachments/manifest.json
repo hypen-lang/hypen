@@ -1,0 +1,53 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "0DE18F3F-D09C-4660-A09E-4C6F354664A0.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Kotlin-ping_0_DFBF4D50-8A01-47C0-ACB9-BF4B5D81B2EB.png",
+        "timestamp" : 1790421189.055
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "C0311748-EAF8-4763-A322-A770C70E44EE.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Kotlin-record_0_88168283-16B3-4687-978F-AAB6B22BA42C.png",
+        "timestamp" : 1790421187.561
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "C6DF2BF5-4BD2-4C25-8526-736714672581.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Kotlin-save_0_86CF10FB-AFD0-4C9B-89EE-CFA951519B70.png",
+        "timestamp" : 1790421179.815
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "F25C41E0-E72B-4958-8E05-5788E883217E.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Kotlin-gallery_0_87CD35C3-014D-48E5-A947-C05A4D4860BF.png",
+        "timestamp" : 1790421168.472
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "8F1BDD50-F3BF-4ACD-B357-C249E584A65B.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Kotlin-query_0_E65B3365-21DB-4C22-B8EA-A44BD0963174.png",
+        "timestamp" : 1790421163.261
+      }
+    ],
+    "testIdentifier" : "DeviceLabUITests/testKotlin()",
+    "testIdentifierURL" : "test://com.apple.xcode/HypenGallery/HypenGalleryUITests/DeviceLabUITests/testKotlin"
+  }
+]

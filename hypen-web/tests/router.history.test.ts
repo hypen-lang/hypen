@@ -586,3 +586,53 @@ describe("HypenRouter - History Integration", () => {
     });
   });
 });
+
+describe("HypenRouter - windowless (server/worker) history", () => {
+  test("back() pops the internal stack when no window exists", () => {
+    const savedWindow = global.window;
+    // Simulate a worker: no window at construction time.
+    // @ts-expect-error deliberate removal
+    delete global.window;
+    try {
+      const router = new HypenRouter();
+      router.push("/");
+      router.push("/movie/detour");
+      router.push("/watch/detour");
+      expect(router.getCurrentPath()).toBe("/watch/detour");
+
+      router.back();
+      expect(router.getCurrentPath()).toBe("/movie/detour");
+      router.back();
+      expect(router.getCurrentPath()).toBe("/");
+
+      // back() past the stack bottom stays put instead of throwing —
+      // callers compare paths before/after for a fallback route.
+      const before = router.getCurrentPath();
+      router.back();
+      router.back();
+      expect(router.getCurrentPath()).toBe(before);
+    } finally {
+      global.window = savedWindow;
+    }
+  });
+
+  test("replace() and back-navigation itself do not grow the stack", () => {
+    const savedWindow = global.window;
+    // @ts-expect-error deliberate removal
+    delete global.window;
+    try {
+      const router = new HypenRouter();
+      router.push("/a");
+      router.replace("/b"); // replace: no history entry
+      router.push("/c");
+      router.back(); // → /b (the replaced path), not /a twice
+      expect(router.getCurrentPath()).toBe("/b");
+      // replace("/b") overwrote the /a entry (browser replaceState
+      // semantics), and the back-navigation itself didn't push /c:
+      router.back();
+      expect(router.getCurrentPath()).toBe("/");
+    } finally {
+      global.window = savedWindow;
+    }
+  });
+});

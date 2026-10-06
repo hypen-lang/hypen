@@ -83,5 +83,16 @@ enum BuiltInApps {
             description: "User profile demo",
             isBuiltIn: true
         ),
+        // Served by component-gallery-server rather than a standalone example.
+        // It lives here, in the browser shell, because that is the host that
+        // renders Hypen content fully edge-to-edge — the component-preview
+        // sheet keeps its navigation bar, so only its bottom edge bleeds.
+        HypenAppEntry(
+            id: "safearea",
+            name: "SafeArea",
+            url: "ws://\(GalleryItems.serverHost):\(GalleryItems.serverPort)/components/safearea",
+            description: "Notch & home-indicator insets",
+            isBuiltIn: true
+        ),
     ]
 }

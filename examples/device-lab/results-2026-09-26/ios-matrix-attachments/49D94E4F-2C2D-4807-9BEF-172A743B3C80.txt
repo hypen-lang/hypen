@@ -1,0 +1,28 @@
+Application, 0x11249f840, pid: 92397, label: 'HypenGallery' <App element pid: 92397>
+  Window (Main), 0x11249fac0, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 92397, elementOrHash.elementID: 4393583616.4>
+    Other, 0x11249fc00, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 92397, elementOrHash.elementID: 4450839552.5>
+      Other, 0x11249fd40, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 92397, elementOrHash.elementID: 4452059008.6>
+        Other, 0x11249fe80, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 92397, elementOrHash.elementID: 4393584640.7>
+          Other, 0x102a6f5c0, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 92397, elementOrHash.elementID: 4395284928.8>
+            StaticText, 0x1125a0000, {{18.0, 110.0}, {157.0, 26.3}}, label: 'Device Lab · Go' <AX element pid: 92397, elementOrHash.elementID: 4450858112.9>
+            StaticText, 0x1125a0140, {{18.0, 146.3}, {162.0, 14.3}}, label: 'Real host / real server · run 2' <AX element pid: 92397, elementOrHash.elementID: 4394907200.10>
+            StaticText, 0x1125a0280, {{26.0, 178.7}, {49.0, 20.3}}, label: 'Status' <AX element pid: 92397, elementOrHash.elementID: 4395096640.11>
+            StaticText, 0x1125a03c0, {{97.0, 178.7}, {107.7, 20.3}}, label: 'Query camera' <AX element pid: 92397, elementOrHash.elementID: 4394827776.12>
+            StaticText, 0x1125a0500, {{226.7, 178.7}, {60.0, 20.3}}, label: 'Ask mic' <AX element pid: 92397, elementOrHash.elementID: 4395371584.13>
+            StaticText, 0x1125a0640, {{26.0, 225.0}, {81.0, 20.3}}, label: 'Pick photo' <AX element pid: 92397, elementOrHash.elementID: 4395010240.14>
+            StaticText, 0x1125a0780, {{129.0, 225.0}, {59.3, 20.3}}, label: 'Pick file' <AX element pid: 92397, elementOrHash.elementID: 4395014720.15>
+            StaticText, 0x1125a08c0, {{210.3, 225.0}, {72.7, 20.3}}, label: 'Save 96K' <AX element pid: 92397, elementOrHash.elementID: 4395017408.16>
+            StaticText, 0x1125a0a00, {{26.0, 271.3}, {59.3, 20.3}}, label: 'Camera' <AX element pid: 92397, elementOrHash.elementID: 4395075328.17>
+            StaticText, 0x1125a0b40, {{107.3, 271.3}, {77.3, 20.3}}, label: 'Record 3s' <AX element pid: 92397, elementOrHash.elementID: 4395078912.18>
+            StaticText, 0x1125a0c80, {{206.7, 271.3}, {61.0, 20.3}}, label: 'Scan 3s' <AX element pid: 92397, elementOrHash.elementID: 4395084736.19>
+            StaticText, 0x1125a0dc0, {{26.0, 317.7}, {73.7, 20.3}}, label: 'Bluetooth' <AX element pid: 92397, elementOrHash.elementID: 4395089216.20>
+            StaticText, 0x1125a0f00, {{121.7, 317.7}, {52.7, 20.3}}, label: 'Cancel' <AX element pid: 92397, elementOrHash.elementID: 4395271936.21>
+            StaticText, 0x1125a1040, {{196.3, 317.7}, {54.0, 20.3}}, label: 'UI ping' <AX element pid: 92397, elementOrHash.elementID: 4395273280.22>
+            StaticText, 0x1125a1180, {{18.0, 356.0}, {291.0, 17.0}}, label: 'gallery: device: unavailable (device-disabled)' <AX element pid: 92397, elementOrHash.elementID: 4395274176.23>
+            StaticText, 0x1125a12c0, {{18.0, 383.0}, {18.7, 13.3}}, label: 'null' <AX element pid: 92397, elementOrHash.elementID: 4395275072.24>
+            StaticText, 0x1125a1400, {{18.0, 406.3}, {237.0, 39.7}}, label: 'gallery: device: unavailable (device-disabled)
+query: device: unavailable (device-disabled)
+' <AX element pid: 92397, elementOrHash.elementID: 4395277312.25>
+            Other, 0x1125a1540, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 92397, elementOrHash.elementID: 4395278208.26>
+            Button, 0x1125a1680, {{154.7, 76.8}, {89.7, 14.3}}, label: 'Browser chrome, collapsed. 127.0.0.1:45102' <AX element pid: 92397, elementOrHash.elementID: 4395279104.27>
+            Button, 0x1125a17c0, {{251.3, 81.7}, {8.0, 4.7}}, identifier: 'chevron.down', label: 'Browser chrome, collapsed. 127.0.0.1:45102' <AX element pid: 92397, elementOrHash.elementID: 4395280896.28>

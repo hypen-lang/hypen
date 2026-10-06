@@ -102,6 +102,7 @@ fn test_column_with_text_children() {
                 id,
                 element_type,
                 props,
+                ..
             } => {
                 println!(
                     "  [{}] Create: id={}, type={}, props={:?}",

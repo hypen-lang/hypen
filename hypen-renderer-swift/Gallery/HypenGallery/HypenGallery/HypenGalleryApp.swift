@@ -12,6 +12,15 @@ struct HypenGalleryApp: App {
     @State private var deepLinkItem: GalleryItem?
     @State private var previewUrl: String?
 
+    init() {
+        self.init(arguments: ProcessInfo.processInfo.arguments)
+    }
+
+    init(arguments: [String]) {
+        _deepLinkItem = State(initialValue: GalleryLaunchArguments.galleryItem(from: arguments))
+        _previewUrl = State(initialValue: ProcessInfo.processInfo.environment["DEVICE_LAB_URL"])
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView(deepLinkItem: $deepLinkItem, previewUrl: $previewUrl)

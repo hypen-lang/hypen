@@ -1,0 +1,30 @@
+module App {
+  SafeArea {
+    Column {
+      Row { Text("orbit").fontSize(26).fontWeight("bold").color("#c9ff70") Spacer() Text("THE MARKET, IN FOUR CHARTS").fontSize(9).color("#909097") }.fillMaxWidth().alignItems("center")
+      Row { Text("IBM · @{state.price}").fontSize(23).fontWeight("bold") Spacer() Text("+8.60% / 30D").fontSize(10).color("#c9ff70") }.fillMaxWidth().alignItems("center")
+      Chart(y: @state.domain) {
+        Axis(y, ticks: 4, grid: true)
+        Area(points: @state.points, smooth: true).fill("#c9ff70").fillOpacity(0.06)
+        Rule(y: @state.baseline).stroke("#55555d").strokeWidth(1)
+        Line(points: @state.points, smooth: true).stroke("#c9ff70").strokeWidth(2.5).glow(color: "#baff59", radius: 4.5).onClick(@actions.inspect)
+        Marker(x: @state.hover.x, y: @state.hover.y) { Text("@{state.hover.label}").fontSize(10).padding(4).backgroundColor("#c9ff70").color("#080a06") }
+      }.height(155).fillMaxWidth().color("#66666f")
+      Text("Daily volume · millions of shares").fontSize(11).color("#909097")
+      Chart { Bars(data: @state.volume, radius: 2).fill("#75718c") }.height(50).fillMaxWidth()
+      Row { Text("Paper portfolio").fontSize(16).fontWeight("bold") Spacer() Text("@{state.total}").fontSize(19).fontWeight("bold").color("#b7a4ff") }.fillMaxWidth().alignItems("center")
+      Chart {
+        Area(points: @state.portfolio, smooth: true).fill("#b7a4ff").fillOpacity(0.08)
+        Line(points: @state.portfolio, smooth: true).stroke("#b7a4ff").strokeWidth(2.2).glow(color: "#a18aff", radius: 4)
+      }.height(85).fillMaxWidth()
+      Text("Capital at work · USD").fontSize(16).fontWeight("bold")
+      Chart {
+        Axis(x)
+        Axis(y, ticks: 3, grid: true)
+        Bars(data: @state.allocation, x: "symbol", y: "value", highlight: @state.selected, radius: 5).fill("#b7a4ff").glow(color: "#7864c7", radius: 2).onClick(@actions.allocation)
+      }.height(145).fillMaxWidth().color("#909097")
+      Text("IBM: Alpha Vantage snapshot · 2026-09-04").fontSize(9).color("#909097")
+      Text("Other symbols and paper holdings are demo fixtures.").fontSize(9).color("#909097")
+    }.padding(20).gap(12).fillMaxWidth().color("#f5f5f7")
+  }.fillMaxSize().backgroundColor("#050505")
+}

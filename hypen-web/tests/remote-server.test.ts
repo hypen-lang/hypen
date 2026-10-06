@@ -297,3 +297,137 @@ describe("RemoteServer syncActions + updateState", () => {
     expect(devicePatch.patches.length).toBeGreaterThan(0);
   });
 });
+
+describe("RemoteServer compression", () => {
+  let server: RemoteServer | null = null;
+  let clients: Client[] = [];
+  const PORT = 19880;
+
+  afterEach(async () => {
+    for (const c of clients) c.close();
+    clients = [];
+    await wait(50);
+    server?.stop();
+    server = null;
+    await wait(50);
+  });
+
+  /**
+   * Start a server while intercepting `Bun.serve` so we can assert on the
+   * websocket options `listen()` actually hands to Bun.
+   */
+  async function listenCapturingServeOptions(s: RemoteServer): Promise<any> {
+    const originalServe = Bun.serve;
+    let captured: any = null;
+    (Bun as any).serve = (options: any) => {
+      captured = options;
+      return (originalServe as any)(options);
+    };
+    try {
+      await s.listen(PORT);
+    } finally {
+      (Bun as any).serve = originalServe;
+    }
+    return captured;
+  }
+
+  // Per-message DEFLATE: "shared" (de)compressors = no context takeover in
+  // both directions (never "dedicated", which keeps a sliding window).
+  const PER_MESSAGE = { compress: "shared", decompress: "shared" };
+
+  test("per-message permessage-deflate by default (device plane on) with a 4 MiB payload cap", async () => {
+    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI);
+
+    const options = await listenCapturingServeOptions(server);
+    expect(options.websocket.perMessageDeflate).toEqual(PER_MESSAGE);
+    expect(options.websocket.maxPayloadLength).toBe(4 * 1024 * 1024);
+  });
+
+  test("disableDevice(): same per-message compression, Bun's payload cap (UI-only server)", async () => {
+    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI).disableDevice();
+
+    const options = await listenCapturingServeOptions(server);
+    expect(options.websocket.perMessageDeflate).toEqual(PER_MESSAGE);
+    expect(options.websocket.maxPayloadLength).toBeUndefined();
+  });
+
+  test("explicit compression: true is the default: per-message DEFLATE, device plane still on (4 MiB cap)", async () => {
+    server = new RemoteServer()
+      .module("Counter", createCounterModule())
+      .ui(UI)
+      .config({ compression: true });
+
+    const options = await listenCapturingServeOptions(server);
+    expect(options.websocket.perMessageDeflate).toEqual(PER_MESSAGE);
+    expect(options.websocket.maxPayloadLength).toBe(4 * 1024 * 1024);
+  });
+
+  test("compression: false disables permessage-deflate (device plane unaffected: 4 MiB cap)", async () => {
+    server = new RemoteServer()
+      .module("Counter", createCounterModule())
+      .ui(UI)
+      .config({ compression: false });
+
+    const options = await listenCapturingServeOptions(server);
+    expect(options.websocket.perMessageDeflate).toBe(false);
+    expect(options.websocket.maxPayloadLength).toBe(4 * 1024 * 1024);
+  });
+
+  test("still serves the initial tree with compression enabled", async () => {
+    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI).config({ compression: true });
+
+    await server.listen(PORT);
+
+    const client = await connectClient(PORT);
+    clients.push(client);
+    const initMsg = await client.waitForMessage((m) => m.type === "initialTree");
+
+    expect(initMsg.state.count).toBe(0);
+    expect(initMsg.patches.length).toBeGreaterThan(0);
+  });
+});
+
+describe("RemoteServer default web client", () => {
+  let server: RemoteServer | null = null;
+  const PORT = 19881;
+
+  afterEach(async () => {
+    server?.stop();
+    server = null;
+    await wait(50);
+  });
+
+  test("serves an HTML shell and client bundle at / by default", async () => {
+    server = new RemoteServer()
+      .module("Counter", createCounterModule())
+      .ui(UI);
+    await server.listen(PORT);
+
+    const page = await fetch(`http://localhost:${PORT}/`);
+    expect(page.status).toBe(200);
+    expect(page.headers.get("content-type")).toContain("text/html");
+    const html = await page.text();
+    expect(html).toContain('<div id="app">');
+    expect(html).toContain("/__hypen__/client.js");
+
+    const bundle = await fetch(`http://localhost:${PORT}/__hypen__/client.js`);
+    expect(bundle.status).toBe(200);
+    expect(bundle.headers.get("content-type")).toContain("javascript");
+    const js = await bundle.text();
+    expect(js.length).toBeGreaterThan(1000);
+  });
+
+  test("webClient: false keeps the plain-text HTTP responses", async () => {
+    // Own port: reusing PORT can ride a kept-alive connection into the
+    // previous test's still-draining server and read its HTML instead.
+    const port = PORT + 1;
+    server = new RemoteServer()
+      .module("Counter", createCounterModule())
+      .ui(UI)
+      .config({ webClient: false });
+    await server.listen(port);
+
+    const page = await fetch(`http://localhost:${port}/`);
+    expect(await page.text()).toBe("Hypen Remote Server");
+  });
+});

@@ -144,35 +144,61 @@ Handles text measurement and rendering:
 - **Text Alignment**: left, center, right, top, middle, bottom
 - **Caching**: Text metrics are cached for performance
 
-### 5. Input Overlay (`input.ts`)
+### 5. Native Text Editing (`editing.ts`)
 
-Since canvas can't handle text input natively, we use DOM overlays:
+Text, caret, and selection inside `Input`/`Textarea` are painted **on the
+canvas** — there is no visible DOM overlay. The browser does the actual
+editing (typing, caret movement, word-jumps, select-all, clipboard, undo,
+IME composition) in a single hidden **proxy textarea** positioned at the
+caret (the Monaco/xterm.js approach); the `TextEditController` reads
+`value`/`selectionStart`/`selectionEnd` after each event and the canvas
+paints the result. Focus and accessibility stay on the node's mirror
+element (below) — browsers won't run text editing on unrendered fallback
+content, which is why the keystroke stream needs the proxy. Positioning the
+proxy at the caret also puts the IME candidate window next to the painted
+text.
+
+**Editing visuals (painted in `paint.ts#paintInput`):**
+- Selection highlight and blinking caret via shared `text-geometry.ts` math
+- IME composition range underlined (dashed)
+- Single-line inputs pan horizontally (`scrollX`) to keep the caret visible
+- Click/drag on the canvas maps point → character offset → `setSelectionRange`
+
+Two-way binding dispatches `__hypen_bind {path, value}` on input (suppressed
+during IME composition; flushed at `compositionend`).
+
+### 6. Accessibility & Focus (`accessibility.ts`, `focus.ts`)
+
+A live DOM mirror of the virtual tree is rendered as a **transparent
+positioned overlay** above the canvas (the Flutter-web approach), with every
+element absolutely positioned at its painted bounds and `pointer-events:
+none` so the canvas keeps all pointer interaction.
+
+Canvas *fallback content* was evaluated first and rejected on evidence:
+Chromium exposes fallback elements to the accessibility tree (names, roles,
+focus, Tab order all work) but gives them **zero geometry** — and screen
+reader browse modes (VoiceOver cursor, rotor, touch exploration) are
+geometry-driven, so they skip boundless elements entirely.
 
 **Strategy:**
-1. When canvas input is focused, create a real `<input>` element
-2. Position it exactly over the canvas input (invisible to user)
-3. Style it to match the canvas input appearance
-4. Capture input and update state
-5. Remove overlay when focus is lost
-
-**Supports:**
-- Single-line text input
-- Multi-line textarea
-- Number input
-- Custom styling
-
-### 6. Accessibility (`accessibility.ts`)
-
-Maintains a shadow DOM tree for screen readers:
-
-**Strategy:**
-1. Create hidden DOM tree that mirrors canvas structure
-2. Use semantic HTML (button, input, etc.)
-3. Update shadow DOM when patches are applied
-4. Support keyboard navigation
-5. ARIA labels and roles
-
-This makes the canvas renderer fully accessible without impacting visual rendering.
+1. Mirror elements use semantic HTML (button, input, h1-h6, ...) driven by
+   the engine-derived `Semantics` block, invisibly rendered (transparent
+   text/background; placeholders and selection suppressed via a shared
+   stylesheet) so AT gets real boxes and native focus rings land exactly
+   over the painted controls
+2. The mirror is synced **incrementally** from the patch stream
+   (create/insert/move/remove/detach/attach) — element identity survives
+   re-renders and router navigation, so AT focus/virtual-cursor position
+   is never destroyed by an update; element positions are refreshed after
+   every canvas render
+3. Real DOM focus on mirror elements is the **single source of truth** for
+   focus: Tab/Shift+Tab work natively, `focusin`/`focusout` drive
+   `node.focused` and the painted focus ring, and the canvas hit-test path
+   funnels into the same place by focusing the node's mirror element
+4. Enter/Space on a mirror `<button>` (or AT activation) dispatches the
+   node's action — identical payload to a canvas click
+5. The `<canvas>` itself is `aria-hidden` — the overlay carries all
+   semantics
 
 ## Supported Components
 
@@ -193,6 +219,18 @@ All Hypen components work with the canvas renderer:
 
 ### Media Components
 - **Image**: Image rendering (basic support)
+- **Video**: Inline playback via an offscreen `<video>` element drawn to the
+  canvas each frame (see `hypen-docs/content/docs/guide/components.mdx` for the cross-platform
+  contract). Supports `src`/`playlist` (auto-advance + `loop` wrap),
+  `poster`, `autoplay` (with muted fallback), `muted`, `loop`, `preload`,
+  `objectFit` (`contain` default, `cover`, `fill`), `headers`
+  (fetch → Blob fallback), and the `onPlay`/`onPause`/`onEnded`/
+  `onTrackChange`/`onError` action props. Controls are the canvas common
+  denominator: **tap toggles play/pause** when `controls` is set — there is
+  no scrubber/volume UI. Repaints are driven by a rAF loop that runs only
+  while a video is actually playing. Note: the offscreen elements are keyed
+  by node id in a module-level cache, so two `CanvasRenderer` instances on
+  the same page should not share node ids.
 
 ## Configuration Options
 
@@ -203,9 +241,9 @@ const renderer = new CanvasRenderer(canvas, engine, {
   backgroundColor: "#ffffff",                  // Canvas background
   
   // Features
-  enableAccessibility: true,      // Shadow DOM for screen readers
+  enableAccessibility: true,      // Fallback-content mirror: screen readers,
+                                  // Tab focus, and text-input editing
   enableHitTesting: true,         // Mouse event handling
-  enableInputOverlay: true,       // DOM overlays for text input
   
   // Performance (future)
   enableDirtyRects: false,        // Only redraw changed regions
@@ -257,6 +295,8 @@ open examples/canvas-counter.html
 - ❌ No shadows
 - ❌ No transforms (rotate/scale/skew)
 - ❌ Limited image support
+- ⚠️ Video controls are tap-to-toggle only (no scrubber, volume, or
+  fullscreen UI); HLS only where the browser decodes it natively (Safari)
 
 ### Future Improvements
 All of these are planned for future releases!

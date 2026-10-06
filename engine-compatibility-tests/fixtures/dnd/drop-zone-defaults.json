@@ -1,0 +1,33 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "drop-zone-defaults",
+  "description": "A .dropZone with no usable arguments still lowers: group defaults to null (accepts any group), an out-of-range band (must be within 0..=1) warns and falls back to 0.5, and the optional pieces __dnd.zoneId / __dnd.zoneEnabled are simply absent (renderers use the node's id / treat the zone as enabled)",
+  "category": "dnd",
+  "priority": "P1",
+
+  "input": {
+    "source": "Row().dropZone(band: 7)",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Row",
+        "props": {
+          "__dnd.zone": { "group": null, "band": 0.5 }
+        },
+        "absentProps": ["dropZone.0", "dropZone.band", "__dnd.zoneId", "__dnd.zoneEnabled"]
+      },
+      { "type": "insert" }
+    ]
+  }
+}

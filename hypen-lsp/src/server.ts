@@ -23,11 +23,17 @@ import {
   SignatureHelp,
   SignatureHelpParams,
   SignatureInformation,
-  ParameterInformation
+  ParameterInformation,
+  CodeAction,
+  CodeActionKind,
+  CodeActionParams
 } from "vscode-languageserver/node";
 
 import { TextDocument } from "vscode-languageserver-textdocument";
 import { parseHypenDocument, getContextAtPosition, isInString, initWasmParser, isWasmParserAvailable } from "./parser";
+import { a11yDiagnostics, initWasmEngine } from "./a11y";
+import { tailwindDiagnostics } from "./tailwind";
+import { computeQuickFix } from "./quickfix";
 
 // Create a connection for the server
 const connection = createConnection(ProposedFeatures.all);
@@ -65,6 +71,7 @@ connection.onInitialize((params: InitializeParams) => {
       hoverProvider: true,
       documentSymbolProvider: true,
       documentFormattingProvider: true,
+      codeActionProvider: true,
       signatureHelpProvider: {
         triggerCharacters: ["(", ","],
         retriggerCharacters: [","]
@@ -97,6 +104,17 @@ connection.onInitialized(async () => {
     connection.console.log("Hypen LSP: WASM parser loaded successfully");
   } else {
     connection.console.log("Hypen LSP: Using regex-based parser (WASM not available)");
+  }
+
+  // Try to load the engine WASM for accessibility conformance squiggles.
+  const engineLoaded = await initWasmEngine();
+  if (engineLoaded) {
+    connection.console.log("Hypen LSP: engine WASM loaded — a11y diagnostics active");
+    // Documents validated before the engine finished loading have no a11y
+    // findings yet — revalidate them now.
+    documents.all().forEach(validateTextDocument);
+  } else {
+    connection.console.log("Hypen LSP: engine WASM not available — a11y diagnostics disabled");
   }
 });
 
@@ -199,6 +217,15 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
     });
   }
 
+  // Accessibility conformance squiggles (source: "hypen-a11y", code: rule).
+  // No-op until the engine WASM has loaded; parse failures return [] so a
+  // syntax error is never double-reported.
+  diagnostics.push(...a11yDiagnostics(text));
+
+  // `.tw("absolute …")` & friends: CSS positioning is a hard error in the
+  // engine's Tailwind parser (Hypen has no positioning model); mirror it here.
+  diagnostics.push(...tailwindDiagnostics(text));
+
   // Send the computed diagnostics to VSCode
   connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });
 }
@@ -209,15 +236,17 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
 
 const commonComponents = [
   // Layout
-  "Column", "Row", "Container", "Box", "Center", "Stack", "Grid", "Spacer", "Divider",
+  "Column", "Row", "Container", "Box", "Center", "Stack", "Grid", "Spacer", "Divider", "SafeArea",
   // Content
   "Text", "Heading", "Paragraph", "Image", "Avatar", "Badge", "Card", "Spinner", "ProgressBar",
   // Input
-  "Button", "Input", "Textarea", "Checkbox", "Switch", "Select", "Slider",
+  "Button", "Input", "Textarea", "Checkbox", "Switch", "Select", "Slider", "Scrubber",
   // Navigation
   "Router", "Route", "Link",
   // Media
-  "Video", "Audio"
+  "Video", "Audio",
+  // Charts (data-space marks inside a Chart)
+  "Chart", "Axis", "Line", "Area", "Bars", "Points", "Rule", "Marker", "Path"
 ];
 
 // ─── Applicators ─────────────────────────────────────────────────────────────
@@ -255,7 +284,7 @@ const commonApplicators = [
   // Position
   "position", "offset", "zIndex",
   // Grid
-  "gridColumns", "gridTemplateColumns", "gridAutoFlow", "gridAutoRows",
+  "gridColumns", "gridColumn",
   // Background
   "linearGradient", "radialGradient",
   // Display
@@ -266,8 +295,15 @@ const commonApplicators = [
   "onClick", "onPress", "onChange", "onSubmit", "onInput",
   "onKey", "onScroll", "onLongClick", "onLongPress",
   "onFocus", "onBlur", "onMouseEnter", "onMouseLeave",
+  // Drag and drop
+  "draggable", "dropZone", "sortable", "pinboard",
+  "onDragStart", "onDragOver", "onDrop", "onSort", "onPin", "onDragEnd",
   // Binding
   "bind",
+  // Composition
+  "slot",
+  // Renderer-local intents
+  "videoIntent",
   // Tailwind
   "tw"
 ];
@@ -326,6 +362,13 @@ const componentSignatures: Record<string, ComponentSignature> = {
     label: "Divider",
     documentation: "A thin horizontal line for visual separation. Style with `.color()` and `.height()`.\n\n```hypen\nColumn {\n  Text(\"Above\")\n  Divider\n  Text(\"Below\")\n}\n```",
     parameters: []
+  },
+  SafeArea: {
+    label: "SafeArea(edges?: List) { children }",
+    documentation: "Full-size vertical container that pads its content by the device safe-area insets (notch, status bar, home indicator). By default all four edges are inset; pass `edges` to limit which ones.\n\n```hypen\nSafeArea {\n  Column {\n    Text(\"Content clear of the notch\")\n  }\n}\n\nSafeArea(edges: [\"top\", \"bottom\"]) {\n  Text(\"Only vertical insets applied\")\n}\n```\n\nEmbedders can override the insets per edge (renderer option / environment value); unspecified edges keep the platform default.",
+    parameters: [
+      { label: "edges", documentation: "List of edges to inset: `\"top\"`, `\"right\"`, `\"bottom\"`, `\"left\"`. Omitted or empty means all four. Unknown values are ignored." }
+    ]
   },
 
   // ── Content ──
@@ -458,10 +501,32 @@ const componentSignatures: Record<string, ComponentSignature> = {
 
   // ── Media ──
   Video: {
-    label: "Video(src: String)",
-    documentation: "Embeds a video player.\n\n```hypen\nVideo(src: \"intro.mp4\")\n  .width(\"100%\")\n```",
+    label: "Video(src: String, playlist?: [String], poster?: String)",
+    documentation: "Embeds a video player. Plays a resolved streamable URL, or an ordered `playlist` of URLs with auto-advance — only URLs cross the wire, never media payloads.\n\n```hypen\nVideo(\n  src: \"https://cdn.example.com/intro.mp4\",\n  poster: \"thumbnail.jpg\",\n  controls: true,\n  startPosition: 90,\n  onError: @actions.playbackFailed,\n)\n  .fillMaxWidth(true)\n  .height(220)\n```\n\n**Props:** `src` (or positional), `playlist`, `startIndex`, `startPosition`, `poster`, `controls`, `autoplay`, `loop`, `muted`, `preload`, `headers`, plus the `onPlay` / `onPause` / `onEnded` / `onTrackChange` / `onError` action refs.\n\n`startPosition: Number` seeks once, when the source first becomes seekable — \"resume where you left off\" without a full bind. It re-arms when `src`/`playlist`/`headers` change.\n\n**Playback control — `.bind(@state.playback)`**\n\nBinds a playback struct: `{ playing: Boolean, position: Number, duration: Number, state: String }`. `playing`/`position` are read-write (a `position` write seeks, applied only past a 1 s epsilon); `duration`/`state` are renderer-owned. `state` is one of `idle` | `loading` | `playing` | `paused` | `ended` | `error`. The module must initialize the struct in `defineState` — writes to a missing parent path drop silently. Position reports are throttled to 250 ms while playing; transitions report immediately.\n\n**Composition slots**\n\nChildren tagged `.slot(\"controls\")`, `.slot(\"loading\")`, `.slot(\"error\")` or `.slot(\"poster\")` compose into the player chrome, overlaid full-bleed and shown/hidden by player state. A present slot replaces the built-in for that concern (a `controls` slot suppresses native chrome regardless of the `controls` prop). Untagged children are invalid — Video is a leaf otherwise.\n\n```hypen\nVideo(src: \"@{state.url}\", autoplay: true) {\n  Row {\n    Button { Text(\"⏯\") }\n      .onClick(@actions.togglePlay)\n    Scrubber()\n  }\n    .slot(\"controls\")\n\n  Column { Spinner() }\n    .slot(\"loading\")\n}\n  .bind(@state.playback)\n```",
     parameters: [
-      { label: "src", documentation: "Video URL or asset path" }
+      { label: "src", documentation: "Resolved streamable video URL (progressive MP4/WebM; HLS where the platform supports it)" },
+      { label: "playlist", documentation: "Ordered array of URLs played in sequence. Supersedes src when non-empty; auto-advances when a track ends" },
+      { label: "startIndex", documentation: "Index into playlist to start from (default 0, clamped to valid range)" },
+      { label: "poster", documentation: "Image URL shown before playback starts" },
+      { label: "controls", documentation: "Show native transport controls (default false)" },
+      { label: "autoplay", documentation: "Start playback when ready (default false; browsers fall back to muted autoplay)" },
+      { label: "loop", documentation: "Loop the video; with a playlist, wrap to track 0 after the last track (default false)" },
+      { label: "muted", documentation: "Start muted (default false)" },
+      { label: "preload", documentation: "Web preload hint: \"none\" | \"metadata\" | \"auto\" (default \"metadata\")" },
+      { label: "headers", documentation: "Map of extra HTTP request headers for media fetches (auth-protected streams)" },
+      { label: "onPlay", documentation: "@actions ref — playback starts/resumes. Payload: { type, src, index }" },
+      { label: "onPause", documentation: "@actions ref — playback pauses. Payload: { type, src, index }" },
+      { label: "onEnded", documentation: "@actions ref — a track finishes. Payload: { type, src, index, completed }" },
+      { label: "onTrackChange", documentation: "@actions ref — the playlist advances to a new track. Payload: { type, src, index }" },
+      { label: "onError", documentation: "@actions ref — the stream cannot be fetched or decoded. Payload: { type, src, index, status?, code?, message }" }
+    ]
+  },
+  Scrubber: {
+    label: "Scrubber(onSeek?: @actions.name, disabled?: Boolean)",
+    documentation: "Media timeline for a Video's `controls` slot. Inside a Video it wires itself to the enclosing player renderer-side: the thumb tracks playback at frame rate without touching module state, dragging previews locally, and only the release commits.\n\nCommit resolution: the Scrubber's own `.bind(...)` wins, else the enclosing Video's `.bind(@state.playback)`, else the `onSeek` action (payload `{ type: \"seek\", position }`). The local seek applies in every case, so the playhead moves even with no wire commit. Outside a Video, `Scrubber` renders inert.\n\nExposes the `slider` accessibility role, with `aria-valuemin`/`aria-valuemax`/`aria-valuenow` tracking the timeline; arrow keys seek ±5 s and commit immediately.\n\n```hypen\nVideo(src: \"@{state.url}\") {\n  Row {\n    Scrubber()\n      .fillMaxWidth(true)\n  }\n    .slot(\"controls\")\n}\n  .bind(@state.playback)\n```",
+    parameters: [
+      { label: "onSeek", documentation: "@actions ref — fallback seek commit when neither the Scrubber nor the Video carries a bind. Payload: { type: \"seek\", position }" },
+      { label: "disabled", documentation: "Render inert — not focusable, no commits (default false)" }
     ]
   },
   Audio: {
@@ -565,10 +630,8 @@ const applicatorSignatures: Record<string, ComponentSignature> = {
   offset:             { label: ".offset(x: Number, y: Number)", documentation: "Position offset (requires position: absolute/relative)", parameters: [{ label: "x", documentation: "Horizontal offset pixels" }, { label: "y", documentation: "Vertical offset pixels" }] },
   zIndex:             { label: ".zIndex(value: Number)", documentation: "Stacking order (higher = in front)", parameters: [{ label: "value", documentation: "Integer z-index" }] },
   // Grid
+  gridColumn:         { label: ".gridColumn(span: String)", documentation: "Columns a Grid item spans", parameters: [{ label: "span", documentation: "\"span 2\" (or 2)" }] },
   gridColumns:        { label: ".gridColumns(count: Number)", documentation: "Number of grid columns", parameters: [{ label: "count", documentation: "Column count" }] },
-  gridTemplateColumns: { label: ".gridTemplateColumns(template: String)", documentation: "CSS grid-template-columns", parameters: [{ label: "template", documentation: "e.g. \"1fr 2fr 1fr\", \"repeat(3, 1fr)\"" }] },
-  gridAutoFlow:       { label: ".gridAutoFlow(value: String)", documentation: "How auto-placed items flow", parameters: [{ label: "value", documentation: "row, column, dense" }] },
-  gridAutoRows:       { label: ".gridAutoRows(value: String)", documentation: "Default size of auto-created rows", parameters: [{ label: "value", documentation: "e.g. \"minmax(100px, auto)\"" }] },
   // Background
   linearGradient:     { label: ".linearGradient(direction: String, ...colors)", documentation: "Linear gradient background", parameters: [{ label: "direction", documentation: "Angle or direction, e.g. \"to right\", \"135deg\"" }] },
   radialGradient:     { label: ".radialGradient(...colors)", documentation: "Radial gradient background", parameters: [] },
@@ -592,8 +655,23 @@ const applicatorSignatures: Record<string, ComponentSignature> = {
   onBlur:             { label: ".onBlur(action: @actions.name)", documentation: "Fires when the element loses focus", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
   onMouseEnter:       { label: ".onMouseEnter(action: @actions.name)", documentation: "Fires when the mouse enters the element (desktop)", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
   onMouseLeave:       { label: ".onMouseLeave(action: @actions.name)", documentation: "Fires when the mouse leaves the element (desktop)", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  // Drag and drop (see hypen-web/docs/dnd.md)
+  draggable:          { label: ".draggable(group?: String, payload?: Any, handle?: Boolean, activation?: auto|slop|press|immediate, enabled?: Boolean)", documentation: "Marks the node as a lift surface. Named args only. `group` (static) defaults to the enclosing `.sortable`/`.pinboard`'s group; `payload` (bindable) rides in every drag event; `handle: true` is informational (no renderer reads it — a `.draggable` always lifts from its own subtree, so put `.draggable()` on the grip node); `activation` defaults to `auto` (mouse/pen 6px slop; touch: cross-axis slop inside an axis-constrained `.sortable`, 300ms press elsewhere); `enabled` is bindable.\n\n```hypen\nForEach(items: @state.tasks, key: \"id\") {\n  TaskRow(\"@{item.title}\").draggable()\n}\n```\n\nIdentity is the ForEach key — never pass an id.", parameters: [{ label: "group", documentation: "Static string — which zones/sortables/pinboards accept this source" }, { label: "payload", documentation: "Any value (may bind) — delivered as `payload` in every event" }, { label: "handle", documentation: "Boolean — informational in v1: no renderer reads it; a .draggable always lifts from its own subtree (place .draggable() on the grip)" }, { label: "activation", documentation: "auto (default: mouse 6px slop; touch cross-axis slop in an axis-constrained sortable, 300ms press elsewhere) | slop | press | immediate" }, { label: "enabled", documentation: "Boolean (may bind) — false makes the node inert to drag; flipping to false mid-drag cancels silently (no onDragEnd)" }] },
+  dropZone:           { label: ".dropZone(group?: String, id?: String, enabled?: Boolean, band?: Number)", documentation: "Makes the node a drop target a compatible drag can be dropped INTO. `id` (bindable, defaults to the node's `id` prop) is what `to.zone` carries; `enabled` (bindable) disables the target; `band` (0..1, default 0.5) is the middle fraction of a sortable item that means \"into\" — the outer parts fall through to reorder.\n\n```hypen\nRow { Text(\"Trash\") }\n  .dropZone(group: \"cards\", id: \"trash\")\n  .onDrop(@actions.deleteCard)\n  .states { onState(over).backgroundColor(\"#fee2e2\") }\n```", parameters: [{ label: "group", documentation: "Static string — which sources may land here (null = ungrouped sources)" }, { label: "id", documentation: "String (may bind / template) — the zone name in event payloads" }, { label: "enabled", documentation: "Boolean (may bind) — a disabled zone is transparent to drags" }, { label: "band", documentation: "0..1 (default 0.5) — 'into' band on a sortable item" }] },
+  sortable:           { label: ".sortable(group?: String, axis?: x|y)", documentation: "Declares a container whose ForEach children reorder by dragging. Add `.bind(@state.list)` and the engine reorders the list for you (`path_move`); omit it to own the mutation in `.onSort`. `group` defaults to the node's static `id` (else self-only); lists sharing a group transfer items between each other.\n\n```hypen\nColumn { ForEach(items: @state.tasks, key: \"id\") { TaskRow(\"@{item.title}\").draggable() } }\n  .sortable(axis: y)\n  .bind(@state.tasks)\n```", parameters: [{ label: "group", documentation: "Static string — defaults to the node's static id; null = self-only" }, { label: "axis", documentation: "x | y (default y) — the sort axis; also drives the touch activation rule" }] },
+  pinboard:           { label: ".pinboard(group?: String, x?: String, y?: String, grid?: Number, bounds?: clamp|free, units?: px|fraction)", documentation: "Declares a Stack whose ForEach children can be dropped anywhere and stay there. Without `.bind`, positions live in the reserved `__dnd.<group>.<key>` module state (group REQUIRED) and the engine injects the translates; with `.bind(@state.list)` the drop writes the `x`/`y` fields of your items and you author `.translateX(@item.x).translateY(@item.y)` yourself.\n\n```hypen\nStack { ForEach(items: @state.notes, key: \"id\") { StickyNote(\"@{item.text}\").draggable() } }\n  .size(1200, 800)\n  .pinboard(group: \"board\", grid: 8)\n```", parameters: [{ label: "group", documentation: "Static string — defaults to the node's static id; required in reserved-state mode" }, { label: "x", documentation: "Field name for the x coordinate (default \"x\")" }, { label: "y", documentation: "Field name for the y coordinate (default \"y\")" }, { label: "grid", documentation: "Snap increment (> 0)" }, { label: "bounds", documentation: "clamp (default) | free" }, { label: "units", documentation: "px (default) | fraction of the board's content box" }] },
+  onDragStart:        { label: ".onDragStart(action: @actions.name)", documentation: "Fires when a drag is claimed (after activation). On a draggable, or on a sortable/pinboard to cover all its children. Payload: `{ item, payload?, from, to }`. For a draggable outside any sortable/pinboard, `from.zone` is the nearest enclosing `.dropZone` id (else the parent node id) and `from.index` is null.", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  onDragOver:         { label: ".onDragOver(action: @actions.name, dwell?: Number)", documentation: "On a drop zone: fires once per entry after the pointer has rested over it for `dwell` ms (default 500) — the spring-loaded-folder hook. `dwell` is stripped from the payload.", parameters: [{ label: "action", documentation: "@actions.actionName" }, { label: "dwell", documentation: "Milliseconds the pointer must rest before firing (default 500)" }] },
+  onDrop:             { label: ".onDrop(action: @actions.name)", documentation: "On a drop zone: fires when a drop resolves INTO this zone. Nothing is written for you — the handler moves the data. Payload: `{ item, payload?, from: {zone, index}, to: {zone, index: null} }`.", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  onSort:             { label: ".onSort(action: @actions.name)", documentation: "On a sortable: fires on the DESTINATION list when a drop resolves as a reorder or a cross-list transfer, after the `.bind` write (if any) has been applied. Payload: `{ item, payload?, from: {zone, index}, to: {zone, index} }`.", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  onPin:              { label: ".onPin(action: @actions.name)", documentation: "On a pinboard: fires when a drop resolves as a position on the same board, after the position write. Payload adds `x`, `y` in the board's content-box units (after grid/units).", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  onDragEnd:          { label: ".onDragEnd(action: @actions.name)", documentation: "Fires on drop AND cancel, on the draggable or its enclosing sortable/pinboard. Payload adds `dropped: true | false`; a cancel fires only this event.", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
   // Binding
-  bind:               { label: ".bind(stateRef: @state.path)", documentation: "Two-way data binding. Syncs the form element's value with the given state path automatically.\n\nWorks with: Input, Textarea, Checkbox, Switch, Select, Slider.", parameters: [{ label: "stateRef", documentation: "@state.fieldName — the state path to bind to" }] },
+  bind:               { label: ".bind(stateRef: @state.path)", documentation: "Two-way data binding. Syncs the element's value with the given state path automatically.\n\nWorks with: Input, Textarea, Checkbox, Switch, Select, Slider.\n\nOn **Video** it binds a playback struct instead of a scalar — `{ playing, position, duration, state }`. `playing`/`position` are read-write (a `position` write seeks); `duration`/`state` are renderer-owned. Initialize the struct in `defineState` or the writes drop.\n\n```hypen\nVideo(src: \"@{state.url}\")\n  .bind(@state.playback)\n```\n\nOn **Scrubber** it overrides which struct a seek commits to (otherwise the enclosing Video's bind is used).", parameters: [{ label: "stateRef", documentation: "@state.fieldName — the state path to bind to" }] },
+  // Composition
+  slot:               { label: ".slot(name: String)", documentation: "Assigns the element to a named slot of its parent.\n\nOn a **component** with `Children().slot(\"name\")` placeholders, it routes the child into that placeholder.\n\nOn a **Video** child it selects a composition slot — `\"controls\"`, `\"loading\"`, `\"error\"` or `\"poster\"` — overlaid full-bleed on the video surface and shown/hidden by player state. A present slot replaces the built-in for that concern.\n\n```hypen\nVideo(src: \"@{state.url}\") {\n  Row { Scrubber() }\n    .slot(\"controls\")\n  Column { Spinner() }\n    .slot(\"loading\")\n}\n```", parameters: [{ label: "name", documentation: "Slot name. On Video: \"controls\", \"loading\", \"error\", \"poster\"" }] },
+  // Renderer-local intents
+  videoIntent:        { label: ".videoIntent(intent: String)", documentation: "Renderer-local video intent. Tag any element inside a **Video**'s subtree — typically a `controls`-slot button — and the renderer handles the tap itself: no action, no module, no round trip (platforms gate fullscreen behind a user gesture, which a network hop can lose).\n\n**`\"fullscreen\"`** — the only intent today. Toggles fullscreen on the **video container** (the wrapper hosting the surface *and* the composition slots), never on the raw platform video element, so custom controls stay overlaid instead of being replaced by native player chrome. The same tagged element toggles back out. Player state and events are unaffected — fullscreen is presentation only.\n\nInert outside a Video subtree, and inert on renderers that have not implemented it — so it is safe to author everywhere.\n\n```hypen\nVideo(src: \"@{state.url}\") {\n  Row {\n    Scrubber()\n    Button { Icon(@resources.fullscreen) }\n      .videoIntent(\"fullscreen\")\n      .label(\"Toggle fullscreen\")\n  }\n    .slot(\"controls\")\n}\n```", parameters: [{ label: "intent", documentation: "\"fullscreen\" — toggle the enclosing Video's container fullscreen" }] },
   // Tailwind
   tw:                 { label: ".tw(classes: String)", documentation: "Apply Tailwind CSS utility classes.\n\n```hypen\nContainer {\n  Text(\"Styled\")\n}\n  .tw(\"p-4 bg-blue-500 rounded-lg\")\n```", parameters: [{ label: "classes", documentation: "Space-separated Tailwind class names" }] }
 };
@@ -613,7 +691,8 @@ const componentArguments: Record<string, string[]> = {
   Slider: ["min", "max", "step", "value"],
   Route: ["path"],
   Link: ["to"],
-  Video: ["src", "autoplay", "controls", "loop", "muted"],
+  Video: ["src", "playlist", "startIndex", "startPosition", "poster", "controls", "autoplay", "loop", "muted", "preload", "headers", "onPlay", "onPause", "onEnded", "onTrackChange", "onError"],
+  Scrubber: ["onSeek", "disabled"],
   Audio: ["src", "autoplay", "controls", "loop"]
 };
 
@@ -1067,6 +1146,47 @@ connection.onDocumentFormatting((params: DocumentFormattingParams): TextEdit[] =
       newText: formatted
     }
   ];
+});
+
+// Quick fixes for accessibility diagnostics (source "hypen-a11y", code =
+// kebab rule id). Edit computation lives in quickfix.ts; here we only map
+// LSP ranges to string offsets and wrap the result in a WorkspaceEdit.
+connection.onCodeAction((params: CodeActionParams): CodeAction[] => {
+  const document = documents.get(params.textDocument.uri);
+  if (!document) {
+    return [];
+  }
+
+  const text = document.getText();
+  const actions: CodeAction[] = [];
+
+  for (const diagnostic of params.context.diagnostics) {
+    if (diagnostic.source !== "hypen-a11y" || typeof diagnostic.code !== "string") {
+      continue;
+    }
+    const fix = computeQuickFix(text, {
+      code: diagnostic.code,
+      startOffset: document.offsetAt(diagnostic.range.start),
+      endOffset: document.offsetAt(diagnostic.range.end)
+    });
+    if (!fix) {
+      continue;
+    }
+    actions.push({
+      title: fix.title,
+      kind: CodeActionKind.QuickFix,
+      diagnostics: [diagnostic],
+      edit: {
+        changes: {
+          [params.textDocument.uri]: [
+            TextEdit.insert(document.positionAt(fix.insertOffset), fix.newText)
+          ]
+        }
+      }
+    });
+  }
+
+  return actions;
 });
 
 function formatHypenDocument(text: string, tabSize: number): string {

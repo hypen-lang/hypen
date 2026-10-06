@@ -27,9 +27,14 @@ class CenterComponent : ComponentHandler {
         // This matches iOS which has .frame(maxWidth: .infinity, maxHeight: .infinity)
         Box(
             modifier = modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center,
+            // Centred unless the author aligned an axis explicitly.
+            contentAlignment = hypenContentAlignment(
+                element,
+                defaultHorizontal = Alignment.CenterHorizontally,
+                defaultVertical = Alignment.CenterVertically,
+            ),
         ) {
-            renderChildren()
+            ProvideHypenContentColor(element, renderChildren)
         }
     }
 }

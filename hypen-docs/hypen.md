@@ -103,6 +103,7 @@ Text(@spacetime.messages)               // Data source reference
 | `List { }` | Virtualized scrollable list |
 | `Spacer()` | Flexible space |
 | `Divider()` | Separator line |
+| `SafeArea { }` | Vertical stack padded by device safe-area insets; optional `edges: ["top", ...]` (default: all four) |
 
 ### Content
 | Component | Description |
@@ -139,7 +140,7 @@ Text(@spacetime.messages)               // Data source reference
 ### Media
 | Component | Description |
 |-----------|-------------|
-| `Video(src: "url")` | Video player (Web, iOS, Android) |
+| `Video(src: "url")` | Video player (Web, iOS, Android). Also takes `playlist: [urls]` (auto-advance), `startIndex`, `poster`, `controls`, `autoplay`, `loop`, `muted`, `preload`, `headers`, `title`, and event actions `onPlay`/`onPause`/`onEnded`/`onTrackChange`/`onError` |
 | `Audio(src: "url")` | Audio player (Web, iOS, Android) |
 
 ## Control Flow
@@ -331,7 +332,7 @@ resourcesDir("./resources")          // Kotlin
 `.verticalAlignment("start"|"center"|"end"|"space-between"|"space-around")`
 `.weight(1)` `.flex(1)` `.flexDirection("row"|"column")` `.flexWrap("wrap")`
 `.overflow("hidden"|"scroll"|"auto")` `.scrollable(true)`
-`.gridColumns(3)` `.gridTemplateColumns("1fr 2fr 1fr")`
+`.gridColumns(3)`
 
 ### Positioning
 `.position("absolute"|"relative"|"fixed"|"sticky")`
@@ -351,8 +352,21 @@ resourcesDir("./resources")          // Kotlin
 ### Background Images
 `.backgroundImage("url")` `.backgroundSize("cover"|"contain")` `.backgroundPosition("center")`
 
-### Animation (Web only)
-`.transition("all 0.2s ease")` `.cursor("pointer")`
+### Animation (portable — plays natively on web, iOS, Android, desktop; snaps where unsupported)
+`.transition(200, easeOut)` `.transition(duration: 300, curve: spring, delay: 50, props: [opacity])` — animate future prop changes
+`.enter(slide, fade, from: bottom)` `.exit(fade, duration: 150)` — appearance/removal (presets: `fade|slide|scale`; directions: `top|bottom|leading|trailing`)
+`.layout(spring)` — FLIP keyed list reorders (web/desktop only)
+`.animate(spin)` `.animate(pulse, duration: 800, repeat: 3)` — preset timelines: `pulse|spin|shimmer|shake`; `repeat:` is `loop` or a count
+`.states(@state.phase, transition: spring, duration: 250) { onState(collapsed).width(48) onState(expanded).width(240) }` — named multi-prop poses driven by one state path
+`.sharedElement("cover-@{item.id}")` — same key on two routes = element continues across navigation (web/desktop only)
+`.scrub(from: closed, to: open, axis: y, over: [0, -400]).settle(bind: @state.phase)` — drag/scroll between two `.states` poses (web/desktop only)
+`.onAnimationComplete(@actions.done)` — dispatches on natural settle; payload `{ animation: "enter"|"exit"|"states"|"<preset>"|"sharedElement", state?: label }`
+`.onClick(@actions.toggle, animate: spring)` — transaction scope: that action's synchronous state changes glide, everything else snaps (TS hosts)
+`.motion(essential)` — opt a meaning-bearing animation out of reduced-motion snapping
+Curves: `linear|easeIn|easeOut|easeInOut|spring` (fixed overshoot). Flat syntax only — bare tokens + named args; `slide(from: bottom)` is invalid. Bindings in animation args are ignored (except the `.sharedElement` key). Deprecated: `.transition("all 0.2s ease")` CSS string (web-only, warns).
+
+### Cursor (Web only)
+`.cursor("pointer")`
 
 ### Responsive Breakpoints
 ```hypen
@@ -481,7 +495,7 @@ remote.NewRemoteServer().WithDefinition(counter).Listen(3000)
 |---------|-----|---------|-----|
 | All layout/content/input components | Yes | Yes | Yes |
 | Icon (SVG resources) | Yes | Yes | Yes |
-| Video, Audio | Yes | Yes | Yes |
+| Video (src/playlist/poster/events), Audio | Yes | Yes | Yes |
 | ForEach, If, When | Yes | Yes | Yes |
 | List (virtualized) | Yes (scroll) | LazyColumn | LazyVStack |
 | Grid | Yes (CSS Grid) | LazyGrid | LazyVGrid |
@@ -489,7 +503,9 @@ remote.NewRemoteServer().WithDefinition(counter).Listen(3000)
 | Router / Route / Link | Yes | Yes | Yes |
 | position (absolute/fixed) | Yes | Partial | Partial |
 | filter, backdropFilter | Yes | No | No |
-| transition, cursor | Yes | No | No |
+| transition, enter/exit, animate, states | Yes | Yes | Yes |
+| layout, sharedElement, scrub/settle | Yes | No | No |
+| cursor | Yes | No | No |
 | Responsive breakpoints | Yes | Yes | Yes |
 | State variants (:hover) | Yes | Partial | Partial |
 | Tailwind CSS (.tw) | Yes | Yes | Yes |

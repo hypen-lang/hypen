@@ -125,6 +125,25 @@ export function TestMode({ activeFile, onClose }: TestModeProps) {
     setRemoteUrlState("");
   }, []);
 
+  // When studio is launched by `hypen test` (or `hypen run --studio`) the
+  // launcher passes the dev-server URL through HYPEN_REMOTE_URL, which we
+  // expose at /api/project.remoteUrl. Pre-fill the input, auto-connect,
+  // and (when no file-based starter cell already exists) drop in a DOM
+  // preview so Test Mode lands populated instead of on the empty state.
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/project")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((p) => {
+        if (cancelled || !p || typeof p.remoteUrl !== "string" || !p.remoteUrl) return;
+        setRemoteUrlDraft((prev) => prev || p.remoteUrl);
+        setRemoteUrlState((prev) => prev || p.remoteUrl);
+        setCells((prev) => (prev.length === 0 ? [{ kind: "web-dom" }] : prev));
+      })
+      .catch(() => { /* /api/project is optional */ });
+    return () => { cancelled = true; };
+  }, []);
+
   // Collapsed-sidebar preference persists across reloads.
   const [sidebarCollapsed, setSidebarCollapsedState] = useState<boolean>(() => {
     try { return localStorage.getItem("hypen.testmode.sidebar.collapsed") === "1"; } catch { return false; }
@@ -339,7 +358,7 @@ export function TestMode({ activeFile, onClose }: TestModeProps) {
           variant={hasDomToggle ? "secondary" : "ghost"}
           size="sm"
           className="gap-1.5"
-          disabled={!activeFile?.endsWith(".hypen")}
+          disabled={!activeFile?.endsWith(".hypen") && !remoteUrl}
           onClick={() => toggleCell({ kind: "web-dom" })}
         >
           <Monitor className="w-4 h-4" />
@@ -349,7 +368,7 @@ export function TestMode({ activeFile, onClose }: TestModeProps) {
           variant={hasCanvasToggle ? "secondary" : "ghost"}
           size="sm"
           className="gap-1.5"
-          disabled={!activeFile?.endsWith(".hypen")}
+          disabled={!activeFile?.endsWith(".hypen") && !remoteUrl}
           onClick={() => toggleCell({ kind: "web-canvas" })}
         >
           <Palette className="w-4 h-4" />
@@ -438,7 +457,10 @@ export function TestMode({ activeFile, onClose }: TestModeProps) {
         <div className="flex-1 flex flex-col min-w-0">
           <div className="flex-1 overflow-auto bg-gradient-to-b from-zinc-800 to-zinc-900 p-4">
             {cells.length === 0 ? (
-              <EmptyState />
+              <EmptyState
+                hasFile={!!activeFile?.endsWith(".hypen")}
+                hasRemoteUrl={!!remoteUrl}
+              />
             ) : (
               <div
                 className="grid gap-4 h-full auto-rows-fr"
@@ -1021,7 +1043,23 @@ function CellMessage({ children }: { children: React.ReactNode }) {
   );
 }
 
-function EmptyState() {
+function EmptyState({ hasFile, hasRemoteUrl }: { hasFile: boolean; hasRemoteUrl: boolean }) {
+  // Without either a .hypen file open or a remote dev server URL, the
+  // DOM/Canvas toggles are disabled — so the default "pick surfaces from
+  // the toolbar" copy is a dead end. Tell the user what to do instead.
+  if (!hasFile && !hasRemoteUrl) {
+    return (
+      <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
+        <div className="text-center max-w-md">
+          <p className="mb-2">Ready to connect.</p>
+          <p className="text-xs">
+            Enter a dev server URL above (e.g. <code className="font-mono">ws://localhost:3000</code>)
+            and press Connect, or boot a device from the sidebar.
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="h-full flex items-center justify-center text-muted-foreground text-sm">
       <div className="text-center">

@@ -419,6 +419,38 @@ fileprivate final class UniffiHandleMap<T>: @unchecked Sendable {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterUInt16: FfiConverterPrimitive {
+    typealias FfiType = UInt16
+    typealias SwiftType = UInt16
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt16 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterUInt32: FfiConverterPrimitive {
+    typealias FfiType = UInt32
+    typealias SwiftType = UInt32
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> UInt32 {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     typealias FfiType = UInt64
     typealias SwiftType = UInt64
@@ -428,6 +460,30 @@ fileprivate struct FfiConverterUInt64: FfiConverterPrimitive {
     }
 
     public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterBool : FfiConverter {
+    typealias FfiType = Int8
+    typealias SwiftType = Bool
+
+    public static func lift(_ value: Int8) throws -> Bool {
+        return value != 0
+    }
+
+    public static func lower(_ value: Bool) -> Int8 {
+        return value ? 1 : 0
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Bool {
+        return try lift(readInt(&buf))
+    }
+
+    public static func write(_ value: Bool, into buf: inout [UInt8]) {
         writeInt(&buf, lower(value))
     }
 }
@@ -473,6 +529,789 @@ fileprivate struct FfiConverterString: FfiConverter {
     }
 }
 
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterData: FfiConverterRustBuffer {
+    typealias SwiftType = Data
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> Data {
+        let len: Int32 = try readInt(&buf)
+        return Data(try readBytes(&buf, count: Int(len)))
+    }
+
+    public static func write(_ value: Data, into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        writeBytes(&buf, value)
+    }
+}
+
+
+
+
+/**
+ * The server-side device broker for one device-enabled connection
+ * (sans-IO: the host feeds text/frames/time and drains `poll`).
+ *
+ * Releasing the object (its last Kotlin `destroy()`/`close()`, Swift
+ * reference or Python reference) closes the broker with `connectionLost`
+ * if the host did not, so its retained bytes always return to a shared
+ * [`DeviceRetainedBytesPool`] (see `device_binding::OwnedBroker`).
+ */
+public protocol DeviceBrokerProtocol: AnyObject, Sendable {
+    
+    func admitsBackground(moduleInstanceId: String)  -> Bool
+    
+    /**
+     * Server-initiated cancel (sends `cancel`, settles `cancelled`).
+     */
+    func cancel(id: UInt32, nowMs: UInt64) 
+    
+    /**
+     * Close the device plane locally with a wire error code.
+     */
+    func close(code: String) throws 
+    
+    /**
+     * The consumer finished the next `chunks` data chunks of stream `id`.
+     */
+    func consumedData(id: UInt32, chunks: UInt32, nowMs: UInt64) 
+    
+    /**
+     * The consumer finished `n` JSON events of stream `id`.
+     */
+    func consumedEvents(id: UInt32, n: UInt64, nowMs: UInt64) 
+    
+    func coreStreamId()  -> UInt32?
+    
+    func hasBackgroundWork(moduleInstanceId: String)  -> Bool
+    
+    /**
+     * A JSON snapshot of the broker state (`device_binding::info_json`).
+     */
+    func infoJson()  -> String
+    
+    func isClosed()  -> Bool
+    
+    func isLive(id: UInt32)  -> Bool
+    
+    func liveCount()  -> UInt32
+    
+    /**
+     * The next deadline without running anything.
+     */
+    func nextDeadline()  -> UInt64?
+    
+    /**
+     * Feed one client → server binary frame.
+     */
+    func onFrame(frame: Data, nowMs: UInt64)  -> Bool
+    
+    /**
+     * Feed one client → server device text message.
+     */
+    func onText(text: String, nowMs: UInt64)  -> Bool
+    
+    /**
+     * Open a request from the open JSON; `download` carries `file.save`
+     * bytes.
+     */
+    func `open`(specJson: String, download: Data?, nowMs: UInt64) throws  -> DeviceOpenResult
+    
+    func outstandingCredit(id: UInt32)  -> UInt64?
+    
+    func outstandingEventCredit(id: UInt32)  -> UInt64?
+    
+    /**
+     * Record a module activation; false for a stale one.
+     */
+    func ownerActivated(moduleInstanceId: String, activationId: UInt32, nowMs: UInt64)  -> Bool
+    
+    /**
+     * The activation ended: activation-owned work is cancelled.
+     */
+    func ownerDeactivated(moduleInstanceId: String, activationId: UInt32, nowMs: UInt64) 
+    
+    /**
+     * The module instance was destroyed: all of its work is cancelled.
+     */
+    func ownerDestroyed(moduleInstanceId: String, nowMs: UInt64) 
+    
+    func ownerIsActive(moduleInstanceId: String, activationId: UInt32)  -> Bool
+    
+    /**
+     * Drain every output (and at most one bulk turn).
+     */
+    func poll()  -> [DeviceOutput]
+    
+    /**
+     * Release a held result's retained-bytes charge (idempotent).
+     */
+    func releaseResult(id: UInt32) 
+    
+    /**
+     * Planned reopen of `core.capabilities`; the new id, if reopened.
+     */
+    func reopenCoreCapabilities(nowMs: UInt64)  -> UInt32?
+    
+    /**
+     * Count a connection-level violation the host detected itself.
+     */
+    func reportViolation(reason: String, nowMs: UInt64) 
+    
+    func retainedBytes()  -> UInt64
+    
+    /**
+     * The revision this broker enforces for `capability@version`
+     * (`device_binding::revision_json`: the registry revision or its
+     * configured override, `maxItemBytes` capped by the broker's) as JSON,
+     * or `None` when it is not a registry revision.
+     */
+    func revisionJson(capability: String, version: UInt32)  -> String?
+    
+    func selectedVersion(capability: String)  -> UInt32?
+    
+    /**
+     * Report the transport's buffered (accepted, unwritten) bytes.
+     */
+    func setTransportBuffered(bytes: UInt64) 
+    
+    /**
+     * Open the connection-owned `core.capabilities` stream.
+     */
+    func start(nowMs: UInt64)  -> DeviceOpenResult
+    
+    func supports(capability: String)  -> Bool
+    
+    /**
+     * Run due timers; the next deadline (absolute ms), if any.
+     */
+    func tick(nowMs: UInt64)  -> UInt64?
+    
+}
+/**
+ * The server-side device broker for one device-enabled connection
+ * (sans-IO: the host feeds text/frames/time and drains `poll`).
+ *
+ * Releasing the object (its last Kotlin `destroy()`/`close()`, Swift
+ * reference or Python reference) closes the broker with `connectionLost`
+ * if the host did not, so its retained bytes always return to a shared
+ * [`DeviceRetainedBytesPool`] (see `device_binding::OwnedBroker`).
+ */
+open class DeviceBroker: DeviceBrokerProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_hypen_engine_fn_clone_devicebroker(self.handle, $0) }
+    }
+    /**
+     * A broker from the configuration JSON (only `ack` is required),
+     * optionally sharing `pool`'s aggregate budget.
+     */
+public convenience init(configJson: String, pool: DeviceRetainedBytesPool?, nowMs: UInt64)throws  {
+    let handle =
+        try rustCallWithError(FfiConverterTypeDeviceBindingError_lift) {
+    uniffi_hypen_engine_fn_constructor_devicebroker_new(
+        FfiConverterString.lower(configJson),
+        FfiConverterOptionTypeDeviceRetainedBytesPool.lower(pool),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_hypen_engine_fn_free_devicebroker(handle, $0) }
+    }
+
+    
+
+    
+open func admitsBackground(moduleInstanceId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_admits_background(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleInstanceId),$0
+    )
+})
+}
+    
+    /**
+     * Server-initiated cancel (sends `cancel`, settles `cancelled`).
+     */
+open func cancel(id: UInt32, nowMs: UInt64)  {try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_cancel(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(id),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+}
+}
+    
+    /**
+     * Close the device plane locally with a wire error code.
+     */
+open func close(code: String)throws   {try rustCallWithError(FfiConverterTypeDeviceBindingError_lift) {
+    uniffi_hypen_engine_fn_method_devicebroker_close(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(code),$0
+    )
+}
+}
+    
+    /**
+     * The consumer finished the next `chunks` data chunks of stream `id`.
+     */
+open func consumedData(id: UInt32, chunks: UInt32, nowMs: UInt64)  {try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_consumed_data(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(id),
+        FfiConverterUInt32.lower(chunks),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+}
+}
+    
+    /**
+     * The consumer finished `n` JSON events of stream `id`.
+     */
+open func consumedEvents(id: UInt32, n: UInt64, nowMs: UInt64)  {try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_consumed_events(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(id),
+        FfiConverterUInt64.lower(n),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+}
+}
+    
+open func coreStreamId() -> UInt32?  {
+    return try!  FfiConverterOptionUInt32.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_core_stream_id(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func hasBackgroundWork(moduleInstanceId: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_has_background_work(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleInstanceId),$0
+    )
+})
+}
+    
+    /**
+     * A JSON snapshot of the broker state (`device_binding::info_json`).
+     */
+open func infoJson() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_info_json(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func isClosed() -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_is_closed(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func isLive(id: UInt32) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_is_live(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(id),$0
+    )
+})
+}
+    
+open func liveCount() -> UInt32  {
+    return try!  FfiConverterUInt32.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_live_count(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * The next deadline without running anything.
+     */
+open func nextDeadline() -> UInt64?  {
+    return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_next_deadline(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Feed one client → server binary frame.
+     */
+open func onFrame(frame: Data, nowMs: UInt64) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_on_frame(
+            self.uniffiCloneHandle(),
+        FfiConverterData.lower(frame),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+})
+}
+    
+    /**
+     * Feed one client → server device text message.
+     */
+open func onText(text: String, nowMs: UInt64) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_on_text(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(text),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+})
+}
+    
+    /**
+     * Open a request from the open JSON; `download` carries `file.save`
+     * bytes.
+     */
+open func `open`(specJson: String, download: Data?, nowMs: UInt64)throws  -> DeviceOpenResult  {
+    return try  FfiConverterTypeDeviceOpenResult_lift(try rustCallWithError(FfiConverterTypeDeviceBindingError_lift) {
+    uniffi_hypen_engine_fn_method_devicebroker_open(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(specJson),
+        FfiConverterOptionData.lower(download),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+})
+}
+    
+open func outstandingCredit(id: UInt32) -> UInt64?  {
+    return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_outstanding_credit(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(id),$0
+    )
+})
+}
+    
+open func outstandingEventCredit(id: UInt32) -> UInt64?  {
+    return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_outstanding_event_credit(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(id),$0
+    )
+})
+}
+    
+    /**
+     * Record a module activation; false for a stale one.
+     */
+open func ownerActivated(moduleInstanceId: String, activationId: UInt32, nowMs: UInt64) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_owner_activated(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleInstanceId),
+        FfiConverterUInt32.lower(activationId),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+})
+}
+    
+    /**
+     * The activation ended: activation-owned work is cancelled.
+     */
+open func ownerDeactivated(moduleInstanceId: String, activationId: UInt32, nowMs: UInt64)  {try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_owner_deactivated(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleInstanceId),
+        FfiConverterUInt32.lower(activationId),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+}
+}
+    
+    /**
+     * The module instance was destroyed: all of its work is cancelled.
+     */
+open func ownerDestroyed(moduleInstanceId: String, nowMs: UInt64)  {try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_owner_destroyed(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleInstanceId),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+}
+}
+    
+open func ownerIsActive(moduleInstanceId: String, activationId: UInt32) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_owner_is_active(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(moduleInstanceId),
+        FfiConverterUInt32.lower(activationId),$0
+    )
+})
+}
+    
+    /**
+     * Drain every output (and at most one bulk turn).
+     */
+open func poll() -> [DeviceOutput]  {
+    return try!  FfiConverterSequenceTypeDeviceOutput.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_poll(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Release a held result's retained-bytes charge (idempotent).
+     */
+open func releaseResult(id: UInt32)  {try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_release_result(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt32.lower(id),$0
+    )
+}
+}
+    
+    /**
+     * Planned reopen of `core.capabilities`; the new id, if reopened.
+     */
+open func reopenCoreCapabilities(nowMs: UInt64) -> UInt32?  {
+    return try!  FfiConverterOptionUInt32.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_reopen_core_capabilities(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+})
+}
+    
+    /**
+     * Count a connection-level violation the host detected itself.
+     */
+open func reportViolation(reason: String, nowMs: UInt64)  {try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_report_violation(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(reason),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+}
+}
+    
+open func retainedBytes() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_retained_bytes(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * The revision this broker enforces for `capability@version`
+     * (`device_binding::revision_json`: the registry revision or its
+     * configured override, `maxItemBytes` capped by the broker's) as JSON,
+     * or `None` when it is not a registry revision.
+     */
+open func revisionJson(capability: String, version: UInt32) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_revision_json(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(capability),
+        FfiConverterUInt32.lower(version),$0
+    )
+})
+}
+    
+open func selectedVersion(capability: String) -> UInt32?  {
+    return try!  FfiConverterOptionUInt32.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_selected_version(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(capability),$0
+    )
+})
+}
+    
+    /**
+     * Report the transport's buffered (accepted, unwritten) bytes.
+     */
+open func setTransportBuffered(bytes: UInt64)  {try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_set_transport_buffered(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(bytes),$0
+    )
+}
+}
+    
+    /**
+     * Open the connection-owned `core.capabilities` stream.
+     */
+open func start(nowMs: UInt64) -> DeviceOpenResult  {
+    return try!  FfiConverterTypeDeviceOpenResult_lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_start(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+})
+}
+    
+open func supports(capability: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_supports(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(capability),$0
+    )
+})
+}
+    
+    /**
+     * Run due timers; the next deadline (absolute ms), if any.
+     */
+open func tick(nowMs: UInt64) -> UInt64?  {
+    return try!  FfiConverterOptionUInt64.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_devicebroker_tick(
+            self.uniffiCloneHandle(),
+        FfiConverterUInt64.lower(nowMs),$0
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceBroker: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = DeviceBroker
+
+    public static func lift(_ handle: UInt64) throws -> DeviceBroker {
+        return DeviceBroker(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: DeviceBroker) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceBroker {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: DeviceBroker, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceBroker_lift(_ handle: UInt64) throws -> DeviceBroker {
+    return try FfiConverterTypeDeviceBroker.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceBroker_lower(_ value: DeviceBroker) -> UInt64 {
+    return FfiConverterTypeDeviceBroker.lower(value)
+}
+
+
+
+
+
+
+/**
+ * An aggregate retained-bytes budget shared by several brokers.
+ */
+public protocol DeviceRetainedBytesPoolProtocol: AnyObject, Sendable {
+    
+    /**
+     * Bytes currently reserved across every broker using this pool.
+     */
+    func inUse()  -> UInt64
+    
+    func limit()  -> UInt64
+    
+}
+/**
+ * An aggregate retained-bytes budget shared by several brokers.
+ */
+open class DeviceRetainedBytesPool: DeviceRetainedBytesPoolProtocol, @unchecked Sendable {
+    fileprivate let handle: UInt64
+
+    /// Used to instantiate a [FFIObject] without an actual handle, for fakes in tests, mostly.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public struct NoHandle {
+        public init() {}
+    }
+
+    // TODO: We'd like this to be `private` but for Swifty reasons,
+    // we can't implement `FfiConverter` without making this `required` and we can't
+    // make it `required` without making it `public`.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    required public init(unsafeFromHandle handle: UInt64) {
+        self.handle = handle
+    }
+
+    // This constructor can be used to instantiate a fake object.
+    // - Parameter noHandle: Placeholder value so we can have a constructor separate from the default empty one that may be implemented for classes extending [FFIObject].
+    //
+    // - Warning:
+    //     Any object instantiated with this constructor cannot be passed to an actual Rust-backed object. Since there isn't a backing handle the FFI lower functions will crash.
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public init(noHandle: NoHandle) {
+        self.handle = 0
+    }
+
+#if swift(>=5.8)
+    @_documentation(visibility: private)
+#endif
+    public func uniffiCloneHandle() -> UInt64 {
+        return try! rustCall { uniffi_hypen_engine_fn_clone_deviceretainedbytespool(self.handle, $0) }
+    }
+public convenience init(limit: UInt64) {
+    let handle =
+        try! rustCall() {
+    uniffi_hypen_engine_fn_constructor_deviceretainedbytespool_new(
+        FfiConverterUInt64.lower(limit),$0
+    )
+}
+    self.init(unsafeFromHandle: handle)
+}
+
+    deinit {
+        if handle == 0 {
+            // Mock objects have handle=0 don't try to free them
+            return
+        }
+
+        try! rustCall { uniffi_hypen_engine_fn_free_deviceretainedbytespool(handle, $0) }
+    }
+
+    
+
+    
+    /**
+     * Bytes currently reserved across every broker using this pool.
+     */
+open func inUse() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_deviceretainedbytespool_in_use(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+open func limit() -> UInt64  {
+    return try!  FfiConverterUInt64.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_deviceretainedbytespool_limit(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+
+    
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceRetainedBytesPool: FfiConverter {
+    typealias FfiType = UInt64
+    typealias SwiftType = DeviceRetainedBytesPool
+
+    public static func lift(_ handle: UInt64) throws -> DeviceRetainedBytesPool {
+        return DeviceRetainedBytesPool(unsafeFromHandle: handle)
+    }
+
+    public static func lower(_ value: DeviceRetainedBytesPool) -> UInt64 {
+        return value.uniffiCloneHandle()
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceRetainedBytesPool {
+        let handle: UInt64 = try readInt(&buf)
+        return try lift(handle)
+    }
+
+    public static func write(_ value: DeviceRetainedBytesPool, into buf: inout [UInt8]) {
+        writeInt(&buf, lower(value))
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceRetainedBytesPool_lift(_ handle: UInt64) throws -> DeviceRetainedBytesPool {
+    return try FfiConverterTypeDeviceRetainedBytesPool.lift(handle)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceRetainedBytesPool_lower(_ value: DeviceRetainedBytesPool) -> UInt64 {
+    return FfiConverterTypeDeviceRetainedBytesPool.lower(value)
+}
+
+
+
 
 
 
@@ -503,6 +1342,25 @@ public protocol HypenEngineProtocol: AnyObject, Sendable {
     func dispatchAction(actionName: String, payloadJson: String?) throws 
     
     /**
+     * Dispatch on behalf of an external caller.
+     *
+     * Authorises against exactly what `list_external_actions` advertises,
+     * then queues the *resolved* internal action for the host to poll — so
+     * `navigate` arrives as `router.push` and `set_input` as `__hypen_bind`
+     * with a payload built here, never one the caller supplied.
+     */
+    func dispatchExternal(actionName: String, payloadJson: String?) throws 
+    
+    /**
+     * The built-in external action names, as JSON
+     * `{ navigate, back, setInput, bindAction }`.
+     *
+     * Exported so SDKs bind to these rather than hardcoding the literals —
+     * hardcoding is why one rename broke four SDKs silently.
+     */
+    func externalBuiltinNames()  -> String
+    
+    /**
      * Return the list of standard Hypen primitive element names.
      */
     func getDefaultPrimitives()  -> [String]
@@ -523,6 +1381,42 @@ public protocol HypenEngineProtocol: AnyObject, Sendable {
      * Get the current revision number
      */
     func getRevision()  -> UInt64
+    
+    /**
+     * Read module state, whole or at a path, as a JSON string.
+     *
+     * `module` is `None` for the primary module or a registered module's
+     * name (case-insensitive). Returns `None` when the module is unknown or
+     * the path is absent.
+     */
+    func getStateAt(module: String?, path: String?)  -> String?
+    
+    /**
+     * List `.bind()`-declared writable inputs as a JSON array of
+     * `{ path, prop, elementType, moduleScope }`, backing `set_input`'s
+     * argument schema.
+     */
+    func listBindings()  -> String
+    
+    /**
+     * List every action an external caller may dispatch, as a JSON array of
+     * `{ name, module, builtin }`.
+     */
+    func listExternalActions()  -> String
+    
+    /**
+     * List declared routes as a JSON array of `{ path, params, moduleScope }`,
+     * backing `navigate`'s argument schema.
+     */
+    func listRoutes()  -> String
+    
+    /**
+     * The full MCP handshake for this app, as a JSON string.
+     *
+     * Composed in the engine so every SDK transports the same bytes rather
+     * than writing its own prose and drifting.
+     */
+    func mcpManifest()  -> String
     
     /**
      * Parse Hypen DSL and return AST as JSON
@@ -605,6 +1499,15 @@ public protocol HypenEngineProtocol: AnyObject, Sendable {
      * Set module configuration
      */
     func setModule(config: ModuleConfig) 
+    
+    /**
+     * Drop a module and every action it declared.
+     *
+     * **Call on destroy only**, never on unmount: under the default
+     * `persist: true` an off-screen module stays registered on purpose so
+     * siblings can read its state.
+     */
+    func unregisterModule(name: String) 
     
     /**
      * Update engine state with a JSON patch and re-render affected nodes.
@@ -745,6 +1648,38 @@ open func dispatchAction(actionName: String, payloadJson: String?)throws   {try 
 }
     
     /**
+     * Dispatch on behalf of an external caller.
+     *
+     * Authorises against exactly what `list_external_actions` advertises,
+     * then queues the *resolved* internal action for the host to poll — so
+     * `navigate` arrives as `router.push` and `set_input` as `__hypen_bind`
+     * with a payload built here, never one the caller supplied.
+     */
+open func dispatchExternal(actionName: String, payloadJson: String?)throws   {try rustCallWithError(FfiConverterTypeHypenError_lift) {
+    uniffi_hypen_engine_fn_method_hypenengine_dispatch_external(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(actionName),
+        FfiConverterOptionString.lower(payloadJson),$0
+    )
+}
+}
+    
+    /**
+     * The built-in external action names, as JSON
+     * `{ navigate, back, setInput, bindAction }`.
+     *
+     * Exported so SDKs bind to these rather than hardcoding the literals —
+     * hardcoding is why one rename broke four SDKs silently.
+     */
+open func externalBuiltinNames() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_hypenengine_external_builtin_names(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
      * Return the list of standard Hypen primitive element names.
      */
 open func getDefaultPrimitives() -> [String]  {
@@ -785,6 +1720,74 @@ open func getPendingImports() -> [ImportInfo]  {
 open func getRevision() -> UInt64  {
     return try!  FfiConverterUInt64.lift(try! rustCall() {
     uniffi_hypen_engine_fn_method_hypenengine_get_revision(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * Read module state, whole or at a path, as a JSON string.
+     *
+     * `module` is `None` for the primary module or a registered module's
+     * name (case-insensitive). Returns `None` when the module is unknown or
+     * the path is absent.
+     */
+open func getStateAt(module: String?, path: String?) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_hypenengine_get_state_at(
+            self.uniffiCloneHandle(),
+        FfiConverterOptionString.lower(module),
+        FfiConverterOptionString.lower(path),$0
+    )
+})
+}
+    
+    /**
+     * List `.bind()`-declared writable inputs as a JSON array of
+     * `{ path, prop, elementType, moduleScope }`, backing `set_input`'s
+     * argument schema.
+     */
+open func listBindings() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_hypenengine_list_bindings(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * List every action an external caller may dispatch, as a JSON array of
+     * `{ name, module, builtin }`.
+     */
+open func listExternalActions() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_hypenengine_list_external_actions(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * List declared routes as a JSON array of `{ path, params, moduleScope }`,
+     * backing `navigate`'s argument schema.
+     */
+open func listRoutes() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_hypenengine_list_routes(
+            self.uniffiCloneHandle(),$0
+    )
+})
+}
+    
+    /**
+     * The full MCP handshake for this app, as a JSON string.
+     *
+     * Composed in the engine so every SDK transports the same bytes rather
+     * than writing its own prose and drifting.
+     */
+open func mcpManifest() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_method_hypenengine_mcp_manifest(
             self.uniffiCloneHandle(),$0
     )
 })
@@ -945,6 +1948,21 @@ open func setModule(config: ModuleConfig)  {try! rustCall() {
     uniffi_hypen_engine_fn_method_hypenengine_set_module(
             self.uniffiCloneHandle(),
         FfiConverterTypeModuleConfig_lower(config),$0
+    )
+}
+}
+    
+    /**
+     * Drop a module and every action it declared.
+     *
+     * **Call on destroy only**, never on unmount: under the default
+     * `persist: true` an off-screen module stays registered on purpose so
+     * siblings can read its state.
+     */
+open func unregisterModule(name: String)  {try! rustCall() {
+    uniffi_hypen_engine_fn_method_hypenengine_unregister_module(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(name),$0
     )
 }
 }
@@ -1164,6 +2182,141 @@ public func FfiConverterTypeComponentDef_lower(_ value: ComponentDef) -> RustBuf
 
 
 /**
+ * One verified upload item of a successful unary result.
+ */
+public struct DeviceBlob: Equatable, Hashable {
+    public var channel: UInt16
+    public var name: String?
+    public var contentType: String
+    public var bytes: Data
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(channel: UInt16, name: String?, contentType: String, bytes: Data) {
+        self.channel = channel
+        self.name = name
+        self.contentType = contentType
+        self.bytes = bytes
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeviceBlob: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceBlob: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceBlob {
+        return
+            try DeviceBlob(
+                channel: FfiConverterUInt16.read(from: &buf), 
+                name: FfiConverterOptionString.read(from: &buf), 
+                contentType: FfiConverterString.read(from: &buf), 
+                bytes: FfiConverterData.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeviceBlob, into buf: inout [UInt8]) {
+        FfiConverterUInt16.write(value.channel, into: &buf)
+        FfiConverterOptionString.write(value.name, into: &buf)
+        FfiConverterString.write(value.contentType, into: &buf)
+        FfiConverterData.write(value.bytes, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceBlob_lift(_ buf: RustBuffer) throws -> DeviceBlob {
+    return try FfiConverterTypeDeviceBlob.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceBlob_lower(_ value: DeviceBlob) -> RustBuffer {
+    return FfiConverterTypeDeviceBlob.lower(value)
+}
+
+
+/**
+ * The server-side handshake for a raw `hello.device`: strict validation
+ * and selection in one call, with a diagnostic when the plane is disabled.
+ */
+public struct DeviceHandshake: Equatable, Hashable {
+    /**
+     * The `sessionAck.device` JSON to send, or `None` (ack without device).
+     */
+    public var ackJson: String?
+    /**
+     * Why the device plane is disabled (server log only), when it is.
+     */
+    public var reason: String?
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(
+        /**
+         * The `sessionAck.device` JSON to send, or `None` (ack without device).
+         */ackJson: String?, 
+        /**
+         * Why the device plane is disabled (server log only), when it is.
+         */reason: String?) {
+        self.ackJson = ackJson
+        self.reason = reason
+    }
+
+    
+
+    
+}
+
+#if compiler(>=6)
+extension DeviceHandshake: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceHandshake: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceHandshake {
+        return
+            try DeviceHandshake(
+                ackJson: FfiConverterOptionString.read(from: &buf), 
+                reason: FfiConverterOptionString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: DeviceHandshake, into buf: inout [UInt8]) {
+        FfiConverterOptionString.write(value.ackJson, into: &buf)
+        FfiConverterOptionString.write(value.reason, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceHandshake_lift(_ buf: RustBuffer) throws -> DeviceHandshake {
+    return try FfiConverterTypeDeviceHandshake.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceHandshake_lower(_ value: DeviceHandshake) -> RustBuffer {
+    return FfiConverterTypeDeviceHandshake.lower(value)
+}
+
+
+/**
  * Import information returned to SDK hosts (Kotlin, Swift, etc.)
  */
 public struct ImportInfo: Equatable, Hashable {
@@ -1320,10 +2473,65 @@ public struct Patch: Equatable, Hashable {
     public var text: String?
     public var parentId: String?
     public var beforeId: String?
+    /**
+     * Serialized `Semantics` block (camelCase JSON, same shape as the web
+     * wire format). Present on `Create` for nodes with derivable a11y and
+     * on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+     * constructors keep compiling.
+     */
+    public var semanticsJson: String?
+    /**
+     * Roots an animated exit: set on the **root** `Remove` of a subtree
+     * whose node carried an `"__anim.exit"` spec. The renderer may play
+     * the exit and finalize teardown itself; the engine-side node is
+     * dead the moment the patch is emitted (no ack round-trip). `false`
+     * on every other patch type — which matches the wire default, where
+     * the field is skip-if-false, so relays that re-serialize this
+     * record stay byte-identical for unflagged removes.
+     */
+    public var transition: Bool
+    /**
+     * Animation spec for `PatchType::BatchAnimation`, as a JSON *string*
+     * (UniFFI has no arbitrary-JSON type, so the engine's `serde_json`
+     * object is stringified at this boundary and consumers parse it).
+     * Always a JSON object, e.g. `{"curve":"spring","duration":250}`.
+     * `None` on every other patch type.
+     *
+     * **Both fields are appended last on purpose.** The generated
+     * Kotlin/Swift record readers are positional, so inserting a field
+     * anywhere but the tail silently mis-reads every field after it.
+     */
+    public var specJson: String?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(patchType: PatchType, id: String, elementType: String?, propsJson: String?, name: String?, valueJson: String?, text: String?, parentId: String?, beforeId: String?) {
+    public init(patchType: PatchType, id: String, elementType: String?, propsJson: String?, name: String?, valueJson: String?, text: String?, parentId: String?, beforeId: String?, 
+        /**
+         * Serialized `Semantics` block (camelCase JSON, same shape as the web
+         * wire format). Present on `Create` for nodes with derivable a11y and
+         * on every `SetSemantics`. Defaults to `None` so existing Kotlin/Swift
+         * constructors keep compiling.
+         */semanticsJson: String? = nil, 
+        /**
+         * Roots an animated exit: set on the **root** `Remove` of a subtree
+         * whose node carried an `"__anim.exit"` spec. The renderer may play
+         * the exit and finalize teardown itself; the engine-side node is
+         * dead the moment the patch is emitted (no ack round-trip). `false`
+         * on every other patch type — which matches the wire default, where
+         * the field is skip-if-false, so relays that re-serialize this
+         * record stay byte-identical for unflagged removes.
+         */transition: Bool = false, 
+        /**
+         * Animation spec for `PatchType::BatchAnimation`, as a JSON *string*
+         * (UniFFI has no arbitrary-JSON type, so the engine's `serde_json`
+         * object is stringified at this boundary and consumers parse it).
+         * Always a JSON object, e.g. `{"curve":"spring","duration":250}`.
+         * `None` on every other patch type.
+         *
+         * **Both fields are appended last on purpose.** The generated
+         * Kotlin/Swift record readers are positional, so inserting a field
+         * anywhere but the tail silently mis-reads every field after it.
+         */specJson: String? = nil) {
         self.patchType = patchType
         self.id = id
         self.elementType = elementType
@@ -1333,6 +2541,9 @@ public struct Patch: Equatable, Hashable {
         self.text = text
         self.parentId = parentId
         self.beforeId = beforeId
+        self.semanticsJson = semanticsJson
+        self.transition = transition
+        self.specJson = specJson
     }
 
     
@@ -1359,7 +2570,10 @@ public struct FfiConverterTypePatch: FfiConverterRustBuffer {
                 valueJson: FfiConverterOptionString.read(from: &buf), 
                 text: FfiConverterOptionString.read(from: &buf), 
                 parentId: FfiConverterOptionString.read(from: &buf), 
-                beforeId: FfiConverterOptionString.read(from: &buf)
+                beforeId: FfiConverterOptionString.read(from: &buf), 
+                semanticsJson: FfiConverterOptionString.read(from: &buf), 
+                transition: FfiConverterBool.read(from: &buf), 
+                specJson: FfiConverterOptionString.read(from: &buf)
         )
     }
 
@@ -1373,6 +2587,9 @@ public struct FfiConverterTypePatch: FfiConverterRustBuffer {
         FfiConverterOptionString.write(value.text, into: &buf)
         FfiConverterOptionString.write(value.parentId, into: &buf)
         FfiConverterOptionString.write(value.beforeId, into: &buf)
+        FfiConverterOptionString.write(value.semanticsJson, into: &buf)
+        FfiConverterBool.write(value.transition, into: &buf)
+        FfiConverterOptionString.write(value.specJson, into: &buf)
     }
 }
 
@@ -1390,6 +2607,387 @@ public func FfiConverterTypePatch_lift(_ buf: RustBuffer) throws -> Patch {
 public func FfiConverterTypePatch_lower(_ value: Patch) -> RustBuffer {
     return FfiConverterTypePatch.lower(value)
 }
+
+
+/**
+ * A host error: malformed configuration, open spec, server list or error
+ * code. Protocol refusals are values ([`DeviceOpenResult::Refused`]).
+ */
+public enum DeviceBindingError: Swift.Error, Equatable, Hashable, Foundation.LocalizedError {
+
+    
+    
+    case InvalidInput(String
+    )
+
+    
+
+    
+
+    
+    public var errorDescription: String? {
+        String(reflecting: self)
+    }
+    
+}
+
+#if compiler(>=6)
+extension DeviceBindingError: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceBindingError: FfiConverterRustBuffer {
+    typealias SwiftType = DeviceBindingError
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceBindingError {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        
+
+        
+        case 1: return .InvalidInput(
+            try FfiConverterString.read(from: &buf)
+            )
+
+         default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DeviceBindingError, into buf: inout [UInt8]) {
+        switch value {
+
+        
+
+        
+        
+        case let .InvalidInput(v1):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(v1, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceBindingError_lift(_ buf: RustBuffer) throws -> DeviceBindingError {
+    return try FfiConverterTypeDeviceBindingError.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceBindingError_lower(_ value: DeviceBindingError) -> RustBuffer {
+    return FfiConverterTypeDeviceBindingError.lower(value)
+}
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * `start` / `open`: the new request id, or a local refusal (nothing sent).
+ */
+
+public enum DeviceOpenResult: Equatable, Hashable {
+    
+    case opened(id: UInt32
+    )
+    case refused(code: String, detail: String?
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DeviceOpenResult: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceOpenResult: FfiConverterRustBuffer {
+    typealias SwiftType = DeviceOpenResult
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceOpenResult {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .opened(id: try FfiConverterUInt32.read(from: &buf)
+        )
+        
+        case 2: return .refused(code: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DeviceOpenResult, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .opened(id):
+            writeInt(&buf, Int32(1))
+            FfiConverterUInt32.write(id, into: &buf)
+            
+        
+        case let .refused(code,detail):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(code, into: &buf)
+            FfiConverterOptionString.write(detail, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceOpenResult_lift(_ buf: RustBuffer) throws -> DeviceOpenResult {
+    return try FfiConverterTypeDeviceOpenResult.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceOpenResult_lower(_ value: DeviceOpenResult) -> RustBuffer {
+    return FfiConverterTypeDeviceOpenResult.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * A request's terminal outcome.
+ */
+
+public enum DeviceOutcome: Equatable, Hashable {
+    
+    /**
+     * `result_json` is the client's validated result; `blobs` the verified
+     * upload items in result order (buffered unary uploads).
+     */
+    case success(resultJson: String, blobs: [DeviceBlob], simulated: Bool, held: Bool
+    )
+    /**
+     * `code` is the wire error code (`"cancelled"`, `"invalidParams"`…).
+     */
+    case failure(code: String, detail: String?
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DeviceOutcome: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceOutcome: FfiConverterRustBuffer {
+    typealias SwiftType = DeviceOutcome
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceOutcome {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .success(resultJson: try FfiConverterString.read(from: &buf), blobs: try FfiConverterSequenceTypeDeviceBlob.read(from: &buf), simulated: try FfiConverterBool.read(from: &buf), held: try FfiConverterBool.read(from: &buf)
+        )
+        
+        case 2: return .failure(code: try FfiConverterString.read(from: &buf), detail: try FfiConverterOptionString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DeviceOutcome, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .success(resultJson,blobs,simulated,held):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(resultJson, into: &buf)
+            FfiConverterSequenceTypeDeviceBlob.write(blobs, into: &buf)
+            FfiConverterBool.write(simulated, into: &buf)
+            FfiConverterBool.write(held, into: &buf)
+            
+        
+        case let .failure(code,detail):
+            writeInt(&buf, Int32(2))
+            FfiConverterString.write(code, into: &buf)
+            FfiConverterOptionString.write(detail, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceOutcome_lift(_ buf: RustBuffer) throws -> DeviceOutcome {
+    return try FfiConverterTypeDeviceOutcome.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceOutcome_lower(_ value: DeviceOutcome) -> RustBuffer {
+    return FfiConverterTypeDeviceOutcome.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * Everything the broker asks the host to do, in order.
+ */
+
+public enum DeviceOutput: Equatable, Hashable {
+    
+    /**
+     * Send this device JSON text message.
+     */
+    case sendText(text: String
+    )
+    /**
+     * Send this binary frame (download bytes), already scheduled.
+     */
+    case sendFrame(frame: Data
+    )
+    /**
+     * A validated JSON stream event; call `consumed_events` when done.
+     */
+    case event(id: UInt32, eventJson: String
+    )
+    /**
+     * Upload bytes of a binary-upload stream; call `consumed_data` when done.
+     */
+    case data(id: UInt32, channel: UInt16, bytes: Data
+    )
+    /**
+     * Request `id` ended (exactly once per opened request).
+     */
+    case settled(id: UInt32, outcome: DeviceOutcome
+    )
+    /**
+     * The broker closed the device plane: close the socket with this code.
+     */
+    case closeConnection(code: UInt16, reason: String
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension DeviceOutput: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeDeviceOutput: FfiConverterRustBuffer {
+    typealias SwiftType = DeviceOutput
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> DeviceOutput {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+        
+        case 1: return .sendText(text: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 2: return .sendFrame(frame: try FfiConverterData.read(from: &buf)
+        )
+        
+        case 3: return .event(id: try FfiConverterUInt32.read(from: &buf), eventJson: try FfiConverterString.read(from: &buf)
+        )
+        
+        case 4: return .data(id: try FfiConverterUInt32.read(from: &buf), channel: try FfiConverterUInt16.read(from: &buf), bytes: try FfiConverterData.read(from: &buf)
+        )
+        
+        case 5: return .settled(id: try FfiConverterUInt32.read(from: &buf), outcome: try FfiConverterTypeDeviceOutcome.read(from: &buf)
+        )
+        
+        case 6: return .closeConnection(code: try FfiConverterUInt16.read(from: &buf), reason: try FfiConverterString.read(from: &buf)
+        )
+        
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: DeviceOutput, into buf: inout [UInt8]) {
+        switch value {
+        
+        
+        case let .sendText(text):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(text, into: &buf)
+            
+        
+        case let .sendFrame(frame):
+            writeInt(&buf, Int32(2))
+            FfiConverterData.write(frame, into: &buf)
+            
+        
+        case let .event(id,eventJson):
+            writeInt(&buf, Int32(3))
+            FfiConverterUInt32.write(id, into: &buf)
+            FfiConverterString.write(eventJson, into: &buf)
+            
+        
+        case let .data(id,channel,bytes):
+            writeInt(&buf, Int32(4))
+            FfiConverterUInt32.write(id, into: &buf)
+            FfiConverterUInt16.write(channel, into: &buf)
+            FfiConverterData.write(bytes, into: &buf)
+            
+        
+        case let .settled(id,outcome):
+            writeInt(&buf, Int32(5))
+            FfiConverterUInt32.write(id, into: &buf)
+            FfiConverterTypeDeviceOutcome.write(outcome, into: &buf)
+            
+        
+        case let .closeConnection(code,reason):
+            writeInt(&buf, Int32(6))
+            FfiConverterUInt16.write(code, into: &buf)
+            FfiConverterString.write(reason, into: &buf)
+            
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceOutput_lift(_ buf: RustBuffer) throws -> DeviceOutput {
+    return try FfiConverterTypeDeviceOutput.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeDeviceOutput_lower(_ value: DeviceOutput) -> RustBuffer {
+    return FfiConverterTypeDeviceOutput.lower(value)
+}
+
 
 
 /**
@@ -1544,6 +3142,27 @@ public enum PatchType: Equatable, Hashable {
      * Emitted by the engine's Router subtree cache on navigation-back.
      */
     case attach
+    /**
+     * Replace a node's accessibility semantics after a reactive change
+     * (templated accessible name, bound self-state, bound checked). The
+     * updated block rides `semantics_json`; renderers re-apply it with the
+     * same translation they run at create, clearing attributes the new
+     * block no longer sets. `semantics_json == None` clears everything.
+     */
+    case setSemantics
+    /**
+     * Batch-scoped animation prelude (transaction-scoped animation).
+     * Addresses no node — it scopes the *batch*: renderers that
+     * understand it animate every prop change in the patches that
+     * follow using the spec carried on `spec_json`. Only ever valid at
+     * batch index 0; a prelude anywhere else is not a stamp.
+     *
+     * **Appended last on purpose.** UniFFI enum discriminants are
+     * positional (the generated Kotlin does `PatchType.values()[i - 1]`
+     * and Swift switches on the same ordinal), so new variants must go
+     * at the end or every existing case shifts.
+     */
+    case batchAnimation
 
 
 
@@ -1582,6 +3201,10 @@ public struct FfiConverterTypePatchType: FfiConverterRustBuffer {
         case 8: return .detach
         
         case 9: return .attach
+        
+        case 10: return .setSemantics
+        
+        case 11: return .batchAnimation
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -1626,6 +3249,14 @@ public struct FfiConverterTypePatchType: FfiConverterRustBuffer {
         case .attach:
             writeInt(&buf, Int32(9))
         
+        
+        case .setSemantics:
+            writeInt(&buf, Int32(10))
+        
+        
+        case .batchAnimation:
+            writeInt(&buf, Int32(11))
+        
         }
     }
 }
@@ -1649,6 +3280,54 @@ public func FfiConverterTypePatchType_lower(_ value: PatchType) -> RustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = UInt32?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt32.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt32.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionUInt64: FfiConverterRustBuffer {
+    typealias SwiftType = UInt64?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterUInt64.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterUInt64.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
     typealias SwiftType = String?
 
@@ -1667,6 +3346,79 @@ fileprivate struct FfiConverterOptionString: FfiConverterRustBuffer {
         case 1: return try FfiConverterString.read(from: &buf)
         default: throw UniffiInternalError.unexpectedOptionalTag
         }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionData: FfiConverterRustBuffer {
+    typealias SwiftType = Data?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterData.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterData.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterOptionTypeDeviceRetainedBytesPool: FfiConverterRustBuffer {
+    typealias SwiftType = DeviceRetainedBytesPool?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeDeviceRetainedBytesPool.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeDeviceRetainedBytesPool.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceUInt32: FfiConverterRustBuffer {
+    typealias SwiftType = [UInt32]
+
+    public static func write(_ value: [UInt32], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterUInt32.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [UInt32] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [UInt32]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterUInt32.read(from: &buf))
+        }
+        return seq
     }
 }
 
@@ -1723,6 +3475,31 @@ fileprivate struct FfiConverterSequenceTypeAction: FfiConverterRustBuffer {
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterSequenceTypeDeviceBlob: FfiConverterRustBuffer {
+    typealias SwiftType = [DeviceBlob]
+
+    public static func write(_ value: [DeviceBlob], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDeviceBlob.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DeviceBlob] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DeviceBlob]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDeviceBlob.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterSequenceTypeImportInfo: FfiConverterRustBuffer {
     typealias SwiftType = [ImportInfo]
 
@@ -1765,6 +3542,31 @@ fileprivate struct FfiConverterSequenceTypePatch: FfiConverterRustBuffer {
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypePatch.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeDeviceOutput: FfiConverterRustBuffer {
+    typealias SwiftType = [DeviceOutput]
+
+    public static func write(_ value: [DeviceOutput], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeDeviceOutput.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [DeviceOutput] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [DeviceOutput]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeDeviceOutput.read(from: &buf))
         }
         return seq
     }
@@ -1889,6 +3691,25 @@ public func portablePathHas(valueJson: String, path: String)throws  -> String  {
 })
 }
 /**
+ * Move element `from` of the array at `from_path` to index `to` of the
+ * array at `to_path` (the `__hypen_reorder` primitive; see
+ * [`crate::portable::path_move`] for the exact semantics — `to` is the
+ * final index, clamped after removal). Returns
+ * `{"json": <updated>, "moved": bool}`; on `moved: false` the JSON is the
+ * input unchanged.
+ */
+public func portablePathMove(valueJson: String, fromPath: String, from: UInt32, toPath: String, to: UInt32)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeHypenError_lift) {
+    uniffi_hypen_engine_fn_func_portable_path_move(
+        FfiConverterString.lower(valueJson),
+        FfiConverterString.lower(fromPath),
+        FfiConverterUInt32.lower(from),
+        FfiConverterString.lower(toPath),
+        FfiConverterUInt32.lower(to),$0
+    )
+})
+}
+/**
  * Set `new_value_json` at `path` inside `value_json`; returns the
  * updated JSON. Intermediate objects are created; arrays are extended
  * with `null` padding.
@@ -1923,6 +3744,131 @@ public func portableSessionStep(stateJson: String, eventJson: String)throws  -> 
 public func version() -> String  {
     return try!  FfiConverterString.lift(try! rustCall() {
     uniffi_hypen_engine_fn_func_version($0
+    )
+})
+}
+/**
+ * Protocol and broker constants JSON.
+ */
+public func deviceConstantsJson() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_func_device_constants_json($0
+    )
+})
+}
+/**
+ * The `file.save@1` announcement params JSON for `bytes`.
+ */
+public func deviceFileSaveParamsJson(name: String, contentType: String, bytes: Data) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_func_device_file_save_params_json(
+        FfiConverterString.lower(name),
+        FfiConverterString.lower(contentType),
+        FfiConverterData.lower(bytes),$0
+    )
+})
+}
+/**
+ * `hello.device` JSON → [`DeviceHandshake`]. `server_capabilities_json`
+ * (`[{name, versions}]`) replaces the default advertisement (every
+ * capability the broker consumes); a malformed one is an error.
+ */
+public func deviceHandshake(helloJson: String, binaryRoute: Bool, serverCapabilitiesJson: String?)throws  -> DeviceHandshake  {
+    return try  FfiConverterTypeDeviceHandshake_lift(try rustCallWithError(FfiConverterTypeDeviceBindingError_lift) {
+    uniffi_hypen_engine_fn_func_device_handshake(
+        FfiConverterString.lower(helloJson),
+        FfiConverterBool.lower(binaryRoute),
+        FfiConverterOptionString.lower(serverCapabilitiesJson),$0
+    )
+})
+}
+/**
+ * Whether `text` is device text over the size limit (decided without
+ * parsing): report it with `report_violation` instead of parsing it.
+ */
+public func deviceIsOversizeText(text: String) -> Bool  {
+    return try!  FfiConverterBool.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_func_device_is_oversize_text(
+        FfiConverterString.lower(text),$0
+    )
+})
+}
+/**
+ * `hello.device` JSON → the `sessionAck.device` JSON of a broker-backed
+ * server, or `None` (invalid hello or nothing mutual: device disabled).
+ */
+public func deviceNegotiate(helloJson: String, binaryRoute: Bool) -> String?  {
+    return try!  FfiConverterOptionString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_func_device_negotiate(
+        FfiConverterString.lower(helloJson),
+        FfiConverterBool.lower(binaryRoute),$0
+    )
+})
+}
+/**
+ * `select_device_ack` with explicit server lists (`server_capabilities_json`
+ * = `[{name, versions}]`); the ack JSON or `None`.
+ */
+public func deviceSelectAck(helloJson: String, serverProtocolVersions: [UInt32], serverCapabilitiesJson: String, serverBinary: Bool)throws  -> String?  {
+    return try  FfiConverterOptionString.lift(try rustCallWithError(FfiConverterTypeDeviceBindingError_lift) {
+    uniffi_hypen_engine_fn_func_device_select_ack(
+        FfiConverterString.lower(helloJson),
+        FfiConverterSequenceUInt32.lower(serverProtocolVersions),
+        FfiConverterString.lower(serverCapabilitiesJson),
+        FfiConverterBool.lower(serverBinary),$0
+    )
+})
+}
+/**
+ * What a broker-backed server advertises: `[{name, versions}]` JSON.
+ */
+public func deviceServerAdvertisementJson() -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_func_device_server_advertisement_json($0
+    )
+})
+}
+/**
+ * Whether a broker-backed server has a consuming API for a capability
+ * revision JSON with `mode` and `data` (e.g. a
+ * [`DeviceBroker::revision_json`] answer): unary, or a stream whose data
+ * plane flows client to server. A missing or unknown `mode`/`data` is an
+ * error.
+ */
+public func deviceServerConsumes(revisionJson: String)throws  -> Bool  {
+    return try  FfiConverterBool.lift(try rustCallWithError(FfiConverterTypeDeviceBindingError_lift) {
+    uniffi_hypen_engine_fn_func_device_server_consumes(
+        FfiConverterString.lower(revisionJson),$0
+    )
+})
+}
+/**
+ * Lowercase hex SHA-256.
+ */
+public func deviceSha256Hex(bytes: Data) -> String  {
+    return try!  FfiConverterString.lift(try! rustCall() {
+    uniffi_hypen_engine_fn_func_device_sha256_hex(
+        FfiConverterData.lower(bytes),$0
+    )
+})
+}
+/**
+ * Strictly decode `sessionAck.device`; the normalized JSON, or the reason.
+ */
+public func deviceValidateAck(ackJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeDeviceBindingError_lift) {
+    uniffi_hypen_engine_fn_func_device_validate_ack(
+        FfiConverterString.lower(ackJson),$0
+    )
+})
+}
+/**
+ * Strictly decode `hello.device`; the normalized JSON, or the reason.
+ */
+public func deviceValidateHello(helloJson: String)throws  -> String  {
+    return try  FfiConverterString.lift(try rustCallWithError(FfiConverterTypeDeviceBindingError_lift) {
+    uniffi_hypen_engine_fn_func_device_validate_hello(
+        FfiConverterString.lower(helloJson),$0
     )
 })
 }
@@ -1972,6 +3918,9 @@ private let initializationResult: InitializationResult = {
     if (uniffi_hypen_engine_checksum_func_portable_path_has() != 26095) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_hypen_engine_checksum_func_portable_path_move() != 30685) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_hypen_engine_checksum_func_portable_path_set() != 30972) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1981,6 +3930,39 @@ private let initializationResult: InitializationResult = {
     if (uniffi_hypen_engine_checksum_func_version() != 40847) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_hypen_engine_checksum_func_device_constants_json() != 43686) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_file_save_params_json() != 56970) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_handshake() != 47835) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_is_oversize_text() != 18419) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_negotiate() != 24746) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_select_ack() != 64236) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_server_advertisement_json() != 64876) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_server_consumes() != 7001) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_sha256_hex() != 25198) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_validate_ack() != 13791) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_func_device_validate_hello() != 35123) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_hypen_engine_checksum_method_hypenengine_action_scope_for() != 30596) {
         return InitializationResult.apiChecksumMismatch
     }
@@ -1988,6 +3970,12 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hypen_engine_checksum_method_hypenengine_dispatch_action() != 61576) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_dispatch_external() != 21907) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_external_builtin_names() != 47225) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hypen_engine_checksum_method_hypenengine_get_default_primitives() != 51381) {
@@ -2000,6 +3988,21 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hypen_engine_checksum_method_hypenengine_get_revision() != 37374) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_get_state_at() != 24215) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_list_bindings() != 24562) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_list_external_actions() != 37543) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_list_routes() != 35448) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_mcp_manifest() != 8313) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hypen_engine_checksum_method_hypenengine_parse_to_json() != 19998) {
@@ -2038,13 +4041,124 @@ private let initializationResult: InitializationResult = {
     if (uniffi_hypen_engine_checksum_method_hypenengine_set_module() != 9330) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_unregister_module() != 32749) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_hypen_engine_checksum_method_hypenengine_update_state() != 65422) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hypen_engine_checksum_method_hypenengine_update_state_sparse() != 14668) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_admits_background() != 28222) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_cancel() != 27195) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_close() != 29203) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_consumed_data() != 26367) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_consumed_events() != 61402) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_core_stream_id() != 28282) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_has_background_work() != 43895) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_info_json() != 23381) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_is_closed() != 10740) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_is_live() != 42596) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_live_count() != 3925) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_next_deadline() != 62760) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_on_frame() != 64139) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_on_text() != 35312) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_open() != 47980) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_outstanding_credit() != 28204) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_outstanding_event_credit() != 32257) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_owner_activated() != 55691) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_owner_deactivated() != 55293) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_owner_destroyed() != 57606) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_owner_is_active() != 38338) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_poll() != 42457) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_release_result() != 63315) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_reopen_core_capabilities() != 8318) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_report_violation() != 19269) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_retained_bytes() != 11687) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_revision_json() != 16799) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_selected_version() != 23862) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_set_transport_buffered() != 25200) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_start() != 36192) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_supports() != 55273) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_devicebroker_tick() != 21660) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_deviceretainedbytespool_in_use() != 64193) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_deviceretainedbytespool_limit() != 28639) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_hypen_engine_checksum_constructor_hypenengine_new() != 42970) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_constructor_devicebroker_new() != 18621) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_constructor_deviceretainedbytespool_new() != 17059) {
         return InitializationResult.apiChecksumMismatch
     }
 

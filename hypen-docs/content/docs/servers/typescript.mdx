@@ -421,7 +421,7 @@ await server.listen(3000);
 | `.module(name, module)` | Single-module shortcut — skip `HypenApp` for demos |
 | `.ui(dsl)` | Top-level UI template string (pairs with `.module()`) |
 | `.source(dir)` | Discover `.hypen` + module files from a directory |
-| `.config({ port, hostname })` | Server configuration |
+| `.config({ port, hostname, compression })` | Server configuration |
 | `.session(config)` | Session management configuration |
 | `.onConnection(callback)` | Called when a client connects |
 | `.onDisconnection(callback)` | Called when a client disconnects |
@@ -452,8 +452,19 @@ new RemoteServer()
   .config({
     port: 3000,          // default: 3000
     hostname: "0.0.0.0", // default: "0.0.0.0"
+    compression: true,   // default: true
   })
 ```
+
+### Compression
+
+Patch streams are JSON, so WebSocket `permessage-deflate` is enabled by
+default. It is negotiated per-connection during the upgrade handshake —
+clients that don't offer the extension (for example iOS
+`URLSessionWebSocketTask`) transparently fall back to uncompressed frames.
+
+Set `compression: false` to opt out, which is handy when you want to read the
+raw wire in a proxy or packet capture.
 
 ## Session Management
 
@@ -561,6 +572,7 @@ Bun.serve({
     return new Response("Not Found", { status: 404 });
   },
   websocket: {
+    perMessageDeflate: true, // what `.listen()` does by default
     // Wire up RemoteServer WebSocket handlers
   },
 });

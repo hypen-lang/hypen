@@ -124,7 +124,7 @@ Hypen DSL (string)
 
 ### Key Patterns
 
-- **Observable State**: Proxy-based mutation tracking. Direct assignment (`state.count++`) auto-propagates — no `setState()` needed.
+- **Observable State**: Proxy-based mutation tracking. Direct assignment (`state.count++`) auto-propagates — no `setState()` needed. The traps record *dirty roots* (which paths were written) and the microtask flush diffs only those subtrees against the snapshot — O(edit), not O(state) — using the TS port of the engine's canonical diff (`@hypen-space/core/diff`, pinned to `diff.rs` by the cross-SDK fixtures and a differential fuzz suite). Set `HYPEN_DIFF_ORACLE=1` (or `globalThis.__HYPEN_DIFF_ORACLE__ = true`) to cross-check every flush against the full diff and the WASM implementation at runtime.
 - **Sparse Updates**: Only changed state paths sent to engine via `updateStateSparse(scope, paths, values)`. Empty `scope` targets the primary module slot; non-empty `scope` targets a named nested module.
 - **Patch-Based Rendering**: Engine emits Create/SetProp/RemoveProp/SetText/Insert/Move/Remove patches, plus Detach/Attach for Router subtree caching (off-screen routes stay alive under the same NodeId; re-entry emits `Attach` instead of `Create`, preserving DOM scroll/focus/form state for free). All renderers (DOM, Canvas, iOS, Android) consume the same format.
 - **Route-Level Persistence**: `ManagedRouter` keeps module instances alive across navigation by default (opt out via `persist: false` on the module definition), and the engine's Router IR node caches detached route subtrees under the same `NodeId`s (LRU, default cap 10). Navigating back to a visited route fires `onActivated` (not `onCreated`) at the SDK layer and emits `Attach` patches (not `Create`) at the engine layer — no loading flash, no DOM rebuild. Both caches are bounded: `ManagedRouter` evicts the least-recently-persisted module past `maxPersistedModules` (default 10, matches the engine's `DEFAULT_ROUTER_CACHE_SIZE`) via the same `destroy() + unregisterModule()` path `persist: false` uses, so a long session over many routes cannot leak module instances indefinitely.
@@ -160,3 +160,89 @@ Common patterns: `FakeEngine` mock for unit tests, `flushMicrotasks()` for async
 - Use `bun` instead of `node`/`npm`/`pnpm`
 - Use `bun:test` instead of `jest`/`vitest`
 - Bun auto-loads `.env` files
+
+## Rust device broker (WASM) — RFC 001
+
+The server-side device broker is the Rust `DeviceBroker` (hypen-engine-rs `src/device/`), shared by
+every server SDK. TypeScript has NO broker of its own any more (the former `broker.ts` /
+`scheduler.ts` were removed):
+
+- `@hypen-space/core` stays WASM-free. `remote/device/port.ts` describes the broker as a port
+  (`DeviceBrokerPort`, `DeviceBrokerFactory`, config/open/output shapes); `remote/device/plane.ts`
+  (`DevicePlane`) is the host driver every TS server shares: socket text/frames in, `poll()`
+  outputs out (texts, download frames, JSON events, streamed upload bytes, settlements, close),
+  one timer re-armed from the broker's next deadline (`DeviceClock` seam), transport buffered
+  bytes reported before each poll, due bulk turns deferred so UI traffic goes first, consumer
+  pacing via `consumedEvents` / `consumedData`. `DeviceContext` (context.ts) is the typed,
+  Result-style handler API on top of the plane; `RemoteSession` keeps admission, `resumeToken`
+  and module ownership (`ownerActivated/Deactivated/Destroyed`) native. The device plane is ON
+  by default on every TS server (no `enableDevice`; `RemoteServer.disableDevice()` /
+  `SessionHost.deviceDisabled` / CF `device: false` opt out; `configureDevice(options)` tunes
+  budgets). Nothing device-related ever refuses to start a server: `allow-multiple` turns the
+  plane off with ONE warning; no `allowedOrigins`/`authenticate` admits everyone with ONE
+  warning. `syncActions` keeps the plane on (a replayed dispatch — `runReplayed`, replay
+  provenance — gets a `context.device` that refuses `unavailable`/`syncActions.replay`; the
+  agent handle's sibling mirror replays the same way). Compression is on by default and
+  per message: `RemoteServer` passes `perMessageDeflate: { compress: "shared", decompress:
+  "shared" }` (Bun answers `server_no_context_takeover; client_no_context_takeover`), and a
+  connection keeps its device plane only when its negotiated extension has BOTH params
+  (`remote/ws-extensions.ts` `deflateContextPolicy`, used by `RemoteEngine.attachDevice` and
+  the CF DO per socket; CF `webSocketCompression: true` only makes an unobservable
+  negotiation fail closed for clients that offered DEFLATE). Legacy clients keep the 1 s
+  hello grace (grace-initialised ⇒ no device plane). Every
+  ack carries a `resumeToken`; it is REQUIRED only to resume a session that negotiated a device
+  plane (`SessionManager.markDeviceSession`), UI-only sessions keep id-only resume. Handshake negotiation
+  (hello validation + selection) is the Rust `deviceHandshake`, reached through the port as
+  `DeviceBrokerFactory.negotiate(helloText, binaryRoute, serverCapabilities?)` — TS has no
+  selection code. On a live device connection `RemoteSession.receive` routes text by its RAW
+  top-level `type` (`isDeviceTypedText`, before `JSON.parse`): every device type — a client
+  `deviceRequest` included — goes to the broker, so D8 reactions happen and JSON-limit breakers
+  (even text `JSON.parse` rejects) count against the connection's violation budget
+  (`tests/device-srv-socket-routing.test.ts`, real socket).
+- `@hypen-space/server` supplies the WASM-backed factory (`createWasmDeviceBrokerFactory`,
+  `src/device-broker.ts`, one process-wide `WasmRetainedBytesPool`); `RemoteServer` wires it as
+  `SessionHost.deviceBrokerFactory`. A host without a factory never admits the device plane.
+- `@hypen-space/cf` supplies `createCFDeviceBrokerFactory(wasm, poolBytes)`;
+  `HypenDurableObjectConfig.deviceWasm` (the web-target exports; `defineHypenWorker` sets it from
+  `wasm` automatically — the `pkg/web` glue carries the broker) is needed for the device plane;
+  without it the DO stays UI-only with one warning. The DO reset marker (the attachment's
+  `deviceEnabled: true`, 1012 on wake) stays native.
+- Tests build the broker through the port: `tests/device-srv-harness.ts` `makePlane()` (a plane
+  over wasm-node's `WasmDeviceBroker` with a `FakeClock`), `loopback()` (plane ↔ `DeviceClient`),
+  and `makeHost()` (a `SessionHost` with the WASM factory).
+- End to end: `tests/device-remote-server-e2e.test.ts` drives a listening `RemoteServer` with
+  `RemoteEngine` + `FakeDeviceHost` over a real WebSocket (admission, handshake, uploads,
+  `file.save`, streams, cancel, lease renewals, `resumeToken` resume);
+  `tests/device-cf-define-worker.test.ts` runs `defineHypenWorker({ wasm })` (device on by default) on the
+  web-target glue (`tests/fixtures/wasm-web-glue`) Cloudflare uses.
+- `RemoteSession` builds the broker BEFORE the `sessionAck`: a factory/config failure acks without
+  `device` (UI-only continues); a broker that cannot open `core.capabilities` resets with 1012
+  (`tests/device-srv-broker-failure.test.ts`).
+
+The wasm-bindgen build exposes `WasmDeviceBroker` (+ `WasmRetainedBytesPool`,
+`deviceHandshake`, `deviceNegotiate`, `deviceSelectAck`, `deviceValidateHello`, `deviceValidateAck`,
+`deviceServerAdvertisement`, `deviceConstants`, `deviceIsOversizeText`,
+`deviceFileSaveParams`, `deviceSha256Hex`, `deviceServerConsumes`). It ships in the SERVER
+builds only (`--features js,device-broker`): `packages/server/wasm-node/` (Node/Bun) and
+`hypen-engine-rs/pkg/web` (web target, which Cloudflare apps import as `hypen-engine`). The
+browser bundle `packages/web-engine/wasm-browser/` is built with `--features js` alone and has
+NO device broker exports (browsers never broker device requests; it saves ~0.5 MB raw).
+
+- Construct: `new WasmDeviceBroker({ ack, ...limits }, nowMs)` or
+  `WasmDeviceBroker.withPool(config, pool, nowMs)`; config/spec accept an object or JSON string.
+- Drive: `start(now)`, `ownerActivated/Deactivated/Destroyed`, `open(spec, now, download?)`
+  (`{id}` or `{error:{code,detail?}}`; host errors throw), `onText(text, now)`,
+  `onFrame(uint8, now)`, `tick(now)` → next deadline, `setTransportBuffered(n)`, `poll()` →
+  `[{type:"sendText"|"sendFrame"|"event"|"data"|"settled"|"closeConnection", ...}]`
+  (`frame`/`bytes`/`outcome.blobs[i].bytes` are `Uint8Array`s), `consumedEvents/consumedData`,
+  `cancel`, `releaseResult`, `close(code)`, `info()`, `revision(capability, version)` (the
+  effective revision object or `null`; feed it to `deviceServerConsumes`).
+- Shapes are defined once in `hypen-engine-rs/src/wasm/device_binding.rs` (shared with Go/Kotlin/Swift).
+
+Rebuild and re-copy the WASM after any engine change:
+
+```bash
+cd ../hypen-engine-rs && ./build-wasm.sh    # needs wasm-pack + wasm-bindgen-cli 0.2.111 on PATH,
+                                           # rustup targets wasm32-unknown-unknown + wasm32-wasip1
+cd ../hypen-web && bun test tests/device-wasm-broker-binding.test.ts   # binding smoke (wasm-node) + no broker in wasm-browser
+```

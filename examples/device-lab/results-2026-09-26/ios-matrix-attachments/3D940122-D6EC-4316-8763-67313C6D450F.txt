@@ -1,0 +1,4 @@
+Query chain:
+ →Find: Target Application 'space.hypen.gallery.HypenGallery'
+  ↪︎Find: Descendants matching type Button
+    ↪︎Find: Elements matching predicate '"Save" IN identifiers'

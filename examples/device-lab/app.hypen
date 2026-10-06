@@ -1,0 +1,27 @@
+Column {
+    Text("Device Lab · @{state.server}").fontSize(22).fontWeight(bold)
+    Text("Real host / real server · run @{state.runs}").fontSize(12)
+    Row {
+        Button { Text("Status") }.onClick(@actions.status).padding(8)
+        Button { Text("Query camera") }.onClick(@actions.query).padding(8)
+        Button { Text("Ask mic") }.onClick(@actions.permission).padding(8)
+    }.gap(6)
+    Row {
+        Button { Text("Pick photo") }.onClick(@actions.gallery).padding(8)
+        Button { Text("Pick file") }.onClick(@actions.file).padding(8)
+        Button { Text("Save 96K") }.onClick(@actions.save).padding(8)
+    }.gap(6)
+    Row {
+        Button { Text("Camera") }.onClick(@actions.camera).padding(8)
+        Button { Text("Record 3s") }.onClick(@actions.record).padding(8)
+        Button { Text("Scan 3s") }.onClick(@actions.scan).padding(8)
+    }.gap(6)
+    Row {
+        Button { Text("Bluetooth") }.onClick(@actions.bluetooth).padding(8)
+        Button { Text("Cancel") }.onClick(@actions.cancel).padding(8)
+        Button { Text("UI ping") }.onClick(@actions.ping).padding(8)
+    }.gap(6)
+    Text("@{state.result}").fontSize(14)
+    Text("@{state.detail}").fontSize(11)
+    Text("@{state.history}").fontSize(11)
+}.padding(top: 110, left: 18, right: 18, bottom: 18).gap(10).backgroundColor(white)

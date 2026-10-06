@@ -1,0 +1,62 @@
+{
+  "name": "@hypen-space/device-web",
+  "version": "0.6.5",
+  "description": "Hypen browser DeviceHost — host-owned consent and real platform drivers for the Device Capability Protocol (RFC 001)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "browser": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "browser": "./dist/index.js",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "build:types": "tsc --emitDeclarationOnly",
+    "prepublishOnly": "bun run build",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hypen-space/core": "^0.6.5"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "hypen",
+    "device",
+    "browser",
+    "permissions",
+    "file-picker"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-web/packages/device-web"
+  }
+}

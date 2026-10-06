@@ -157,13 +157,17 @@ enum Patch {
     SetText { id, text },                             // reserved; reconciler emits SetProp for text
     Insert { parent_id, id, before_id },
     Move { parent_id, id, before_id },
-    Remove { id },
+    Remove { id, transition },                        // transition: true (serde skip-if-false) roots an animated exit
     Detach { id },                                    // unlink but keep alive (Router cache)
     Attach { parent_id, id, before_id },              // reinsert a previously-detached subtree
 }
 // Note: Event handling is done at the renderer level, not via patches.
 // Detach/Attach back the Router subtree cache — navigating back to a visited route
 // reuses the same NodeId subtree instead of rebuilding it.
+// Remove.transition flags the root of a subtree whose node carried an "__anim.exit"
+// prop (from the .exit() applicator): the flagged root Remove is emitted FIRST,
+// then its descendants as plain Removes, and the renderer may defer teardown to
+// play the exit. Absent flag = wire-identical to the old protocol (renderers snap).
 ```
 
 ## Hypen DSL Syntax
@@ -197,6 +201,17 @@ Textarea(placeholder: "Bio").bind(@state.bio)
 Checkbox {}.bind(@state.agreed)
 Switch {}.bind(@state.darkMode)
 Select {}.bind(@state.country)
+
+// Drag and drop: roles + .bind as the write + events; identity is the ForEach key
+Column { ForEach(items: @state.tasks, key: "id") { TaskRow("@{item.title}").draggable() } }
+    .sortable(axis: y).bind(@state.tasks)            // engine path_moves state.tasks; .onSort(@actions.x) to observe
+Row { Text("Trash") }.dropZone(group: "cards", id: "trash").onDrop(@actions.deleteCard)
+Stack { ForEach(items: @state.notes, key: "id") { Note("@{item.text}").draggable() } }
+    .pinboard(group: "board", grid: 8)               // positions in reserved __dnd.board.<key> state
+
+// Files dragged in from the desktop: a UI signal only (no file data). Answer with
+// context.device.request("file.pick", …); the DeviceHost's dialog has the drop zone.
+Column { Text("Drop files here") }.onFileDragEnter(@actions.upload)
 
 // Strings: double or single quotes, with escape support
 Text("Hello")
@@ -251,7 +266,7 @@ export default app
 - **Path-Based Dependency Tracking**: Dependencies tracked by string paths (`"user.name"`, `"items.0.title"`), not values. Host must correctly signal which paths changed.
 - **Arc-Shared Props**: `Props` (raw, with bindings) and `ResolvedProps` (resolved JSON values, on `InstanceNode` and `Patch::Create`) are `Arc<IndexMap<...>>`. Cloning a node's props into a `Create` patch, or snapshotting old props before a dirty re-render, is an `Arc::clone` rather than a deep copy. Other per-render clones should be scrutinised — prefer moves and `&mut` over `.clone()` unless a shared-ownership handoff genuinely requires it.
 - **First-Class Control Flow**: ForEach/When/If are IR-level types, not runtime hacks. Exhaustive pattern matching catches missing cases at compile time.
-- **Proxy-Based State (SDK)**: TypeScript Proxy tracks mutations automatically. The `deleteProperty` trap correctly tracks `delete` operations. The `in` operator (`has` trap) is not tracked.
+- **Proxy-Based State (SDK)**: TypeScript Proxy tracks mutations automatically. The `deleteProperty` trap correctly tracks `delete` operations. The `in` operator (`has` trap) is not tracked. The traps record dirty roots and the flush diffs only those subtrees (O(edit), not O(state)) via the TS port of the engine's canonical diff (`@hypen-space/core/diff` — pinned to `portable/diff.rs` by the cross-SDK fixtures, a differential fuzz suite, and the `HYPEN_DIFF_ORACLE=1` runtime cross-check).
 - **Renderer-Agnostic Patches**: All renderers (DOM, Canvas, iOS, Android) receive the same Patch format.
 
 ## Common Workflows

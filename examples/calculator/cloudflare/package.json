@@ -1,0 +1,21 @@
+{
+  "name": "hypen-calculator-cf",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@hypen-space/core": "0.6.5",
+    "@hypen-space/cf": "0.6.5",
+    "@hypen-space/web": "0.6.5",
+    "hypen-engine": "0.6.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250101.0",
+    "typescript": "^5.6.0",
+    "wrangler": "^4.0.0"
+  }
+}

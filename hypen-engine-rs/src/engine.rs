@@ -55,7 +55,10 @@ pub type RenderCallback = Box<dyn Fn(&[Patch]) + Send + Sync>;
 pub struct Engine {
     /// Shared core: component registry, resource registry, module state,
     /// instance tree, dependency graph, scheduler, data sources, etc.
-    core: EngineCore,
+    ///
+    /// `pub(crate)` so the external-surface module (`crate::agent`) can read
+    /// the registries it guards against. Still private to the crate.
+    pub(crate) core: EngineCore,
 
     /// Action dispatcher
     actions: ActionDispatcher,
@@ -164,7 +167,13 @@ impl Engine {
         &self.core.modules
     }
 
-    /// Set the render callback
+    /// Set the render callback.
+    ///
+    /// The callback receives the engine's raw patch stream, which carries
+    /// template-shaped list rows as `RegisterTemplate`/`Instantiate`.
+    /// Embedders whose consumers need the plain `Create`+`Insert` wire
+    /// lower each batch through one session-lifetime
+    /// [`crate::portable::TemplateExpander`].
     pub fn set_render_callback<F>(&mut self, callback: F)
     where
         F: Fn(&[Patch]) + Send + Sync + 'static,
@@ -177,7 +186,9 @@ impl Engine {
     where
         F: Fn(&Action) + Send + Sync + 'static,
     {
-        self.actions.on(action_name, handler);
+        let name = action_name.into();
+        self.core.note_handler(&name);
+        self.actions.on(name, handler);
     }
 
     /// Render an element tree (initial render or full re-render).
@@ -240,7 +251,27 @@ impl Engine {
     ///
     /// Skips rendering if the patch produces no actual state change.
     pub fn update_state(&mut self, scope: Option<&str>, state_patch: serde_json::Value) {
-        if self.core.update_state(scope, state_patch) {
+        self.update_state_with_animation(scope, state_patch, None)
+    }
+
+    /// [`update_state`](Self::update_state) with an optional batch-animation
+    /// context (Option D cheap subset — transaction-scoped animation).
+    ///
+    /// `animation` is either a spec object (`{"curve": "spring", ...}`) or a
+    /// bare curve string (`"spring"`, normalized to
+    /// `{"curve": "spring", "duration": 250}`). If the update changed state
+    /// and the resulting render cycle produced patches, the batch is
+    /// prefixed with a [`Patch::BatchAnimation`](crate::reconcile::Patch)
+    /// prelude carrying the normalized spec. A no-op update, an empty diff,
+    /// or an invalid spec (warned, never a hard error) all emit an
+    /// unstamped batch — no stamp without patches.
+    pub fn update_state_with_animation(
+        &mut self,
+        scope: Option<&str>,
+        state_patch: serde_json::Value,
+        animation: Option<serde_json::Value>,
+    ) {
+        if self.core.update_state(scope, state_patch, animation) {
             self.render_dirty();
         }
     }
@@ -253,14 +284,37 @@ impl Engine {
         paths: &[String],
         values: &serde_json::Value,
     ) {
-        if self.core.update_state_sparse(scope, paths, values) {
+        self.update_state_sparse_with_animation(scope, paths, values, None)
+    }
+
+    /// [`update_state_sparse`](Self::update_state_sparse) with an optional
+    /// batch-animation context. See
+    /// [`update_state_with_animation`](Self::update_state_with_animation)
+    /// for the stamping contract.
+    pub fn update_state_sparse_with_animation(
+        &mut self,
+        scope: Option<&str>,
+        paths: &[String],
+        values: &serde_json::Value,
+        animation: Option<serde_json::Value>,
+    ) {
+        if self
+            .core
+            .update_state_sparse(scope, paths, values, animation)
+        {
             self.render_dirty();
         }
     }
 
     /// Dispatch an action to its registered handler.
     pub fn dispatch_action(&mut self, action: Action) -> Result<(), EngineError> {
+        let action = self.core.route_ui_action(action)?;
         self.actions.dispatch(&action)
+    }
+
+    /// Resolve a UI envelope for hosts that own their action dispatch loop.
+    pub fn resolve_ui_action(&self, action: Action) -> Result<Action, EngineError> {
+        self.core.route_ui_action(action)
     }
 
     /// Look up which named module (by lowercased name) owns a given action.

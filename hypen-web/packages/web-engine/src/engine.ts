@@ -8,16 +8,18 @@
  *     JS glue code from a CDN (or caller-provided URL) and then calls
  *     the wasm-bindgen `__wbg_init(wasmUrl)` entry point.
  *
- *   - `unwrapForWasm` using `JSON.parse(JSON.stringify())` (structuredClone
- *     doesn't handle Hypen's proxy-backed state uniformly across browsers).
+ *   - `unwrapForWasm` using core's copy-on-write `normalizeForWasm` walk,
+ *     which strips Hypen's state proxies and JSON-normalizes exotic values
+ *     without cloning data that is already plain.
  *
  * The web-target `Map`-payload conversion (`normalizeAction`) now lives in
  * `BaseEngine` as the default, so this subclass inherits it — every
  * web-target consumer gets the fix without re-declaring it.
  */
 
-import { BaseEngine } from "@hypen-space/core/engine-base";
+import { BaseEngine, normalizeForWasm } from "@hypen-space/core/engine-base";
 import { frameworkLoggers } from "@hypen-space/core/logger";
+import type { A11yDiagnostic } from "@hypen-space/core";
 import { installPortableFromWasm } from "./install-portable.js";
 
 // Re-export types so consumers of "./engine.js" still work
@@ -28,6 +30,13 @@ export type {
   ActionHandler,
   ResolvedComponent,
   ComponentResolver,
+  // External capability surface — `listActions` / `listRoutes` /
+  // `listBindings` / `dispatchExternal` / `getStateAt` /
+  // `unregisterModule` are inherited from `BaseEngine`, so a browser host
+  // reaches the guarded surface through this `Engine` with no extra wiring.
+  AgentAction,
+  AgentRoute,
+  BoundInput,
 } from "@hypen-space/core/types";
 
 const log = frameworkLoggers.engine;
@@ -98,16 +107,37 @@ export class Engine extends BaseEngine {
   }
 
   /**
+   * Run the engine's dev-mode accessibility conformance pass over a DSL
+   * source and return the findings as `A11yDiagnostic[]`.
+   *
+   * The underlying WASM binding only exists after a WASM rebuild
+   * (`bun run build:wasm`); until then this returns `[]` so hosts can wire
+   * the call without breaking typecheck or runtime. Cast through `any`
+   * because the generated `WasmEngine` types lag the Rust binding.
+   */
+  checkAccessibility(source: string): A11yDiagnostic[] {
+    if (typeof (this.wasmEngine as any)?.checkAccessibility !== "function") {
+      return [];
+    }
+    return (this.wasmEngine as any).checkAccessibility(source) as A11yDiagnostic[];
+  }
+
+  /**
    * Unwrap host state for WASM.
    *
-   * Browser path uses `JSON.parse(JSON.stringify())` — `structuredClone`
-   * is available in modern browsers, but Hypen's proxy-backed state has
-   * historically been more consistent with the JSON round-trip here.
+   * The wasm-bindgen entry points deserialize each argument synchronously
+   * (`serde_wasm_bindgen::from_value`) and retain nothing afterwards, so
+   * no defensive copy is needed — only proxy-stripping and JSON
+   * normalization, which `normalizeForWasm` applies copy-on-write. The
+   * hot sparse-update path (values just parsed out of the engine's own
+   * diff output) is already plain and crosses by reference, instead of
+   * round-tripping through `JSON.parse(JSON.stringify())` on every
+   * mutation flush.
    */
   protected unwrapForWasm<T>(value: T): T {
     if (value === null || typeof value !== "object") {
       return value;
     }
-    return JSON.parse(JSON.stringify(value));
+    return normalizeForWasm(value) as T;
   }
 }

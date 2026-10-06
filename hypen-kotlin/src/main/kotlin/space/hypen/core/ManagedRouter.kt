@@ -153,13 +153,22 @@ class ManagedRouter(
         unsubscribe = null
         unmountActive()
 
-        // Destroy all persisted modules on full stop
+        // Destroy all persisted modules on full stop — a destroy site,
+        // so the engine registration goes with them (see [unmountActive]).
         persistedModules.forEach { (moduleId, instance) ->
             instance.destroy()
             globalContext.unregisterNestedModule(moduleId)
+            engine.unregisterModule(moduleId)
         }
         persistedModules.clear()
     }
+
+    /**
+     * Every live module instance this router owns: the active one plus the
+     * persisted (off-screen, cached) ones.
+     */
+    fun liveInstances(): List<NestedModuleInstance<*>> =
+        listOfNotNull(activeModule) + persistedModules.values.toList()
 
     /**
      * Get the currently active module instance.
@@ -280,6 +289,13 @@ class ManagedRouter(
         } else {
             module.destroy()
             globalContext.unregisterNestedModule(moduleId)
+            // Only here — on an actual destroy — does the engine drop the
+            // module and the actions it declared. Doing it on every unmount
+            // would defeat the persist path above: a persisted module is
+            // off-screen but still registered on purpose, so siblings can
+            // read its state and so its cached instance still has a home in
+            // the engine when we navigate back.
+            engine.unregisterModule(moduleId)
         }
     }
 }

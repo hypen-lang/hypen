@@ -1,47 +1,131 @@
+import { pinOffset } from "./pin-position";
 /**
  * Event System
  *
  * Hit testing and event handling for canvas nodes
  */
 
-import type { VirtualNode, Point } from "./types.js";
-import { isPointInRoundedRect } from "./utils.js";
-import { getScrollAwareBounds } from "./scroll.js";
-import { resolveEventAction } from "./props.js";
+import type { VirtualNode, Point, Rectangle } from "./types.js";
+import { isLayoutHidden, isPointInRoundedRect } from "./utils.js";
+import { dispatchNodeEvent } from "./dispatch.js";
+import {
+  isFormControl,
+  isToggleControl,
+  isSliderControl,
+  isControlDisabled,
+  activateToggle,
+  finishSliderDrag as finishSliderDragCommit,
+  updateSliderDrag,
+} from "./controls.js";
+import {
+  beginScrubberDrag,
+  cancelScrubberDrag,
+  commitScrubberDrag,
+  hasVideoSlot,
+  isScrubberLive,
+  isScrubberNode,
+  isInsideVideoSlot,
+  isVideoNode,
+  isVideoSlotChildVisible,
+  scrubberFractionAt,
+  toggleVideoPlayback,
+  updateScrubberDrag,
+  visibleVideoSlotChildren,
+} from "./paint.js";
+import {
+  CHART_POINTER_KEY,
+  chartMarkKind,
+  isChartNode,
+  isInteractiveMark,
+  markContainsPoint,
+} from "./chart.js";
+import type { FocusManager } from "./focus.js";
+import type { CanvasDnd } from "./dnd.js";
+import { dragCarriesFiles, dragFileTypes, dragItemCount, transferOf } from "../file-drag.js";
+
+/** `onMove` is throttled to roughly a frame, matching the DOM applicator. */
+const MOVE_THROTTLE_MS = 32;
+
+/** How long a press must be held before `onLongPress` fires. */
+const LONG_PRESS_MS = 500;
+
+/** How far the pointer may drift during a press before it stops being one. */
+const LONG_PRESS_SLOP_PX = 10;
+
+/** Does this node declare a long-press handler? */
+function hasLongPress(node: VirtualNode): boolean {
+  const p = node.props;
+  return p.onLongPress != null || p["onLongPress.0"] != null || p.onlongpress != null;
+}
+
+/** `controls` may arrive as a boolean or a "true"/"false" string. */
+function hasVideoControls(node: VirtualNode): boolean {
+  const v = node.props.controls;
+  return v === true || v === "true" || (v !== undefined && v !== null && v !== false && v !== "false" && !!v);
+}
+
+/**
+ * The renderer-local video intent a node is tagged with, or null.
+ * `.videoIntent("fullscreen")` lowers to the `videoIntent.0` prop; the flat
+ * alias is accepted the same way slot names are.
+ */
+function videoIntentOf(node: VirtualNode): string | null {
+  const raw = node.props["videoIntent.0"] ?? node.props.videoIntent;
+  return typeof raw === "string" ? raw : null;
+}
 
 // Interface for the engine that CanvasEventManager needs
 interface IEngine {
   dispatchAction(name: string, payload?: any): void;
 }
 
-// Maps a DOM event type to the applicator prop names the engine may have set
-// on a node, in priority order. Multi-word events (`mouseenter`) need their
-// proper camelCase form (`onMouseEnter`) since the engine emits applicator
-// names verbatim. `mouseenter` also accepts `onHover` as an alias.
-const CANVAS_EVENT_PROP_NAMES: Record<string, string[]> = {
-  mouseenter: ["onMouseEnter", "onHover", "onmouseenter", "mouseenter"],
-  mouseleave: ["onMouseLeave", "onmouseleave", "mouseleave"],
-  mousedown: ["onMouseDown", "onmousedown", "mousedown"],
-  mouseup: ["onMouseUp", "onmouseup", "mouseup"],
-  dblclick: ["onDblClick", "onDoubleClick", "ondblclick", "dblclick"],
-  contextmenu: ["onContextMenu", "oncontextmenu", "contextmenu"],
-  keydown: ["onKeyDown", "onkeydown", "keydown"],
-  keyup: ["onKeyUp", "onkeyup", "keyup"],
-};
-
 /**
  * Canvas Event Manager
+ *
+ * Pointer-side interaction: hit testing, hover/pressed state, cursor, and
+ * click dispatch. Focus is NOT owned here — the pointer path funnels into
+ * the {@link FocusManager}, which treats real DOM focus on the
+ * accessibility-mirror (canvas fallback content) as the single source of
+ * truth. Keyboard events likewise arrive via the mirror (a canvas without
+ * tabindex never receives them), so this class attaches no key listeners.
  */
+/** Native drag events the canvas listens to for OS file drags. */
+const FILE_DRAG_EVENTS = ["dragenter", "dragover", "dragleave", "drop", "dragend"] as const;
+
 export class CanvasEventManager {
   private canvas: HTMLCanvasElement;
   private engine: IEngine;
   private rootNode: VirtualNode | null = null;
   private hoveredNode: VirtualNode | null = null;
-  private focusedNode: VirtualNode | null = null;
   private mouseDownNode: VirtualNode | null = null;
-  private focusChangeHandler:
-    | ((next: VirtualNode | null, prev: VirtualNode | null) => void)
-    | null = null;
+  /** Scrubber the pointer is currently dragging (local preview, no dispatch). */
+  private scrubbingNode: VirtualNode | null = null;
+  /** Slider currently being dragged, if any. Mirrors `scrubbingNode`. */
+  private slidingNode: VirtualNode | null = null;
+  private focusManager: FocusManager | null = null;
+  private editablePointerHandler: ((node: VirtualNode, point: Point) => void) | null = null;
+  /** Drag-and-drop runtime (`__dnd.*`); owns the pointer once a drag claims it. */
+  private dnd: CanvasDnd | null = null;
+  /**
+   * A completed drag (or an `immediate` lift) is not a click: the browser
+   * still fires `click` after `mouseup`, so the next click is swallowed.
+   * Reset on the next press so a missed click can never eat a later one.
+   */
+  private suppressClick = false;
+
+  /** `onMove` throttling state — the last node the pointer tracked, and when. */
+  private lastMoveNode: VirtualNode | null = null;
+  private lastMoveTime = 0;
+
+  /** Live long-press candidate: the pressed node, its timer and its origin. */
+  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  private longPressNode: VirtualNode | null = null;
+  private longPressPoint: Point | null = null;
+  private longPressData: Record<string, any> = {};
+
+  // Reused for the per-node rounded-rect test so hit testing allocates
+  // nothing per visited node.
+  private scratchBounds: Rectangle = { x: 0, y: 0, width: 0, height: 0 };
 
   // Bound handler references for cleanup
   private boundOnMouseMove!: (e: MouseEvent) => void;
@@ -50,8 +134,11 @@ export class CanvasEventManager {
   private boundOnClick!: (e: MouseEvent) => void;
   private boundOnDoubleClick!: (e: MouseEvent) => void;
   private boundOnContextMenu!: (e: MouseEvent) => void;
-  private boundOnKeyDown!: (e: KeyboardEvent) => void;
-  private boundOnKeyUp!: (e: KeyboardEvent) => void;
+  private boundOnWindowRelease!: (e: MouseEvent) => void;
+  private boundOnPointerMove!: (e: PointerEvent) => void;
+  private boundOnFileDrag!: (e: DragEvent) => void;
+  /** True while the drag-scoped window release listeners are registered. */
+  private windowReleaseArmed = false;
 
   constructor(canvas: HTMLCanvasElement, engine: IEngine) {
     this.canvas = canvas;
@@ -67,16 +154,37 @@ export class CanvasEventManager {
   }
 
   /**
-   * Subscribe to focus changes. Used by the renderer to mount the
-   * `InputOverlay` HTML element when an Input/Textarea gains focus and
-   * unmount it when focus moves away. Without this hookup the canvas
-   * Input painted as a pretty pill but a click on it did nothing — the
-   * overlay was constructed but never invoked.
+   * Wire the focus manager the pointer path reports into. Clicking a
+   * focusable node focuses its mirror element; clicking anything else
+   * clears mirror focus.
    */
-  setFocusChangeHandler(
-    fn: ((next: VirtualNode | null, prev: VirtualNode | null) => void) | null,
+  setFocusManager(fm: FocusManager | null): void {
+    this.focusManager = fm;
+  }
+
+  /**
+   * Wire the drag-and-drop runtime. The pointer handlers offer every
+   * press/move/release to it first; while it owns the pointer, hover,
+   * `:active`, click dispatch and the scrubber stand down (precedence:
+   * dnd > scrub, plan §6.6).
+   */
+  setDnd(dnd: CanvasDnd | null): void {
+    this.dnd = dnd;
+  }
+
+  /** Is a drag pending or live (the phases that own the pointer)? */
+  private dndOwnsPointer(): boolean {
+    return this.dnd !== null && (this.dnd.isPending() || this.dnd.isDragging());
+  }
+
+  /**
+   * Called with (node, point) when a mousedown lands on a focusable node —
+   * the renderer maps the point to a caret position for editable nodes.
+   */
+  setEditablePointerHandler(
+    fn: ((node: VirtualNode, point: Point) => void) | null,
   ): void {
-    this.focusChangeHandler = fn;
+    this.editablePointerHandler = fn;
   }
 
   /**
@@ -89,17 +197,51 @@ export class CanvasEventManager {
     this.boundOnClick = this.onClick.bind(this);
     this.boundOnDoubleClick = this.onDoubleClick.bind(this);
     this.boundOnContextMenu = this.onContextMenu.bind(this);
-    this.boundOnKeyDown = this.onKeyDown.bind(this);
-    this.boundOnKeyUp = this.onKeyUp.bind(this);
+    this.boundOnWindowRelease = this.onWindowRelease.bind(this);
+    this.boundOnPointerMove = this.onPointerMove.bind(this);
+    this.boundOnFileDrag = this.onFileDrag.bind(this);
 
     this.canvas.addEventListener("mousemove", this.boundOnMouseMove);
+    // `onMove` is a pointer-level applicator (mouse, touch and pen alike),
+    // so it rides `pointermove` rather than `mousemove` — same choice the
+    // DOM renderer's applicator makes.
+    this.canvas.addEventListener("pointermove", this.boundOnPointerMove);
     this.canvas.addEventListener("mousedown", this.boundOnMouseDown);
     this.canvas.addEventListener("mouseup", this.boundOnMouseUp);
     this.canvas.addEventListener("click", this.boundOnClick);
     this.canvas.addEventListener("dblclick", this.boundOnDoubleClick);
     this.canvas.addEventListener("contextmenu", this.boundOnContextMenu);
-    this.canvas.addEventListener("keydown", this.boundOnKeyDown);
-    this.canvas.addEventListener("keyup", this.boundOnKeyUp);
+    // OS file drags (`.dropZone(files: true)` / `.onFileDragEnter`): the
+    // canvas element is the only native drag target (the accessibility
+    // mirror is `pointer-events: none`).
+    for (const type of FILE_DRAG_EVENTS) this.canvas.addEventListener(type, this.boundOnFileDrag as EventListener);
+  }
+
+  /**
+   * Native drag events carrying OS files. Hit-tests the pointer and hands
+   * the node to the DnD runtime, which lights the innermost files zone and
+   * fires its `.onFileDragEnter`; over an enabled files zone the default is
+   * swallowed with `dropEffect: "none"`, so a release never opens the file.
+   * The canvas has no child elements, so a `dragleave` means the drag left
+   * the canvas (or was cancelled).
+   */
+  private onFileDrag(e: DragEvent): void {
+    if (!this.dnd || !dragCarriesFiles(e)) return;
+    if (e.type === "dragleave" || e.type === "dragend") {
+      this.dnd.fileDragEnd();
+      return;
+    }
+    const point = this.getCanvasCoordinates(e);
+    const hit = this.hitTest(point);
+    if (e.type === "drop") {
+      if (this.dnd.fileDrop(hit)) e.preventDefault?.();
+      return;
+    }
+    if (this.dnd.fileDragOver(hit, dragFileTypes(e), dragItemCount(e))) {
+      e.preventDefault?.();
+      const dt = transferOf(e);
+      if (dt) dt.dropEffect = "none";
+    }
   }
 
   /**
@@ -121,9 +263,10 @@ export class CanvasEventManager {
   }
 
   /**
-   * Find node at canvas coordinates
+   * Find node at canvas coordinates (the lifted drag ghost excluded). Public
+   * so the DnD runtime can re-resolve its target after a mid-drag rebuild.
    */
-  private hitTest(point: Point): VirtualNode | null {
+  hitTest(point: Point): VirtualNode | null {
     if (!this.rootNode) return null;
     return this.hitTestNode(this.rootNode, point);
   }
@@ -133,35 +276,203 @@ export class CanvasEventManager {
    * checked first because they paint on top (see `paint.ts` overlay
    * ordering) — without this, a click on the Story's close-button overlay
    * lands on the underlying Image instead.
+   *
+   * `scrollX`/`scrollY` accumulate the ancestors' scroll offsets down the
+   * recursion (the translation paint applies) so no per-node ancestor walk
+   * is needed. Subtrees behind a clipping container are pruned when the
+   * point falls outside the container — nothing inside can be visible there.
+   *
+   * `offsetX`/`offsetY` likewise accumulate the ancestors' translations:
+   * paint applies `translateX`/`translateY` (and the drag-and-drop
+   * `dndOffset`) as a subtree transform, so a translated node receives
+   * hits where it PAINTS, not at its untransformed layout box — a pinned
+   * note dragged to `x: 240` must be grabbable at 240 (plan §6.10). `null`
+   * or absent translate is 0. Rotation/scale are not modelled here.
    */
-  private hitTestNode(node: VirtualNode, point: Point): VirtualNode | null {
-    if (!node.visible || !node.layout) return null;
+  private hitTestNode(
+    node: VirtualNode,
+    point: Point,
+    scrollX: number = 0,
+    scrollY: number = 0,
+    offsetX: number = 0,
+    offsetY: number = 0,
+  ): VirtualNode | null {
+    // Exit-animating subtrees are pruned wholesale: the corpse is painted
+    // while its exit plays, but engine-side those ids are already dead.
+    if (!node.visible || !node.layout || node.exiting) return null;
 
-    const bounds = getScrollAwareBounds(node);
-    if (!bounds) return null;
+    // The lifted drag item floats above the tree under the pointer; the
+    // pointer must see what is BENEATH it (the drop target), never itself.
+    if (node.dndGhost) return null;
 
-    // Front-to-back order: absolute overlays (newest in paint stack)
-    // first, then flow children in reverse paint order.
-    for (let i = node.children.length - 1; i >= 0; i--) {
-      const child = node.children[i];
-      if (child.props.position !== "absolute") continue;
-      const hit = this.hitTestNode(child, point);
-      if (hit) return hit;
+    // A Video's slot children are only hittable while the normative
+    // visibility table shows them (a `controls` overlay must not swallow
+    // taps in `loading`), and untagged children of a Video never are.
+    if (!isVideoSlotChildVisible(node)) return null;
+
+    const layout = node.layout;
+    const tx = offsetX + (parseFloat(node.props.translateX) || 0) + pinOffset(node).x + (node.dndOffset?.x ?? 0);
+    const ty = offsetY + (parseFloat(node.props.translateY) || 0) + pinOffset(node).y + (node.dndOffset?.y ?? 0);
+    const x = layout.x - scrollX + tx;
+    const y = layout.y - scrollY + ty;
+    const inBounds =
+      point.x >= x && point.x <= x + layout.width &&
+      point.y >= y && point.y <= y + layout.height;
+
+    if (!inBounds) {
+      const overflow = node.props.overflow;
+      if (overflow === "hidden" || overflow === "scroll" || overflow === "auto") {
+        return null;
+      }
     }
-    for (let i = node.children.length - 1; i >= 0; i--) {
-      const child = node.children[i];
-      if (child.props.position === "absolute") continue;
-      const hit = this.hitTestNode(child, point);
-      if (hit) return hit;
+
+    const childScrollX = scrollX + (node.scrollState?.scrollX ?? 0);
+    const childScrollY = scrollY + (node.scrollState?.scrollY ?? 0);
+
+    if (isChartNode(node)) {
+      // A Chart positions its own marks in data units, so hit testing them
+      // is geometric rather than box-based (every mark's box is the chart's
+      // own). Decorative marks stay pointer-transparent.
+      const markHit = this.hitTestChartMarks(node, point, childScrollX, childScrollY);
+      if (markHit) return markHit;
+    } else if (isVideoNode(node)) {
+      // A Video's children paint in NORMATIVE slot order (poster → loading
+      // → controls → error, bottom-to-top), not declaration order — so hit
+      // testing walks the same list topmost-first. Without this, a `poster`
+      // slot declared after `controls` (the spec's own example order) would
+      // swallow the controls' taps in `idle`/`ended`, where both are
+      // visible — exactly the states where a controls-slot play button must
+      // be reachable to start first play.
+      const slots = visibleVideoSlotChildren(node);
+      for (let i = slots.length - 1; i >= 0; i--) {
+        const hit = this.hitTestNode(slots[i]!, point, childScrollX, childScrollY, tx, ty);
+        if (hit) return hit;
+      }
+    } else {
+      // Front-to-back order: absolute overlays (newest in paint stack)
+      // first, then flow children in reverse paint order.
+      for (let i = node.children.length - 1; i >= 0; i--) {
+        const child = node.children[i];
+        if (child.props.position !== "absolute") continue;
+        const hit = this.hitTestNode(child, point, childScrollX, childScrollY, tx, ty);
+        if (hit) return hit;
+      }
+      for (let i = node.children.length - 1; i >= 0; i--) {
+        const child = node.children[i];
+        if (child.props.position === "absolute") continue;
+        const hit = this.hitTestNode(child, point, childScrollX, childScrollY, tx, ty);
+        if (hit) return hit;
+      }
     }
 
     // Test this node
-    const radius = node.layout.border.radius;
-    if (isPointInRoundedRect(point, bounds, radius)) {
-      return node;
+    if (inBounds) {
+      const radius = layout.border.radius;
+      if (radius <= 0) return node;
+      const bounds = this.scratchBounds;
+      bounds.x = x;
+      bounds.y = y;
+      bounds.width = layout.width;
+      bounds.height = layout.height;
+      if (isPointInRoundedRect(point, bounds, radius)) {
+        return node;
+      }
     }
 
     return null;
+  }
+
+  /**
+   * Topmost interactive mark under the pointer, or null.
+   *
+   * Marks are tested front-to-back (last declared paints on top). A `Marker`
+   * hosts ordinary Hypen children with real boxes, so it recurses through
+   * the normal path; every other mark is tested against its drawn geometry,
+   * with a 12px touch radius around points and line vertices.
+   */
+  private hitTestChartMarks(
+    chart: VirtualNode,
+    point: Point,
+    scrollX: number,
+    scrollY: number,
+  ): VirtualNode | null {
+    const localX = point.x + scrollX;
+    const localY = point.y + scrollY;
+    for (let i = chart.children.length - 1; i >= 0; i--) {
+      const mark = chart.children[i]!;
+      if (!mark.visible || !mark.layout || mark.exiting || isLayoutHidden(mark)) continue;
+      const kind = chartMarkKind(mark);
+      if (kind === null) continue;
+      if (kind === "marker") {
+        const hit = this.hitTestNode(mark, point, scrollX, scrollY);
+        // The Marker box itself is transparent unless it carries an event;
+        // an interactive child inside it always wins.
+        if (hit && (hit !== mark || isInteractiveMark(mark))) return hit;
+        continue;
+      }
+      if (!isInteractiveMark(mark)) continue;
+      if (markContainsPoint(mark, localX, localY)) return mark;
+    }
+    return null;
+  }
+
+  /**
+   * Pointer tracking (`onMove`): fires as the pointer crosses a node,
+   * throttled to roughly a frame so a module handler is not flooded.
+   */
+  private onPointerMove(e: PointerEvent): void {
+    if (this.scrubbingNode || this.slidingNode) return;
+    const point = this.getCanvasCoordinates(e as unknown as MouseEvent);
+    this.noteLongPressMove(point);
+    const hit = this.hitTest(point);
+    if (!hit) {
+      this.lastMoveNode = null;
+      return;
+    }
+    const now = Date.now();
+    if (hit === this.lastMoveNode && now - this.lastMoveTime < MOVE_THROTTLE_MS) return;
+    this.lastMoveNode = hit;
+    this.lastMoveTime = now;
+    this.dispatchNodeEvent(hit, "pointermove", {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      [CHART_POINTER_KEY]: point,
+    });
+  }
+
+  /** Start the long-press clock for a press that landed on `node`. */
+  private armLongPress(node: VirtualNode | null, point: Point, data: Record<string, any>): void {
+    this.cancelLongPress();
+    if (!node || !hasLongPress(node)) return;
+    this.longPressNode = node;
+    this.longPressPoint = point;
+    this.longPressData = data;
+    this.longPressTimer = setTimeout(() => {
+      this.longPressTimer = null;
+      const target = this.longPressNode;
+      const payload = this.longPressData;
+      this.longPressNode = null;
+      this.longPressPoint = null;
+      if (target) this.dispatchNodeEvent(target, "longpress", payload);
+    }, LONG_PRESS_MS);
+  }
+
+  private cancelLongPress(): void {
+    if (this.longPressTimer !== null) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
+    this.longPressNode = null;
+    this.longPressPoint = null;
+  }
+
+  /** A press that drifts more than the slop is a drag, not a long press. */
+  private noteLongPressMove(point: Point): void {
+    const origin = this.longPressPoint;
+    if (!origin) return;
+    if (Math.hypot(point.x - origin.x, point.y - origin.y) > LONG_PRESS_SLOP_PX) {
+      this.cancelLongPress();
+    }
   }
 
   /**
@@ -180,10 +491,254 @@ export class CanvasEventManager {
   }
 
   /**
+   * Walk up from a hit node to the nearest Video (video nodes are leaves,
+   * so the hit itself is the common case — the walk covers overlays that
+   * absorb the hit inside a Video-wrapping Stack).
+   */
+  private findVideoAncestor(node: VirtualNode | null): VirtualNode | null {
+    let current = node;
+    while (current) {
+      if (current.type.toLowerCase() === "video") return current;
+      current = current.parent;
+    }
+    return null;
+  }
+
+  /**
+   * Walk up from a hit node to the nearest node carrying a renderer-local
+   * `.videoIntent(...)` (normally the hit itself — a controls-slot Button —
+   * but a tap can land on that Button's Icon child).
+   */
+  private findVideoIntentAncestor(node: VirtualNode | null): VirtualNode | null {
+    let current = node;
+    while (current) {
+      if (videoIntentOf(current) !== null) return current;
+      current = current.parent;
+    }
+    return null;
+  }
+
+  /**
+   * Renderer-local fullscreen intent (`.videoIntent("fullscreen")`).
+   *
+   * Runs SYNCHRONOUSLY inside the input handler: platforms gate fullscreen
+   * behind a user gesture, and even a local promise hop can lose transient
+   * activation. Presentation only — no action dispatch, no module round
+   * trip, and the player's state/events are untouched.
+   *
+   * Target: the canvas HOST element, which is this renderer's analogue of
+   * the DOM wrapper. The canvas paints the whole app, so the video surface
+   * AND its painted slot chrome (custom controls) scale with it — the same
+   * normative guarantee the DOM path gets by fullscreening the video
+   * container rather than the raw <video>.
+   *
+   * Returns true when the intent was consumed, so the caller can suppress
+   * the built-in tap-to-toggle for that same tap.
+   */
+  private handleVideoIntent(node: VirtualNode): boolean {
+    if (videoIntentOf(node) !== "fullscreen") return false;
+    // Inert outside a Video subtree (contract: the intent is scoped to a
+    // player, exactly like Scrubber).
+    if (!this.findVideoAncestor(node)) return false;
+
+    const host = this.canvas as HTMLCanvasElement & {
+      requestFullscreen?: () => Promise<void>;
+      ownerDocument?: Document;
+    };
+    const doc = (host.ownerDocument ?? (globalThis as any).document) as
+      | (Document & { fullscreenElement?: Element | null; exitFullscreen?: () => Promise<void> })
+      | undefined;
+    try {
+      if (doc?.fullscreenElement === host) {
+        void doc.exitFullscreen?.();
+      } else {
+        void host.requestFullscreen?.();
+      }
+    } catch {
+      // Environments without the Fullscreen API (or with it blocked by
+      // permissions policy) simply render the intent inert.
+    }
+    return true;
+  }
+
+  /**
+   * Walk up from a hit node to the nearest Scrubber (the widget is a leaf,
+   * so this normally resolves to the hit itself).
+   */
+  /**
+   * Nearest form control at or above `node`.
+   *
+   * Same lift as `findClickableAncestor`: a press on the label inside a
+   * Checkbox has to operate the checkbox, not fall through to the container.
+   */
+  private findFormControlAncestor(node: VirtualNode | null): VirtualNode | null {
+    let current = node;
+    while (current) {
+      if (isFormControl(current)) return current;
+      current = current.parent;
+    }
+    return null;
+  }
+
+  private findScrubberAncestor(node: VirtualNode | null): VirtualNode | null {
+    let current = node;
+    while (current) {
+      if (isScrubberNode(current)) return current;
+      current = current.parent;
+    }
+    return null;
+  }
+
+  /**
+   * A Scrubber drag owns the pointer beyond the canvas: the button can be
+   * released anywhere on the page (or outside the window entirely), so while
+   * a drag is live we listen for release at the window level. Registered on
+   * drag start, removed as soon as the drag finalizes — the listeners never
+   * outlive the drag they serve.
+   */
+  private armWindowRelease(): void {
+    if (this.windowReleaseArmed || typeof window === "undefined") return;
+    window.addEventListener("pointerup", this.boundOnWindowRelease);
+    window.addEventListener("mouseup", this.boundOnWindowRelease);
+    this.windowReleaseArmed = true;
+  }
+
+  private disarmWindowRelease(): void {
+    if (!this.windowReleaseArmed) return;
+    this.windowReleaseArmed = false;
+    if (typeof window === "undefined") return;
+    window.removeEventListener("pointerup", this.boundOnWindowRelease);
+    window.removeEventListener("mouseup", this.boundOnWindowRelease);
+  }
+
+  /**
+   * Release observed at the window level (pointer left the canvas before the
+   * button went up). Commit — DOM's <input type=range> commits on release
+   * wherever the pointer is, and the local preview the user watched during
+   * the drag is exactly what commit applies. A release the canvas handler
+   * already consumed leaves scrubbingNode null; then this only tidies up.
+   */
+  private onWindowRelease(e: MouseEvent): void {
+    // A drag released anywhere drops where the pointer is. In a browser the
+    // window `pointerup` fires BEFORE the canvas `mouseup` listener, so an
+    // on-canvas release of a claimed drag normally completes HERE — a drop
+    // must therefore end `:active` and swallow the trailing `click` exactly
+    // as the canvas mouseup path does (§6.11), or the pressed node's onClick
+    // would fire after the drop. (When the canvas mouseup fired first it
+    // already consumed the drag — then this only tidies up.)
+    if (this.dndOwnsPointer()) {
+      const point = this.getCanvasCoordinates(e);
+      const dropped = this.dnd!.pointerUp(point, this.hitTest(point));
+      this.disarmWindowRelease();
+      if (dropped) {
+        if (this.mouseDownNode && this.mouseDownNode.pressed) {
+          this.mouseDownNode.pressed = false;
+        }
+        this.mouseDownNode = null;
+        this.suppressClick = true;
+      }
+      this.updateCursor(this.hoveredNode);
+      this.requestRedraw();
+      return;
+    }
+    if (this.scrubbingNode) {
+      this.finishScrubberDrag(e);
+      return;
+    }
+    if (this.slidingNode) {
+      this.finishSliderDrag();
+      return;
+    }
+    this.disarmWindowRelease();
+  }
+
+  /**
+   * Finalize the live drag exactly once: sync the preview to the event's
+   * pointer x (fraction clamps to the track), commit (seek + bind write or
+   * onSeek), drop the window listeners, repaint. Every release path — canvas
+   * mouseup, window pointerup/mouseup, and the missed-release guard in
+   * onMouseMove — funnels here so commit semantics cannot diverge.
+   */
+  /**
+   * End a slider drag exactly once: the value was written and `input`
+   * dispatched on every move; this sends the single `change`. Every release
+   * path — canvas mouseup/click, window release, the buttonless-move guard,
+   * and removal of the node — funnels here.
+   */
+  private finishSliderDrag(): void {
+    const slider = this.slidingNode;
+    if (!slider) return;
+    this.slidingNode = null;
+    this.disarmWindowRelease();
+    finishSliderDragCommit(this.engine, slider);
+    this.requestRedraw();
+  }
+
+  private finishScrubberDrag(e: MouseEvent): void {
+    const scrubber = this.scrubbingNode;
+    if (!scrubber) return;
+    this.scrubbingNode = null;
+    this.disarmWindowRelease();
+    const point = this.getCanvasCoordinates(e);
+    updateScrubberDrag(scrubber, scrubberFractionAt(scrubber, point.x));
+    commitScrubberDrag(scrubber);
+    this.requestRedraw();
+  }
+
+  /**
    * Handle mouse move
    */
   private onMouseMove(e: MouseEvent): void {
     const point = this.getCanvasCoordinates(e);
+    this.noteLongPressMove(point);
+
+    // A scrub in flight owns the pointer: preview locally (no dispatch, no
+    // hover churn) until release commits.
+    if (this.scrubbingNode) {
+      // No buttons down means the release happened where nobody could see
+      // it (outside the window, alt-tab, listener races). Finalize now —
+      // commit, matching release semantics — instead of letting the thumb
+      // follow buttonless hover forever and a later unrelated click commit
+      // a stale seek. Strict === 0: synthetic events without a `buttons`
+      // field (undefined) must not end a drag.
+      if (e.buttons === 0) {
+        this.finishScrubberDrag(e);
+        return;
+      }
+      updateScrubberDrag(this.scrubbingNode, scrubberFractionAt(this.scrubbingNode, point.x));
+      this.requestRedraw();
+      return;
+    }
+
+    if (this.slidingNode) {
+      // Same buttonless-release guard the scrubber uses: a drag that ended
+      // where no listener saw it must finalize rather than follow the cursor.
+      if (e.buttons === 0) {
+        this.finishSliderDrag();
+      } else {
+        updateSliderDrag(this.engine, this.slidingNode, point.x);
+        this.requestRedraw();
+      }
+      return;
+    }
+
+    // A pending/live drag gets the move first: below the activation
+    // threshold it declines and hover proceeds as usual; once claimed it
+    // owns the pointer (no hover churn, no dispatch) until release.
+    if (this.dndOwnsPointer()) {
+      const dndHit = this.hitTest(point);
+      if (this.dnd!.pointerMove(point, dndHit, e.buttons)) {
+        if (this.dnd!.isDragging()) {
+          this.canvas.style.cursor = "grabbing";
+        } else {
+          // The move finished the drag (missed release): pointer is free.
+          this.disarmWindowRelease();
+          this.updateCursor(this.hoveredNode);
+        }
+        return;
+      }
+    }
+
     const hit = this.hitTest(point);
     // Resolve to the clickable ancestor so the cursor stays a pointer over
     // the whole Button surface (not flashing back to default whenever the
@@ -195,14 +750,16 @@ export class CanvasEventManager {
       // Leave old node
       if (this.hoveredNode) {
         this.hoveredNode.hovered = false;
-        this.dispatchNodeEvent(this.hoveredNode, "mouseleave", {});
+        this.dispatchNodeEvent(this.hoveredNode, "mouseleave", {
+          [CHART_POINTER_KEY]: point,
+        });
       }
 
       // Enter new node
       this.hoveredNode = node;
       if (node) {
         node.hovered = true;
-        this.dispatchNodeEvent(node, "mouseenter", {});
+        this.dispatchNodeEvent(node, "mouseenter", { [CHART_POINTER_KEY]: point });
       }
 
       // Update cursor
@@ -217,27 +774,101 @@ export class CanvasEventManager {
    * Handle mouse down
    */
   private onMouseDown(e: MouseEvent): void {
+    // Suppress the browser's default mousedown focus action. The canvas
+    // itself isn't focusable, so the default would move focus to <body>
+    // AFTER this handler — undoing the mirror/proxy focus we set below and
+    // instantly ending any edit session. (Synthetic events have no default
+    // action, so this only bites with real pointers.)
+    e.preventDefault?.();
+
     const point = this.getCanvasCoordinates(e);
+    // A new press is a new gesture: a stale click suppression (release that
+    // never produced a click) must not eat this one.
+    this.suppressClick = false;
     // Same lift-to-clickable as hover so a click on a Button's Icon child
     // dispatches against the Button (where `onClick` actually lives).
     const hit = this.hitTest(point);
     const node = this.findClickableAncestor(hit) ?? hit;
 
+    // Drag-and-drop gets the press first (dnd > scrub). A press on a source
+    // opens a PENDING drag — the ordinary press handling below still runs,
+    // so a tap stays a click; only an `immediate` activation claims here.
+    if (this.dnd) {
+      const claimed = this.dnd.pointerDown(hit, point, e.button);
+      if (this.dndOwnsPointer()) {
+        // The release may land anywhere — arm window-level listeners for
+        // the lifetime of this gesture so an off-canvas release still drops.
+        this.armWindowRelease();
+      }
+      if (claimed) {
+        this.mouseDownNode = null;
+        this.suppressClick = true;
+        this.canvas.style.cursor = "grabbing";
+        this.requestRedraw();
+        return;
+      }
+    }
+
+    // Press on a live Scrubber starts a local scrub: the thumb follows the
+    // pointer renderer-side and nothing is dispatched until release.
+    const scrubber = this.findScrubberAncestor(hit);
+    if (scrubber && isScrubberLive(scrubber) && !this.dndOwnsPointer()) {
+      this.scrubbingNode = scrubber;
+      beginScrubberDrag(scrubber, scrubberFractionAt(scrubber, point.x));
+      // The release may land anywhere — arm window-level listeners for the
+      // lifetime of this drag so an off-canvas release still commits.
+      this.armWindowRelease();
+      this.requestRedraw();
+    }
+
+    // Press on a slider starts a drag and seeks immediately, so a click
+    // anywhere on the track jumps the thumb there — the same affordance the
+    // scrubber and every native slider give.
+    const control = this.findFormControlAncestor(hit);
+    if (control && isSliderControl(control) && !isControlDisabled(control)) {
+      this.slidingNode = control;
+      updateSliderDrag(this.engine, control, point.x);
+      this.armWindowRelease();
+      this.requestRedraw();
+    }
+
     this.mouseDownNode = node;
+
+    // Track pressed (`:active`) state so paint-time `:active` variants resolve.
+    // Repaint so the active style appears immediately on press.
+    if (node) {
+      node.pressed = true;
+      this.requestRedraw();
+    }
+
+    // A long press is armed on the hit itself (a chart mark is not
+    // clickable unless it also wired `onClick`).
+    this.armLongPress(hit, point, {
+      button: e.button,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      [CHART_POINTER_KEY]: point,
+    });
 
     if (node && node.clickable) {
       this.dispatchNodeEvent(node, "mousedown", {
         button: e.button,
         clientX: e.clientX,
         clientY: e.clientY,
+        [CHART_POINTER_KEY]: point,
       });
     }
 
-    // Update focus
+    // Focus routes through the mirror: focusing the node's fallback-content
+    // element makes document.activeElement the truth, and the FocusManager's
+    // focusin/focusout handlers update node state + repaint.
     if (node && node.focusable) {
-      this.setFocus(node);
+      this.focusManager?.requestFocus(node);
+      // After focus (which starts an edit session for Input/Textarea), let
+      // the renderer place the caret at the clicked character.
+      this.editablePointerHandler?.(node, point);
     } else {
-      this.setFocus(null);
+      this.focusManager?.requestFocus(null);
     }
   }
 
@@ -246,14 +877,54 @@ export class CanvasEventManager {
    */
   private onMouseUp(e: MouseEvent): void {
     const point = this.getCanvasCoordinates(e);
+    this.cancelLongPress();
+
+    // Release commits the scrub exactly once (seek + `position` bind write
+    // or `onSeek`), then the pointer goes back to normal handling. (With a
+    // real pointer the window-level pointerup may have finalized already —
+    // finishScrubberDrag no-ops when the drag is gone.)
+    if (this.scrubbingNode) {
+      this.finishScrubberDrag(e);
+    }
+    // A slider drag ends on release too (click may not follow if press and
+    // release straddled the canvas edge).
+    this.finishSliderDrag();
+
+    // Release under a drag: a pending (never-claimed) drag is abandoned and
+    // the tap proceeds as an ordinary click below; a live drag DROPS, and
+    // the release/click are the drag's, not the node's.
+    if (this.dndOwnsPointer()) {
+      const dndHit = this.hitTest(point);
+      const dropped = this.dnd!.pointerUp(point, dndHit);
+      this.disarmWindowRelease();
+      if (dropped) {
+        if (this.mouseDownNode && this.mouseDownNode.pressed) {
+          this.mouseDownNode.pressed = false;
+        }
+        this.mouseDownNode = null;
+        this.suppressClick = true;
+        this.updateCursor(this.hoveredNode);
+        this.requestRedraw();
+        return;
+      }
+    }
+
     const hit = this.hitTest(point);
     const node = this.findClickableAncestor(hit) ?? hit;
+
+    // Clear the pressed (`:active`) flag from the node that was pressed —
+    // release ends `:active` even if the pointer drifted off the node first.
+    if (this.mouseDownNode && this.mouseDownNode.pressed) {
+      this.mouseDownNode.pressed = false;
+      this.requestRedraw();
+    }
 
     if (node && node.clickable) {
       this.dispatchNodeEvent(node, "mouseup", {
         button: e.button,
         clientX: e.clientX,
         clientY: e.clientY,
+        [CHART_POINTER_KEY]: point,
       });
     }
 
@@ -268,15 +939,71 @@ export class CanvasEventManager {
    * Handle click
    */
   private onClick(e: MouseEvent): void {
+    // The click that trails a drop (or an `immediate` lift) belongs to the
+    // drag: no video intent, no tap-to-toggle, no onClick.
+    if (this.suppressClick) {
+      this.suppressClick = false;
+      this.mouseDownNode = null;
+      return;
+    }
     const point = this.getCanvasCoordinates(e);
     const hit = this.hitTest(point);
     const node = this.findClickableAncestor(hit) ?? hit;
+
+    // Renderer-local video intents fire on a COMPLETED tap: press and
+    // release must resolve to the same intent node (the same pairing rule
+    // the click dispatch below uses), so a press that drifts off the
+    // button never fullscreens.
+    const intentNode = this.findVideoIntentAncestor(hit);
+    const intentHandled =
+      intentNode !== null &&
+      this.findVideoIntentAncestor(this.mouseDownNode) === intentNode &&
+      this.handleVideoIntent(intentNode);
+
+    // Canvas video controls common denominator: tap toggles play/pause.
+    // Only when the node opts in via `controls` (DOM parity — a
+    // controls-less <video> offers no transport UI either).
+    //
+    // A `controls` slot REPLACES the built-in transport (normative), so it
+    // suppresses tap-to-toggle regardless of the `controls` prop; and a tap
+    // that landed inside ANY slot's authored chrome (a Retry button, a
+    // Scrubber) is that widget's, never the player's. A tap consumed by a
+    // renderer-local intent likewise isn't the player's: fullscreen is
+    // presentation only and must not also pause playback.
+    const videoNode = this.findVideoAncestor(hit);
+    if (
+      !intentHandled &&
+      videoNode &&
+      hasVideoControls(videoNode) &&
+      !hasVideoSlot(videoNode, "controls") &&
+      !isInsideVideoSlot(hit)
+    ) {
+      toggleVideoPlayback(videoNode.id);
+      this.requestRedraw();
+    }
+
+    // A slider drag ends here; its value is already committed.
+    this.finishSliderDrag();
+
+    // Operate a toggle before the generic click dispatch, so a control that
+    // also carries `onClick` gets both its state change and its action.
+    const control = this.findFormControlAncestor(hit);
+    if (
+      control &&
+      isToggleControl(control) &&
+      control === this.findFormControlAncestor(this.mouseDownNode)
+    ) {
+      if (activateToggle(this.engine, control)) {
+        this.requestRedraw();
+      }
+    }
 
     if (node && node.clickable && node === this.mouseDownNode) {
       this.dispatchNodeEvent(node, "click", {
         button: e.button,
         clientX: e.clientX,
         clientY: e.clientY,
+        [CHART_POINTER_KEY]: point,
       });
     }
     this.mouseDownNode = null;
@@ -294,6 +1021,7 @@ export class CanvasEventManager {
         button: e.button,
         clientX: e.clientX,
         clientY: e.clientY,
+        [CHART_POINTER_KEY]: point,
       });
     }
   }
@@ -314,65 +1042,10 @@ export class CanvasEventManager {
           button: e.button,
           clientX: e.clientX,
           clientY: e.clientY,
+          [CHART_POINTER_KEY]: point,
         });
       }
     }
-  }
-
-  /**
-   * Handle keyboard events
-   */
-  private onKeyDown(e: KeyboardEvent): void {
-    if (this.focusedNode) {
-      this.dispatchNodeEvent(this.focusedNode, "keydown", {
-        key: e.key,
-        code: e.code,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-      });
-    }
-  }
-
-  private onKeyUp(e: KeyboardEvent): void {
-    if (this.focusedNode) {
-      this.dispatchNodeEvent(this.focusedNode, "keyup", {
-        key: e.key,
-        code: e.code,
-        ctrlKey: e.ctrlKey,
-        shiftKey: e.shiftKey,
-        altKey: e.altKey,
-      });
-    }
-  }
-
-  /**
-   * Set focused node
-   */
-  private setFocus(node: VirtualNode | null): void {
-    if (node === this.focusedNode) return;
-
-    const prev = this.focusedNode;
-    if (prev) {
-      prev.focused = false;
-      this.dispatchNodeEvent(prev, "blur", {});
-    }
-
-    this.focusedNode = node;
-
-    if (node) {
-      node.focused = true;
-      this.dispatchNodeEvent(node, "focus", {});
-    }
-
-    if (this.focusChangeHandler) this.focusChangeHandler(node, prev);
-
-    this.requestRedraw();
-  }
-
-  /** Public for the renderer's overlay-blur path. */
-  clearFocus(): void {
-    this.setFocus(null);
   }
 
   /**
@@ -389,50 +1062,23 @@ export class CanvasEventManager {
       const t = node.type.toLowerCase();
       if (t === "input" || t === "textarea") cursor = "text";
       else if (node.clickable) cursor = "pointer";
+      else if (t === "scrubber" && isScrubberLive(node)) cursor = "pointer";
+      else if (
+        t === "video" &&
+        hasVideoControls(node) &&
+        !hasVideoSlot(node, "controls")
+      ) cursor = "pointer";
       else cursor = "default";
     }
     this.canvas.style.cursor = cursor;
   }
 
   /**
-   * Dispatch event to engine
+   * Dispatch event to engine (shared resolver — same payload shape as the
+   * mirror's keyboard/AT path).
    */
   private dispatchNodeEvent(node: VirtualNode, eventType: string, data: any): void {
-    // Engine emits event applicators in camelCase (`onClick`, `onMouseEnter`).
-    // Multi-word DOM events like `mouseenter` must map to `onMouseEnter`, not
-    // the naive `onMouseenter` that `on${capitalize(eventType)}` would produce.
-    // The older flat form `onclick`/`onmouseenter` is still accepted. After
-    // prop normalisation the value is either a string (action name) or an
-    // object carrying an action name at `"0"` plus an auxiliary payload.
-    const propNames = CANVAS_EVENT_PROP_NAMES[eventType] ?? [
-      `on${eventType.charAt(0).toUpperCase()}${eventType.slice(1)}`,
-      `on${eventType}`,
-      eventType,
-    ];
-
-    let spec: unknown;
-    for (const name of propNames) {
-      if (node.props[name] != null) {
-        spec = node.props[name];
-        break;
-      }
-    }
-
-    // Actionable components fall back to the bare `action` prop on click.
-    if (spec == null && eventType === "click") {
-      spec = node.props.action;
-    }
-
-    const resolved = resolveEventAction(spec);
-    if (!resolved) return;
-
-    this.engine.dispatchAction(resolved.actionName, {
-      type: eventType,
-      nodeId: node.id,
-      timestamp: Date.now(),
-      ...resolved.payload,
-      ...data,
-    });
+    dispatchNodeEvent(this.engine, node, eventType, data);
   }
 
   /**
@@ -447,19 +1093,56 @@ export class CanvasEventManager {
   /**
    * Cleanup
    */
+  /**
+   * Drop pointer state that refers to `node` or a descendant — called before
+   * a subtree is removed or detached, so a slider removed mid-drag stops
+   * receiving writes and a pressed node does not stay `:active` forever.
+   */
+  clearIfWithin(node: VirtualNode): void {
+    const within = (candidate: VirtualNode | null): boolean => {
+      for (let cur = candidate; cur; cur = cur.parent) if (cur === node) return true;
+      return false;
+    };
+    if (within(this.slidingNode)) {
+      // No `change`: the node is engine-dead.
+      this.slidingNode = null;
+      if (!this.scrubbingNode) this.disarmWindowRelease();
+    }
+    if (within(this.scrubbingNode)) {
+      cancelScrubberDrag();
+      this.scrubbingNode = null;
+      if (!this.slidingNode) this.disarmWindowRelease();
+    }
+    if (within(this.mouseDownNode)) {
+      this.mouseDownNode!.pressed = false;
+      this.mouseDownNode = null;
+    }
+    if (within(this.hoveredNode)) this.hoveredNode = null;
+    if (within(this.lastMoveNode)) this.lastMoveNode = null;
+    if (within(this.longPressNode)) this.cancelLongPress();
+  }
+
   destroy(): void {
     this.canvas.removeEventListener("mousemove", this.boundOnMouseMove);
+    this.canvas.removeEventListener("pointermove", this.boundOnPointerMove);
     this.canvas.removeEventListener("mousedown", this.boundOnMouseDown);
     this.canvas.removeEventListener("mouseup", this.boundOnMouseUp);
     this.canvas.removeEventListener("click", this.boundOnClick);
     this.canvas.removeEventListener("dblclick", this.boundOnDoubleClick);
     this.canvas.removeEventListener("contextmenu", this.boundOnContextMenu);
-    this.canvas.removeEventListener("keydown", this.boundOnKeyDown);
-    this.canvas.removeEventListener("keyup", this.boundOnKeyUp);
+    for (const type of FILE_DRAG_EVENTS) this.canvas.removeEventListener(type, this.boundOnFileDrag as EventListener);
+    if (this.mouseDownNode) this.mouseDownNode.pressed = false;
+    if (this.scrubbingNode) cancelScrubberDrag();
+    this.scrubbingNode = null;
+    this.slidingNode = null;
+    this.disarmWindowRelease();
+    this.cancelLongPress();
     this.rootNode = null;
     this.hoveredNode = null;
-    this.focusedNode = null;
     this.mouseDownNode = null;
+    this.lastMoveNode = null;
+    this.focusManager = null;
+    this.dnd = null;
   }
 }
 

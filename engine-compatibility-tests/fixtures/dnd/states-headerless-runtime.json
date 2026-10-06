@@ -1,0 +1,44 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "states-headerless-runtime",
+  "description": "A header-less .states { onState(label)... } block on a node that carries a __dnd.* prop is renderer-driven: the node's own props stay the untouched base, __anim.states is the static {label: null, runtime: true} marker (never a SetProp), __anim.statePoses materializes every pose as {label: {loweredPropKey: value}} in source order, and __anim.transition is synthesized (default timing) scoped to the animatable overridden props. No states.*/onState.* junk props",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Card(\"x\").opacity(1).draggable().states {\n    onState(lifted).opacity(0.6).scale(1.04)\n    onState(over).backgroundColor(\"#eee\")\n}",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Card",
+        "props": {
+          "opacity.0": 1,
+          "__dnd.source": { "group": null, "handle": false, "activation": "auto" },
+          "__anim.states": { "label": null, "runtime": true },
+          "__anim.statePoses": {
+            "lifted": { "opacity.0": 0.6, "scale.0": 1.04 },
+            "over": { "backgroundColor.0": "#eee" }
+          },
+          "__anim.transition": {
+            "curve": "easeOut",
+            "duration": 250,
+            "props": ["opacity", "scale", "backgroundColor"]
+          }
+        },
+        "absentProps": ["scale.0", "backgroundColor.0", "states.0", "onState.0", "transition.0"]
+      },
+      { "type": "insert" }
+    ]
+  }
+}

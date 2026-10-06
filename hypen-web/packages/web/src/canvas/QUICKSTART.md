@@ -255,9 +255,8 @@ const renderer = new CanvasRenderer(canvas, engine, {
   backgroundColor: "#ffffff",                  // Canvas background
   
   // Features
-  enableAccessibility: true,      // Screen reader support
+  enableAccessibility: true,      // Screen readers + Tab focus + text editing
   enableHitTesting: true,         // Mouse events
-  enableInputOverlay: true,       // Text input support
   
   // Debug
   showLayoutBounds: false,        // Show red boxes around elements
@@ -373,11 +372,12 @@ const renderer = new CanvasRenderer(canvas, engine, {
 
 ### Text Input Not Working
 
-Ensure `enableInputOverlay` is true:
+Text editing runs through the accessibility mirror (canvas fallback
+content), so `enableAccessibility` must be true (the default):
 
 ```typescript
 const renderer = new CanvasRenderer(canvas, engine, {
-  enableInputOverlay: true,
+  enableAccessibility: true,
 });
 ```
 

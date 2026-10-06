@@ -163,20 +163,6 @@ Grid(columns: 3, gap: 16) {
 }
 ```
 
-**Advanced Grid:**
-```hypen
-Grid()
-  .gridTemplateColumns("200px 1fr 1fr")
-  .gridTemplateRows("auto 1fr auto")
-  .gap(20) {
-  
-  // Grid items with specific placement
-  Box().gridColumn("1 / 4") { Text("Header") }
-  Box().gridColumn("1 / 2") { Text("Sidebar") }
-  Box().gridColumn("2 / 4") { Text("Main content") }
-}
-```
-
 **Rendered as:** `<div>` with `display: grid;`
 
 ---
@@ -206,8 +192,9 @@ Row {
 Visual separator line between content sections.
 
 **Props:**
-- `thickness` (Number | String): Line thickness (default: 1px)
-- `orientation` (String): `"horizontal"` (default) or `"vertical"`
+- `thickness` / `height` (Number | String): Line thickness (default: 1px)
+- `color` / `backgroundColor` (String): Line color (default: `#e0e0e0`)
+- `orientation` (String): `"horizontal"` (default). `"vertical"` is currently Web-only.
 
 **Example:**
 ```hypen
@@ -218,7 +205,7 @@ Column {
 }
 ```
 
-**Vertical Divider:**
+**Web-only vertical Divider:**
 ```hypen
 Row()
   .height(100) {
@@ -229,7 +216,69 @@ Row()
 }
 ```
 
-**Rendered as:** `<hr>`
+**Rendered as:** `<div>`
+
+---
+
+## SafeArea
+
+Full-size vertical container whose content is padded by the device safe-area insets — the notch/status bar at the top, the home indicator at the bottom, and the rounded-corner/cutout gutters on the sides. Use it as the outermost container of a screen so content never lands under system chrome.
+
+It fills its parent (100% width and height) and lays its children out as a vertical stack, exactly like `Column`. The safe-area padding is applied to the container itself, so a background set with applicators still extends full-bleed *under* the insets while content stays inside them.
+
+**Props:**
+- `edges` (List of String): Which edges to inset — any of `"top"`, `"right"`, `"bottom"`, `"left"`. Omitted, absent, or empty means **all four edges**. Unknown strings are ignored.
+
+**Example:**
+```hypen
+SafeArea {
+  Column {
+    Text("Never under the notch")
+  }
+}
+```
+
+**Selected edges only:**
+```hypen
+SafeArea(edges: ["top"]) {
+  Row()
+    .padding(16)
+    .backgroundColor("#111827") {
+    Text("Header")
+  }
+
+  Container()
+    .flex(1) {
+    Text("Content runs to the bottom of the screen")
+  }
+}
+```
+
+Applicators still apply as they do on any container. Safe-area padding and a user `.padding()` combine additively — the safe-area inset is carried by the outer element and user styling flows normally inside it.
+
+Nesting SafeAreas is allowed and simply applies the insets again on the inner one; there is no special-casing.
+
+**Rendered as:** `<div>` with `display: flex; flex-direction: column;` and `padding` from `env(safe-area-inset-*, 0px)` on the selected edges.
+
+### Overriding the insets
+
+The *effective* inset for an edge is the embedder-supplied value for that edge if one was given, otherwise the platform default. Overrides are **per-edge and merge over the defaults** — passing `{ bottom: 0 }` zeroes only the bottom inset; top, left, and right still use the platform default.
+
+| Renderer | Default insets | Embedder override |
+|----------|----------------|-------------------|
+| Web DOM | `env(safe-area-inset-*, 0px)` | `safeAreaInsets?: Partial<SafeAreaInsets>` option on the DOM renderer options (number of CSS px or a CSS length string per edge) |
+| Web Canvas | probed once from `env(safe-area-inset-*)`; `0` where unsupported | same-named `safeAreaInsets` option on the Canvas renderer options (numbers, CSS px) |
+| Android | `WindowInsets.safeDrawing` | `LocalHypenSafeAreaInsets` composition local, or the insets parameter on the `HypenApp` entry composable; `null` falls back to `safeDrawing` |
+| iOS / SwiftUI | the hosting view's real safe area (`GeometryReader`) | `\.hypenSafeAreaInsets` environment value (`HypenSafeAreaInsets?`); `nil` falls back to the real safe area |
+| Desktop | zeros, except under the macOS unified titlebar, where the window-controls bar (close/minimize/maximize, 28 logical px) drawn over the content becomes the top inset | `safe_area_insets` field on the renderer/app config struct |
+
+Values are in each platform's logical unit: CSS px on web, dp on Android, points on iOS, logical px on desktop.
+
+**Web caveat — iOS Safari:** `env(safe-area-inset-*)` resolves to `0` unless the page opts into the full viewport. Add `viewport-fit=cover` to the viewport meta tag or SafeArea will look like a plain `Column` on iOS:
+
+```html
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+```
 
 ---
 
@@ -281,10 +330,10 @@ Column()
 }
 ```
 
-### Responsive Grid
+### Product Grid
 ```hypen
 Grid()
-  .gridTemplateColumns("repeat(auto-fit, minmax(250px, 1fr))")
+  .gridColumns(3)
   .gap(16)
   .padding(20) {
   
@@ -300,5 +349,4 @@ Grid()
 ## See Also
 - [Layout Applicators](../applicators/layout.md) - Flexbox and grid styling
 - [Spacing Applicators](../applicators/spacing.md) - Padding, margin, and gap
-
 

@@ -1,0 +1,73 @@
+[
+  {
+    "step": "connected",
+    "text": [
+      "Device Lab \u00b7 Rust SDK \u00b7 UI only",
+      "Real host / real server \u00b7 run 0",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "Connected. Device API absent from this SDK.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45105)",
+      "10.0.2.2:45105",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "query",
+    "text": [
+      "Device Lab \u00b7 Rust SDK \u00b7 UI only",
+      "Real host / real server \u00b7 run 1",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "query: NOT IMPLEMENTED IN RUST SDK",
+      "This running RemoteSession has no DeviceContext or device handshake. No hardware request was sent.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45105)",
+      "10.0.2.2:45105",
+      "\u25be"
+    ]
+  },
+  {
+    "step": "ping",
+    "text": [
+      "Device Lab \u00b7 Rust SDK \u00b7 UI only",
+      "Real host / real server \u00b7 run 2",
+      "Status",
+      "Query camera",
+      "Ask mic",
+      "Pick photo",
+      "Pick file",
+      "Save 96K",
+      "Camera",
+      "Record 3s",
+      "Scan 3s",
+      "Bluetooth",
+      "Cancel",
+      "UI ping",
+      "ping: UI OK",
+      "This running RemoteSession has no DeviceContext or device handshake. No hardware request was sent.",
+      "Development mode: device access over unencrypted ws:// (ws://10.0.2.2:45105)",
+      "10.0.2.2:45105",
+      "\u25be"
+    ]
+  }
+]

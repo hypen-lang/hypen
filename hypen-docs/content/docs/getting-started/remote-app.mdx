@@ -376,10 +376,18 @@ Bun.serve({
     server.upgrade(req);
   },
   websocket: {
+    perMessageDeflate: true, // what `.listen()` does by default
     // ... RemoteServer handlers
   }
 });
 ```
+
+### Compression
+
+`RemoteServer.listen()` enables WebSocket `permessage-deflate` by default —
+patch streams are JSON and compress well. It's negotiated per-connection, so
+clients that don't offer the extension fall back to uncompressed frames. Opt
+out with `.config({ compression: false })` when you need to read the raw wire.
 
 ### Deployment
 

@@ -70,14 +70,11 @@ Stack {
 
 ### Grid
 
-Arranges children in a grid.
+Arranges a bound collection in a grid — data-driven, like `List`.
 
 ```hypen
-Grid {
-    Card { Text("1") }
-    Card { Text("2") }
-    Card { Text("3") }
-    Card { Text("4") }
+Grid(@state.cells, key: "id") {
+    Card { Text("@{item.label}") }
 }
 .gridColumns(2)
 .gap(16)
@@ -85,13 +82,12 @@ Grid {
 
 ### List
 
-Scrollable container for items.
+Scrollable, data-driven list — shorthand for
+`ForEach(items: @state.items, key: "id")`.
 
 ```hypen
-List {
-    Text("Item 1")
-    Text("Item 2")
-    Text("Item 3")
+List(@state.items) {
+    Text("@{item.title}")
 }
 ```
 
@@ -118,6 +114,32 @@ Column {
     Text("Section 2")
 }
 ```
+
+### SafeArea
+
+Full-size vertical container that pads its content by the device safe-area
+insets (notch, status bar, home indicator). Use it as the outermost container
+of a screen.
+
+```hypen
+SafeArea {
+    Column {
+        Text("Clear of the notch and the home indicator")
+    }
+}
+```
+
+Pass `edges` to inset only some sides — omitted or empty means all four:
+
+```hypen
+SafeArea(edges: ["top"]) {
+    Text("Only the top inset is applied")
+}
+```
+
+Embedders can override the insets per edge; unspecified edges keep the platform
+default. See [Layout → SafeArea](/docs/guide/layout#safearea) for the per-renderer
+override APIs and the iOS Safari `viewport-fit=cover` caveat.
 
 ## Content Components
 
@@ -183,7 +205,7 @@ Single-line text input.
 
 ```hypen
 Input(placeholder: "Enter your name")
-    .value(@{state.name})
+    .value(@state.name)
     .onInput(@actions.updateName)
     .padding(12)
     .borderRadius(4)
@@ -205,7 +227,7 @@ Toggle checkbox.
 
 ```hypen
 Checkbox {}
-    .checked(@{state.agreed})
+    .checked(@state.agreed)
     .onChange(@actions.toggleAgreed)
 ```
 
@@ -215,7 +237,7 @@ Toggle switch.
 
 ```hypen
 Switch {}
-    .checked(@{state.darkMode})
+    .checked(@state.darkMode)
     .onChange(@actions.toggleDarkMode)
 ```
 
@@ -225,7 +247,7 @@ Dropdown selection.
 
 ```hypen
 Select {}
-    .value(@{state.country})
+    .value(@state.country)
     .onChange(@actions.updateCountry)
 ```
 
@@ -235,7 +257,7 @@ Range slider.
 
 ```hypen
 Slider {}
-    .value(@{state.volume})
+    .value(@state.volume)
     .onChange(@actions.updateVolume)
 ```
 
@@ -288,7 +310,7 @@ Spinner()
 Progress indicator.
 
 ```hypen
-ProgressBar(value: @{state.progress})
+ProgressBar(value: @state.progress)
     .height(4)
 ```
 
@@ -345,13 +367,161 @@ await server.resourcesDir("./icons/")
 
 ### Video
 
-Video player.
+Video player. Streams a resolved URL — or an ordered `playlist` of URLs with
+auto-advance — using the platform's native media stack. Media payloads never
+cross the wire, only URLs.
 
 ```hypen
 Video("https://example.com/video.mp4")
     .width(640)
     .height(360)
 ```
+
+Props: `src` (or positional), `playlist`, `startIndex`, `startPosition`,
+`poster`, `controls`, `autoplay`, `loop`, `muted`, `preload` (web hint),
+`headers` (auth-protected streams), and `title` (accessible label). Optional
+event actions `onPlay`, `onPause`, `onEnded`, `onTrackChange`, and `onError`
+receive the track's `src` and playlist `index` (plus `status`/`code`/`message`
+on errors).
+
+```hypen
+Video(
+    playlist: ["https://cdn/ep1.mp4", "https://cdn/ep2.mp4"],
+    poster: "https://cdn/cover.jpg",
+    controls: true,
+    title: "Season 1",
+    onTrackChange: @actions.trackChanged,
+    onEnded: @actions.playbackDone,
+    onError: @actions.playbackFailed,
+)
+```
+
+`startPosition` seeks once, the moment the source first becomes seekable —
+"resume where you left off" without any further wiring. It re-arms when the
+source configuration (`src`, `playlist`, `headers`) changes.
+
+**Playback control:**
+
+`.bind(@state.playback)` is the media analogue of `Input.bind` — it keeps a
+playback struct in sync with the player:
+
+| Field | Type | Access | Meaning |
+|-------|------|--------|---------|
+| `playing` | boolean | read-write | Play/pause. Writing `true` while `ended` restarts from 0. |
+| `position` | number | read-write | Seconds. Writing seeks. |
+| `duration` | number | read-only | Seconds, `0` until known. |
+| `state` | string | read-only | `idle`, `loading`, `playing`, `paused`, `ended`, or `error`. |
+
+The module must initialize the struct in `defineState` — binding writes into a
+missing parent path are dropped:
+
+```typescript
+export default app
+  .defineState({
+    streamUrl: "",
+    playback: { playing: true, position: 0, duration: 0, state: "idle" },
+  })
+  .onAction("togglePlay", ({ state }) => {
+    state.playback.playing = !state.playback.playing;
+  });
+```
+
+Reports flow the other way too. `position` updates at most every 250 ms while
+playing, so it is cheap to render; `playing`, `state`, and `duration` report
+immediately on every transition (play, pause, seek completion, track change,
+ended, error). A `position` write is only applied as a seek when it differs
+from the player's real position by more than a second, so the renderer's own
+progress reports never echo back as seeks.
+
+**Composition slots:**
+
+Children tagged with `.slot(name)` compose into the player chrome instead of
+being laid out as ordinary children. Slot content is normal Hypen UI —
+applicators, `@actions`, and `@{state.*}` bindings all work — the renderer just
+overlays it full-bleed on the video surface:
+
+```hypen
+Video(src: "@{state.streamUrl}", title: "@{state.title}", autoplay: true) {
+    Row {
+        Button {
+            Text("⏯")
+        }
+            .onClick(@actions.togglePlay)
+            .label("Play or pause")
+
+        Scrubber()
+            .tw("flex-1 ml-3")
+    }
+        .tw("px-4 pb-4 items-center self-end w-full")
+        .slot("controls")
+
+    Column {
+        Spinner()
+        Text("Buffering…")
+    }
+        .tw("items-center justify-center w-full h-full")
+        .slot("loading")
+}
+    .bind(@state.playback)
+    .tw("w-full aspect-video rounded-2xl overflow-hidden")
+```
+
+The four slots are `controls`, `loading`, `error`, and `poster`, and the player
+state decides which are visible: `poster` shows in `idle`/`loading`/`ended`,
+`loading` only while loading or rebuffering, `controls` in `idle`, `playing`,
+`paused`, and `ended`, and `error` only in `error`. A present slot replaces the
+built-in for that concern — a `controls` slot suppresses native chrome
+regardless of the `controls` prop — and visibility is show/hide, not
+mount/unmount, so slot subtrees keep their state across transitions.
+
+**Fullscreen:**
+
+Fullscreen can't ride the normal action → module → state round trip: browsers
+only honor a fullscreen request inside the user's click, and a network hop can
+lose that activation. `.videoIntent("fullscreen")` marks an element inside a
+Video (typically a `controls`-slot button) as a renderer-local toggle — the
+tap is handled on-device, no module involvement:
+
+```hypen
+Button { Icon(@resources.fullscreen) }
+    .videoIntent("fullscreen")
+    .label("Toggle fullscreen")
+```
+
+What goes fullscreen is the video *container*, never the raw platform video
+element — so composition slots stay overlaid and custom controls keep working;
+handing the element itself to the platform would swap in native chrome. Per
+platform: web DOM fullscreens the wrapper via the Fullscreen API, canvas
+fullscreens its host element, Android presents an immersive dialog hosting the
+same player, iOS uses a `fullScreenCover` with the same `AVPlayer`, and
+desktop fullscreens the window. Playback state, the bind, and slot visibility
+are unaffected — fullscreen is presentation only. `.videoIntent` composes with
+`.onClick`: both fire, and outside a Video subtree the applicator is inert.
+
+There is no mute or volume intent — muting has no user-gesture requirement, so
+it stays declarative: bind the `muted` prop to state and toggle it from an
+action (`muted: "@{state.muted}"`).
+
+### Scrubber
+
+Media timeline for a Video's `controls` slot. Inside a Video it wires itself to
+the enclosing player renderer-side: the thumb tracks playback at frame rate
+without touching module state, dragging previews locally, and only the release
+commits — so scrubbing stays responsive even when a state round trip costs a
+network hop. It carries the `slider` accessibility role with live timeline
+values, and where the platform gives it keyboard focus, arrow keys seek
+±5 seconds and commit immediately.
+
+```hypen
+Scrubber()
+    .bind(@state.playback)
+```
+
+The commit goes to the Scrubber's own `.bind(...)` if it has one, otherwise to
+the enclosing Video's bind, otherwise to its `onSeek` action (payload
+`{ type: "seek", position }`). The local seek applies either way, so the
+playhead moves even with no bind at all. Outside a Video, `Scrubber` renders
+inert.
 
 ### Audio
 
@@ -378,29 +548,32 @@ Link(href: "/about") {
 Declarative routing driven by module state. Routes are matched by the platform renderer based on `state.location`. For a complete routing guide, see **[Routing](/docs/guide/routing)**.
 
 ```hypen
-Router(initialRoute: "/home") {
+Router {
     Route(path: "/home") {
         HomePage()
     }
     Route(path: "/users/:id") {
-        UserProfile(userId: @{state.params.id})
+        UserProfile(userId: @state.params.id)
     }
-    Route(path: "/settings", guard: @actions.requireAuth) {
+    Route(path: "/settings") {
         SettingsPage()
     }
-    Route.fallback {
+    Else {
         NotFoundPage()
     }
 }
 ```
 
 **Router Arguments:**
-- `initialRoute`: Default route on mount
+- `value` (optional): State binding that drives the active route
+  (defaults to `@state.location`). The initial route, path persistence, and
+  module lifecycle are configured on the host SDK's `ManagedRouter`, not in
+  the DSL.
 
 **Route Arguments:**
 - `path`: URL pattern (supports `:param` segments)
-- `guard` (optional): Async action to run before entering the route
-- `exact` (optional): Only match the exact path
+
+An `Else { ... }` child renders when no route matches.
 
 ## Control Flow Components
 
@@ -503,6 +676,22 @@ If(condition: @state.hasNotifications) {
 - Main content (rendered when truthy)
 - `Else`: Optional fallback (rendered when falsy)
 
+## Charts
+
+`Chart` opens a coordinate space; its children (`Line`, `Area`, `Bars`,
+`Points`, `Axis`, `Rule`, `Marker`, `Path`) are marks positioned in data
+units, and their events carry the datum rather than a pixel. See the
+[Charts guide](/docs/guide/charts).
+
+```hypen
+Chart(y: [0, 100]) {
+    Axis(x)
+    Axis(y)
+    Bars(data: @state.units, x: "month", y: "count").onClick(@actions.selectMonth)
+}
+.height(220)
+```
+
 ## Platform Support
 
 | Component | Web | Android | iOS |
@@ -510,6 +699,7 @@ If(condition: @state.hasNotifications) {
 | Column, Row, Box | Yes | Yes | Yes |
 | Center, Stack, Grid | Yes | Yes | Yes |
 | List, Spacer, Divider | Yes | Yes | Yes |
+| SafeArea | Yes | Yes | Yes |
 | Text, Heading, Paragraph | Yes | Yes | Yes |
 | Image | Yes | Yes | Yes |
 | Button, Input, Textarea | Yes | Yes | Yes |
@@ -518,11 +708,19 @@ If(condition: @state.hasNotifications) {
 | Card, Badge, Avatar | Yes | Yes | Yes |
 | Spinner, ProgressBar | Yes | Yes | Yes |
 | Video, Audio | Yes | Yes | Yes |
+| Video playback bind, slots, Scrubber | Yes | Yes | Yes |
 | Link, Router, Route | Yes | Yes | Yes |
 | ForEach, When, If | Yes | Yes | Yes |
+| Chart, Axis, Line, Area, Bars, Points, Rule, Marker, Path | Yes | Yes | Yes |
+
+Video's playback bind, composition slots, and `Scrubber` ship on all five
+renderers — web DOM, web canvas, Android, iOS, and desktop. On desktop the
+playback-dependent parts need the `video` cargo feature (GStreamer); the slots
+themselves work without it for the `idle` and `error` states.
 
 ## Next Steps
 
+- [Child Slots](/docs/guide/slots) — Build reusable components that accept children with `Children()` and named slots
 - [Control Flow](/docs/guide/control-flow) — Deep dive into ForEach, When, If with patterns and performance tips
 - [Routing](/docs/guide/routing) — Navigation, route guards, and nested routing
 - [Layout](/docs/guide/layout) — Layout components and alignment

@@ -10,15 +10,25 @@
     "types": ["bun-types"],
     "baseUrl": ".",
     "paths": {
+      // Redirect workspace packages to their src/ trees so cross-package types
+      // resolve from one source. The wildcard substitution must NOT carry a
+      // `.ts` suffix: subpaths like `@hypen-space/core/remote` are directories
+      // (`remote/index.ts`), so a `*.ts` suffix misses them and tsc silently
+      // falls back to `core/dist/*.d.ts` via package exports — producing a
+      // src-vs-dist "separate declarations of private property" cascade. Bare
+      // `*` lets tsc resolve both `app.ts` and `remote/index.ts`.
       "@hypen-space/core": ["../hypen-web/packages/core/src/index.ts"],
-      "@hypen-space/core/*": ["../hypen-web/packages/core/src/*.ts"],
+      // core/package.json maps "./components" to src/components/builtin.ts
+      // (no index.ts in components/), so the wildcard can't resolve it.
+      "@hypen-space/core/components": ["../hypen-web/packages/core/src/components/builtin.ts"],
+      "@hypen-space/core/*": ["../hypen-web/packages/core/src/*"],
       "@hypen-space/server": ["../hypen-web/packages/server/src/index.ts"],
       "@hypen-space/server/remote": ["../hypen-web/packages/server/src/remote/server.ts"],
-      "@hypen-space/server/*": ["../hypen-web/packages/server/src/*.ts"],
+      "@hypen-space/server/*": ["../hypen-web/packages/server/src/*"],
       "@hypen-space/web": ["../hypen-web/packages/web/src/index.ts"],
-      "@hypen-space/web/*": ["../hypen-web/packages/web/src/*.ts"],
+      "@hypen-space/web/*": ["../hypen-web/packages/web/src/*"],
       "@hypen-space/web-engine": ["../hypen-web/packages/web-engine/src/index.ts"],
-      "@hypen-space/web-engine/*": ["../hypen-web/packages/web-engine/src/*.ts"]
+      "@hypen-space/web-engine/*": ["../hypen-web/packages/web-engine/src/*"]
     }
   },
   "include": ["src/**/*", "bin/**/*"]

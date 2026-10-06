@@ -102,6 +102,15 @@ impl ShellState {
     }
 }
 
+/// Return the floating browser chrome to its unobtrusive pill state.
+///
+/// Navigation uses this in the same reducer turn as the click so the
+/// destination is never briefly covered by a still-expanded toolbar.
+fn collapse_island(state: &mut ShellState) {
+    state.island_expanded = false;
+    state.island_pinned = false;
+}
+
 /// Commands the shell dispatches back to the binary so it can spin
 /// up / tear down [`hypen_renderer_desktop::RemoteModule`]s for each
 /// tab. Sent over an mpsc channel; [`crate::browser::BrowserModule`]
@@ -160,7 +169,7 @@ pub fn build_shell_module(
 
     HypenApp::module::<ShellState>("Shell")
         .state(ShellState::home(recents))
-        .ui(SHELL_UI)
+        .ui(shell_ui())
         .on_action::<()>("connect", move |state, _payload, _ctx| {
             let raw = state.url_input.trim().to_string();
             if raw.is_empty() {
@@ -183,6 +192,7 @@ pub fn build_shell_module(
                     name,
                 }
             };
+            collapse_island(state);
             let _ = tx_connect.send(cmd);
         })
         .on_action::<ConnectRecentPayload>("connect_recent", move |state, payload, _ctx| {
@@ -200,6 +210,7 @@ pub fn build_shell_module(
                     name: display,
                 }
             };
+            collapse_island(state);
             let _ = tx_recent.send(cmd);
         })
         .on_action::<()>("new_tab", move |state, _payload, _ctx| {
@@ -295,6 +306,7 @@ pub fn build_shell_module(
         // latest `connecting → connected → failed` for each tab
         // without the shell having to know about RemoteModules.
         .on_action::<TabsUpdatePayload>("__set_tabs", |state, payload, _ctx| {
+            let had_active_tab = state.has_active_tab;
             state.tabs = payload.tabs;
             state.active_tab_id = payload.active_tab_id.clone();
             state.has_tabs = !state.tabs.is_empty();
@@ -302,7 +314,8 @@ pub fn build_shell_module(
                 .tabs
                 .iter()
                 .find(|t| t.id == state.active_tab_id);
-            state.has_active_tab = active.is_some();
+            let has_active_tab = active.is_some();
+            state.has_active_tab = has_active_tab;
             state.active_status = active
                 .map(|t| t.status.clone())
                 .unwrap_or_default();
@@ -312,6 +325,14 @@ pub fn build_shell_module(
             state.active_url = active
                 .map(|t| t.url.clone())
                 .unwrap_or_default();
+            // `open_url()` (the CLI / first-launch path) bypasses the
+            // address-bar reducers above. Collapse on the first transition
+            // from Home to an active tab so every entry path has the same
+            // behavior, without collapsing an already-open toolbar merely
+            // because a status update or tab switch arrived.
+            if !had_active_tab && has_active_tab {
+                collapse_island(state);
+            }
         })
         .build()
 }
@@ -415,7 +436,63 @@ pub struct TabsUpdatePayload {
 /// }
 /// ```
 ///
-/// The home content is padded so it doesn't sit under the chrome bar.
+/// The shell's own screens (home, connecting, error) and the docked
+/// debug pane sit inside that full-bleed viewport too, so they are
+/// padded down past the chrome. Those paddings are derived from
+/// [`crate::chrome`] — the same constants that describe the window's
+/// safe-area top inset — rather than hand-tuned, so "how tall is the
+/// chrome" has exactly one definition.
+///
+/// Deliberately NOT a `SafeArea`: the renderer's insets are per-window
+/// and the browser forwards one merged tree, so a `SafeArea` here would
+/// be inset by the value that exists for the *hosted app's* benefit and
+/// double-count against this padding. See `crate::chrome`.
+///
+/// The toolbar's left inset is platform-dependent: on macOS the
+/// unified title bar puts the traffic-light cluster on the toolbar's
+/// row, so the buttons start past it; on Linux / Windows the title bar
+/// is ordinary window decoration above us and the buttons hug the
+/// left edge like the rest of the toolbar padding.
+fn toolbar_geometry() -> (i32, i32, i32) {
+    let inset = if cfg!(target_os = "macos") { 82 } else { 8 };
+    // Keep the address pill centered in the window. On macOS the traffic
+    // lights consume the leading 74 px that ordinary title bars keep out of
+    // our content; the trailing control rail absorbs the same optical space.
+    // Other platforms use equal rails because there is no in-content window
+    // control cluster.
+    let (leading_controls, trailing_controls) = if cfg!(target_os = "macos") {
+        (64, 138)
+    } else {
+        (100, 100)
+    };
+    (inset, leading_controls, trailing_controls)
+}
+
+fn shell_ui() -> String {
+    let (inset, leading_controls, trailing_controls) = toolbar_geometry();
+    // Home + status screens are vertically centred, so they only need
+    // the chrome's height plus a breathing gap; only the toolbar shows
+    // on the home screen (a collapsed island still renders the toolbar
+    // when nothing is open).
+    let home_top = crate::chrome::TOOLBAR_HEIGHT + 32.0;
+    let status_top = crate::chrome::TOOLBAR_HEIGHT + 56.0;
+    // The debug pane is right-docked and full height, exactly where the
+    // toolbar's `{ }` / `⊞` / caret buttons and the tab strip's `+` live
+    // — clear the whole expanded chrome so they stay clickable.
+    let devtools_top = crate::chrome::max_chrome_height();
+    SHELL_UI
+        .replace("__TOOLBAR_LEFT_INSET__", &inset.to_string())
+        .replace("__LEADING_CONTROL_WIDTH__", &leading_controls.to_string())
+        .replace("__TRAILING_CONTROL_WIDTH__", &trailing_controls.to_string())
+        .replace(
+            "__TOOLBAR_HEIGHT__",
+            &format!("{:.0}", crate::chrome::TOOLBAR_HEIGHT),
+        )
+        .replace("__HOME_TOP_PAD__", &format!("{home_top:.0}"))
+        .replace("__STATUS_TOP_PAD__", &format!("{status_top:.0}"))
+        .replace("__DEVTOOLS_TOP_PAD__", &format!("{devtools_top:.0}"))
+}
+
 const SHELL_UI: &str = r##"
 Stack {
     Container {
@@ -423,21 +500,21 @@ Stack {
             Column {
                 Text("Hypen Browser")
                     .fontSize(40)
-                    .color("#0f172a")
+                    .color("#F4F4F5")
                 Text("Open any Hypen app over WebSocket — no installs, no servers.")
                     .fontSize(15)
-                    .color("#64748b")
+                    .color("#9CA3AF")
                     .marginTop(8)
 
                 Text("Last opened")
                     .fontSize(13)
-                    .color("#94a3b8")
+                    .color("#8A8F98")
                     .marginTop(40)
 
                 If(condition: "@{length(state.recents) == 0}") {
                     Text("No apps opened yet. Type a URL above and press →.")
                         .fontSize(13)
-                        .color("#94a3b8")
+                        .color("#8A8F98")
                         .marginTop(8)
                 }
 
@@ -449,31 +526,31 @@ Stack {
                                     Column {
                                         Text("@{item.name}")
                                             .fontSize(14)
-                                            .color("#0f172a")
+                                            .color("#F4F4F5")
                                         Text("@{item.url}")
                                             .fontSize(12)
-                                            .color("#94a3b8")
+                                            .color("#8A8F98")
                                             .marginTop(2)
                                     }
                                 }
-                                    .backgroundColor("white")
+                                    .backgroundColor("#1F1F24")
                                     .borderWidth(0)
                                     .padding(14)
                                     .flex(1)
                                     .onClick(@actions.connect_recent, url: "@{item.url}", name: "@{item.name}")
                                 Button {
                                     Text("×")
-                                        .color("#cbd5e1")
+                                        .color("#6B7280")
                                         .fontSize(16)
                                 }
-                                    .backgroundColor("white")
+                                    .backgroundColor("#1F1F24")
                                     .borderWidth(0)
                                     .padding(14)
                                     .onClick(@actions.delete_recent, url: "@{item.url}")
                             }
-                                .backgroundColor("white")
+                                .backgroundColor("#1F1F24")
                                 .borderWidth(1)
-                                .borderColor("#e2e8f0")
+                                .borderColor("#2A2A31")
                                 .borderRadius(10)
                                 .marginTop(8)
                         }
@@ -484,7 +561,7 @@ Stack {
                 }
             }
                 .padding(56)
-                .paddingTop(96)
+                .paddingTop(__HOME_TOP_PAD__)
                 .width("100%")
                 .height("100%")
                 .alignItems("center")
@@ -495,28 +572,28 @@ Stack {
             Column {
                 Text("●")
                     .fontSize(28)
-                    .color("#3554d1")
+                    .color("#FFA7E1")
                 Text("Connecting…")
                     .fontSize(15)
-                    .color("#0f172a")
+                    .color("#F4F4F5")
                     .marginTop(12)
                 Text("@{state.active_url}")
                     .fontSize(13)
-                    .color("#64748b")
+                    .color("#9CA3AF")
                     .marginTop(6)
                 If(condition: "@{state.active_status_message != ''}") {
                     Text("@{state.active_status_message}")
                         .fontSize(12)
-                        .color("#94a3b8")
+                        .color("#8A8F98")
                         .marginTop(8)
                 }
             }
                 .width("100%")
                 .height("100%")
                 .padding(56)
-                .paddingTop(120)
+                .paddingTop(__STATUS_TOP_PAD__)
                 .alignItems("center")
-                .backgroundColor("#f8fafc")
+                .backgroundColor("#161616")
         }
 
         If(condition: "@{state.has_active_tab && state.active_status == 'failed'}") {
@@ -526,32 +603,32 @@ Stack {
                     .color("#ef4444")
                 Text("Couldn't connect")
                     .fontSize(16)
-                    .color("#0f172a")
+                    .color("#F4F4F5")
                     .marginTop(12)
                 Text("@{state.active_url}")
                     .fontSize(13)
-                    .color("#64748b")
+                    .color("#9CA3AF")
                     .marginTop(6)
                 Text("@{state.active_status_message}")
                     .fontSize(12)
-                    .color("#94a3b8")
+                    .color("#8A8F98")
                     .marginTop(8)
                 Row {
                     Button("@actions.refresh") {
                         Text("Try again")
-                            .color("white")
+                            .color("#161616")
                             .fontSize(13)
                     }
-                        .backgroundColor("#3554d1")
+                        .backgroundColor("#FFA7E1")
                         .borderWidth(0)
                         .borderRadius(8)
                         .padding(10)
                     Button("@actions.go_home") {
                         Text("Home")
-                            .color("#475569")
+                            .color("#C9CDD3")
                             .fontSize(13)
                     }
-                        .backgroundColor("#e2e8f0")
+                        .backgroundColor("#26262C")
                         .borderWidth(0)
                         .borderRadius(8)
                         .padding(10)
@@ -562,110 +639,146 @@ Stack {
                 .width("100%")
                 .height("100%")
                 .padding(56)
-                .paddingTop(120)
+                .paddingTop(__STATUS_TOP_PAD__)
                 .alignItems("center")
-                .backgroundColor("#f8fafc")
+                .backgroundColor("#161616")
         }
     }
         .width("100%")
         .height("100%")
-        .backgroundColor("#f1f5f9")
+        .backgroundColor("#161616")
 
     Column {
-        // Toolbar is expanded when (a) there's no tab open (so the
-        // user can always type a URL) or (b) the user hasn't
-        // collapsed it. Collapsing without an open tab leaves an
-        // empty pill that's confusing — gate it on `has_tabs`.
-        If(condition: "@{state.island_expanded || !state.has_tabs}") {
+        // The first-open Home toolbar follows the same hover-out behavior as
+        // an open tab. When collapsed, a labelled Home pill below remains as
+        // the discoverable target for bringing the URL bar back.
+        If(condition: "@{state.island_expanded}") {
             Column {
                 Row {
-                    Button {
-                        Text("⌂")
-                            .color("#475569")
-                            .fontSize(13)
+                    Row {
+                        Button {
+                            Text("⌂")
+                                .color("#C9CDD3")
+                                .fontSize(13)
+                        }
+                            .width(28)
+                            .height(32)
+                            .backgroundColor("#1F1F24")
+                            .borderWidth(1)
+                            .borderColor("#2A2A31")
+                            .borderRadius(8)
+                            .padding(0)
+                            .alignItems("center")
+                            .justifyContent("center")
+                            .onClick(@actions.go_home)
+                        Button {
+                            Text("⟳")
+                                .color("#C9CDD3")
+                                .fontSize(13)
+                        }
+                            .width(28)
+                            .height(32)
+                            .backgroundColor("#1F1F24")
+                            .borderWidth(1)
+                            .borderColor("#2A2A31")
+                            .borderRadius(8)
+                            .padding(0)
+                            .alignItems("center")
+                            .justifyContent("center")
+                            .onClick(@actions.refresh)
                     }
-                        .backgroundColor("#ffffff")
-                        .borderWidth(1)
-                        .borderColor("#e2e8f0")
-                        .borderRadius(8)
-                        .padding(6)
-                        .onClick(@actions.go_home)
-                    Button {
-                        Text("⟳")
-                            .color("#475569")
-                            .fontSize(13)
-                    }
-                        .backgroundColor("#ffffff")
-                        .borderWidth(1)
-                        .borderColor("#e2e8f0")
-                        .borderRadius(8)
-                        .padding(6)
-                        .onClick(@actions.refresh)
+                        .width(__LEADING_CONTROL_WIDTH__)
+                        .gap(8)
+                        .alignItems("center")
 
                     Row {
                         Input(placeholder: "Enter a URL — e.g. localhost:3000")
                             .bind(@state.url_input)
                             .backgroundColor("transparent")
-                            .color("#0f172a")
+                            .color("#F4F4F5")
                             .borderWidth(0)
                             .padding(6)
                             .fontSize(13)
                             .flex(1)
                         Button("@actions.connect") {
                             Text("→")
-                                .color("white")
+                                .color("#161616")
                                 .fontSize(14)
                         }
-                            .backgroundColor("#3554d1")
+                            .width(32)
+                            .height(32)
+                            .backgroundColor("#FFA7E1")
                             .borderWidth(0)
                             .borderRadius(999)
-                            .padding(6)
+                            .padding(0)
+                            .alignItems("center")
+                            .justifyContent("center")
                     }
                         .flex(1)
-                        .backgroundColor("#ffffff")
+                        .height(40)
+                        .backgroundColor("#1F1F24")
                         .borderWidth(1)
-                        .borderColor("#e2e8f0")
+                        .borderColor("#2A2A31")
                         .borderRadius(999)
                         .padding(2)
                         .alignItems("center")
 
-                    Button {
-                        Text("{ }")
-                            .color("@{state.debug_open ? '#3554d1' : '#94a3b8'}")
-                            .fontSize(13)
+                    Row {
+                        Button {
+                            Text("{ }")
+                                .color("@{state.debug_open ? '#FFA7E1' : '#8A8F98'}")
+                                .fontSize(13)
+                        }
+                            .width(28)
+                            .height(32)
+                            .backgroundColor("transparent")
+                            .borderWidth(0)
+                            .borderRadius(8)
+                            .padding(0)
+                            .alignItems("center")
+                            .justifyContent("center")
+                            .onClick(@actions.toggle_debug)
+                        Button {
+                            Text("⊞")
+                                .color("#8A8F98")
+                                .fontSize(13)
+                        }
+                            .width(28)
+                            .height(32)
+                            .backgroundColor("transparent")
+                            .borderWidth(0)
+                            .borderRadius(8)
+                            .padding(0)
+                            .alignItems("center")
+                            .justifyContent("center")
+                            .onClick(@actions.dump_tree)
+                        Button {
+                            Text("@{state.island_pinned ? '⌃' : '⌄'}")
+                                .color("@{state.island_pinned ? '#FFA7E1' : '#8A8F98'}")
+                                .fontSize(13)
+                        }
+                            .width(28)
+                            .height(32)
+                            .backgroundColor("@{state.island_pinned ? '#332632' : 'transparent'}")
+                            .borderWidth(0)
+                            .borderRadius(8)
+                            .padding(0)
+                            .alignItems("center")
+                            .justifyContent("center")
+                            .onClick(@actions.toggle_pin)
                     }
-                        .backgroundColor("transparent")
-                        .borderWidth(0)
-                        .borderRadius(8)
-                        .padding(6)
-                        .onClick(@actions.toggle_debug)
-                    Button {
-                        Text("⊞")
-                            .color("#94a3b8")
-                            .fontSize(13)
-                    }
-                        .backgroundColor("transparent")
-                        .borderWidth(0)
-                        .borderRadius(8)
-                        .padding(6)
-                        .onClick(@actions.dump_tree)
-                    Button {
-                        Text("@{state.island_pinned ? '⌃' : '⌄'}")
-                            .color("@{state.island_pinned ? '#3554d1' : '#94a3b8'}")
-                            .fontSize(13)
-                    }
-                        .backgroundColor("@{state.island_pinned ? '#eef2ff' : 'transparent'}")
-                        .borderWidth(0)
-                        .borderRadius(8)
-                        .padding(6)
-                        .onClick(@actions.toggle_pin)
+                        .width(__TRAILING_CONTROL_WIDTH__)
+                        .gap(8)
+                        .alignItems("center")
+                        .justifyContent("flex-end")
                 }
                     .width("100%")
-                    .padding(8)
-                    // Clear the macOS traffic lights (unified title bar):
-                    // the toolbar shares the top row with them, so inset
-                    // the left edge past the ~70px light cluster.
-                    .paddingLeft(82)
+                    .height(__TOOLBAR_HEIGHT__)
+                    // macOS: clear the traffic lights (unified title bar)
+                    // sharing this row — see `shell_ui()`. Elsewhere this
+                    // matches the toolbar's own padding.
+                    .paddingLeft(__TOOLBAR_LEFT_INSET__)
+                    .paddingRight(8)
                     .gap(8)
                     .alignItems("center")
 
@@ -677,7 +790,7 @@ Stack {
                                     Row {
                                         If(condition: "@{item.status == 'connecting' || item.status == 'reconnecting'}") {
                                             Text("◐")
-                                                .color("#94a3b8")
+                                                .color("#8A8F98")
                                                 .fontSize(11)
                                         }
                                         If(condition: "@{item.status == 'connected'}") {
@@ -691,7 +804,7 @@ Stack {
                                                 .fontSize(10)
                                         }
                                         Text("@{item.name}")
-                                            .color("#0f172a")
+                                            .color("#F4F4F5")
                                             .fontSize(12)
                                             .marginLeft(6)
                                     }
@@ -703,7 +816,7 @@ Stack {
                                     .onClick(@actions.switch_tab, tabId: "@{item.id}")
                                 Button {
                                     Text("×")
-                                        .color("#94a3b8")
+                                        .color("#8A8F98")
                                         .fontSize(13)
                                 }
                                     .backgroundColor("transparent")
@@ -711,16 +824,16 @@ Stack {
                                     .padding(6)
                                     .onClick(@actions.close_tab, tabId: "@{item.id}")
                             }
-                                .backgroundColor("#ffffff")
+                                .backgroundColor("#1F1F24")
                                 .borderWidth(1)
-                                .borderColor("#e2e8f0")
+                                .borderColor("#2A2A31")
                                 .borderRadius(8)
                                 .gap(0)
                         }
 
                         Button {
                             Text("+")
-                                .color("#475569")
+                                .color("#C9CDD3")
                                 .fontSize(14)
                         }
                             .backgroundColor("transparent")
@@ -737,20 +850,20 @@ Stack {
                 }
             }
                 .width("100%")
-                .linearGradient("to bottom", ["#fbfcfd", "#e9ebef"])
+                .linearGradient("to bottom", ["#1E1E24", "#141417"])
                 .borderWidth(1)
-                .borderColor("#d8dade")
+                .borderColor("#26262C")
                 .onHover(@actions.island_hover)
         }
 
-        // Collapsed pill — only shown when a tab is open, so the
-        // pill always has a meaningful label (active URL + status).
-        If(condition: "@{!state.island_expanded && state.has_tabs}") {
+        // Collapsed pill. Tabs show their URL/status; the first-open Home
+        // screen gets its own label so hover-out never leaves an empty chip.
+        If(condition: "@{!state.island_expanded}") {
             Row {
                 Row {
                     If(condition: "@{state.active_status == 'connecting' || state.active_status == 'reconnecting'}") {
                         Text("◐")
-                            .color("#94a3b8")
+                            .color("#8A8F98")
                             .fontSize(10)
                     }
                     If(condition: "@{state.active_status == 'connected'}") {
@@ -763,19 +876,26 @@ Stack {
                             .color("#ef4444")
                             .fontSize(10)
                     }
-                    Text("@{state.active_url}")
-                        .color("#0f172a")
-                        .fontSize(12)
-                        .marginLeft(8)
+                    If(condition: "@{state.has_tabs}") {
+                        Text("@{state.active_url}")
+                            .color("#F4F4F5")
+                            .fontSize(12)
+                            .marginLeft(8)
+                    }
+                    If(condition: "@{!state.has_tabs}") {
+                        Text("⌂  Hypen Home")
+                            .color("#F4F4F5")
+                            .fontSize(12)
+                    }
                     Text("▾")
-                        .color("#94a3b8")
+                        .color("#8A8F98")
                         .fontSize(10)
                         .marginLeft(8)
                 }
                     .alignItems("center")
-                    .backgroundColor("#ffffff")
+                    .backgroundColor("#1F1F24")
                     .borderWidth(1)
-                    .borderColor("#d8dade")
+                    .borderColor("#26262C")
                     .borderRadius(999)
                     .padding(8)
                     .onClick(@actions.toggle_pin)
@@ -800,7 +920,7 @@ Stack {
                     .fontSize(12)
                     .marginBottom(2)
                 Text("▶ out (actions) · ◀ in (patches) · · logs")
-                    .color("#94a3b8")
+                    .color("#8A8F98")
                     .fontSize(10)
                     .marginBottom(8)
                 Text("@{state.debug_log}")
@@ -810,14 +930,14 @@ Stack {
                 .width(440)
                 .height("100%")
                 .padding(12)
-                .backgroundColor("#0f172a")
-                .borderColor("#1e293b")
+                .backgroundColor("#101014")
+                .borderColor("#26262C")
                 .borderWidth(1)
                 .scrollable("vertical")
         }
             .width("100%")
             .height("100%")
-            .paddingTop(52)
+            .paddingTop(__DEVTOOLS_TOP_PAD__)
             .justifyContent("flex-end")
     }
 }
@@ -889,6 +1009,42 @@ mod tests {
     }
 
     #[test]
+    fn shell_ui_substitutes_every_placeholder() {
+        // A missed `__PLACEHOLDER__` parses as a bare reference rather
+        // than erroring, so it would silently render as no padding at
+        // all — assert the template is fully filled in.
+        let ui = shell_ui();
+        assert!(
+            !ui.contains("__"),
+            "unsubstituted placeholder left in the shell DSL",
+        );
+        // The chrome-derived paddings land as plain numbers.
+        let expect = format!(".paddingTop({:.0})", crate::chrome::max_chrome_height());
+        assert!(
+            ui.contains(&expect),
+            "debug pane should clear the full expanded chrome ({expect})",
+        );
+    }
+
+    #[test]
+    fn toolbar_control_rails_center_the_address_pill() {
+        let (left_inset, leading_controls, trailing_controls) = toolbar_geometry();
+        const RIGHT_INSET: i32 = 8;
+        const GAP: i32 = 8;
+        let address_left_edge = left_inset + leading_controls + GAP;
+        let address_right_edge = RIGHT_INSET + trailing_controls + GAP;
+        assert_eq!(
+            address_left_edge, address_right_edge,
+            "equal outer address edges keep the flexible URL pill centered",
+        );
+
+        let ui = shell_ui();
+        let toolbar_height = format!(".height({:.0})", crate::chrome::TOOLBAR_HEIGHT);
+        assert!(ui.contains(&toolbar_height));
+        assert!(ui.matches(".justifyContent(\"center\")").count() >= 6);
+    }
+
+    #[test]
     fn shell_module_instantiates_with_initial_state() {
         let (instance, _rx) = build_instance();
         let state = instance.get_state();
@@ -898,8 +1054,22 @@ mod tests {
     }
 
     #[test]
+    fn first_open_home_toolbar_can_collapse_to_a_labelled_pill() {
+        let ui = shell_ui();
+        assert!(ui.contains("If(condition: \"@{state.island_expanded}\")"));
+        assert!(ui.contains("If(condition: \"@{!state.island_expanded}\")"));
+        assert!(ui.contains("Hypen Home"));
+        assert!(
+            !ui.contains("state.island_expanded || !state.has_tabs"),
+            "no-tab state must not force the full toolbar open",
+        );
+    }
+
+    #[test]
     fn connect_action_emits_open_tab_command() {
         let (instance, rx) = build_instance();
+        instance.dispatch_action("toggle_pin", None).expect("pin");
+        assert!(instance.get_state().island_pinned);
         instance
             .dispatch_action(
                 "__hypen_bind",
@@ -922,6 +1092,54 @@ mod tests {
         // the opened URL — the user can edit it for the next nav.
         let state = instance.get_state();
         assert_eq!(state.url_input, "localhost:3000");
+        assert!(!state.island_expanded, "opening an app hides the toolbar");
+        assert!(!state.island_pinned, "navigation must also release the pin");
+    }
+
+    #[test]
+    fn recent_item_click_collapses_toolbar_and_emits_open_tab() {
+        let (instance, rx) = build_instance();
+        instance.dispatch_action("toggle_pin", None).expect("pin");
+        instance
+            .dispatch_action(
+                "connect_recent",
+                Some(json!({
+                    "url": "wss://movies.example/app",
+                    "name": "Movie DB",
+                })),
+            )
+            .expect("connect recent");
+
+        let state = instance.get_state();
+        assert!(!state.island_expanded);
+        assert!(!state.island_pinned);
+        assert_eq!(state.url_input, "wss://movies.example/app");
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ShellCommand::OpenTab { url, name })
+                if url == "wss://movies.example/app" && name == "Movie DB"
+        ));
+    }
+
+    #[test]
+    fn first_cli_open_collapses_when_the_first_active_tab_is_published() {
+        let (instance, _rx) = build_instance();
+        push_tabs(
+            &instance,
+            vec![TabInfo {
+                id: "tab-1".into(),
+                url: "wss://movies.example/app".into(),
+                name: "Movie DB".into(),
+                status: "connecting".into(),
+                status_message: String::new(),
+            }],
+            Some("tab-1".into()),
+        );
+
+        let state = instance.get_state();
+        assert!(state.has_active_tab);
+        assert!(!state.island_expanded);
+        assert!(!state.island_pinned);
     }
 
     #[test]

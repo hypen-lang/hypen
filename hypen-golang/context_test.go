@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"sync"
 	"testing"
 )
@@ -83,6 +84,17 @@ func (e *FakeEngine) DispatchAction(name string, payload any) error {
 func (e *FakeEngine) DispatchActionAs(name string, payload any, sender string) {
 	e.mu.Lock()
 	handler := e.actionHandlers[name]
+	if handler == nil {
+		for key, candidate := range e.actionHandlers {
+			if strings.HasPrefix(key, "__hypen_scoped:") && strings.HasSuffix(key, ":"+name) {
+				if handler != nil {
+					handler = nil
+					break
+				}
+				handler = candidate
+			}
+		}
+	}
 	e.mu.Unlock()
 	if handler != nil {
 		handler(Action{Name: name, Payload: payload, Sender: sender})

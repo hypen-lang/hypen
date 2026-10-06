@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-todo",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // The Hypen WASM engine is pulled in as a CompiledWasm module — this rule is
+  // what lets the engine boot inside a Worker.
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/dist/client/*.js"], "fallthrough": true }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "TODO_DO", "class_name": "TodoDO" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["TodoDO"] }
+  ]
+}

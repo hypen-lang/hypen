@@ -23,7 +23,7 @@ module HomePage {
             }
             .tw("flex-row shrink-0")
         }
-        .tw("py-3 px-4 flex-row items-center border-b border-gray-200")
+        .tw("py-3 px-4 flex-row items-center")
 
         Stories()
 

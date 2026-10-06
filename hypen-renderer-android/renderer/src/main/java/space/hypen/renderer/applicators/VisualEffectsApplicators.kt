@@ -286,7 +286,26 @@ class ScaleYApplicator : ApplicatorHandler {
 }
 
 /**
- * Applicator for translateX.
+ * A translate value in dp — the renderer's logical unit, like every other
+ * length applicator (`padding`, `width`, …) and like the DOM's CSS px / the
+ * iOS renderer's points. A drag-and-drop pin round-trips through this: the
+ * runtime reports `(x, y)` in dp and the engine writes them back as
+ * `translateX.0` / `translateY.0`, so the two MUST agree on the unit.
+ *
+ * `null` reads as 0: the engine's reserved-mode pinboard injection emits an
+ * EXPLICIT `null` for a not-yet-pinned item (plan §3), and a `RemoveProp`
+ * never follows. Anything unparseable is null too (no transform).
+ */
+internal fun translateDp(value: Any?): Float? =
+    when (value) {
+        null -> 0f
+        is Number -> value.toFloat().takeIf { it.isFinite() }
+        is String -> parseCssUnit(value)?.value
+        else -> null
+    }
+
+/**
+ * Applicator for translateX. Bare numbers are dp; `null` is 0 (see [translateDp]).
  */
 class TranslateXApplicator : ApplicatorHandler {
     override val name: String = "translateX"
@@ -296,17 +315,13 @@ class TranslateXApplicator : ApplicatorHandler {
         value: Any?,
         context: ApplicatorContext,
     ): Modifier {
-        val tx = when (value) {
-            is Number -> value.toFloat()
-            is String -> parseCssUnit(value)?.value ?: return modifier
-            else -> return modifier
-        }
-        return modifier.graphicsLayer(translationX = tx)
+        val tx = translateDp(value) ?: return modifier
+        return modifier.graphicsLayer { translationX = tx.dp.toPx() }
     }
 }
 
 /**
- * Applicator for translateY.
+ * Applicator for translateY. Bare numbers are dp; `null` is 0 (see [translateDp]).
  */
 class TranslateYApplicator : ApplicatorHandler {
     override val name: String = "translateY"
@@ -316,12 +331,8 @@ class TranslateYApplicator : ApplicatorHandler {
         value: Any?,
         context: ApplicatorContext,
     ): Modifier {
-        val ty = when (value) {
-            is Number -> value.toFloat()
-            is String -> parseCssUnit(value)?.value ?: return modifier
-            else -> return modifier
-        }
-        return modifier.graphicsLayer(translationY = ty)
+        val ty = translateDp(value) ?: return modifier
+        return modifier.graphicsLayer { translationY = ty.dp.toPx() }
     }
 }
 
@@ -337,20 +348,36 @@ class TransformApplicator : ApplicatorHandler {
         value: Any?,
         context: ApplicatorContext,
     ): Modifier {
+        if (value is String) {
+            fun number(name: String): Float? = Regex("$name\\(([-+]?\\d*\\.?\\d+)(?:deg|px)?\\)", RegexOption.IGNORE_CASE)
+                .find(value)?.groupValues?.get(1)?.toFloatOrNull()
+            val rotate = number("rotate") ?: 0f
+            val scale = number("scale") ?: 1f
+            val translateX = number("translateX") ?: 0f
+            val translateY = number("translateY") ?: 0f
+            return modifier.graphicsLayer(
+                rotationZ = rotate,
+                scaleX = scale,
+                scaleY = scale,
+                translationX = translateX,
+                translationY = translateY,
+            )
+        }
         if (value !is Map<*, *>) return modifier
 
         val rotationZ = (value["rotate"] as? Number)?.toFloat() ?: 0f
         val scaleX = (value["scaleX"] as? Number)?.toFloat() ?: (value["scale"] as? Number)?.toFloat() ?: 1f
         val scaleY = (value["scaleY"] as? Number)?.toFloat() ?: (value["scale"] as? Number)?.toFloat() ?: 1f
-        val translationX = (value["translateX"] as? Number)?.toFloat() ?: 0f
-        val translationY = (value["translateY"] as? Number)?.toFloat() ?: 0f
+        val translateX = (value["translateX"] as? Number)?.toFloat() ?: 0f
+        val translateY = (value["translateY"] as? Number)?.toFloat() ?: 0f
 
-        return modifier.graphicsLayer(
-            rotationZ = rotationZ,
-            scaleX = scaleX,
-            scaleY = scaleY,
-            translationX = translationX,
-            translationY = translationY,
-        )
+        return modifier.graphicsLayer {
+            this.rotationZ = rotationZ
+            this.scaleX = scaleX
+            this.scaleY = scaleY
+            // dp, like the standalone translate applicators.
+            translationX = translateX.dp.toPx()
+            translationY = translateY.dp.toPx()
+        }
     }
 }

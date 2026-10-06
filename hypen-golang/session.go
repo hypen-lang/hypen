@@ -2,6 +2,8 @@ package core
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -133,10 +135,77 @@ type pendingSession struct {
 type SessionManager struct {
 	config SessionConfig
 
-	mu                sync.Mutex
-	activeSessions    map[string]*Session
-	pendingSessions   map[string]*pendingSession
+	mu                 sync.Mutex
+	activeSessions     map[string]*Session
+	pendingSessions    map[string]*pendingSession
 	sessionConnections map[string]map[any]struct{}
+	// resumeTokens holds each session's current resume credential
+	// (RFC 001 §5): issued per acknowledged connection, rotated on every
+	// issue, dropped when the session is destroyed or expires.
+	resumeTokens map[string]string
+	// deviceSessions marks the sessions that negotiated a device plane on
+	// some connection: only those require the resume token to resume
+	// (UI-only sessions keep the legacy id-only resume). Sticky for the
+	// session's life; dropped with its token.
+	deviceSessions map[string]struct{}
+}
+
+// Config returns the manager's effective configuration.
+func (m *SessionManager) Config() SessionConfig {
+	return m.config
+}
+
+// IssueResumeToken creates a fresh resume credential for sessionID —
+// 256 random bits, base64url — replacing (and so revoking) the previous
+// one. Servers hand it out in every sessionAck.resumeToken and require
+// it, next to the public session id, to resume a session that negotiated
+// a device plane (MarkDeviceSession).
+func (m *SessionManager) IssueResumeToken(sessionID string) (string, error) {
+	var buf [32]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("resume token: %w", err)
+	}
+	token := base64.RawURLEncoding.EncodeToString(buf[:])
+	m.mu.Lock()
+	if m.resumeTokens == nil {
+		m.resumeTokens = make(map[string]string)
+	}
+	m.resumeTokens[sessionID] = token
+	m.mu.Unlock()
+	return token, nil
+}
+
+// VerifyResumeToken reports whether token is sessionID's current resume
+// credential. The comparison is constant-time over the token contents.
+func (m *SessionManager) VerifyResumeToken(sessionID, token string) bool {
+	m.mu.Lock()
+	expected, ok := m.resumeTokens[sessionID]
+	m.mu.Unlock()
+	if !ok || token == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(expected), []byte(token)) == 1
+}
+
+// MarkDeviceSession records that sessionID negotiated a device plane, so
+// resuming it requires its resume token from now on (RequiresResumeToken).
+func (m *SessionManager) MarkDeviceSession(sessionID string) {
+	m.mu.Lock()
+	if m.deviceSessions == nil {
+		m.deviceSessions = make(map[string]struct{})
+	}
+	m.deviceSessions[sessionID] = struct{}{}
+	m.mu.Unlock()
+}
+
+// RequiresResumeToken reports whether resuming sessionID requires its
+// resume token: true exactly when the session negotiated a device plane
+// (a UI-only session keeps the legacy id-only resume).
+func (m *SessionManager) RequiresResumeToken(sessionID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	_, ok := m.deviceSessions[sessionID]
+	return ok
 }
 
 // NewSessionManager creates a SessionManager with the given config.
@@ -158,6 +227,7 @@ func NewSessionManager(config *SessionConfig) *SessionManager {
 		activeSessions:     make(map[string]*Session),
 		pendingSessions:    make(map[string]*pendingSession),
 		sessionConnections: make(map[string]map[any]struct{}),
+		resumeTokens:       make(map[string]string),
 	}
 }
 
@@ -241,6 +311,8 @@ func (m *SessionManager) SuspendSession(id string, savedState map[string]any, on
 		_, stillPending := m.pendingSessions[id]
 		if stillPending {
 			delete(m.pendingSessions, id)
+			delete(m.resumeTokens, id)
+			delete(m.deviceSessions, id)
 		}
 		m.mu.Unlock()
 		if stillPending && onExpire != nil {
@@ -292,6 +364,8 @@ func (m *SessionManager) DestroySession(id string) {
 		delete(m.pendingSessions, id)
 	}
 	delete(m.sessionConnections, id)
+	delete(m.resumeTokens, id)
+	delete(m.deviceSessions, id)
 	m.mu.Unlock()
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/server",
-  "version": "0.5.0",
+  "version": "0.6.5",
   "description": "Hypen server runtime - Node.js WASM engine, component loader, discovery, and remote server",
   "type": "module",
   "main": "./dist/index.js",
@@ -57,17 +57,21 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@hypen-space/core": "^0.5.0"
+    "@hypen-space/core": "^0.6.5"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "typescript": "^5"
   },
   "peerDependencies": {
-    "typescript": "^5"
+    "typescript": "^5",
+    "@hypen-space/web": ">=0.6.0"
   },
   "peerDependenciesMeta": {
     "typescript": {
+      "optional": true
+    },
+    "@hypen-space/web": {
       "optional": true
     }
   },

@@ -24,6 +24,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenApp
+import space.hypen.renderer.components.HypenSafeAreaInsets
 import space.hypen.renderer.remote.RemoteEngineConfig
 import space.hypen.gallery.ui.theme.HypenGalleryTheme
 
@@ -61,6 +62,7 @@ object GalleryItems {
         GalleryItem("Spacer", "/components/spacer", "Flexible space", false),
         GalleryItem("Stack", "/components/stack", "Overlays children", false),
         GalleryItem("Divider", "/components/divider", "Visual separator", false),
+        GalleryItem("SafeArea", "/components/safearea", "Insets content past the system bars", false),
         GalleryItem("Grid", "/components/grid", "Grid layout", false),
         GalleryItem("Card", "/components/card", "Styled card container", false),
         GalleryItem("Heading", "/components/heading", "Semantic heading", false),
@@ -70,6 +72,7 @@ object GalleryItems {
         GalleryItem("Badge", "/components/badge", "Status badge", false),
         GalleryItem("Avatar", "/components/avatar", "User avatar", false),
         GalleryItem("ProgressBar", "/components/progressbar", "Progress indicator", false),
+        GalleryItem("Chart", "/components/chart", "Data marks in a coordinate space", false),
         GalleryItem("Video", "/components/video", "Video player", false),
         GalleryItem("Audio", "/components/audio", "Audio player", false),
         GalleryItem("Paragraph", "/components/paragraph", "Block of text", false),
@@ -117,6 +120,15 @@ object GalleryItems {
     )
 
     val all = components + applicators
+
+    /** Resolve either the user-facing item name or its canonical deeplink segment. */
+    fun find(nameOrPathSegment: String): GalleryItem? {
+        val query = nameOrPathSegment.trim()
+        return all.find { item ->
+            item.name.equals(query, ignoreCase = true) ||
+                item.path.substringAfterLast('/').equals(query, ignoreCase = true)
+        }
+    }
 }
 
 class ComponentListActivity : ComponentActivity() {
@@ -162,13 +174,10 @@ class ComponentListActivity : ComponentActivity() {
         // Get the name parameter, removing any surrounding quotes
         val name = uri.getQueryParameter("name")?.trim()?.removeSurrounding("\"")
 
-        // Validate that the component exists
-        return if (name != null && GalleryItems.all.any { it.name.equals(name, ignoreCase = true) }) {
-            // Return the actual name with correct casing
-            GalleryItems.all.find { it.name.equals(name, ignoreCase = true) }?.name
-        } else {
-            null
-        }
+        // Accept both the user-facing name and the canonical deeplink segment.
+        // Some applicators intentionally use different labels, such as
+        // verticalAlignment -> /applicators/justifyContent.
+        return name?.let(GalleryItems::find)?.name
     }
 }
 
@@ -360,9 +369,15 @@ fun ComponentPreviewScreen(
     item: GalleryItem,
     onClose: () -> Unit,
 ) {
-    val url = "ws://10.0.2.2:${GalleryItems.SERVER_PORT}${item.path}"
+    val url = "ws://10.0.2.2:${GalleryItems.SERVER_PORT}${item.path}?platform=android"
 
     Scaffold(
+        // The preview surface has to reach the bottom window edge, or `SafeArea` inside the
+        // previewed component has no unconsumed navigation-bar inset left to pad by. The
+        // Scaffold's default content insets would eat exactly that, so they are dropped here;
+        // the top bar still applies its own `statusBarsPadding()` and the content padding
+        // below still clears the bar itself.
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             TopAppBar(
                 title = {
@@ -392,6 +407,11 @@ fun ComponentPreviewScreen(
                 url = url,
                 modifier = Modifier.fillMaxSize(),
                 config = RemoteEngineConfig.DEBUG,
+                // The top app bar (status-bar padded) stacks above this surface, so the
+                // preview's top edge is already clear — but the unconsumed top inset would
+                // still show up in `WindowInsets.safeDrawing`, double-padding every SafeArea.
+                // Zero just that edge; bottom/left/right stay on the real safeDrawing insets.
+                safeAreaInsets = remember { HypenSafeAreaInsets(top = 0.dp) },
                 loadingContent = {
                     Box(
                         modifier = Modifier.fillMaxSize(),

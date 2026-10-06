@@ -1,6 +1,8 @@
 package space.hypen.renderer.components
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.ContentScale
@@ -50,16 +52,29 @@ class ImageComponent : ComponentHandler {
                 else -> ContentScale.Fit
             }
 
+        val imageModifier = if (
+            LocalGridStretchesBareImage.current && !element.hasExplicitImageSize()
+        ) {
+            modifier.fillMaxWidth().aspectRatio(1f)
+        } else {
+            modifier
+        }
+
         if (src != null) {
             AsyncImage(
                 model = src,
                 contentDescription = contentDescription,
-                modifier = modifier,
+                modifier = imageModifier,
                 contentScale = contentScale,
             )
         } else {
             // Placeholder if no source
-            Box(modifier = modifier)
+            Box(modifier = imageModifier)
         }
     }
 }
+
+internal fun HypenElement.hasExplicitImageSize(): Boolean = listOf(
+    "width", "height", "size", "minWidth", "maxWidth", "minHeight", "maxHeight",
+    "fillMaxWidth", "fillMaxHeight", "fillMaxSize", "aspectRatio",
+).any { name -> props.containsKey(name) || props.containsKey("$name.0") }

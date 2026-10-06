@@ -11,6 +11,8 @@ import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.dp
 
 /**
@@ -85,10 +87,19 @@ fun parseSizeValue(value: Any?): SizeValue? {
 
     return when (unit) {
         "px" -> {
-            // Convert absolute pixels to dp
-            // px to dp: dp = px / density
-            val density = Resources.getSystem().displayMetrics.density
-            SizeValue.Fixed((num / density).dp)
+            // CSS `px` is a LOGICAL pixel, so 1px = 1dp.
+            //
+            // This used to divide by display density, treating px as a
+            // PHYSICAL device pixel. That shrank every px-specified dimension
+            // by 2–3× on a normal phone — `max-w-[250px]` became a 95dp cap at
+            // density 2.625 — and disagreed with the other renderers.
+            //
+            // The cross-renderer contract is stated in the DOM renderer's
+            // `parseSizeValue` header: "100px: absolute pixels (1px = 1px
+            // everywhere)". Web emits `${value}px` untouched and desktop
+            // (`style.rs` `parse_length`) strips the suffix and uses the
+            // number. `dp`/`pt` remain the density-aware units.
+            SizeValue.Fixed(num.dp)
         }
         "dp", "sp", "" -> {
             // dp / sp are 1 logical Compose `.dp` at standard density.
@@ -248,13 +259,27 @@ fun systemScreenHeightDp(): Dp {
 }
 
 /**
+ * Viewport width for `vw`, falling back to the display when the Hypen root
+ * hasn't been measured yet (tests, previews, non-composable callers).
+ */
+fun viewportWidthDp(viewport: DpSize): Dp =
+    if (viewport.isSpecified) viewport.width else systemScreenWidthDp()
+
+/**
+ * Viewport height for `vh`. See [viewportWidthDp]; `100vh` must mean the area
+ * the Hypen root was given, not the physical display.
+ */
+fun viewportHeightDp(viewport: DpSize): Dp =
+    if (viewport.isSpecified) viewport.height else systemScreenHeightDp()
+
+/**
  * Apply a width SizeValue to a Modifier.
  */
-fun Modifier.applyWidth(size: SizeValue): Modifier = when (size) {
+fun Modifier.applyWidth(size: SizeValue, viewport: DpSize = DpSize.Unspecified): Modifier = when (size) {
     is SizeValue.Fixed -> width(size.dp)
     is SizeValue.Percent -> fillMaxWidth(size.fraction.coerceIn(0f, 1f))
-    is SizeValue.ViewportWidth -> width(systemScreenWidthDp() * size.fraction)
-    is SizeValue.ViewportHeight -> width(systemScreenHeightDp() * size.fraction)
+    is SizeValue.ViewportWidth -> width(viewportWidthDp(viewport) * size.fraction)
+    is SizeValue.ViewportHeight -> width(viewportHeightDp(viewport) * size.fraction)
     is SizeValue.Fill -> fillMaxWidth(size.fraction.coerceIn(0f, 1f))
     is SizeValue.Wrap -> wrapContentWidth()
 }
@@ -262,11 +287,11 @@ fun Modifier.applyWidth(size: SizeValue): Modifier = when (size) {
 /**
  * Apply a height SizeValue to a Modifier.
  */
-fun Modifier.applyHeight(size: SizeValue): Modifier = when (size) {
+fun Modifier.applyHeight(size: SizeValue, viewport: DpSize = DpSize.Unspecified): Modifier = when (size) {
     is SizeValue.Fixed -> height(size.dp)
     is SizeValue.Percent -> fillMaxHeight(size.fraction.coerceIn(0f, 1f))
-    is SizeValue.ViewportWidth -> height(systemScreenWidthDp() * size.fraction)
-    is SizeValue.ViewportHeight -> height(systemScreenHeightDp() * size.fraction)
+    is SizeValue.ViewportWidth -> height(viewportWidthDp(viewport) * size.fraction)
+    is SizeValue.ViewportHeight -> height(viewportHeightDp(viewport) * size.fraction)
     is SizeValue.Fill -> fillMaxHeight(size.fraction.coerceIn(0f, 1f))
     is SizeValue.Wrap -> wrapContentHeight()
 }
@@ -274,20 +299,20 @@ fun Modifier.applyHeight(size: SizeValue): Modifier = when (size) {
 /**
  * Apply a min width SizeValue to a Modifier.
  */
-fun Modifier.applyMinWidth(size: SizeValue): Modifier = when (size) {
+fun Modifier.applyMinWidth(size: SizeValue, viewport: DpSize = DpSize.Unspecified): Modifier = when (size) {
     is SizeValue.Fixed -> widthIn(min = size.dp)
-    is SizeValue.ViewportWidth -> widthIn(min = systemScreenWidthDp() * size.fraction)
-    is SizeValue.ViewportHeight -> widthIn(min = systemScreenHeightDp() * size.fraction)
+    is SizeValue.ViewportWidth -> widthIn(min = viewportWidthDp(viewport) * size.fraction)
+    is SizeValue.ViewportHeight -> widthIn(min = viewportHeightDp(viewport) * size.fraction)
     else -> this // Percent, Fill, Wrap don't apply to min
 }
 
 /**
  * Apply a max width SizeValue to a Modifier.
  */
-fun Modifier.applyMaxWidth(size: SizeValue): Modifier = when (size) {
+fun Modifier.applyMaxWidth(size: SizeValue, viewport: DpSize = DpSize.Unspecified): Modifier = when (size) {
     is SizeValue.Fixed -> widthIn(max = size.dp)
-    is SizeValue.ViewportWidth -> widthIn(max = systemScreenWidthDp() * size.fraction)
-    is SizeValue.ViewportHeight -> widthIn(max = systemScreenHeightDp() * size.fraction)
+    is SizeValue.ViewportWidth -> widthIn(max = viewportWidthDp(viewport) * size.fraction)
+    is SizeValue.ViewportHeight -> widthIn(max = viewportHeightDp(viewport) * size.fraction)
     is SizeValue.Fill -> fillMaxWidth(size.fraction.coerceIn(0f, 1f))
     else -> this
 }
@@ -295,20 +320,20 @@ fun Modifier.applyMaxWidth(size: SizeValue): Modifier = when (size) {
 /**
  * Apply a min height SizeValue to a Modifier.
  */
-fun Modifier.applyMinHeight(size: SizeValue): Modifier = when (size) {
+fun Modifier.applyMinHeight(size: SizeValue, viewport: DpSize = DpSize.Unspecified): Modifier = when (size) {
     is SizeValue.Fixed -> heightIn(min = size.dp)
-    is SizeValue.ViewportWidth -> heightIn(min = systemScreenWidthDp() * size.fraction)
-    is SizeValue.ViewportHeight -> heightIn(min = systemScreenHeightDp() * size.fraction)
+    is SizeValue.ViewportWidth -> heightIn(min = viewportWidthDp(viewport) * size.fraction)
+    is SizeValue.ViewportHeight -> heightIn(min = viewportHeightDp(viewport) * size.fraction)
     else -> this
 }
 
 /**
  * Apply a max height SizeValue to a Modifier.
  */
-fun Modifier.applyMaxHeight(size: SizeValue): Modifier = when (size) {
+fun Modifier.applyMaxHeight(size: SizeValue, viewport: DpSize = DpSize.Unspecified): Modifier = when (size) {
     is SizeValue.Fixed -> heightIn(max = size.dp)
-    is SizeValue.ViewportWidth -> heightIn(max = systemScreenWidthDp() * size.fraction)
-    is SizeValue.ViewportHeight -> heightIn(max = systemScreenHeightDp() * size.fraction)
+    is SizeValue.ViewportWidth -> heightIn(max = viewportWidthDp(viewport) * size.fraction)
+    is SizeValue.ViewportHeight -> heightIn(max = viewportHeightDp(viewport) * size.fraction)
     is SizeValue.Fill -> fillMaxHeight(size.fraction.coerceIn(0f, 1f))
     else -> this
 }

@@ -41,12 +41,15 @@ fun ApplicatorRegistry.registerDefaults(): ApplicatorRegistry {
     register(BorderApplicator())
     register(BorderWidthApplicator())
     register(BorderColorApplicator())
+    register(BorderSideWidthApplicator(BorderSide.TOP))
+    register(BorderSideWidthApplicator(BorderSide.RIGHT))
+    register(BorderSideWidthApplicator(BorderSide.BOTTOM))
+    register(BorderSideWidthApplicator(BorderSide.LEFT))
     register(BorderStyleApplicator())
     register(BorderRadiusApplicator())
     register(CornerRadiusApplicator())
 
     // Layout
-    register(AlignmentApplicator())
     register(WeightApplicator())
     register(FlexApplicator())
     register(FlexGrowApplicator())
@@ -92,6 +95,13 @@ fun ApplicatorRegistry.registerDefaults(): ApplicatorRegistry {
     register(OnLongPressApplicator())
     register(OnFocusApplicator())
     register(OnBlurApplicator())
+
+    // Content alignment (skipped on containers that resolve it themselves)
+    register(AlignmentApplicator())
+    register(JustifyContentApplicator())
+    register(AlignItemsApplicator())
+    register(HorizontalAlignmentApplicator())
+    register(VerticalAlignmentApplicator())
 
     return this
 }

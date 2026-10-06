@@ -194,17 +194,53 @@ impl CpuPainter {
                     continue;
                 }
             }
-            // Background and border apply to every element type. Buttons
-            // additionally tint based on hover/press state.
+            // Background and border apply to every element type. Two
+            // overlays compose here, in order:
+            //   1. Explicit paint-time state variants
+            //      (`backgroundColor:hover.0`, `borderColor@md:active.0`,
+            //      ...) resolved via the shared precedence rules from the
+            //      node's live interaction state. These are authoritative
+            //      when present.
+            //   2. The legacy hover/press TINT on Buttons — only applied
+            //      as a fallback for whichever channel the state variants
+            //      did NOT override, so we never double-apply.
+            let hovered = self.interaction.hovered.contains(&item.node_id);
+            let pressed = self.interaction.pressed.contains(&item.node_id);
+            let focused = self.interaction.focused.as_deref() == Some(&item.node_id);
             let mut background = item.background;
             let mut border_color = item.border.color;
-            if matches!(item.kind, ItemKind::Button) {
-                if self.interaction.pressed.contains(&item.node_id) {
-                    if let Some(bg) = background.as_mut() {
-                        *bg = darken(*bg, 0.85);
+            let mut bg_from_variant = false;
+            let mut border_from_variant = false;
+            // Resolve background / border / foreground state variants in one
+            // pass. `active_states` is computed once and reused for all three.
+            // `fg_override` is the foreground `color` variant (Text / Icon /
+            // Input glyph colour); `None` → use the base colour baked into the
+            // ItemKind.
+            let fg_override = if item.state_variants.is_empty() {
+                None
+            } else {
+                let states = item.state_variants.active_states(hovered, pressed, focused);
+                if let Some(c) = item.state_variants.background_color_for(&states) {
+                    background = Some(c);
+                    bg_from_variant = true;
+                }
+                if let Some(c) = item.state_variants.border_color_for(&states) {
+                    border_color = c;
+                    border_from_variant = true;
+                }
+                item.state_variants.color_for(&states)
+            };
+            if matches!(item.kind, ItemKind::Button | ItemKind::Card) {
+                if pressed {
+                    if !bg_from_variant {
+                        if let Some(bg) = background.as_mut() {
+                            *bg = darken(*bg, 0.85);
+                        }
                     }
-                    border_color = darken(border_color, 0.7);
-                } else if self.interaction.hovered.contains(&item.node_id) {
+                    if !border_from_variant {
+                        border_color = darken(border_color, 0.7);
+                    }
+                } else if hovered && !bg_from_variant {
                     if let Some(bg) = background.as_mut() {
                         *bg = lighten(*bg, 1.05);
                     }
@@ -212,6 +248,19 @@ impl CpuPainter {
             }
 
             let radius = item.border.radius * scale_factor;
+            if matches!(item.kind, ItemKind::Card) {
+                // The GPU path uses a gaussian shadow. The CPU fallback keeps
+                // the same offset/alpha with a small expanded soft-looking
+                // underlay; screenshots use Vello, while this preserves a
+                // readable Card surface on software-only hosts.
+                let shadow = crate::layout::Rect {
+                    x: item.rect.x - scale_factor,
+                    y: item.rect.y + scale_factor,
+                    w: item.rect.w + 2.0 * scale_factor,
+                    h: item.rect.h + 2.0 * scale_factor,
+                };
+                fill_rect(pixmap, shadow, Rgba(0, 0, 0, 26), radius);
+            }
             if let Some(bg) = background {
                 fill_rect(pixmap, item.rect, bg, radius);
             }
@@ -252,6 +301,59 @@ impl CpuPainter {
                         &mut self.image_cache,
                     );
                 }
+                ItemKind::Video {
+                    poster,
+                    state,
+                    slots,
+                    ..
+                } => {
+                    // Video v2 slot replacement rules — see the matching
+                    // branch in the Vello painter.
+                    let glyph = slots.draws_builtin_glyph(*state);
+                    // Feature `video`: a live decoded frame wins over
+                    // the poster (objectFit contain, letterboxed on
+                    // black, play glyph only while paused / ended).
+                    #[cfg(feature = "video")]
+                    let live_frame_drawn = {
+                        if let Some(frame) = crate::media::current_frame(&item.node_id) {
+                            crate::paint::image::paint_video_frame(
+                                pixmap,
+                                item.rect,
+                                &frame,
+                                scale_factor,
+                                item.border.radius * scale_factor,
+                                glyph && crate::media::is_paused(&item.node_id),
+                            );
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    #[cfg(not(feature = "video"))]
+                    let live_frame_drawn = false;
+                    if !live_frame_drawn {
+                        // No inline decode (feature off) or no frame
+                        // yet: poster frame (cover) or dark
+                        // placeholder, plus the play affordance.
+                        crate::paint::image::paint_video_surface(
+                            pixmap,
+                            item.rect,
+                            // A `poster` slot replaces the poster prop's
+                            // image — fall through to the dark box, over
+                            // which the slot subtree paints.
+                            poster.as_deref().filter(|_| !slots.poster),
+                            scale_factor,
+                            item.border.radius * scale_factor,
+                            glyph,
+                            &mut self.image_cache,
+                        );
+                    }
+                }
+                ItemKind::Scrubber { video_id, preview } => {
+                    let fraction =
+                        crate::video_v2::scrubber_fraction(video_id.as_deref(), *preview);
+                    crate::paint::image::paint_scrubber(pixmap, item.rect, fraction, scale_factor);
+                }
                 ItemKind::Icon {
                     paths,
                     view_box,
@@ -262,7 +364,7 @@ impl CpuPainter {
                         item.rect,
                         paths,
                         *view_box,
-                        *tint,
+                        fg_override.or(*tint),
                         &mut self.icon_cache,
                     );
                 }
@@ -273,18 +375,16 @@ impl CpuPainter {
                     align,
                     max_lines: _,
                     padding: _,
+                    line_height: _,
                 } => {
                     // Pre-measure the line so right/center alignment
                     // can offset within the laid-out rect. Wrap width
                     // is the full rect for alignment purposes — long
                     // text still wraps at the rect edge.
                     let scaled_size = *font_size * scale_factor;
-                    let (line_w, _) = self.text.measure_weighted(
-                        content,
-                        scaled_size,
-                        Some(item.rect.w),
-                        item.font_weight,
-                    );
+                    let (line_w, _) =
+                        self.text
+                            .measure_weighted(content, scaled_size, None, item.font_weight);
                     let dx = match align {
                         crate::layout::TextAlign::Start => 0.0,
                         crate::layout::TextAlign::Center => ((item.rect.w - line_w).max(0.0)) * 0.5,
@@ -296,7 +396,7 @@ impl CpuPainter {
                         item.rect.x + dx,
                         item.rect.y,
                         scaled_size,
-                        *color,
+                        fg_override.unwrap_or(*color),
                         Some(item.rect.w),
                         item.font_weight,
                     );
@@ -306,13 +406,13 @@ impl CpuPainter {
                     placeholder,
                     font_size,
                     color,
+                    padding,
                     ..
                 } => {
-                    let pad_x = 12.0 * scale_factor;
-                    let pad_y = 8.0 * scale_factor;
-                    let inner_w = (item.rect.w - 2.0 * pad_x).max(0.0);
-                    let text_x = item.rect.x + pad_x;
-                    let text_y = item.rect.y + pad_y;
+                    let (pad_left, pad_top, pad_right, _) = *padding;
+                    let inner_w = (item.rect.w - pad_left - pad_right).max(0.0);
+                    let text_x = item.rect.x + pad_left;
+                    let text_y = item.rect.y + pad_top;
                     if value.is_empty() {
                         if let Some(p) = placeholder.as_deref() {
                             // Placeholder is muted gray; engine doesn't
@@ -335,7 +435,7 @@ impl CpuPainter {
                             text_x,
                             text_y,
                             *font_size * scale_factor,
-                            *color,
+                            fg_override.unwrap_or(*color),
                             Some(inner_w),
                             item.font_weight,
                         );
@@ -425,6 +525,17 @@ impl CpuPainter {
                             fill_rect(pixmap, caret, Rgba(0x00, 0x7a, 0xff, 0xff), 0.0);
                         }
                     }
+                }
+                ItemKind::Audio { .. }
+                | ItemKind::Checkbox { .. }
+                | ItemKind::Switch { .. }
+                | ItemKind::Slider { .. }
+                | ItemKind::ProgressBar { .. }
+                | ItemKind::Spinner { .. }
+                | ItemKind::Select { .. } => {
+                    // The production Desktop path is Vello. Keep the legacy
+                    // CPU fallback exhaustive; its control raster parity is a
+                    // separate compatibility path.
                 }
                 _ => {}
             }
@@ -876,6 +987,112 @@ mod tests {
             pm.data(),
             baseline.as_slice(),
             "stroke_rect with zero width must leave pixmap unchanged",
+        );
+    }
+}
+
+#[cfg(test)]
+mod paint_variant_tests {
+    //! End-to-end paint coverage: drive a real `Tree` through the CPU
+    //! painter and read back a pixel, proving interaction-state variants
+    //! actually reach the painted output (not just the resolver). The
+    //! Vello painter shares the same resolution path; only the raster
+    //! backend differs, so the CPU painter is the testable proxy.
+    use super::CpuPainter;
+    use crate::painter::PaintTarget;
+    use crate::tree::{Tree, ROOT_ID};
+    use hypen_engine::Patch;
+    use indexmap::IndexMap;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+
+    fn props(entries: &[(&str, Value)]) -> Arc<IndexMap<String, Value>> {
+        let mut m = IndexMap::new();
+        for (k, v) in entries {
+            m.insert((*k).to_string(), v.clone());
+        }
+        Arc::new(m)
+    }
+
+    /// A 100×100 Container with a base + hover + md-breakpoint background.
+    fn tree_with_variant_box() -> Tree {
+        let mut tree = Tree::new();
+        tree.apply(&Patch::Create {
+            id: "box".into(),
+            element_type: "Container".to_string(),
+            props: props(&[
+                ("width", json!(100)),
+                ("height", json!(100)),
+                ("backgroundColor.0", json!("#ff0000")), // base: red
+                ("backgroundColor:hover.0", json!("#0000ff")), // hover: blue
+                ("backgroundColor@md.0", json!("#00ff00")), // md: green
+            ]),
+            semantics: None,
+        });
+        tree.apply(&Patch::Insert {
+            parent_id: ROOT_ID.into(),
+            id: "box".into(),
+            before_id: None,
+        });
+        tree
+    }
+
+    /// Read pixel (x, y) as (r, g, b). tiny-skia stores premultiplied RGBA;
+    /// for the opaque (alpha = 255) fills here that equals straight RGB.
+    /// Sample a point inside the top-left 100×100 box (so it's box-interior
+    /// regardless of viewport width, unlike the pixmap center).
+    fn box_rgb(painter: &CpuPainter) -> (u8, u8, u8) {
+        let (w, _h) = painter.pixmap_size().expect("pixmap allocated");
+        let data = painter.pixmap_data().expect("pixmap data");
+        let (x, y) = (50u32, 50u32);
+        let i = ((y * w + x) * 4) as usize;
+        (data[i], data[i + 1], data[i + 2])
+    }
+
+    #[test]
+    fn hover_state_variant_changes_painted_background() {
+        let tree = tree_with_variant_box();
+        let mut painter = CpuPainter::new();
+
+        // Narrow viewport (md inactive), not hovered → base red.
+        painter.paint_with_scroll(&tree, PaintTarget::new(100, 100, 1.0), 0.0);
+        assert_eq!(
+            box_rgb(&painter),
+            (0xff, 0x00, 0x00),
+            "base background should be red"
+        );
+
+        // Hover the box → blue variant wins (state outranks breakpoint).
+        painter.interaction_mut().hovered.insert("box".to_string());
+        painter.paint_with_scroll(&tree, PaintTarget::new(100, 100, 1.0), 0.0);
+        assert_eq!(
+            box_rgb(&painter),
+            (0x00, 0x00, 0xff),
+            "hover background should be blue"
+        );
+
+        // Stop hovering → back to base red (variant is reversible per frame).
+        painter.interaction_mut().hovered.clear();
+        painter.paint_with_scroll(&tree, PaintTarget::new(100, 100, 1.0), 0.0);
+        assert_eq!(
+            box_rgb(&painter),
+            (0xff, 0x00, 0x00),
+            "clearing hover should restore the base background"
+        );
+    }
+
+    #[test]
+    fn breakpoint_variant_changes_painted_background_at_width() {
+        let tree = tree_with_variant_box();
+        let mut painter = CpuPainter::new();
+
+        // The viewport width feeds breakpoint resolution. The box is a fixed
+        // 100px, but a wide surface makes @md (>=768) active.
+        painter.paint_with_scroll(&tree, PaintTarget::new(800, 100, 1.0), 0.0);
+        assert_eq!(
+            box_rgb(&painter),
+            (0x00, 0xff, 0x00),
+            "at width >= 768 the @md background (green) should win"
         );
     }
 }

@@ -1,0 +1,1 @@
+{ "$schema": "../../../schema/variant.schema.json", "name": "resolve-focus-within-ranks-as-focus", "description": "focus-within shares the focus slot, so it outranks hover.", "function": "resolve_variant", "input": { "base": "c", "props": { "c.0": "base", "c:hover.0": "h", "c:focus-within.0": "fw" }, "width": 1000, "activeStates": ["hover", "focus-within"] }, "expected": "fw" }

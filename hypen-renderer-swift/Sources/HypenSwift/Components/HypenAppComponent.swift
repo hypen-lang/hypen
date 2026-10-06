@@ -11,7 +11,19 @@ private let log = HypenLoggers.view
 ///
 /// // Or with named prop:
 /// HypenApp(url: "ws://localhost:3000")
+///
+/// // With custom loading / error UI via slot children:
+/// HypenApp("ws://localhost:3000") {
+///     Column { Spinner() Text("Connecting...") }.slot("loading")
+///     Column { Text("Couldn't reach the app") }.slot("error")
+/// }
 /// ```
+///
+/// Slot children are host-app subtrees (rendered by the *host* renderer,
+/// with full access to host state and actions); the component shows the
+/// `loading` slot while connecting and the `error` slot on connection
+/// failure, falling back to the built-in spinner / error views when a
+/// slot isn't provided.
 public struct HypenAppComponent: ComponentHandler {
     public let typeName = "hypenapp"
 
@@ -28,16 +40,69 @@ public struct HypenAppComponent: ComponentHandler {
 
         guard let url = url else {
             return AnyView(
-                Text("HypenApp: URL required")
-                    .foregroundColor(.red)
-                    .hypenModifier(modifier)
+                HypenAppSlotView(
+                    slot: HypenAppSlots.error,
+                    hostElementId: context.element.id,
+                    renderer: context.renderer,
+                    actionDispatcher: context.actionDispatcher
+                ) {
+                    Text("HypenApp: URL required")
+                        .foregroundColor(.red)
+                }
+                .hypenModifier(modifier)
             )
         }
 
         return AnyView(
-            EmbeddedHypenView(url: url)
-                .hypenModifier(modifier)
+            EmbeddedHypenView(
+                url: url,
+                hostElementId: context.element.id,
+                hostRenderer: context.renderer,
+                hostActionDispatcher: context.actionDispatcher
+            )
+            .hypenModifier(modifier)
         )
+    }
+}
+
+// MARK: - Slots
+
+enum HypenAppSlots {
+    static let loading = "loading"
+    static let error = "error"
+}
+
+/// Renders the host-provided children tagged `.slot(name)`, or `fallback`
+/// when the host didn't pass any. Looks the children up through the *host*
+/// renderer at body time so slot subtrees that appear/disappear reactively
+/// (e.g. under a `When`) are picked up.
+private struct HypenAppSlotView<Fallback: View>: View {
+    let slot: String
+    let hostElementId: String
+    let renderer: HypenRenderer
+    let actionDispatcher: ActionDispatcher
+    @ViewBuilder let fallback: () -> Fallback
+
+    var body: some View {
+        let slotIds = slotChildIds()
+        if slotIds.isEmpty {
+            fallback()
+        } else {
+            ForEach(slotIds, id: \.self) { id in
+                HypenElementView(
+                    elementId: id,
+                    renderer: renderer,
+                    actionDispatcher: actionDispatcher
+                )
+            }
+        }
+    }
+
+    private func slotChildIds() -> [String] {
+        guard let host = renderer.getElement(hostElementId) else { return [] }
+        return host.children.filter { childId in
+            renderer.getElement(childId)?.getStringProp("slot.0") == slot
+        }
     }
 }
 
@@ -47,11 +112,22 @@ public struct HypenAppComponent: ComponentHandler {
 /// for rendering a remote Hypen app inline within the component tree.
 private struct EmbeddedHypenView: View {
     let url: String
+    let hostElementId: String
+    let hostRenderer: HypenRenderer
+    let hostActionDispatcher: ActionDispatcher
 
     @StateObject private var viewModel: EmbeddedHypenViewModel
 
-    init(url: String) {
+    init(
+        url: String,
+        hostElementId: String,
+        hostRenderer: HypenRenderer,
+        hostActionDispatcher: ActionDispatcher
+    ) {
         self.url = url
+        self.hostElementId = hostElementId
+        self.hostRenderer = hostRenderer
+        self.hostActionDispatcher = hostActionDispatcher
         self._viewModel = StateObject(wrappedValue: EmbeddedHypenViewModel(url: url))
     }
 
@@ -75,25 +151,44 @@ private struct EmbeddedHypenView: View {
                     renderer: viewModel.renderer,
                     actionDispatcher: viewModel.actionDispatcher
                 )
+                // Rebuild the element view tree when the renderer is reset
+                // (initialTree replay on reconnect) — see HypenView.
+                .id(viewModel.renderer.resetEpoch)
+                // The embedded app is its own drag-and-drop host: its
+                // renderer's coordinator, its own coordinate space.
+                .hypenDndHost(viewModel.renderer.dnd)
             } else {
-                ProgressView()
-                    .progressViewStyle(.circular)
+                loadingView
             }
 
-        case .connecting, .reconnecting:
-            ProgressView()
-                .progressViewStyle(.circular)
+        case .connecting, .reconnecting, .disconnected:
+            loadingView
 
         case .error(let message):
-            VStack(spacing: 8) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundColor(.red)
-                Text(message)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
+            HypenAppSlotView(
+                slot: HypenAppSlots.error,
+                hostElementId: hostElementId,
+                renderer: hostRenderer,
+                actionDispatcher: hostActionDispatcher
+            ) {
+                VStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.red)
+                    Text(message)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
             }
+        }
+    }
 
-        case .disconnected:
+    private var loadingView: some View {
+        HypenAppSlotView(
+            slot: HypenAppSlots.loading,
+            hostElementId: hostElementId,
+            renderer: hostRenderer,
+            actionDispatcher: hostActionDispatcher
+        ) {
             ProgressView()
                 .progressViewStyle(.circular)
         }
@@ -131,10 +226,39 @@ private final class EmbeddedHypenViewModel: ObservableObject {
     private func setupBindings() {
         guard let engine = engine else { return }
 
-        renderer.objectWillChange
+        // Drag-and-drop outcomes and events dispatch to the embedded
+        // app's own engine.
+        renderer.dnd.actionDispatcher = actionDispatcher
+        // `.onAnimationComplete` completions likewise go to the embedded engine.
+        renderer.animator.actionDispatcher = actionDispatcher
+
+        // Element views observe their own HypenElement; the embedded root
+        // only needs to re-render when the root element changes.
+        renderer.$rootId
+            .removeDuplicates()
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        // Re-render the embedded root on renderer resets so the element
+        // view tree (keyed by resetEpoch) rebuilds against the fresh
+        // HypenElement instances — see HypenViewModel.
+        renderer.$resetEpoch
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.objectWillChange.send()
+            }
+            .store(in: &cancellables)
+
+        // Drop the stale tree before an initialTree replay's patches
+        // rebuild it under the same ids (reconnect/session-restore).
+        engine.treeResets
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.renderer.clear()
             }
             .store(in: &cancellables)
 

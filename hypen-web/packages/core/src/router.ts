@@ -34,6 +34,17 @@ export class HypenRouter {
   private isInitialized = false;
   private isUpdating = false;
   private browserListeners: Disposable[] = [];
+  /** Whether browser history is available. Captured once so tests can
+   * exercise the windowless (server/worker) code paths. */
+  private hasWindow = typeof window !== "undefined";
+  /** Back stack for windowless environments (workers, server-driven
+   * apps): the browser owns history when a window exists, but on the
+   * server `window.history.back()` doesn't exist, and without this
+   * stack `back()` was a silent no-op — a Back button in a
+   * server-driven app did nothing. Bounded so a long session can't
+   * grow it without limit. */
+  private serverHistory: string[] = [];
+  private static readonly SERVER_HISTORY_CAP = 50;
 
   constructor() {
     // Create observable state for reactivity
@@ -140,9 +151,19 @@ export class HypenRouter {
    */
   back() {
     log.debug("back");
-    if (typeof window !== "undefined") {
+    if (this.hasWindow) {
       window.history.back();
+      return;
     }
+    // Windowless: pop the internal stack. `replace` semantics so the
+    // back-navigation itself doesn't re-push the path we're leaving —
+    // otherwise back()/back() would oscillate between two entries.
+    const prev = this.serverHistory.pop();
+    if (prev !== undefined) {
+      this.updatePath(prev, false, true);
+    }
+    // Empty stack: stay put. Callers that need a guaranteed exit can
+    // compare getCurrentPath() before/after and push a fallback route.
   }
 
   /**
@@ -169,6 +190,12 @@ export class HypenRouter {
     this.isUpdating = true;
     try {
       const oldPath = this.state.currentPath;
+      if (!this.hasWindow && !replace && path !== oldPath) {
+        this.serverHistory.push(oldPath);
+        if (this.serverHistory.length > HypenRouter.SERVER_HISTORY_CAP) {
+          this.serverHistory.shift();
+        }
+      }
       this.state.previousPath = oldPath;
       this.state.currentPath = path;
       this.state.query = this.parseQuery();

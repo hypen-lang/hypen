@@ -15,6 +15,7 @@
 import { WasmEngine } from "../wasm-node/hypen_engine.js";
 import { BaseEngine } from "@hypen-space/core/engine-base";
 import type { Action } from "@hypen-space/core/types";
+import type { A11yDiagnostic } from "@hypen-space/core";
 
 // Side-effect import: installs the engine-backed PortableImpl into
 // `@hypen-space/core` as soon as the server package is loaded. After
@@ -30,6 +31,13 @@ export type {
   ActionHandler,
   ResolvedComponent,
   ComponentResolver,
+  // External capability surface — `listActions` / `listRoutes` /
+  // `listBindings` / `dispatchExternal` / `getStateAt` /
+  // `unregisterModule` are inherited from `BaseEngine`, so a Node host
+  // reaches the guarded surface through this `Engine` with no extra wiring.
+  AgentAction,
+  AgentRoute,
+  BoundInput,
 } from "@hypen-space/core/types";
 
 /**
@@ -51,6 +59,22 @@ export class Engine extends BaseEngine {
     this.wasmEngine = new WasmEngine();
     this.wasmEngine.registerDefaultPrimitives();
     this.initialized = true;
+  }
+
+  /**
+   * Run the engine's dev-mode accessibility conformance pass over a DSL
+   * source and return the findings as `A11yDiagnostic[]`.
+   *
+   * The underlying WASM binding only exists after a WASM rebuild
+   * (`bun run build:wasm`); until then this returns `[]` so hosts can wire
+   * the call without breaking typecheck or runtime. Cast through `any`
+   * because the generated `WasmEngine` types lag the Rust binding.
+   */
+  checkAccessibility(source: string): A11yDiagnostic[] {
+    if (typeof (this.wasmEngine as any)?.checkAccessibility !== "function") {
+      return [];
+    }
+    return (this.wasmEngine as any).checkAccessibility(source) as A11yDiagnostic[];
   }
 
   /**

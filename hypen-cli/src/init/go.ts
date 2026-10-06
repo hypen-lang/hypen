@@ -36,11 +36,13 @@ function ensureDir(projectDir: string, relPath: string): void {
 function goMod(projectName: string): string {
   // Go module paths must be lowercase and cannot contain spaces.
   const modName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
+  // The `github.com/hypen-space/core` require is intentionally omitted —
+  // `go mod tidy` (run during `hypen init`) resolves it to the latest
+  // published version from the import in main.go, the same way the
+  // TypeScript scaffold pins `@hypen-space/*` to "latest".
   return `module ${modName}
 
 go 1.21
-
-require github.com/hypen-space/core v0.0.0
 `;
 }
 

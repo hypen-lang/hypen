@@ -1,0 +1,53 @@
+[
+  {
+    "attachments" : [
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "9B70FE06-F64A-4D45-BBF5-54552D64641E.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Go-ping_0_07333809-804A-432B-8611-AAFA9DCF2503.png",
+        "timestamp" : 1790364455.382
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "996C0AF1-6DFB-406E-9EC5-33301F6793D9.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Go-record_0_6C6DEBE1-4484-4122-9346-AA8D84965373.png",
+        "timestamp" : 1790364453.855
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "47650530-15F1-411E-889A-7CD1392539E4.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Go-save_0_428DA302-10B5-4CE6-A27D-EF5C3FC3730E.png",
+        "timestamp" : 1790364447.127
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "425A46CE-144F-4FBB-BB3C-BFF51AE75A9C.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Go-gallery_0_485CC8C1-62E2-460F-8E91-6BB67819BAF2.png",
+        "timestamp" : 1790364439.084
+      },
+      {
+        "configurationName" : "Test Scheme Action",
+        "deviceId" : "F2C0F317-81D7-4817-AE5C-055712D5E6EF",
+        "deviceName" : "iPhone 17 Pro",
+        "exportedFileName" : "0D4B352F-DD29-4366-B857-1ADBDEFF7B2C.png",
+        "isAssociatedWithFailure" : false,
+        "suggestedHumanReadableName" : "Go-query_0_3B8FA7AA-7B37-4636-8A3B-9E698B76D681.png",
+        "timestamp" : 1790364434.303
+      }
+    ],
+    "testIdentifier" : "DeviceLabUITests/testGo()",
+    "testIdentifierURL" : "test://com.apple.xcode/HypenGallery/HypenGalleryUITests/DeviceLabUITests/testGo"
+  }
+]

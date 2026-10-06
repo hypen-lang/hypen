@@ -51,6 +51,10 @@ thread_local! {
     /// Stores the JSON result of the last successful `hypen_portable_*`
     /// call. Read with [`hypen_get_portable_result`] / _len.
     static PORTABLE_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    /// Stores the JSON result of the last successful external-surface call
+    /// (`hypen_list_*`, `hypen_get_state_at`). Read with
+    /// [`hypen_get_external_result`] / _len.
+    static EXTERNAL_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
 }
 
 /// Internal engine state for WASI.
@@ -71,6 +75,11 @@ struct WasiEngine {
     /// by the next `hypen_update_state` / `hypen_update_state_sparse` so
     /// host action handlers don't need to plumb the scope through themselves.
     active_action_scope: Option<String>,
+    /// WASI hosts can't exploit template cloning, so template patches are
+    /// lowered back to plain `Create`+`Insert` runs before crossing the
+    /// C FFI. Session-lifetime state: skeletons registered by earlier
+    /// batches expand later `Instantiate`s.
+    template_expander: crate::portable::TemplateExpander,
 }
 
 impl WasiEngine {
@@ -79,12 +88,16 @@ impl WasiEngine {
             core: EngineCore::new(),
             node_id_index: NodeIdIndex::new(),
             active_action_scope: None,
+            template_expander: crate::portable::TemplateExpander::new(),
         }
     }
 
-    /// Filter spurious removes, index newly created node IDs for `render_into`,
-    /// then write the patches to `PATCH_BUFFER` for the host to read.
-    fn emit_patches(&mut self, mut patches: Vec<Patch>) {
+    /// Lower template patches, filter spurious removes, index newly created
+    /// node IDs for `render_into`, then write the patches to `PATCH_BUFFER`
+    /// for the host to read. Expansion runs FIRST so the remove filter and
+    /// the node-id index see the `Create`s a template instance carries.
+    fn emit_patches(&mut self, patches: Vec<Patch>) {
+        let mut patches = self.template_expander.expand(patches);
         EngineCore::filter_spurious_removes(&mut patches);
         self.node_id_index.index_creates(&patches, &self.core);
         emit_patches_internal(&patches);
@@ -106,8 +119,12 @@ pub extern "C" fn wasi_alloc(size: usize) -> *mut u8 {
 }
 
 /// Free memory previously allocated with wasi_alloc
+///
+/// # Safety
+/// `ptr` must be null or a pointer returned by `wasi_alloc(size)` with this
+/// same `size`, not yet freed.
 #[no_mangle]
-pub extern "C" fn wasi_free(ptr: *mut u8, size: usize) {
+pub unsafe extern "C" fn wasi_free(ptr: *mut u8, size: usize) {
     if !ptr.is_null() {
         unsafe {
             let _ = Vec::from_raw_parts(ptr, 0, size);
@@ -116,8 +133,11 @@ pub extern "C" fn wasi_free(ptr: *mut u8, size: usize) {
 }
 
 /// Get the length of a null-terminated string
+///
+/// # Safety
+/// `ptr` must be null or point to a NUL-terminated string.
 #[no_mangle]
-pub extern "C" fn wasi_strlen(ptr: *const c_char) -> usize {
+pub unsafe extern "C" fn wasi_strlen(ptr: *const c_char) -> usize {
     if ptr.is_null() {
         return 0;
     }
@@ -161,8 +181,11 @@ pub extern "C" fn hypen_get_last_error_len() -> usize {
 ///     // err now contains the UTF-8 error message
 /// }
 /// ```
+///
+/// # Safety
+/// `out_ptr` must be null or valid for writes of `out_len` bytes.
 #[no_mangle]
-pub extern "C" fn hypen_get_last_error(out_ptr: *mut u8, out_len: usize) -> usize {
+pub unsafe extern "C" fn hypen_get_last_error(out_ptr: *mut u8, out_len: usize) -> usize {
     ERROR_BUFFER.with(|buf| {
         let error = buf.borrow();
         let copy_len = error.len().min(out_len);
@@ -405,7 +428,11 @@ pub extern "C" fn hypen_update_state(patch_ptr: *const u8, patch_len: usize) -> 
         };
 
         let scope = engine.active_action_scope.take();
-        if engine.core.update_state(scope.as_deref(), patch) {
+        // The full-patch form has no envelope to carry a batch-animation
+        // context (the payload IS the state patch — adding a reserved key
+        // would collide with real state). Animation stamping is
+        // sparse-update-only on WASI; see `hypen_update_state_sparse`.
+        if engine.core.update_state(scope.as_deref(), patch, None) {
             render_dirty_internal(engine);
         }
         0
@@ -423,13 +450,19 @@ fn update_module_state_internal(
     patch: serde_json::Value,
 ) -> i32 {
     let canonical = name.to_lowercase();
+    if canonical.is_empty() {
+        if engine.core.update_state(None, patch, None) {
+            render_dirty_internal(engine);
+        }
+        return 0;
+    }
     if !engine.core.modules.contains_key(&canonical) {
         return fail(
             4,
             &format!("update_module_state: module '{}' not found", name),
         );
     }
-    if engine.core.update_state(Some(&canonical), patch) {
+    if engine.core.update_state(Some(&canonical), patch, None) {
         render_dirty_internal(engine);
     }
     0
@@ -481,7 +514,12 @@ pub extern "C" fn hypen_update_module_state(config_ptr: *const u8, config_len: u
 /// Update state with sparse path-value pairs (more efficient for large state)
 ///
 /// # Arguments
-/// * `update_ptr/len` - JSON object with { paths: string[], values: object }
+/// * `update_ptr/len` - JSON object with
+///   { paths: string[], values: object, animation?: object|string }.
+///   `animation` is the optional batch-animation context (Option D cheap
+///   subset): when the update changes state, the resulting patch batch is
+///   prefixed with a `{"type": "batchAnimation", "spec": {...}}` prelude.
+///   Omitting the key keeps the pre-animation wire format.
 ///
 /// # Returns
 /// 0 on success, non-zero on error
@@ -510,10 +548,12 @@ pub extern "C" fn hypen_update_state_sparse(update_ptr: *const u8, update_len: u
         };
 
         let scope = engine.active_action_scope.take();
-        if engine
-            .core
-            .update_state_sparse(scope.as_deref(), &update.paths, &update.values)
-        {
+        if engine.core.update_state_sparse(
+            scope.as_deref(),
+            &update.paths,
+            &update.values,
+            update.animation,
+        ) {
             render_dirty_internal(engine);
         }
         0
@@ -717,7 +757,7 @@ pub extern "C" fn hypen_register_action(name_ptr: *const u8, name_len: usize) ->
     ENGINE.with(|engine| {
         let mut engine_ref = engine.borrow_mut();
         if let Some(e) = engine_ref.as_mut() {
-            e.core.registered_actions.push(name);
+            e.core.note_handler(&name);
             0
         } else {
             fail(2, "hypen_register_action: engine not initialized")
@@ -751,7 +791,18 @@ pub extern "C" fn hypen_dispatch_action(action_ptr: *const u8, action_len: usize
             None => return fail(3, "hypen_dispatch_action: engine not initialized"),
         };
 
-        // Set active scope so the next hypen_update_state routes to the correct module
+        let routed = match engine
+            .core
+            .route_ui_action(Action::new(action_payload.name).with_payload(action_payload.payload))
+        {
+            Ok(action) => action,
+            Err(e) => return fail(4, &e.to_string()),
+        };
+        let action_payload = ActionPayload {
+            name: routed.name,
+            payload: routed.payload.unwrap_or(serde_json::Value::Null),
+        };
+        // Every dispatch establishes its own owner, including follow-up events.
         engine.active_action_scope = engine.core.action_scope_for(&action_payload.name);
 
         // Registered action: serialize the Action envelope. Otherwise fall
@@ -779,6 +830,335 @@ pub extern "C" fn hypen_dispatch_action(action_ptr: *const u8, action_len: usize
         }
         0
     })
+}
+
+// ============================================================================
+// External Capability Surface
+// ============================================================================
+//
+// For callers that are NOT the rendered UI: MCP servers, REST APIs, CLIs,
+// agents. `hypen_dispatch_action` above queues whatever name it is handed —
+// including `__hypen_bind`, which writes an arbitrary state path — which is
+// right for a renderer and wrong for anyone else. These entry points accept
+// only what the app declares. The rule and its rationale live in
+// `crate::agent`; the implementation is shared with every other binding via
+// `crate::agent_core`, so the guard cannot drift between SDKs.
+//
+// Results are JSON written to `EXTERNAL_BUFFER` and read back with
+// `hypen_get_external_result_len` / `hypen_get_external_result` — a buffer of
+// its own rather than `PORTABLE_BUFFER`, because hosts interleave the two
+// (a router calls `hypen_portable_match_path` on every navigation) and one
+// result must not clobber the other.
+
+fn write_external_result(bytes: Vec<u8>) {
+    EXTERNAL_BUFFER.with(|buf| *buf.borrow_mut() = bytes);
+}
+
+/// Serialize one of the declared-capability listings into `EXTERNAL_BUFFER`.
+/// `op` names the calling export so the error message points at it.
+///
+/// Returns 0 on success, 1 if the engine is not initialized, 2 on a
+/// serialization failure.
+fn list_into_external_buffer<T: serde::Serialize>(
+    op: &str,
+    list: impl FnOnce(&EngineCore) -> Vec<T>,
+) -> i32 {
+    ENGINE.with(|engine| {
+        let engine_ref = engine.borrow();
+        let engine = match engine_ref.as_ref() {
+            Some(e) => e,
+            None => {
+                return fail(
+                    1,
+                    &format!("{op}: engine not initialized (call hypen_init first)"),
+                )
+            }
+        };
+
+        match serde_json::to_vec(&list(&engine.core)) {
+            Ok(bytes) => {
+                write_external_result(bytes);
+                0
+            }
+            Err(e) => fail(2, &format!("{op}: serialise: {e}")),
+        }
+    })
+}
+
+/// List every action an external caller may dispatch.
+///
+/// Result JSON layout: `[{"name": "...", "module": null|"scope",
+/// "builtin": bool}]`. Module-declared actions plus `hypen.navigate` /
+/// `hypen.back` / `hypen.set_input`, the last three only when the app
+/// declares the backing `Router` or `.bind()`. Framework internals never
+/// appear.
+///
+/// # Returns
+/// 0 on success, non-zero on error (1: engine not initialized, 2: serialise)
+#[no_mangle]
+pub extern "C" fn hypen_list_external_actions() -> i32 {
+    list_into_external_buffer("hypen_list_external_actions", |core| {
+        crate::agent_core::list_actions(core)
+    })
+}
+
+/// List the app's declared routes, backing `hypen.navigate`'s argument schema.
+///
+/// Result JSON layout: `[{"path": "/user/:id", "params": ["id"],
+/// "moduleScope": null|"scope"}]`.
+///
+/// # Returns
+/// 0 on success, non-zero on error (1: engine not initialized, 2: serialise)
+#[no_mangle]
+pub extern "C" fn hypen_list_routes() -> i32 {
+    list_into_external_buffer("hypen_list_routes", |core| {
+        crate::agent_core::list_routes(core)
+    })
+}
+
+/// List `.bind()`-declared writable inputs, backing `hypen.set_input`'s
+/// argument schema.
+///
+/// Result JSON layout: `[{"path": "name", "prop": "value",
+/// "elementType": "Input", "moduleScope": null|"scope"}]`. `prop` is
+/// `checked` / `on` for boolean controls, so a host can type the field
+/// without reading state.
+///
+/// # Returns
+/// 0 on success, non-zero on error (1: engine not initialized, 2: serialise)
+#[no_mangle]
+pub extern "C" fn hypen_list_bindings() -> i32 {
+    list_into_external_buffer("hypen_list_bindings", |core| {
+        crate::agent_core::list_bindings(core)
+    })
+}
+
+/// Dispatch an action on behalf of a caller that is not the rendered UI.
+///
+/// Authorises against exactly what `hypen_list_external_actions` advertises,
+/// then queues the *resolved* internal action into `ACTION_BUFFER` for the
+/// host to poll — so `hypen.navigate` arrives as `router.push`, and
+/// `hypen.set_input` as `__hypen_bind` carrying a payload built by the guard.
+///
+/// # Arguments
+/// * `name_ptr/len` - External action name (`hypen.navigate`,
+///   `hypen.set_input`, or a module-declared action)
+/// * `payload_ptr/len` - Optional JSON payload; pass length 0 for none
+///
+/// # Returns
+/// 0 on success, non-zero on error (1: invalid UTF-8, 2: invalid JSON
+/// payload, 3: engine not initialized, 4: refused — not externally
+/// dispatchable). Code 4's reason is in `hypen_get_last_error`.
+#[no_mangle]
+pub extern "C" fn hypen_dispatch_external(
+    name_ptr: *const u8,
+    name_len: usize,
+    payload_ptr: *const u8,
+    payload_len: usize,
+) -> i32 {
+    let name = match ptr_to_str(name_ptr, name_len) {
+        Ok(s) => s,
+        Err(_) => return fail(1, "hypen_dispatch_external: invalid UTF-8 name pointer"),
+    };
+
+    // A zero-length payload means "no payload", not "empty string" — the
+    // guard distinguishes the two (`hypen.set_input` requires one,
+    // `hypen.back` takes none).
+    let payload: Option<serde_json::Value> = if payload_len == 0 {
+        None
+    } else {
+        let raw = match ptr_to_str(payload_ptr, payload_len) {
+            Ok(s) => s,
+            Err(_) => return fail(1, "hypen_dispatch_external: invalid UTF-8 payload pointer"),
+        };
+        match serde_json::from_str(raw) {
+            Ok(v) => Some(v),
+            Err(e) => return fail(2, &format!("hypen_dispatch_external: invalid JSON: {}", e)),
+        }
+    };
+
+    ENGINE.with(|engine| {
+        let mut engine_ref = engine.borrow_mut();
+        let engine = match engine_ref.as_mut() {
+            Some(e) => e,
+            None => return fail(3, "hypen_dispatch_external: engine not initialized"),
+        };
+
+        // The single authorisation point. Deliberately not reimplemented
+        // here: the built-in table, the route/bind allowlists and the
+        // `hypen.set_input` field check all live in `agent_core` so there is one
+        // copy of the rule for every SDK.
+        // The single construction point for every binding: the guard verdict
+        // becomes an `Action` (bind payload shape, reserved bind name, and the
+        // `sender` stamp) in `agent_core::external_action`, not here.
+        let action = match crate::agent_core::external_action(&engine.core, name, payload, None) {
+            Ok(a) => a,
+            Err(e) => return fail(4, &format!("hypen_dispatch_external: {}", e)),
+        };
+
+        // Same scope hand-off as `hypen_dispatch_action`: the host handler
+        // this queues for will call `hypen_update_state`, which needs to know
+        // which module owns the *resolved* action.
+        engine.active_action_scope = engine.core.action_scope_for(&action.name);
+
+        // Queued unconditionally, unlike `hypen_dispatch_action`'s
+        // `registered_actions` gate: the guard has already decided this name
+        // is dispatchable, and dropping it here would break the invariant
+        // that everything listed dispatches. Matches uniffi's
+        // `dispatch_external`.
+        ACTION_BUFFER.with(|buf| {
+            if let Ok(json) = serde_json::to_vec(&action) {
+                *buf.borrow_mut() = json;
+            }
+        });
+        0
+    })
+}
+
+/// Read module state, whole or at a path, into `EXTERNAL_BUFFER`.
+///
+/// # Arguments
+/// * `module_ptr/len` - Module name (case-insensitive); length 0 reads the
+///   primary module
+/// * `path_ptr/len` - Dotted state path; length 0 reads the whole state tree
+///
+/// Writes the JSON value, or `null` when the module is unknown *or* the path
+/// is absent — the two are not distinguished, so a caller cannot probe for
+/// state it is not being shown.
+///
+/// # Returns
+/// 0 on success, non-zero on error (1: invalid UTF-8, 2: engine not
+/// initialized, 3: serialise)
+#[no_mangle]
+pub extern "C" fn hypen_get_state_at(
+    module_ptr: *const u8,
+    module_len: usize,
+    path_ptr: *const u8,
+    path_len: usize,
+) -> i32 {
+    let module = match ptr_to_str(module_ptr, module_len) {
+        Ok(s) => s,
+        Err(_) => return fail(1, "hypen_get_state_at: invalid UTF-8 module pointer"),
+    };
+    let path = match ptr_to_str(path_ptr, path_len) {
+        Ok(s) => s,
+        Err(_) => return fail(1, "hypen_get_state_at: invalid UTF-8 path pointer"),
+    };
+
+    ENGINE.with(|engine| {
+        let engine_ref = engine.borrow();
+        let engine = match engine_ref.as_ref() {
+            Some(e) => e,
+            None => return fail(2, "hypen_get_state_at: engine not initialized"),
+        };
+
+        // Empty is "unset" rather than "the empty name": C hosts have no
+        // null-vs-empty distinction for a (ptr, len) pair.
+        let state = crate::agent_core::get_state(
+            &engine.core,
+            (!module.is_empty()).then_some(module),
+            (!path.is_empty()).then_some(path),
+        )
+        .unwrap_or(serde_json::Value::Null);
+
+        match serde_json::to_vec(&state) {
+            Ok(bytes) => {
+                write_external_result(bytes);
+                0
+            }
+            Err(e) => fail(3, &format!("hypen_get_state_at: serialise: {e}")),
+        }
+    })
+}
+
+/// Drop a module and every action it declared.
+///
+/// **Call on destroy only**, never on ordinary unmount: under the default
+/// `persist: true` an off-screen module stays registered on purpose so
+/// siblings can still read its state. A host's destroy sites — full stop,
+/// `persist: false` unmount, and LRU eviction where its router bounds the
+/// persist cache — are the correct call sites. Unknown names are a no-op.
+///
+/// # Returns
+/// 0 on success, non-zero on error (1: invalid UTF-8, 2: engine not
+/// initialized)
+#[no_mangle]
+pub extern "C" fn hypen_unregister_module(name_ptr: *const u8, name_len: usize) -> i32 {
+    let name = match ptr_to_str(name_ptr, name_len) {
+        Ok(s) => s,
+        Err(_) => return fail(1, "hypen_unregister_module: invalid UTF-8 name pointer"),
+    };
+
+    ENGINE.with(|engine| {
+        let mut engine_ref = engine.borrow_mut();
+        let engine = match engine_ref.as_mut() {
+            Some(e) => e,
+            None => return fail(2, "hypen_unregister_module: engine not initialized"),
+        };
+
+        // Snapshot the allowlist BEFORE eviction — afterwards there is no
+        // record of which names this call dropped.
+        //
+        // Which names those are is `agent_core`'s decision, not ours: it
+        // matches a named scope, and separately matches the primary slot
+        // (whose actions carry no scope at all). Diffing the map is how this
+        // stays in step with that logic without restating it — restating it
+        // is exactly how the primary module ended up un-unregisterable in
+        // the first place.
+        let before: Vec<String> = engine.core.action_module_map.keys().cloned().collect();
+
+        crate::agent_core::unregister_module(&mut engine.core, name);
+
+        // Keep `registered_actions` in step, so a destroyed module's action
+        // can no longer pass `hypen_dispatch_action`'s own check. Only names
+        // the eviction actually removed are dropped: a name a surviving
+        // module still owns is still a key, and the framework internals the
+        // host registers directly (`__hypen_bind`, `router.*`) were never
+        // keys at all, so neither is touched.
+        let evicted: Vec<&String> = before
+            .iter()
+            .filter(|a| !engine.core.action_module_map.contains_key(*a))
+            .collect();
+        if !evicted.is_empty() {
+            engine
+                .core
+                .registered_actions
+                .retain(|a| !evicted.contains(&a));
+        }
+        0
+    })
+}
+
+/// Return the byte length of the last external-surface result.
+#[no_mangle]
+pub extern "C" fn hypen_get_external_result_len() -> usize {
+    EXTERNAL_BUFFER.with(|buf| buf.borrow().len())
+}
+
+/// Copy the last external-surface result into the caller's buffer.
+/// Returns the number of bytes copied.
+///
+/// # Safety
+/// `out_ptr` must be null or valid for writes of `out_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn hypen_get_external_result(out_ptr: *mut u8, out_len: usize) -> usize {
+    EXTERNAL_BUFFER.with(|buf| {
+        let src = buf.borrow();
+        let copy_len = src.len().min(out_len);
+        if copy_len > 0 && !out_ptr.is_null() {
+            unsafe {
+                std::ptr::copy_nonoverlapping(src.as_ptr(), out_ptr, copy_len);
+            }
+        }
+        copy_len
+    })
+}
+
+/// Clear the external-surface result buffer. Optional — each call
+/// overwrites the previous result.
+#[no_mangle]
+pub extern "C" fn hypen_clear_external_result() {
+    EXTERNAL_BUFFER.with(|buf| buf.borrow_mut().clear());
 }
 
 // ============================================================================
@@ -966,8 +1346,11 @@ pub extern "C" fn hypen_get_patches_len() -> usize {
 
 /// Copy patches to the provided buffer
 /// Returns the number of bytes copied
+///
+/// # Safety
+/// `out_ptr` must be null or valid for writes of `out_len` bytes.
 #[no_mangle]
-pub extern "C" fn hypen_get_patches(out_ptr: *mut u8, out_len: usize) -> usize {
+pub unsafe extern "C" fn hypen_get_patches(out_ptr: *mut u8, out_len: usize) -> usize {
     PATCH_BUFFER.with(|buf| {
         let patches = buf.borrow();
         let copy_len = patches.len().min(out_len);
@@ -994,8 +1377,11 @@ pub extern "C" fn hypen_get_action_len() -> usize {
 
 /// Copy the pending action to the provided buffer
 /// Returns the number of bytes copied
+///
+/// # Safety
+/// `out_ptr` must be null or valid for writes of `out_len` bytes.
 #[no_mangle]
-pub extern "C" fn hypen_get_action(out_ptr: *mut u8, out_len: usize) -> usize {
+pub unsafe extern "C" fn hypen_get_action(out_ptr: *mut u8, out_len: usize) -> usize {
     ACTION_BUFFER.with(|buf| {
         let action = buf.borrow();
         let copy_len = action.len().min(out_len);
@@ -1030,8 +1416,11 @@ pub extern "C" fn hypen_get_pending_imports_len() -> usize {
 /// Copy pending imports JSON to the provided buffer
 /// The JSON format is: [{ "names": ["Button", "Card"], "source_path": "./ui", "source_type": "local" }, ...]
 /// Returns the number of bytes copied
+///
+/// # Safety
+/// `out_ptr` must be null or valid for writes of `out_len` bytes.
 #[no_mangle]
-pub extern "C" fn hypen_get_pending_imports(out_ptr: *mut u8, out_len: usize) -> usize {
+pub unsafe extern "C" fn hypen_get_pending_imports(out_ptr: *mut u8, out_len: usize) -> usize {
     IMPORT_BUFFER.with(|buf| {
         let imports = buf.borrow();
         let copy_len = imports.len().min(out_len);
@@ -1353,8 +1742,11 @@ pub extern "C" fn hypen_get_portable_result_len() -> usize {
 
 /// Copy the last `hypen_portable_*` result into the caller's buffer.
 /// Returns the number of bytes copied.
+///
+/// # Safety
+/// `out_ptr` must be null or valid for writes of `out_len` bytes.
 #[no_mangle]
-pub extern "C" fn hypen_get_portable_result(out_ptr: *mut u8, out_len: usize) -> usize {
+pub unsafe extern "C" fn hypen_get_portable_result(out_ptr: *mut u8, out_len: usize) -> usize {
     PORTABLE_BUFFER.with(|buf| {
         let src = buf.borrow();
         let copy_len = src.len().min(out_len);
@@ -1489,6 +1881,52 @@ pub extern "C" fn hypen_portable_path_set(
             0
         }
         Err(e) => fail(3, &format!("hypen_portable_path_set: serialise: {e}")),
+    }
+}
+
+/// path_move: move element `from` of the array at `from_path` to index
+/// `to` of the array at `to_path` (the `__hypen_reorder` primitive; see
+/// `crate::portable::path_move`). Result JSON:
+/// `{"json": <updated>, "moved": bool}`.
+#[no_mangle]
+pub extern "C" fn hypen_portable_path_move(
+    value_ptr: *const u8,
+    value_len: usize,
+    from_path_ptr: *const u8,
+    from_path_len: usize,
+    from: u32,
+    to_path_ptr: *const u8,
+    to_path_len: usize,
+    to: u32,
+) -> i32 {
+    let value_str = match ptr_to_str(value_ptr, value_len) {
+        Ok(s) => s,
+        Err(_) => return fail(1, "hypen_portable_path_move: invalid UTF-8 value pointer"),
+    };
+    let from_path = match ptr_to_str(from_path_ptr, from_path_len) {
+        Ok(s) => s,
+        Err(_) => {
+            return fail(
+                1,
+                "hypen_portable_path_move: invalid UTF-8 from-path pointer",
+            )
+        }
+    };
+    let to_path = match ptr_to_str(to_path_ptr, to_path_len) {
+        Ok(s) => s,
+        Err(_) => return fail(1, "hypen_portable_path_move: invalid UTF-8 to-path pointer"),
+    };
+    let mut v: serde_json::Value = match serde_json::from_str(value_str) {
+        Ok(v) => v,
+        Err(e) => return fail(2, &format!("hypen_portable_path_move: bad JSON: {e}")),
+    };
+    let moved = crate::portable::path_move(&mut v, from_path, from as usize, to_path, to as usize);
+    match serde_json::to_vec(&serde_json::json!({ "json": v, "moved": moved })) {
+        Ok(bytes) => {
+            write_portable_result(bytes);
+            0
+        }
+        Err(e) => fail(3, &format!("hypen_portable_path_move: serialise: {e}")),
     }
 }
 

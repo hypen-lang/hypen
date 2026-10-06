@@ -42,7 +42,7 @@ Link(href: "/contact")
 Link(href: "/products")
   .color("#333")
   .textDecoration("none")
-  .transition("color 0.2s") {
+  .transition(200, props: [color]) {
   Text("Products")
 }
 ```

@@ -20,6 +20,9 @@
 //!
 //! For WASM/JavaScript usage, see the [`wasm`] module (enabled via the `js` feature).
 //!
+//! The server side of the Device Capability Protocol (RFC 001) is the
+//! sans-IO [`device::DeviceBroker`], shared by every server SDK.
+//!
 //! ## Internal Modules
 //!
 //! The following modules are exported for advanced use and testing but are
@@ -28,6 +31,11 @@
 //!
 //! `ir`, `reactive`, `reconcile`, `dispatch`, `render`, `serialize`
 
+pub mod action_routing;
+pub mod agent;
+pub(crate) mod agent_core;
+pub(crate) mod agent_manifest;
+pub mod device;
 pub mod dispatch;
 pub mod engine;
 pub(crate) mod engine_core;
@@ -68,16 +76,21 @@ pub mod uniffi;
 
 // ── Public API ─────────────────────────────────────────────────────────
 
+pub use agent::{AgentAction, AgentRoute, BoundInput, BACK, BIND_ACTION, NAVIGATE, SET_INPUT};
 pub use engine::Engine;
 pub use error::EngineError;
 
 pub use ir::{ast_to_ir_node, Element, IRNode, Value};
+pub use ir::{
+    check_accessibility, check_accessibility_source, check_accessibility_source_located,
+    check_accessibility_trees, A11yDiagnostic, A11yRule, LineIndex, LocatedDiagnostic, SourceSpan,
+};
 pub use ir::{parse_svg, resolve_icons_in_ir, IconData, IconPath, ResourceRegistry};
 pub use lifecycle::{Module, ModuleInstance};
 pub use portable::{
     build_url, decode_uri_component, diff_paths, encode_uri_component, match_path, parse_query,
-    path_delete, path_get, path_has, path_set, session_step, DiffEntry, RouteMatch, SessionEffect,
-    SessionEvent, SessionPolicy, SessionState,
+    path_delete, path_get, path_has, path_move, path_set, session_step, DiffEntry, RouteMatch,
+    SessionEffect, SessionEvent, SessionPolicy, SessionState, TemplateExpander,
 };
 pub use reconcile::Patch;
 pub use state::StateChange;
@@ -88,7 +101,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_basic() {
-        let output = parse_classes("p-4 text-blue-500 bg-white");
+        let output = parse_classes("p-4 text-blue-500 bg-white").unwrap();
         assert_eq!(output.base.len(), 3);
 
         let props = output.to_props();
@@ -99,7 +112,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_with_breakpoints() {
-        let output = parse_classes("p-4 md:p-8 lg:p-12");
+        let output = parse_classes("p-4 md:p-8 lg:p-12").unwrap();
 
         let props = output.to_props();
         assert_eq!(props.get("padding"), Some(&"1rem".to_string()));
@@ -109,7 +122,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_with_hover() {
-        let output = parse_classes("bg-white hover:bg-blue-500");
+        let output = parse_classes("bg-white hover:bg-blue-500").unwrap();
 
         let props = output.to_props();
         assert_eq!(props.get("background-color"), Some(&"#ffffff".to_string()));
@@ -121,7 +134,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_layout() {
-        let output = parse_classes("flex justify-center items-center gap-4");
+        let output = parse_classes("flex justify-center items-center gap-4").unwrap();
 
         let props = output.to_props();
         assert_eq!(props.get("display"), Some(&"flex".to_string()));
@@ -132,7 +145,7 @@ mod tailwind_tests {
 
     #[test]
     fn test_tailwind_parse_sizing() {
-        let output = parse_classes("w-full h-screen max-w-lg");
+        let output = parse_classes("w-full h-screen max-w-lg").unwrap();
 
         let props = output.to_props();
         assert_eq!(props.get("width"), Some(&"100%".to_string()));

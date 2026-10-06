@@ -20,7 +20,7 @@ The parser maps each Tailwind class to its corresponding CSS properties, which a
 - **Colors**: Full Tailwind color palette (`text-blue-500`, `bg-red-200`, etc.)
 - **Backgrounds**: `bg-*`
 - **Borders**: `border-*`, `rounded-*`
-- **Layout**: `flex`, `grid`, display, position utilities
+- **Layout**: `flex`, `grid`, display utilities (CSS positioning — `absolute`, `relative`, `top-*`, `inset-*` — is rejected with an error; use `Stack` + alignment)
 - **Transforms**: `rotate-*`, `scale-*`, `translate-*`
 - **Effects**: `opacity-*`, `shadow-*`, `blur-*`
 - **Tables**: Table-related utilities

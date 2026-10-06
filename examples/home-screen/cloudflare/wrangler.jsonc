@@ -1,0 +1,41 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-home-screen",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  // `no_web_socket_compression`: since the 2023-08-15 compatibility date
+  // workerd negotiates permessage-deflate WITH context takeover, and a
+  // socket compressed that way stays UI-only (RFC 001 §2.3) — no device
+  // plane, so no uploads. Frames go uncompressed instead.
+  "compatibility_flags": ["nodejs_compat", "no_web_socket_compression"],
+
+  // Wallpaper renditions are deployed with the Worker and served asset-first
+  // from Cloudflare's edge. Requests such as /ws still fall through here.
+  "assets": {
+    "directory": "./public"
+  },
+
+  // The Hypen WASM engine is pulled in as a CompiledWasm module — this rule is
+  // what lets the engine boot inside a Worker.
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/dist/client/*.js", "../../../../hypen-web/packages/cf/dist/client/*.js"], "fallthrough": true }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "HOME_SCREEN_DO", "class_name": "HomeScreenDO" }
+    ]
+  },
+
+  // The Files app's bytes (metadata lives in each visitor's Durable Object).
+  // `wrangler dev` emulates the bucket locally; before the first deploy create
+  // it once: `bunx wrangler r2 bucket create hypen-home-files`.
+  "r2_buckets": [
+    { "binding": "FILES", "bucket_name": "hypen-home-files" }
+  ],
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["HomeScreenDO"] }
+  ]
+}

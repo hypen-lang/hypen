@@ -1,0 +1,32 @@
+{
+  "name": "handshake-invalid-hello-disables-device",
+  "description": "A hello.device that fails handshake-v1 (here: the reserved protocol version 0) disables device access: select_device_ack validates the hello before selecting (decision D7).",
+  "hello": {
+    "protocolVersions": [
+      0,
+      1
+    ],
+    "binary": true,
+    "capabilities": [
+      {
+        "name": "core.capabilities",
+        "versions": [
+          1
+        ]
+      }
+    ]
+  },
+  "serverProtocolVersions": [
+    1
+  ],
+  "serverBinary": true,
+  "serverCapabilities": [
+    {
+      "name": "core.capabilities",
+      "versions": [
+        1
+      ]
+    }
+  ],
+  "expectAck": null
+}

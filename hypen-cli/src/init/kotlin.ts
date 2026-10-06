@@ -167,7 +167,10 @@ repositories {
 }
 
 dependencies {
-    implementation("space.hypen:hypen-kotlin:0.1.0")
+    // Resolve the latest published SDK from Maven Central, mirroring the
+    // TypeScript scaffold's use of "latest" for @hypen-space/* (avoids a
+    // hardcoded version number that goes stale between releases).
+    implementation("space.hypen:hypen-kotlin:latest.release")
     implementation("io.ktor:ktor-server-core:3.1.1")
     implementation("io.ktor:ktor-server-netty:3.1.1")
     implementation("io.ktor:ktor-server-websockets:3.1.1")

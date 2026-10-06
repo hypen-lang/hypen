@@ -425,12 +425,20 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
     None
 }
 
-/// Parse arbitrary typography values like `text-[#ff00ff]`, `leading-[1.5]`
+/// Parse arbitrary typography values like `text-[#ff00ff]`, `text-[14px]`, `leading-[1.5]`
 pub fn parse_arbitrary(prefix: &str, value: &str) -> Option<Vec<CssProperty>> {
     let property = match prefix {
-        "text" => "color",
+        // text-[...] accepts both colors and sizes: text-[#ff00ff] vs text-[14px]
+        "text" => {
+            if crate::colors::is_color_like(value) {
+                "color"
+            } else {
+                "font-size"
+            }
+        }
         "font-size" => "font-size",
         "leading" => "line-height",
+        "tracking" => "letter-spacing",
         _ => return None,
     };
     Some(vec![CssProperty::new(property, value)])

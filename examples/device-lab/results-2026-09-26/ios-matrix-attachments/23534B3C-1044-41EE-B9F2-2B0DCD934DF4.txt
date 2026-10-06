@@ -1,0 +1,5 @@
+Query chain:
+ →Find: Target Application 'space.hypen.gallery.HypenGallery'
+  ↪︎Find: Descendants matching type StaticText
+    ↪︎Find: Elements matching predicate 'label CONTAINS "102000"'
+      ↪︎Find: First Match

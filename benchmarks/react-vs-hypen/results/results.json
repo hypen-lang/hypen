@@ -1,0 +1,642 @@
+{
+  "meta": {
+    "date": "2026-08-04T21:49:15.544Z",
+    "chromium": "141.0.7390.37",
+    "scenarioCount": 9,
+    "note": "Median of repeated runs; click to post-paint of the last mutated frame."
+  },
+  "parity": null,
+  "bundles": {
+    "react": {
+      "files": [
+        {
+          "name": "assets/index-Bo3OjwQU.js",
+          "bytes": 202120,
+          "gzip": 63595
+        },
+        {
+          "name": "index.html",
+          "bytes": 544,
+          "gzip": 377
+        }
+      ],
+      "totalBytes": 202664,
+      "totalGzip": 63972,
+      "jsBytes": 202120,
+      "jsGzip": 63595,
+      "wasmBytes": 0,
+      "wasmGzip": 0
+    },
+    "hypen": {
+      "files": [
+        {
+          "name": "wasm/hypen_engine_bg.wasm",
+          "bytes": 2213167,
+          "gzip": 689724
+        },
+        {
+          "name": "assets/index-CIrxcv-c.js",
+          "bytes": 325573,
+          "gzip": 92303
+        },
+        {
+          "name": "wasm/hypen_engine.js",
+          "bytes": 48766,
+          "gzip": 10320
+        },
+        {
+          "name": "index.html",
+          "bytes": 544,
+          "gzip": 373
+        }
+      ],
+      "totalBytes": 2588050,
+      "totalGzip": 792720,
+      "jsBytes": 374339,
+      "jsGzip": 102623,
+      "wasmBytes": 2213167,
+      "wasmGzip": 689724
+    }
+  },
+  "startup": {
+    "react": {
+      "ready": {
+        "samples": [
+          82.60000000009313,
+          86.20000000018626,
+          97,
+          76.89999999990687,
+          88.89999999990687,
+          91
+        ],
+        "median": 87.55000000004657,
+        "min": 76.89999999990687,
+        "p95": 97,
+        "mean": 87.10000000001553
+      },
+      "fcp": {
+        "samples": [
+          84,
+          88,
+          96,
+          0,
+          92,
+          92
+        ],
+        "median": 90,
+        "min": 0,
+        "p95": 96,
+        "mean": 75.33333333333333
+      }
+    },
+    "hypen": {
+      "ready": {
+        "samples": [
+          175.79999999981374,
+          171.09999999962747,
+          169.89999999990687,
+          180.89999999990687,
+          174.89999999990687,
+          166.5
+        ],
+        "median": 172.99999999976717,
+        "min": 166.5,
+        "p95": 180.89999999990687,
+        "mean": 173.18333333319364
+      },
+      "fcp": {
+        "samples": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "median": 0,
+        "min": 0,
+        "p95": 0,
+        "mean": 0
+      }
+    }
+  },
+  "memory": {
+    "react": {
+      "empty": 1711468,
+      "after1k": 6043056,
+      "afterClear": 2427700,
+      "perRow1k": 4331.588
+    },
+    "hypen": {
+      "empty": 2264460,
+      "after1k": 6755460,
+      "afterClear": 2705724,
+      "perRow1k": 4491
+    }
+  },
+  "scaling": {
+    "react": {
+      "ms": null,
+      "rows": 10000,
+      "error": "not run"
+    },
+    "hypen": {
+      "ms": null,
+      "rows": 10000,
+      "error": "not run"
+    }
+  },
+  "scenarios": [
+    {
+      "id": "create-1k",
+      "description": "Render 1,000 rows (17,000 elements) into an empty list",
+      "react": {
+        "samples": [
+          389.70000000018626,
+          365.59999999962747,
+          369.20000000018626,
+          344.70000000018626,
+          368.29999999981374
+        ],
+        "median": 368.29999999981374,
+        "min": 344.70000000018626,
+        "p95": 389.70000000018626,
+        "mean": 367.5
+      },
+      "hypen": {
+        "samples": [
+          707.8999999999069,
+          590.7000000001863,
+          707.8999999999069,
+          517.3000000002794,
+          587.8999999999069
+        ],
+        "median": 590.7000000001863,
+        "min": 517.3000000002794,
+        "p95": 707.8999999999069,
+        "mean": 622.3400000000372
+      },
+      "work": {
+        "react": {
+          "added": 1000,
+          "removed": 0,
+          "attrs": 0,
+          "text": 1,
+          "records": 1001
+        },
+        "hypen": {
+          "added": 1000,
+          "removed": 0,
+          "attrs": 0,
+          "text": 1,
+          "records": 1001
+        }
+      },
+      "domCounts": {
+        "react": {
+          "elements": 17049,
+          "rows": 1000
+        },
+        "hypen": {
+          "elements": 17049,
+          "rows": 1000
+        }
+      },
+      "domMatches": true
+    },
+    {
+      "id": "replace-1k",
+      "description": "Replace all 1,000 rows with 1,000 freshly generated ones",
+      "react": {
+        "samples": [
+          376.59999999962747,
+          476.39999999990687,
+          404.59999999962747
+        ],
+        "median": 404.59999999962747,
+        "min": 376.59999999962747,
+        "p95": 476.39999999990687,
+        "mean": 419.1999999997206
+      },
+      "hypen": {
+        "samples": [
+          755.5,
+          678.5,
+          655.6000000000931
+        ],
+        "median": 678.5,
+        "min": 655.6000000000931,
+        "p95": 755.5,
+        "mean": 696.5333333333643
+      },
+      "work": {
+        "react": {
+          "added": 1000,
+          "removed": 1000,
+          "attrs": 0,
+          "text": 0,
+          "records": 2000
+        },
+        "hypen": {
+          "added": 1000,
+          "removed": 1000,
+          "attrs": 0,
+          "text": 0,
+          "records": 2000
+        }
+      },
+      "domCounts": {
+        "react": {
+          "elements": 17049,
+          "rows": 1000
+        },
+        "hypen": {
+          "elements": 17049,
+          "rows": 1000
+        }
+      },
+      "domMatches": true
+    },
+    {
+      "id": "append-1k",
+      "description": "Append 1,000 rows to an existing 1,000-row list",
+      "react": {
+        "samples": [
+          361.59999999962747,
+          348.60000000009313
+        ],
+        "median": 355.0999999998603,
+        "min": 348.60000000009313,
+        "p95": 361.59999999962747,
+        "mean": 355.0999999998603
+      },
+      "hypen": {
+        "samples": [
+          592.8000000002794,
+          499.5
+        ],
+        "median": 546.1500000001397,
+        "min": 499.5,
+        "p95": 592.8000000002794,
+        "mean": 546.1500000001397
+      },
+      "work": {
+        "react": {
+          "added": 1000,
+          "removed": 0,
+          "attrs": 0,
+          "text": 1,
+          "records": 1001
+        },
+        "hypen": {
+          "added": 1000,
+          "removed": 0,
+          "attrs": 0,
+          "text": 1,
+          "records": 1001
+        }
+      },
+      "domCounts": {
+        "react": {
+          "elements": 34049,
+          "rows": 2000
+        },
+        "hypen": {
+          "elements": 34049,
+          "rows": 2000
+        }
+      },
+      "domMatches": true
+    },
+    {
+      "id": "update-10th",
+      "description": "Mutate the name of every 10th row of 1,000 (100 text updates)",
+      "react": {
+        "samples": [
+          33.5,
+          37,
+          38.39999999990687,
+          34.90000000037253
+        ],
+        "median": 35.950000000186265,
+        "min": 33.5,
+        "p95": 38.39999999990687,
+        "mean": 35.95000000006985
+      },
+      "hypen": {
+        "samples": [
+          58.09999999962747,
+          59,
+          63,
+          60.700000000186265
+        ],
+        "median": 59.85000000009313,
+        "min": 58.09999999962747,
+        "p95": 63,
+        "mean": 60.199999999953434
+      },
+      "work": {
+        "react": {
+          "added": 0,
+          "removed": 0,
+          "attrs": 0,
+          "text": 100,
+          "records": 100
+        },
+        "hypen": {
+          "added": 0,
+          "removed": 0,
+          "attrs": 0,
+          "text": 100,
+          "records": 100
+        }
+      },
+      "domCounts": {
+        "react": {
+          "elements": 17049,
+          "rows": 1000
+        },
+        "hypen": {
+          "elements": 17049,
+          "rows": 1000
+        }
+      },
+      "domMatches": true
+    },
+    {
+      "id": "update-all",
+      "description": "Mutate the name of every one of 1,000 rows — a state change that touches every row but adds and removes nothing",
+      "react": {
+        "samples": [
+          90.89999999990687,
+          75.5,
+          77.1999999997206,
+          63.6999999997206
+        ],
+        "median": 76.3499999998603,
+        "min": 63.6999999997206,
+        "p95": 90.89999999990687,
+        "mean": 76.82499999983702
+      },
+      "hypen": {
+        "samples": [
+          176.39999999990687,
+          173.8000000002794,
+          171.8000000002794,
+          156.89999999990687
+        ],
+        "median": 172.8000000002794,
+        "min": 156.89999999990687,
+        "p95": 176.39999999990687,
+        "mean": 169.72500000009313
+      },
+      "work": {
+        "react": {
+          "added": 0,
+          "removed": 0,
+          "attrs": 0,
+          "text": 1000,
+          "records": 1000
+        },
+        "hypen": {
+          "added": 0,
+          "removed": 0,
+          "attrs": 0,
+          "text": 1000,
+          "records": 1000
+        }
+      },
+      "domCounts": {
+        "react": {
+          "elements": 17049,
+          "rows": 1000
+        },
+        "hypen": {
+          "elements": 17049,
+          "rows": 1000
+        }
+      },
+      "domMatches": true
+    },
+    {
+      "id": "select-row",
+      "description": "Toggle the highlight on a single row out of 1,000",
+      "react": {
+        "samples": [
+          19.100000000093132,
+          19.5,
+          18.299999999813735,
+          21.59999999962747
+        ],
+        "median": 19.300000000046566,
+        "min": 18.299999999813735,
+        "p95": 21.59999999962747,
+        "mean": 19.624999999883585
+      },
+      "hypen": {
+        "samples": [
+          40.8000000002794,
+          36,
+          38.8000000002794,
+          37.6999999997206
+        ],
+        "median": 38.25,
+        "min": 36,
+        "p95": 40.8000000002794,
+        "mean": 38.32500000006985
+      },
+      "work": {
+        "react": {
+          "added": 0,
+          "removed": 0,
+          "attrs": 2,
+          "text": 0,
+          "records": 2
+        },
+        "hypen": {
+          "added": 0,
+          "removed": 0,
+          "attrs": 2,
+          "text": 0,
+          "records": 2
+        }
+      },
+      "domCounts": {
+        "react": {
+          "elements": 17049,
+          "rows": 1000
+        },
+        "hypen": {
+          "elements": 17049,
+          "rows": 1000
+        }
+      },
+      "domMatches": true
+    },
+    {
+      "id": "swap-rows",
+      "description": "Swap row 1 and row 998 of a 1,000-row list",
+      "react": {
+        "samples": [
+          201.79999999981374,
+          220.59999999962747,
+          238.70000000018626,
+          248
+        ],
+        "median": 229.64999999990687,
+        "min": 201.79999999981374,
+        "p95": 248,
+        "mean": 227.27499999990687
+      },
+      "hypen": {
+        "samples": [
+          51.299999999813735,
+          63,
+          54.5,
+          52
+        ],
+        "median": 53.25,
+        "min": 51.299999999813735,
+        "p95": 63,
+        "mean": 55.199999999953434
+      },
+      "work": {
+        "react": {
+          "added": 997,
+          "removed": 997,
+          "attrs": 0,
+          "text": 0,
+          "records": 1994
+        },
+        "hypen": {
+          "added": 2,
+          "removed": 2,
+          "attrs": 0,
+          "text": 0,
+          "records": 4
+        }
+      },
+      "domCounts": {
+        "react": {
+          "elements": 17049,
+          "rows": 1000
+        },
+        "hypen": {
+          "elements": 17049,
+          "rows": 1000
+        }
+      },
+      "domMatches": true
+    },
+    {
+      "id": "remove-row",
+      "description": "Remove one row from a 1,000-row list",
+      "react": {
+        "samples": [
+          49,
+          53.700000000186265,
+          53.299999999813735,
+          57.89999999990687
+        ],
+        "median": 53.5,
+        "min": 49,
+        "p95": 57.89999999990687,
+        "mean": 53.47499999997672
+      },
+      "hypen": {
+        "samples": [
+          108.60000000009313,
+          89.70000000018626,
+          92.60000000009313,
+          94.39999999990687
+        ],
+        "median": 93.5,
+        "min": 89.70000000018626,
+        "p95": 108.60000000009313,
+        "mean": 96.32500000006985
+      },
+      "work": {
+        "react": {
+          "added": 0,
+          "removed": 1,
+          "attrs": 0,
+          "text": 1,
+          "records": 2
+        },
+        "hypen": {
+          "added": 0,
+          "removed": 1,
+          "attrs": 0,
+          "text": 1,
+          "records": 2
+        }
+      },
+      "domCounts": {
+        "react": {
+          "elements": 17032,
+          "rows": 999
+        },
+        "hypen": {
+          "elements": 17032,
+          "rows": 999
+        }
+      },
+      "domMatches": true
+    },
+    {
+      "id": "clear",
+      "description": "Remove all 1,000 rows",
+      "react": {
+        "samples": [
+          34.299999999813735,
+          32.5,
+          36.39999999990687,
+          34.5
+        ],
+        "median": 34.39999999990687,
+        "min": 32.5,
+        "p95": 36.39999999990687,
+        "mean": 34.42499999993015
+      },
+      "hypen": {
+        "samples": [
+          149.20000000018626,
+          118.70000000018626,
+          118,
+          138.60000000009313
+        ],
+        "median": 128.6500000001397,
+        "min": 118,
+        "p95": 149.20000000018626,
+        "mean": 131.12500000011642
+      },
+      "work": {
+        "react": {
+          "added": 0,
+          "removed": 1000,
+          "attrs": 0,
+          "text": 1,
+          "records": 1001
+        },
+        "hypen": {
+          "added": 0,
+          "removed": 1000,
+          "attrs": 0,
+          "text": 1,
+          "records": 1001
+        }
+      },
+      "domCounts": {
+        "react": {
+          "elements": 49,
+          "rows": 0
+        },
+        "hypen": {
+          "elements": 49,
+          "rows": 0
+        }
+      },
+      "domMatches": true
+    }
+  ]
+}

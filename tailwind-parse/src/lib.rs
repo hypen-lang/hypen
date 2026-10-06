@@ -7,8 +7,10 @@
 //! ```
 //! use hypen_tailwind_parse::{parse_classes, TailwindOutput};
 //!
-//! let output = parse_classes("p-4 md:p-8 text-blue-500 hover:bg-white");
-//! // Returns structured props with variants separated
+//! let output = parse_classes("p-4 md:p-8 text-blue-500 hover:bg-white").unwrap();
+//! // Returns structured props with variants separated.
+//! // Positioning classes (`absolute`, `relative`, `top-0`, …) are a hard error:
+//! assert!(parse_classes("absolute top-0").is_err());
 //! ```
 
 mod backgrounds;
@@ -25,7 +27,10 @@ mod tables;
 mod transforms;
 mod typography;
 
-pub use parser::{parse_class, parse_classes, CssProperty, TailwindOutput, Variant};
+pub use parser::{
+    forbidden_utility_reason, parse_class, parse_classes, CssProperty, TailwindError,
+    TailwindOutput, Variant,
+};
 
 /// Re-export for convenience
 pub use colors::COLORS;

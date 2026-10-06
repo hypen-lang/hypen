@@ -26,6 +26,7 @@ fn test_initial_tree_new() {
         test_node_id(),
         "Column".to_string(),
         std::sync::Arc::new(indexmap::indexmap! {}),
+        None,
     )];
 
     // WHEN: Create InitialTree
@@ -61,6 +62,7 @@ fn test_initial_tree_serialization() {
             test_node_id(),
             "Text".to_string(),
             std::sync::Arc::new(indexmap::indexmap! {}),
+            None,
         )],
     );
 
@@ -392,6 +394,7 @@ fn test_initial_tree_with_multiple_patches() {
             test_node_id(),
             "Column".to_string(),
             std::sync::Arc::new(indexmap::indexmap! {}),
+            None,
         ),
         Patch::insert(test_node_id(), test_node_id(), None),
         Patch::set_text(test_node_id(), "Hello".to_string()),

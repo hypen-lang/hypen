@@ -6,6 +6,9 @@ Column {
     .tw("p-0.5 rounded-full")
     .borderWidth(2)
     .borderColor("@{item.hasUnseenStory ? '#e1306c' : '#dbdbdb'}")
+    // Source half of the story hero flight. The matching key lives on the
+    // full-screen image in Story.hypen — exactly two occurrences per story id.
+    .sharedElement("story-@{item.id}", curve: spring, duration: 380)
 
     Text("@{item.user.username}")
         .tw("text-xs text-gray-800 mt-1 w-full text-center truncate")

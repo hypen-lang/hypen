@@ -1,0 +1,12 @@
+[
+  {
+    "server": "TS",
+    "status": "HTTP/1.1 101 Switching Protocols",
+    "extensions": "Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover; server_no_context_takeover"
+  },
+  {
+    "server": "Go",
+    "status": "HTTP/1.1 101 Switching Protocols",
+    "extensions": "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover"
+  }
+]

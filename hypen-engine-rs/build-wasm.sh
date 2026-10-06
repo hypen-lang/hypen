@@ -17,21 +17,33 @@ echo ""
 echo "=== JavaScript Runtime Builds (wasm-bindgen) ==="
 echo ""
 
+# Server-side JS builds carry the device broker (RFC 001: `WasmDeviceBroker`
+# + `device*` helpers) via the `device-broker` feature: Node/Bun
+# (@hypen-space/server) and Cloudflare (@hypen-space/cf, which imports the
+# web-target `hypen-engine` package from pkg/web). The browser bundle
+# (pkg/browser -> @hypen-space/web-engine) never brokers device requests and
+# is built with `js` alone, keeping the broker, SHA-256 and the device payload
+# validators (~0.5 MB raw) out of what browsers download.
+
 # Build for web (bundler)
 echo "Building for web (bundler)..."
-wasm-pack build --target bundler --out-dir pkg/bundler --features js
+wasm-pack build --target bundler --out-dir pkg/bundler --features js,device-broker
 
 # Build for node.js
 echo "Building for Node.js..."
-wasm-pack build --target nodejs --out-dir pkg/nodejs --features js
+wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
 
-# Build for web (no bundler)
-echo "Building for web (no bundler)..."
-wasm-pack build --target web --out-dir pkg/web --features js
+# Build for web (no bundler; Cloudflare Workers / Durable Objects)
+echo "Building for web (no bundler, with device broker)..."
+wasm-pack build --target web --out-dir pkg/web --features js,device-broker
 
-# Build for browser (alias for web, but keeps imports consistent)
-echo "Building for browser..."
+# Build for browser (web target, no device broker)
+echo "Building for browser (no device broker)..."
 wasm-pack build --target web --out-dir pkg/browser --features js
+if grep -q "WasmDeviceBroker" pkg/browser/hypen_engine.d.ts; then
+  echo "error: the browser build must not include the device broker" >&2
+  exit 1
+fi
 
 # ==============================================================================
 # WASI Build (C FFI)
@@ -118,6 +130,28 @@ Data is exchanged as JSON strings.
 - `hypen_get_action(out_ptr, out_len) -> bytes_copied` - Copy action to buffer
 - `hypen_clear_action()` - Clear action buffer
 
+### Device broker (RFC 001) — `hypen_device_*`
+Handle-based sans-IO broker; JSON shapes are documented in
+`src/wasm/device_binding.rs`, ABI conventions in `src/wasm/wasi_device.rs`.
+Statuses: 0 ok, 1/0 booleans, -1 "none" for i64 answers, errors <= -2
+(-2 unknown handle, -3 bad pointer/UTF-8, -4 bad JSON); error text via
+`hypen_device_last_error_len` / `hypen_device_last_error`.
+- `hypen_device_result_len()` / `hypen_device_result(out, len)` - read the last result body
+- `hypen_device_pool_create(limit) -> handle`, `hypen_device_pool_destroy`, `hypen_device_pool_in_use`
+- `hypen_device_broker_create(cfg_ptr, cfg_len, pool, now_ms) -> handle (0 = error)`, `hypen_device_broker_destroy`
+- `hypen_device_broker_start(h, now)`, `hypen_device_broker_open(h, spec, spec_len, dl, dl_len, has_dl, now)` - result `{"id"}` or `{"error"}`
+- `hypen_device_broker_on_text(h, ptr, len, now)`, `hypen_device_broker_on_frame(h, ptr, len, now)`
+- `hypen_device_broker_tick(h, now) -> next deadline | -1`, `hypen_device_broker_poll(h)` - result framed
+  `[u32 LE header_len][JSON array of outputs][payload bytes]`, byte runs referenced by `offset`/`len`
+- cancel / release_result / consumed_events / consumed_data / owner_activated / owner_deactivated /
+  owner_destroyed / report_violation / set_transport_buffered / close / reopen_core / info / queries
+- `hypen_device_broker_revision(h, cap, cap_len, version)` - effective revision JSON (or `null`)
+- `hypen_device_server_consumes(rev, rev_len) -> 1 | 0` - does a broker-backed server consume that revision
+- `hypen_device_handshake(hello, len, binary, caps, caps_len)` - validation + selection: `{"ack"}` or `{"ack": null, "reason"}`
+- `hypen_device_negotiate`, `hypen_device_select_ack`, `hypen_device_validate_hello`,
+  `hypen_device_validate_ack`, `hypen_device_server_advertisement`, `hypen_device_constants`,
+  `hypen_device_is_oversize_text`, `hypen_device_file_save_params`, `hypen_device_sha256_hex`
+
 ## Example (Go with wasmtime-go)
 
 ```go
@@ -144,47 +178,9 @@ init(store)
 ```
 EOF
 
-echo ""
-echo "=== Copying WASM to SDK locations ==="
-echo ""
 
-CORE_DIR="../hypen-web/packages/core"
-SERVER_DIR="../hypen-web/packages/server"
-WEB_ENGINE_DIR="../hypen-web/packages/web-engine"
-
-# Copy Node.js build to server package wasm-node/
-if [ -d "pkg/nodejs" ] && [ -d "$SERVER_DIR" ]; then
-  mkdir -p "$SERVER_DIR/wasm-node"
-  cp -r pkg/nodejs/* "$SERVER_DIR/wasm-node/"
-  echo "  Copied pkg/nodejs/ -> $SERVER_DIR/wasm-node/"
-fi
-
-# Copy Web build to web-engine package wasm-browser/
-if [ -d "pkg/web" ] && [ -d "$WEB_ENGINE_DIR" ]; then
-  mkdir -p "$WEB_ENGINE_DIR/wasm-browser"
-  cp -r pkg/web/* "$WEB_ENGINE_DIR/wasm-browser/"
-  echo "  Copied pkg/web/ -> $WEB_ENGINE_DIR/wasm-browser/"
-fi
-
-# Legacy: also copy to core for backwards compatibility during transition
-if [ -d "$CORE_DIR" ]; then
-  if [ -d "pkg/nodejs" ] && [ -d "$CORE_DIR/wasm-node" ]; then
-    cp -r pkg/nodejs/* "$CORE_DIR/wasm-node/"
-    echo "  Copied pkg/nodejs/ -> $CORE_DIR/wasm-node/ (legacy)"
-  fi
-  if [ -d "pkg/web" ] && [ -d "$CORE_DIR/wasm-browser" ]; then
-    cp -r pkg/web/* "$CORE_DIR/wasm-browser/"
-    echo "  Copied pkg/web/ -> $CORE_DIR/wasm-browser/ (legacy)"
-  fi
-fi
-
-# Copy WASI build to Go SDK (embedded via go:embed)
-GO_SDK_DIR="../hypen-golang"
-if [ -d "$GO_SDK_DIR" ] && [ -f "pkg/wasi/hypen_engine.wasm" ]; then
-  cp pkg/wasi/hypen_engine.wasm "$GO_SDK_DIR/hypen_engine.wasm"
-  echo "  Copied pkg/wasi/hypen_engine.wasm -> $GO_SDK_DIR/hypen_engine.wasm"
-fi
-
+# Copy every build output to where its SDK loads it (shared with CI).
+bash "$(dirname "${BASH_SOURCE[0]}")/copy-wasm-artifacts.sh"
 echo ""
 echo "=== Regenerating UniFFI bindings (Kotlin + Swift) ==="
 echo ""
@@ -217,8 +213,8 @@ echo ""
 echo "JavaScript builds (wasm-bindgen):"
 echo "  - Bundler: pkg/bundler/"
 echo "  - Node.js: pkg/nodejs/"
-echo "  - Web: pkg/web/"
-echo "  - Browser: pkg/browser/"
+echo "  - Web: pkg/web/ (with device broker; Cloudflare)"
+echo "  - Browser: pkg/browser/ (no device broker)"
 echo ""
 echo "WASI build (C FFI):"
 echo "  - WASI: pkg/wasi/"

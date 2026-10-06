@@ -48,7 +48,7 @@ Column {
           .border("none")
           .borderRadius(8)
           .cursor("pointer")
-          .transition("all 0.3s ease")
+          .transition(300, easeOut)
 
           Text("@{item.quantity}")
             .fontSize(16)
@@ -70,7 +70,7 @@ Column {
           .border("none")
           .borderRadius(8)
           .cursor("pointer")
-          .transition("all 0.3s ease")
+          .transition(300, easeOut)
         }
         .verticalAlignment("center")
       }
@@ -94,7 +94,7 @@ Column {
         .border("1px solid #3a3a3a")
         .borderRadius(8)
         .cursor("pointer")
-        .transition("all 0.3s ease")
+        .transition(300, easeOut)
       }
       .horizontalAlignment("flex-end")
     }
@@ -103,7 +103,7 @@ Column {
     .padding(20)
     .border("1px solid #2a2a2a")
     .marginBottom(16)
-    .transition("all 0.3s ease")
+    .transition(300, easeOut)
   }
   .width("100%")
   .display("@{state.cart.length > 0 ? 'flex' : 'none'}")
@@ -136,7 +136,7 @@ Column {
       .borderRadius(8)
       .cursor("pointer")
       .marginRight(16)
-      .transition("all 0.3s ease")
+      .transition(300, easeOut)
 
       Button {
         Text("Checkout")
@@ -150,7 +150,7 @@ Column {
       .border("none")
       .borderRadius(8)
       .cursor("pointer")
-      .transition("all 0.3s ease")
+      .transition(300, easeOut)
     }
   }
   .backgroundColor("#1a1a1a")

@@ -8,7 +8,7 @@ A complete Go implementation of the Hypen reactive UI framework SDK.
 go get github.com/hypen-space/core
 ```
 
-Requires Go 1.21+.
+Requires Go 1.25+ (wazero v1.12.0, whose own floor is Go 1.25).
 
 ## Quick Start
 
@@ -209,6 +209,79 @@ defer client.Disconnect()
 client.DispatchAction("increment", nil)
 ```
 
+### Device Capabilities (RFC 001, provisional)
+
+Handlers can ask the connected client for device work — permissions, the
+photo/file pickers, file downloads, the camera, the microphone and Bluetooth —
+through `ctx.Device()`. The protocol state machine is the Rust device broker
+every Hypen server SDK shares (run through the embedded engine module); the Go
+side adds the handshake, the socket pump and this API.
+
+The device plane is **on by default**: every connection whose `hello` offers
+`device` gets one, with no call. `ConfigureDevice(remote.DeviceConfig{...})`
+changes its options (retained budgets, item caps, broker overrides) and
+`DisableDevice()` is the one opt-out (a plain UI-only server).
+
+```go
+import "github.com/hypen-space/core/device"
+
+server := remote.NewRemoteServer().
+    WithDefinition(profile).Source("./components").UI(ui).
+    // Connection admission — the app's ordinary policy for UI and device
+    // traffic, enforced when configured. With neither, every client is
+    // admitted and one startup warning recommends them for production.
+    AllowedOrigins("https://app.example.com").    // browsers: a foreign Origin → 403
+    Authenticate(func(r *http.Request) bool {     // every upgrade (natives send no Origin)
+        return validBearer(r.Header.Get("Authorization"))
+    })
+
+profile := core.NewApp(Profile{}).Name("Profile").
+    OnAction("changeAvatar", func(ctx core.TypedActionContext[Profile]) {
+        photos, err := ctx.Device().Gallery().Pick(context.Background(), device.GalleryPickParams{
+            MediaTypes: []device.MediaType{device.MediaTypePhoto}, MaxCount: 1,
+        })
+        switch {
+        case errors.Is(err, device.ErrDenied), errors.Is(err, device.ErrCancelled):
+            return // ordinary values, never panics
+        case err != nil:
+            ctx.State.Error = err.Error()
+            return
+        }
+        ctx.State.Avatar = store(photos[0].Bytes) // size + SHA-256 verified by the broker
+    }).
+    OnAction("export", func(ctx core.TypedActionContext[Profile]) {
+        _, _ = ctx.Device().Save(context.Background(), "profile.json", "application/json", export())
+    }).
+    Build()
+```
+
+- `ctx.Device()` is never nil: without a device plane every call fails
+  `unavailable` and `Supports` is false. `Supports`/`Version` report negotiated,
+  live support (not a permission grant).
+- Typed helpers: `Permissions().Query/Request(ctx, device.PermissionCamera)`,
+  `Gallery().Pick`, `Files().Pick/Save`, `Camera().Photo/Video/Capture`,
+  `Mic().Record(ctx, params, onData)`, `Bluetooth().Select/Scan(ctx, onDevice)`;
+  generic `Request`, `RequestAs[R]`, `Stream` (`Next`/`Result`/`Cancel`) and `Save`.
+- Calls block and take a `context.Context`: cancelling it cancels the request on
+  the wire (`device.ErrCancelled`), a deadline becomes the request's deadline
+  (`device.ErrTimeout`). While a handler waits, later actions of the same
+  session still run; revalidate state after the wait.
+- Authority is scoped: a request belongs to the module instance's activation
+  that was live when the handler started — navigating away cancels it, and
+  agent (`Attach`) dispatches can never open device work.
+- WebSocket compression stays on with the device plane (turn it off with
+  `DisableCompression()`): gorilla negotiates permessage-deflate only with
+  `server_no_context_takeover; client_no_context_takeover`, so every message
+  is compressed on its own and device data never shares a compression
+  history with other messages. With the device plane on, every
+  `sessionAck` carries a rotating `resumeToken`, and resuming a session that
+  negotiated a device plane requires it (UI-only sessions keep id-only resume).
+  Legacy clients are unaffected: one that never sends `hello` is still
+  initialised after the 1 s grace (without a device plane).
+- Settings incompatible with the device plane (a session config that lets
+  several connections share a session) never stop the server: the plane is
+  off for it and one startup warning says why.
+
 ### Session Lifecycle
 
 When a client disconnects, Hypen can suspend the session and resume it on reconnect within a TTL. Register hooks on the typed `NewApp[T]` builder — context types carry a `*T` state pointer so handlers mutate fields directly, no string-keyed casts required:
@@ -251,6 +324,61 @@ mgr.SuspendSession(session.ID(), currentState, func() {
 // on reconnect:
 pending, saved := mgr.ResumeSession(session.ID())
 ```
+
+### Agent Surface (Attach Mode)
+
+Callers that are not the rendered UI — an MCP server, an operator CLI, an LLM
+agent — reach a session through the engine's **guarded** external surface:
+only declared `OnAction` names, `Router { Route }` targets and `.bind()` fields
+are dispatchable, and only the state paths the template renders are readable.
+`RemoteServer.Attach` binds such a caller to a **live user session**, so the
+dispatch runs on that user's engine and the user's own transport receives the
+result:
+
+```go
+import (
+    "errors"
+
+    core "github.com/hypen-space/core"
+    "github.com/hypen-space/core/remote"
+)
+
+// Ready() closes once the user's hello → initialTree flow has completed and
+// the Router auto-wiring is in place; SessionID() is the acked id — the one
+// the client presents to your backend.
+server.OnSessionCreate(func(sess *remote.RemoteSession) {
+    go func() {
+        <-sess.Ready()
+        log.Printf("attachable: %s", sess.SessionID())
+    }()
+})
+
+// From an HTTP handler that has already authenticated the caller for
+// sessionID — Attach does no authorization of its own and has no HTTP
+// route; whoever calls it is the authorizer.
+handle, err := server.Attach(sessionID) // remote.ErrNoSuchSession, remote.ErrNoEngine
+if err != nil {
+    return err
+}
+actions, _ := handle.ListActions()                                  // declared surface only
+if err := handle.Dispatch("addToCart", map[string]any{"sku": "A1"}); err != nil {
+    var engErr *core.EngineError
+    if errors.As(err, &engErr) { /* guard refusal: nothing sent, revision unchanged */ }
+}
+path := "total"
+total, _ := handle.GetState(nil, &path)  // json.RawMessage, bounded to rendered paths
+rev, _ := handle.Revision()
+```
+
+A successful `Dispatch` emits on the user's transport exactly what a click
+does: a `patch` message at revision N+1, then a `stateUpdate` at N+1. A guard
+refusal returns `*core.EngineError` before any handler runs — no traffic, no
+revision bump. The handle **never owns the session**: it cannot destroy,
+suspend or close it, and once the user's session is destroyed every method
+returns `remote.ErrSessionClosed`. `Attach` needs an engine-backed server
+(`Source()` **and** `UI()` configured); the legacy no-engine shim returns
+`remote.ErrNoEngine`. There is no `Manifest()` on the Go handle — the WASI
+build the Go SDK loads exports no `mcp_manifest`.
 
 ### Nested Modules
 
@@ -348,6 +476,7 @@ fmt.Println(btn.Template)
 | `RemoteServer` | WebSocket server for streaming apps |
 | `Patch` | DOM operation (create, update, remove) |
 | `Message` | Protocol message types |
+| `AgentHandle` | Non-owning, guarded agent view of one live session — `RemoteServer.Attach(sessionID)` |
 
 ## Testing
 

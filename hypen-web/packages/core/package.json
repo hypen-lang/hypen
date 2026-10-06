@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/core",
-  "version": "0.5.0",
+  "version": "0.6.5",
   "description": "Hypen core - Platform-agnostic reactive UI runtime (types, state, router, events)",
   "type": "module",
   "main": "./dist/index.js",
@@ -63,6 +63,12 @@
       "import": "./dist/remote/index.js",
       "default": "./dist/remote/index.js"
     },
+    "./remote/device": {
+      "types": "./dist/remote/device/index.d.ts",
+      "bun": "./src/remote/device/index.ts",
+      "import": "./dist/remote/device/index.js",
+      "default": "./dist/remote/device/index.js"
+    },
     "./remote/client": {
       "types": "./dist/remote/client.d.ts",
       "bun": "./src/remote/client.ts",
@@ -94,6 +100,18 @@
       "import": "./dist/types.js",
       "default": "./dist/types.js"
     },
+    "./animation": {
+      "types": "./dist/animation.d.ts",
+      "bun": "./src/animation.ts",
+      "import": "./dist/animation.js",
+      "default": "./dist/animation.js"
+    },
+    "./dnd": {
+      "types": "./dist/dnd.d.ts",
+      "bun": "./src/dnd.ts",
+      "import": "./dist/dnd.js",
+      "default": "./dist/dnd.js"
+    },
     "./result": {
       "types": "./dist/result.d.ts",
       "bun": "./src/result.ts",
@@ -112,6 +130,12 @@
       "import": "./dist/engine-base.js",
       "default": "./dist/engine-base.js"
     },
+    "./diff": {
+      "types": "./dist/diff.d.ts",
+      "bun": "./src/diff.ts",
+      "import": "./dist/diff.js",
+      "default": "./dist/diff.js"
+    },
     "./persistence": {
       "types": "./dist/persistence.d.ts",
       "bun": "./src/persistence.ts",
@@ -123,6 +147,12 @@
       "bun": "./src/portable.ts",
       "import": "./dist/portable.js",
       "default": "./dist/portable.js"
+    },
+    "./patch-expand": {
+      "types": "./dist/patch-expand.d.ts",
+      "bun": "./src/patch-expand.ts",
+      "import": "./dist/patch-expand.js",
+      "default": "./dist/patch-expand.js"
     }
   },
   "files": [

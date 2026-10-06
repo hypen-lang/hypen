@@ -9,7 +9,7 @@ public struct ComponentContext: @unchecked Sendable {
     public init(element: HypenElement, renderer: HypenRenderer, actionDispatcher: ActionDispatcher) {
         self.element = element
         self.renderer = renderer
-        self.actionDispatcher = actionDispatcher
+        self.actionDispatcher = NodeActionDispatcher(base: actionDispatcher, node: element.id)
     }
 }
 
@@ -49,12 +49,14 @@ public final class ComponentRegistry: @unchecked Sendable {
 
     /// Get a handler for a given element type
     public func getHandler(for typeName: String) -> (any ComponentHandler)? {
-        handlers[typeName.lowercased()]
+        // Keys are stored lowercased; try the name as-is first so
+        // already-lowercase lookups skip the `lowercased()` allocation.
+        handlers[typeName] ?? handlers[typeName.lowercased()]
     }
 
     /// Check if a handler exists for a given element type
     public func hasHandler(for typeName: String) -> Bool {
-        handlers[typeName.lowercased()] != nil
+        getHandler(for: typeName) != nil
     }
 
     /// Get all registered type names
@@ -82,8 +84,8 @@ extension ComponentRegistry {
         registry.register(SpacerComponent())
         registry.register(StackComponent())
         registry.register(ListComponent())
-        registry.register(ScrollViewComponent())
         registry.register(GridComponent())
+        registry.register(SafeAreaComponent())
 
         // Content components
         registry.register(TextComponent())
@@ -91,6 +93,11 @@ extension ComponentRegistry {
         registry.register(ParagraphComponent())
         registry.register(ImageComponent())
         registry.register(DividerComponent())
+
+        // Accessibility components
+        // Without a handler this falls through to the container fallback in
+        // HypenElementView, which renders screen-reader-only content visibly.
+        registry.register(VisuallyHiddenComponent())
 
         // Interactive components
         registry.register(ButtonComponent())
@@ -118,9 +125,20 @@ extension ComponentRegistry {
         // Media components
         registry.register(AudioComponent())
         registry.register(VideoComponent())
+        // Video v2 chrome: a timeline for the `controls` slot (inert
+        // outside a Video).
+        registry.register(ScrubberComponent())
 
         // Icon component (renders server-resolved SVG path data)
         registry.register(IconComponent())
+
+        // Chart family: the host owns the coordinate space and draws every
+        // mark itself, so the marks register as no-op handlers — that keeps a
+        // stray mark out of the container fallback in HypenElementView.
+        registry.register(ChartComponent())
+        for mark in ChartMarkComponent.all() {
+            registry.register(mark)
+        }
 
         // Remote embedding
         registry.register(HypenAppComponent())

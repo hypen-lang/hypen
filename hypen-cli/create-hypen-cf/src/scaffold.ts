@@ -112,7 +112,9 @@ function wranglerJsonc(o: ResolvedOptions): string {
   "name": "${o.appName}",
   "main": "src/worker.ts",
   "compatibility_date": "2025-05-01",
-  "compatibility_flags": ["nodejs_compat"],
+  // web_socket_compression lets workerd negotiate permessage-deflate on the
+  // DO's WebSocketPair — without the flag it always serves uncompressed frames.
+  "compatibility_flags": ["nodejs_compat", "web_socket_compression"],
 
   // The Hypen WASM engine is pulled in as a CompiledWasm module. This rule is
   // what makes the engine boot inside a Worker (workerd hands you a
@@ -231,6 +233,10 @@ export class ${o.doClass} extends HypenDurableObject {
       module: ${o.moduleName.toLowerCase()}Module,
       template: ${o.moduleName.toLowerCase()}Module.template ?? "",
       moduleName: "${o.moduleName}",
+      // wrangler.jsonc enables the web_socket_compression flag; declaring it
+      // lets the DO check each socket's negotiated compression before
+      // allowing device traffic on it.
+      webSocketCompression: true,
     };
   }
 

@@ -2,6 +2,23 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSCameraUsageDescription</key><string>Device Lab tests camera capture.</string>
+    <key>NSMicrophoneUsageDescription</key><string>Device Lab tests short audio recording.</string>
+    <key>NSPhotoLibraryUsageDescription</key><string>Device Lab tests choosing a sample photo.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key><string>Device Lab tests saving media.</string>
+    <key>NSBluetoothAlwaysUsageDescription</key><string>Device Lab tests Bluetooth device discovery.</string>
+	<!-- App Transport Security blocks cleartext by default, so every
+	     ws://localhost:PORT connection to a local Hypen dev server was
+	     refused — and because the connection simply never opened, the UI sat
+	     on "Connecting to …" forever with no error to explain it.
+	     NSAllowsLocalNetworking permits cleartext to local hosts (localhost,
+	     .local, link-local) only; it does NOT open arbitrary loads, so
+	     remote wss:// endpoints still require TLS. -->
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>

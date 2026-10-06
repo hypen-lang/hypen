@@ -1,0 +1,124 @@
+---
+title: Remote UI
+description: Stream a live Hypen app into any other app, over a WebSocket
+---
+
+# Remote UI
+
+Remote UI is Hypen's server-driven mode: the engine runs on your server, and
+clients receive UI as a stream of patches over a WebSocket. The client never
+loads your business logic, never runs WASM, and never needs to know what your
+app does — it just applies patches and sends actions back.
+
+This is what lets you **embed any Hypen app inside any other app**, live.
+
+## How It Works
+
+```
+┌──────────────────────────────────────────┐
+│  Your Server                             │
+│  • Runs the Hypen engine                 │
+│  • Owns state and business logic         │
+│  • Diffs the UI, streams patches         │
+└──────────────────────────────────────────┘
+              │ WebSocket
+   ┌──────────┼──────────┬──────────┐
+   ↓          ↓          ↓          ↓
+  Web     Desktop     Android      iOS
+```
+
+1. **Client connects** and sends `Hello` (with a `sessionId` if resuming).
+2. **Server instantiates** the module and replies `SessionAck` + `InitialTree`.
+3. **User interacts** — the client sends `DispatchAction`.
+4. **Server updates** state, re-renders, and diffs.
+5. **Only the changed nodes** travel back as `Patch` messages.
+
+The protocol is the same for every client. A native Android app, a desktop
+window, and a browser tab connected to the same server are running the same
+session logic through different renderers.
+
+## Why It Matters
+
+**Ship UI without shipping an app.** The UI lives on your server, so changing
+it is a deploy, not an app store review. Clients pick up the new interface on
+their next connection.
+
+**Build an app store.** Because a Hypen app is just a WebSocket endpoint, a
+host app can render *someone else's* app inside itself without loading their
+code. The host controls the surface; the guest controls the UI.
+
+**Generate apps with AI.** A generated `.hypen` template plus a module is a
+complete app. Serve it and any Hypen client can render it immediately — no
+build step, no distribution.
+
+**Keep secrets on the server.** API keys, business rules, and pricing logic
+never reach the device, because the device only ever sees resolved UI.
+
+**Thin clients.** A client that only applies patches stays small and fast, and
+behaves identically across platforms.
+
+## Running a Remote Server
+
+Every [server SDK](/docs/servers) exposes the same shape. TypeScript:
+
+```typescript
+import { app } from "@hypen-space/core";
+import { RemoteServer } from "@hypen-space/server";
+
+const appModule = app
+  .defineState({ count: 0 })
+  .onAction("inc", ({ state }) => { state.count += 1; });
+
+new RemoteServer()
+  .module("App", appModule)
+  .source("./components")
+  .listen(3000);
+```
+
+Go:
+
+```go
+remote.NewRemoteServer().
+    WithDefinition(appDef).
+    Source("./components").
+    Listen(3000)
+```
+
+The server discovers every `Router { Route ... }` block at session start,
+matches each route body against registered modules, and runs a per-session
+`ManagedRouter` that mounts and unmounts modules as the URL changes. No routing
+glue in host code — see [Routing](/docs/guide/routing).
+
+## Connecting a Client
+
+Each adapter has a one-line remote entry point:
+
+```rust
+// Desktop
+DesktopApp::new().connect("ws://localhost:3000", "App").run();
+```
+
+The [Web](/docs/adapters/web), [Android](/docs/adapters/android), and
+[iOS](/docs/adapters/ios) adapters connect the same way. Nothing else about the
+client changes between local and remote mode — layout, hit-testing,
+accessibility, and IME all work unchanged.
+
+## Sessions
+
+Sessions are identified by a `sessionId` issued in `SessionAck`. Clients replay
+it on reconnect, so a dropped connection or a server restart **resumes** rather
+than starting over. If the server responds `SessionExpired`, the client clears
+its stored id and mints a fresh session.
+
+Clients are expected to disconnect and reconnect — the desktop adapter, for
+example, retries with exponential backoff up to a 30s interval. Server-side
+session lifecycle hooks are covered in the
+[TypeScript SDK](/docs/servers/typescript).
+
+## See Also
+
+- [Server SDKs](/docs/servers) — TypeScript, Go, Kotlin, Swift, Rust
+- [Cloudflare](/docs/servers/cloudflare) — remote UI on Workers + Durable Objects
+- [Remote App Tutorial](/docs/getting-started/remote-app) — build one step by step
+- [Routing](/docs/guide/routing) — how routes work across a remote session
+- [Multi-Platform](/docs/concepts/multi-platform) — what's shared across clients

@@ -13,15 +13,17 @@
 //! functions, binding resolution) is exported for integration testing but
 //! may change between minor versions.
 
+pub mod binding_map;
 pub mod conditionals;
 pub mod diff;
 pub mod item_bindings;
 pub mod keyed;
+pub mod layered;
 pub mod patch;
 pub mod resolve;
 pub mod tree;
 
-pub(crate) use diff::{reconcile_ir_node_impl, ReconcileCtx};
+pub(crate) use diff::{emit_semantics_delta, reconcile_ir_node_impl, ReconcileCtx};
 // Only consumed by `wasm::shared`; re-export it under the same gate so
 // native non-test builds don't flag it dead.
 #[cfg(any(
@@ -34,6 +36,8 @@ pub use diff::{reconcile_ir, reconcile_ir_with_ds};
 #[doc(hidden)]
 pub use item_bindings::replace_item_bindings;
 #[doc(hidden)]
+pub use layered::LayeredProps;
+#[doc(hidden)]
 pub use patch::node_id_str;
 pub use patch::Patch;
 #[doc(hidden)]
@@ -42,4 +46,4 @@ pub use resolve::{
     resolve_props_with_item,
 };
 #[doc(hidden)]
-pub use tree::{ControlFlowKind, InstanceNode, InstanceTree};
+pub use tree::{ControlFlowKind, ExitTombstone, InstanceNode, InstanceTree, MAX_EXIT_TOMBSTONES};

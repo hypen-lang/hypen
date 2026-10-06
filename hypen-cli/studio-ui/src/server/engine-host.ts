@@ -93,6 +93,28 @@ export class StudioEngineHost {
   }
 
   private async bootstrap(): Promise<void> {
+    // Server-based projects configure `entry` as a script path — their
+    // modules register inside that script's own RemoteServer, so there is
+    // nothing for the embedded engine to discover. Point the user at the
+    // real server instead of warning about a components directory that is
+    // intentionally absent.
+    if (/\.(ts|js|mjs)$/.test(this.options.entryName)) {
+      const remoteUrl = process.env.HYPEN_REMOTE_URL;
+      if (remoteUrl) {
+        // The CLI started (or found) the project's own server and wired
+        // its URL through — previews connect there, nothing to warn about.
+        console.log(
+          `  [engine] server-based project — previews connect to ${remoteUrl}.`
+        );
+      } else {
+        console.warn(
+          `  [engine] server-based project (entry: ${this.options.entryName}) — ` +
+            `run \`hypen dev\` and connect Test Mode to its ws:// URL to preview.`
+        );
+      }
+      return;
+    }
+
     const candidates = [
       this.options.componentsDir,
       "src/components",

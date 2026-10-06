@@ -135,6 +135,29 @@ fn format_value_for_replacement(val: &serde_json::Value, quote_strings: bool) ->
 // Element-level item binding replacement
 // ---------------------------------------------------------------------------
 
+/// Cached `("@{name.", "@{name}")` textual-marker pair for the last item
+/// name seen. The substitution hot loop probes every string prop of every
+/// row for these markers; building them with `format!` per probe was two
+/// heap allocations per prop per row (~20k per 1,000-row update). The name
+/// is `"item"` for virtually every pass, so a 1-entry cache hits ~always.
+/// WASM is single-threaded; on native, thread-locals keep this sound.
+pub(crate) fn with_item_markers<R>(item_name: &str, f: impl FnOnce(&str, &str) -> R) -> R {
+    use std::cell::RefCell;
+    thread_local! {
+        static MARKERS: RefCell<(String, String, String)> =
+            const { RefCell::new((String::new(), String::new(), String::new())) };
+    }
+    MARKERS.with(|cell| {
+        let mut m = cell.borrow_mut();
+        if m.0 != item_name {
+            m.0 = item_name.to_string();
+            m.1 = format!("@{{{}.", item_name);
+            m.2 = format!("@{{{}}}", item_name);
+        }
+        f(&m.1, &m.2)
+    })
+}
+
 /// Replace item bindings (Value::Binding with is_item() or TemplateString with item bindings) with actual item values
 /// OPTIMIZED: Uses single-pass replacement instead of O(n²) repeated scans
 /// This is a convenience wrapper that uses "item" as the default item name.
@@ -154,6 +177,25 @@ pub fn replace_item_bindings_with_name(
     index: usize,
     item_name: &str,
 ) -> Element {
+    replace_item_bindings_impl(element, item, index, item_name, None)
+}
+
+/// [`replace_item_bindings_with_name`] plus DnD identity stamping.
+///
+/// `dnd_key` is the iteration's item key (`keyed::generate_item_key`) when
+/// known — the per-row identity a draggable needs (`__dnd.key`, and the
+/// reserved-state translate bindings under a `__dnd.pinGroup`). It is
+/// threaded to EVERY descendant element (unlike `Element::key`, which keeps
+/// its historical per-level derivation) so a draggable nested below the
+/// template root still carries the `ForEach` key, never a positional
+/// stand-in. `None` = a caller without a key in hand; no stamping.
+fn replace_item_bindings_impl(
+    element: &Element,
+    item: &serde_json::Value,
+    index: usize,
+    item_name: &str,
+    dnd_key: Option<&str>,
+) -> Element {
     // Replace bindings in props using the unified Value replacement logic
     let mut new_props = Props::new();
     for (key, value) in &element.props {
@@ -161,6 +203,9 @@ pub fn replace_item_bindings_with_name(
             key.clone(),
             replace_value_item_bindings(value, item, item_name),
         );
+    }
+    if let Some(key) = dnd_key {
+        crate::ir::dnd::stamp_pin_identity(&mut new_props, key, item);
     }
 
     // Generate key using the item name
@@ -184,7 +229,7 @@ pub fn replace_item_bindings_with_name(
     let ir_children = element
         .ir_children
         .iter()
-        .map(|child_ir| replace_ir_node_item_bindings(child_ir, item, index, item_name, &child_key))
+        .map(|child_ir| replace_ir_node_impl(child_ir, item, index, item_name, &child_key, dnd_key))
         .collect();
 
     Element {
@@ -193,6 +238,9 @@ pub fn replace_item_bindings_with_name(
         ir_children,
         key: Some(key),
         module_scope: element.module_scope.clone(),
+        semantics: element.semantics.clone(),
+        span: element.span,
+        expr_span: element.expr_span,
     }
 }
 
@@ -209,9 +257,26 @@ pub(crate) fn replace_ir_node_item_bindings(
     item_name: &str,
     item_key: &str,
 ) -> IRNode {
+    replace_ir_node_impl(node, item, index, item_name, item_key, Some(item_key))
+}
+
+/// Recursive worker for [`replace_ir_node_item_bindings`]. `item_key` is
+/// the `Element::key` to assign at THIS level (the historical per-level
+/// derivation); `dnd_key` is the iteration's item key threaded unchanged to
+/// every descendant for DnD identity stamping (see
+/// [`replace_item_bindings_impl`]).
+fn replace_ir_node_impl(
+    node: &IRNode,
+    item: &serde_json::Value,
+    index: usize,
+    item_name: &str,
+    item_key: &str,
+    dnd_key: Option<&str>,
+) -> IRNode {
     match node {
         IRNode::Element(element) => {
-            let mut new_element = replace_item_bindings_with_name(element, item, index, item_name);
+            let mut new_element =
+                replace_item_bindings_impl(element, item, index, item_name, dnd_key);
             // Override key with the computed item key
             new_element.key = Some(item_key.to_string());
             IRNode::Element(new_element)
@@ -231,7 +296,7 @@ pub(crate) fn replace_ir_node_item_bindings(
             // Recursively replace in template (but inner ForEach has its own item context)
             let new_template: Vec<IRNode> = template
                 .iter()
-                .map(|child| replace_ir_node_item_bindings(child, item, index, item_name, item_key))
+                .map(|child| replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key))
                 .collect();
 
             IRNode::ForEach {
@@ -261,7 +326,7 @@ pub(crate) fn replace_ir_node_item_bindings(
                         .children
                         .iter()
                         .map(|child| {
-                            replace_ir_node_item_bindings(child, item, index, item_name, item_key)
+                            replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key)
                         })
                         .collect();
                     ConditionalBranch::new(new_pattern, new_children)
@@ -272,7 +337,7 @@ pub(crate) fn replace_ir_node_item_bindings(
             let new_fallback = fallback.as_ref().map(|f| {
                 f.iter()
                     .map(|child| {
-                        replace_ir_node_item_bindings(child, item, index, item_name, item_key)
+                        replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key)
                     })
                     .collect()
             });
@@ -302,7 +367,7 @@ pub(crate) fn replace_ir_node_item_bindings(
                         .children
                         .iter()
                         .map(|child| {
-                            replace_ir_node_item_bindings(child, item, index, item_name, item_key)
+                            replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key)
                         })
                         .collect(),
                 })
@@ -312,7 +377,7 @@ pub(crate) fn replace_ir_node_item_bindings(
             let new_fallback = fallback.as_ref().map(|f| {
                 f.iter()
                     .map(|child| {
-                        replace_ir_node_item_bindings(child, item, index, item_name, item_key)
+                        replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key)
                     })
                     .collect()
             });
@@ -346,7 +411,11 @@ fn replace_props_item_bindings(props: &Props, item: &serde_json::Value, item_nam
 /// Replace item bindings in a Value
 /// Uses optimized single-pass replacement to avoid O(n²) string operations.
 /// `item_name` allows custom iteration variable names (e.g., "todo", "user" instead of "item").
-fn replace_value_item_bindings(value: &Value, item: &serde_json::Value, item_name: &str) -> Value {
+pub(crate) fn replace_value_item_bindings(
+    value: &Value,
+    item: &serde_json::Value,
+    item_name: &str,
+) -> Value {
     match value {
         Value::Binding(binding) => {
             if binding.is_item() {
@@ -369,8 +438,7 @@ fn replace_value_item_bindings(value: &Value, item: &serde_json::Value, item_nam
         }
         // Handle static strings containing @{item.xxx} pattern (legacy/fallback)
         Value::Static(serde_json::Value::String(s))
-            if s.contains(&format!("@{{{}.", item_name))
-                || s.contains(&format!("@{{{}}}", item_name)) =>
+            if with_item_markers(item_name, |dot, bare| s.contains(dot) || s.contains(bare)) =>
         {
             replace_static_item_bindings_with_name(s, item, item_name)
         }
@@ -386,11 +454,31 @@ fn replace_template_string_item_bindings(
     item_name: &str,
     original: &Value,
 ) -> Value {
-    use crate::reactive::{build_evaluator, evaluate_template_string};
+    use crate::reactive::evaluate_context_free_template;
 
     let has_item_bindings = bindings.iter().any(|b| b.is_item());
-    if !has_item_bindings {
+
+    // Custom `as:` names (e.g. `as: "opt"`) are deliberately rejected by
+    // `parse_binding` — unknown `@{...}` prefixes must not become data-source
+    // bindings — so the template carries no parsed item bindings for them.
+    // They are only detectable textually, and only here at substitution time
+    // where the iteration variable's name is known.
+    let has_named_refs = with_item_markers(item_name, |dot, bare| {
+        template.contains(dot) || template.contains(bare)
+    });
+
+    if !has_item_bindings && !has_named_refs {
         return original.clone();
+    }
+
+    // Whole-template item reference ("@{opt.id}") that expand could not parse
+    // into a `Value::Binding`: resolve to the item value directly, preserving
+    // its JSON type. Guarded on `!has_item_bindings` so the parsed-binding
+    // path (default "item" name) keeps its existing string-formatting shape.
+    if !has_item_bindings {
+        if let Some(val) = whole_template_item_value(template, item, item_name) {
+            return Value::Static(val);
+        }
     }
 
     // PHASE 1: Collect all replacements for explicit bindings (single pass)
@@ -418,6 +506,15 @@ fn replace_template_string_item_bindings(
     // PHASE 2: Apply explicit binding replacements
     let mut result = apply_replacements(template, replacements);
 
+    // PHASE 2.5: whole `@{<item_name>}` / `@{<item_name>.path}` occurrences
+    // that carry no parsed binding (custom `as:` names) — replace the entire
+    // `@{...}` with the raw value, mirroring PHASE 1's unquoted treatment so
+    // simple refs never round-trip through the expression evaluator.
+    if has_named_refs {
+        let named_replacements = collect_named_ref_replacements(&result, item, item_name);
+        result = apply_replacements(&result, named_replacements);
+    }
+
     // PHASE 3: Replace item.xxx references in expressions (e.g., ternary operators)
     // Uses the configurable item_name for custom iteration variables
     let expr_replacements = collect_item_replacements_with_name(&result, item, true, item_name);
@@ -428,8 +525,9 @@ fn replace_template_string_item_bindings(
 
     if remaining_bindings.is_empty() {
         if result.contains("@{") {
-            let evaluator = build_evaluator(&serde_json::Value::Null, None, None);
-            match evaluate_template_string(&result, &evaluator) {
+            // Every item ref is inlined and no state binding remains, so
+            // what's left is context-free: memoized, no per-row evaluator.
+            match evaluate_context_free_template(&result) {
                 Ok(evaluated) => Value::Static(serde_json::Value::String(evaluated)),
                 Err(_) => Value::Static(serde_json::Value::String(result)),
             }
@@ -442,6 +540,78 @@ fn replace_template_string_item_bindings(
             bindings: remaining_bindings,
         }
     }
+}
+
+/// If the entire template is one simple reference to the iteration variable
+/// (`"@{opt}"` / `"@{opt.path}"`), resolve it to the item's JSON value.
+/// Returns `None` (falling back to string substitution) for anything else,
+/// including refs whose path is absent from the item.
+fn whole_template_item_value(
+    template: &str,
+    item: &serde_json::Value,
+    item_name: &str,
+) -> Option<serde_json::Value> {
+    let trimmed = template.trim();
+    if !trimmed.starts_with("@{") || !trimmed.ends_with('}') {
+        return None;
+    }
+    let content = &trimmed[2..trimmed.len() - 1];
+    if content == item_name {
+        return Some(item.clone());
+    }
+    if content.starts_with(item_name)
+        && content[item_name.len()..].starts_with('.')
+        && is_simple_path_with_name(content, item_name)
+    {
+        let path = &content[item_name.len() + 1..];
+        return navigate_item_path(item, path).cloned();
+    }
+    None
+}
+
+/// Collect whole `@{...}` occurrences of the iteration variable — bare
+/// `@{opt}` or simple-path `@{opt.a.b}` — replacing the full `@{...}` span
+/// with the unquoted value. Complex expressions are left for the
+/// expression-level pass ([`collect_item_replacements_with_name`]).
+fn collect_named_ref_replacements(
+    s: &str,
+    item: &serde_json::Value,
+    item_name: &str,
+) -> Vec<Replacement> {
+    let mut replacements = Vec::new();
+    let mut pos = 0;
+
+    while let Some(rel_start) = s[pos..].find("@{") {
+        let abs_start = pos + rel_start;
+        let Some(end) = s[abs_start..].find('}') else {
+            break;
+        };
+        let abs_end = abs_start + end;
+        let content = &s[abs_start + 2..abs_end];
+
+        if content == item_name {
+            replacements.push(Replacement {
+                start: abs_start,
+                end: abs_end + 1,
+                text: format_value_for_replacement(item, false),
+            });
+        } else if content.starts_with(item_name)
+            && content[item_name.len()..].starts_with('.')
+            && is_simple_path_with_name(content, item_name)
+        {
+            let path = &content[item_name.len() + 1..];
+            if let Some(val) = navigate_item_path(item, path) {
+                replacements.push(Replacement {
+                    start: abs_start,
+                    end: abs_end + 1,
+                    text: format_value_for_replacement(val, false),
+                });
+            }
+        }
+        pos = abs_end + 1;
+    }
+
+    replacements
 }
 
 /// Find all item.xxx references in a string with configurable item name.
@@ -492,7 +662,7 @@ fn replace_static_item_bindings_with_name(
     item: &serde_json::Value,
     item_name: &str,
 ) -> Value {
-    use crate::reactive::{build_evaluator, evaluate_template_string};
+    use crate::reactive::evaluate_context_free_template;
 
     let mut replacements = Vec::new();
     let mut pos = 0;
@@ -534,8 +704,7 @@ fn replace_static_item_bindings_with_name(
                 let substituted_content = apply_replacements(content, expr_replacements);
                 let new_expr = format!("@{{{}}}", substituted_content);
 
-                let evaluator = build_evaluator(&serde_json::Value::Null, None, None);
-                if let Ok(evaluated) = evaluate_template_string(&new_expr, &evaluator) {
+                if let Ok(evaluated) = evaluate_context_free_template(&new_expr) {
                     replacements.push(Replacement {
                         start: abs_start,
                         end: abs_end + 1,

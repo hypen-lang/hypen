@@ -4,6 +4,7 @@ import { join, resolve } from "path";
 import {
   discoverComponents,
   generateComponentsCode,
+  watchComponents,
   type DiscoveredComponent,
 } from "../packages/server/src/discovery";
 
@@ -220,7 +221,9 @@ Text('Counter')`
         patterns: ["folder"],
       });
 
-      expect(code).toContain('FooterModule = app.defineState({}, { name: "Footer" }).build()');
+      expect(code).toContain(
+        'FooterModule = app.defineState({}, { name: "Footer" }).build()'
+      );
     });
 
     test("generates import statements for modules", async () => {
@@ -378,6 +381,49 @@ Column {
       // Imports are now preserved — engine processes them via parse_document
       expect(components[0].template).toContain("import");
       expect(components[0].template).toContain("Column");
+    });
+  });
+
+  describe("watchComponents", () => {
+    test("does not throw when the directory does not exist", async () => {
+      const missing = join(testDir, "no-such-dir", "components");
+
+      const watcher = watchComponents(missing);
+      // Give the initial (empty) scan a beat to settle before stopping.
+      await new Promise((r) => setTimeout(r, 50));
+      watcher.stop();
+    });
+
+    test("picks up components once a missing directory is created", async () => {
+      const missing = join(testDir, "late", "components");
+      const changes: DiscoveredComponent[][] = [];
+
+      const watcher = watchComponents(missing, {
+        patterns: ["sibling"],
+        onChange: (components) => changes.push(components),
+      });
+
+      try {
+        await new Promise((r) => setTimeout(r, 50));
+
+        mkdirSync(missing, { recursive: true });
+        writeFileSync(join(missing, "Late.ts"), "export default {}");
+        writeFileSync(join(missing, "Late.hypen"), "Text('Late')");
+
+        // Creation watch + debounce are async; poll rather than sleep a
+        // fixed (flaky) amount.
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline) {
+          if (changes.some((c) => c.some((comp) => comp.name === "Late"))) break;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+
+        expect(
+          changes.some((c) => c.some((comp) => comp.name === "Late"))
+        ).toBe(true);
+      } finally {
+        watcher.stop();
+      }
     });
   });
 });

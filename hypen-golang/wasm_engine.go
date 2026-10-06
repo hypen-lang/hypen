@@ -23,35 +23,47 @@ type WasmEngine struct {
 	ctx     context.Context
 
 	// Exported WASM functions
-	fnInit             api.Function
-	fnDestroy          api.Function
-	fnRenderSource     api.Function
-	fnRenderInto       api.Function
-	fnUpdateState      api.Function
-	fnUpdateStateSparse    api.Function
-	fnUpdateModuleState    api.Function
-	fnSetModule        api.Function
-	fnRegisterModule   api.Function
-	fnRegisterAction   api.Function
-	fnDispatchAction   api.Function
+	fnInit                      api.Function
+	fnDestroy                   api.Function
+	fnRenderSource              api.Function
+	fnRenderInto                api.Function
+	fnUpdateState               api.Function
+	fnUpdateStateSparse         api.Function
+	fnUpdateModuleState         api.Function
+	fnSetModule                 api.Function
+	fnRegisterModule            api.Function
+	fnRegisterAction            api.Function
+	fnDispatchAction            api.Function
 	fnRegisterPrimitive         api.Function
 	fnRegisterDefaultPrimitives api.Function
 	fnRegisterComponent         api.Function
-	fnRegisterResources  api.Function
-	fnGetPatchesLen    api.Function
-	fnGetPatches       api.Function
-	fnClearPatches     api.Function
-	fnGetActionLen     api.Function
-	fnGetAction        api.Function
-	fnClearAction      api.Function
-	fnClearTree        api.Function
-	fnParseToJson      api.Function
-	fnGetRevision      api.Function
-	fnGetPendingImportsLen api.Function
-	fnGetPendingImports    api.Function
-	fnClearPendingImports  api.Function
-	fnAlloc            api.Function
-	fnFree             api.Function
+	fnRegisterResources         api.Function
+	fnGetPatchesLen             api.Function
+	fnGetPatches                api.Function
+	fnClearPatches              api.Function
+	fnGetActionLen              api.Function
+	fnGetAction                 api.Function
+	fnClearAction               api.Function
+	fnClearTree                 api.Function
+	fnParseToJson               api.Function
+	fnGetRevision               api.Function
+	fnGetPendingImportsLen      api.Function
+	fnGetPendingImports         api.Function
+	fnClearPendingImports       api.Function
+	// External capability surface (see agent.go)
+	fnListExternalActions  api.Function
+	fnListRoutes           api.Function
+	fnListBindings         api.Function
+	fnDispatchExternal     api.Function
+	fnGetStateAt           api.Function
+	fnUnregisterModule     api.Function
+	fnGetExternalResultLen api.Function
+	fnGetExternalResult    api.Function
+	fnGetLastErrorLen      api.Function
+	fnGetLastError         api.Function
+	fnClearLastError       api.Function
+	fnAlloc                api.Function
+	fnFree                 api.Function
 
 	// Action handlers (called when WASM dispatches actions back)
 	actionHandlers map[string]func(action Action)
@@ -73,6 +85,19 @@ type WasmEngineConfig struct {
 
 	// Primitives to register (e.g., "Text", "Button", "Column", "Row")
 	Primitives []string
+}
+
+var (
+	compilationCacheOnce sync.Once
+	compilationCache     wazero.CompilationCache
+)
+
+// SharedCompilationCache is the process-wide wazero compilation cache every
+// runtime of the engine module uses (renderer engines and the device broker
+// runtime): identical module bytes compile once per process.
+func SharedCompilationCache() wazero.CompilationCache {
+	compilationCacheOnce.Do(func() { compilationCache = wazero.NewCompilationCache() })
+	return compilationCache
 }
 
 // NewDefaultEngine creates a WASM engine using the embedded binary.
@@ -99,8 +124,10 @@ func NewWasmEngine(config WasmEngineConfig) (*WasmEngine, error) {
 		return nil, fmt.Errorf("either WasmPath or WasmBytes must be provided")
 	}
 
-	// Create wazero runtime
-	runtime := wazero.NewRuntime(ctx)
+	// Create wazero runtime. The compilation cache is process-wide, so the
+	// engine module is compiled once and every later engine (one per
+	// remote session) only instantiates it.
+	runtime := wazero.NewRuntimeWithConfig(ctx, wazero.NewRuntimeConfig().WithCompilationCache(SharedCompilationCache()))
 
 	// Instantiate WASI
 	_, err = wasi_snapshot_preview1.Instantiate(ctx, runtime)
@@ -160,6 +187,17 @@ func NewWasmEngine(config WasmEngineConfig) (*WasmEngine, error) {
 	engine.fnGetPendingImportsLen = module.ExportedFunction("hypen_get_pending_imports_len")
 	engine.fnGetPendingImports = module.ExportedFunction("hypen_get_pending_imports")
 	engine.fnClearPendingImports = module.ExportedFunction("hypen_clear_pending_imports")
+	engine.fnListExternalActions = module.ExportedFunction("hypen_list_external_actions")
+	engine.fnListRoutes = module.ExportedFunction("hypen_list_routes")
+	engine.fnListBindings = module.ExportedFunction("hypen_list_bindings")
+	engine.fnDispatchExternal = module.ExportedFunction("hypen_dispatch_external")
+	engine.fnGetStateAt = module.ExportedFunction("hypen_get_state_at")
+	engine.fnUnregisterModule = module.ExportedFunction("hypen_unregister_module")
+	engine.fnGetExternalResultLen = module.ExportedFunction("hypen_get_external_result_len")
+	engine.fnGetExternalResult = module.ExportedFunction("hypen_get_external_result")
+	engine.fnGetLastErrorLen = module.ExportedFunction("hypen_get_last_error_len")
+	engine.fnGetLastError = module.ExportedFunction("hypen_get_last_error")
+	engine.fnClearLastError = module.ExportedFunction("hypen_clear_last_error")
 	engine.fnAlloc = module.ExportedFunction("wasi_alloc")
 	engine.fnFree = module.ExportedFunction("wasi_free")
 
@@ -556,7 +594,14 @@ func (e *WasmEngine) dispatchAndReadAction(name string, payload any) (*Action, e
 		return nil, newWasmError("dispatch_action", results[0])
 	}
 
-	// Read pending action from buffer
+	return e.readPendingActionLocked()
+}
+
+// readPendingActionLocked drains the WASM action buffer into an Action, or
+// returns (nil, nil) when the engine queued nothing. Caller must hold the
+// mutex. Shared with the external capability surface (see agent.go), which
+// queues the *resolved* action through the same buffer.
+func (e *WasmEngine) readPendingActionLocked() (*Action, error) {
 	lenResults, err := e.fnGetActionLen.Call(e.ctx)
 	if err != nil {
 		return nil, err
@@ -975,11 +1020,6 @@ func (e *WasmEngine) OnAction(actionName string, handler func(action Action)) {
 // active_action_scope. Nested modules use this path when their state mutates
 // outside a dispatch window (e.g. from a goroutine).
 func (e *WasmEngine) NotifyStateChange(scope string, paths []string, changedValues map[string]any) {
-	if scope == "" {
-		// UpdateState already invokes the patch callback for any produced patches.
-		_, _ = e.UpdateState(changedValues)
-		return
-	}
 	_, _ = e.UpdateModuleState(scope, changedValues)
 }
 

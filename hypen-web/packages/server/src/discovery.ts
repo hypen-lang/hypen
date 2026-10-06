@@ -16,8 +16,8 @@
  * `loadDiscoveredComponents()` -> feed results into a `ComponentLoader`.
  */
 
-import { existsSync, readdirSync, readFileSync, watch } from "fs";
-import { join, basename, resolve, relative } from "path";
+import { existsSync, readdirSync, readFileSync, statSync, watch } from "fs";
+import { join, basename, dirname, resolve, relative } from "path";
 import type { HypenModuleDefinition } from "@hypen-space/core/app";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 
@@ -271,9 +271,10 @@ export async function discoverComponents(
 
       // Quick heuristic: look for .ui( or .ui(hypen pattern
       if (content.includes(".ui(") || content.includes(".ui(hypen")) {
-        // Try to import and check for template
+        // Try to import and check for template (mtime-busted so rescans
+        // see edited inline templates — see importComponentModule)
         try {
-          const moduleExport = await import(modulePath);
+          const moduleExport = await importComponentModule(modulePath);
           const module = moduleExport.default as HypenModuleDefinition<any>;
 
           if (module && typeof module === "object" && module.template) {
@@ -308,6 +309,33 @@ export async function discoverComponents(
 }
 
 /**
+ * Import a component's `.ts` module with the file's mtime as a cache-busting
+ * query. Plain `import(path)` hits the ESM module cache forever, so a dev
+ * server re-running discovery on file change would keep serving the stale
+ * module — edited action handlers or initial state would silently never
+ * apply until restart. Keying the specifier by mtime re-imports only when
+ * the file actually changed (unchanged files reuse the cached instance).
+ *
+ * Limitation: only the component file itself is busted — helpers it imports
+ * stay cached until they're touched too.
+ */
+async function importComponentModule(modulePath: string): Promise<any> {
+  let specifier = modulePath;
+  try {
+    // Query on the plain path, NOT on a pathToFileURL() href — Bun caches
+    // file:// URL imports by path and ignores their query string, while
+    // path-with-query specifiers get distinct cache entries in both Bun
+    // and Node.
+    const mtime = statSync(modulePath).mtimeMs;
+    specifier = `${modulePath}?mtime=${mtime}`;
+  } catch {
+    // File vanished mid-scan — fall back to a plain import and let it
+    // surface the real error.
+  }
+  return import(specifier);
+}
+
+/**
  * Load discovered components into a map for use with Hypen
  */
 export async function loadDiscoveredComponents(
@@ -339,8 +367,9 @@ export async function loadDiscoveredComponents(
     let template = component.template;
 
     if (component.modulePath) {
-      // Import the TypeScript module
-      const moduleExport = await import(component.modulePath);
+      // Import the TypeScript module (mtime-busted so dev-server reloads
+      // pick up edits — see importComponentModule).
+      const moduleExport = await importComponentModule(component.modulePath);
       module = moduleExport.default as HypenModuleDefinition<any>;
 
       // For single-file components, template is already in the module
@@ -438,25 +467,76 @@ export function watchComponents(
     }, 100);
   };
 
-  // Start watching
-  const watcher = watch(
-    resolvedDir,
-    { recursive: true },
-    (event, filename) => {
-      if (!filename) return;
-      if (filename.endsWith(".hypen") || filename.endsWith(".ts")) {
-        log("File changed:", filename);
-        rescan();
+  // Start watching. A missing directory must not throw: server-based
+  // projects have no components directory at all, and file-based projects
+  // can have theirs deleted mid-session. In both cases we watch the
+  // nearest existing ancestor and attach the real recursive watcher once
+  // the directory appears.
+  let watcher: ReturnType<typeof watch> | null = null;
+  let stopped = false;
+
+  const attachWatcher = () => {
+    if (stopped) return;
+    watcher = watch(
+      resolvedDir,
+      { recursive: true },
+      (event, filename) => {
+        if (!filename) return;
+        if (filename.endsWith(".hypen") || filename.endsWith(".ts")) {
+          log("File changed:", filename);
+          rescan();
+        }
       }
+    );
+  };
+
+  let creationPoll: ReturnType<typeof setInterval> | null = null;
+
+  const watchForCreation = () => {
+    if (stopped) return;
+    const onCreated = () => {
+      if (stopped || !existsSync(resolvedDir)) return;
+      watcher?.close();
+      watcher = null;
+      if (creationPoll) {
+        clearInterval(creationPoll);
+        creationPoll = null;
+      }
+      attachWatcher();
+      rescan();
+    };
+    let ancestor = dirname(resolvedDir);
+    while (!existsSync(ancestor)) {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) break; // filesystem root
+      ancestor = parent;
     }
-  );
+    watcher = watch(ancestor, { recursive: true }, onCreated);
+    // Recursive watchers can miss events inside directories created after
+    // the watch started (the OS-level watch on a new subtree attaches
+    // asynchronously), so back the event path with a cheap existence poll.
+    creationPoll = setInterval(onCreated, 500);
+  };
+
+  if (existsSync(resolvedDir)) {
+    attachWatcher();
+  } else {
+    frameworkLoggers.discovery.warn(
+      `Components directory does not exist: ${resolvedDir} — watching for it to be created.`
+    );
+    watchForCreation();
+  }
 
   // Initial scan
   initialScan();
 
   return {
     stop: () => {
-      watcher.close();
+      stopped = true;
+      watcher?.close();
+      if (creationPoll) {
+        clearInterval(creationPoll);
+      }
       if (debounceTimer) {
         clearTimeout(debounceTimer);
       }

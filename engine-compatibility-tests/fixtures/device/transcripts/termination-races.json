@@ -1,0 +1,246 @@
+{
+  "name": "termination-races",
+  "description": "Every operation settles exactly once and the server never sends a deviceResponse. (1) Client deadline wins: terminal timeout. (2) Server deadline wins: the server cancels, retires the id and settles locally; the client's own timeout is ignored. (3) Client-initiated cancellation is a terminal cancelled response with no server reply. (4) An undismissable OS dialog finishes after the server cancelled: a conforming client uploads nothing and its late cancelled terminal is ignored. (5) A non-conforming client that uploads anyway: blobStart, bytes and result for the retired id are all ignored by the server.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "permission.request",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "camera"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "error": {
+          "code": "timeout"
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 3,
+        "capability": "permission.request",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "camera"
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 3,
+        "control": {
+          "cancel": true
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 3,
+        "error": {
+          "code": "timeout"
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 4,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 4,
+        "error": {
+          "code": "cancelled",
+          "platformDetail": "picker-dismissed"
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 5,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 5,
+        "control": {
+          "cancel": true
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 5,
+        "error": {
+          "code": "cancelled"
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 6,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 6,
+        "control": {
+          "cancel": true
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 6,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "image/jpeg",
+          "bytes": 17
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 6,
+          "seq": 0
+        },
+        "hex": "01000000060000000000000068656c6c6f2d687970656e2d70686f746f"
+      },
+      "ignored": true
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 6,
+        "result": {
+          "items": [
+            {
+              "channel": 0,
+              "contentType": "image/jpeg",
+              "bytes": 17,
+              "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+            }
+          ]
+        }
+      },
+      "ignored": true
+    }
+  ]
+}

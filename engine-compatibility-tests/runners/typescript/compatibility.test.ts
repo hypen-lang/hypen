@@ -22,6 +22,9 @@ interface EnginePatch {
   parentId?: string;
   beforeId?: string | null;
   eventName?: string;
+  semantics?: Record<string, any>;
+  transition?: boolean;
+  spec?: Record<string, any>;
 }
 
 // Test case types
@@ -34,19 +37,38 @@ interface ExpectedPatch {
   type: string;
   elementType?: string;
   props?: Record<string, any>;
+  /** Prop keys that must NOT be present on the matched patch's props
+   *  (pins omission contracts, e.g. an invalid `.animate` preset lowering
+   *  to no `__anim.animate` prop and no raw `animate.0` passthrough). */
+  absentProps?: string[];
   name?: string;
   value?: any;
   text?: string;
+  semantics?: Record<string, any>;
+  transition?: boolean;
+  /** Batch-animation spec on `batchAnimation` patches (deep partial match
+   *  like `value` — the fixture pins the normalized `{curve, duration}`). */
+  spec?: Record<string, any>;
 }
 
 interface TestStep {
   description?: string;
-  action: "initialRender" | "updateState" | "dispatchAction";
+  action: "initialRender" | "updateState" | "dispatchAction" | "renderSource";
+  source?: string;
   stateChange?: StateChange;
+  /**
+   * Optional batch-animation context for this step's state update (Option D
+   * transaction-scoped animation): a spec object or bare curve string,
+   * forwarded as the engine's `animation` argument — for updateState steps
+   * directly, and for the state update a dispatchAction step's handler
+   * produces (mirrors the rust runner's `update_state_with_animation`).
+   */
+  animation?: any;
   dispatchAction?: Action;
   expectedPatches?: ExpectedPatch[];
   expectedPatchCount?: number;
   expectedPatchTypes?: string[];
+  strictPatchOrder?: boolean;
   forbiddenPatchTypes?: string[];
   expectedState?: Record<string, any>;
 }
@@ -69,6 +91,7 @@ interface TestCase {
     patches?: ExpectedPatch[];
     patchCount?: number;
     patchTypes?: string[];
+    strictPatchOrder?: boolean;
   };
   steps?: TestStep[];
   skip?: {
@@ -79,6 +102,11 @@ interface TestCase {
 
 // State management for action handlers
 let currentState: Record<string, any> = {};
+
+// The current step's optional batch-animation context (Option D) — set per
+// step so both the direct updateState path and the dispatchAction handler's
+// state sync stamp their engine update with it (rust-runner parity).
+let currentStepAnimation: any = undefined;
 
 // Action handler implementations for tests
 const actionHandlers: Record<string, (action: Action, state: Record<string, any>) => Record<string, any>> = {
@@ -99,9 +127,14 @@ async function findFixtures(dir: string): Promise<string[]> {
     for (const entry of entries) {
       const fullPath = join(currentDir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === "portable") continue;
+        // `device/` is the Device Capability Protocol corpus, replayed by
+        // the engine crate and every SDK's device suite.
+        if (entry.name === "portable" || entry.name === "variant" || entry.name === "device") continue;
         await walk(fullPath);
       } else if (entry.name.endsWith(".json")) {
+        // `dnd/path-move.json` is a state-transform fixture (fixtures/dnd/README.md),
+        // replayed by the engine crate and host SDKs — not a test-case fixture.
+        if (entry.name === "path-move.json") continue;
         fixtures.push(fullPath);
       }
     }
@@ -131,35 +164,27 @@ function normalizePatches(patches: any[]): EnginePatch[] {
   });
 }
 
-// Match patches by structure, ignoring IDs
-function matchPatchStructure(actual: EnginePatch[], expected: ExpectedPatch[]): boolean {
+// Match patches index-by-index — for fixtures whose contract IS the
+// emission order (e.g. flagged-root-first deferred removes), where the
+// unordered structural match below cannot distinguish orderings.
+function matchPatchSequence(actual: EnginePatch[], expected: ExpectedPatch[]): boolean {
   if (actual.length !== expected.length) return false;
-
-  // Group patches by type for structural comparison
-  const actualByType = groupByType(actual);
-  const expectedByType = groupByType(expected);
-
-  for (const [type, expectedPatches] of Object.entries(expectedByType)) {
-    const actualPatches = actualByType[type] || [];
-    if (actualPatches.length !== expectedPatches.length) return false;
-
-    // For each expected patch of this type, verify there's a matching actual patch
-    for (const exp of expectedPatches) {
-      const hasMatch = actualPatches.some((act) => patchMatches(act, exp));
-      if (!hasMatch) return false;
-    }
-  }
-
-  return true;
+  return expected.every((exp, i) => patchMatches(actual[i], exp));
 }
 
-function groupByType<T extends { type: string }>(patches: T[]): Record<string, T[]> {
-  const groups: Record<string, T[]> = {};
-  for (const patch of patches) {
-    if (!groups[patch.type]) groups[patch.type] = [];
-    groups[patch.type].push(patch);
-  }
-  return groups;
+// Match patches by structure, ignoring IDs
+function matchPatchStructure(actual: EnginePatch[], expected: ExpectedPatch[], allowExtra = false): boolean {
+  // DnD fixtures pin selected nodes/props; explicit counts and type lists
+  // assert the complete batch separately. Never reuse one actual patch to
+  // satisfy two expected rows.
+  if (allowExtra ? actual.length < expected.length : actual.length !== expected.length) return false;
+  const used = new Set<number>();
+  return expected.every(exp => {
+    const index = actual.findIndex((act, i) => !used.has(i) && patchMatches(act, exp));
+    if (index < 0) return false;
+    used.add(index);
+    return true;
+  });
 }
 
 function patchMatches(actual: EnginePatch, expected: ExpectedPatch): boolean {
@@ -170,18 +195,67 @@ function patchMatches(actual: EnginePatch, expected: ExpectedPatch): boolean {
     return false;
   }
 
-  // Check props if specified (partial match)
+  // Check props if specified (partial match; deep comparison so
+  // object-valued props like `__anim.transition` can be pinned)
   if (expected.props !== undefined) {
     for (const [key, value] of Object.entries(expected.props)) {
-      if (actual.props?.[key] !== value) return false;
+      if (!deepEquals(actual.props?.[key], value)) return false;
+    }
+  }
+
+  // Check absent props if specified — every listed key must be missing
+  if (expected.absentProps !== undefined) {
+    for (const key of expected.absentProps) {
+      if (actual.props?.[key] !== undefined) return false;
     }
   }
 
   // Check name/value for setProp patches
   if (expected.name !== undefined && actual.name !== expected.name) return false;
-  if (expected.value !== undefined && actual.value !== expected.value) return false;
+  if (expected.value !== undefined && !deepEquals(actual.value, expected.value)) return false;
+
+  // Check the animation spec on batchAnimation patches
+  if (expected.spec !== undefined && !deepEquals(actual.spec, expected.spec)) return false;
+
+  // Check the exit-animation flag on remove patches. `transition: true`
+  // requires the flag on the wire; `transition: false` requires it absent
+  // or false (the flag is skip-serialized when false).
+  if (expected.transition !== undefined && (actual.transition ?? false) !== expected.transition) {
+    return false;
+  }
+
+  // Check the semantics block on create/setSemantics patches. Exact match
+  // (not partial) — the fixture pins the complete wire block, so an extra
+  // or missing field is a mismatch.
+  if (expected.semantics !== undefined) {
+    if (JSON.stringify(sortKeys(actual.semantics)) !== JSON.stringify(sortKeys(expected.semantics))) {
+      return false;
+    }
+  }
 
   return true;
+}
+
+// Deep equality via canonical JSON. Numbers, strings, booleans and null
+// compare as before; objects and arrays compare structurally with
+// key-order insensitivity.
+function deepEquals(a: any, b: any): boolean {
+  if (a === b) return true;
+  if (a === undefined || b === undefined) return false;
+  return JSON.stringify(sortKeys(a)) === JSON.stringify(sortKeys(b));
+}
+
+// Key-order-insensitive canonicalization for exact object comparison
+function sortKeys(value: any): any {
+  if (Array.isArray(value)) return value.map(sortKeys);
+  if (value !== null && typeof value === "object") {
+    const sorted: Record<string, any> = {};
+    for (const key of Object.keys(value).sort()) {
+      sorted[key] = sortKeys(value[key]);
+    }
+    return sorted;
+  }
+  return value;
 }
 
 // Main test runner
@@ -234,13 +308,14 @@ describe("Engine Compatibility Tests", async () => {
               const handler = actionHandlers[actionName];
               if (handler) {
                 currentState = handler(action, currentState);
-                // Notify engine of state change
+                // Notify engine of state change, stamped with the current
+                // step's optional batch-animation context (Option D).
                 const paths = Object.keys(currentState);
                 const values: Record<string, any> = {};
                 for (const path of paths) {
                   values[path] = currentState[path];
                 }
-                engine.updateStateSparse(null, paths, values);
+                engine.updateStateSparse(null, paths, values, currentStepAnimation);
               }
             });
           }
@@ -265,7 +340,9 @@ describe("Engine Compatibility Tests", async () => {
 
           // Check patch structure (ignoring IDs)
           if (testCase.expected.patches) {
-            const matches = matchPatchStructure(collectedPatches, testCase.expected.patches);
+            const matches = testCase.expected.strictPatchOrder
+              ? matchPatchSequence(collectedPatches, testCase.expected.patches)
+              : matchPatchStructure(collectedPatches, testCase.expected.patches, testCase.category === "dnd");
             if (!matches) {
               console.log("Expected patches:", JSON.stringify(testCase.expected.patches, null, 2));
               console.log("Actual patches:", JSON.stringify(collectedPatches, null, 2));
@@ -279,10 +356,17 @@ describe("Engine Compatibility Tests", async () => {
         if (testCase.steps) {
           for (const step of testCase.steps) {
             collectedPatches = []; // Reset for each step
+            currentStepAnimation = step.animation;
 
             switch (step.action) {
               case "initialRender":
                 engine.renderSource(testCase.input.source);
+                break;
+
+              case "renderSource":
+                // Re-render with replacement source — reconciled against the
+                // existing tree, exercising subtree replacement/teardown.
+                engine.renderSource(step.source!);
                 break;
 
               case "updateState":
@@ -291,7 +375,16 @@ describe("Engine Compatibility Tests", async () => {
                   for (const [path, value] of Object.entries(step.stateChange.newValues)) {
                     setNestedValue(currentState, path, value);
                   }
-                  engine.updateStateSparse(null, step.stateChange.paths, step.stateChange.newValues);
+                  // Forward the step's optional batch-animation context
+                  // (Option D) as the engine's `animation` argument.
+                  engine.updateStateSparse(
+                    null,
+                    step.stateChange.paths,
+                    Object.fromEntries(step.stateChange.paths.map(path => [
+                      path, path.split(".").reduce((value, key) => value?.[key], currentState as any),
+                    ])),
+                    step.animation
+                  );
                 }
                 break;
 
@@ -315,9 +408,12 @@ describe("Engine Compatibility Tests", async () => {
               expect(actualTypes).toEqual(step.expectedPatchTypes);
             }
 
-            // Verify expected patches (structural match)
+            // Verify expected patches (ordered when the step demands it,
+            // structural otherwise)
             if (step.expectedPatches) {
-              const matches = matchPatchStructure(collectedPatches, step.expectedPatches);
+              const matches = step.strictPatchOrder
+                ? matchPatchSequence(collectedPatches, step.expectedPatches)
+                : matchPatchStructure(collectedPatches, step.expectedPatches, testCase.category === "dnd");
               if (!matches) {
                 console.log("Step:", step.description || step.action);
                 console.log("Expected patches:", JSON.stringify(step.expectedPatches, null, 2));

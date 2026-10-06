@@ -7,6 +7,10 @@ import {
   getUserPosts,
   getStories,
   getComments,
+  getConversations,
+  getConversation,
+  getConversationMessages,
+  markConversationRead,
   formatUser,
 } from "./queries";
 
@@ -153,42 +157,6 @@ function getMockNotifications(currentUserId: string): Notification[] {
   ];
 }
 
-function getMockMessages(currentUserId: string): Conversation[] {
-  const users = db
-    .query("SELECT * FROM users WHERE id != ?")
-    .all(currentUserId) as any[];
-  return [
-    {
-      id: "m1",
-      user: { id: users[0].id, username: users[0].username, displayName: users[0].display_name, avatarUrl: users[0].avatar_url },
-      lastMessage: "That coffee spot was incredible!",
-      timeAgo: "2h",
-      isUnread: true,
-    },
-    {
-      id: "m2",
-      user: { id: users[1].id, username: users[1].username, displayName: users[1].display_name, avatarUrl: users[1].avatar_url },
-      lastMessage: "See you at the food festival 🍕",
-      timeAgo: "5h",
-      isUnread: true,
-    },
-    {
-      id: "m3",
-      user: { id: users[2].id, username: users[2].username, displayName: users[2].display_name, avatarUrl: users[2].avatar_url },
-      lastMessage: "Love the new designs!",
-      timeAgo: "1d",
-      isUnread: false,
-    },
-    {
-      id: "m4",
-      user: { id: users[3].id, username: users[3].username, displayName: users[3].display_name, avatarUrl: users[3].avatar_url },
-      lastMessage: "Want to join the next hike?",
-      timeAgo: "2d",
-      isUnread: false,
-    },
-  ];
-}
-
 function getExplorePosts(): {
   id: string;
   imageUrl: string;
@@ -271,7 +239,8 @@ export const homePageModule = app
     state.stories = getStories(id);
   })
   .onAction<{ postId: string }>("toggleLike", async ({ state, action }) => {
-    const postId = action.payload.postId;
+    const postId = action.payload?.postId;
+    if (!postId) return;
     const post = state.posts.find((p) => p.id === postId);
     if (!post || !state.currentUser) return;
 
@@ -294,7 +263,8 @@ export const homePageModule = app
     );
   })
   .onAction<{ postId: string }>("toggleSave", async ({ state, action }) => {
-    const postId = action.payload.postId;
+    const postId = action.payload?.postId;
+    if (!postId) return;
     const post = state.posts.find((p) => p.id === postId);
     if (!post || !state.currentUser) return;
 
@@ -382,9 +352,101 @@ interface MessagesState {
 export const messagesModule = app
   .module("Messages")
   .defineState<MessagesState>({ currentUser: null, messages: [] })
-  .onCreated(async (state, context) => {
+  // onActivated (not onCreated) so the inbox re-reads unread markers and
+  // last-message previews every time the user navigates back to it.
+  .onActivated(async (state, context) => {
     state.currentUser = context ? currentUserFromApp(context) : null;
-    state.messages = getMockMessages(state.currentUser?.id ?? "u1");
+    state.messages = getConversations(state.currentUser?.id ?? "u1");
+  })
+  .build();
+
+// ---------------------------------------------------------------------------
+// Conversation — route "/dm/:id". A single DM thread: message history plus a
+// composer. onActivated re-reads the URL param so switching between threads
+// reuses the module instance but swaps the data.
+// ---------------------------------------------------------------------------
+
+interface ChatMessage {
+  id: string;
+  text: string;
+  isMine: boolean;
+  avatarUrl: string;
+  timeAgo: string;
+}
+
+interface ConversationState {
+  currentUser: User | null;
+  conversationId: string;
+  peer: Pick<User, "id" | "username" | "displayName" | "avatarUrl"> | null;
+  chatMessages: ChatMessage[];
+  draft: string;
+}
+
+const cannedReplies = [
+  "Absolutely — sounds good!",
+  "Haha, I was just thinking the same thing.",
+  "Send me the details 👀",
+  "I’m in! When works for you?",
+  "That looks amazing!",
+  "Deal 🙌",
+];
+
+export const conversationModule = app
+  .module("Conversation")
+  .defineState<ConversationState>({
+    currentUser: null,
+    conversationId: "",
+    peer: null,
+    chatMessages: [],
+    draft: "",
+  })
+  .onActivated(async (state, context) => {
+    if (!context?.router) return;
+    state.currentUser = currentUserFromApp(context);
+    const userId = state.currentUser?.id ?? "u1";
+    const path = context.router.getCurrentPath();
+    const match = context.router.matchPath("/dm/:id", path);
+    const id = match?.params.id ?? "";
+    state.conversationId = id;
+    state.draft = "";
+
+    const conversation = id ? getConversation(id, userId) : null;
+    state.peer = conversation?.user ?? null;
+    state.chatMessages = conversation ? getConversationMessages(id, userId) : [];
+    if (conversation) markConversationRead(id, userId);
+  })
+  .onAction("sendMessage", async ({ state }) => {
+    const text = state.draft.trim();
+    if (!text || !state.currentUser || !state.conversationId) return;
+
+    if (!state.peer) return;
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `msg-${nonce}`;
+    db.query(
+      "INSERT INTO messages (id, conversation_id, sender_id, text, is_read) VALUES (?, ?, ?, ?, 1)"
+    ).run(id, state.conversationId, state.currentUser.id, text);
+
+    state.chatMessages.push({
+      id,
+      text,
+      isMine: true,
+      avatarUrl: state.currentUser.avatarUrl,
+      timeAgo: "now",
+    });
+    state.draft = "";
+
+    const reply = cannedReplies[Math.floor(Math.random() * cannedReplies.length)]!;
+    const replyId = `${id}-reply`;
+    db.query(
+      "INSERT INTO messages (id, conversation_id, sender_id, text, is_read) VALUES (?, ?, ?, ?, 1)"
+    ).run(replyId, state.conversationId, state.peer.id, reply);
+    state.chatMessages.push({
+      id: replyId,
+      text: reply,
+      isMine: false,
+      avatarUrl: state.peer.avatarUrl,
+      timeAgo: "now",
+    });
   })
   .build();
 
@@ -400,9 +462,11 @@ interface ProfileState {
 export const profileModule = app
   .module("Profile")
   .defineState<ProfileState>({ currentUser: null, userPosts: [] })
-  .onCreated(async (state, context) => {
-    state.currentUser = context ? currentUserFromApp(context) : null;
-    const id = state.currentUser?.id ?? "u1";
+  .onActivated(async (state, context) => {
+    const appUser = context ? currentUserFromApp(context) : null;
+    const id = appUser?.id ?? "u1";
+    const freshUser = getUser(id);
+    state.currentUser = freshUser ? formatUser(freshUser) : appUser;
     state.userPosts = getUserPosts(id);
   })
   .onAction("editProfile", async () => {
@@ -420,13 +484,16 @@ interface UserProfileState {
   viewedUser: ViewedUser | null;
 }
 
-function loadViewedUser(userId: string): ViewedUser | null {
+function loadViewedUser(userId: string, currentUserId: string): ViewedUser | null {
   const raw = getUser(userId);
   if (!raw) return null;
+  const follow = db.query(
+    "SELECT 1 AS present FROM follows WHERE follower_id = ? AND following_id = ?"
+  ).get(currentUserId, userId);
   return {
     ...formatUser(raw),
     posts: getUserPosts(userId),
-    isFollowing: false,
+    isFollowing: !!follow,
   };
 }
 
@@ -439,24 +506,40 @@ export const userProfileModule = app
     const match = context.router.matchPath("/user-profile/:id", path);
     const id = match?.params.id;
     if (!id) return;
-    state.viewedUser = loadViewedUser(id);
+    const appUser = currentUserFromApp(context);
+    if (!appUser) return;
+    state.viewedUser = loadViewedUser(id, appUser.id);
   })
   .onAction("toggleFollow", async ({ state, context }) => {
     if (!state.viewedUser) return;
     const appUser = context ? currentUserFromApp(context) : null;
-    if (!appUser) return;
-    state.viewedUser.isFollowing = !state.viewedUser.isFollowing;
-    if (state.viewedUser.isFollowing) {
-      state.viewedUser.followersCount += 1;
+    if (!appUser || appUser.id === state.viewedUser.id) return;
+
+    const targetId = state.viewedUser.id;
+    const alreadyFollowing = !!db.query(
+      "SELECT 1 AS present FROM follows WHERE follower_id = ? AND following_id = ?"
+    ).get(appUser.id, targetId);
+    const delta = alreadyFollowing ? -1 : 1;
+
+    db.transaction(() => {
+      if (alreadyFollowing) {
+        db.query(
+          "DELETE FROM follows WHERE follower_id = ? AND following_id = ?"
+        ).run(appUser.id, targetId);
+      } else {
+        db.query(
+          "INSERT OR IGNORE INTO follows (follower_id, following_id) VALUES (?, ?)"
+        ).run(appUser.id, targetId);
+      }
       db.query(
-        "INSERT OR IGNORE INTO follows (follower_id, following_id) VALUES (?, ?)"
-      ).run(appUser.id, state.viewedUser.id);
-    } else {
-      state.viewedUser.followersCount -= 1;
+        "UPDATE users SET followers_count = MAX(0, followers_count + ?) WHERE id = ?"
+      ).run(delta, targetId);
       db.query(
-        "DELETE FROM follows WHERE follower_id = ? AND following_id = ?"
-      ).run(appUser.id, state.viewedUser.id);
-    }
+        "UPDATE users SET following_count = MAX(0, following_count + ?) WHERE id = ?"
+      ).run(delta, appUser.id);
+    })();
+
+    state.viewedUser = loadViewedUser(targetId, appUser.id);
   })
   .build();
 
@@ -512,7 +595,8 @@ export const commentsModule = app
   })
   .onAction<{ commentId: string }>("likeComment", async ({ state, action }) => {
     if (!state.currentUser) return;
-    const commentId = action.payload.commentId;
+    const commentId = action.payload?.commentId;
+    if (!commentId) return;
     const existing = db
       .query(
         "SELECT COUNT(*) as cnt FROM comment_likes WHERE comment_id = ? AND user_id = ?"

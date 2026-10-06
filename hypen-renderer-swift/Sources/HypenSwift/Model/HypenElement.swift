@@ -1,17 +1,170 @@
 import Foundation
+import Combine
+import SwiftUI
 
 /// Represents a single element in the Hypen render tree.
+///
+/// Each element is its own `ObservableObject`: a patch that mutates one
+/// element invalidates only the SwiftUI view rendering that element, not
+/// the whole tree. Structural patches notify through the parent's
+/// `children` array.
 ///
 /// Thread safety is guaranteed by MainActor isolation: `HypenRenderer` is `@MainActor`
 /// and all view code that accesses elements runs on MainActor. The `@unchecked Sendable`
 /// conformance is safe under this guarantee.
-public final class HypenElement: @unchecked Sendable {
+public final class HypenElement: ObservableObject, @unchecked Sendable {
     public let id: String
     public let elementType: String
-    public var props: [String: Any]
-    public var children: [String]
+    public var props: [String: Any] {
+        willSet { objectWillChange.send() }
+        didSet {
+            cachedApplicatorResult = nil
+            cachedAnimSpecs = nil
+            cachedDndSpecs = nil
+        }
+    }
+    public var children: [String] {
+        willSet { objectWillChange.send() }
+    }
     public var parentId: String?
-    public var textContent: String?
+    public var textContent: String? {
+        willSet { objectWillChange.send() }
+    }
+    /// Engine-derived accessibility semantics: set at `create`, replaced
+    /// wholesale by `setSemantics` reactive re-emits (nil clears). Translated
+    /// to SwiftUI accessibility modifiers in `applyHypenSemantics`.
+    public var semantics: HypenSemantics? {
+        willSet { objectWillChange.send() }
+    }
+
+    // MARK: - Animation state (owned by `HypenAnimator`)
+
+    /// Displacement from the element's base pose, driven by an enter or an
+    /// exit playback. `nil` = base pose. The view layer applies it as
+    /// opacity/offset/scale; the animator flips it and lets the implicit
+    /// `.animation(animPoseAnimation, value: animPose)` glide it.
+    public var animPose: HypenAnimPose? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// The animation the next `animPose` change should ride.
+    public var animPoseAnimation: Animation? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// The animation whitelisted prop changes on this node should glide on,
+    /// resolved per batch through the precedence chain (structural >
+    /// transaction > node `.transition` > snap). `nil` snaps.
+    public var animTransitionAnimation: Animation? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// This node sits inside a subtree playing its exit: engine-side dead,
+    /// so it is excluded from hit-testing, event dispatch, focus and
+    /// accessibility for the rest of its life. Invalidates the memoized
+    /// applicator result because the event closures it holds must be
+    /// rebuilt against the suppressed dispatcher.
+    public var isAnimationExcluded: Bool = false {
+        willSet { objectWillChange.send() }
+        didSet {
+            if oldValue != isAnimationExcluded { cachedApplicatorResult = nil }
+        }
+    }
+
+    /// A finite `.animate` preset has run to completion on this node. A
+    /// cached Router `Attach` resumes loops but must never replay a finite
+    /// preset, so the view gate consults this instead of restarting on
+    /// every `onAppear`.
+    public var animateFiniteExhausted: Bool = false
+
+    /// Bumped whenever the `.animate` channel changes, so the view-local
+    /// playback restarts (a changed spec restarts; a removed channel stops).
+    public var animateGeneration: Int = 0 {
+        willSet { objectWillChange.send() }
+    }
+
+    // MARK: - Drag-and-drop state (owned by `HypenDndCoordinator`)
+
+    /// Runtime `.states` label overlaid on this node (`lifted` on the dragged
+    /// source, `over` on the hovered zone). `nil` = base pose. The view
+    /// layer overlays `__anim.statePoses[label]` onto the resolved
+    /// applicator result; clearing the label restores the base by
+    /// construction.
+    public var dndPoseLabel: String? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// Ghost translation of the moving item (sortable row, pinboard note, or
+    /// loose draggable) while lifted, and the pin snap during the
+    /// post-drop hold. Never animated — it follows the finger.
+    public var dndPinOffset: CGSize = .zero {
+        willSet { if newValue != dndPinOffset { objectWillChange.send() } }
+    }
+
+    public var dndGhostOffset: CGSize = .zero {
+        willSet { objectWillChange.send() }
+    }
+
+    /// Gap-opening shift of a sortable sibling while a drag hovers its list.
+    public var dndShift: CGSize = .zero {
+        willSet { objectWillChange.send() }
+    }
+
+    /// The animation the next `dndShift` change should ride (`nil` snaps —
+    /// the release, and reduced motion).
+    public var dndShiftAnimation: Animation? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// The moving item is raised above its siblings for the drag's duration.
+    public var dndRaised: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+
+    private var cachedDndSpecs: NodeDndSpecs?
+
+    /// The node's parsed `__dnd.*` surface (plus the header-less `.states`
+    /// poses), memoized until `props` change. Parsing is defensive: a
+    /// malformed channel degrades to `nil` (no such role) and never poisons
+    /// its siblings.
+    public var dndSpecs: NodeDndSpecs {
+        if let cached = cachedDndSpecs { return cached }
+        let parsed = HypenDnd.parseSpecs(props)
+        cachedDndSpecs = parsed
+        return parsed
+    }
+
+    private var cachedAnimSpecs: NodeAnimSpecs?
+
+    /// The node's parsed `__anim.*` channels, memoized until `props`
+    /// change. Parsing is defensive: a malformed channel degrades to `nil`
+    /// (snap) and never poisons its siblings.
+    public var animSpecs: NodeAnimSpecs {
+        if let cached = cachedAnimSpecs { return cached }
+        let parsed = HypenAnim.parseSpecs(props)
+        cachedAnimSpecs = parsed
+        return parsed
+    }
+
+    /// Applicator pipeline output memoized by `ApplicatorRegistry`.
+    /// Cleared whenever `props` change; the registry identity is kept
+    /// alongside so a subtree rendered with a custom registry never
+    /// reuses a result built by a different one.
+    var cachedApplicatorResult: ApplicatorResult?
+    var cachedApplicatorRegistryID: ObjectIdentifier?
+
+    /// Viewport the cached result was resolved against. `vw`/`vh` depend on
+    /// it, and nothing mutates the element when the window resizes, so it is
+    /// part of the cache key rather than an invalidation trigger.
+    var cachedApplicatorViewport: CGSize = .zero
+
+    /// Re-emit this element's change publisher without mutating it.
+    /// Used by `HypenRenderer` when a change to a descendant (e.g. a
+    /// control-flow wrapper's children, or a child prop the parent's
+    /// layout reads) must re-render this element's view.
+    func notifyChanged() {
+        objectWillChange.send()
+    }
 
     public init(
         id: String,
@@ -39,6 +192,13 @@ public final class HypenElement: @unchecked Sendable {
         if let value = props[name] {
             if let str = value as? String {
                 return str
+            }
+            // A JSON `null` decodes to `NSNull`; stringifying it yields the
+            // literal "<null>", which e.g. made `Image(src: null)` try to load
+            // an asset named "<null>" instead of rendering empty until the
+            // real URL arrived in a follow-up SetProp.
+            if value is NSNull {
+                return nil
             }
             return String(describing: value)
         }
@@ -140,6 +300,54 @@ public final class HypenElement: @unchecked Sendable {
         return nil
     }
 
+    /// List-of-strings prop (e.g. `playlist: ["url1", "url2"]`).
+    ///
+    /// Pass the base name: the plain key is tried first, then the engine's
+    /// positional `"<name>.0"` form. Accepts `[String]` and `[Any]` values
+    /// (JSON deserialization yields `[Any]`); non-string entries are
+    /// stringified, `NSNull` entries are dropped. Returns nil when the prop
+    /// is absent or not a list.
+    public func getStringListProp(_ name: String) -> [String]? {
+        guard let value = props[name] ?? props["\(name).0"] else { return nil }
+        if let list = value as? [String] {
+            return list
+        }
+        if let list = value as? [Any] {
+            return list.compactMap { entry -> String? in
+                if entry is NSNull { return nil }
+                if let str = entry as? String { return str }
+                return String(describing: entry)
+            }
+        }
+        return nil
+    }
+
+    /// String-to-string map prop (e.g. `headers: {"Authorization": "Bearer x"}`).
+    ///
+    /// Same key fallback as `getStringListProp` (plain, then `"<name>.0"`).
+    /// Accepts `[String: String]` and `[String: Any]` values; non-string
+    /// entries are stringified, `NSNull` entries are dropped. Returns nil
+    /// when the prop is absent or not a map.
+    public func getStringMapProp(_ name: String) -> [String: String]? {
+        guard let value = props[name] ?? props["\(name).0"] else { return nil }
+        if let map = value as? [String: String] {
+            return map
+        }
+        if let map = value as? [String: Any] {
+            var result: [String: String] = [:]
+            for (key, entry) in map {
+                if entry is NSNull { continue }
+                if let str = entry as? String {
+                    result[key] = str
+                } else {
+                    result[key] = String(describing: entry)
+                }
+            }
+            return result
+        }
+        return nil
+    }
+
     // MARK: - Mutators
 
     public func setProp(_ name: String, value: Any?) {
@@ -159,7 +367,9 @@ public final class HypenElement: @unchecked Sendable {
     }
 
     public func removeChild(_ childId: String) {
-        children.removeAll { $0 == childId }
+        if let index = children.firstIndex(of: childId) {
+            children.remove(at: index)
+        }
     }
 }
 

@@ -2,7 +2,7 @@
 
 # Screenshot Comparison Script
 #
-# Compares screenshots across iOS, Android, and Web platforms.
+# Compares screenshots across iOS, Android, Web, Desktop, and Canvas platforms.
 #
 # Usage:
 #   ./compare.sh [options]
@@ -11,6 +11,7 @@
 #   --component=X    Compare only a specific component
 #   --threshold=X    Pixel difference threshold 0-1 (default: 0.1)
 #   --output=dir     Output directory for diff images
+#   --allow-differences  Generate output without failing similarity targets
 
 set -e
 

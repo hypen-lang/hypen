@@ -104,6 +104,26 @@ public struct TransformApplicator: ApplicatorHandler {
     public init() {}
 
     public func apply(modifier: inout HypenModifier, value: Any?, context: ApplicatorContext) {
+        if let source = value as? String {
+            if let rotate = cssTransformNumber(source, function: "rotate") {
+                modifier.rotation = rotate
+                modifier.explicitlySetProperties.insert("rotation")
+            }
+            if let scale = cssTransformNumber(source, function: "scale") {
+                modifier.scaleX = CGFloat(scale)
+                modifier.scaleY = CGFloat(scale)
+                modifier.explicitlySetProperties.formUnion(["scaleX", "scaleY"])
+            }
+            if let translateX = cssTransformNumber(source, function: "translateX") {
+                modifier.translateX = CGFloat(translateX)
+                modifier.explicitlySetProperties.insert("translateX")
+            }
+            if let translateY = cssTransformNumber(source, function: "translateY") {
+                modifier.translateY = CGFloat(translateY)
+                modifier.explicitlySetProperties.insert("translateY")
+            }
+            return
+        }
         guard let dict = value as? [String: Any] else { return }
 
         if let rotate = parseDouble(dict["rotate"]) {
@@ -132,6 +152,17 @@ public struct TransformApplicator: ApplicatorHandler {
             modifier.explicitlySetProperties.insert("translateY")
         }
     }
+}
+
+fileprivate func cssTransformNumber(_ source: String, function: String) -> Double? {
+    guard let start = source.range(of: "\(function)(", options: .caseInsensitive) else { return nil }
+    let remainder = source[start.upperBound...]
+    guard let end = remainder.firstIndex(of: ")") else { return nil }
+    let raw = remainder[..<end]
+        .replacingOccurrences(of: "deg", with: "", options: .caseInsensitive)
+        .replacingOccurrences(of: "px", with: "", options: .caseInsensitive)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return Double(raw)
 }
 
 // MARK: - Helpers

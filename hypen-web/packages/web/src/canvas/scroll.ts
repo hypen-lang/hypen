@@ -211,7 +211,8 @@ export class ScrollManager {
   }
 
   private findScrollableAt(node: VirtualNode, point: Point): VirtualNode | null {
-    if (!node.visible || !node.layout) return null;
+    // Exit-animating subtrees no longer scroll — same exclusion as hit-testing.
+    if (!node.visible || !node.layout || node.exiting) return null;
 
     const bounds = getScrollAwareBounds(node);
     if (!bounds) return null;

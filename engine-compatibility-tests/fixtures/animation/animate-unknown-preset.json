@@ -1,0 +1,36 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "animate-unknown-preset",
+  "description": "An unknown .animate preset omits the channel entirely (warn, never hard-error): the create patch carries no __anim.animate prop AND no raw animate.0 passthrough — the applicator is consumed, not leaked",
+  "category": "animation",
+  "priority": "P1",
+
+  "skip": {
+    "reason": "animation protocol not yet implemented",
+    "sdks": ["golang"]
+  },
+
+  "input": {
+    "source": "Text(\"Static\").animate(wobble)",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Text",
+        "props": { "0": "Static" },
+        "absentProps": ["__anim.animate", "animate.0"]
+      },
+      { "type": "insert" }
+    ]
+  }
+}

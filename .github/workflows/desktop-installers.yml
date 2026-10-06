@@ -1,0 +1,121 @@
+name: Desktop Installers
+
+# Builds installable packages of the Hypen Browser (the desktop gallery
+# app, crate `hypen-browser`) for macOS, Windows, and Linux via
+# cargo-packager. Runs on demand, and attaches installers to the GitHub
+# release when one is published.
+#
+#   macOS   → .dmg            (arm64 + x86_64)
+#   Windows → NSIS setup .exe (x86_64)
+#   Linux   → .deb + .AppImage + pacman .tar.gz/PKGBUILD (x86_64)
+#
+# Packaging config lives in hypen-browser/Cargo.toml under
+# [package.metadata.packager]; icons in hypen-browser/assets/icons.
+# Artifacts are unsigned — see hypen-browser/README.md for the
+# first-launch notes on macOS / Windows.
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    name: Package (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: macos-arm64
+            os: macos-latest
+            formats: dmg
+            rust-target: aarch64-apple-darwin
+            artifacts: dist/*.dmg dist/*.tar.gz
+          - label: macos-x86_64
+            # Last GitHub-hosted Intel macOS image (supported into 2027).
+            os: macos-15-intel
+            formats: dmg
+            rust-target: x86_64-apple-darwin
+            artifacts: dist/*.dmg dist/*.tar.gz
+          - label: windows-x86_64
+            os: windows-latest
+            formats: nsis
+            rust-target: x86_64-pc-windows-msvc
+            artifacts: dist/*-setup.exe dist/*.tar.gz
+          - label: linux-x86_64
+            os: ubuntu-latest
+            # pacman output is a binary .tar.gz + generated PKGBUILD
+            # (installed with `makepkg -si`), built without Arch tooling.
+            formats: deb,appimage,pacman
+            rust-target: x86_64-unknown-linux-gnu
+            artifacts: dist/*.deb dist/*.AppImage dist/*.tar.gz dist/PKGBUILD
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: desktop-installers-${{ matrix.label }}
+
+      - name: Install Linux build + packaging deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # winit/wgpu build headers, the device-capability backends of
+          # hypen-renderer-desktop (default features `mic`, `bluetooth`,
+          # `camera`: ALSA for cpal, D-Bus for btleplug/BlueZ, libclang for
+          # nokhwa's V4L2 bindgen, a C++ compiler for OpenH264's bundled
+          # source), plus libfuse2 for the AppImage tooling.
+          sudo apt-get install -y \
+            libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
+            pkg-config libasound2-dev libdbus-1-dev libclang-dev g++
+          sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
+
+      - name: Install cargo-packager
+        shell: bash
+        run: cargo install cargo-packager --locked
+
+      - name: Build installers
+        shell: bash
+        run: cargo packager --release -p hypen-browser --formats ${{ matrix.formats }} --out-dir dist --verbose
+
+      # Bare-binary archive for `hypen run desktop`: the CLI downloads
+      # these via the stable (version-less) name at
+      # releases/latest/download/hypen-browser-<rust-target>.tar.gz,
+      # caches under ~/.hypen/runners/, and launches with the dev
+      # server's ws:// URL as the argument.
+      - name: Package CLI runner archive
+        shell: bash
+        run: |
+          BIN=hypen-browser
+          if [ "$RUNNER_OS" = "Windows" ]; then BIN=hypen-browser.exe; fi
+          tar -czf "dist/hypen-browser-${{ matrix.rust-target }}.tar.gz" -C target/release "$BIN"
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hypen-browser-${{ matrix.label }}
+          path: |
+            dist/*.dmg
+            dist/*-setup.exe
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.tar.gz
+            dist/PKGBUILD
+          if-no-files-found: error
+
+      - name: Attach to release
+        if: github.event_name == 'release'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" ${{ matrix.artifacts }} --clobber

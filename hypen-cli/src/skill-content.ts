@@ -175,7 +175,7 @@ import HomePage from "./pages/HomePage"
 
 | Component | Description | Key Props | Has Children |
 |-----------|-------------|-----------|-------------|
-| \`Video\` | Video player | src | No |
+| \`Video\` | Video player (single src or playlist with auto-advance) | src, playlist, poster, controls, title, onEnded, onError | No |
 | \`Audio\` | Audio player | src | No |
 
 ### Navigation Components
@@ -367,7 +367,6 @@ Applicators are chained with dot notation after components. Any unrecognized app
 
 \`\`\`hypen
 .gridColumns(3)
-.gridTemplateColumns("1fr 2fr 1fr")
 .gridColumn("span 2")
 \`\`\`
 

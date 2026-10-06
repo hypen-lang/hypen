@@ -1,0 +1,12 @@
+Button {
+    Text("@{item.name}")
+        .tw("text-sm font-medium")
+        .color("@{item.id == state.selectedCategory ? '#ffffff' : '#374151'}")
+        .transition(200, easeOut, props: [color])
+}
+.tw("px-4 py-2 rounded-full border shrink-0")
+.opacity({ default: 1, active: 0.7 })
+.transition(200, easeOut)
+.backgroundColor("@{item.id == state.selectedCategory ? '#f97316' : '#ffffff'}")
+.borderColor("@{item.id == state.selectedCategory ? '#f97316' : '#e5e7eb'}")
+.onClick(@actions.selectCategory, categoryId: "@{item.id}")

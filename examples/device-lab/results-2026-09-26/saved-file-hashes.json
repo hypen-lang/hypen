@@ -1,0 +1,72 @@
+[
+  {
+    "client": "iOS",
+    "server": "TS",
+    "compressionOverride": true,
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790421936.1444955
+  },
+  {
+    "client": "iOS",
+    "server": "Go",
+    "compressionOverride": true,
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790421903.4255247
+  },
+  {
+    "client": "iOS",
+    "server": "Kotlin",
+    "compressionOverride": false,
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790421177.75542
+  },
+  {
+    "client": "iOS",
+    "server": "Swift",
+    "compressionOverride": false,
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790420888.2043629
+  },
+  {
+    "client": "iOS",
+    "server": "Rust",
+    "compressionOverride": false,
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350",
+    "mtime": 1790420855.0916464
+  },
+  {
+    "client": "Desktop",
+    "file": "desktop-Kotlin.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  },
+  {
+    "client": "Desktop",
+    "file": "desktop-TS.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  },
+  {
+    "client": "Desktop",
+    "file": "desktop-Rust.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  },
+  {
+    "client": "Desktop",
+    "file": "desktop-Swift.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  },
+  {
+    "client": "Desktop",
+    "file": "desktop-Go.txt",
+    "bytes": 102000,
+    "sha256": "ca3da39460b02267afabd8da42778d5e434e64d3302ed4be304f7318c0335350"
+  }
+]

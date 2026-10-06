@@ -3,13 +3,18 @@ package space.hypen.renderer.components
 import android.util.Log
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
 
@@ -65,10 +70,15 @@ class ListComponent : ComponentHandler {
         renderChildren: @Composable () -> Unit,
     ) {
         val renderer = LocalComposeRenderer.current
+        val listModifier = if (LocalParentAllowsHorizontalExpansion.current) {
+            modifier.fillMaxWidth()
+        } else {
+            modifier
+        }
 
         if (renderer == null) {
             Log.w(TAG, "No renderer available for List component, falling back to regular render")
-            Box(modifier = modifier) {
+            Box(modifier = listModifier) {
                 renderChildren()
             }
             return
@@ -77,6 +87,7 @@ class ListComponent : ComponentHandler {
         // Flatten control-flow wrappers (__ForEach, __Conditional) to get actual items
         val rawChildren = renderer.getChildren(element.id)
         val children = flattenControlFlowChildren(rawChildren, renderer)
+        val hasDynamicItems = rawChildren.any { it.elementType in CONTROL_FLOW_TYPES }
 
         // Direction - prop or positional arg
         val direction = element.getStringProp("direction.0")
@@ -85,9 +96,9 @@ class ListComponent : ComponentHandler {
         val isHorizontal = direction.lowercase() == "horizontal"
 
         if (isHorizontal) {
-            renderHorizontalList(element, modifier, children, renderer)
+            renderHorizontalList(element, listModifier, children, renderer)
         } else {
-            renderVerticalList(element, modifier, children, renderer)
+            renderVerticalList(element, listModifier, children, renderer, hasDynamicItems)
         }
     }
 
@@ -97,6 +108,7 @@ class ListComponent : ComponentHandler {
         modifier: Modifier,
         children: List<HypenElement>,
         renderer: space.hypen.renderer.render.ComposeRenderer,
+        hasDynamicItems: Boolean,
     ) {
         val verticalStr = element.getStringProp("verticalAlignment.0")
             ?: element.getStringProp("justifyContent.0")
@@ -119,17 +131,42 @@ class ListComponent : ComponentHandler {
             else -> Alignment.Start
         }
 
-        LazyColumn(
-            modifier = modifier,
-            verticalArrangement = verticalArrangement,
-            horizontalAlignment = horizontalAlignment,
-        ) {
-            items(
-                items = children,
-                key = { child -> child.id }
-            ) { child ->
-                key(child.id) {
-                    ListItemRenderer(element = child, renderer = renderer)
+        val gap = element.getFloatProp("gap.0") ?: element.getFloatProp("gap") ?: 0f
+        val layout = resolveListLayout(element, hasDynamicItems)
+
+        if (layout.scrollsVertically) {
+            LazyColumn(
+                modifier = modifier,
+                verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
+                    Arrangement.spacedBy(gap.dp)
+                } else {
+                    verticalArrangement
+                },
+                horizontalAlignment = horizontalAlignment,
+            ) {
+                items(
+                    items = children,
+                    key = { child -> child.id }
+                ) { child ->
+                    key(child.id) {
+                        ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+                    }
+                }
+            }
+        } else {
+            Column(
+                modifier = modifier,
+                verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
+                    Arrangement.spacedBy(gap.dp)
+                } else {
+                    verticalArrangement
+                },
+                horizontalAlignment = horizontalAlignment,
+            ) {
+                children.forEach { child ->
+                    key(child.id) {
+                        ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+                    }
                 }
             }
         }
@@ -184,59 +221,80 @@ class ListComponent : ComponentHandler {
     }
 }
 
+internal data class ListLayout(
+    val fillsFiniteWidth: Boolean = true,
+    val scrollsVertically: Boolean,
+)
+
+internal fun resolveListLayout(element: HypenElement, hasDynamicItems: Boolean = false): ListLayout {
+    val props = element.props
+    val overflow = listOf(
+        "overflowY.0", "overflow-y.0", "overflowY", "overflow-y", "overflow.0", "overflow",
+    ).firstNotNullOfOrNull { props[it]?.toString()?.lowercase() }
+    val explicitlyScrollable = element.getBoolProp("scrollable.0") == true ||
+        element.getStringProp("scrollable.0")?.lowercase() in setOf("true", "vertical", "both", "auto", "scroll")
+    val hasFiniteHeight = listOf("height.0", "height", "maxHeight.0", "maxHeight", "size.0", "size")
+        .any { props[it] != null } ||
+        element.getBoolProp("fillMaxHeight.0") == true ||
+        element.getBoolProp("fillMaxSize.0") == true
+    val clipsOverflow = overflow in setOf("hidden", "clip")
+    val scrolls = !clipsOverflow && (
+        hasDynamicItems || explicitlyScrollable || hasFiniteHeight || overflow in setOf("auto", "scroll")
+    )
+    return ListLayout(scrollsVertically = scrolls)
+}
+
 /**
- * Renders a single list item element with its modifiers and applicators.
- * This is a simplified version of HypenElement rendering for use within Lazy* composables.
+ * Renders one list item through the FULL element pipeline.
+ *
+ * This used to be a private re-implementation of [HypenElement] ("a
+ * simplified version"), which silently dropped everything the real pipeline
+ * layers on: the `__anim.*` playbacks (so `.enter`/`.exit`/`.transition` on
+ * a `List` item never reached the pixels — the exit still deferred teardown
+ * on the coordinator's timer, so a removed row froze for its exit duration
+ * and then snapped), engine-derived accessibility semantics, and applicator
+ * variants. Since it recursed into its own children, the whole subtree under
+ * every `List` was affected. [HypenElement] is `internal` precisely so
+ * handlers can reuse it, so we delegate.
+ *
+ * The Row/Column scopes are cleared first. Lazy item content inherits the
+ * CompositionLocals of the composition that declared the `List`, so an outer
+ * `Column`'s [LocalColumnScope] would still be visible here — and
+ * `Modifier.weight` from a foreign scope is not valid in a Lazy item. The old
+ * simplified renderer avoided that by never applying weight at all; clearing
+ * the scopes preserves exactly that behaviour while everything else in the
+ * pipeline comes back.
  */
 @Composable
 private fun ListItemRenderer(
     element: HypenElement,
     renderer: space.hypen.renderer.render.ComposeRenderer,
+    fillsWidth: Boolean = false,
 ) {
-    // Check visibility
-    val visible = element.getBoolProp("visible.0")
-        ?: element.getBoolProp("visible")
-        ?: true
-    if (!visible) return
-
-    val componentRegistry = renderer.getComponentRegistry()
-    val applicatorRegistry = renderer.getApplicatorRegistry()
-
-    val handler = componentRegistry.getHandler(element.elementType)
-    if (handler == null) {
-        // Render as a simple box with children
-        Box {
-            RenderListItemChildren(element, renderer)
-        }
-        return
-    }
-
-    // Build modifier from applicators
-    val context = renderer.createApplicatorContext(element)
-    val modifier = applicatorRegistry.applyAll(Modifier, element, context)
-
-    // Render the component
-    handler.Render(
-        element = element,
-        modifier = modifier,
-        renderChildren = {
-            RenderListItemChildren(element, renderer)
-        },
-    )
-}
-
-/**
- * Renders children of a list item element.
- */
-@Composable
-private fun RenderListItemChildren(
-    element: HypenElement,
-    renderer: space.hypen.renderer.render.ComposeRenderer,
-) {
-    val children = renderer.getChildren(element.id)
-    for (child in children) {
-        key(child.id) {
-            ListItemRenderer(element = child, renderer = renderer)
+    val content: @Composable () -> Unit = {
+        CompositionLocalProvider(
+            LocalRowScope provides null,
+            LocalColumnScope provides null,
+            LocalStretchCrossAxis provides false,
+            LocalParentAllowsHorizontalExpansion provides fillsWidth,
+        ) {
+            RenderHypenElement(element = element, renderer = renderer)
         }
     }
+
+    if (fillsWidth) {
+        Box(
+            modifier = Modifier.fillMaxWidth(),
+            propagateMinConstraints = element.stretchesToListWidth(),
+        ) {
+            content()
+        }
+    } else {
+        content()
+    }
 }
+
+private fun HypenElement.stretchesToListWidth(): Boolean =
+    listOf("width", "size", "maxWidth").none { name ->
+        props["$name.0"] != null || props[name] != null
+    }

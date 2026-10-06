@@ -5,19 +5,62 @@
 //! same `App` defined in the parent.
 
 use super::*;
+use crate::textarea::FieldFrame;
+
+/// Resolve editing state directly from the renderer Tree, with the newest
+/// unacknowledged local value taking precedence. Keyboard delivery must not
+/// depend on a LayoutPass: a second key can legally arrive before the first
+/// key's requested redraw.
+pub(crate) fn controlled_input_state(
+    tree: &Tree,
+    optimistic: &HashMap<String, OptimisticInputEdit>,
+    id: &str,
+) -> Option<(String, String)> {
+    let node = tree.get(id)?;
+    if !crate::layout::TEXT_INPUT_TYPES
+        .iter()
+        .any(|t| node.element_type.eq_ignore_ascii_case(t))
+    {
+        return None;
+    }
+    // A disabled field takes no edits (DOM `disabled` / `enabled: false`).
+    if crate::style::is_disabled(node) {
+        return None;
+    }
+    let bind_path = node
+        .props
+        .get("bind")
+        .or_else(|| node.props.get("bind.0"))?
+        .as_str()?
+        .to_string();
+    let value = optimistic
+        .get(id)
+        .map(|edit| edit.value.clone())
+        .or_else(|| {
+            node.props
+                .get("value")
+                .or_else(|| node.props.get("value.0"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    Some((value, bind_path))
+}
 
 impl App {
     /// Find the focused Input (if any) and return `(node_id, value, bind_path)`.
     pub(super) fn focused_input(&self) -> Option<(String, String, String)> {
         let id = self.focused.clone()?;
-        let layout = self.layout.as_ref()?;
-        let item = layout.item_by_id(&id)?;
-        match &item.kind {
-            ItemKind::Input {
-                value, bind_path, ..
-            } => bind_path.as_ref().map(|p| (id, value.clone(), p.clone())),
-            _ => None,
+        // An Input inside an exit-animating subtree is engine-side
+        // dead: typing, IME composition, and `__hypen_bind` dispatch
+        // all stop the moment the exit begins. (Focus itself is cleared
+        // on the flush that starts the exit; this guards the window
+        // between events.)
+        if self.exit_excluded(&id) {
+            return None;
         }
+        let (value, bind_path) = controlled_input_state(&self.tree, &self.optimistic_inputs, &id)?;
+        Some((id, value, bind_path))
     }
 
     /// Look up an Input's `(value, font_size, rect)` by node id. Used
@@ -31,6 +74,171 @@ impl App {
             } => Some((value.clone(), *font_size, item.rect)),
             _ => None,
         }
+    }
+
+    /// Window scale factor (layout rects are physical, font sizes logical).
+    fn field_scale(&self) -> f32 {
+        self.window
+            .as_ref()
+            .map(|window| window.scale_factor() as f32)
+            .unwrap_or(1.0)
+    }
+
+    /// Physical text frame of the Input / Textarea `id`.
+    fn field_frame(&self, id: &str) -> Option<FieldFrame> {
+        let item = self.layout.as_ref()?.item_by_id(id)?;
+        FieldFrame::of(item, self.field_scale())
+    }
+
+    /// True when the focused editable field is a `Textarea`.
+    pub(super) fn focused_is_multiline(&self) -> bool {
+        self.focused
+            .as_deref()
+            .and_then(|id| self.tree.get(id))
+            .is_some_and(|node| crate::layout::is_multiline_text_input(&node.element_type))
+    }
+
+    /// Map a window-space pointer to `(value, byte offset)` inside the
+    /// Input / Textarea `id` — click-to-place-caret and drag-select.
+    /// The pointer is inverse-transformed into the item's layout space
+    /// first, so a transformed field still hit-tests correctly.
+    pub(super) fn input_offset_at_pointer(
+        &mut self,
+        id: &str,
+        px: f32,
+        py: f32,
+    ) -> Option<(String, usize)> {
+        let (value, _, _) = self.lookup_input(id)?;
+        let frame = self.field_frame(id)?;
+        let (lx, ly) = self.pointer_to_item_local(id, px, py);
+        let stored = self.textarea_scroll.get(id).copied().unwrap_or(0.0);
+        let engine = self.painter.text_engine_mut();
+        let byte = if frame.multiline {
+            let scroll = frame.clamp_scroll_for(engine, &value, stored);
+            let lines = frame.lines(engine, &value);
+            crate::textarea::offset_at_point(&lines, lx - frame.text_x, ly - frame.text_y + scroll)
+        } else {
+            // Same origin + physical font size the painter draws with.
+            engine.byte_offset_at_x(&value, (lx - frame.text_x).max(0.0), frame.font_px)
+        };
+        let byte = byte.min(value.len());
+        Some((value, byte))
+    }
+
+    /// Scroll the Textarea `id` (no-op for an Input) just enough that
+    /// the caret at `head` in `value` is on a visible line.
+    pub(super) fn reveal_textarea_caret(&mut self, id: &str, value: &str, head: usize) {
+        use crate::textarea::{caret_position, clamp_scroll, content_height, scroll_to_reveal};
+        let Some(frame) = self.field_frame(id).filter(|f| f.multiline) else {
+            return;
+        };
+        let lines = frame.lines(self.painter.text_engine_mut(), value);
+        let content_h = content_height(&lines);
+        let stored = self.textarea_scroll.get(id).copied().unwrap_or(0.0);
+        let current = clamp_scroll(stored, content_h, frame.view_h);
+        let (_, top, h) = caret_position(&lines, head.min(value.len()));
+        let next = clamp_scroll(
+            scroll_to_reveal(current, top, h, frame.view_h),
+            content_h,
+            frame.view_h,
+        );
+        if (next - stored).abs() > f32::EPSILON {
+            if next <= 0.0 {
+                self.textarea_scroll.remove(id);
+            } else {
+                self.textarea_scroll.insert(id.to_string(), next);
+            }
+            if let Some(r) = self.item_damage_rect(id) {
+                self.damage.add_region(r);
+            } else {
+                self.damage.add_full();
+            }
+        }
+    }
+
+    /// Wheel over a Textarea whose content overflows: scroll its inner
+    /// text. Returns `false` (let the page / container take the gesture)
+    /// when the pointer isn't over one, it doesn't overflow, or it is
+    /// already at the limit in the wheel's direction.
+    pub(super) fn textarea_wheel(&mut self, px: f32, py: f32, dy: f32) -> bool {
+        let Some(id) = self.layout.as_ref().and_then(|layout| {
+            layout
+                .hit_focusable_excluding(px, py, &|id| self.exit_excluded(id))
+                .filter(|item| matches!(item.kind, ItemKind::Input { multiline: true, .. }))
+                .map(|item| item.node_id.clone())
+        }) else {
+            return false;
+        };
+        let Some((value, _, _)) = self.lookup_input(&id) else {
+            return false;
+        };
+        let Some(frame) = self.field_frame(&id) else {
+            return false;
+        };
+        let (_, content_h) = self.painter.text_engine_mut().measure_weighted_line_height(
+            &value,
+            frame.font_px,
+            Some(frame.inner_w),
+            frame.weight,
+            frame.line_px,
+        );
+        let stored = self.textarea_scroll.get(&id).copied().unwrap_or(0.0);
+        let current = crate::textarea::clamp_scroll(stored, content_h, frame.view_h);
+        let next = crate::textarea::clamp_scroll(current + dy, content_h, frame.view_h);
+        if (next - current).abs() <= f32::EPSILON {
+            return false;
+        }
+        self.textarea_scroll.insert(id.clone(), next);
+        if let Some(r) = self.item_damage_rect(&id) {
+            self.damage.add_region(r);
+        } else {
+            self.damage.add_full();
+        }
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+        true
+    }
+
+    /// Textarea-only keys: Enter inserts a newline, Up / Down move the
+    /// caret across visual lines, Home / End go to the visual line's
+    /// start / end (Cmd/Ctrl + Up / Down / Home / End: whole text).
+    /// `None` = not a Textarea key; fall through to the shared Input
+    /// handling (Left / Right / Backspace / typing / clipboard).
+    fn handle_textarea_key(&mut self, ev: &KeyEvent, shift: bool, cmd: bool) -> Option<bool> {
+        enum Nav {
+            Up,
+            Down,
+            Home,
+            End,
+        }
+        let nav = match ev.logical_key.as_ref() {
+            Key::Named(NamedKey::Enter) if !cmd => {
+                return Some(self.edit_focused_input(textarea_enter_edit));
+            }
+            Key::Named(NamedKey::ArrowUp) => Nav::Up,
+            Key::Named(NamedKey::ArrowDown) => Nav::Down,
+            Key::Named(NamedKey::Home) => Nav::Home,
+            Key::Named(NamedKey::End) => Nav::End,
+            _ => return None,
+        };
+        let (id, value, _) = self.focused_input()?;
+        let frame = self.field_frame(&id)?;
+        let sel = self.selection_of(&id, &value);
+        let lines = frame.lines(self.painter.text_engine_mut(), &value);
+        let len = value.len();
+        let new_head = match (nav, cmd) {
+            (Nav::Up | Nav::Home, true) => 0,
+            (Nav::Down | Nav::End, true) => len,
+            (Nav::Up, false) => crate::textarea::vertical_move(&lines, sel.head, false, len),
+            (Nav::Down, false) => crate::textarea::vertical_move(&lines, sel.head, true, len),
+            (Nav::Home, false) => crate::textarea::line_home(&lines, sel.head),
+            (Nav::End, false) => crate::textarea::line_end(&lines, sel.head, len),
+        };
+        Some(self.edit_focused_input(move |val, sel| {
+            let anchor = if shift { sel.anchor } else { new_head };
+            (val.to_string(), Selection::range(anchor, new_head))
+        }))
     }
 
     /// Read the current selection of `id`, defaulting to a caret at
@@ -111,7 +319,14 @@ impl App {
             return false;
         }
         self.input_selections.insert(id.clone(), new_sel);
+        // Keep a Textarea's caret line in view (typing past the last
+        // visible line, arrowing up out of it, …). No-op for an Input.
+        self.reveal_textarea_caret(&id, &new_value, new_sel.head);
         if new_value != value {
+            self.optimistic_inputs
+                .entry(id.clone())
+                .or_default()
+                .push(new_value.clone());
             // Optimistic local update: stamp the Input's `value` prop
             // directly into the Tree before dispatching to the engine.
             // The engine will eventually echo back a SetProp patch with
@@ -124,13 +339,27 @@ impl App {
             // place), which is the same pattern every web framework
             // uses for controlled inputs.
             let patch = hypen_engine::Patch::SetProp {
-                id: id.clone(),
+                id: id.as_str().into(),
                 name: "value".to_string(),
                 value: serde_json::Value::String(new_value.clone()),
             };
             self.tree.apply(&patch);
-            self.tree_generation = self.tree_generation.wrapping_add(1);
-            self.layout = None;
+            // `value` is paint/a11y state, not geometry. Refresh the cached
+            // item in place so another keyboard event arriving before the
+            // redraw can still resolve the focused Input. Invalidating the
+            // whole layout here made burst typing drop every event that landed
+            // between the first key and its paint.
+            let scale = self
+                .window
+                .as_ref()
+                .map(|window| window.scale_factor() as f32)
+                .unwrap_or(1.0);
+            let viewport = self.logical_viewport();
+            if let Some(layout) = self.layout.as_mut() {
+                let affected = HashSet::from([id.clone()]);
+                layout.refresh_paint_only(&self.tree, &affected, viewport, scale);
+                self.layout_generation = self.layout_generation.wrapping_add(1);
+            }
             // Same reason as `flush_patches`: the focused Input's
             // cached scene fragment now has the wrong text and needs
             // re-encoding. Bulk-clear; the next paint rebuilds only
@@ -140,7 +369,8 @@ impl App {
             if let Some(w) = self.window.as_ref() {
                 w.request_redraw();
             }
-            self.module.dispatch_action(
+            self.module.dispatch_ui_action(
+                &id,
                 "__hypen_bind",
                 Some(json!({ "path": bind_path, "value": new_value })),
             );
@@ -161,8 +391,11 @@ impl App {
                     obj.insert("type".to_string(), json!("input"));
                     obj.insert("value".to_string(), json!(new_value.clone()));
                     obj.insert("input".to_string(), json!(new_value.clone()));
-                    self.module
-                        .dispatch_action(&action, Some(serde_json::Value::Object(obj)));
+                    self.module.dispatch_ui_action(
+                        &id,
+                        &action,
+                        Some(serde_json::Value::Object(obj)),
+                    );
                 }
             }
         }
@@ -221,9 +454,10 @@ impl App {
             Some(s) => s,
             None => return false,
         };
-        // Single-line `Input` strips embedded newlines; Textarea will
-        // preserve them when multi-line editing lands.
-        let cleaned: String = pasted.replace(['\n', '\r'], " ");
+        // Single-line `Input` folds embedded newlines to spaces; a
+        // Textarea keeps them (normalised to `\n`).
+        let cleaned =
+            crate::textarea::normalize_inserted_text(&pasted, self.focused_is_multiline());
         if cleaned.is_empty() {
             return false;
         }
@@ -243,6 +477,11 @@ impl App {
             event,
         );
         if let ImeEffect::Commit(text) = effect {
+            let text = if self.focused_is_multiline() {
+                crate::textarea::normalize_inserted_text(&text, true)
+            } else {
+                text
+            };
             // Insertion goes through the same primitive typing uses,
             // so a non-empty selection is replaced and the caret
             // advances to the end of the inserted text.
@@ -274,7 +513,16 @@ impl App {
             // individually but show up in profiles when called every
             // frame on a focused input that hasn't moved.
             if let Some(id) = self.focused.as_deref() {
-                if let Some((_, _, rect)) = self.lookup_input(id) {
+                if self.lookup_input(id).is_some() {
+                    // IME candidate windows position in SCREEN space —
+                    // use the transform-aware visual rect so a
+                    // transformed Input's candidates track the pixels.
+                    let rect = self
+                        .layout
+                        .as_ref()
+                        .and_then(|l| l.item_by_id(id))
+                        .map(|it| it.visual_rect())
+                        .expect("lookup_input implies layout item");
                     let target = (
                         id.to_string(),
                         (rect.x as i32, rect.y as i32, rect.w as u32, rect.h as u32),
@@ -294,20 +542,47 @@ impl App {
     }
 
     pub(super) fn dispatch_focused(&mut self) -> bool {
-        let resolved = (|| -> Option<(String, Option<serde_json::Value>)> {
-            let id = self.focused.as_deref()?;
-            let layout = self.layout.as_ref()?;
-            let item = layout.item_by_id(id)?;
-            item.action
-                .clone()
-                .map(|a| (a, item.action_payload.clone()))
-        })();
+        // A focused `.videoIntent(...)` control performs its intent on
+        // Enter / Space — keyboard parity with the pointer path (and the
+        // reason such a node is focusable with no `.onClick` at all).
+        let intent = self
+            .focused
+            .clone()
+            .filter(|id| !self.exit_excluded(id))
+            .and_then(|id| self.layout.as_ref()?.item_by_id(&id)?.video_intent);
+        let intent_handled = match intent {
+            Some(i) => {
+                self.perform_video_intent(i);
+                true
+            }
+            None => false,
+        };
+        let resolved = self.layout.as_ref().and_then(|layout| {
+            focused_dispatch(layout, self.focused.as_deref(), &|id| {
+                self.exit_excluded(id)
+            })
+        });
         if let Some((action, payload)) = resolved {
+            // Same rule as the click path: a derived `onPlay` is the
+            // built-in's own event and must not fire when a
+            // presentation-only intent consumed the activation.
+            let derived_play = payload
+                .as_ref()
+                .and_then(|p| p.get("type"))
+                .and_then(|v| v.as_str())
+                == Some("play");
+            if intent_handled && derived_play {
+                return true;
+            }
             log::debug!("dispatch (kbd): {action} payload={payload:?}");
-            self.module.dispatch_action(&action, payload);
+            // Node-addressed, like the click path (multi-module apps).
+            match self.focused.clone() {
+                Some(node) => self.module.dispatch_ui_action(&node, &action, payload),
+                None => self.module.dispatch_action(&action, payload),
+            }
             true
         } else {
-            false
+            intent_handled
         }
     }
 
@@ -319,6 +594,17 @@ impl App {
     pub(super) fn handle_keyboard(&mut self, ev: &KeyEvent) -> bool {
         if ev.state != ElementState::Pressed {
             return false;
+        }
+
+        // Esc cancels a claimed drag-and-drop gesture (`.onDragEnd
+        // {dropped: false}`) before any other Escape handling — the drag
+        // owns the pointer, so it owns the cancel key too.
+        if matches!(ev.logical_key.as_ref(), Key::Named(NamedKey::Escape))
+            && self.dnd.escape(&mut self.tree)
+        {
+            self.apply_dnd_dirty();
+            self.dispatch_dnd_actions();
+            return true;
         }
 
         let editing_focused = self.focused_input().is_some();
@@ -358,21 +644,62 @@ impl App {
             return true;
         }
 
+        // Textarea: Enter inserts a newline and Up / Down / Home / End
+        // navigate visual lines. A single-line Input never gets here, so
+        // its Enter keeps doing what it did (nothing / shortcuts).
+        if editing_focused && self.focused_is_multiline() {
+            if let Some(handled) = self.handle_textarea_key(ev, shift, cmd) {
+                return handled;
+            }
+        }
+
+        // Video v2: Left / Right on a focused `Scrubber` seek by ±5 s
+        // with an immediate commit (no preview phase) — the keyboard
+        // analogue of a native range input's arrow step. Checked before
+        // the editing-focused arrow handling below; the two are mutually
+        // exclusive (a Scrubber is never a text input).
+        if !editing_focused {
+            let step = match ev.logical_key.as_ref() {
+                Key::Named(NamedKey::ArrowLeft) => {
+                    Some(-crate::window::window_video::SCRUB_KEY_STEP)
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    Some(crate::window::window_video::SCRUB_KEY_STEP)
+                }
+                _ => None,
+            };
+            if let Some(step) = step {
+                if self.video_scrub_key(step) {
+                    return true;
+                }
+            }
+        }
+
         match ev.logical_key.as_ref() {
             Key::Named(NamedKey::Tab) => {
                 let layout = match self.layout.as_ref() {
                     Some(l) => l,
                     None => return false,
                 };
+                // Exit-animating ids are excluded from the Tab order —
+                // they still paint (mid-exit) but are engine-side dead,
+                // so focus walks past them exactly like hit-testing
+                // walks past them.
                 let next = if shift {
-                    layout.focus_prev(self.focused.as_deref())
+                    layout
+                        .focus_prev_excluding(self.focused.as_deref(), &|id| self.exit_excluded(id))
                 } else {
-                    layout.focus_next(self.focused.as_deref())
+                    layout
+                        .focus_next_excluding(self.focused.as_deref(), &|id| self.exit_excluded(id))
                 };
                 if next != self.focused {
                     self.focused = next;
                     // Keyboard-driven focus shows the ring (`:focus-visible`).
                     self.focus_visible = true;
+                    // Focus may land on an item outside the visible window
+                    // (culling only emits viewport ± buffer); bring it into
+                    // view so Tab never selects something invisible.
+                    self.scroll_focused_into_view();
                     return true;
                 }
                 false
@@ -483,8 +810,23 @@ impl App {
                 self.damage.add_region(r);
             }
         }
+        // Resolve the dispatch inside the layout borrow, act on it
+        // after the borrow ends — the video playback toggle (feature
+        // `video`) needs `&mut self`.
+        let mut resolved: Option<(String, Option<String>, Option<serde_json::Value>)> = None;
+        #[cfg(feature = "video")]
+        let mut video_target: Option<String> = None;
+        // Renderer-local `.videoIntent(...)` on the released item (only
+        // set for a node inside a Video subtree — layout resolves that).
+        let mut intent: Option<crate::video_v2::VideoIntent> = None;
         if let Some(layout) = self.layout.as_ref() {
-            if let Some(item) = layout.hit(px, py) {
+            // Exit-animating subtrees are excluded: their ids are
+            // engine-side dead, so a click during the exit playback
+            // must not dispatch (mirrors the DOM renderer's
+            // exiting-subtree event drop).
+            if let Some(item) =
+                layout.hit_excluding(px, py, &|id| self.animator.is_exit_excluded(&self.tree, id))
+            {
                 // A click only fires when the press AND release land on
                 // the same actionable. `unwrap_or(false)` rejects the
                 // case where nothing was pressed (e.g. press landed on
@@ -497,11 +839,67 @@ impl App {
                     .map(|id| id == item.node_id)
                     .unwrap_or(false);
                 if same_target {
-                    if let Some(action) = item.action.clone() {
-                        let payload = item.action_payload.clone();
-                        log::debug!("dispatch action: {action} payload={payload:?}");
-                        self.module.dispatch_action(&action, payload);
+                    // `action_payload_at` merges a chart mark's
+                    // `{series, index, x, y, datum}` (or a chart host's
+                    // pointer position in data units) on top of the
+                    // static action arguments; every other item kind
+                    // returns its static payload unchanged.
+                    resolved = Some((
+                        item.node_id.clone(),
+                        item.action.clone(),
+                        item.action_payload_at(Some((px, py))),
+                    ));
+                    intent = item.video_intent;
+                    #[cfg(feature = "video")]
+                    if matches!(item.kind, crate::layout::ItemKind::Video { .. }) {
+                        video_target = Some(item.node_id.clone());
                     }
+                }
+            }
+        }
+        if let Some((node_id, action, payload)) = resolved {
+            // Renderer-local intent first: fullscreen is performed HERE,
+            // with no dispatch and no module round trip. It is
+            // presentation only, so it also stands in for the built-in
+            // tap-to-toggle on that tap — a fullscreen button must not
+            // pause the player on the way out.
+            let intent_handled = match intent {
+                Some(i) => {
+                    self.perform_video_intent(i);
+                    true
+                }
+                None => false,
+            };
+            // Feature `video`: a click on a Video surface toggles
+            // playback and dispatches the contract play/pause events
+            // itself (`App::handle_video_click`). A *derived* `onPlay`
+            // item action (payload `type == "play"`, resolved by
+            // `resolve_video_play_action`) must then not double-fire;
+            // an explicit `.onClick` still dispatches alongside the
+            // toggle.
+            #[cfg(feature = "video")]
+            let toggled = match video_target.as_deref() {
+                Some(id) if !intent_handled => self.handle_video_click(id),
+                _ => false,
+            };
+            #[cfg(not(feature = "video"))]
+            let toggled = false;
+            // The derived `onPlay` action is the built-in's own event:
+            // whichever built-in consumed the tap (playback toggle, or a
+            // presentation-only intent that replaced it) suppresses it.
+            let suppress = (toggled || intent_handled)
+                && payload
+                    .as_ref()
+                    .and_then(|p| p.get("type"))
+                    .and_then(|v| v.as_str())
+                    == Some("play");
+            if !suppress {
+                if let Some(action) = action {
+                    log::debug!("dispatch action: {action} node={node_id} payload={payload:?}");
+                    // Node-addressed: in a multi-module app the engine
+                    // resolves the owning module from the clicked node
+                    // (a bare name is ambiguous there).
+                    self.module.dispatch_ui_action(&node_id, &action, payload);
                 }
             }
         }
@@ -515,4 +913,31 @@ impl App {
             w.request_redraw();
         }
     }
+}
+
+/// Resolve the keyboard-activation dispatch (Enter / Space) for the
+/// focused id. Exit-animating ids resolve to `None` — a focused button
+/// mid-exit dispatches nothing, mirroring the pointer paths'
+/// exclusion. Free function so the guard is testable without a
+/// GPU-backed `App`.
+pub(crate) fn focused_dispatch(
+    layout: &LayoutPass,
+    focused: Option<&str>,
+    excluded: &dyn Fn(&str) -> bool,
+) -> Option<(String, Option<serde_json::Value>)> {
+    let id = focused?;
+    if excluded(id) {
+        return None;
+    }
+    let item = layout.item_by_id(id)?;
+    item.action
+        .clone()
+        .map(|a| (a, item.action_payload.clone()))
+}
+
+/// Enter inside a Textarea: replace the selection with a hard newline
+/// (the caret lands at the start of the new line). Pure so the editing
+/// contract is testable without a window.
+pub(crate) fn textarea_enter_edit(value: &str, sel: Selection) -> (String, Selection) {
+    App::replace_selection_with(value, sel, "\n")
 }

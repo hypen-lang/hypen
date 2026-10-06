@@ -37,25 +37,52 @@ const isHostedByCli = Boolean(process.env.HYPEN_PROJECT_DIR);
 let serveIndex: any;
 let buildAssetsDir: string | null = null;
 
+// Prebuilt bundle shipped inside the published @hypen-space/cli package
+// (built by hypen-cli/build.ts at publish time, into the CLI's dist/ so the
+// tarball's `dist/` gitignore rule can't strip it). Preferring it over a
+// runtime build matters beyond startup speed: published installs live
+// under bun's global dir (`~/.bun/install/global/node_modules/...`), and
+// Tailwind's source scanner silently skips everything under a hidden
+// (dot-)directory — a runtime build there emits CSS with ZERO utility
+// classes and Studio renders completely unstyled.
+const prebuiltAssetsDir = join(import.meta.dir, "..", "..", "dist", "studio-ui");
+
 if (isHostedByCli) {
-  const tailwindPlugin = (await import("bun-plugin-tailwind")).default;
-  buildAssetsDir = join(tmpdir(), `hypen-studio-${process.pid}`);
+  if (existsSync(join(prebuiltAssetsDir, "index.html"))) {
+    buildAssetsDir = prebuiltAssetsDir;
+  } else {
+    // Monorepo / teleport dev: no prebuilt bundle, build on the fly.
+    const tailwindPlugin = (await import("bun-plugin-tailwind")).default;
+    buildAssetsDir = join(tmpdir(), `hypen-studio-${process.pid}`);
 
-  const result = await Bun.build({
-    entrypoints: [join(import.meta.dir, "index.html")],
-    outdir: buildAssetsDir,
-    plugins: [tailwindPlugin],
-    target: "browser",
-  });
+    const result = await Bun.build({
+      entrypoints: [join(import.meta.dir, "index.html")],
+      outdir: buildAssetsDir,
+      plugins: [tailwindPlugin],
+      target: "browser",
+    });
 
-  if (!result.success) {
-    console.error("Studio UI build failed:", result.logs);
-    process.exit(1);
+    if (!result.success) {
+      console.error("Studio UI build failed:", result.logs);
+      process.exit(1);
+    }
+
+    // Surface the hidden-directory Tailwind failure mode instead of
+    // serving a silently unstyled Studio.
+    const cssArtifact = result.outputs.find((o) => o.path.endsWith(".css"));
+    if (cssArtifact && !/\.flex\b/.test(await Bun.file(cssArtifact.path).text())) {
+      console.warn(
+        "[studio] Tailwind emitted no utility classes — studio-ui is likely under a " +
+          "hidden directory (e.g. ~/.bun), which Tailwind's scanner skips. " +
+          "Studio will render unstyled. Upgrade @hypen-space/cli (newer builds ship a " +
+          "prebuilt Studio UI) or run from a path with no dot-directories."
+      );
+    }
+
+    // Clean up temp build on exit
+    const dir = buildAssetsDir;
+    process.on("exit", () => { try { rmSync(dir, { recursive: true }); } catch {} });
   }
-
-  // Clean up temp build on exit
-  const dir = buildAssetsDir;
-  process.on("exit", () => { try { rmSync(dir, { recursive: true }); } catch {} });
 } else {
   // Dev mode: use Bun's HTML import for HMR support
   serveIndex = (await import("./index.html")).default;
@@ -247,10 +274,75 @@ if (existsSync(resolve(projectDir, componentsDir))) {
   });
 }
 
+/**
+ * Locate `@hypen-space/web-engine`'s bundled `wasm-browser/` directory —
+ * the project's install first (version-matched with the app), studio-ui's
+ * own copy as fallback. Serving the WASM locally means the in-browser
+ * preview engine works offline / behind proxies instead of fetching
+ * `@latest` from the unpkg CDN.
+ */
+function findWasmBrowserDir(): string | null {
+  for (const root of [projectDir, import.meta.dir]) {
+    try {
+      const entry = Bun.resolveSync("@hypen-space/web-engine", root);
+      let dir = resolve(entry, "..");
+      for (let i = 0; i < 5 && dir !== "/"; i++) {
+        const candidate = join(dir, "wasm-browser");
+        if (existsSync(join(candidate, "hypen_engine.js"))) return candidate;
+        dir = resolve(dir, "..");
+      }
+    } catch {
+      // Not resolvable from this root — try the next.
+    }
+  }
+  return null;
+}
+const wasmBrowserDir = findWasmBrowserDir();
+
+function wasmFileResponse(fileName: string, contentType: string): Response {
+  if (!wasmBrowserDir) return new Response("Not Found", { status: 404 });
+  try {
+    return new Response(Bun.file(join(wasmBrowserDir, fileName)), {
+      headers: { "Content-Type": contentType },
+    });
+  } catch {
+    return new Response("Not Found", { status: 404 });
+  }
+}
+
 const server = serve({
   port: Number(process.env.PORT) || 5173,
 
   routes: {
+    // Local WASM engine for the in-browser preview (see findWasmBrowserDir).
+    // HEAD is the client's availability probe (lib/wasm-urls.ts).
+    "/wasm/hypen_engine.js": {
+      GET: () => wasmFileResponse("hypen_engine.js", "application/javascript"),
+      HEAD: () => wasmFileResponse("hypen_engine.js", "application/javascript"),
+    },
+    "/wasm/hypen_engine_bg.wasm": {
+      GET: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm"),
+      HEAD: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm"),
+    },
+
+    // TS→JS transpile for the in-browser preview's sibling `.ts` modules.
+    // Server-side (Bun.Transpiler) so the preview doesn't depend on a
+    // CDN-hosted typescript build (esm.sh) at runtime.
+    "/api/transpile": {
+      async POST(req) {
+        try {
+          const { code } = await req.json();
+          if (typeof code !== "string") {
+            return Response.json({ error: "code must be a string" }, { status: 400 });
+          }
+          const transpiler = new Bun.Transpiler({ loader: "ts" });
+          return Response.json({ code: transpiler.transformSync(code) });
+        } catch (e: any) {
+          return Response.json({ error: e?.message ?? String(e) }, { status: 400 });
+        }
+      },
+    },
+
     // API Routes - must come before catch-all
     "/api/files": {
       async GET(req) {

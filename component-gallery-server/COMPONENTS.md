@@ -8,7 +8,7 @@ Single server with path-based routing on port **4000**.
 ws://localhost:4000/<path>
 ```
 
-## Components (28)
+## Components (29)
 
 | Component | Path | Description |
 |-----------|------|-------------|
@@ -28,6 +28,7 @@ ws://localhost:4000/<path>
 | Spacer | /components/spacer | Flexible space |
 | Stack | /components/stack | Overlays children |
 | Divider | /components/divider | Visual separator |
+| SafeArea | /components/safearea | Container padded by device safe-area insets |
 | Grid | /components/grid | Grid layout |
 | Card | /components/card | Styled card container |
 | Heading | /components/heading | Semantic heading |

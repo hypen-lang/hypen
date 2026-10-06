@@ -12,13 +12,28 @@ use indexmap::IndexMap;
 use tiny_skia::Pixmap;
 
 /// Cap on cached `(text, font_size, wrap_width) -> (w, h)` entries.
-/// 2k is plenty for a busy screen (the social example tops out near
-/// ~120 unique text/font/wrap tuples) and bounds memory at ~32KB.
+///
+/// This was briefly raised to 16k and reverted. The measurement that
+/// justified the raise (a 600-post feed missing on nearly every lookup,
+/// ~85% of a window-height resize frame) was real when taken, but
+/// `TaffyState::wrapped_probes` now answers the repeated "how tall is
+/// this text at this width" question *before* the measure cache is
+/// consulted. Re-measured against the larger cap afterwards: exactly 0%
+/// on a height drag, ~8% on the heaviest width drag — not worth ~950 KB
+/// resident per window, which nothing clears outside an `Occluded(true)`
+/// transition.
+///
+/// Note the real per-entry cost is ~60 B, not the 16 B the payload
+/// suggests: `IndexMap` reserves its entry `Vec` to the index table's
+/// capacity and hashbrown carries a control byte per bucket.
 const MEASURE_CACHE_CAP: usize = 2048;
 /// Cap on cached rasterised-text pixmaps. ~500 unique
 /// (text, font_size, color, wrap) tuples covers a complex screen with
 /// headroom. Avg pixmap size is ~5KB so memory is bounded near 2.5MB.
 const RASTER_CACHE_CAP: usize = 512;
+/// DOM Text sets `line-height: 1` so the line box equals the declared font
+/// size. Native font ascent/descent still positions glyphs within that box.
+const TEXT_LINE_HEIGHT_MULTIPLIER: f32 = 1.0;
 
 /// Owns the long-lived text engine state.
 pub struct TextEngine {
@@ -38,6 +53,13 @@ pub struct TextEngine {
     /// loop again. This is the leaf-element layer cache — text nodes
     /// are by far the slowest single op in the paint loop.
     raster_cache: IndexMap<u64, Pixmap>,
+    /// GPU-side twin of `raster_cache` for the Vello path, same key.
+    /// `peniko::ImageData` shares its bytes via an `Arc`'d `Blob`, so a
+    /// hit in `draw_text_into_scene` is an Arc bump instead of the
+    /// multi-KB `tile.data().to_vec()` the pixmap→ImageData conversion
+    /// costs — which used to run for EVERY text draw on every subtree
+    /// re-encode.
+    scene_tile_cache: IndexMap<u64, vello::peniko::ImageData>,
 }
 
 impl TextEngine {
@@ -47,6 +69,7 @@ impl TextEngine {
             swash: SwashCache::new(),
             measure_cache: IndexMap::new(),
             raster_cache: IndexMap::new(),
+            scene_tile_cache: IndexMap::new(),
         }
     }
 
@@ -57,6 +80,7 @@ impl TextEngine {
     pub fn clear_measure_cache(&mut self) {
         self.measure_cache.clear();
         self.raster_cache.clear();
+        self.scene_tile_cache.clear();
     }
 
     /// Measure `text` at `font_size` (physical px). When `wrap_width` is
@@ -76,6 +100,17 @@ impl TextEngine {
         wrap_width: Option<f32>,
         weight: u16,
     ) -> (f32, f32) {
+        self.measure_weighted_line_height(text, font_size, wrap_width, weight, font_size)
+    }
+
+    pub fn measure_weighted_line_height(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
+    ) -> (f32, f32) {
         // Cache key: hash text + font_size bits + wrap bits + weight.
         // f32 NaN never reaches us (Taffy hands us finite values), so
         // to_bits() is collision-free across the inputs we get.
@@ -85,12 +120,13 @@ impl TextEngine {
         font_size.to_bits().hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         weight.hash(&mut hasher);
+        line_height.to_bits().hash(&mut hasher);
         let key = hasher.finish();
         if let Some(&hit) = self.measure_cache.get(&key) {
             return hit;
         }
 
-        let metrics = Metrics::new(font_size, font_size * 1.3);
+        let metrics = Metrics::new(font_size, line_height.max(font_size));
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
             .family(Family::SansSerif)
@@ -112,10 +148,10 @@ impl TextEngine {
         let mut total_h: f32 = 0.0;
         for run in buffer.layout_runs() {
             max_w = max_w.max(run.line_w);
-            total_h = total_h.max(run.line_y + run.line_height * 0.3);
+            total_h = total_h.max(run.line_top + run.line_height);
         }
         if total_h == 0.0 {
-            total_h = font_size * 1.3;
+            total_h = font_size * TEXT_LINE_HEIGHT_MULTIPLIER;
         }
         let result = (max_w.ceil(), total_h.ceil());
         if self.measure_cache.len() >= MEASURE_CACHE_CAP {
@@ -124,6 +160,15 @@ impl TextEngine {
             // the cap re-shaped the next 2k unique text/font/wrap
             // tuples in lockstep. Single-entry pop keeps churn
             // proportional to inserts.
+            //
+            // FIFO deliberately, not a cheaper O(1) arbitrary victim:
+            // nothing here re-inserts on a hit, so insertion order *is*
+            // "time since this entry was faulted in", and dropping the
+            // oldest is the only policy that guarantees a just-inserted
+            // entry survives the next CAP-1 inserts. Random replacement
+            // has the same mean lifetime and a worse tail. The O(len)
+            // compaction is affordable at this cap; it would not be at
+            // 16k, which is the other reason that raise was reverted.
             self.measure_cache.shift_remove_index(0);
         }
         self.measure_cache.insert(key, result);
@@ -201,6 +246,24 @@ impl TextEngine {
         wrap_width: Option<f32>,
         weight: u16,
     ) {
+        self.draw_text_weighted_line_height(
+            pixmap, text, x, y, font_size, color, wrap_width, weight, font_size,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_weighted_line_height(
+        &mut self,
+        pixmap: &mut Pixmap,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        color: Rgba,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
+    ) {
         // cosmic-text's swash glyph path overwrites the source colour's
         // alpha byte with the per-pixel coverage byte, so the inner
         // `if a == 0` guard never sees a zero source. Short-circuit
@@ -209,7 +272,7 @@ impl TextEngine {
         if color.3 == 0 {
             return;
         }
-        let metrics = Metrics::new(font_size, font_size * 1.3);
+        let metrics = Metrics::new(font_size, line_height.max(font_size));
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
             .family(Family::SansSerif)
@@ -302,10 +365,29 @@ impl TextEngine {
         wrap_width: Option<f32>,
         weight: u16,
     ) {
+        self.draw_text_into_scene_line_height(
+            scene, text, x, y, font_size, color, wrap_width, weight, font_size,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_text_into_scene_line_height(
+        &mut self,
+        scene: &mut vello::Scene,
+        text: &str,
+        x: f32,
+        y: f32,
+        font_size: f32,
+        color: Rgba,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
+    ) {
         if color.3 == 0 || text.is_empty() {
             return;
         }
-        let (mw, mh) = self.measure_weighted(text, font_size, wrap_width, weight);
+        let (mw, mh) =
+            self.measure_weighted_line_height(text, font_size, wrap_width, weight, line_height);
         let cw = mw.ceil().max(1.0) as u32;
         let ch = mh.ceil().max(1.0) as u32;
 
@@ -317,35 +399,62 @@ impl TextEngine {
         color_u32.hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         weight.hash(&mut hasher);
+        line_height.to_bits().hash(&mut hasher);
         cw.hash(&mut hasher);
         ch.hash(&mut hasher);
         let key = hasher.finish();
 
-        if !self.raster_cache.contains_key(&key) {
-            let mut tile = match Pixmap::new(cw, ch) {
-                Some(p) => p,
-                None => return,
+        // GPU tile cache first: a hit skips both the CPU raster AND
+        // the per-draw `to_vec` byte clone — the ImageData's Blob is
+        // Arc-shared, so replaying a text tile costs a refcount bump.
+        if !self.scene_tile_cache.contains_key(&key) {
+            let img = {
+                let tile = if let Some(t) = self.raster_cache.get(&key) {
+                    t
+                } else {
+                    let mut tile = match Pixmap::new(cw, ch) {
+                        Some(p) => p,
+                        None => return,
+                    };
+                    self.draw_text_weighted_line_height(
+                        &mut tile,
+                        text,
+                        0.0,
+                        0.0,
+                        font_size,
+                        color,
+                        wrap_width,
+                        weight,
+                        line_height,
+                    );
+                    if self.raster_cache.len() >= RASTER_CACHE_CAP {
+                        self.raster_cache.shift_remove_index(0);
+                    }
+                    self.raster_cache.insert(key, tile);
+                    self.raster_cache.get(&key).expect("inserted above")
+                };
+                // peniko::Image wraps the byte buffer in a
+                // Blob<Arc<Vec<u8>>>; the one-time `to_vec` here is the
+                // tile's bytes (~few KB for normal text spans).
+                let blob = vello::peniko::Blob::new(std::sync::Arc::new(tile.data().to_vec()));
+                vello::peniko::ImageData {
+                    data: blob,
+                    format: vello::peniko::ImageFormat::Rgba8,
+                    alpha_type: vello::peniko::ImageAlphaType::AlphaPremultiplied,
+                    width: tile.width(),
+                    height: tile.height(),
+                }
             };
-            self.draw_text_weighted(
-                &mut tile, text, 0.0, 0.0, font_size, color, wrap_width, weight,
-            );
-            if self.raster_cache.len() >= RASTER_CACHE_CAP {
-                self.raster_cache.shift_remove_index(0);
+            if self.scene_tile_cache.len() >= RASTER_CACHE_CAP {
+                self.scene_tile_cache.shift_remove_index(0);
             }
-            self.raster_cache.insert(key, tile);
+            self.scene_tile_cache.insert(key, img);
         }
-        let tile = self.raster_cache.get(&key).expect("inserted above");
-        // peniko::Image wraps the byte buffer in a Blob<Arc<Vec<u8>>>;
-        // the `to_vec` here is the tile's bytes (~few KB for normal
-        // text spans).
-        let blob = vello::peniko::Blob::new(std::sync::Arc::new(tile.data().to_vec()));
-        let img = vello::peniko::ImageData {
-            data: blob,
-            format: vello::peniko::ImageFormat::Rgba8,
-            alpha_type: vello::peniko::ImageAlphaType::AlphaPremultiplied,
-            width: tile.width(),
-            height: tile.height(),
-        };
+        let img = self
+            .scene_tile_cache
+            .get(&key)
+            .expect("inserted above")
+            .clone();
         // Pixmap is already physical-pixel sized and our translate is
         // integer-aligned (`x.round()`), so nearest-neighbor sampling
         // produces a 1:1 unblurred blit. Vello's default
@@ -457,6 +566,94 @@ impl TextEngine {
             transform,
             None,
         );
+    }
+}
+
+impl TextEngine {
+    /// Lay `text` out exactly as [`Self::draw_text_into_scene_line_height`]
+    /// paints it (same font, metrics, and `Wrap::Word` policy) and
+    /// return the visual lines with GLOBAL byte offsets. Backs Textarea
+    /// caret / hit-test / selection geometry ([`crate::textarea`]).
+    ///
+    /// Not cached: only the focused (or pointer-targeted) Textarea asks,
+    /// at most a few times per event / frame.
+    pub fn visual_lines(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
+    ) -> Vec<crate::textarea::VisualLine> {
+        use crate::textarea::{GlyphBox, VisualLine};
+        let metrics = Metrics::new(font_size, line_height.max(font_size));
+        let mut buffer = Buffer::new(&mut self.fonts, metrics);
+        let attrs = Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight(weight));
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.set_size(wrap_width, None);
+        buffer.set_wrap(Wrap::Word);
+        buffer.shape_until_scroll(&mut self.fonts, false);
+
+        // Global byte offset where each paragraph (BufferLine) starts:
+        // the previous paragraph's text plus its own line ending.
+        let mut para_start = Vec::with_capacity(buffer.lines.len());
+        let mut acc = 0usize;
+        for line in &buffer.lines {
+            para_start.push(acc);
+            acc += line.text().len() + line.ending().as_str().len();
+        }
+
+        let mut out: Vec<VisualLine> = Vec::new();
+        let mut para_of: Vec<usize> = Vec::new();
+        for run in buffer.layout_runs() {
+            let base = para_start.get(run.line_i).copied().unwrap_or(acc);
+            let mut glyphs: Vec<GlyphBox> = run
+                .glyphs
+                .iter()
+                .map(|g| GlyphBox {
+                    start: base + g.start,
+                    end: base + g.end,
+                    x: g.x,
+                    w: g.w,
+                })
+                .collect();
+            glyphs.sort_by(|a, b| a.x.total_cmp(&b.x));
+            let same_para_prev = para_of.last() == Some(&run.line_i);
+            let (start, end) = if glyphs.is_empty() {
+                // Empty paragraph (or a glyph-less wrapped continuation):
+                // anchor at the previous line's end within the same
+                // paragraph, else at the paragraph start.
+                let at = if same_para_prev {
+                    out.last().map(|p: &VisualLine| p.end).unwrap_or(base)
+                } else {
+                    base
+                };
+                (at, at)
+            } else {
+                let lo = glyphs.iter().map(|g| g.start).min().unwrap_or(base);
+                let hi = glyphs.iter().map(|g| g.end).max().unwrap_or(base);
+                // The first visual line of a paragraph always starts at
+                // the paragraph start.
+                (if same_para_prev { lo } else { base.min(lo) }, hi)
+            };
+            out.push(VisualLine {
+                start,
+                end,
+                top: run.line_top,
+                height: run.line_height,
+                para_end: true,
+                glyphs,
+            });
+            para_of.push(run.line_i);
+        }
+        for i in 1..out.len() {
+            if para_of[i] == para_of[i - 1] {
+                out[i - 1].para_end = false;
+            }
+        }
+        out
     }
 }
 

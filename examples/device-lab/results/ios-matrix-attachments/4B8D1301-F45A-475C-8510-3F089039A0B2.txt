@@ -1,0 +1,26 @@
+Application, 0x104e7b480, pid: 85841, label: 'HypenGallery' <App element pid: 85841>
+  Window (Main), 0x104e7b5c0, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 85841, elementOrHash.elementID: 4389586944.3>
+    Other, 0x104e7b700, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 85841, elementOrHash.elementID: 4446989312.4>
+      Other, 0x104e7b840, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 85841, elementOrHash.elementID: 4448208768.5>
+        Other, 0x104e7b980, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 85841, elementOrHash.elementID: 4389585920.6>
+          Other, 0x104e7bac0, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 85841, elementOrHash.elementID: 4391342016.7>
+            StaticText, 0x104e7bc00, {{18.0, 110.0}, {157.0, 26.3}}, label: 'Device Lab · Go' <AX element pid: 85841, elementOrHash.elementID: 4391175488.8>
+            StaticText, 0x104e7bd40, {{18.0, 146.3}, {162.3, 14.3}}, label: 'Real host / real server · run 0' <AX element pid: 85841, elementOrHash.elementID: 4391184448.9>
+            StaticText, 0x104e7be80, {{26.0, 178.7}, {49.0, 20.3}}, label: 'Status' <AX element pid: 85841, elementOrHash.elementID: 4391186688.10>
+            StaticText, 0x114888000, {{97.0, 178.7}, {107.7, 20.3}}, label: 'Query camera' <AX element pid: 85841, elementOrHash.elementID: 4391423040.11>
+            StaticText, 0x114888140, {{226.7, 178.7}, {60.0, 20.3}}, label: 'Ask mic' <AX element pid: 85841, elementOrHash.elementID: 4391432000.12>
+            StaticText, 0x114888280, {{26.0, 225.0}, {81.0, 20.3}}, label: 'Pick photo' <AX element pid: 85841, elementOrHash.elementID: 4390861696.13>
+            StaticText, 0x1148883c0, {{129.0, 225.0}, {59.3, 20.3}}, label: 'Pick file' <AX element pid: 85841, elementOrHash.elementID: 4390862848.14>
+            StaticText, 0x114888500, {{210.3, 225.0}, {72.7, 20.3}}, label: 'Save 96K' <AX element pid: 85841, elementOrHash.elementID: 4390877632.15>
+            StaticText, 0x114888640, {{26.0, 271.3}, {59.3, 20.3}}, label: 'Camera' <AX element pid: 85841, elementOrHash.elementID: 4390929280.16>
+            StaticText, 0x114888780, {{107.3, 271.3}, {77.3, 20.3}}, label: 'Record 3s' <AX element pid: 85841, elementOrHash.elementID: 4390937344.17>
+            StaticText, 0x1148888c0, {{206.7, 271.3}, {61.0, 20.3}}, label: 'Scan 3s' <AX element pid: 85841, elementOrHash.elementID: 4390942272.18>
+            StaticText, 0x114888a00, {{26.0, 317.7}, {73.7, 20.3}}, label: 'Bluetooth' <AX element pid: 85841, elementOrHash.elementID: 4391110848.19>
+            StaticText, 0x114888b40, {{121.7, 317.7}, {52.7, 20.3}}, label: 'Cancel' <AX element pid: 85841, elementOrHash.elementID: 4391115328.20>
+            StaticText, 0x114888c80, {{196.3, 317.7}, {54.0, 20.3}}, label: 'UI ping' <AX element pid: 85841, elementOrHash.elementID: 4391118016.21>
+            StaticText, 0x114888dc0, {{18.0, 356.0}, {186.0, 17.0}}, label: 'Connected. Choose a check.' <AX element pid: 85841, elementOrHash.elementID: 4391143168.22>
+            StaticText, 0x114888f00, {{0.0, 0.0}, {0.0, 0.0}} <AX element pid: 85841, elementOrHash.elementID: 4391146752.23>
+            StaticText, 0x114889040, {{0.0, 0.0}, {0.0, 0.0}} <AX element pid: 85841, elementOrHash.elementID: 4391152576.24>
+            Other, 0x114889180, {{0.0, 0.0}, {402.0, 874.0}} <AX element pid: 85841, elementOrHash.elementID: 4391157056.25>
+            Button, 0x1148892c0, {{154.7, 76.8}, {89.7, 14.3}}, label: 'Browser chrome, collapsed. 127.0.0.1:45102' <AX element pid: 85841, elementOrHash.elementID: 4391339776.26>
+            Button, 0x114889400, {{251.3, 81.7}, {8.0, 4.7}}, identifier: 'chevron.down', label: 'Browser chrome, collapsed. 127.0.0.1:45102' <AX element pid: 85841, elementOrHash.elementID: 4391341120.27>

@@ -1,0 +1,5 @@
+Query chain:
+ →Find: Target Application 'space.hypen.gallery.HypenGallery'
+  ↪︎Find: Descendants matching type StaticText
+    ↪︎Find: Elements matching predicate 'label CONTAINS "6465bbf6110e746367789368366419b0fbd7919d02558e92a2dfccfa246fb2fe"'
+      ↪︎Find: First Match

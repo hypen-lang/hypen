@@ -5,6 +5,9 @@ Column {
         Image(src: "@{item.user.avatarUrl}")
             .tw("w-8 h-8 rounded-full shrink-0")
 
+        // The "/user-profile/:id" route existed but nothing ever navigated to
+        // it. Tapping the poster's name is the conventional way in, and it is
+        // what makes the follow button's cross-fade reachable at all.
         Column {
             Text("@{item.user.username}")
                 .tw("text-sm font-semibold")
@@ -13,7 +16,8 @@ Column {
                     .tw("text-xs text-gray-500")
             }
         }
-        .tw("flex-1 pl-3")
+        .tw("flex-1 pl-3 cursor-pointer")
+        .onClick(@router.push, to: "/user-profile/@{item.user.id}")
 
         Button {
             Icon(@resources.more-horizontal)
@@ -25,13 +29,25 @@ Column {
     }
     .tw("py-2.5 px-4 flex-row items-center")
 
-    Image(src: "@{item.imageUrl}")
-        .width("100%")
-        .aspectRatio("1")
-        .objectFit("cover")
+    Column {
+        Image(src: "@{item.imageUrl}")
+            .width("100%")
+            .aspectRatio("1")
+            .borderRadius(24)
+            .objectFit("cover")
+    }
+    .tw("px-5")
 
     Row {
         Row {
+            // The two If branches stay: the DOM renderer bakes an Icon's colour
+            // into the SVG stroke attribute at create time, so a bound
+            // `.color()` never repaints — swapping the node is the only way the
+            // heart turns red. The pop therefore lives on the Button, which
+            // survives the swap and can hold a real CSS transition.
+            // `.transform` (whole string) rather than `.scale`, because the
+            // transform applicators append to `style.transform` and would
+            // accumulate across repeated toggles.
             Button {
                 If(condition: "@{item.isLiked}") {
                     Icon(@resources.heart)
@@ -47,6 +63,8 @@ Column {
             .backgroundColor("transparent")
             .border("none")
             .padding(8)
+            .transform("@{item.isLiked ? 'scale(1.25)' : 'scale(1)'}")
+            .transition(duration: 320, curve: spring, props: [scale])
             .onClick(@actions.toggleLike, postId: "@{item.id}")
 
             Button {
@@ -70,21 +88,19 @@ Column {
             .onClick(@actions.sharePost, postId: "@{item.id}")
         }
 
+        // The two If branches here were byte-identical, so "saved" had no
+        // visual signal at all. Collapsed to one node and given a quieter
+        // version of the heart's pop — the bookmark is a secondary action.
         Button {
-            If(condition: "@{item.isSaved}") {
-                Icon(@resources.bookmark)
-                    .size(24)
-                    .color("#262626")
-            }
-            If(condition: "@{!item.isSaved}") {
-                Icon(@resources.bookmark)
-                    .size(24)
-                    .color("#262626")
-            }
+            Icon(@resources.bookmark)
+                .size(24)
+                .color("#262626")
         }
         .backgroundColor("transparent")
         .border("none")
         .padding(8)
+        .transform("@{item.isSaved ? 'scale(1.15)' : 'scale(1)'}")
+        .transition(duration: 260, curve: spring, props: [scale])
         .onClick(@actions.toggleSave, postId: "@{item.id}")
     }
     .tw("py-1 px-3 flex-row justify-between items-center")
@@ -109,4 +125,4 @@ Column {
         .onClick(@router.push, to: "/comments/@{item.id}")
     }
 }
-.tw("bg-white border-b border-gray-100 mb-2")
+.tw("w-full bg-white border-b border-gray-100 mb-2")

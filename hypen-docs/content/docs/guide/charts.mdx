@@ -1,0 +1,260 @@
+---
+title: Charts
+description: Draw data with Chart and its marks — lines, bars, points, axes, markers — in data units, with touch and click events that carry the datum
+---
+
+# Charts
+
+`Chart` gives a subtree a **coordinate space**. Everything inside it is a *mark*
+positioned in data units — a `Line` through `[x, y]` points, `Bars` from rows,
+an `Axis`, a `Marker` that pins ordinary Hypen components to a data point.
+Nothing in the DSL ever names a pixel: the chart resolves the domains, scales
+the marks, and re-lays them out when state, children, or the viewport change.
+
+```hypen
+Chart(y: [0, 100]) {
+    Axis(x)
+    Axis(y, ticks: 4, grid: true)
+    Bars(data: @state.units, x: "month", y: "count")
+        .fill("#3b82f6")
+        .onClick(@actions.selectMonth)
+    Rule(y: 75).stroke("#f59e0b")
+}
+.height(240)
+```
+
+<Callout type="info">
+Charts ship on all five renderers: web DOM, web canvas, Android, iOS and
+desktop. The mark set and the event payload below are the contract each of
+them meets, so a chart and its handlers behave the same everywhere. Glow is
+a true blur on web, Android and iOS; the desktop renderer approximates it
+with layered translucent strokes.
+</Callout>
+
+## Data
+
+Every data mark takes its rows from `points:` / `data:` (or the positional
+argument) and accepts three shapes:
+
+| Shape | Example | Meaning |
+|-------|---------|---------|
+| Numbers | `Line(points: [3, 5, 2])` | x is the index |
+| Tuples | `Line(points: [[1, 3], [2, 5]])` | `[x, y]` pairs |
+| Objects | `Bars(data: @state.rows, x: "month", y: "count")` | field names from `x:` / `y:` |
+
+A string x anywhere in the chart (`"Jan"`, `"Mon"`) switches the x axis to
+**categories**: bars get equal bands, lines and points snap to the band
+centre, `Axis(x)` labels every category.
+
+Data almost always comes from state: compute the rows in your module and bind
+them. A chart re-lays out whenever the bound array changes.
+
+```ts
+export default app
+  .defineState<{ units: Array<{ month: string; count: number }> }>({ units: [] })
+  .onCreated(async (state) => {
+    state.units = await fetchMonthly();
+  })
+  .build();
+```
+
+## Domains
+
+By default the chart's domain is the union of its marks' data, rounded out to
+tick-friendly bounds. `Bars` always include zero so bar heights stay honest.
+Pin either axis explicitly when you want a stable frame:
+
+```hypen
+Chart(x: [0, 12], y: [0, 100]) { ... }
+```
+
+Room for axis labels is reserved automatically. A chart with no `Axis`
+children is drawn edge to edge — that is a sparkline:
+
+```hypen
+Row {
+    Text("Revenue")
+    Chart { Line(points: @state.history).stroke("#10b981") }
+        .width(120)
+        .height(32)
+}
+```
+
+## Marks
+
+| Mark | Props | Draws |
+|------|-------|-------|
+| `Line` | points/data, x, y, `smooth` | a polyline, or a smooth curve with `smooth: true` |
+| `Area` | points/data, x, y, `smooth` | the region between the line and zero |
+| `Bars` | data, x, y (or `label`, `value`), `highlight`, `barWidth`, `radius` | one bar per row |
+| `Points` | points/data, x, y, `radius`, `highlight` | one dot per row |
+| `Axis` | `x` or `y` (positional), `ticks`, `label`, `grid` | axis line, ticks, labels, optional grid |
+| `Rule` | `x:` **or** `y:` | a dashed reference line across the plot |
+| `Marker` | `x`, `y`, `anchor` | pins its **children** to a data point |
+| `Path` | `d` | an SVG path whose coordinates are in data units |
+
+`highlight` on `Bars` / `Points` takes an index or a list of indices; the rest
+are dimmed. Bind it to state to reflect a selection:
+
+```hypen
+Bars(data: @state.units, x: "month", y: "count", highlight: @state.selected)
+```
+
+`Marker` is the bridge back to normal UI. Its children are ordinary components
+with ordinary applicators, positioned at a data coordinate. `anchor` is one of
+`top` (default, content sits above the point), `bottom`, `left`, `right`,
+`center`.
+
+```hypen
+Marker(x: 7, y: 82) {
+    Badge("Launch")
+}
+```
+
+`Path` is the escape hatch: any shape, in data units, computed in your module.
+
+```hypen
+Path(d: @state.outline).stroke("#8b5cf6")
+```
+
+## Styling
+
+Marks are styled with the usual applicators. `stroke`, `fill`, `strokeWidth`,
+`fillOpacity`, `strokeDasharray` and `opacity` apply to the mark's geometry;
+`color` on the `Chart` (or any ancestor) sets the default for axes, lines and
+fills, so a chart follows your text colour unless a mark says otherwise.
+
+```hypen
+Chart {
+    Axis(y)
+    Area(points: @state.revenue).fill("#10b981").fillOpacity(0.2)
+    Line(points: @state.revenue, smooth: true).stroke("#10b981").strokeWidth(3)
+}
+.color("#64748b")
+```
+
+Any applicator that resolves to CSS applies to a mark, because the mark's
+`<g>` is a normal styling target. What differs from a `Box` is which
+properties SVG geometry honours:
+
+| Want | Use | Notes |
+|------|-----|-------|
+| Colour, thickness | `stroke`, `fill`, `strokeWidth`, `strokeDasharray`, `strokeLinecap` | inherit into every shape in the mark |
+| Translucency | `opacity`, `fillOpacity`, `strokeOpacity` | unitless |
+| Glow | `glow(color)`, `glow(radius: 10)`, `glow(color: "#f59e0b", radius: 12)` | a `drop-shadow` filter that follows the stroke |
+| Shadow | `shadow(...)`, `boxShadow(...)`, `elevation(n)`, `dropShadow(...)` | on SVG these all become `drop-shadow`; a box shadow would be invisible |
+| Filters | `blur`, `saturate`, `brightness`, `hueRotate`, `filter(...)` | compose with each other and with `glow` |
+| Blend | `mixBlendMode` | overlapping series |
+| Animate | `transition("d 300ms ease-out")`, `transition("stroke 200ms")` | CSS transitions on `d` animate a `Line` between datasets (Chromium); `stroke`, `opacity` and `filter` transition everywhere |
+| Cursor | `cursor("pointer")` | on interactive marks |
+
+Layout applicators (`padding`, `margin`, `width` on a mark) have nothing to
+lay out inside an `<svg>` and are ignored; size the `Chart` instead.
+
+## Interaction
+
+Marks respond to touch and pointer input through the same event applicators as
+everything else. What differs is the payload: **every event on a mark carries
+the datum it refers to, in data units**, never pixels. Handlers therefore work
+identically on every renderer.
+
+```hypen
+Bars(data: @state.units, x: "month", y: "count", highlight: @state.selected)
+    .onClick(@actions.selectMonth)
+    .onLongPress(@actions.showDetails)
+Line(points: @state.revenue)
+    .onMove(@actions.hoverPoint)
+    .onMouseLeave(@actions.clearHover)
+```
+
+The payload:
+
+```json
+{ "series": "bars", "index": 3, "x": "Apr", "y": 62, "datum": { "month": "Apr", "count": 62 } }
+```
+
+| Field | Meaning |
+|-------|---------|
+| `series` | the mark's `series:` / `name:` prop, else its kind (`bars`, `line`, …) |
+| `index` | position of the datum in the bound array |
+| `x`, `y` | the datum's values |
+| `datum` | the original row, untouched |
+
+Static arguments travel alongside: `.onClick(@actions.pick, tag: "targets")`
+yields `{ tag, series, index, x, y, datum }`.
+
+Tapping a bar, a point, or a line vertex resolves that datum directly. A hit
+anywhere else on a line resolves the datum **nearest the pointer along x**, so
+a finger landing between two vertices still gets a useful answer. Touch
+targets around vertices and points are larger than what is drawn.
+
+| Applicator | Fires |
+|------------|-------|
+| `onClick` / `onPress` | tap or click |
+| `onLongPress` | press held for 500 ms |
+| `onHover` | pointer enters the mark (once) |
+| `onMove` | pointer moves across the mark, throttled to about a frame — mouse, touch and pen |
+| `onMouseLeave` | pointer leaves the mark |
+
+Events on the `Chart` itself carry the pointer position in data units
+(`{ x, y }`), for "add a point where I tapped" interactions.
+
+### Selection and tooltips go through state
+
+A mark holds no selection of its own. The handler writes to state, and the
+chart reflects it — `highlight` for the selected bar, a `Marker` for the
+tooltip.
+
+```hypen
+Chart {
+    Axis(x)
+    Axis(y)
+    Line(points: @state.revenue, smooth: true)
+        .onMove(@actions.hoverPoint)
+        .onMouseLeave(@actions.clearHover)
+    Points(points: @state.hoverPoints).radius(5)
+    Marker(x: @state.hover.x, y: @state.hover.y) {
+        Card { Text("@{state.hover.label}") }.padding(6)
+    }
+}
+```
+
+```ts
+.onAction<{ x: number; y: number }>("hoverPoint", ({ state, action }) => {
+    const { x, y } = action.payload!;
+    state.hover = { x, y, label: `Week ${x}: ${y}k` };
+    state.hoverPoints = [[x, y]];
+})
+.onAction("clearHover", ({ state }) => {
+    state.hover = null;
+    state.hoverPoints = [];
+})
+```
+
+A `Marker` whose coordinates are missing (here, `state.hover` is `null`) is
+hidden, so no conditional is needed around it.
+
+## Composition
+
+A dashboard is just layout. Charts size to their container like any block, so
+put them in `Row`s, `Grid`s and `Card`s, and give them a height.
+
+```hypen
+Row {
+    Card {
+        Heading("Units")
+        Chart { Axis(x) Bars(data: @state.units, x: "month", y: "count") }.height(180)
+    }
+    Card {
+        Heading("Revenue")
+        Chart { Axis(y) Line(points: @state.revenue, smooth: true) }.height(180)
+    }
+}
+.gap(16)
+```
+
+## Next Steps
+
+- [State](/docs/guide/state) — computing rows in a module and binding them
+- [Inputs](/docs/guide/inputs) — the full event applicator reference
+- [Styling](/docs/guide/styling) — applicators for colour, size and spacing

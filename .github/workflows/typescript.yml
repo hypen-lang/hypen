@@ -8,6 +8,18 @@ on:
       - "hypen-cli/**"
       - "hypen-lsp/**"
       - "engine-compatibility-tests/runners/typescript/**"
+      # Device Capability Protocol (RFC 001): the TS runners, the generated
+      # validators (tests/device-generated.test.ts re-runs
+      # scripts/generate-device-types.ts and diffs generated.ts) consume the
+      # shared schemas and fixtures.
+      - "engine-compatibility-tests/schema/device/**"
+      - "engine-compatibility-tests/fixtures/device/**"
+      # The server SDK runs the Rust device broker from the engine WASM
+      # built below: engine changes must run the TS suites against it.
+      - "hypen-engine-rs/src/**"
+      - "hypen-engine-rs/Cargo.toml"
+      - "hypen-engine-rs/copy-wasm-artifacts.sh"
+      - "Cargo.lock"
       - ".github/workflows/typescript.yml"
   pull_request:
     branches: [main, develop]
@@ -16,6 +28,18 @@ on:
       - "hypen-cli/**"
       - "hypen-lsp/**"
       - "engine-compatibility-tests/runners/typescript/**"
+      # Device Capability Protocol (RFC 001): the TS runners, the generated
+      # validators (tests/device-generated.test.ts re-runs
+      # scripts/generate-device-types.ts and diffs generated.ts) consume the
+      # shared schemas and fixtures.
+      - "engine-compatibility-tests/schema/device/**"
+      - "engine-compatibility-tests/fixtures/device/**"
+      # The server SDK runs the Rust device broker from the engine WASM
+      # built below: engine changes must run the TS suites against it.
+      - "hypen-engine-rs/src/**"
+      - "hypen-engine-rs/Cargo.toml"
+      - "hypen-engine-rs/copy-wasm-artifacts.sh"
+      - "Cargo.lock"
       - ".github/workflows/typescript.yml"
 
 jobs:
@@ -40,15 +64,30 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
+      # `device-broker`: @hypen-space/server drives the Rust device broker
+      # (RFC 001) through this build's `WasmDeviceBroker`; Cloudflare
+      # (`@hypen-space/cf`) through the web-target build. The browser bundle
+      # is built without the broker (build-wasm.sh).
       - name: Build WASM (nodejs)
-        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
+        working-directory: hypen-engine-rs
+
+      - name: Build WASM (web, Cloudflare)
+        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker
+        working-directory: hypen-engine-rs
+
+      - name: Build WASM (browser, no device broker)
+        run: wasm-pack build --target web --out-dir pkg/browser --features js
         working-directory: hypen-engine-rs
 
       - name: Upload WASM artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wasm-nodejs
-          path: hypen-engine-rs/pkg/nodejs/
+          name: wasm-js
+          path: |
+            hypen-engine-rs/pkg/nodejs/
+            hypen-engine-rs/pkg/web/
+            hypen-engine-rs/pkg/browser/
           retention-days: 1
 
   web-sdk:
@@ -64,20 +103,15 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: wasm-nodejs
-          path: hypen-engine-rs/pkg/nodejs
+          name: wasm-js
+          path: hypen-engine-rs/pkg
 
+      # The freshly built engine goes exactly where each package loads it
+      # (the same script build-wasm.sh runs): wasm-node for the server,
+      # the Cloudflare glue fixture paired with its wasm by SHA-256, and
+      # the browser bundle. Copies, not symlinks (Bun __dirname resolution).
       - name: Setup WASM
-        run: |
-          # Copy the freshly-built WASM into the committed wasm-node directories
-          # (avoids symlinks which can cause __dirname resolution issues in Bun)
-          for dir in hypen-web/packages/core/wasm-node hypen-web/packages/server/wasm-node; do
-            mkdir -p $dir
-            cp hypen-engine-rs/pkg/nodejs/hypen_engine_bg.wasm $dir/
-            cp hypen-engine-rs/pkg/nodejs/hypen_engine.js $dir/
-            cp hypen-engine-rs/pkg/nodejs/hypen_engine.d.ts $dir/
-            cp hypen-engine-rs/pkg/nodejs/hypen_engine_bg.wasm.d.ts $dir/
-          done
+        run: bash hypen-engine-rs/copy-wasm-artifacts.sh
 
       - name: Install dependencies
         run: bun install
@@ -109,6 +143,12 @@ jobs:
         run: bun install
         working-directory: hypen-cli
 
+      # The studio-ui LSP integration tests spawn hypen-lsp/src/server.ts,
+      # which needs hypen-lsp's own dependencies installed.
+      - name: Install LSP dependencies
+        run: bun install
+        working-directory: hypen-lsp
+
       - name: Run tests
         run: bun test
         working-directory: hypen-cli
@@ -120,9 +160,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      # hypen-lsp/wasm-engine is a symlink to ../hypen-engine-rs/pkg/nodejs;
+      # without the engine WASM artifact, `tsc -b` fails resolving
+      # src/a11y.ts's import of ../wasm-engine/hypen_engine.js.
+      - uses: actions/download-artifact@v4
         with:
-          node-version: 20
+          name: wasm-js
+          path: hypen-engine-rs/pkg
+
+      # hypen-lsp is a bun package (bun.lock, no package-lock.json), so use
+      # bun for installs; `npm ci` fails without an npm lockfile.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -146,15 +196,15 @@ jobs:
           ln -sf ../parser/pkg/nodejs wasm
 
       - name: Install dependencies
-        run: npm ci
+        run: bun install --frozen-lockfile
         working-directory: hypen-lsp
 
       - name: Compile
-        run: npx tsc -b
+        run: bunx tsc -b
         working-directory: hypen-lsp
 
       - name: Lint
-        run: npx eslint ./src --ext .ts
+        run: bunx eslint ./src --ext .ts
         working-directory: hypen-lsp
         continue-on-error: true
 
@@ -171,18 +221,11 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: wasm-nodejs
-          path: hypen-engine-rs/pkg/nodejs
+          name: wasm-js
+          path: hypen-engine-rs/pkg
 
       - name: Setup WASM
-        run: |
-          for dir in hypen-web/packages/core/wasm-node hypen-web/packages/server/wasm-node; do
-            mkdir -p $dir
-            cp hypen-engine-rs/pkg/nodejs/hypen_engine_bg.wasm $dir/
-            cp hypen-engine-rs/pkg/nodejs/hypen_engine.js $dir/
-            cp hypen-engine-rs/pkg/nodejs/hypen_engine.d.ts $dir/
-            cp hypen-engine-rs/pkg/nodejs/hypen_engine_bg.wasm.d.ts $dir/
-          done
+        run: bash hypen-engine-rs/copy-wasm-artifacts.sh
 
       - name: Install dependencies
         run: bun install

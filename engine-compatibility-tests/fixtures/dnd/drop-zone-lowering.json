@@ -1,0 +1,58 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "drop-zone-lowering",
+  "description": "The .dropZone applicator lowers to ONE static __dnd.zone object ({group, band}) plus split bindable pieces __dnd.zoneId and __dnd.zoneEnabled. A static id lands as a plain string; a bound enabled re-resolves per render as SetProp. No dropZone.* junk props reach the wire",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Row().dropZone(group: \"fs\", id: \"trash\", band: 0.3, enabled: @state.accepting)",
+    "initialState": { "accepting": true },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["accepting"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render carries the zone spec, the static id and the resolved enabled flag",
+      "action": "initialRender",
+      "expectedPatchCount": 2,
+      "expectedPatchTypes": ["create", "insert"],
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Row",
+          "props": {
+            "__dnd.zone": { "group": "fs", "band": 0.3 },
+            "__dnd.zoneId": "trash",
+            "__dnd.zoneEnabled": true
+          },
+          "absentProps": [
+            "dropZone.0",
+            "dropZone.group",
+            "dropZone.id",
+            "dropZone.band",
+            "dropZone.enabled",
+            "__dnd.source"
+          ]
+        },
+        { "type": "insert" }
+      ]
+    },
+    {
+      "description": "Flipping the bound enabled flag re-resolves __dnd.zoneEnabled in place",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["accepting"],
+        "newValues": { "accepting": false }
+      },
+      "expectedPatches": [
+        { "type": "setProp", "name": "__dnd.zoneEnabled", "value": false }
+      ],
+      "forbiddenPatchTypes": ["create", "insert", "remove", "move", "setText", "detach", "attach"]
+    }
+  ]
+}

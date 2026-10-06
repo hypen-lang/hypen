@@ -48,22 +48,48 @@ Image("thumbnail.jpg")
 
 ## Video
 
-Video player component.
+Video player component. Plays a resolved streamable URL, or an ordered
+`playlist` of URLs with auto-advance. Only URLs cross the wire — never media
+payloads. Full cross-platform contract (failure modes, `headers` behavior,
+platform capability matrix): the [Video docs](../../../hypen-docs/content/docs/guide/components.mdx).
 
 **Props:**
-- `src` (String) or first positional argument: Video source URL
-- `controls` (Boolean): Show video controls (default: false)
-- `autoplay` (Boolean): Auto-play video (default: false)
-- `loop` (Boolean): Loop video (default: false)
-- `muted` (Boolean): Mute audio (default: false)
+- `src` (String) or first positional argument: Resolved streamable video URL (`source` is an alias)
+- `playlist` (Array of String): Ordered play queue; supersedes `src` when non-empty and auto-advances when a track ends
+- `startIndex` (Number): Index into `playlist` to start from (default: 0, clamped)
 - `poster` (String): Poster image URL shown before playback
+- `controls` (Boolean): Show native transport controls (default: false)
+- `autoplay` (Boolean): Auto-play video (default: false; browsers fall back to muted autoplay)
+- `loop` (Boolean): Loop the video — with a playlist, wrap to track 0 after the last track (default: false)
+- `muted` (Boolean): Start muted (default: false)
+- `preload` (String): Web hint: `none` | `metadata` | `auto` (default: `metadata`)
+- `headers` (Map): Extra HTTP request headers for media fetches (auth-protected streams; see the [Video docs](../../../hypen-docs/content/docs/guide/components.mdx) for the web blob fallback)
+- `title` (String): Accessible label for the player (flagged by the `video-missing-label` a11y check when absent)
+
+**Events** (optional `@actions` refs; payloads carry `src` and the playlist `index`):
+- `onPlay`, `onPause`: playback starts/resumes or pauses
+- `onEnded`: a track finishes (`completed: true` when the whole queue is done)
+- `onTrackChange`: the queue advances to a new track
+- `onError`: the stream cannot be fetched or decoded (`status`/`code`/`message`)
 
 **Example:**
 ```hypen
 Video(
   src: "intro.mp4",
   controls: true,
-  poster: "thumbnail.jpg"
+  poster: "thumbnail.jpg",
+  title: "Product intro"
+)
+```
+
+**Playlist with events:**
+```hypen
+Video(
+  playlist: ["https://cdn/ep1.mp4", "https://cdn/ep2.mp4"],
+  controls: true,
+  onTrackChange: @actions.trackChanged,
+  onEnded: @actions.playbackDone,
+  onError: @actions.playbackFailed,
 )
 ```
 

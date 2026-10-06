@@ -1,0 +1,183 @@
+{
+  "$defs": {
+    "blobItem": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "maximum": 67108864,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "channel": {
+          "maximum": 0,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contentType": {
+          "enum": [
+            "image/jpeg",
+            "image/heic",
+            "video/mp4",
+            "video/quicktime",
+            "video/webm"
+          ],
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "channel",
+        "contentType",
+        "bytes",
+        "sha256"
+      ],
+      "type": "object"
+    },
+    "blobStart": {
+      "additionalProperties": false,
+      "properties": {
+        "bytes": {
+          "maximum": 67108864,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "channel": {
+          "maximum": 0,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "contentType": {
+          "enum": [
+            "image/jpeg",
+            "image/heic",
+            "video/mp4",
+            "video/quicktime",
+            "video/webm"
+          ],
+          "type": "string"
+        },
+        "kind": {
+          "const": "blobStart"
+        }
+      },
+      "required": [
+        "kind",
+        "channel",
+        "contentType"
+      ],
+      "type": "object"
+    },
+    "event": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/blobStart"
+        },
+        {
+          "$ref": "#/$defs/progress"
+        }
+      ]
+    },
+    "params": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "facing": {
+              "enum": [
+                "front",
+                "back"
+              ],
+              "type": "string"
+            },
+            "mode": {
+              "const": "photo"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "facing": {
+              "enum": [
+                "front",
+                "back"
+              ],
+              "type": "string"
+            },
+            "maxDurationMs": {
+              "maximum": 600000,
+              "minimum": 1,
+              "type": "integer"
+            },
+            "mode": {
+              "const": "video"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "progress": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "progress"
+        },
+        "state": {
+          "enum": [
+            "pendingConsent",
+            "running"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "state"
+      ],
+      "type": "object"
+    },
+    "result": {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "$ref": "#/$defs/blobItem"
+          },
+          "maxItems": 1,
+          "minItems": 1,
+          "type": "array"
+        }
+      },
+      "required": [
+        "items"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "https://hypen.space/schemas/device/camera.capture-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/params"
+    },
+    {
+      "$ref": "#/$defs/result"
+    },
+    {
+      "$ref": "#/$defs/event"
+    }
+  ],
+  "description": "Provisional (RFC 001 §6): may change until the Phase 4 real-driver gate; after stabilization an optional addition creates a new revision. Bounds come from this revision's registry entry (registry-v1.json). Validate a payload against #/$defs/params, #/$defs/result or #/$defs/event; the document root only accepts a value matching any of them.",
+  "title": "camera.capture capability, revision 1"
+}

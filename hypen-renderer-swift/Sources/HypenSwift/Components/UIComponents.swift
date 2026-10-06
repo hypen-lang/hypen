@@ -61,21 +61,38 @@ public struct SpinnerComponent: ComponentHandler {
     ) -> AnyView {
         let size = context.element.getStringProp("size.0") ?? "medium"
         let color = ColorParser.parse(context.element.props["color.0"])
+            ?? Color(red: 59 / 255, green: 130 / 255, blue: 246 / 255)
+        let animated = context.element.getBoolProp("animated")
+            ?? context.element.getBoolProp("animated.0")
+            ?? true
+        let diameter = modifier.width
+            ?? modifier.height
+            ?? diameterForSize(size)
 
         return AnyView(
-            ProgressView()
+            Group {
+                if animated {
+                    ProgressView()
+                } else {
+                    ProgressView(value: 0.75)
+                }
+            }
                 .progressViewStyle(.circular)
-                .scaleEffect(scaleForSize(size))
+                // SwiftUI's circular ProgressView keeps the same glyph size
+                // when only its frame changes. Scale the glyph as well so
+                // authored 20/40/60 sizes match the other renderers.
+                .scaleEffect(diameter / 20)
+                .frame(width: diameter, height: diameter)
                 .tint(color)
                 .hypenModifier(modifier)
         )
     }
 
-    private func scaleForSize(_ size: String) -> CGFloat {
+    private func diameterForSize(_ size: String) -> CGFloat {
         switch size.lowercased() {
-        case "small": return 0.7
-        case "large": return 1.5
-        default: return 1.0
+        case "small": return 20
+        case "large": return 60
+        default: return 40
         }
     }
 }
@@ -92,9 +109,12 @@ public struct ProgressBarComponent: ComponentHandler {
         modifier: HypenModifier,
         children: @escaping () -> AnyView
     ) -> AnyView {
-        let progress = context.element.getDoubleProp("progress.0")
+        let rawProgress = context.element.getDoubleProp("progress")
+            ?? context.element.getDoubleProp("progress.0")
+            ?? context.element.getDoubleProp("value")
             ?? context.element.getDoubleProp("value.0")
             ?? 0
+        let progress = rawProgress > 1 ? rawProgress / 100 : rawProgress
 
         let color = ColorParser.parse(context.element.props["color.0"])
         let backgroundColor = ColorParser.parse(context.element.props["trackColor.0"])
@@ -126,19 +146,10 @@ public struct BadgeComponent: ComponentHandler {
             ?? context.element.getStringProp("0")
             ?? ""
 
-        var badgeModifier = modifier
-        if badgeModifier.backgroundColor == nil {
-            badgeModifier.backgroundColor = .accentColor
-        }
-        if badgeModifier.cornerRadius == 0 {
-            badgeModifier.cornerRadius = 10
-        }
-        if badgeModifier.paddingTop == 0 && badgeModifier.paddingLeading == 0 {
-            badgeModifier.setPadding(horizontal: 8, vertical: 4)
-        }
-        if badgeModifier.foregroundColor == nil {
-            badgeModifier.foregroundColor = .white
-        }
+        let resolution = resolveBadgeModifier(modifier)
+        let badgeModifier = resolution.modifier
+        let fontSize = badgeModifier.fontSize ?? BadgeDefaults.fontSize
+        let fontWeight = badgeModifier.fontWeight ?? BadgeDefaults.fontWeight
 
         return AnyView(
             Group {
@@ -146,13 +157,79 @@ public struct BadgeComponent: ComponentHandler {
                     children()
                 } else {
                     Text(text)
-                        .font(.caption)
-                        .fontWeight(.medium)
                 }
             }
+            // Parent font values are inherited by renderer-owned Text children,
+            // while a child with explicit typography can still override them.
+            .font(.system(size: fontSize, weight: fontWeight))
             .hypenModifier(badgeModifier)
         )
     }
+}
+
+enum BadgeDefaults {
+    static let backgroundColor = Color(red: 224 / 255, green: 224 / 255, blue: 224 / 255)
+    static let foregroundColor = Color(red: 51 / 255, green: 51 / 255, blue: 51 / 255)
+    static let cornerRadius: CGFloat = 4
+    static let horizontalPadding: CGFloat = 8
+    static let verticalPadding: CGFloat = 4
+    static let fontSize: CGFloat = 12
+    static let fontWeight: Font.Weight = .semibold
+}
+
+struct BadgeModifierResolution {
+    let modifier: HypenModifier
+    let defaultedBackground: Bool
+    let defaultedForeground: Bool
+    let defaultedCornerRadius: Bool
+    let defaultedPadding: Bool
+}
+
+/// Resolves component defaults without turning zero-valued custom applicators
+/// back into defaults. Padding is one shorthand contract: declaring any edge
+/// replaces the implicit 4x8 padding rather than stacking with it. A fully
+/// fixed badge owns its 2D box and therefore receives no implicit padding.
+func resolveBadgeModifier(_ source: HypenModifier) -> BadgeModifierResolution {
+    var result = source
+
+    let defaultedBackground = result.backgroundColor == nil
+        && result.backgroundGradient == nil
+        && result.cssBackground == nil
+    if defaultedBackground {
+        result.backgroundColor = BadgeDefaults.backgroundColor
+    }
+
+    let defaultedForeground = result.foregroundColor == nil
+    if defaultedForeground {
+        result.foregroundColor = BadgeDefaults.foregroundColor
+    }
+
+    let hasExplicitCornerRadius = result.explicitlySetProperties.contains("cornerRadius")
+    let defaultedCornerRadius = !hasExplicitCornerRadius
+    if defaultedCornerRadius {
+        result.cornerRadius = BadgeDefaults.cornerRadius
+    }
+
+    let paddingProperties: Set<String> = [
+        "paddingTop", "paddingBottom", "paddingLeading", "paddingTrailing"
+    ]
+    let hasExplicitPadding = !result.explicitlySetProperties.isDisjoint(with: paddingProperties)
+    let hasFixedBox = result.width != nil && result.height != nil
+    let defaultedPadding = !hasExplicitPadding && !hasFixedBox
+    if defaultedPadding {
+        result.setPadding(
+            horizontal: BadgeDefaults.horizontalPadding,
+            vertical: BadgeDefaults.verticalPadding
+        )
+    }
+
+    return BadgeModifierResolution(
+        modifier: result,
+        defaultedBackground: defaultedBackground,
+        defaultedForeground: defaultedForeground,
+        defaultedCornerRadius: defaultedCornerRadius,
+        defaultedPadding: defaultedPadding
+    )
 }
 
 // MARK: - Avatar Component
@@ -178,16 +255,15 @@ public struct AvatarComponent: ComponentHandler {
 
         // Default size 40 to match Web (Android uses 48)
         let size = context.element.getCGFloatProp("size.0") ?? modifier.width ?? 40
-        let backgroundColor = ColorParser.parse(context.element.props["backgroundColor.0"]) ?? Color.gray.opacity(0.3)
-
-        // Don't override modifier width/height - just use for the avatar frame
-        // This avoids double-frame issues
+        let componentBackgroundColor = ColorParser.parse(context.element.props["backgroundColor.0"])
+        let avatarModifier = avatarDecorationModifier(
+            modifier,
+            size: size,
+            componentBackgroundColor: componentBackgroundColor
+        )
 
         return AnyView(
             ZStack {
-                Circle()
-                    .fill(backgroundColor)
-
                 if let src = src {
                     if src.hasPrefix("http://") || src.hasPrefix("https://") {
                         AsyncImage(url: URL(string: src)) { phase in
@@ -211,18 +287,7 @@ public struct AvatarComponent: ComponentHandler {
             }
             .frame(width: size, height: size)
             .clipShape(Circle())
-            // Apply modifier but exclude width/height/cornerRadius since we handle them
-            .opacity(modifier.isVisible ? modifier.opacity : 0)
-            .shadow(
-                color: modifier.shadowColor ?? .clear,
-                radius: modifier.shadowRadius,
-                x: modifier.shadowX,
-                y: modifier.shadowY
-            )
-            .padding(.top, modifier.marginTop)
-            .padding(.bottom, modifier.marginBottom)
-            .padding(.leading, modifier.marginLeading)
-            .padding(.trailing, modifier.marginTrailing)
+            .hypenModifier(avatarModifier)
         )
     }
 
@@ -245,4 +310,88 @@ public struct AvatarComponent: ComponentHandler {
         }
         return "?"
     }
+}
+
+/// An Avatar owns its square content frame and circular image clip. Applying the
+/// original modifier directly would install width/height and padding a second
+/// time, changing the component's measured size. Strip only those layout fields
+/// and send the remaining decoration through the shared background/border paint
+/// path used by every other component.
+func avatarDecorationModifier(
+    _ source: HypenModifier,
+    size: CGFloat,
+    componentBackgroundColor: Color? = nil
+) -> HypenModifier {
+    var result = source
+
+    result.width = nil
+    result.height = nil
+    result.minWidth = nil
+    result.maxWidth = nil
+    result.minHeight = nil
+    result.maxHeight = nil
+    result.fillMaxWidth = false
+    result.fillMaxHeight = false
+    result.fillMaxWidthFraction = 1
+    result.fillMaxHeightFraction = 1
+    result.aspectRatio = nil
+
+    result.paddingTop = 0
+    result.paddingBottom = 0
+    result.paddingLeading = 0
+    result.paddingTrailing = 0
+
+    result.alignment = nil
+    result.weight = nil
+    result.flexGrow = nil
+    result.flexShrink = nil
+
+    if result.backgroundColor == nil && result.backgroundGradient == nil && result.cssBackground == nil {
+        result.backgroundColor = componentBackgroundColor ?? Color.gray.opacity(0.3)
+    }
+
+    // Avatar images remain circular even without an explicit corner-radius.
+    // Give their background and border the same default geometry. An explicit
+    // zero is still honored for callers that intentionally request a square
+    // decoration around the circular image.
+    if result.cornerRadius == 0 && !result.explicitlySetProperties.contains("cornerRadius") {
+        result.cornerRadius = size / 2
+    }
+
+    return result
+}
+
+/// Testable geometry/paint contract for Avatar decoration. Borders are overlays,
+/// so they never participate in the Avatar's declared square measurement.
+struct AvatarRenderRecipe: Equatable {
+    let contentSize: CGFloat
+    let imageClipRadius: CGFloat
+    let decorationCornerRadius: CGFloat
+    let borderWidth: CGFloat
+    let borderPaint: BorderRenderingStyle?
+
+    var paintsCircularSeparator: Bool {
+        borderPaint != nil
+            && borderWidth > 0
+            && decorationCornerRadius >= contentSize / 2
+    }
+}
+
+func avatarRenderRecipe(modifier: HypenModifier, size: CGFloat) -> AvatarRenderRecipe {
+    let paint: BorderRenderingStyle?
+    if modifier.borderWidth > 0,
+       modifier.borderColor != nil,
+       canonicalBorderStyle(modifier.borderStyle) != "none" {
+        paint = borderRenderingStyle(modifier.borderStyle, width: modifier.borderWidth)
+    } else {
+        paint = nil
+    }
+
+    return AvatarRenderRecipe(
+        contentSize: size,
+        imageClipRadius: size / 2,
+        decorationCornerRadius: modifier.cornerRadius,
+        borderWidth: modifier.borderWidth,
+        borderPaint: paint
+    )
 }

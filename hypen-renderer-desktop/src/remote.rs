@@ -8,13 +8,50 @@
 //! local engine for a `RemoteModule` without touching the rest of the
 //! window / paint / layout pipeline.
 //!
-//! Phase 11 v1 ships the happy path: connect, hello, stream patches,
-//! dispatch actions. Reconnect-with-backoff and session resume land in
-//! a follow-up.
+//! The worker connects, sends `hello`, streams patches, dispatches
+//! actions, reconnects with backoff and resumes its session (with the
+//! server's rotating `resumeToken` when it sends one).
+//!
+//! # Device capabilities (RFC 001)
+//!
+//! Unless disabled with [`RemoteOptions::device`], the module is also a
+//! **DeviceHost** ([`crate::device`]): its `hello` advertises what the
+//! desktop implements (`file.pick`, `gallery.pick`, `file.save` behind native
+//! dialogs; `camera.capture`, `mic.record`, `bluetooth.scan`,
+//! `bluetooth.select` and `permission.*` behind the window's host UI and the
+//! hardware backends compiled in), it accepts the server's
+//! `sessionAck.device`, and device
+//! messages and binary frames are routed to the host instead of the patch
+//! path. Without that advertisement a device-enabled server disables device
+//! access for the connection and every server call answers `unavailable`
+//! (`device-disabled`) — which is what this client did before it had a host.
+//!
+//! Device-enabled servers admit a connection that carries no `Origin` (this
+//! client sends none) only through their authenticator: pass the app
+//! credential with [`RemoteOptions::header`] (e.g. `Authorization`).
+//!
+//! # Robustness
+//!
+//! Nothing a server sends stops the patch stream. Text that is not a known
+//! UI message is ignored; a `patch`/`initialTree` batch is decoded patch by
+//! patch, so one malformed or unknown patch is skipped instead of dropping
+//! the batch; malformed, unknown or invalid device messages and frames are
+//! handled by the device host per RFC 001 §2.1 (ignored for unknown ids,
+//! the request terminated for a live one, counted as connection-level
+//! otherwise, the socket reset only after repeated violations).
+//!
+//! The socket is **uncompressed**: `tokio-tungstenite` cannot negotiate
+//! `permessage-deflate`, so this client offers no WebSocket extensions.
+//! That is fully interoperable with compression-enabled Hypen servers —
+//! see the note at the `connect_async` call in `run_session` for the
+//! ecosystem status and what would change it.
 
+use crate::device::{origin_of, DesktopDevice, DeviceConfig, DriverMsg, WireOut};
 use crate::module::HypenModule;
+use hypen_engine::device::{device_message_type, is_oversize_device_text, top_level_member_text};
 use hypen_engine::Patch;
 use hypen_server::remote::RemoteMessage;
+use serde::Deserialize;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -96,6 +133,42 @@ pub(crate) struct Inner {
     pending: Vec<Patch>,
 }
 
+/// How a [`RemoteModule`] connects.
+#[derive(Clone, Debug)]
+pub struct RemoteOptions {
+    /// Extra HTTP headers on every WebSocket upgrade (reconnects included),
+    /// e.g. `Authorization`: device-enabled servers admit native clients —
+    /// which send no `Origin` — only through their authenticator (RFC 001 §5).
+    pub headers: Vec<(String, String)>,
+    /// The device host (RFC 001). `Some` by default ([`DeviceConfig::native`]);
+    /// `None` connects UI-only (no `hello.device`, device calls on the server
+    /// answer `unavailable`).
+    pub device: Option<DeviceConfig>,
+}
+
+impl Default for RemoteOptions {
+    fn default() -> Self {
+        RemoteOptions {
+            headers: Vec::new(),
+            device: Some(DeviceConfig::native()),
+        }
+    }
+}
+
+impl RemoteOptions {
+    /// Add an upgrade header (e.g. `("Authorization", "Bearer …")`).
+    pub fn header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Replace (or with `None`, remove) the device host.
+    pub fn device(mut self, device: Option<DeviceConfig>) -> Self {
+        self.device = device;
+        self
+    }
+}
+
 pub struct RemoteModule {
     /// Module name the server registered. Travels with every
     /// `DispatchAction` so the server routes to the right module.
@@ -110,6 +183,16 @@ impl RemoteModule {
     /// single-threaded tokio runtime so the (sync) winit event loop
     /// stays sync.
     pub fn connect(url: impl Into<String>, module_name: impl Into<String>) -> Self {
+        Self::connect_with(url, module_name, RemoteOptions::default())
+    }
+
+    /// [`Self::connect`] with explicit [`RemoteOptions`] (upgrade headers,
+    /// device host).
+    pub fn connect_with(
+        url: impl Into<String>,
+        module_name: impl Into<String>,
+        options: RemoteOptions,
+    ) -> Self {
         let url = url.into();
         let module_name = module_name.into();
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
@@ -130,6 +213,7 @@ impl RemoteModule {
                     module_for_worker,
                     outbound_rx,
                     inner_for_worker,
+                    options,
                 ));
             })
             .expect("spawn remote worker");
@@ -187,20 +271,53 @@ enum SessionEnd {
     Disconnected,
 }
 
+/// What survives a reconnect: the ids a resume presents.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct Resume {
+    /// `sessionAck.sessionId` of the last session.
+    pub(crate) session_id: Option<String>,
+    /// The latest `sessionAck.resumeToken` (device-enabled servers rotate it
+    /// on every ack; without it they start a new session, RFC 001 §5).
+    pub(crate) resume_token: Option<String>,
+}
+
 async fn run_worker(
     url: String,
     module_name: String,
     mut outbound: mpsc::UnboundedReceiver<RemoteMessage>,
     inner: Arc<Mutex<Inner>>,
+    options: RemoteOptions,
 ) {
-    let mut session_id: Option<String> = None;
+    let mut resume = Resume::default();
     let mut attempt: u32 = 0;
+    // Dialog answers come back on this channel; the worker keeps a sender so
+    // `recv` never reports "closed" while the device host is idle.
+    let (driver_tx, mut driver_rx) = mpsc::unbounded_channel::<DriverMsg>();
+    let mut device = options
+        .device
+        .as_ref()
+        .map(|cfg| DesktopDevice::new(cfg, driver_tx.clone()));
     // First connect attempt — surface the Connecting state before
     // the TCP handshake even starts so the UI has time to render
     // a spinner.
     deliver_status(&inner, ConnectionStatus::Connecting);
     loop {
-        let result = run_session(&url, &module_name, &mut session_id, &mut outbound, &inner).await;
+        let result = run_session(
+            &url,
+            &options.headers,
+            &module_name,
+            &mut resume,
+            &mut outbound,
+            &inner,
+            device.as_mut(),
+            &mut driver_rx,
+        )
+        .await;
+        if let Some(device) = device.as_mut() {
+            // Connection loss: stop every device operation, delete temp
+            // files, send nothing (§2.5). The next socket re-advertises.
+            device.detach();
+        }
         match result {
             Ok(SessionEnd::Shutdown) => {
                 log::info!("remote: shutdown requested; exiting worker");
@@ -208,6 +325,9 @@ async fn run_worker(
                 break;
             }
             Ok(SessionEnd::Disconnected) | Err(_) => {
+                if let Err(e) = &result {
+                    log::warn!("remote: {e}");
+                }
                 attempt = attempt.saturating_add(1);
                 if attempt > MAX_RECONNECT_ATTEMPTS {
                     log::error!(
@@ -235,49 +355,118 @@ async fn run_worker(
             }
         }
     }
+    drop(driver_tx);
 }
 
-/// Run a single connect → handshake → pump cycle. Captures
-/// `session_id` from `SessionAck` so reconnects can resume. Returns
+/// Build the upgrade request: the URL plus the configured headers.
+fn upgrade_request(
+    url: &str,
+    headers: &[(String, String)],
+) -> Result<tokio_tungstenite::tungstenite::handshake::client::Request, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::header::{HeaderName, HeaderValue};
+    let mut req = url
+        .into_client_request()
+        .map_err(|e| format!("bad url {url}: {e}"))?;
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes())
+            .map_err(|e| format!("bad header name {name:?}: {e}"))?;
+        let value = HeaderValue::from_str(value)
+            .map_err(|e| format!("bad header value for {name}: {e}"))?;
+        req.headers_mut().append(name, value);
+    }
+    Ok(req)
+}
+
+/// Run a single connect → handshake → pump cycle. Captures the session
+/// id and resume token from `SessionAck` so reconnects can resume. Returns
 /// `Shutdown` only when the outbound channel hangs up.
+#[allow(clippy::too_many_arguments)]
 async fn run_session(
     url: &str,
+    headers: &[(String, String)],
     module_name: &str,
-    session_id: &mut Option<String>,
+    resume: &mut Resume,
     outbound: &mut mpsc::UnboundedReceiver<RemoteMessage>,
     inner: &Arc<Mutex<Inner>>,
+    mut device: Option<&mut DesktopDevice>,
+    driver_rx: &mut mpsc::UnboundedReceiver<DriverMsg>,
 ) -> Result<SessionEnd, String> {
     use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::{connect_async, tungstenite::protocol::Message as WsMsg};
+    use tokio_tungstenite::{
+        connect_async,
+        tungstenite::protocol::{frame::coding::CloseCode, CloseFrame, Message as WsMsg},
+    };
 
     log::info!(
         "remote: connecting to {url} (resume session={:?})",
-        session_id.as_deref(),
+        resume.session_id.as_deref(),
     );
-    let (ws_stream, _resp) = connect_async(url)
+    // NOTE: no `permessage-deflate` — this client always runs uncompressed.
+    //
+    // Hypen enables WebSocket compression by default in its other SDKs, but
+    // `tokio-tungstenite` (pinned at 0.24 here) cannot negotiate it. No
+    // published `tungstenite`/`tokio-tungstenite` release up to and including
+    // 0.30.0 exposes a `deflate`/compression feature or depends on a
+    // compression crate; the README still says "There is no support for
+    // permessage-deflate at the moment". Upstream issue
+    // https://github.com/snapview/tungstenite-rs/issues/2 has been open since
+    // 2017 — an implementation merged as PR #328 and was then reverted, and
+    // the re-land (PR #426) remains unmerged. So there is no version bump
+    // that would turn compression on; the dep is deliberately left alone.
+    //
+    // This is interoperable, not broken. `permessage-deflate` is negotiated
+    // per connection and optional (RFC 7692): we simply never send a
+    // `Sec-WebSocket-Extensions` offer, so a compression-enabled Hypen server
+    // has nothing to accept and both peers speak plain frames. Connecting to a
+    // server that compresses for browser/OkHttp clients works unchanged — this
+    // client just pays full bandwidth for the patch stream. It is also exactly
+    // what the device plane requires (RFC 001 §2.3: device traffic never
+    // shares a DEFLATE context), so the device host needs no extra check.
+    //
+    // Re-check on any `tokio-tungstenite` bump: if snapview/tungstenite-rs#426
+    // merges, enable the `deflate` feature and offer the extension here — and
+    // then keep the device plane off on compressed sockets.
+    let request = upgrade_request(url, headers)?;
+    let (ws_stream, _resp) = connect_async(request)
         .await
         .map_err(|e| format!("connect failed: {e}"))?;
     let (mut sink, mut stream) = ws_stream.split();
     log::info!("remote: connected (module={module_name})");
 
-    // Hello — replay our session_id if we have one so the server can
-    // resume; otherwise it'll mint a new one.
-    let hello = build_hello(session_id.clone());
+    // A fresh device connection: new ids, new selection (§2.5).
+    if let Some(device) = device.as_deref_mut() {
+        device.attach(origin_of(url));
+    }
+
+    // Hello — replay our session_id (and the latest resume token) if we
+    // have one so the server can resume; otherwise it'll mint a new one.
+    let hello = build_hello(
+        resume.session_id.clone(),
+        resume.resume_token.clone(),
+        device.as_deref().map(DesktopDevice::hello_device),
+    );
     let hello_text = hello.to_json().map_err(|e| format!("encode Hello: {e}"))?;
     sink.send(WsMsg::Text(hello_text))
         .await
         .map_err(|e| format!("send Hello: {e}"))?;
 
     loop {
+        let deadline = device.as_deref().and_then(DesktopDevice::next_deadline);
+        let bulk_ready = device.as_deref().is_some_and(DesktopDevice::has_ready_work);
         tokio::select! {
             biased;
 
             incoming = stream.next() => match incoming {
                 Some(Ok(WsMsg::Text(text))) => {
-                    handle_incoming(text.as_ref(), inner, session_id);
+                    route_text(text.as_ref(), inner, resume, device.as_deref_mut());
                 }
-                Some(Ok(WsMsg::Binary(_))) => {
-                    // Hypen's wire format is JSON text; ignore binary.
+                Some(Ok(WsMsg::Binary(frame))) => {
+                    // Binary frames are device frames (RFC 001 §2.3); a
+                    // client without a device host drops them.
+                    if let Some(device) = device.as_deref_mut() {
+                        device.on_frame(&frame);
+                    }
                 }
                 Some(Ok(WsMsg::Close(_))) | None => {
                     log::info!("remote: server closed connection");
@@ -305,22 +494,147 @@ async fn run_session(
                     }
                 }
                 None => return Ok(SessionEnd::Shutdown),
+            },
+
+            Some(msg) = driver_rx.recv() => {
+                if let Some(device) = device.as_deref_mut() {
+                    device.on_driver(msg);
+                }
+            },
+
+            _ = sleep_until_opt(deadline) => {
+                if let Some(device) = device.as_deref_mut() {
+                    device.tick();
+                }
+            },
+
+            // Bulk upload turns run only when nothing above is ready: UI
+            // messages and controls are served before the next chunk (§2.3).
+            _ = std::future::ready(()), if bulk_ready => {},
+        }
+
+        // Put whatever the device host produced on the wire, in order.
+        if let Some(device) = device.as_deref_mut() {
+            for out in device.drain() {
+                let sent = match out {
+                    WireOut::Text(t) => sink.send(WsMsg::Text(t)).await,
+                    WireOut::Binary(b) => sink.send(WsMsg::Binary(b)).await,
+                    WireOut::Close(code, reason) => {
+                        log::warn!("remote: device host closing the socket ({code}): {reason}");
+                        let frame = CloseFrame {
+                            code: CloseCode::from(code),
+                            reason: reason.into(),
+                        };
+                        let _ = sink.send(WsMsg::Close(Some(frame))).await;
+                        return Ok(SessionEnd::Disconnected);
+                    }
+                };
+                if let Err(e) = sent {
+                    log::warn!("remote: device send failed: {e}");
+                    return Ok(SessionEnd::Disconnected);
+                }
             }
         }
     }
 }
 
-/// Build the Hello payload. Pulled out as a free function so tests
-/// can assert the shape without spinning up a worker.
-pub(crate) fn build_hello(session_id: Option<String>) -> RemoteMessage {
-    RemoteMessage::Hello {
-        session_id,
-        props: None,
+async fn sleep_until_opt(deadline: Option<std::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(tokio::time::Instant::from_std(at)).await,
+        None => std::future::pending().await,
     }
 }
 
-fn handle_incoming(text: &str, inner: &Arc<Mutex<Inner>>, session_id: &mut Option<String>) {
-    let msg: RemoteMessage = match serde_json::from_str(text) {
+/// Build the Hello payload. Pulled out as a free function so tests
+/// can assert the shape without spinning up a worker.
+pub(crate) fn build_hello(
+    session_id: Option<String>,
+    resume_token: Option<String>,
+    device: Option<Value>,
+) -> RemoteMessage {
+    // A token only means something together with the id it resumes.
+    let resume_token = resume_token.filter(|_| session_id.is_some());
+    RemoteMessage::Hello {
+        session_id,
+        props: None,
+        device,
+        resume_token,
+    }
+}
+
+/// Route one text message: device messages (and over-limit text claiming a
+/// device type) to the device host, everything else to the UI path.
+pub(crate) fn route_text(
+    text: &str,
+    inner: &Arc<Mutex<Inner>>,
+    resume: &mut Resume,
+    device: Option<&mut DesktopDevice>,
+) {
+    if is_oversize_device_text(text) || device_message_type(text).is_some() {
+        match device {
+            Some(device) => device.on_text(text),
+            None => log::debug!("remote: dropping a device message (no device host)"),
+        }
+        return;
+    }
+    handle_incoming(text, inner, resume, device);
+}
+
+/// Decode a `patches` array one patch at a time: a malformed or unknown
+/// patch is skipped (and logged) instead of dropping the whole batch.
+pub(crate) fn decode_patches_lenient(value: Option<&Value>) -> Vec<Patch> {
+    let Some(Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    let mut patches = Vec::with_capacity(items.len());
+    let mut skipped = 0usize;
+    for item in items {
+        match Patch::deserialize(item) {
+            Ok(p) => patches.push(p),
+            Err(e) => {
+                skipped += 1;
+                if skipped <= 3 {
+                    log::warn!("remote: skipping a malformed patch: {e}");
+                }
+            }
+        }
+    }
+    if skipped > 3 {
+        log::warn!("remote: skipped {skipped} malformed patches in one batch");
+    }
+    patches
+}
+
+pub(crate) fn handle_incoming(
+    text: &str,
+    inner: &Arc<Mutex<Inner>>,
+    resume: &mut Resume,
+    device: Option<&mut DesktopDevice>,
+) {
+    let value: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("remote: ignoring malformed message: {e}");
+            return;
+        }
+    };
+    // Patch batches are decoded patch by patch (see
+    // `decode_patches_lenient`); everything else as a whole message.
+    match value.get("type").and_then(Value::as_str) {
+        Some("patch") | Some("initialTree") => {
+            let patches = decode_patches_lenient(value.get("patches"));
+            if !patches.is_empty() {
+                deliver_patches(inner, &patches);
+            }
+            return;
+        }
+        Some(_) => {}
+        None => {
+            log::warn!("remote: ignoring a message without a type");
+            return;
+        }
+    }
+    let msg: RemoteMessage = match serde_json::from_value(value) {
         Ok(m) => m,
         Err(e) => {
             log::warn!("remote: ignoring malformed message: {e}");
@@ -332,9 +646,28 @@ fn handle_incoming(text: &str, inner: &Arc<Mutex<Inner>>, session_id: &mut Optio
             session_id: id,
             is_new,
             is_restored,
+            resume_token,
+            ..
         } => {
             log::info!("remote: session ack id={id} new={is_new} restored={is_restored}",);
-            *session_id = Some(id);
+            resume.session_id = Some(id);
+            // A device-enabled server rotates the token on every ack; a
+            // server without the device plane sends none (legacy resume).
+            resume.resume_token = resume_token;
+            if let Some(device) = device {
+                // The exact `sessionAck.device` text goes to the strict
+                // decoder; a duplicated member is ambiguous and disables
+                // the device plane (it never guesses).
+                match top_level_member_text(text, "device") {
+                    Ok(raw) => device.on_ack(raw),
+                    Err(()) => {
+                        // An empty text never decodes: the plane stays
+                        // disabled for this socket.
+                        log::warn!("remote: ambiguous sessionAck.device — device plane disabled");
+                        device.on_ack(Some(""));
+                    }
+                }
+            }
             // Handshake done — UI can drop the spinner now.
             deliver_status(inner, ConnectionStatus::Connected);
         }
@@ -351,7 +684,8 @@ fn handle_incoming(text: &str, inner: &Arc<Mutex<Inner>>, session_id: &mut Optio
             log::warn!("remote: session expired: {reason}");
             // Drop our id so the next reconnect mints a fresh one
             // instead of failing the resume handshake again.
-            *session_id = None;
+            resume.session_id = None;
+            resume.resume_token = None;
         }
         // Client→server variants — ignore if they ever bounce back.
         RemoteMessage::Hello { .. }
@@ -425,6 +759,7 @@ mod tests {
             id: id.into(),
             element_type: kind.into(),
             props: Arc::new(IndexMap::new()),
+            semantics: None,
         }
     }
 
@@ -482,8 +817,8 @@ mod tests {
 
         let got = received.lock().unwrap();
         assert_eq!(got.len(), 2, "pending patches should drain on wiring");
-        assert!(matches!(got[0], Patch::Create { ref id, .. } if id == "root_a"));
-        assert!(matches!(got[1], Patch::Create { ref id, .. } if id == "a_text"));
+        assert!(matches!(got[0], Patch::Create { ref id, .. } if id.as_ref() == "root_a"));
+        assert!(matches!(got[1], Patch::Create { ref id, .. } if id.as_ref() == "a_text"));
     }
 
     // ---------------------------------------------------------------
@@ -539,7 +874,7 @@ mod tests {
         inner.lock().unwrap().callback = Some(Arc::new(move |p: &[Patch]| {
             captured.lock().unwrap().extend_from_slice(p);
         }));
-        let mut session_id: Option<String> = None;
+        let mut resume = Resume::default();
 
         let initial_tree = json!({
             "type": "initialTree",
@@ -557,26 +892,27 @@ mod tests {
         })
         .to_string();
 
-        handle_incoming(&initial_tree, &inner, &mut session_id);
+        handle_incoming(&initial_tree, &inner, &mut resume, None);
         let got = received.lock().unwrap();
         assert_eq!(got.len(), 1);
-        assert!(matches!(got[0], Patch::Create { ref id, .. } if id == "1"));
+        assert!(matches!(got[0], Patch::Create { ref id, .. } if id.as_ref() == "1"));
     }
 
     #[test]
     fn handle_incoming_ignores_malformed_messages_without_panicking() {
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
-        let mut session_id: Option<String> = None;
-        handle_incoming("{not json}", &inner, &mut session_id);
-        handle_incoming(r#"{"type":"unknownVariant"}"#, &inner, &mut session_id);
+        let mut resume = Resume::default();
+        handle_incoming("{not json}", &inner, &mut resume, None);
+        handle_incoming(r#"{"type":"unknownVariant"}"#, &inner, &mut resume, None);
         assert!(inner.lock().unwrap().pending.is_empty());
-        assert!(session_id.is_none());
+        assert!(resume.session_id.is_none());
+        assert!(resume.resume_token.is_none());
     }
 
     #[test]
     fn handle_incoming_session_ack_captures_session_id_for_resume() {
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
-        let mut session_id: Option<String> = None;
+        let mut resume = Resume::default();
         let session_ack = json!({
             "type": "sessionAck",
             "sessionId": "session-abc-123",
@@ -584,8 +920,8 @@ mod tests {
             "isRestored": false,
         })
         .to_string();
-        handle_incoming(&session_ack, &inner, &mut session_id);
-        assert_eq!(session_id.as_deref(), Some("session-abc-123"));
+        handle_incoming(&session_ack, &inner, &mut resume, None);
+        assert_eq!(resume.session_id.as_deref(), Some("session-abc-123"));
         assert!(inner.lock().unwrap().pending.is_empty());
     }
 
@@ -595,15 +931,19 @@ mod tests {
         // it so the next reconnect mints a fresh session instead of
         // failing the resume handshake repeatedly.
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
-        let mut session_id: Option<String> = Some("expired-id".into());
+        let mut resume = Resume {
+            session_id: Some("expired-id".into()),
+            resume_token: Some("tok".into()),
+        };
         let expired = json!({
             "type": "sessionExpired",
             "sessionId": "expired-id",
             "reason": "idle timeout"
         })
         .to_string();
-        handle_incoming(&expired, &inner, &mut session_id);
-        assert!(session_id.is_none());
+        handle_incoming(&expired, &inner, &mut resume, None);
+        assert!(resume.session_id.is_none());
+        assert!(resume.resume_token.is_none());
     }
 
     // ---------------------------------------------------------------
@@ -626,7 +966,7 @@ mod tests {
 
     #[test]
     fn build_hello_serialises_session_id_when_present() {
-        let hello = build_hello(Some("resume-me".into()));
+        let hello = build_hello(Some("resume-me".into()), None, None);
         let json = serde_json::to_value(&hello).expect("encode");
         assert_eq!(json["type"], "hello");
         assert_eq!(json["sessionId"], "resume-me");
@@ -634,12 +974,197 @@ mod tests {
 
     #[test]
     fn build_hello_omits_session_id_for_fresh_connect() {
-        let hello = build_hello(None);
+        let hello = build_hello(None, None, None);
         let json = serde_json::to_value(&hello).expect("encode");
         assert_eq!(json["type"], "hello");
         assert!(
             json.get("sessionId").is_none(),
             "fresh Hello must not carry a sessionId field, got {json:?}",
         );
+    }
+
+    // ---------------------------------------------------------------
+    // Device routing + robustness (RFC 001 §2.1; tester report "malformed
+    // messages break desktop rendering")
+    // ---------------------------------------------------------------
+
+    fn capture(inner: &Arc<Mutex<Inner>>) -> Arc<Mutex<Vec<Patch>>> {
+        let received: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
+        let captured = Arc::clone(&received);
+        inner.lock().unwrap().callback = Some(Arc::new(move |p: &[Patch]| {
+            captured.lock().unwrap().extend_from_slice(p);
+        }));
+        received
+    }
+
+    fn test_device() -> DesktopDevice {
+        struct NoDialogs;
+        impl crate::device::FileDialogs for NoDialogs {
+            fn pick_files(
+                &self,
+                _: &crate::device::PickDialog,
+            ) -> Result<Option<Vec<std::path::PathBuf>>, crate::device::DialogUnavailable>
+            {
+                Ok(None)
+            }
+            fn save_file(
+                &self,
+                _: &crate::device::SaveDialog,
+            ) -> Result<Option<std::path::PathBuf>, crate::device::DialogUnavailable> {
+                Ok(None)
+            }
+        }
+        let (tx, _rx) = mpsc::unbounded_channel();
+        DesktopDevice::new(&DeviceConfig::with_dialogs(Arc::new(NoDialogs)), tx)
+    }
+
+    #[test]
+    fn build_hello_carries_the_device_advertisement_and_resume_token() {
+        let device = test_device();
+        let hello = build_hello(
+            Some("s-1".into()),
+            Some("tok".into()),
+            Some(device.hello_device()),
+        );
+        let json = serde_json::to_value(&hello).unwrap();
+        assert_eq!(json["resumeToken"], "tok");
+        assert_eq!(json["device"]["protocolVersions"], json!([1]));
+        let names: Vec<&str> = json["device"]["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "core.capabilities",
+                "file.pick",
+                "gallery.pick",
+                "file.save"
+            ]
+        );
+        // A token never travels without the id it resumes.
+        let fresh = serde_json::to_value(build_hello(None, Some("tok".into()), None)).unwrap();
+        assert!(fresh.get("resumeToken").is_none() && fresh.get("device").is_none());
+    }
+
+    #[test]
+    fn session_ack_selects_the_device_plane_and_rotates_the_token() {
+        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let mut device = test_device();
+        device.attach("ws://localhost:1".into());
+        let mut resume = Resume::default();
+        let ack = json!({"type":"sessionAck","sessionId":"s","isNew":true,"isRestored":false,
+            "resumeToken":"t1",
+            "device":{"protocolVersion":1,"binary":true,"capabilities":[
+                {"name":"core.capabilities","version":1},{"name":"file.save","version":1}]}});
+        handle_incoming(&ack.to_string(), &inner, &mut resume, Some(&mut device));
+        assert_eq!(resume.resume_token.as_deref(), Some("t1"));
+        let live: Vec<String> = device.host().live_selection().keys().cloned().collect();
+        assert_eq!(live, ["core.capabilities", "file.save"]);
+        // A later ack from a server without the device plane drops the token.
+        let legacy = json!({"type":"sessionAck","sessionId":"s","isNew":false,"isRestored":true});
+        handle_incoming(&legacy.to_string(), &inner, &mut resume, Some(&mut device));
+        assert!(resume.resume_token.is_none());
+    }
+
+    #[test]
+    fn device_messages_are_routed_to_the_host_never_to_the_patch_path() {
+        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let received = capture(&inner);
+        let mut resume = Resume::default();
+        let request = json!({"type":"deviceRequest","id":1,"capability":"core.capabilities",
+            "version":1,"owner":{"connection":true},"lifetime":"connection",
+            "timeoutMs":1000,"initialCredit":8,"params":{}})
+        .to_string();
+        // Without a device host: dropped quietly.
+        route_text(&request, &inner, &mut resume, None);
+        // With a host that has no selection yet: ignored (no traffic before
+        // the ack), still never a patch.
+        let mut device = test_device();
+        device.attach("ws://localhost:1".into());
+        route_text(&request, &inner, &mut resume, Some(&mut device));
+        assert!(device.drain().is_empty());
+        assert!(received.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_malformed_patch_is_skipped_not_the_whole_batch() {
+        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let received = capture(&inner);
+        let mut resume = Resume::default();
+        let batch = json!({"type":"patch","module":"App","revision":4,"patches":[
+            {"type":"create","id":"a","elementType":"Text","props":{"0":"x"}},
+            {"type":"create","id":7},
+            {"type":"teleport","id":"a"},
+            "not even an object",
+            {"type":"setProp","id":"a","name":"0","value":"y"}]});
+        handle_incoming(&batch.to_string(), &inner, &mut resume, None);
+        let got = received.lock().unwrap();
+        assert_eq!(got.len(), 2, "{got:?}");
+        assert!(matches!(got[1], Patch::SetProp { ref id, .. } if id.as_ref() == "a"));
+    }
+
+    #[test]
+    fn junk_ui_messages_are_ignored_and_the_stream_continues() {
+        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let received = capture(&inner);
+        let mut resume = Resume {
+            session_id: Some("keep".into()),
+            resume_token: None,
+        };
+        let mut device = test_device();
+        device.attach("ws://localhost:1".into());
+        for junk in [
+            "",
+            "null",
+            "[1,2,3]",
+            r#"{"hello":"world"}"#,
+            r#"{"type":42}"#,
+            r#"{"type":"fromTheFuture"}"#,
+            r#"{"type":"sessionAck","sessionId":7}"#,
+            r#"{"type":"patch","patches":"nope"}"#,
+            r#"{"type":"deviceEvent","id":"one"}"#,
+            "\u{0}\u{1}garbage",
+        ] {
+            route_text(junk, &inner, &mut resume, Some(&mut device));
+        }
+        assert_eq!(resume.session_id.as_deref(), Some("keep"));
+        route_text(
+            &json!({"type":"patch","module":"App","revision":1,"patches":[
+                {"type":"create","id":"ok","elementType":"Text","props":{}}]})
+            .to_string(),
+            &inner,
+            &mut resume,
+            Some(&mut device),
+        );
+        assert_eq!(received.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn patch_batches_missing_their_other_members_still_render() {
+        // The Kotlin server shipped `patch` without `module` and
+        // `initialTree` without `state` (tester report "malformed messages
+        // break … desktop rendering"): a whole-message serde decode dropped
+        // both, so nothing rendered. Only `patches` matters to the renderer.
+        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let received = capture(&inner);
+        let mut resume = Resume::default();
+        for msg in [
+            json!({"type":"initialTree","module":"App","patches":[
+                {"type":"create","id":"a","elementType":"Text","props":{"0":"x"}}],"revision":0}),
+            json!({"type":"patch","patches":[
+                {"type":"setProp","id":"a","name":"0","value":"y"}],"revision":1}),
+            json!({"type":"patch","module":"App","patches":[
+                {"type":"setProp","id":"a","name":"0","value":"z"}]}),
+            // A type the client does not know (the Kotlin server's old
+            // `render`): ignored, the stream goes on.
+            json!({"type":"render","patches":[{"type":"remove","id":"a"}]}),
+        ] {
+            route_text(&msg.to_string(), &inner, &mut resume, None);
+        }
+        let got = received.lock().unwrap();
+        assert_eq!(got.len(), 3, "{got:?}");
     }
 }

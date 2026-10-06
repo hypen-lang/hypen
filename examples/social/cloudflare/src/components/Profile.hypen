@@ -54,12 +54,30 @@ module Profile {
         }
         .tw("px-4 pb-3 gap-1")
 
-        Button {
-            Text("Edit Profile")
-                .tw("text-sm font-semibold text-center")
+        Row {
+            Button {
+                Text("Change photo")
+                    .tw("text-sm font-semibold text-center")
+            }
+            .tw("flex-1 py-1.5 bg-gray-50 border border-gray-300 rounded-md")
+            .onClick(@actions.editProfile)
+
+            Button {
+                Text("New post")
+                    .tw("text-sm font-semibold text-center")
+            }
+            .tw("flex-1 py-1.5 bg-gray-50 border border-gray-300 rounded-md")
+            .onClick(@router.push, to: "/create")
         }
-        .tw("mx-4 mb-5 py-1.5 bg-gray-50 border border-gray-300 rounded-md")
-        .onClick(@actions.editProfile)
+        .tw("mx-4 mb-2 gap-2")
+
+        If(condition: "@{state.avatarStatus != ''}") {
+            Text("@{state.avatarStatus}")
+                .tw("mx-4 text-xs text-gray-500")
+        }
+
+        Column {}
+            .tw("h-3")
 
         Grid(@state.userPosts, key: "id") {
             Image(src: "@{item.imageUrl}")

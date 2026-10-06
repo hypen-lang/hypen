@@ -13,6 +13,13 @@ hypen studio
 
 Studio opens at `http://localhost:5173` by default.
 
+<img src="/tooling/studio.png" alt="Hypen Studio: file explorer, editor, and live preview connected to a running app" />
+
+For server-based projects (script entry in `hypen.json`), Studio starts
+your entry script automatically — or reuses a dev server that is already
+running on the configured port — and connects the preview to it. One
+command, no second terminal.
+
 ## Features at a Glance
 
 | Feature | Description |
@@ -60,7 +67,13 @@ Studio uses Monaco (the engine behind VS Code) for code editing. It supports:
 
 The preview panel renders your entry component in real time. As you edit `.hypen` templates or `.ts` modules, changes appear immediately — no manual refresh needed.
 
-The preview uses the same rendering pipeline as `hypen dev`, so what you see in Studio is exactly what your users will see in the browser.
+<img src="/tooling/studio-preview.png" alt="The live preview rendering a multi-component app in the phone frame" />
+
+Components referenced by bare name (like `Home()` inside a Router) are
+auto-discovered from the components directory — nested folders and sibling
+component folders both resolve, matching the dev server's discovery rules.
+The preview uses the same rendering pipeline as `hypen dev`, so what you
+see in Studio is exactly what your users will see in the browser.
 
 ## File Browser
 
@@ -105,6 +118,12 @@ The timeline records every state snapshot as your app runs. You can:
 
 This is especially powerful for debugging complex state flows — you can step through exactly how state evolved across a sequence of actions.
 
+<img src="/tooling/studio-timeline.png" alt="The State and Timeline panels with time travel active" />
+
+Note: the State panel and Timeline currently track the **primary module's**
+state. State owned by nested route modules (for example a counter mounted
+via a `Route`) is not yet captured in snapshots or restored by time travel.
+
 ## Integrated Terminal
 
 Studio includes a full PTY terminal. Run any shell command — install packages, run tests, check git status — without switching windows.
@@ -123,6 +142,20 @@ Open it with `Cmd/Ctrl+T` or from the bottom panel tabs.
 | `Cmd/Ctrl+T` | Toggle terminal |
 | `Cmd/Ctrl+Shift+T` | Toggle timeline |
 | `Esc` | Close command palette |
+
+## Test Mode
+
+Test Mode (`hypen test`, or the **Test** button in the toolbar) turns
+Studio into a multi-surface preview board: live web cells rendered with the
+DOM or Canvas renderer, next to Android and iOS device mirrors.
+
+<img src="/tooling/test-mode.png" alt="Test Mode with an interactive web cell" />
+
+Every cell is fully interactive and connected to the same dev server, with
+actions mirrored across surfaces — tap a button in the web cell and every
+other cell (and any connected device) updates too. Inside a project,
+`hypen test` starts the dev server for you; outside one, paste a `ws://`
+URL into the Connect input to attach to any running Hypen server.
 
 ## Preview on Android and iOS
 

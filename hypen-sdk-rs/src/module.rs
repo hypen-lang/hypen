@@ -606,6 +606,12 @@ pub struct ModuleInstance<S: State> {
     /// renderers must re-implement the parse/render dance themselves.
     pending_ir: Mutex<Option<hypen_engine::ir::IRNode>>,
     global_context: Option<Arc<GlobalContext>>,
+    /// Where the engine-side `__hypen_bind` closure parks a failed bind.
+    /// `on_action` handlers return `()`, so a `set_input` that clears the
+    /// engine's guard but doesn't fit the typed state has no other way
+    /// home; [`dispatch_external`](Self::dispatch_external) — the only
+    /// caller that can reach that closure — drains it after dispatch.
+    bind_error: Arc<Mutex<Option<SdkError>>>,
 }
 
 impl<S: State> ModuleInstance<S> {
@@ -644,11 +650,13 @@ impl<S: State> ModuleInstance<S> {
         };
 
         let state = Arc::new(Mutex::new(state_container));
+        let bind_error = Arc::new(Mutex::new(None));
         Self::register_action_handlers_with_engine(
             &mut engine,
             Arc::clone(&definition),
             Arc::clone(&state),
             global_context.clone(),
+            Arc::clone(&bind_error),
         );
 
         Ok(Self {
@@ -658,6 +666,7 @@ impl<S: State> ModuleInstance<S> {
             mounted: Mutex::new(false),
             pending_ir: Mutex::new(pending_ir),
             global_context,
+            bind_error,
         })
     }
 
@@ -745,11 +754,13 @@ impl<S: State> ModuleInstance<S> {
         };
 
         let state = Arc::new(Mutex::new(state_container));
+        let bind_error = Arc::new(Mutex::new(None));
         Self::register_action_handlers_with_engine(
             &mut engine,
             Arc::clone(&definition),
             Arc::clone(&state),
             global_context.clone(),
+            Arc::clone(&bind_error),
         );
 
         Ok(Self {
@@ -759,28 +770,58 @@ impl<S: State> ModuleInstance<S> {
             mounted: Mutex::new(false),
             pending_ir: Mutex::new(pending_ir),
             global_context,
+            bind_error,
         })
     }
 
     /// Register all sync action handlers from the definition with the engine
     /// via [`Engine::on_action`]. Each registration captures the per-instance
     /// state and global context Arcs and runs the typed handler when fired.
-    /// Async handlers are not registered here — they're invoked directly from
+    /// Async handlers register their routing identity here and execute through
     /// [`dispatch_action_async`].
     fn register_action_handlers_with_engine(
         engine: &mut hypen_engine::Engine,
         definition: Arc<ModuleDefinition<S>>,
         state: Arc<Mutex<StateContainer<S>>>,
         global_context: Option<Arc<GlobalContext>>,
+        bind_error: Arc<Mutex<Option<SdkError>>>,
     ) {
+        // Both node-scoped UI binds and guard-approved external set_input
+        // writes land in the same typed state pipeline.
+        {
+            let state = Arc::clone(&state);
+            engine.on_action(
+                hypen_engine::action_routing::scoped_action_name("", "__hypen_bind"),
+                move |action| {
+                    if let Err(e) = apply_bind_payload(&state, action.payload.as_ref()) {
+                        *bind_error.lock().unwrap() = Some(e);
+                    }
+                },
+            );
+        }
+
+        for name in ["__hypen_reorder", "__hypen_pin"] {
+            let state = Arc::clone(&state);
+            engine.on_action(
+                hypen_engine::action_routing::scoped_action_name("", name),
+                move |action| {
+                    let mut state = state.lock().unwrap();
+                    let outcome = state.to_json().and_then(|current| {
+                        crate::state::apply_dnd_to_json::<S>(
+                            &current,
+                            name,
+                            action.payload.as_ref(),
+                        )
+                    });
+                    match outcome.and_then(|json| state.replace_json(json)) {
+                        Ok(()) => {}
+                        Err(error) => eprintln!("[Hypen] {error}"),
+                    }
+                },
+            );
+        }
+
         for (action_name, handler) in definition.action_handlers.iter() {
-            // Skip async-only handlers — the engine's action dispatcher is
-            // sync, so async handlers are still invoked directly from
-            // `dispatch_action_async`.
-            #[cfg(feature = "async")]
-            if matches!(handler, ActionHandler::Async(_)) {
-                continue;
-            }
             // Sync handlers route through the engine. The closure captures
             // Arcs of the definition (to look up the typed handler), the
             // state (to mutate), and the global context. The user-visible
@@ -790,15 +831,18 @@ impl<S: State> ModuleInstance<S> {
             let state = Arc::clone(&state);
             let global_context = global_context.clone();
             let action_name_owned = action_name.clone();
-            engine.on_action(action_name.clone(), move |action| {
-                if let Some(ActionHandler::Sync(handler)) =
-                    definition.action_handlers.get(&action_name_owned)
-                {
-                    let ctx = global_context.as_deref();
-                    let mut state_guard = state.lock().unwrap();
-                    handler(state_guard.get_mut(), action.payload.as_ref(), ctx);
-                }
-            });
+            engine.on_action(
+                hypen_engine::action_routing::scoped_action_name("", action_name),
+                move |action| {
+                    if let Some(ActionHandler::Sync(handler)) =
+                        definition.action_handlers.get(&action_name_owned)
+                    {
+                        let ctx = global_context.as_deref();
+                        let mut state_guard = state.lock().unwrap();
+                        handler(state_guard.get_mut(), action.payload.as_ref(), ctx);
+                    }
+                },
+            );
             // Suppress unused-variable warning when the `async` cfg branch
             // above is the only consumer.
             let _ = handler;
@@ -919,6 +963,14 @@ impl<S: State> ModuleInstance<S> {
     /// to the engine via `engine.update_state(None, patch)`.
     pub fn dispatch_action(&self, name: impl Into<String>, payload: Option<Value>) -> Result<()> {
         let name = name.into();
+        let (name, payload) = if name == hypen_engine::action_routing::UI_ACTION {
+            let mut action = hypen_engine::dispatch::Action::new(name);
+            action.payload = payload;
+            let action = self.engine.lock().unwrap().resolve_ui_action(action)?;
+            (action.name, action.payload)
+        } else {
+            (name, payload)
+        };
 
         // `__hypen_bind` is the engine-level reserved action used by renderers
         // for two-way binding. It carries `{path, value}` and writes the value
@@ -936,7 +988,11 @@ impl<S: State> ModuleInstance<S> {
         // that error itself for consistency.
         #[cfg(feature = "async")]
         if matches!(
-            self.definition.action_handlers.get(&name),
+            self.definition.action_handlers.get(
+                hypen_engine::action_routing::split_scoped_action(&name)
+                    .map(|(_, name)| name)
+                    .unwrap_or(&name)
+            ),
             Some(ActionHandler::Async(_))
         ) {
             return Err(SdkError::Engine(hypen_engine::EngineError::ActionNotFound(
@@ -963,6 +1019,10 @@ impl<S: State> ModuleInstance<S> {
         {
             let mut engine = self.engine.lock().unwrap();
             engine.dispatch_action(action).map_err(SdkError::Engine)?;
+        }
+
+        if let Some(error) = self.bind_error.lock().unwrap().take() {
+            return Err(error);
         }
 
         // Diff state and notify engine of changes
@@ -998,6 +1058,108 @@ impl<S: State> ModuleInstance<S> {
     /// Name of this module.
     pub fn name(&self) -> &str {
         &self.definition.name
+    }
+
+    // -----------------------------------------------------------------
+    // External capability surface
+    //
+    // For callers that are not the rendered UI — an MCP server, a REST
+    // endpoint, a CLI, an agent. Nothing here is a new capability: each
+    // list is an allowlist the engine derives from what the developer
+    // declared (`.on_action(...)`, `Router { Route }`, `.bind(@state.x)`),
+    // and `dispatch_external` is the guard that admits exactly what the
+    // lists advertise. See `hypen_engine::agent` for the rule.
+    // -----------------------------------------------------------------
+
+    /// Every action an external caller may dispatch right now.
+    ///
+    /// Listed from the module's *declared* action names, so an async-only
+    /// handler appears here even though [`dispatch_external`](Self::dispatch_external)
+    /// (like [`dispatch_action`](Self::dispatch_action)) runs sync handlers
+    /// only.
+    pub fn list_actions(&self) -> Vec<hypen_engine::AgentAction> {
+        self.engine.lock().unwrap().list_actions()
+    }
+
+    /// Every route this module's UI declares, in declaration order.
+    ///
+    /// Empty until [`mount`](Self::mount) has fired the initial render —
+    /// the route table is read from the expanded IR.
+    pub fn list_routes(&self) -> Vec<hypen_engine::AgentRoute> {
+        self.engine.lock().unwrap().list_routes()
+    }
+
+    /// Every `.bind()`-declared writable input. The only fields
+    /// [`SET_INPUT`](hypen_engine::SET_INPUT) will accept.
+    ///
+    /// Empty until [`mount`](Self::mount), for the same reason as
+    /// [`list_routes`](Self::list_routes).
+    pub fn list_bindings(&self) -> Vec<hypen_engine::BoundInput> {
+        self.engine.lock().unwrap().list_bindings()
+    }
+
+    /// Dispatch an action on behalf of a caller that is not the rendered UI.
+    ///
+    /// Routes through the engine's guard, which accepts only what
+    /// [`list_actions`](Self::list_actions) advertises — so the reserved
+    /// names a renderer legitimately uses (`__hypen_bind`, `router.replace`)
+    /// are refused here even though [`dispatch_action`](Self::dispatch_action)
+    /// honours them. Writing a bound input goes through
+    /// [`SET_INPUT`](hypen_engine::SET_INPUT) instead, whose `field` the
+    /// engine checks against the declared binds before lowering it.
+    ///
+    /// Navigation built-ins pass the guard as soon as the UI declares a
+    /// `Router`, but a bare `ModuleInstance` registers no `router.*`
+    /// handlers — hosts that own a router (e.g. [`RemoteSession`](crate::remote::RemoteSession))
+    /// are where navigation actually lands.
+    ///
+    /// # Errors
+    ///
+    /// [`SdkError::Engine`] with `ActionNotFound` when the name is not
+    /// externally dispatchable; [`SdkError::StateSerde`] when a `set_input`
+    /// value doesn't fit the typed state.
+    pub fn dispatch_external(&self, name: impl Into<String>, payload: Option<Value>) -> Result<()> {
+        // Deliberately no `__hypen_bind` short-circuit like `dispatch_action`
+        // has: the guard is the only way in and it refuses that name.
+        {
+            let mut state = self.state.lock().unwrap();
+            state.take_snapshot()?;
+        }
+
+        let mut action = hypen_engine::dispatch::Action::new(name.into());
+        if let Some(p) = payload {
+            action = action.with_payload(p);
+        }
+        {
+            let mut engine = self.engine.lock().unwrap();
+            engine.dispatch_external(action).map_err(SdkError::Engine)?;
+        }
+
+        // A guard-approved `set_input` can still fail against the typed
+        // state; the engine-side closure has no return channel, so it parks
+        // the error for us to surface here.
+        if let Some(err) = self.bind_error.lock().unwrap().take() {
+            return Err(err);
+        }
+
+        self.sync_state_to_engine()?;
+        Ok(())
+    }
+
+    /// Release this module's externally reachable surface.
+    ///
+    /// **Destroy only.** A module that is merely off-screen stays registered
+    /// on purpose — under `persist` the [`ManagedRouter`](crate::managed_router::ManagedRouter)
+    /// keeps it so siblings can still read its state — so calling this on
+    /// unmount would break the persist cache and cross-module reads.
+    ///
+    /// Each `ModuleInstance` owns a private engine and holds its *primary*
+    /// slot, whose actions are scoped to no module and so outlive this call;
+    /// they go away with the engine when the instance drops. What this does
+    /// clear is any module registered by name on the same engine, which is
+    /// what makes the router's destroy path correct for hosts that share one.
+    pub fn unregister_external(&self) {
+        self.engine.lock().unwrap().unregister_module(self.name());
     }
 
     /// Mount the module asynchronously. Runs whichever variant of
@@ -1072,6 +1234,21 @@ impl<S: State> ModuleInstance<S> {
     ) -> Result<()> {
         let name = name.into();
 
+        let (name, payload) = if name == hypen_engine::action_routing::UI_ACTION {
+            let mut action = hypen_engine::dispatch::Action::new(name);
+            action.payload = payload;
+            let action = self.engine.lock().unwrap().resolve_ui_action(action)?;
+            let name = hypen_engine::action_routing::split_scoped_action(&action.name)
+                .map(|(_, name)| name.to_string())
+                .unwrap_or(action.name);
+            (name, action.payload)
+        } else {
+            (name, payload)
+        };
+        if matches!(name.as_str(), "__hypen_reorder" | "__hypen_pin") {
+            return self.dispatch_action(name, payload);
+        }
+
         // `__hypen_bind` is synchronous regardless of async dispatch — see
         // the comment in `dispatch_action`.
         if name == "__hypen_bind" {
@@ -1115,31 +1292,11 @@ impl<S: State> ModuleInstance<S> {
     /// [`SdkError::StateSerde`]), and syncs the resulting state back to the
     /// engine. See ENGINE_CONTRACT.md §13 for the cross-SDK contract.
     fn handle_bind_action(&self, payload: Option<Value>) -> Result<()> {
-        let payload = payload.ok_or_else(|| SdkError::ActionPayload {
-            action: "__hypen_bind".into(),
-            message: "missing payload".into(),
-        })?;
-        let obj = payload.as_object().ok_or_else(|| SdkError::ActionPayload {
-            action: "__hypen_bind".into(),
-            message: "payload must be an object".into(),
-        })?;
-        let path = obj
-            .get("path")
-            .and_then(|p| p.as_str())
-            .ok_or_else(|| SdkError::ActionPayload {
-                action: "__hypen_bind".into(),
-                message: "missing 'path' string field".into(),
-            })?
-            .to_string();
-        let value = obj.get("value").cloned().unwrap_or(Value::Null);
-
         {
             let mut state = self.state.lock().unwrap();
             state.take_snapshot()?;
-            let new_typed: S = crate::state::apply_bind(state.get(), &path, value)?;
-            *state.get_mut() = new_typed;
         }
-
+        apply_bind_payload(&self.state, payload.as_ref())?;
         self.sync_state_to_engine()
     }
 
@@ -1169,6 +1326,41 @@ impl<S: State> ModuleInstance<S> {
 
         Ok(())
     }
+}
+
+/// Parse a `{path, value}` bind payload and write it into `state`.
+///
+/// Shared by the renderer-facing [`ModuleInstance::handle_bind_action`] and by
+/// the engine-side `__hypen_bind` closure the external `set_input` capability
+/// lowers to. Neither snapshots nor syncs — both callers bracket this with
+/// their own `take_snapshot` / `sync_state_to_engine` pair.
+fn apply_bind_payload<S: State>(
+    state: &Arc<Mutex<StateContainer<S>>>,
+    payload: Option<&Value>,
+) -> Result<()> {
+    let payload = payload.ok_or_else(|| SdkError::ActionPayload {
+        action: "__hypen_bind".into(),
+        message: "missing payload".into(),
+    })?;
+    let obj = payload.as_object().ok_or_else(|| SdkError::ActionPayload {
+        action: "__hypen_bind".into(),
+        message: "payload must be an object".into(),
+    })?;
+    let path = obj
+        .get("path")
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| SdkError::ActionPayload {
+            action: "__hypen_bind".into(),
+            message: "missing 'path' string field".into(),
+        })?;
+    let value = obj.get("value").cloned().unwrap_or(Value::Null);
+
+    let mut state = state.lock().unwrap();
+    let current = state.to_json()?;
+    let next = crate::state::apply_bind_to_json::<S>(&current, path, value)
+        .ok_or_else(|| SdkError::StateSerde(format!("__hypen_bind apply at '{path}'")))?;
+    state.replace_json(next)?;
+    Ok(())
 }
 
 /// Create a nested module instance and register its state in the GlobalContext.
@@ -1209,6 +1401,59 @@ mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
     use std::sync::atomic::{AtomicI32, Ordering};
+
+    #[test]
+    fn reserved_dnd_writes_emit_patches_and_survive_typed_actions() {
+        use serde_json::json;
+        #[derive(Clone, Serialize, Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Board {
+            notes: Vec<Value>,
+            count: u32,
+        }
+        let def = ModuleBuilder::new("Board")
+            .state(Board { notes: vec![json!({"id":"a"}), json!({"id":"b"})], count: 0 })
+            .ui(r#"Stack { ForEach(items: @state.notes, key: "id") { Text("@{item.id}").draggable() } }.pinboard(group: "board", x: "left", y: "top", units: fraction)"#)
+            .on_action::<()>("increment", |state, _, _| state.count += 1).build();
+        let instance = ModuleInstance::new(Arc::new(def), None).unwrap();
+        let batches = Arc::new(Mutex::new(Vec::new()));
+        let capture = batches.clone();
+        instance.on_patches(move |p| capture.lock().unwrap().push(p.to_vec()));
+        instance.mount();
+        let id = batches
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .find_map(|p| match p {
+                hypen_engine::Patch::Create { id, props, .. }
+                    if props.get("__dnd.key") == Some(&json!("a")) =>
+                {
+                    Some(id.to_string())
+                }
+                _ => None,
+            })
+            .unwrap();
+        batches.lock().unwrap().clear();
+        instance.dispatch_action("__hypen_dispatch", Some(json!({"node":id,"action":"__hypen_pin","payload":{"path":"__dnd.board.a","x":0.5,"y":0.25,"xKey":"left","yKey":"top"}}))).unwrap();
+        assert_eq!(batches.lock().unwrap().len(), 1);
+        assert_eq!(
+            instance.get_state_json().unwrap()["__dnd"]["board"]["a"],
+            json!({"left":0.5,"top":0.25})
+        );
+        instance.dispatch_action("increment", None).unwrap();
+        assert_eq!(
+            instance.get_state_json().unwrap()["__dnd"]["board"]["a"]["left"],
+            json!(0.5)
+        );
+        instance
+            .dispatch_action(
+                "__hypen_reorder",
+                Some(json!({"path":"notes","from":0,"to":1})),
+            )
+            .unwrap();
+        assert_eq!(instance.get_state().notes[0]["id"], json!("b"));
+    }
 
     #[derive(Clone, Default, Serialize, Deserialize, Debug)]
     struct TestState {
@@ -1822,6 +2067,135 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // External capability surface
+    //
+    // The rule these guard is the engine's (see `hypen_engine::agent`):
+    // nothing is externally reachable that a developer did not declare.
+    // What's proved here is that the SDK routes through that guard rather
+    // than around it — a renderer-only name must be refused by
+    // `dispatch_external` even though `dispatch_action` honours it.
+    // -----------------------------------------------------------------------
+
+    /// A module declaring one action and one `.bind()`, already rendered so
+    /// the bind is enumerable (the bind set is read from the expanded IR).
+    fn external_instance() -> ModuleInstance<BindState> {
+        let def = ModuleBuilder::<BindState>::new("BindTest")
+            .state(BindState::default())
+            .on_action::<()>("bump", |state, _, _ctx| state.count += 1)
+            .ui(r#"Column { Input(placeholder: "Name").bind(@state.name) }"#)
+            .build();
+        let instance = ModuleInstance::new(Arc::new(def), None).unwrap();
+        instance.mount();
+        instance
+    }
+
+    #[test]
+    fn test_external_lists_declared_action_and_binding() {
+        let instance = external_instance();
+
+        let names: Vec<String> = instance
+            .list_actions()
+            .into_iter()
+            .map(|a| a.name)
+            .collect();
+        assert!(names.contains(&"bump".to_string()));
+        assert!(
+            names.contains(&hypen_engine::SET_INPUT.to_string()),
+            "a declared .bind() should offer the set_input built-in: {names:?}"
+        );
+
+        let bindings = instance.list_bindings();
+        assert_eq!(
+            bindings.len(),
+            1,
+            "expected one declared bind: {bindings:?}"
+        );
+        assert_eq!(bindings[0].path, "name");
+        assert_eq!(bindings[0].prop, "value");
+    }
+
+    #[test]
+    fn test_external_dispatch_runs_listed_action() {
+        let instance = external_instance();
+
+        instance.dispatch_external("bump", None).unwrap();
+
+        assert_eq!(instance.get_state().count, 1);
+    }
+
+    #[test]
+    fn test_external_refuses_bind_action_by_name() {
+        let instance = external_instance();
+
+        // The same payload succeeds through `dispatch_action` (the renderer
+        // path) — it is the caller's provenance that differs, not the write.
+        let result = instance.dispatch_external(
+            "__hypen_bind",
+            Some(serde_json::json!({"path": "name", "value": "Mallory"})),
+        );
+
+        assert!(
+            result.is_err(),
+            "__hypen_bind must not be reachable by name"
+        );
+        assert_eq!(instance.get_state().name, "");
+    }
+
+    #[test]
+    fn test_external_refuses_history_manipulation() {
+        let instance = external_instance();
+
+        for name in ["router.replace", "router.forward", "router.push"] {
+            assert!(
+                instance.dispatch_external(name, None).is_err(),
+                "{name} must not be externally dispatchable"
+            );
+        }
+    }
+
+    #[test]
+    fn test_external_set_input_writes_declared_field() {
+        let instance = external_instance();
+
+        instance
+            .dispatch_external(
+                hypen_engine::SET_INPUT,
+                Some(serde_json::json!({"field": "name", "value": "Alice"})),
+            )
+            .unwrap();
+
+        assert_eq!(instance.get_state().name, "Alice");
+    }
+
+    #[test]
+    fn test_external_set_input_refuses_undeclared_field() {
+        let instance = external_instance();
+
+        // `count` is real state, but no `.bind()` points at it — so it is
+        // not an input, and set_input is not a general state writer.
+        let result = instance.dispatch_external(
+            hypen_engine::SET_INPUT,
+            Some(serde_json::json!({"field": "count", "value": 99})),
+        );
+
+        assert!(result.is_err(), "undeclared field must be refused");
+        assert_eq!(instance.get_state().count, 0);
+    }
+
+    #[test]
+    fn test_external_navigate_refused_without_router() {
+        let instance = external_instance();
+
+        assert!(instance.list_routes().is_empty());
+        assert!(
+            instance
+                .dispatch_external(hypen_engine::NAVIGATE, None)
+                .is_err(),
+            "navigation must not be offered by an app that declares no Router"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Async handler tests (behind "async" feature)
     // -----------------------------------------------------------------------
 
@@ -1833,6 +2207,52 @@ mod tests {
         struct AsyncState {
             count: i32,
             name: String,
+        }
+
+        #[tokio::test]
+        async fn ui_envelope_dispatches_async_handlers_and_reserved_writes() {
+            use serde_json::json;
+            let definition = Arc::new(
+                ModuleBuilder::new("App")
+                    .state(json!({"items":["a","b"],"count":0}))
+                    .ui(r#"Button().onClick(@actions.increment)"#)
+                    .on_action_async::<()>("increment", |mut state, _, _| {
+                        Box::pin(async move {
+                            state["count"] = json!(1);
+                            state
+                        })
+                    })
+                    .build(),
+            );
+            let instance = ModuleInstance::new(definition, None).unwrap();
+            let captured = Arc::new(Mutex::new(Vec::new()));
+            let copy = captured.clone();
+            instance.on_patches(move |patches| copy.lock().unwrap().extend_from_slice(patches));
+            instance.mount_async().await;
+            let id = captured
+                .lock()
+                .unwrap()
+                .iter()
+                .find_map(|patch| match patch {
+                    hypen_engine::Patch::Create { id, .. } => Some(id.to_string()),
+                    _ => None,
+                })
+                .unwrap();
+            instance
+                .dispatch_action_async(
+                    "__hypen_dispatch",
+                    Some(json!({"node":id,"action":"increment","payload":{}})),
+                )
+                .await
+                .unwrap();
+            instance
+                .dispatch_action_async(
+                    "__hypen_reorder",
+                    Some(json!({"path":"items","from":0,"to":1})),
+                )
+                .await
+                .unwrap();
+            assert_eq!(instance.get_state(), json!({"items":["b","a"],"count":1}));
         }
 
         #[tokio::test]
