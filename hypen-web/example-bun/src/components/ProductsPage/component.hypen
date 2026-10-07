@@ -8,7 +8,7 @@ module Column {
     .textAlign("center")
 
   Column {
-    List(@state.products) {
+    Grid(@state.products, key: "id") {
       Column {
         Column {
           Image("@{item.images.0}")
@@ -58,8 +58,7 @@ module Column {
         .transition(300, easeOut)
       }
     }
-    .display("grid")
-    .gridTemplateColumns("repeat(auto-fill, minmax(320px, 1fr))")
+    .gridColumns(3)
     .gap(24)
     .width("100%")
   }

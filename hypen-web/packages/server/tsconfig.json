@@ -25,6 +25,8 @@
       "@hypen-space/core/*": ["../core/src/*"]
     }
   },
-  "include": ["src/**/*"],
+  // typetests/: compile-only checks of the typed device API (never built or
+  // shipped — the build uses tsconfig.build.json).
+  "include": ["src/**/*", "typetests/**/*"],
   "exclude": ["node_modules", "dist", "src/remote/web-client-entry.ts"]
 }

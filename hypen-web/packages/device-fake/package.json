@@ -1,0 +1,60 @@
+{
+  "name": "@hypen-space/device-fake",
+  "version": "0.6.5",
+  "description": "Hypen fake DeviceHost — scripted, simulated device drivers for development and conformance (RFC 001 §1.11). Refuses production initialization.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "build:types": "tsc --emitDeclarationOnly",
+    "prepublishOnly": "bun run build",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hypen-space/core": "^0.6.5"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "peerDependenciesMeta": {
+    "typescript": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "hypen",
+    "device",
+    "fake",
+    "testing",
+    "simulated"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-web/packages/device-fake"
+  }
+}

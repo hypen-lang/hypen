@@ -86,6 +86,23 @@ pub fn resolve_props_full(
     item: Option<&serde_json::Value>,
     data_sources: Option<&IndexMap<String, serde_json::Value>>,
 ) -> ResolvedProps {
+    resolve_props_iter(
+        props.iter().map(|(k, v)| (k.as_str(), v)),
+        state,
+        item,
+        data_sources,
+    )
+}
+
+/// [`resolve_props_full`] over any ordered `(key, value)` sequence — the
+/// instance tree's raw props are a layered map (`reconcile::layered`), not
+/// a flat `IndexMap`, and re-resolve through this same loop.
+pub(crate) fn resolve_props_iter<'a>(
+    props: impl Iterator<Item = (&'a str, &'a Value)>,
+    state: &serde_json::Value,
+    item: Option<&serde_json::Value>,
+    data_sources: Option<&IndexMap<String, serde_json::Value>>,
+) -> ResolvedProps {
     let mut resolved = IndexMap::new();
     // Lazily built evaluator — only allocated when we hit a TemplateString prop.
     let mut evaluator: Option<exprimo::Evaluator> = None;
@@ -93,7 +110,7 @@ pub fn resolve_props_full(
     for (key, value) in props {
         match resolve_single_value(value, state, item, data_sources, &mut evaluator) {
             Some(v) => {
-                resolved.insert(key.clone(), v);
+                resolved.insert(key.to_string(), v);
             }
             None => continue,
         }
@@ -181,10 +198,7 @@ pub(crate) fn resolve_single_value(
             // means the prop is ABSENT — omit the key entirely, exactly
             // as if it were never set. Resolution always yields plain
             // JSON, so the variant never reaches the wire.
-            match resolve_state_switch(path, cases, default.as_ref(), state) {
-                Some(v) => v,
-                None => return None,
-            }
+            resolve_state_switch(path, cases, default.as_ref(), state)?
         }
     };
     Some(resolved_value)

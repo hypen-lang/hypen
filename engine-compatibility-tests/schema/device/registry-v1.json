@@ -1,0 +1,205 @@
+{
+  "capabilities": [
+    {
+      "name": "core.capabilities",
+      "revisions": [
+        {
+          "consent": "none",
+          "data": "jsonEvents",
+          "lifetimes": [
+            "connection"
+          ],
+          "maxInitialCredit": 64,
+          "maxItemBytes": 0,
+          "maxItems": 0,
+          "maxOutstandingCredit": 64,
+          "maxTimeoutMs": 86400000,
+          "mode": "stream",
+          "overflow": "dropOldest",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "name": "bluetooth.scan",
+      "revisions": [
+        {
+          "consent": "persistable",
+          "data": "jsonEvents",
+          "lifetimes": [
+            "activation"
+          ],
+          "maxInitialCredit": 256,
+          "maxItemBytes": 0,
+          "maxItems": 0,
+          "maxOutstandingCredit": 1024,
+          "maxTimeoutMs": 600000,
+          "mode": "stream",
+          "overflow": "dropOldest",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "name": "bluetooth.select",
+      "revisions": [
+        {
+          "consent": "perUse",
+          "data": "none",
+          "lifetimes": [
+            "activation"
+          ],
+          "maxInitialCredit": 0,
+          "maxItemBytes": 0,
+          "maxItems": 0,
+          "maxOutstandingCredit": 0,
+          "maxTimeoutMs": 300000,
+          "mode": "unary",
+          "overflow": "none",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "name": "camera.capture",
+      "revisions": [
+        {
+          "consent": "perUse",
+          "data": "binaryUpload",
+          "lifetimes": [
+            "activation"
+          ],
+          "maxInitialCredit": 4194304,
+          "maxItemBytes": 67108864,
+          "maxItems": 1,
+          "maxOutstandingCredit": 8388608,
+          "maxTimeoutMs": 600000,
+          "mode": "unary",
+          "overflow": "pause",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "name": "file.pick",
+      "revisions": [
+        {
+          "consent": "perUse",
+          "data": "binaryUpload",
+          "lifetimes": [
+            "activation"
+          ],
+          "maxInitialCredit": 4194304,
+          "maxItemBytes": 67108864,
+          "maxItems": 16,
+          "maxOutstandingCredit": 8388608,
+          "maxTimeoutMs": 300000,
+          "mode": "unary",
+          "overflow": "pause",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "name": "file.save",
+      "revisions": [
+        {
+          "consent": "perUse",
+          "data": "binaryDownload",
+          "lifetimes": [
+            "activation"
+          ],
+          "maxInitialCredit": 0,
+          "maxItemBytes": 67108864,
+          "maxItems": 1,
+          "maxOutstandingCredit": 8388608,
+          "maxTimeoutMs": 300000,
+          "mode": "unary",
+          "overflow": "pause",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "name": "gallery.pick",
+      "revisions": [
+        {
+          "consent": "perUse",
+          "data": "binaryUpload",
+          "lifetimes": [
+            "activation"
+          ],
+          "maxInitialCredit": 4194304,
+          "maxItemBytes": 67108864,
+          "maxItems": 16,
+          "maxOutstandingCredit": 8388608,
+          "maxTimeoutMs": 300000,
+          "mode": "unary",
+          "overflow": "pause",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "name": "mic.record",
+      "revisions": [
+        {
+          "consent": "perUse",
+          "data": "binaryUpload",
+          "lifetimes": [
+            "activation"
+          ],
+          "maxInitialCredit": 262144,
+          "maxItemBytes": 67108864,
+          "maxItems": 1,
+          "maxOutstandingCredit": 1048576,
+          "maxTimeoutMs": 600000,
+          "mode": "stream",
+          "overflow": "pause",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "name": "permission.query",
+      "revisions": [
+        {
+          "consent": "none",
+          "data": "none",
+          "lifetimes": [
+            "activation"
+          ],
+          "maxInitialCredit": 0,
+          "maxItemBytes": 0,
+          "maxItems": 0,
+          "maxOutstandingCredit": 0,
+          "maxTimeoutMs": 30000,
+          "mode": "unary",
+          "overflow": "none",
+          "version": 1
+        }
+      ]
+    },
+    {
+      "name": "permission.request",
+      "revisions": [
+        {
+          "consent": "perUse",
+          "data": "none",
+          "lifetimes": [
+            "activation"
+          ],
+          "maxInitialCredit": 0,
+          "maxItemBytes": 0,
+          "maxItems": 0,
+          "maxOutstandingCredit": 0,
+          "maxTimeoutMs": 300000,
+          "mode": "unary",
+          "overflow": "none",
+          "version": 1
+        }
+      ]
+    }
+  ],
+  "protocolVersion": 1
+}

@@ -8,37 +8,34 @@
  */
 
 import { setPortableImpl, type PortableImpl } from "@hypen-space/core/portable";
+import {
+  diffStateJs,
+  diffOracleEnabled,
+  checkDiffOracle,
+} from "@hypen-space/core/diff";
 
 export function installPortableFromWasm(wasm: any): void {
   // Skip the install if the wasm module doesn't actually expose the
   // portable exports. This happens in tests that mock the wasm-browser
   // module with a stub; in that case we want `@hypen-space/core` to
-  // keep using its TS fallback.
+  // keep throwing its "not installed" error.
   if (typeof wasm?.diffPaths !== "function") {
     return;
   }
 
   const impl: PortableImpl = {
-    diffState(oldState, newState, _basePath) {
-      // JSON.stringify can throw on BigInt / circular refs; the engine
-      // reasons over JSON only, so such values are opaque to reactivity.
-      let oldJson: string;
-      let newJson: string;
-      try {
-        oldJson = JSON.stringify(oldState ?? null);
-        newJson = JSON.stringify(newState ?? null);
-      } catch {
-        return { paths: [], newValues: {} };
+    // `diffState` is the one portable helper NOT routed through WASM:
+    // it runs on every mutation flush, and stringifying the whole
+    // state twice per flush was Θ(|state| bytes) per mutation. The TS
+    // port is pinned to `diff.rs` by the cross-SDK fixtures and the
+    // differential fuzz suite; set globalThis.__HYPEN_DIFF_ORACLE__ =
+    // true to cross-check every diff against WASM at runtime.
+    diffState(oldState, newState, basePath) {
+      const change = diffStateJs(oldState, newState, basePath);
+      if (diffOracleEnabled()) {
+        checkDiffOracle(change, oldState, newState, wasm.diffPaths);
       }
-      const raw: string = wasm.diffPaths(oldJson, newJson);
-      const entries: Array<{ path: string; value: any }> = JSON.parse(raw);
-      const paths: string[] = [];
-      const newValues: Record<string, any> = {};
-      for (const e of entries) {
-        paths.push(e.path);
-        newValues[e.path] = e.value;
-      }
-      return { paths, newValues };
+      return change;
     },
     matchPath(pattern, path) {
       const parsed = JSON.parse(wasm.matchPath(pattern, path));

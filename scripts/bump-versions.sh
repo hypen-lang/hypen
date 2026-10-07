@@ -14,11 +14,11 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Current versions (edit these as the source of truth)
-CURRENT_RUST_VERSION="0.6.4"
-CURRENT_NPM_VERSION="0.6.4"
-CURRENT_LSP_VERSION="0.6.4"
-CURRENT_GRADLE_VERSION="0.6.4"
-CURRENT_SWIFT_SERVER_VERSION="0.6.4"
+CURRENT_RUST_VERSION="0.6.5"
+CURRENT_NPM_VERSION="0.6.5"
+CURRENT_LSP_VERSION="0.6.5"
+CURRENT_GRADLE_VERSION="0.6.5"
+CURRENT_SWIFT_SERVER_VERSION="0.6.5"
 # @hypen-space/ios-streamer is versioned independently (macOS-only, optional
 # CLI dep). Bump it via --ios-streamer <version>; otherwise it's left alone.
 CURRENT_IOS_STREAMER_VERSION="0.1.0"
@@ -186,10 +186,26 @@ update_dep "$ROOT_DIR/hypen-web/packages/web-engine/package.json" "@hypen-space\
 update_dep "$ROOT_DIR/hypen-web/packages/web-engine/package.json" "@hypen-space\/web" "$OLD" "$NEW"
 echo "  ✓ hypen-web/packages/web-engine/package.json"
 
-# @hypen-space/cf (depends on core, web)
+# @hypen-space/device-web (depends on core)
+update_version "$ROOT_DIR/hypen-web/packages/device-web/package.json" "$OLD" "$NEW"
+update_dep "$ROOT_DIR/hypen-web/packages/device-web/package.json" "@hypen-space\/core" "$OLD" "$NEW"
+echo "  ✓ hypen-web/packages/device-web/package.json"
+
+# @hypen-space/device-fake (depends on core)
+update_version "$ROOT_DIR/hypen-web/packages/device-fake/package.json" "$OLD" "$NEW"
+update_dep "$ROOT_DIR/hypen-web/packages/device-fake/package.json" "@hypen-space\/core" "$OLD" "$NEW"
+echo "  ✓ hypen-web/packages/device-fake/package.json"
+
+# @hypen-space/agent (depends on core)
+update_version "$ROOT_DIR/hypen-web/packages/agent/package.json" "$OLD" "$NEW"
+update_dep "$ROOT_DIR/hypen-web/packages/agent/package.json" "@hypen-space\/core" "$OLD" "$NEW"
+echo "  ✓ hypen-web/packages/agent/package.json"
+
+# @hypen-space/cf (depends on core, web, device-web)
 update_version "$ROOT_DIR/hypen-web/packages/cf/package.json" "$OLD" "$NEW"
 update_dep "$ROOT_DIR/hypen-web/packages/cf/package.json" "@hypen-space\/core" "$OLD" "$NEW"
 update_dep "$ROOT_DIR/hypen-web/packages/cf/package.json" "@hypen-space\/web" "$OLD" "$NEW"
+update_dep "$ROOT_DIR/hypen-web/packages/cf/package.json" "@hypen-space\/device-web" "$OLD" "$NEW"
 echo "  ✓ hypen-web/packages/cf/package.json"
 
 # @hypen-space/lsp

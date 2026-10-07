@@ -11,7 +11,22 @@ categories = ["gui", "rendering"]
 readme = "README.md"
 
 [features]
-default = []
+# Device capabilities (RFC 001) with real hardware backends. On by default so
+# a desktop client offers camera / microphone / Bluetooth out of the box;
+# each can be compiled out (`default-features = false`), and the host then
+# stops advertising it. System build packages per OS: see README "Device
+# capabilities".
+default = ["camera", "mic", "bluetooth"]
+# `camera.capture`: nokhwa (V4L2 / AVFoundation / Media Foundation) frames,
+# photos as JPEG through `image`, video as fragmented H.264 MP4 through
+# OpenH264 (built from its bundled source) and the crate's own muxer.
+camera = ["dep:nokhwa", "dep:openh264"]
+# `mic.record`: cpal capture (ALSA / CoreAudio / WASAPI), converted to the
+# requested PCM16 rate and channel count.
+mic = ["dep:cpal"]
+# `bluetooth.scan` / `bluetooth.select`: btleplug (BlueZ over D-Bus /
+# CoreBluetooth / WinRT).
+bluetooth = ["dep:btleplug"]
 # Enable to re-export `mimalloc::MiMalloc` from `hypen_renderer_desktop`.
 # Wire it in your binary as:
 #   #[global_allocator]
@@ -30,9 +45,9 @@ video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 dev-overlay = ["dep:sysinfo"]
 
 [dependencies]
-hypen-engine = { version = "0.6.4", path = "../hypen-engine-rs" }
-hypen-parser = { version = "0.6.4", path = "../parser" }
-hypen-server = { version = "0.6.4", path = "../hypen-sdk-rs" }
+hypen-engine = { version = "0.6.5", path = "../hypen-engine-rs" }
+hypen-parser = { version = "0.6.5", path = "../parser" }
+hypen-server = { version = "0.6.5", path = "../hypen-sdk-rs" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -65,6 +80,14 @@ tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"
 # only `ws://` works.
 tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
+
+# Device Capability Protocol (RFC 001) host: native file dialogs are the
+# consent gate of `file.pick` / `gallery.pick` / `file.save` (XDG desktop
+# portal on Linux — no GTK build dependency —, NSOpenPanel/NSSavePanel on
+# macOS, the common item dialogs on Windows), and SHA-256 over uploaded and
+# downloaded bytes (already in the build through hypen-engine).
+rfd = "0.17"
+sha2 = "0.10"
 
 # Phase 13: Image / Icon element decoding. PNG + JPEG cover the
 # example apps; everything else is a placeholder until we wire HTTP.
@@ -138,6 +161,17 @@ sysinfo = { version = "0.38.3", optional = true, default-features = false, featu
 # it pay zero binary cost.
 mimalloc = { version = "0.1", optional = true, default-features = false }
 
+# Feature `camera`: camera frames without nokhwa's `decoding` feature (no
+# mozjpeg C build) — MJPEG / YUYV / NV12 are converted with `image` and our
+# own code — and the OpenH264 encoder, built from the bundled source (the
+# crate's default `source` feature; needs a C/C++ compiler, no system lib).
+nokhwa = { version = "0.10.11", optional = true, default-features = false, features = ["input-native"] }
+openh264 = { version = "0.9.8", optional = true }
+# Feature `mic`: cross-platform audio input (ALSA needs libasound2-dev).
+cpal = { version = "0.18.2", optional = true }
+# Feature `bluetooth`: BLE central (BlueZ over D-Bus needs libdbus-1-dev).
+btleplug = { version = "0.13.2", optional = true }
+
 # Feature `video`: GStreamer bindings for inline Video playback.
 # playbin handles demux + decode + HTTP streaming + A/V sync; an
 # RGBA appsink hands decoded frames to the painters. Requires the
@@ -156,11 +190,17 @@ gstreamer-video = { version = "0.25", optional = true }
 # window size. wgpu-hal-metal reads this flag but never sets it.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
-objc2-foundation = { version = "0.2", features = ["NSString", "NSArray"] }
+objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSGeometry"] }
 objc2-quartz-core = { version = "0.2", features = ["all"] }
+# Device host: `completionHandler:` blocks of the TCC permission requests
+# (`permission.request` for camera / microphone). Same version objc2 0.5 uses.
+block2 = "0.5"
 
 [dev-dependencies]
 env_logger = "0.11"
+# Device e2e tests run a real Rust SDK server / a hostile server over a
+# real WebSocket in-process.
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "sync", "time"] }
 indexmap = { version = "2.0", features = ["serde"] }
 
 [[example]]

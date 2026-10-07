@@ -1,0 +1,63 @@
+{
+  "name": "handshake-old-client-new-server",
+  "description": "Old client offers gallery.pick v1 only; newer server implements v1 and v2. Selection pins v1; server-only capabilities are excluded from the intersection.",
+  "hello": {
+    "protocolVersions": [
+      1
+    ],
+    "binary": true,
+    "capabilities": [
+      {
+        "name": "core.capabilities",
+        "versions": [
+          1
+        ]
+      },
+      {
+        "name": "gallery.pick",
+        "versions": [
+          1
+        ]
+      }
+    ]
+  },
+  "serverProtocolVersions": [
+    1
+  ],
+  "serverBinary": true,
+  "serverCapabilities": [
+    {
+      "name": "core.capabilities",
+      "versions": [
+        1
+      ]
+    },
+    {
+      "name": "gallery.pick",
+      "versions": [
+        1,
+        2
+      ]
+    },
+    {
+      "name": "mic.record",
+      "versions": [
+        1
+      ]
+    }
+  ],
+  "expectAck": {
+    "protocolVersion": 1,
+    "binary": true,
+    "capabilities": [
+      {
+        "name": "core.capabilities",
+        "version": 1
+      },
+      {
+        "name": "gallery.pick",
+        "version": 1
+      }
+    ]
+  }
+}

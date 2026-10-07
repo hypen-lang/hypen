@@ -113,6 +113,7 @@
 pub mod action;
 pub mod app;
 pub mod context;
+pub mod device;
 pub mod discovery;
 pub mod error;
 pub mod events;

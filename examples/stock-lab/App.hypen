@@ -1,0 +1,124 @@
+module App {
+ SafeArea {
+  Column {
+   Row {
+    Image(src: "https://randomuser.me/api/portraits/women/44.jpg").width(30).height(30).alignSelf("center").borderRadius(15)
+    Spacer()
+    Text("orbit").fontSize(23).fontWeight("medium").color("#f2f3f3")
+    Spacer()
+    Button { Icon(@resources.search, size: 20) }.width(30).height(30).alignSelf("center").backgroundColor("#111213").color("#dedfe0").onClick(@actions.navigate, page: "markets")
+   }.paddingHorizontal(24).height(64).fillMaxWidth().horizontalAlignment("center").verticalAlignment("center").backgroundColor("#111213")
+   Column {
+    When(value: @state.page) {
+     Case(match: "dashboard") {
+      Column {
+       Column {
+        Text("@{state.total}").fontSize(34).fontWeight("normal")
+        Row { Text("Current value").fontSize(12).color("#989b9d") Text("@{state.gainPercent}").fontSize(12).color("@{state.gainColor}") }.gap(8).horizontalAlignment("center").verticalAlignment("center")
+       }.gap(8).horizontalAlignment("center").verticalAlignment("center").fillMaxWidth().paddingTop(20).paddingBottom(8)
+       Chart {
+        Rule(x: "@{state.portfolioGrid.0}").stroke("#2e3031").strokeDasharray("2 5")
+        Rule(x: "@{state.portfolioGrid.1}").stroke("#2e3031").strokeDasharray("2 5")
+        Rule(x: "@{state.portfolioGrid.2}").stroke("#2e3031").strokeDasharray("2 5")
+        Rule(x: "@{state.portfolioGrid.3}").stroke("#2e3031").strokeDasharray("2 5")
+        Rule(x: "@{state.portfolioGrid.4}").stroke("#2e3031").strokeDasharray("2 5")
+        Area(points: @state.portfolio).fill("#dddddf").fillOpacity(0.025)
+        Line(points: @state.portfolio).stroke("#eceeee").strokeWidth(1.5).glow(color: "#b5bcc2", radius: 1.5)
+       }.height(145).fillMaxWidth()
+       Row { Text("— Current value").fontSize(10).color("#8e9293") Spacer() Button { Text("2W").fontSize(11) }.onClick(@actions.portfolioRange, days: 10).padding(8).backgroundColor("@{state.portfolioRange == 10 ? '#353738' : '#1b1c1d'}").color("@{state.portfolioRange == 10 ? '#f2f3f3' : '#989b9d'}").borderRadius(7) Button { Text("1M").fontSize(11) }.onClick(@actions.portfolioRange, days: 30).padding(8).backgroundColor("@{state.portfolioRange == 30 ? '#353738' : '#1b1c1d'}").color("@{state.portfolioRange == 30 ? '#f2f3f3' : '#989b9d'}").borderRadius(7) Button { Text("All").fontSize(11) }.onClick(@actions.portfolioRange, days: 100).padding(8).backgroundColor("@{state.portfolioRange == 100 ? '#353738' : '#1b1c1d'}").color("@{state.portfolioRange == 100 ? '#f2f3f3' : '#989b9d'}").borderRadius(7) }.fillMaxWidth().gap(8).horizontalAlignment("center").verticalAlignment("center")
+       Divider().height(1).backgroundColor("#2b2d2e").marginTop(12).marginBottom(8)
+       Row { Text("Popular assets").fontSize(17) Spacer() Button { Icon(@resources.arrow, size: 18) }.backgroundColor("#1b1c1d").color("#a2a5a6").onClick(@actions.navigate, page: "markets") }.fillMaxWidth().horizontalAlignment("center").verticalAlignment("center")
+       Grid(@state.assetRows, key: "symbol") {
+        Column {
+         Text("@{item.initials}").fontSize(16).fontWeight("medium").color("#f2f3f3").width(34).height(34).paddingTop(7).textAlign("center").backgroundColor("@{item.badge}").borderRadius(8)
+         Text("@{item.name}").fontSize(15).marginTop(6)
+         Row { Text("@{item.price}").fontSize(12).color("#a2a5a6") Spacer() Text("@{item.change}").fontSize(10).color("@{item.color}") }.fillMaxWidth()
+        }.padding(12).gap(6).fillMaxWidth().backgroundColor("#232526").borderRadius(10).onClick(@actions.select, symbol: "@{item.symbol}")
+       }.gridColumns(2).gap(12).fillMaxWidth()
+       Text("Paper account · prices may be delayed").fontSize(10).color("#737778").paddingTop(4)
+      }.paddingHorizontal(24).paddingBottom(24).gap(14).fillMaxWidth()
+     }
+     Case(match: "markets") {
+      Column {
+       Text("Markets").fontSize(25).paddingTop(24)
+       Input(placeholder: "Search stocks").bind(@state.query).onInput(@actions.search).height(42).padding(12).fillMaxWidth().backgroundColor("#252728").borderRadius(10)
+       Column { ForEach(items: @state.filteredAssets, key: "symbol") {
+   Row {
+     Text("@{item.initials}").fontSize(16).fontWeight("medium").color("#f2f3f3").width(40).height(40).textAlign("center").paddingTop(10).backgroundColor("@{item.badge}").borderRadius(9)
+     Column { Text("@{item.name}").fontSize(15) Text("@{item.symbol}").fontSize(11).color("#8e9293") }.gap(5).weight(1)
+     Column { Text("@{item.price}").fontSize(14) Text("@{item.change}").fontSize(11).color("@{item.color}") }.gap(5).horizontalAlignment("end")
+   }.gap(12).paddingVertical(14).fillMaxWidth().onClick(@actions.select, symbol: "@{item.symbol}")
+   Divider().height(1).backgroundColor("#2b2d2e")
+ } }.fillMaxWidth()
+       Column {
+        Row { Text("@{state.symbol}").fontSize(18) Spacer() Button { Text("@{state.saved ? 'Watching' : '+ Watch'}").fontSize(11) }.padding(8).backgroundColor("#303334").borderRadius(7).onClick(@actions.watch) }.fillMaxWidth().horizontalAlignment("center").verticalAlignment("center")
+        Text("@{state.price}").fontSize(30)
+        Text("@{state.change}").fontSize(11).color("#8bc49a")
+        Chart(y: @state.domain) {
+         Area(points: @state.points).fill("#d6ded9").fillOpacity(0.035)
+         Line(points: @state.points).stroke("#e9edeb").strokeWidth(1.5).glow(color: "#adc1b4", radius: 2).onClick(@actions.inspect).onMove(@actions.inspect)
+         Marker(x: @state.hover.x, y: @state.hover.y) { Text("@{state.hover.label}").fontSize(11).padding(6).backgroundColor("#363a38").borderRadius(5) }
+        }.height(140).fillMaxWidth()
+        Row { Button { Text("2W").fontSize(11) }.onClick(@actions.range, days: 10).padding(8).backgroundColor("@{state.range == 10 ? '#353738' : '#1b1c1d'}").color("@{state.range == 10 ? '#f2f3f3' : '#989b9d'}").borderRadius(7) Button { Text("1M").fontSize(11) }.onClick(@actions.range, days: 30).padding(8).backgroundColor("@{state.range == 30 ? '#353738' : '#1b1c1d'}").color("@{state.range == 30 ? '#f2f3f3' : '#989b9d'}").borderRadius(7) Button { Text("All").fontSize(11) }.onClick(@actions.range, days: 100).padding(8).backgroundColor("@{state.range == 100 ? '#353738' : '#1b1c1d'}").color("@{state.range == 100 ? '#f2f3f3' : '#989b9d'}").borderRadius(7) }.fillMaxWidth().gap(8).horizontalAlignment("center").verticalAlignment("center")
+        Text("@{state.source}").fontSize(10).color("#85898a")
+        Button { Text("Refresh prices").fontSize(12) }.onClick(@actions.refresh).padding(10).backgroundColor("#303334").borderRadius(7)
+       }.gap(12).paddingTop(16).fillMaxWidth()
+      }.paddingHorizontal(24).paddingBottom(24).gap(8).fillMaxWidth()
+     }
+     Case(match: "portfolio") {
+      Column {
+       Text("Portfolio").fontSize(25).paddingTop(24)
+       Text("@{state.total}").fontSize(32)
+       Text("@{state.gain}").fontSize(12).color("@{state.gainColor}")
+       Text("Your holdings").fontSize(12).color("#909596").marginTop(16)
+       Column { ForEach(items: @state.holdingRows, key: "symbol") {
+        Row {
+         Text("@{item.symbol}").fontSize(11).width(42).height(42).paddingTop(14).textAlign("center").backgroundColor("#303335").borderRadius(8)
+         Column { Text("@{item.symbol}").fontSize(15) Text("@{item.label}").fontSize(10).color("#909596") }.gap(6).weight(1)
+         Text("@{item.value}").fontSize(14)
+         Button { Text("×").fontSize(18) }.padding(6).backgroundColor("#1b1c1d").color("#85898a").onClick(@actions.remove, symbol: "@{item.symbol}")
+        }.gap(10).paddingVertical(10).fillMaxWidth().horizontalAlignment("center").verticalAlignment("center")
+        Divider().height(1).backgroundColor("#2b2d2e")
+       }
+       }.fillMaxWidth()
+       Text("Allocation").fontSize(16).marginTop(16)
+       Chart {
+        Axis(x)
+        Bars(data: @state.allocation, x: "symbol", y: "value", highlight: @state.selected, radius: 4).fill("#777fa1").onClick(@actions.allocation)
+       }.height(130).fillMaxWidth().color("#919596")
+       Text("Add @{state.symbol} holding").fontSize(15).marginTop(12)
+       Row {
+        Input(placeholder: "Shares").bind(@state.sharesInput).width(70).height(40).padding(10).backgroundColor("#27292a").borderRadius(8)
+        Input(placeholder: "Cost / share").bind(@state.costInput).weight(1).height(40).padding(10).backgroundColor("#27292a").borderRadius(8)
+        Button { Text("Add").fontSize(12) }.onClick(@actions.add).padding(12).backgroundColor("#dfe3e1").color("#171a18").borderRadius(8)
+       }.gap(8).fillMaxWidth()
+       Text("Choose another stock in Markets.").fontSize(10).color("#85898a")
+      }.paddingHorizontal(24).paddingBottom(24).gap(12).fillMaxWidth()
+     }
+     Case(match: "watchlist") {
+      Column {
+       Text("Watchlist").fontSize(25).paddingTop(24)
+       Column { ForEach(items: @state.savedAssets, key: "symbol") {
+   Row {
+     Text("@{item.initials}").fontSize(16).fontWeight("medium").color("#f2f3f3").width(40).height(40).textAlign("center").paddingTop(10).backgroundColor("@{item.badge}").borderRadius(9)
+     Column { Text("@{item.name}").fontSize(15) Text("@{item.symbol}").fontSize(11).color("#8e9293") }.gap(5).weight(1)
+     Column { Text("@{item.price}").fontSize(14) Text("@{item.change}").fontSize(11).color("@{item.color}") }.gap(5).horizontalAlignment("end")
+   }.gap(12).paddingVertical(14).fillMaxWidth().onClick(@actions.select, symbol: "@{item.symbol}")
+   Divider().height(1).backgroundColor("#2b2d2e")
+ } }.fillMaxWidth()
+       Text("Manage saved stocks in Markets.").fontSize(11).color("#85898a")
+       Button { Text("Explore markets").fontSize(13) }.onClick(@actions.navigate, page: "markets").padding(12).backgroundColor("#303334").borderRadius(8)
+      }.paddingHorizontal(24).paddingBottom(24).gap(12).fillMaxWidth()
+     }
+    }
+    If(condition: "@{state.status != ''}") { Text("@{state.status}").fontSize(11).paddingHorizontal(24).paddingBottom(16).color("#a7cbb1") }
+   }.weight(1).minHeight(0).fillMaxWidth().scrollable(true)
+   Row {
+    Button { Column { Icon(@resources.dashboard, size: 19) Text("Dashboard").fontSize(9) }.gap(5).horizontalAlignment("center").verticalAlignment("center") }.onClick(@actions.navigate, page: "dashboard").weight(1).height(52).horizontalAlignment("center").verticalAlignment("center").backgroundColor("@{state.page == 'dashboard' ? '#36393a' : '#222425'}").color("@{state.page == 'dashboard' ? '#f1f3f3' : '#8e9293'}").borderRadius(8)
+    Button { Column { Icon(@resources.markets, size: 19) Text("Markets").fontSize(9) }.gap(5).horizontalAlignment("center").verticalAlignment("center") }.onClick(@actions.navigate, page: "markets").weight(1).height(52).horizontalAlignment("center").verticalAlignment("center").backgroundColor("@{state.page == 'markets' ? '#36393a' : '#222425'}").color("@{state.page == 'markets' ? '#f1f3f3' : '#8e9293'}").borderRadius(8)
+    Button { Column { Icon(@resources.portfolio, size: 19) Text("Portfolio").fontSize(9) }.gap(5).horizontalAlignment("center").verticalAlignment("center") }.onClick(@actions.navigate, page: "portfolio").weight(1).height(52).horizontalAlignment("center").verticalAlignment("center").backgroundColor("@{state.page == 'portfolio' ? '#36393a' : '#222425'}").color("@{state.page == 'portfolio' ? '#f1f3f3' : '#8e9293'}").borderRadius(8)
+    Button { Column { Icon(@resources.watchlist, size: 19) Text("Watchlist").fontSize(9) }.gap(5).horizontalAlignment("center").verticalAlignment("center") }.onClick(@actions.navigate, page: "watchlist").weight(1).height(52).horizontalAlignment("center").verticalAlignment("center").backgroundColor("@{state.page == 'watchlist' ? '#36393a' : '#222425'}").color("@{state.page == 'watchlist' ? '#f1f3f3' : '#8e9293'}").borderRadius(8)
+   }.paddingHorizontal(12).paddingVertical(10).gap(4).height(74).fillMaxWidth().backgroundColor("#222425")
+  }.fillMaxSize().backgroundColor("#1b1c1d").color("#e4e6e6").fontWeight("normal")
+ }.fillMaxSize().backgroundColor("#111213")
+}

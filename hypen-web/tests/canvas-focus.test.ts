@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Canvas Focus Bridge Tests
  *
@@ -66,7 +67,7 @@ function makeCanvas(): any {
 class RecordingEngine {
   actions: Array<{ name: string; payload: any }> = [];
   dispatchAction(name: string, payload?: any) {
-    this.actions.push({ name, payload });
+    this.actions.push(semanticAction(name, payload));
   }
 }
 

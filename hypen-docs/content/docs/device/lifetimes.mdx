@@ -1,0 +1,130 @@
+---
+title: Lifetimes & Navigation
+description: How device work is owned by a module activation, what happens on navigation, deactivation and reconnect, and why the background lifetime is reserved
+---
+
+# Lifetimes & Navigation
+
+Every device operation has an **owner**. By default the owner is the exact
+**activation** of the module instance that started it. When the user leaves
+the screen, the server cancels the operation, and a late result is thrown
+away instead of uploaded.
+
+## Activation lifetime (the default)
+
+A module instance is *activated* each time it takes the active route slot, and
+*deactivated* when it loses it. See the [module lifecycle](/docs/guide/state).
+Device authority follows those transitions exactly:
+
+| Moment | Device calls |
+|--------|--------------|
+| `onCreated`, before the first activation | Return `unavailable` (`owner-inactive`) at once, instead of waiting for activation |
+| `onActivated` | **Work.** Authority begins just before `onActivated` runs. |
+| Action handlers while active | Work |
+| `onDeactivated`, `onDestroyed` | Return `unavailable` (`owner-inactive`). Authority is revoked before these run. |
+
+When a module deactivates, the server **cancels every operation owned by that
+activation**, including pending pickers, open streams and recordings. Those
+operations settle as `cancelled`. The device drops the work, and anything
+that finishes later is discarded.
+
+Under `ManagedRouter`, route modules [persist across navigation](/docs/guide/routing)
+by default. When the user navigates back, the instance is reused and
+`onActivated` runs again with a **new** activation. Operations from the
+earlier visit are gone. Coming back doesn't bring them back.
+
+```typescript
+export default app
+  .defineState({ camera: "unknown" as string })
+  .onActivated(async (state, context) => {
+    // Runs on every visit. Device calls work here.
+    const res = await context?.device.permissions.query("camera");
+    state.camera = res?.ok ? res.value.status : "unknown";
+  })
+  .onCreated(async (state, context) => {
+    // Too early: the module isn't active yet, so this returns unavailable.
+    // Put device calls in onActivated instead.
+  })
+  .build();
+```
+
+### Awaits and timers keep the authority they started with
+
+A handler holds on to the activation that was live when it started. If an
+`await` resumes after the module has deactivated, **new** device calls from
+that continuation fail with `unavailable` (`owner-inactive`). This holds even
+if the module has been activated again since. A stale continuation can't
+start work on behalf of a newer visit.
+
+The same applies to timers and callbacks that captured the context. They keep
+working while the activation that created them is live, and stop afterwards.
+
+### Unary requests end with the handler
+
+Separately from activation, a unary request (`request()`, `save()`) is
+cancelled if **the handler that started it returns** while the request is
+still pending. That's why every device call should be `await`ed inside its
+handler. Streams aren't tied to the handler this way. They run until they
+settle, you cancel them, or the activation ends. See
+[Requests & Streams](/docs/device/requests-and-streams#keep-the-handler-waiting).
+
+### In the Rust SDK
+
+Rust handlers are synchronous, so there is no `await` to keep a handler
+waiting: a unary call returns a `DeviceCall`, and consuming it (`then`,
+`on_settled`, `wait`) is what keeps the request alive past the handler.
+A `DeviceCall` dropped unconsumed is cancelled at once, the equivalent of
+the rule above. The `Device` a handler got keeps that invocation's
+activation: if the module has been deactivated since, calls through it fail
+`unavailable` (`owner-inactive`).
+
+`RemoteSession` gives the primary module and every nested module one
+activation that lasts as long as the connection. A host that moves modules on
+and off screen itself calls `session.deactivate_module(name)` (which cancels
+that activation's work) and `session.activate_module(name)` (which starts a
+new activation); `unregister_module(name)` destroys the module and sweeps all
+of its device work.
+
+## Background lifetime (reserved)
+
+The protocol defines a `background` lifetime, owned by the module instance
+instead of one activation, for work that should outlive navigation, such as a
+long recording. It is **not available in revision 1**: every capability
+allows `activation` only, so a request with `lifetime: "background"` returns
+`unsupported`.
+
+The server already enforces the rules a future background capability would
+need:
+
+- Destroying the module cancels its background work, but ordinary
+  deactivation doesn't.
+- At most 2 modules per connection may hold background work at once.
+  Requests over that cap are `throttled`.
+- The device must show a compliant background indicator. The web host never
+  admits background work.
+
+## Connection loss
+
+Device work is **scoped to the connection** and is never resumed:
+
+- If the socket closes, every pending operation fails with `connectionLost`,
+  and the device tears down its dialogs, recordings and temporary files.
+- The server renews every running operation every 5 seconds. If no renewal
+  is acknowledged for 15 seconds, both sides stop the operation
+  (`connectionLost`). Renewals keep a request alive even when no data flows,
+  for example while a picker waits for the user.
+- After a reconnect, the client advertises its capabilities again, and new
+  requests start fresh. **An operation is never replayed or resumed.** App
+  state can be persisted and restored (see [Persistence](/docs/guide/persistence)),
+  but device operations can't.
+- On Cloudflare, a Durable Object that wakes up without its in-memory broker
+  closes the socket with code `1012`, and the client reconnects.
+
+## Replayed dispatches
+
+Device work can only start from a dispatch that the connection's own client
+sent. A dispatch replayed to other clients by `syncActions`, or derived from a
+broadcast, gets a device context that always returns `unavailable`
+(`syncActions.replay`). The restriction survives `await`. A server that uses
+`syncActions` keeps its device plane: the client that dispatched the action
+can start device work, and the replayed copies can't.

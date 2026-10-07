@@ -16,6 +16,21 @@ pub enum RemoteMessage {
         /// Client metadata (platform, version, etc.).
         #[serde(skip_serializing_if = "Option::is_none")]
         props: Option<serde_json::Value>,
+        /// Device Capability Protocol advertisement (RFC 001 §2.2,
+        /// `hello.device`). Absent = the client has no device host. A server
+        /// negotiates from the exact JSON **text** of this member (see
+        /// [`hypen_engine::device::top_level_member_text`]), never from this
+        /// already-parsed value, which has collapsed duplicate keys.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<serde_json::Value>,
+        /// The latest `sessionAck.resumeToken` for `session_id` (RFC 001
+        /// §5). A device-enabled server resumes only with a matching token.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "resumeToken"
+        )]
+        resume_token: Option<String>,
     },
 
     /// Server → Client: confirm session creation/resumption.
@@ -26,6 +41,18 @@ pub enum RemoteMessage {
         is_new: bool,
         #[serde(rename = "isRestored")]
         is_restored: bool,
+        /// The server's device selection (RFC 001 §2.2, `sessionAck.device`).
+        /// Absent = device access not selected (yet).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<serde_json::Value>,
+        /// Rotating resume credential of a device-enabled server (RFC 001
+        /// §5): present it as `hello.resumeToken` to resume this session.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            rename = "resumeToken"
+        )]
+        resume_token: Option<String>,
     },
 
     /// Server → Client: full tree snapshot on connect.

@@ -1,0 +1,49 @@
+{
+  "name": "violation-core-stream-terminal-closes-connection",
+  "description": "An unexpected terminal of the live core.capabilities stream (not preceded by the server's cancel) closes the device connection; no further device traffic is defined.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 1,
+        "event": {
+          "capabilities": [
+            {
+              "name": "core.capabilities",
+              "versions": [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 1,
+        "result": {}
+      },
+      "expectViolation": "connection"
+    }
+  ]
+}

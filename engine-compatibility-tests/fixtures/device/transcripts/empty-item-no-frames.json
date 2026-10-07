@@ -1,0 +1,125 @@
+{
+  "name": "empty-item-no-frames",
+  "description": "A zero-byte item sends no frames (decision D2): it is announced by blobStart with bytes 0 (or with no size) and completed by the terminal item with bytes 0 and the SHA-256 of the empty string. A zero-length frame is never valid (violation-empty-frame).",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 3
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "text/plain",
+          "bytes": 0
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 1,
+          "contentType": "text/plain"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 2,
+          "contentType": "image/jpeg",
+          "bytes": 17
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 2,
+          "requestId": 2,
+          "seq": 0
+        },
+        "hex": "01000200020000000000000068656c6c6f2d687970656e2d70686f746f"
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "items": [
+            {
+              "channel": 0,
+              "contentType": "text/plain",
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "channel": 1,
+              "contentType": "text/plain",
+              "bytes": 0,
+              "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+            },
+            {
+              "channel": 2,
+              "contentType": "image/jpeg",
+              "bytes": 17,
+              "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

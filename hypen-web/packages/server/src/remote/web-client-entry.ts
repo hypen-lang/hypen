@@ -77,6 +77,38 @@ function hideBanner(): void {
 engine.onConnect(() => hideBanner());
 engine.onDisconnect(() => showBanner("Disconnected — reconnecting…"));
 
+// `window.__hypen`: the hook an app uses to hand its session id to an
+// agent, so the agent can attach to THIS session (`RemoteServer.attach` /
+// `POST /__hypen__/agent/sessions` with `{ sessionId }`) and the user sees
+// the result of what it does.
+//
+// The id is this browser's session resume token: whoever presents it over
+// the WebSocket resumes this session's saved state. Forward it only to a
+// backend you trust — the same one the app authenticates against — never
+// to a third party, and never embed it in a URL. The server's `authorize`
+// callback is where that trust is checked; this global only makes the id
+// reachable from page script.
+//
+// Frozen so page code (or an extension) cannot swap the accessor for one
+// that returns somebody else's id.
+declare global {
+  interface Window {
+    __hypen?: Readonly<{
+      /** The current session id, or `null` before the first `sessionAck`. */
+      getSessionId(): string | null;
+      /** Fires on every (re)established session with its id. */
+      onSessionEstablished(callback: (sessionId: string) => void): void;
+    }>;
+  }
+}
+
+window.__hypen = Object.freeze({
+  getSessionId: () => engine.getSessionId(),
+  onSessionEstablished: (callback: (sessionId: string) => void) => {
+    engine.onSessionEstablished((info) => callback(info.sessionId));
+  },
+});
+
 const result = await engine.connect();
 if (!result.ok) {
   showBanner(`Could not connect to ${proto}://${location.host} — is the server running?`);

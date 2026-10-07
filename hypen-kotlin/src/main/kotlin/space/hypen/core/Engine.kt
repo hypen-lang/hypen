@@ -35,6 +35,21 @@ interface IEngine {
     fun onAction(actionName: String, handler: EngineActionCallback)
 
     /**
+     * Drop a module and every action it declared from the engine's
+     * registry.
+     *
+     * **Call this on destroy only, never on unmount.** The engine's module
+     * registry is otherwise append-only by design, and that retention is
+     * load-bearing: under the default `persist = true`, [ManagedRouter]
+     * keeps an off-screen module registered precisely so sibling modules
+     * can still read its state. Unregistering on unmount would break the
+     * persist cache and cross-module reads.
+     */
+    fun unregisterModule(name: String) {
+        // Default no-op; NativeEngine provides the real implementation.
+    }
+
+    /**
      * Apply a state patch to a specific module and re-render affected nodes.
      *
      * @param scope  Lowercased module name of the target module. An empty string

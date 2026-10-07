@@ -508,6 +508,16 @@ export class Hypen {
       "Scrubber",
       // Web-only primitives (not in the engine list)
       "Canvas",
+      // Chart family (see packages/web/src/dom/components/chart.ts)
+      "Chart",
+      "Axis",
+      "Line",
+      "Area",
+      "Bars",
+      "Points",
+      "Rule",
+      "Marker",
+      "Path",
     ]);
 
     this.engine.setComponentResolver(

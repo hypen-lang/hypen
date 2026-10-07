@@ -1,0 +1,54 @@
+{
+  "name": "violation-timeout-over-revision-max",
+  "description": "timeoutMs 30001 is within the envelope bound but above permission.query's max_timeout_ms (30000).",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30001,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      },
+      "expectViolation": "invalidPayload"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "error": {
+          "code": "invalidParams"
+        }
+      },
+      "reaction": true
+    }
+  ]
+}

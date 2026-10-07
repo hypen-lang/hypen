@@ -133,6 +133,23 @@ a hidden `Box` overlay (`Modifier.size(0.dp).alpha(0f)`) keyed by
 animations across the detach → attach cycle. Not implemented today;
 ship if/when scroll-position loss becomes a real complaint.
 
+## Device Capability Protocol (RFC 001)
+
+`renderer/.../device/` is the Android DeviceHost: a JVM-pure protocol core
+(`DeviceHost.kt`, `DeviceProtocol.kt`, `DevicePayloads.kt`,
+`DeviceHandshake.kt`, `CapabilityDrivers.kt`, and the capture
+drivers `CaptureDrivers.kt` / `CaptureSupport.kt`: file.pick, file.save with
+the download plane, camera.capture, mic.record, bluetooth.select) plus Android
+glue in `device/android/` (`CapturePlatforms.kt` holds SAF, the capture
+intents with `HypenDeviceFileProvider` — declared in the renderer manifest —
+and `AudioRecord`). Driver behaviour is tested through fakes of the platform
+seams in `DeviceCaptureDriversTest.kt`. Strict device JSON (RFC 001 §2.1 limits) is
+`remote/StrictDeviceJson.kt`. The unit tests replay the shared corpus in
+`engine-compatibility-tests/fixtures/device/` with no skips:
+`DeviceConformanceTest.kt` (messages, handshake, payloads, selection) and
+`DeviceTranscriptTest.kt` (every transcript, the Android client as one
+endpoint). Run them with `./gradlew :renderer:testDebugUnitTest --tests 'space.hypen.renderer.device.*'`.
+
 ## Key Dependencies
 
 - Jetpack Compose (BOM)
@@ -140,6 +157,10 @@ ship if/when scroll-position loss becomes a real complaint.
   frames are compressed automatically. The offer cannot be suppressed client-side
   (OkHttp hardcodes it and rejects a caller-supplied `Sec-WebSocket-Extensions`
   header), so `RemoteEngineConfig` intentionally has no `compression` flag —
-  disable it server-side instead. See README "Compression".
+  disable it server-side instead. See README "Compression". The device plane
+  runs on a compressed socket only when the negotiated permessage-deflate has
+  both `server_no_context_takeover` and `client_no_context_takeover`
+  (`remote/PerMessageDeflate.kt`, tests in `RemoteEngineCompressionDeviceTest`);
+  otherwise the hello omits `device` (UI-only, one warning).
 - Kotlin serialization (JSON)
 - CameraX + ML Kit (QR scanning in example app)

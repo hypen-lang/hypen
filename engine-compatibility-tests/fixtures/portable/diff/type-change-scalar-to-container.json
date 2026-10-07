@@ -1,0 +1,33 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-type-change-scalar-to-container",
+  "description": "A value changing type emits the entire new value at that path.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "x": 1,
+      "y": {
+        "a": 1
+      }
+    },
+    "new": {
+      "x": {
+        "nested": true
+      },
+      "y": "now-a-string"
+    }
+  },
+  "expected": [
+    {
+      "path": "x",
+      "value": {
+        "nested": true
+      }
+    },
+    {
+      "path": "y",
+      "value": "now-a-string"
+    }
+  ]
+}

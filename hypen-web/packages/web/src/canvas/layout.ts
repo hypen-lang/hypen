@@ -21,6 +21,7 @@ import {
   inheritedTextProp,
 } from "./utils.js";
 import { measureText } from "./text.js";
+import { trackCount } from "../grid-tracks.js";
 import {
   SAFE_AREA_EDGES,
   getEffectiveSafeAreaInsets,
@@ -33,6 +34,7 @@ import {
   isVideoNode,
   videoSlotName,
 } from "./paint.js";
+import { CHART_DEFAULTS, isChartNode, layoutCharts } from "./chart.js";
 
 /**
  * Components whose size is intrinsic to the component itself (icon, avatar,
@@ -491,44 +493,19 @@ function buildTaffyStyle(
   } else if (isGrid) {
     style.display = T.Display.Grid;
 
-    // --- Grid template tracks ------------------------------------------------
-    // The DSL's `.gridColumns(N)` / `.gridRows(N)` applicators land on
-    // props with the applicator's own name (`gridColumns`, `gridRows`).
-    // The DOM renderer also accepts the older shorthand `columns`/`rows`
-    // and the spec-name `gridTemplateColumns`/`gridTemplateRows`. A bare
-    // number N expands to N equal `1fr` tracks — same logic as
-    // `dom/applicators/advanced-layout.ts`.
-    const colsProp = props.gridTemplateColumns ?? props.gridColumns ?? props.columns;
-    const rowsProp = props.gridTemplateRows ?? props.gridRows ?? props.rows;
-    if (colsProp !== undefined) {
-      style.gridTemplateColumns = parseGridTemplate(colsProp);
-    }
-    if (rowsProp !== undefined) {
-      style.gridTemplateRows = parseGridTemplate(rowsProp);
-    }
+    // --- Grid columns --------------------------------------------------------
+    // `.gridColumns(N)` (or the Grid `columns` prop): a count of equal `1fr`
+    // tracks — the only track form every renderer supports (see
+    // grid-tracks.ts). Same as the DOM renderer.
+    const cols = trackCount(props.gridColumns ?? props.columns);
+    if (cols !== null) style.gridTemplateColumns = equalTracks(cols);
 
-    // --- Grid auto flow ------------------------------------------------------
-    if (props.gridAutoFlow) {
-      style.gridAutoFlow = mapGridAutoFlow(T, props.gridAutoFlow);
-    }
-
-    // --- Grid auto tracks ----------------------------------------------------
-    if (props.gridAutoColumns) {
-      style.gridAutoColumns = parseTrackSizingList(props.gridAutoColumns);
-    }
-    if (props.gridAutoRows) {
-      style.gridAutoRows = parseTrackSizingList(props.gridAutoRows);
-    } else if (typeof props.__autoRowsPx === "number") {
-      // Set by `annotateCollapsedAspectGrids` after a first layout pass —
-      // pin implicit rows to the height we want each cell to be (column
-      // width / aspectRatio), so `aspect-square` images don't overlap.
+    // Set by `annotateCollapsedAspectGrids` after a first layout pass — pin
+    // implicit rows to the height we want each cell to be (column width /
+    // aspectRatio), so `aspect-square` images don't overlap.
+    if (typeof props.__autoRowsPx === "number") {
       const px = props.__autoRowsPx as number;
       style.gridAutoRows = [{ min: px, max: px }];
-    }
-
-    // --- Grid template areas -------------------------------------------------
-    if (props.gridTemplateAreas) {
-      style.gridTemplateAreas = parseGridTemplateAreas(props.gridTemplateAreas);
     }
   } else {
     style.display = T.Display.Flex;
@@ -545,24 +522,11 @@ function buildTaffyStyle(
     style.gridRow = { start: 1, end: 2 };
   }
 
-  // --- Grid child placement (applies regardless of parent display) ----------
-  if (props.gridColumn) {
-    style.gridColumn = parseGridLine(props.gridColumn);
-  }
-  if (props.gridRow) {
-    style.gridRow = parseGridLine(props.gridRow);
-  }
-  if (props.gridColumnStart !== undefined) {
-    style.gridColumnStart = parseGridPlacement(props.gridColumnStart);
-  }
-  if (props.gridColumnEnd !== undefined) {
-    style.gridColumnEnd = parseGridPlacement(props.gridColumnEnd);
-  }
-  if (props.gridRowStart !== undefined) {
-    style.gridRowStart = parseGridPlacement(props.gridRowStart);
-  }
-  if (props.gridRowEnd !== undefined) {
-    style.gridRowEnd = parseGridPlacement(props.gridRowEnd);
+  // --- Grid child placement --------------------------------------------------
+  // `.gridColumn("span N")` (or N): a column span, as on iOS/Android.
+  if (props.gridColumn !== undefined) {
+    const span = trackCount(String(props.gridColumn).trim().replace(/^span\s+/i, ""));
+    if (span !== null) style.gridColumn = parseGridLine(`span ${span}`);
   }
 
   // --- Flex properties -------------------------------------------------------
@@ -734,6 +698,14 @@ function buildTaffyStyle(
     style.size = {
       width: widthIsSet ? widthDimension : sz,
       height: heightIsSet ? heightDimension : sz,
+    };
+  } else if (type === "chart") {
+    // A Chart is a block that fills its parent's width and has an intrinsic
+    // height, exactly like the DOM renderer's <svg> host. Its marks are laid
+    // out by the chart itself (see `layoutCharts`), never by Taffy.
+    style.size = {
+      width: widthIsSet ? widthDimension : "100%",
+      height: heightIsSet ? heightDimension : CHART_DEFAULTS.height,
     };
   } else if (type === "badge") {
     style.size = {
@@ -1031,92 +1003,9 @@ function mapAlignSelf(T: typeof import("taffy-layout"), value: string) {
 // Grid helpers: parse Hypen prop values → Taffy grid types
 // ---------------------------------------------------------------------------
 
-/**
- * Parse a single track sizing value like "100", "auto", "1fr", "50%",
- * "min-content", "max-content" into a TrackSizingFunction.
- */
-function parseTrackSizing(value: string | number): { min: any; max: any } {
-  if (typeof value === "number") {
-    return { min: value, max: value };
-  }
-
-  const s = String(value).trim();
-  if (s === "auto") return { min: "auto", max: "auto" };
-  if (s === "min-content") return { min: "min-content", max: "min-content" };
-  if (s === "max-content") return { min: "max-content", max: "max-content" };
-
-  // Fractional units e.g. "1fr", "2.5fr"
-  if (s.endsWith("fr")) {
-    return { min: "auto", max: s as `${number}fr` };
-  }
-
-  // Percentage e.g. "50%"
-  if (s.endsWith("%")) {
-    return { min: s as `${number}%`, max: s as `${number}%` };
-  }
-
-  // Plain number in a string
-  const n = parseFloat(s);
-  if (!isNaN(n)) {
-    return { min: n, max: n };
-  }
-
-  return { min: "auto", max: "auto" };
-}
-
-/**
- * Parse a grid-template-columns / grid-template-rows value.
- * Accepts:
- *   - An array of values: [100, "1fr", "auto"]
- *   - A space-separated string: "100 1fr auto"
- *   - A single value: "1fr"
- */
-function parseGridTemplate(value: any): any[] {
-  if (Array.isArray(value)) {
-    return value.map(parseTrackSizing);
-  }
-  if (typeof value === "string") {
-    // The DSL's `.gridColumns(3)` sometimes arrives here as `"3"` after
-    // stringification (engine emits numeric applicator args as strings).
-    // Treat a bare integer string the same way the DOM renderer does —
-    // expand to N equal 1fr tracks. `repeat(N, 1fr)` shorthand would work
-    // too but Taffy wants the expanded track list.
-    const trimmed = value.trim();
-    if (/^\d+$/.test(trimmed)) {
-      const n = parseInt(trimmed, 10);
-      return Array.from({ length: n }, () => ({
-        min: "auto",
-        max: "1fr" as `${number}fr`,
-      }));
-    }
-    return value.split(/\s+/).filter(Boolean).map(parseTrackSizing);
-  }
-  if (typeof value === "number") {
-    // Bare number = column count. DOM: `repeat(N, 1fr)`.
-    return Array.from({ length: value }, () => ({
-      min: "auto",
-      max: "1fr" as `${number}fr`,
-    }));
-  }
-  return [];
-}
-
-/**
- * Parse grid-auto-columns / grid-auto-rows (TrackSizingFunction[]).
- * Same format as template tracks but semantically for implicit tracks.
- */
-function parseTrackSizingList(value: any): any[] {
-  return parseGridTemplate(value);
-}
-
-/** Map a gridAutoFlow string to Taffy's GridAutoFlow enum. */
-function mapGridAutoFlow(T: typeof import("taffy-layout"), value: string) {
-  switch (value) {
-    case "column": return T.GridAutoFlow.Column;
-    case "row-dense": case "dense": return T.GridAutoFlow.RowDense;
-    case "column-dense": return T.GridAutoFlow.ColumnDense;
-    default: return T.GridAutoFlow.Row;
-  }
+/** N equal `1fr` tracks (Taffy wants the expanded track list). */
+function equalTracks(n: number): any[] {
+  return Array.from({ length: n }, () => ({ min: "auto", max: "1fr" as `${number}fr` }));
 }
 
 /**
@@ -1162,51 +1051,6 @@ function parseGridLine(value: any): { start: any; end: any } {
     };
   }
   return { start: "auto", end: "auto" };
-}
-
-/**
- * Parse grid-template-areas.
- * Accepts an array of strings like ["header header", "sidebar main", "footer footer"].
- * Each string is a row; each word is a cell name (or "." for empty).
- * Returns an array of GridTemplateArea objects.
- */
-function parseGridTemplateAreas(value: any): any[] {
-  if (!Array.isArray(value)) return [];
-
-  const rows: string[][] = value.map((row: string) =>
-    String(row).split(/\s+/).filter(Boolean)
-  );
-
-  if (rows.length === 0) return [];
-
-  // Collect unique area names (skip "." which means empty)
-  const areaNames = new Set<string>();
-  for (const row of rows) {
-    for (const cell of row) {
-      if (cell !== ".") areaNames.add(cell);
-    }
-  }
-
-  // For each area name, find its bounding rectangle
-  const areas: any[] = [];
-  for (const name of areaNames) {
-    let rowStart = Infinity, rowEnd = -1, colStart = Infinity, colEnd = -1;
-    for (let r = 0; r < rows.length; r++) {
-      for (let c = 0; c < rows[r].length; c++) {
-        if (rows[r][c] === name) {
-          rowStart = Math.min(rowStart, r + 1);
-          rowEnd = Math.max(rowEnd, r + 2); // end line is exclusive
-          colStart = Math.min(colStart, c + 1);
-          colEnd = Math.max(colEnd, c + 2);
-        }
-      }
-    }
-    if (rowEnd > 0) {
-      areas.push({ name, rowStart, rowEnd, columnStart: colStart, columnEnd: colEnd });
-    }
-  }
-
-  return areas;
 }
 
 // ---------------------------------------------------------------------------
@@ -1341,6 +1185,14 @@ function buildTree(
     return tree.newLeaf(style);
   }
 
+  // A Chart is a leaf too: its children are marks positioned in DATA units
+  // against the resolved plot rect, so they must not feed (or be sized by)
+  // the flex/grid pass. `layoutCharts` places them once the chart's own box
+  // is known — the same two-phase shape a Video's composition slots use.
+  if (isChartNode(node)) {
+    return tree.newLeaf(style);
+  }
+
   // Container nodes
   const childIds: bigint[] = [];
   for (const child of node.children) {
@@ -1411,7 +1263,7 @@ function writeLayout(
 
   // A Video was built as a leaf (see buildTree) — its children are slot
   // overlays with no Taffy nodes; `layoutVideoSlots` places them.
-  if (isVideoNode(node) || node.type.toLowerCase() === "select") return;
+  if (isVideoNode(node) || isChartNode(node) || node.type.toLowerCase() === "select") return;
 
   // Recurse children (same order as buildTree)
   for (let i = 0; i < node.children.length; i++) {
@@ -1501,6 +1353,7 @@ function computeLayoutTaffy(
   availableHeight: number,
   x: number,
   y: number,
+  pinRoot: boolean = true,
 ): void {
   const T = taffy!;
   const tree = new T.TaffyTree();
@@ -1518,7 +1371,7 @@ function computeLayoutTaffy(
     const rootHeight = axisSizeValue(rootProps, "height");
     const rootHasExplicitWidth = rootWidth !== undefined && rootWidth !== null;
     const rootHasExplicitHeight = rootHeight !== undefined && rootHeight !== null;
-    if (!rootHasExplicitWidth || !rootHasExplicitHeight) {
+    if (pinRoot && (!rootHasExplicitWidth || !rootHasExplicitHeight)) {
       const rootStyle = tree.getStyle(rootId);
       rootStyle.size = {
         width: rootHasExplicitWidth
@@ -1640,6 +1493,34 @@ export function computeLayout(
 
   // Video composition slots are laid out against the finished player rect.
   layoutVideoSlots(ctx, node);
+
+  // Chart marks are laid out against the finished chart rect, for the same
+  // reason: the chart owns their positions, in data units.
+  layoutCharts(node, (child, maxWidth, maxHeight, cx, cy) =>
+    layoutSubtreeIntrinsic(ctx, child, maxWidth, maxHeight, cx, cy),
+  );
+}
+
+/**
+ * Lay a subtree out at its INTRINSIC size inside `maxWidth`/`maxHeight`,
+ * rooted at `(x, y)` — the root is not pinned to the available box, so a
+ * Marker's tooltip card is as wide as its content rather than as wide as
+ * the plot. Used by the chart layout pass; every other caller wants the
+ * pinned form (`computeLayout`).
+ */
+function layoutSubtreeIntrinsic(
+  ctx: CanvasRenderingContext2D,
+  node: VirtualNode,
+  maxWidth: number,
+  maxHeight: number,
+  x: number,
+  y: number,
+): void {
+  if (layoutBackend === "auto" && taffyReady && taffy) {
+    computeLayoutTaffy(ctx, node, maxWidth, maxHeight, x, y, /* pinRoot */ false);
+  } else {
+    computeLayoutFallback(ctx, node, maxWidth, maxHeight, x, y, /* pinRoot */ false);
+  }
 }
 
 /**
@@ -1842,6 +1723,10 @@ function intrinsicSizeFallback(
     }
     case "audio":
       return { width: 300, height: 54 };
+    case "chart":
+      // Fills the available width, intrinsic 200 tall — the DOM host's
+      // `width: 100%; height: 200px`.
+      return { width: availW, height: CHART_DEFAULTS.height };
     case "icon": {
       const sz = cssLengthToPx(props.size) ?? 24;
       return { width: sz, height: sz };
@@ -1982,7 +1867,12 @@ function measureFallback(
 
   // A Video's children are slot overlays, never flow content — they must
   // not contribute to the player's measured size (see layoutVideoSlots).
-  if ((width === null || height === null) && node.children.length > 0 && type !== "video") {
+  if (
+    (width === null || height === null) &&
+    node.children.length > 0 &&
+    type !== "video" &&
+    type !== "chart"
+  ) {
     // Content size from the children's flow. The cross axis is measured
     // first when it is already known, so text wraps against the real width.
     const innerAvailW = (width !== null ? width : fillW ? availW : availW) - insetW;
@@ -2170,6 +2060,8 @@ function placeFallback(
   // Video slot children are placed by `layoutVideoSlots` against the
   // player's own rect, which only exists once this node is placed.
   if (isVideoNode(node)) return;
+  // Chart marks are likewise placed later, against the resolved plot rect.
+  if (isChartNode(node)) return;
   if (node.children.length > 0) placeChildrenFallback(ctx, node);
 }
 
@@ -2469,6 +2361,7 @@ function computeLayoutFallback(
   availableHeight: number,
   x: number = 0,
   y: number = 0,
+  pinRoot: boolean = true,
 ): void {
   fallbackMeasureCache = new WeakMap();
   try {
@@ -2477,7 +2370,7 @@ function computeLayoutFallback(
     const availH = Math.max(0, availableHeight - margin.top - margin.bottom);
     // The root fills the canvas on both axes unless it declares a size —
     // the same pin the Taffy path applies to its root node.
-    const size = measureFallback(ctx, node, availW, availH, true, true);
+    const size = measureFallback(ctx, node, availW, availH, pinRoot, pinRoot);
     placeFallback(ctx, node, x + margin.left, y + margin.top, size.width, size.height);
   } finally {
     fallbackMeasureCache = null;

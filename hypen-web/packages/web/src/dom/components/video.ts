@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * Video Component
  *
@@ -523,7 +524,7 @@ function dispatchVideoEvent(
   if (!engine) return;
 
   try {
-    engine.dispatchAction(actionName, { ...customPayload, ...contractPayload });
+    dispatchUIAction(engine, host.dataset.hypenId, actionName, { ...customPayload, ...contractPayload });
   } catch (err) {
     log.error(`Error dispatching video action "${actionName}":`, err);
   }
@@ -738,7 +739,7 @@ function reportPlayback(el: HTMLElement, opts: { immediate?: boolean } = {}): vo
   const media = el as HTMLVideoElement;
   const write = (key: string, value: unknown): void => {
     try {
-      engine.dispatchAction("__hypen_bind", { path: `${bindPath}.${key}`, value });
+      dispatchUIAction(engine, (state.root ?? el).dataset.hypenId, "__hypen_bind", { path: `${bindPath}.${key}`, value });
     } catch (err) {
       log.error("Error reporting video playback binding:", err);
     }

@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * DOM Video component — cross-platform Video contract
  * (packages/web/src/dom/components/video.ts, hypen-docs/content/docs/guide/components.mdx)
@@ -16,7 +17,7 @@ ensureFakeDomGlobals();
 class RecordingEngine {
   actions: Array<{ name: string; payload: any }> = [];
   dispatchAction(name: string, payload?: any): void {
-    this.actions.push({ name, payload });
+    this.actions.push(semanticAction(name, payload));
   }
   actionsNamed(name: string): Array<{ name: string; payload: any }> {
     return this.actions.filter((a) => a.name === name);

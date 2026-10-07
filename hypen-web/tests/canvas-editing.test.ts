@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Canvas Native Text Editing Tests
  *
@@ -80,7 +81,7 @@ function makeCanvas(ctx: MockContext): any {
 class RecordingEngine {
   actions: Array<{ name: string; payload: any }> = [];
   dispatchAction(name: string, payload?: any) {
-    this.actions.push({ name, payload });
+    this.actions.push(semanticAction(name, payload));
   }
   binds() {
     return this.actions.filter((a) => a.name === "__hypen_bind");

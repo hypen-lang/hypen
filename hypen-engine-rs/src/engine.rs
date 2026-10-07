@@ -55,7 +55,10 @@ pub type RenderCallback = Box<dyn Fn(&[Patch]) + Send + Sync>;
 pub struct Engine {
     /// Shared core: component registry, resource registry, module state,
     /// instance tree, dependency graph, scheduler, data sources, etc.
-    core: EngineCore,
+    ///
+    /// `pub(crate)` so the external-surface module (`crate::agent`) can read
+    /// the registries it guards against. Still private to the crate.
+    pub(crate) core: EngineCore,
 
     /// Action dispatcher
     actions: ActionDispatcher,
@@ -183,7 +186,9 @@ impl Engine {
     where
         F: Fn(&Action) + Send + Sync + 'static,
     {
-        self.actions.on(action_name, handler);
+        let name = action_name.into();
+        self.core.note_handler(&name);
+        self.actions.on(name, handler);
     }
 
     /// Render an element tree (initial render or full re-render).
@@ -303,7 +308,13 @@ impl Engine {
 
     /// Dispatch an action to its registered handler.
     pub fn dispatch_action(&mut self, action: Action) -> Result<(), EngineError> {
+        let action = self.core.route_ui_action(action)?;
         self.actions.dispatch(&action)
+    }
+
+    /// Resolve a UI envelope for hosts that own their action dispatch loop.
+    pub fn resolve_ui_action(&self, action: Action) -> Result<Action, EngineError> {
+        self.core.route_ui_action(action)
     }
 
     /// Look up which named module (by lowercased name) owns a given action.

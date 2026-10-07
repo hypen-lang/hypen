@@ -14,6 +14,7 @@ import {
   markConversationRead,
   formatUser,
 } from "./queries";
+import { deleteMedia, mediaIdFromUrl, storePhoto } from "./media";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -243,7 +244,10 @@ export const homePageModule = app
     posts: [],
     stories: [],
   })
-  .onCreated(async (state, context) => {
+  // Reload on every return to the feed, not once: posts shared from
+  // /create (by this visitor or anyone else on the shared Durable Object)
+  // show up as soon as the feed is on screen again.
+  .onActivated(async (state, context) => {
     state.currentUser = context ? currentUserFromApp(context) : null;
     const id = state.currentUser?.id ?? "u1";
     state.posts = getFeedPosts(id);
@@ -475,11 +479,13 @@ export const conversationModule = app
 interface ProfileState {
   currentUser: User | null;
   userPosts: { id: string; imageUrl: string }[];
+  /** Progress / error line under "Edit Profile" while changing the avatar. */
+  avatarStatus: string;
 }
 
 export const profileModule = app
   .module("Profile")
-  .defineState<ProfileState>({ currentUser: null, userPosts: [] })
+  .defineState<ProfileState>({ currentUser: null, userPosts: [], avatarStatus: "" })
   .onActivated(async (state, context) => {
     const appUser = context ? currentUserFromApp(context) : null;
     const id = appUser?.id ?? "u1";
@@ -487,10 +493,189 @@ export const profileModule = app
     state.currentUser = freshUser ? formatUser(freshUser) : appUser;
     state.userPosts = getUserPosts(id);
   })
-  .onAction("editProfile", async () => {
-    // No-op — triggers a client-side sheet.
+  // "Edit Profile" → change the avatar. The photo comes from the device
+  // plane: the visitor's DeviceHost shows its own consent dialog (with a
+  // drop zone) and picker; the handler just awaits the verified bytes.
+  .onAction("editProfile", async ({ state, context }) => {
+    const user = state.currentUser;
+    if (!user) return;
+    state.avatarStatus = "Choose a photo…";
+    const res = await context.device.request("gallery.pick", { mediaTypes: ["photo"], maxCount: 1 });
+    if ("error" in res) {
+      state.avatarStatus = deviceErrorMessage(res.error.code);
+      return;
+    }
+    const item = res.value.items[0];
+    if (!item) {
+      state.avatarStatus = "";
+      return;
+    }
+    const stored = await storePhoto(item.bytes, user.id);
+    if ("reason" in stored) {
+      state.avatarStatus = stored.reason;
+      return;
+    }
+    const previous = mediaIdFromUrl(user.avatarUrl);
+    db.query("UPDATE users SET avatar_url = ? WHERE id = ?").run(stored.url, user.id);
+    if (previous) await deleteMedia(previous, user.id);
+    state.currentUser = { ...user, avatarUrl: stored.url };
+    state.avatarStatus = "";
+    // The App shell is the source of truth other screens copy from.
+    if (context.hasModule("app")) {
+      const shell = context.getModule<AppState>("app");
+      const current = shell.getState().currentUser;
+      if (current) shell.setState({ currentUser: { ...current, avatarUrl: stored.url } });
+    }
   })
   .build();
+
+// ---------------------------------------------------------------------------
+// CreatePost — route "/create". A new photo post from the device.
+// ---------------------------------------------------------------------------
+
+type CreateStatus = "idle" | "picking" | "ready" | "posting";
+
+interface CreatePostState {
+  currentUser: User | null;
+  status: CreateStatus;
+  /** Uploaded draft photo (`/media/<id>`), or "" before one is chosen. */
+  draftImageUrl: string;
+  caption: string;
+  location: string;
+  error: string;
+  /** Whether the connected device can open a camera (live device selection). */
+  canUseCamera: boolean;
+  /** Whether the connected client has a device plane at all. */
+  canUpload: boolean;
+}
+
+/** Friendly text for a device error code (handlers never branch on `platformDetail`). */
+export function deviceErrorMessage(code: string): string {
+  switch (code) {
+    case "cancelled":
+    case "denied":
+      return "";
+    case "unsupported":
+    case "unavailable":
+      return "This device can't share photos with Hypengram.";
+    case "throttled":
+      return "That photo is too large, or another prompt is already open.";
+    case "timeout":
+      return "Timed out waiting for a photo.";
+    case "connectionLost":
+      return "Connection lost while uploading. Try again.";
+    default:
+      return "Something went wrong with that photo.";
+  }
+}
+
+export const createPostModule = app
+  .module("CreatePost")
+  .defineState<CreatePostState>({
+    currentUser: null,
+    status: "idle",
+    draftImageUrl: "",
+    caption: "",
+    location: "",
+    error: "",
+    canUseCamera: false,
+    canUpload: false,
+  })
+  .onActivated(async (state, context) => {
+    state.currentUser = context ? currentUserFromApp(context) : null;
+    state.canUpload = !!context?.device.supports("gallery.pick");
+    state.canUseCamera = !!context?.device.supports("camera.capture");
+    state.error = state.canUpload ? "" : "Open Hypengram in a browser to share photos.";
+    if (state.status !== "ready") state.status = "idle";
+  })
+  .onAction("pickPhoto", async ({ state, context }) => {
+    await takeDraft(state, () =>
+      context.device.request("gallery.pick", { mediaTypes: ["photo"], maxCount: 1 })
+    );
+  })
+  .onAction("takePhoto", async ({ state, context }) => {
+    await takeDraft(state, () => context.device.camera.capture({ mode: "photo", facing: "back" }));
+  })
+  .onAction("sharePost", async ({ state, context }) => {
+    const user = state.currentUser;
+    if (!user || !state.draftImageUrl || state.status !== "ready") return;
+    state.status = "posting";
+    const id = `p-${crypto.randomUUID()}`;
+    db.transaction(() => {
+      db.query(
+        "INSERT INTO posts (id, user_id, image_url, caption, location) VALUES (?, ?, ?, ?, ?)"
+      ).run(id, user.id, state.draftImageUrl, state.caption.trim().slice(0, 2200), state.location.trim().slice(0, 100) || null);
+      db.query("UPDATE users SET posts_count = posts_count + 1 WHERE id = ?").run(user.id);
+    })();
+    resetDraft(state, { keepMedia: true });
+    const current = context.hasModule("app") ? context.getModule<AppState>("app").getState().currentUser : null;
+    goHome(context, current ? { currentUser: { ...current, postsCount: current.postsCount + 1 } } : {});
+  })
+  .onAction("discardPost", async ({ state, context }) => {
+    resetDraft(state, { keepMedia: false });
+    goHome(context);
+  })
+  .build();
+
+/**
+ * Back to the feed, in ONE App-shell update. The shell's `location` drives
+ * the Router (and the router mirrors back into it), so a separate
+ * `router.push("/")` next to a shell `setState` races: the shell's flush
+ * lands with the stale "/create" and the mirror navigates right back.
+ */
+function goHome(context: GlobalContext, patch: Partial<AppState> = {}): void {
+  if (context.hasModule("app")) {
+    context.getModule<AppState>("app").setState({ ...patch, location: "/" });
+  } else {
+    context.router?.push("/");
+  }
+}
+
+/** What `gallery.pick` and `camera.capture` both resolve to, as far as a draft cares. */
+type PhotoResult =
+  | { ok: true; value: { items: Array<{ bytes: Uint8Array }> } }
+  | { ok: false; error: { code: string } };
+
+/** Ask the device for one photo and keep it as the draft. */
+async function takeDraft(state: CreatePostState, ask: () => Promise<PhotoResult>): Promise<void> {
+  const user = state.currentUser;
+  if (!user || state.status === "picking" || state.status === "posting") return;
+  state.error = "";
+  const before = state.status;
+  state.status = "picking";
+  const res = await ask();
+  if ("error" in res) {
+    state.status = before === "ready" ? "ready" : "idle";
+    state.error = deviceErrorMessage(res.error.code);
+    return;
+  }
+  const item = res.value.items[0];
+  if (!item) {
+    state.status = before === "ready" ? "ready" : "idle";
+    return;
+  }
+  const stored = await storePhoto(item.bytes, user.id);
+  if ("reason" in stored) {
+    state.status = before === "ready" ? "ready" : "idle";
+    state.error = stored.reason;
+    return;
+  }
+  // Replacing a draft: the old photo was never shared, so drop it.
+  const old = mediaIdFromUrl(state.draftImageUrl);
+  if (old) await deleteMedia(old, user.id);
+  state.draftImageUrl = stored.url;
+  state.status = "ready";
+}
+
+function resetDraft(state: CreatePostState, { keepMedia }: { keepMedia: boolean }): void {
+  const draft = mediaIdFromUrl(state.draftImageUrl);
+  if (draft && !keepMedia && state.currentUser) void deleteMedia(draft, state.currentUser.id);
+  state.draftImageUrl = "";
+  state.caption = "";
+  state.location = "";
+  state.error = "";
+  state.status = "idle";
+}
 
 // ---------------------------------------------------------------------------
 // UserProfile — route "/user-profile/:id". onActivated re-reads the URL

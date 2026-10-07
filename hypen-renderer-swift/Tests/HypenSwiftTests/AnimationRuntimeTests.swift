@@ -26,8 +26,17 @@ private struct AnimHarness {
         renderer.applyPatches([Patch(type: .create, id: "__seed", elementType: "column")])
     }
 
-    var completions: [(action: String, payload: [String: Any]?)] {
-        dispatcher.dispatchedActions.map { ($0.action, $0.payload) }
+    /// Completions unwrapped from their wire form. Every completion must be
+    /// a node-addressed `__hypen_dispatch` envelope; a bare dispatch shows
+    /// up with `wire` = the bare action and `node` = nil so tests fail.
+    var completions: [(wire: String, node: String?, action: String, payload: [String: Any]?)] {
+        dispatcher.dispatchedActions.map { d in
+            guard d.action == "__hypen_dispatch", let env = d.payload else {
+                return (d.action, nil, d.action, d.payload)
+            }
+            return (d.action, env["node"] as? String, env["action"] as? String ?? "",
+                    env["payload"] as? [String: Any])
+        }
     }
 }
 
@@ -244,6 +253,8 @@ private var enterFadeSpec: [String: Any] {
         // Natural settle at duration + delay.
         h.clock.advance(by: 0.25)
         #expect(h.completions.count == 1)
+        #expect(h.completions[0].wire == "__hypen_dispatch")
+        #expect(h.completions[0].node == "toast")
         #expect(h.completions[0].action == "animationDone")
         #expect(h.completions[0].payload?["animation"] as? String == "enter")
     }
@@ -450,6 +461,9 @@ private var enterFadeSpec: [String: Any] {
 
         h.clock.advance(by: 0.25)
         #expect(h.completions.count == 1)
+        #expect(h.completions[0].wire == "__hypen_dispatch")
+        #expect(h.completions[0].node == "card")
+        #expect(h.completions[0].action == "poseDone")
         #expect(h.completions[0].payload?["animation"] as? String == "states")
         #expect(h.completions[0].payload?["state"] as? String == "expanded")
     }
@@ -517,6 +531,9 @@ private var enterFadeSpec: [String: Any] {
         #expect(h.completions.isEmpty)
         h.clock.advance(by: 0.02)
         #expect(h.completions.count == 1)
+        #expect(h.completions[0].wire == "__hypen_dispatch")
+        #expect(h.completions[0].node == "box")
+        #expect(h.completions[0].action == "animationDone")
         #expect(h.completions[0].payload?["animation"] as? String == "shake")
         #expect(h.renderer.getElement("box")?.animateFiniteExhausted == true)
     }
@@ -626,11 +643,24 @@ private var enterFadeSpec: [String: Any] {
             Patch(type: .insert, id: "label", parentId: "card"),
         ])
         h.renderer.applyPatches([Patch(type: .remove, id: "card", transition: true)])
+
+        // While exiting: a non-root member, and the root outside its own
+        // finalize, dispatch nothing (engine-side dead / excluded).
+        if let label = h.renderer.getElement("label"), let card = h.renderer.getElement("card") {
+            h.renderer.animator.dispatchCompletion(element: label, animation: "shake")
+            h.renderer.animator.dispatchCompletion(element: card, animation: "shake")
+        } else {
+            Issue.record("exiting subtree should still be alive")
+        }
+        #expect(h.completions.isEmpty)
+
         h.clock.advance(by: 0.231)
 
-        // Exactly one: the exiting ROOT. Descendants are engine-side dead
-        // and fire nothing.
+        // Exactly one: the exiting ROOT, addressed to its OWN id (the
+        // engine's exit tombstone accepts it). Descendants fire nothing.
         #expect(h.completions.count == 1)
+        #expect(h.completions[0].wire == "__hypen_dispatch")
+        #expect(h.completions[0].node == "card")
         #expect(h.completions[0].action == "animationDone")
         #expect(h.completions[0].payload?["animation"] as? String == "exit")
     }

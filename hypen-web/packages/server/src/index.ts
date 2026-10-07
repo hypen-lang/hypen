@@ -54,7 +54,24 @@ export type { HypenPluginOptions } from "./plugin.js";
 // REMOTE SERVER
 // ============================================================================
 
-export { RemoteServer, serve } from "./remote/server.js";
+export {
+  RemoteServer,
+  serve,
+  OPEN_ADMISSION_WARNING,
+  type RemoteDeviceOptions,
+} from "./remote/server.js";
+export {
+  createWasmDeviceBrokerFactory,
+  WasmDeviceBroker,
+  WasmRetainedBytesPool,
+} from "./device-broker.js";
+export type {
+  WasmDeviceBrokerFactory,
+  WasmDeviceBrokerFactoryOptions,
+} from "./device-broker.js";
+export { AgentHandle, AgentSessionGoneError } from "./remote/agent-handle.js";
+export type { AgentHandleEngine } from "./remote/agent-handle.js";
+export type { AgentOptions } from "./remote/agent-http.js";
 export {
   RemoteSession,
   AsyncQueueTransport,

@@ -15,7 +15,7 @@
     },
     "category": {
       "type": "string",
-      "enum": ["rendering", "state", "reconciliation", "actions", "control-flow", "lifecycle", "animation"],
+      "enum": ["rendering", "state", "reconciliation", "actions", "control-flow", "lifecycle", "animation", "dnd"],
       "description": "Test category for organization"
     },
     "priority": {

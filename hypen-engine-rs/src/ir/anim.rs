@@ -104,6 +104,18 @@ pub(crate) const LEGACY_TRANSITION_PROP: &str = "transition.0";
 /// the settle window. Renderers that ignore it lose nothing.
 pub(crate) const ANIM_STATES_PROP: &str = "__anim.states";
 
+/// Reserved prop key carrying the materialized poses of a HEADER-LESS
+/// `.states { onState(...) }` block (a DnD node whose pose label is driven
+/// by the renderer's drag runtime, not by state — see
+/// `hypen-web/docs/dnd.md`). Static
+/// `{"<label>": {"<propKey>": <value>, ...}, ...}` where `<propKey>` is the
+/// lowered prop key the pose applicator would have produced on the node
+/// itself (`"opacity.0"`, `"scale.0"`, `"backgroundColor:hover.0"`, …). The
+/// node's own props are the base to restore when the label clears. Only
+/// emitted alongside a static `__anim.states` of `{"label": null,
+/// "runtime": true}`; never for a state-driven block.
+pub(crate) const ANIM_STATE_POSES_PROP: &str = "__anim.statePoses";
+
 /// Reserved prop carrying the `.sharedElement` identity KEY (Option H).
 /// Unlike every other animation argument the key is allowed to bind —
 /// identity is data ("cover-@{item.id}") — so it lowers through the standard
@@ -819,9 +831,12 @@ fn lower_scoped_props(value: &ParserValue) -> Option<Vec<String>> {
 /// Parsed `.states(...)` header + pose blocks, ready for lowering in
 /// `expand::apply_states_applicator`. Timing defaults are {easeOut, 250, 0}.
 pub(crate) struct StatesSpec {
-    /// The driving state path (from the mandatory first positional
-    /// `@state.xxx` reference).
-    pub path: String,
+    /// The driving state path (from the first positional `@state.xxx`
+    /// reference). `None` only for a header-less block on a node that
+    /// carries `__dnd.*` props — the pose label is then driven by the
+    /// renderer's DnD runtime (`lifted` / `over`), no `StateSwitch` is
+    /// synthesized, and poses are materialized into `__anim.statePoses`.
+    pub path: Option<String>,
     pub duration: f64,
     pub curve: String,
     /// Only `Some` when the author passed `delay:` — the synthesized spec
@@ -834,12 +849,21 @@ pub(crate) struct StatesSpec {
 
 /// Collect a `.states(...) { onState(label)... }` applicator into a
 /// [`StatesSpec`]. Returns `None` (with a warning) when the whole applicator
-/// must be ignored: a first positional that is not a state reference, or no
-/// valid `onState` entry at all. Malformed *entries* degrade individually.
-pub(crate) fn collect_states(applicator: &ApplicatorSpecification) -> Option<StatesSpec> {
+/// must be ignored: a first positional that is not a state reference, a
+/// missing header when `allow_headerless` is false, or no valid `onState`
+/// entry at all. Malformed *entries* degrade individually.
+///
+/// `allow_headerless` is true when the node carries `__dnd.*` props: a
+/// header-less block is then a RUNTIME-driven pose set (the DnD runtime
+/// applies `lifted` / `over`), collected with `path: None`.
+pub(crate) fn collect_states(
+    applicator: &ApplicatorSpecification,
+    allow_headerless: bool,
+) -> Option<StatesSpec> {
     let channel = STATES_APPLICATOR;
 
-    // --- header: first positional MUST be a state reference/binding ---
+    // --- header: first positional MUST be a state reference/binding
+    //     (or absent, on a DnD node) ---
     let mut positionals = applicator
         .arguments
         .arguments
@@ -850,7 +874,7 @@ pub(crate) fn collect_states(applicator: &ApplicatorSpecification) -> Option<Sta
         });
     let path = match positionals.next() {
         Some(value) => match crate::ir::expand::parser_value_to_ir(value) {
-            crate::ir::Value::Binding(binding) if binding.is_state() => binding.full_path(),
+            crate::ir::Value::Binding(binding) if binding.is_state() => Some(binding.full_path()),
             _ => {
                 crate::log_warn!(
                     LogScope::Engine,
@@ -861,10 +885,11 @@ pub(crate) fn collect_states(applicator: &ApplicatorSpecification) -> Option<Sta
                 return None;
             }
         },
+        None if allow_headerless => None,
         None => {
             crate::log_warn!(
                 LogScope::Engine,
-                ".{}: missing state reference (e.g. .states(@state.cardState) {{ ... }}); applicator ignored",
+                ".{}: missing state reference (e.g. .states(@state.cardState) {{ ... }}); a header-less block is only accepted on a .draggable/.dropZone/.sortable/.pinboard node; applicator ignored",
                 channel
             );
             return None;
@@ -980,10 +1005,12 @@ pub(crate) fn collect_states(applicator: &ApplicatorSpecification) -> Option<Sta
 
 /// True for applicators that must not appear inside an `onState` pose:
 /// animation applicators (including nested `.states` and the Option G
-/// `.scrub`/`.settle` pair), `.bind`, and event applicators (`/^on[A-Z]/`).
+/// `.scrub`/`.settle` pair), the DnD role applicators, `.bind`, and event
+/// applicators (`/^on[A-Z]/`).
 /// Excluded entries warn and are dropped.
 pub(crate) fn is_pose_excluded_applicator(name: &str) -> bool {
     is_anim_applicator(name)
+        || crate::ir::dnd::is_dnd_applicator(name)
         || name == STATES_APPLICATOR
         || name == SCRUB_APPLICATOR
         || name == SETTLE_APPLICATOR

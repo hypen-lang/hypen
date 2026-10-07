@@ -74,6 +74,10 @@ All servers manage the same state shape:
 - `messages` — DM inbox (conversation previews with unread markers)
 - `chatMessages` / `draft` — active DM thread (`/dm/:id`) and its composer input
 
+> Photo uploads (new posts, avatar changes) through the device plane are
+> implemented in the **Cloudflare** port (`cloudflare/`, the one the Home
+> launcher embeds). See its README.
+>
 > DM threads (`Conversation` component + `conversations`/`messages` tables) are
 > fully implemented in the **TypeScript** server. The other language servers
 > still serve a mock conversation list; port the `Conversation` module to them

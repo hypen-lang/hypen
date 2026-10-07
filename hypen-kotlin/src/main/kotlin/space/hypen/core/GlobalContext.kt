@@ -1,5 +1,7 @@
 package space.hypen.core
 
+import space.hypen.remote.device.DeviceContext
+import space.hypen.remote.device.DevicePlane
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -66,6 +68,37 @@ interface GlobalContext {
      * testing usage). Mirrors Swift's `GlobalContext.getRouter()`.
      */
     fun getRouter(): HypenRouter? = null
+
+    /**
+     * Device Capability Protocol access (RFC 001 §4) for the module whose
+     * lifecycle callback (`onCreated` / `onActivated` / `onDeactivated` /
+     * `onDestroyed`) received this context, scoped to that module's current
+     * activation. Action handlers use [ActionHandlerContext.device] instead.
+     * The shared per-connection context itself owns no activation, so its
+     * device always answers `unavailable`.
+     */
+    val device: DeviceContext
+        get() = DeviceContext.disabled("owner-inactive")
+}
+
+/**
+ * The [GlobalContext] a module's handler receives: the shared context plus
+ * the module's own activation-scoped [device].
+ */
+internal class DeviceScopedGlobalContext(
+    private val delegate: GlobalContext,
+    override val device: DeviceContext,
+) : GlobalContext by delegate {
+    override fun getRouter(): HypenRouter? = delegate.getRouter()
+
+    /** The shared context this view wraps (e.g. a [HypenGlobalContext]). */
+    val shared: GlobalContext get() = delegate
+
+    /** A view equals the shared context it wraps (and every other view of it). */
+    override fun equals(other: Any?): Boolean =
+        other === this || other == delegate || (other is DeviceScopedGlobalContext && other.delegate == delegate)
+
+    override fun hashCode(): Int = delegate.hashCode()
 }
 
 /**
@@ -79,6 +112,15 @@ class HypenGlobalContext : GlobalContext {
 
     @Volatile
     private var router: HypenRouter? = null
+
+    /**
+     * The connection's device plane (RFC 001), when the client negotiated
+     * one. Module instances created against this context (e.g. by the
+     * auto-wired [ManagedRouter]) bind to it at construction.
+     */
+    @Volatile
+    var devicePlane: DevicePlane? = null
+        internal set
 
     /** Attach a router to this context. Called by the auto-wired [ManagedRouter]. */
     fun setRouter(router: HypenRouter?) {

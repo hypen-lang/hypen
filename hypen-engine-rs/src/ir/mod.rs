@@ -2,6 +2,7 @@ pub mod anim;
 pub mod component;
 pub mod conformance;
 pub mod discover;
+pub mod dnd;
 pub mod expand;
 pub mod icon;
 pub mod node;

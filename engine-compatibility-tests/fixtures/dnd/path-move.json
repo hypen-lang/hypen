@@ -1,0 +1,128 @@
+{
+  "$schema": "./README.md",
+  "name": "path-move",
+  "description": "Conformance cases for portable::path_move — the __hypen_reorder primitive. `to` is the moved item's FINAL index in the destination array (clamped to [0, len] after removal); a failed move leaves the state untouched and reports moved=false.",
+  "function": "path_move",
+  "priority": "P0",
+  "cases": [
+    {
+      "name": "same-array-forward",
+      "state": { "tasks": ["a", "b", "c", "d"] },
+      "op": { "fromPath": "tasks", "from": 0, "toPath": "tasks", "to": 2 },
+      "expected": { "tasks": ["b", "c", "a", "d"] },
+      "moved": true
+    },
+    {
+      "name": "same-array-backward",
+      "state": { "tasks": ["a", "b", "c", "d"] },
+      "op": { "fromPath": "tasks", "from": 3, "toPath": "tasks", "to": 1 },
+      "expected": { "tasks": ["a", "d", "b", "c"] },
+      "moved": true
+    },
+    {
+      "name": "same-array-to-end",
+      "state": { "tasks": ["a", "b", "c"] },
+      "op": { "fromPath": "tasks", "from": 0, "toPath": "tasks", "to": 2 },
+      "expected": { "tasks": ["b", "c", "a"] },
+      "moved": true
+    },
+    {
+      "name": "same-index-noop",
+      "state": { "tasks": ["a", "b", "c"] },
+      "op": { "fromPath": "tasks", "from": 1, "toPath": "tasks", "to": 1 },
+      "expected": { "tasks": ["a", "b", "c"] },
+      "moved": true
+    },
+    {
+      "name": "to-beyond-length-clamps",
+      "state": { "tasks": ["a", "b", "c"] },
+      "op": { "fromPath": "tasks", "from": 0, "toPath": "tasks", "to": 99 },
+      "expected": { "tasks": ["b", "c", "a"] },
+      "moved": true
+    },
+    {
+      "name": "cross-array",
+      "state": { "todo": [{ "id": "t1" }, { "id": "t2" }], "doing": [{ "id": "d1" }] },
+      "op": { "fromPath": "todo", "from": 1, "toPath": "doing", "to": 0 },
+      "expected": { "todo": [{ "id": "t1" }], "doing": [{ "id": "t2" }, { "id": "d1" }] },
+      "moved": true
+    },
+    {
+      "name": "cross-array-into-empty",
+      "state": { "todo": ["a"], "done": [] },
+      "op": { "fromPath": "todo", "from": 0, "toPath": "done", "to": 0 },
+      "expected": { "todo": [], "done": ["a"] },
+      "moved": true
+    },
+    {
+      "name": "cross-array-to-beyond-length-appends",
+      "state": { "todo": ["a"], "done": ["x"] },
+      "op": { "fromPath": "todo", "from": 0, "toPath": "done", "to": 42 },
+      "expected": { "todo": [], "done": ["x", "a"] },
+      "moved": true
+    },
+    {
+      "name": "cross-array-nested-paths",
+      "state": { "cols": [{ "items": ["a"] }, { "items": ["b", "c"] }] },
+      "op": { "fromPath": "cols.1.items", "from": 1, "toPath": "cols.0.items", "to": 1 },
+      "expected": { "cols": [{ "items": ["a", "c"] }, { "items": ["b"] }] },
+      "moved": true
+    },
+    {
+      "name": "into-later-sibling-subtree-reindexes",
+      "state": { "entries": [{ "id": "f", "children": [] }, { "id": "a", "children": ["a1"] }, { "id": "b", "children": ["b1"] }] },
+      "op": { "fromPath": "entries", "from": 0, "toPath": "entries.2.children", "to": 1 },
+      "expected": { "entries": [{ "id": "a", "children": ["a1"] }, { "id": "b", "children": ["b1", { "id": "f", "children": [] }] }] },
+      "moved": true
+    },
+    {
+      "name": "into-earlier-sibling-subtree",
+      "state": { "entries": [{ "children": [] }, "x"] },
+      "op": { "fromPath": "entries", "from": 1, "toPath": "entries.0.children", "to": 0 },
+      "expected": { "entries": [{ "children": ["x"] }] },
+      "moved": true
+    },
+    {
+      "name": "out-of-nested-subtree-into-parent",
+      "state": { "entries": [{ "children": ["a1"] }, "x"] },
+      "op": { "fromPath": "entries.0.children", "from": 0, "toPath": "entries", "to": 0 },
+      "expected": { "entries": ["a1", { "children": [] }, "x"] },
+      "moved": true
+    },
+    {
+      "name": "into-own-subtree-untouched",
+      "state": { "items": [{ "children": [] }, { "children": ["z"] }] },
+      "op": { "fromPath": "items", "from": 0, "toPath": "items.0.children", "to": 0 },
+      "expected": { "items": [{ "children": [] }, { "children": ["z"] }] },
+      "moved": false
+    },
+    {
+      "name": "from-out-of-range-untouched",
+      "state": { "tasks": ["a", "b"] },
+      "op": { "fromPath": "tasks", "from": 2, "toPath": "tasks", "to": 0 },
+      "expected": { "tasks": ["a", "b"] },
+      "moved": false
+    },
+    {
+      "name": "from-path-not-array-untouched",
+      "state": { "meta": { "n": 1 }, "tasks": ["a"] },
+      "op": { "fromPath": "meta", "from": 0, "toPath": "tasks", "to": 0 },
+      "expected": { "meta": { "n": 1 }, "tasks": ["a"] },
+      "moved": false
+    },
+    {
+      "name": "to-path-not-array-untouched",
+      "state": { "meta": { "n": 1 }, "tasks": ["a"] },
+      "op": { "fromPath": "tasks", "from": 0, "toPath": "meta", "to": 0 },
+      "expected": { "meta": { "n": 1 }, "tasks": ["a"] },
+      "moved": false
+    },
+    {
+      "name": "to-path-missing-untouched",
+      "state": { "tasks": ["a"] },
+      "op": { "fromPath": "tasks", "from": 0, "toPath": "nope", "to": 0 },
+      "expected": { "tasks": ["a"] },
+      "moved": false
+    }
+  ]
+}

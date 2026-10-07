@@ -1,0 +1,29 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-unicode-keys",
+  "description": "Non-ASCII keys (Cyrillic, CJK, astral-plane emoji) pass through paths byte-for-byte.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "ключ": 1,
+      "键": 1,
+      "😀": 1
+    },
+    "new": {
+      "ключ": 2,
+      "键": 1,
+      "😀": 2
+    }
+  },
+  "expected": [
+    {
+      "path": "ключ",
+      "value": 2
+    },
+    {
+      "path": "😀",
+      "value": 2
+    }
+  ]
+}

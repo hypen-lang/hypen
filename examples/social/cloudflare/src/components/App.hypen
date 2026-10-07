@@ -73,6 +73,10 @@ module App {
         Route(path: "/story/:id") {
             Story()
         }
+
+        Route(path: "/create") {
+            CreatePost()
+        }
             }
             .tw("flex-1 w-full h-full min-h-0 overflow-hidden")
         }

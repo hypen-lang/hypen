@@ -1,0 +1,93 @@
+{
+  "$defs": {
+    "device": {
+      "additionalProperties": false,
+      "properties": {
+        "device": {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "maxLength": 128,
+              "type": "string"
+            },
+            "name": {
+              "maxLength": 256,
+              "type": "string"
+            },
+            "rssi": {
+              "maximum": 32767,
+              "minimum": -32768,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "id",
+            "rssi"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "device"
+      ],
+      "type": "object"
+    },
+    "event": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/device"
+        },
+        {
+          "$ref": "#/$defs/progress"
+        }
+      ]
+    },
+    "params": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "progress": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "progress"
+        },
+        "state": {
+          "enum": [
+            "pendingConsent",
+            "running"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "state"
+      ],
+      "type": "object"
+    },
+    "result": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    }
+  },
+  "$id": "https://hypen.space/schemas/device/bluetooth.scan-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/params"
+    },
+    {
+      "$ref": "#/$defs/result"
+    },
+    {
+      "$ref": "#/$defs/event"
+    }
+  ],
+  "description": "Provisional (RFC 001 §6): may change until the Phase 4 real-driver gate; after stabilization an optional addition creates a new revision. Bounds come from this revision's registry entry (registry-v1.json). Validate a payload against #/$defs/params, #/$defs/result or #/$defs/event; the document root only accepts a value matching any of them.",
+  "title": "bluetooth.scan capability, revision 1"
+}

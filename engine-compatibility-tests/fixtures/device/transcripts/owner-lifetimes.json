@@ -1,0 +1,161 @@
+{
+  "name": "owner-lifetimes",
+  "description": "Two instances of one module (editor) carry distinct moduleInstanceIds and stay isolated. Deactivating editor-1 (activation 1) sweeps its work: the server cancels every activation-owned id (2, 4), retires them and settles locally; editor-2's request 3 is unaffected. Late client messages for swept ids are ignored. Reactivation (activationId 2) starts fresh work under a new id; old work is never resurrected, and activationIds never go backwards per module instance.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "editor-1",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 3,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "editor-2",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 4,
+        "capability": "permission.request",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "editor-1",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "camera"
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "cancel": true
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 4,
+        "control": {
+          "cancel": true
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 3,
+        "result": {
+          "status": "granted"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "status": "granted"
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 4,
+        "error": {
+          "code": "cancelled"
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 5,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "editor-1",
+          "activationId": 2
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 5,
+        "result": {
+          "status": "prompt"
+        }
+      }
+    }
+  ]
+}

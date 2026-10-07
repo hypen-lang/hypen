@@ -1,0 +1,86 @@
+{
+  "name": "violation-response-from-server",
+  "description": "Only the client sends deviceResponse. A server deviceResponse on a live id makes the client terminate that operation with invalidParams (decision D8); later messages for the id are ignored.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "status": "granted"
+        }
+      },
+      "expectViolation": "direction"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "error": {
+          "code": "invalidParams"
+        }
+      },
+      "reaction": true
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "status": "granted"
+        }
+      },
+      "ignored": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "renewLease": 1
+        }
+      },
+      "ignored": true
+    }
+  ]
+}

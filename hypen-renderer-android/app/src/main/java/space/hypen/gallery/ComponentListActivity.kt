@@ -72,6 +72,7 @@ object GalleryItems {
         GalleryItem("Badge", "/components/badge", "Status badge", false),
         GalleryItem("Avatar", "/components/avatar", "User avatar", false),
         GalleryItem("ProgressBar", "/components/progressbar", "Progress indicator", false),
+        GalleryItem("Chart", "/components/chart", "Data marks in a coordinate space", false),
         GalleryItem("Video", "/components/video", "Video player", false),
         GalleryItem("Audio", "/components/audio", "Audio player", false),
         GalleryItem("Paragraph", "/components/paragraph", "Block of text", false),

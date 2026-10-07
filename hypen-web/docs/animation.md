@@ -371,6 +371,8 @@ A completion fires **only when a playback settles naturally**. Everything else f
 - **`.states` falling back to the default pose** (no matched label) — there is no label to report.
 - **Off-screen playbacks** — a node inside a Router-cached (detached) or exit-animating subtree.
 
+**Routing.** Every renderer dispatches a completion as a node-addressed `__hypen_dispatch` envelope (`{node, action, payload}`), so the engine resolves the owning module from the node, which matters in multi-module apps. An exit completion arrives after the engine has removed the node, so when the engine emits the `transition: true` Remove for an exiting root that carries `.onAnimationComplete`, it keeps a small tombstone of that node's module and action (the last 128). A completion addressed to the removed root is accepted for that one action only; any other action on the removed id, a descendant, a plain removal or a Router-detached subtree stays inert, and the agent surface (`dispatch_external`) gains nothing from it.
+
 This is deliberate: it removes most completion races by construction. The remaining race — state advanced again before a completion arrives — is handled by the payload carrying the animation name and pose label, so a handler simply drops completions for phases it has already left (latest-wins).
 
 ### The module-machine pattern
@@ -623,7 +625,7 @@ The iOS renderer plays the daily-driver channels natively: SwiftUI's own animati
 
 ### Android (Compose) capability matrix
 
-The Android renderer plays the daily-driver channels natively (the capability matrix in `.notes/ANIMATION_ANDROID.md` is the source of truth). Interpolated values are written back onto the element as animation overrides, so every whitelisted prop animates through its existing applicator/component — and because motion stays in Compose modifiers, hit targets, focus, and TalkBack follow the pixels for free. Curves are the pinned CSS beziers built as explicit `CubicBezierEasing` instances — `spring` is the fixed overshoot bezier `cubic-bezier(0.34, 1.56, 0.64, 1)`, **not** Compose's physics `spring()`. The recorded v1 narrowings:
+The Android renderer plays the daily-driver channels natively (the capability matrix in `hypen-web/docs/animation.md` is the source of truth). Interpolated values are written back onto the element as animation overrides, so every whitelisted prop animates through its existing applicator/component — and because motion stays in Compose modifiers, hit targets, focus, and TalkBack follow the pixels for free. Curves are the pinned CSS beziers built as explicit `CubicBezierEasing` instances — `spring` is the fixed overshoot bezier `cubic-bezier(0.34, 1.56, 0.64, 1)`, **not** Compose's physics `spring()`. The recorded v1 narrowings:
 
 | Channel | Android behavior |
 |---------|------------------|

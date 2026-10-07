@@ -71,7 +71,9 @@ func TestResources_ReachEngineAndResolveIconReferences(t *testing.T) {
 	}
 	defer conn.Close()
 
-	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// Generous: the legacy grace path compiles the WASM engine before it
+	// sends initialTree, which takes well over 5 s under -race.
+	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
 
 	var initialTree map[string]any
 	for i := 0; i < 10; i++ {

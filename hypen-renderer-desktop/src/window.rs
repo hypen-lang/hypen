@@ -8,6 +8,7 @@
 use crate::accessibility::{renderer_id_for, tree_update_for_layout_excluding};
 use crate::anim::{DesktopAnimator, DesktopScrubber, ScrubPointerUp, TickOutcome};
 use crate::damage::Damage;
+use crate::dnd::{DesktopDnd, DndPointerUp};
 use crate::gpu::{Gpu, PresentStatus};
 use crate::ime::{apply_ime_transition, ImeEffect};
 use crate::layout::{ItemKind, LayoutPass, TaffyState};
@@ -25,7 +26,7 @@ use std::sync::{Arc, Mutex};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::{ElementState, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoopProxy};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{CursorIcon, Window, WindowAttributes, WindowId};
 
@@ -364,6 +365,23 @@ pub struct App {
     /// the same demand-driven redraw tick, and its settle writes are drained
     /// into the `__hypen_bind` channel. See [`DesktopScrubber`].
     scrubber: DesktopScrubber,
+    /// Renderer-resident drag-and-drop runtime for the `__dnd.*` wire
+    /// (DnD plan §6). Fed the window's winit pointer events; writes the
+    /// ghost / sibling-shift offsets and the `lifted` / `over` poses into
+    /// the same real [`Tree`] the animator and scrubber write. Its owned
+    /// ids join the scrubber's in the animator's precedence set (dnd >
+    /// scrub > playbacks > transaction), its deadlines ride the redraw
+    /// tick, and its dispatches (reserved writes + `.on*` events) drain
+    /// into `module.dispatch_action`. See [`DesktopDnd`].
+    dnd: DesktopDnd,
+    /// The idle loop is polling the OS cursor for a live OS file hover
+    /// (`ControlFlow::WaitUntil`); restored to `Wait` when it ends.
+    file_hover_polling: bool,
+    /// The current `DroppedFile` burst (one event per file) and where it
+    /// was released; handed to the device overlay's file drop surface in
+    /// the idle loop, else discarded. Paths never leave this process.
+    dropped_files: Vec<std::path::PathBuf>,
+    dropped_pos: Option<(f64, f64)>,
     /// Retained Taffy structure. Reused across frames; rebuilt only
     /// when its structure-key (tree generation, viewport, scale)
     /// stops matching the current redraw inputs. Saves the per-
@@ -385,6 +403,21 @@ pub struct App {
     /// dispatches — leave on the old, enter on the new — so handlers
     /// can flip CSS-:hover-like state on/off.
     hover_subject: Option<String>,
+    /// Chart marks the pointer is currently inside, for the
+    /// `.onMove` / `.onMouseLeave` pair. `.onHover` rides the generic
+    /// `hover_subject` machinery above; these two are chart-specific
+    /// because their payload is the datum under the pointer, which only
+    /// a chart mark can answer.
+    chart_move_subject: Option<String>,
+    /// Last `.onMove` dispatch, for the ~32ms throttle. A chart bound to
+    /// `onMove` re-renders on every dispatch; unthrottled, a mouse drag
+    /// would queue one module round trip per motion event.
+    chart_move_at: Option<std::time::Instant>,
+    /// An in-flight press on a chart mark wired to `.onLongPress`:
+    /// `(node id, press time, pointer)`. Fires once the hold passes
+    /// [`crate::chart::defaults::LONG_PRESS_MS`]; cancelled by release,
+    /// by the pointer leaving the mark, or by the mark disappearing.
+    chart_press: Option<(String, std::time::Instant, (f32, f32))>,
     pressed: Option<String>,
     focused: Option<String>,
     /// `true` when the focused item should show a focus ring — set when
@@ -401,6 +434,10 @@ pub struct App {
     /// Unacknowledged controlled-Input edits. See
     /// [`reconcile_optimistic_input_echoes`].
     optimistic_inputs: HashMap<String, OptimisticInputEdit>,
+    /// Per-Textarea inner scroll offset (physical px) for content taller
+    /// than the box. Moved by the wheel over the Textarea and by caret
+    /// moves that would leave the visible lines; clamped on read.
+    textarea_scroll: HashMap<String, f32>,
     /// Renderer node id of an Input whose text is currently being
     /// drag-selected. `Some(id)` between mouse-down inside that Input
     /// and the next mouse-up; `head` updates on every CursorMoved.
@@ -479,6 +516,11 @@ pub struct App {
     /// Lets later frames skip rebuilding + sending the full TreeUpdate
     /// when nothing semantically changed (hover / scroll / etc.).
     last_a11y_fingerprint: Option<u64>,
+    /// The device host UI (RFC 001 consent dialogs, capture panel,
+    /// Bluetooth chooser, activity indicators) drawn over the app.
+    device_overlay: crate::device::overlay::OverlayController,
+    /// Last device-overlay accessibility fingerprint published.
+    last_overlay_a11y: Option<u64>,
     /// Bumps every time `redraw` produces a fresh `LayoutPass`
     /// (cache miss) or shifts items in place (scroll fast path).
     /// AccessKit publish skips entirely when this matches the
@@ -634,17 +676,25 @@ impl App {
             tree: Tree::new(),
             animator: DesktopAnimator::new(),
             scrubber: DesktopScrubber::new(),
+            dnd: DesktopDnd::new(),
+            file_hover_polling: false,
+            dropped_files: Vec::new(),
+            dropped_pos: None,
             taffy: TaffyState::new(),
             layout: None,
             cursor: PhysicalPosition::new(0.0, 0.0),
             hovered: None,
             hover_subject: None,
+            chart_move_subject: None,
+            chart_move_at: None,
+            chart_press: None,
             pressed: None,
             focused: None,
             focus_visible: false,
             modifiers: ModifiersState::default(),
             input_selections: HashMap::new(),
             optimistic_inputs: HashMap::new(),
+            textarea_scroll: HashMap::new(),
             dragging_input: None,
             last_click_at: None,
             last_click_pos: PhysicalPosition::new(0.0, 0.0),
@@ -660,6 +710,8 @@ impl App {
             last_scroll_y_in_layout: 0.0,
             last_scroll_y_emitted: 0.0,
             last_a11y_fingerprint: None,
+            device_overlay: crate::device::overlay::OverlayController::new(crate::device::overlay_hub()),
+            last_overlay_a11y: None,
             layout_generation: 0,
             last_a11y_layout_generation: 0,
             last_ime_target: None,
@@ -717,9 +769,10 @@ impl App {
             &mut self.dispatched_media_errors,
             &crate::paint::image::load_failure,
         );
-        for (action, payload) in pending {
-            log::debug!("dispatch (media error): {action} payload={payload:?}");
-            self.module.dispatch_action(&action, Some(payload));
+        for (node, action, payload) in pending {
+            log::debug!("dispatch (media error): {action} node={node} payload={payload:?}");
+            self.module
+                .dispatch_ui_action(&node, &action, Some(payload));
         }
     }
 
@@ -836,7 +889,7 @@ impl App {
                 self.video_event_payload(&id, event, typ, &src, index, &[])
             {
                 log::debug!("dispatch (video {typ}): {action} payload={payload:?}");
-                self.module.dispatch_action(&action, Some(payload));
+                self.module.dispatch_ui_action(&id, &action, Some(payload));
             }
         }
     }
@@ -862,7 +915,8 @@ impl App {
                     self.video_event_payload(node_id, "onPlay", "play", src, index, &[])
                 {
                     log::debug!("dispatch (video play): {action} payload={payload:?}");
-                    self.module.dispatch_action(&action, Some(payload));
+                    self.module
+                        .dispatch_ui_action(node_id, &action, Some(payload));
                 }
             }
             // The pipeline failed synchronously but its bus already
@@ -883,7 +937,8 @@ impl App {
                     index,
                     &[("code", json!("pipeline")), ("message", json!(e))],
                 ) {
-                    self.module.dispatch_action(&action, Some(payload));
+                    self.module
+                        .dispatch_ui_action(node_id, &action, Some(payload));
                 }
             }
         }
@@ -977,7 +1032,8 @@ impl App {
                                 cur_idx,
                                 &[("completed", json!(false))],
                             ) {
-                                self.module.dispatch_action(&action, Some(payload));
+                                self.module
+                                    .dispatch_ui_action(&ev.node_id, &action, Some(payload));
                             }
                             // An in-flight Scrubber drag was captured on
                             // the finished track's timeline: committing
@@ -997,7 +1053,11 @@ impl App {
                                         next_idx,
                                         &[],
                                     ) {
-                                        self.module.dispatch_action(&action, Some(payload));
+                                        self.module.dispatch_ui_action(
+                                            &ev.node_id,
+                                            &action,
+                                            Some(payload),
+                                        );
                                     }
                                 }
                                 // Bus error already queued — the next
@@ -1017,7 +1077,11 @@ impl App {
                                         next_idx,
                                         &[("code", json!("pipeline")), ("message", json!(e))],
                                     ) {
-                                        self.module.dispatch_action(&action, Some(payload));
+                                        self.module.dispatch_ui_action(
+                                            &ev.node_id,
+                                            &action,
+                                            Some(payload),
+                                        );
                                     }
                                 }
                             }
@@ -1035,7 +1099,8 @@ impl App {
                                 cur_idx,
                                 &[("completed", json!(true))],
                             ) {
-                                self.module.dispatch_action(&action, Some(payload));
+                                self.module
+                                    .dispatch_ui_action(&ev.node_id, &action, Some(payload));
                             }
                         }
                     }
@@ -1071,7 +1136,8 @@ impl App {
                         cur_idx,
                         &extra,
                     ) {
-                        self.module.dispatch_action(&action, Some(payload));
+                        self.module
+                            .dispatch_ui_action(&ev.node_id, &action, Some(payload));
                     }
                 }
             }
@@ -1158,7 +1224,8 @@ impl App {
                 self.video_event_payload(node_id, event, typ, &src, index, &[])
             {
                 log::debug!("dispatch (video {typ}): {action} payload={payload:?}");
-                self.module.dispatch_action(&action, Some(payload));
+                self.module
+                    .dispatch_ui_action(node_id, &action, Some(payload));
             }
         } else {
             // Clicking is an explicit retry: forget any sticky error
@@ -1284,12 +1351,22 @@ impl App {
         // set into the animator so this batch's transaction/pose/FLIP/shared
         // paths exclude scrub-active nodes (scrub > playbacks > transaction >
         // `.transition`).
+        // Drag-and-drop gets the very first look (dnd > scrub): it registers
+        // `__dnd.*` channels, releases a post-drop hold when the engine's
+        // re-render lands (Move / translate SetProp), cancels on Remove /
+        // Detach of a drag participant with no dispatch, and swallows
+        // engine translate writes to the lifted node until release.
+        self.dnd.pre_ingest(&mut patches, &mut self.tree);
+        let dnd_dirty = self.dnd.take_dirty();
+        let dnd_owned = self.dnd.owned_ids();
+        self.dispatch_dnd_actions();
         self.scrubber.pre_ingest(&mut patches, &mut self.tree);
-        let scrub_owned = self.scrubber.owned_ids();
+        let mut scrub_owned = self.scrubber.owned_ids();
+        scrub_owned.extend(dnd_owned);
         // A scrub-owning frame can replay swallowed values straight
         // into the tree with no patch left in the batch — invisible to
         // the paint-only gate below, so it forces the wholesale drop.
-        let scrub_owns_any = !scrub_owned.is_empty();
+        let scrub_owns_any = !scrub_owned.is_empty() || dnd_dirty.any();
         self.animator.set_scrub_active(scrub_owned);
         self.dispatch_scrub_binds();
         // FLIP pre-pass (before the batch mutates the tree): snapshot
@@ -1470,6 +1547,7 @@ impl App {
             // The scrub source keeps per-node records too; an evicted
             // detached root's subtree leaves the arena, so its entries go.
             self.scrubber.forget(&evicted);
+            self.dnd.forget(&evicted, &mut self.tree);
         }
         // Recompute the layout-state-variant + media gates for the new
         // tree in one scan. Cheap, runs only on patch flush (not per
@@ -1737,6 +1815,14 @@ impl App {
         // settle writes drain into the `__hypen_bind` channel below.
         let scrub_dirty = self.scrubber.tick(&mut self.tree);
         let scrub_active = self.scrubber.has_active();
+        // Drag-and-drop tick: the long-press claim, the `.onDragOver`
+        // dwell, and the post-drop hold timeout are deadlines on the same
+        // demand-driven ticker. Its writes invalidate like any other
+        // runtime write (`apply_dnd_dirty`), its dispatches drain below.
+        self.dnd.tick(&mut self.tree, self.layout.as_ref());
+        let dnd_active = self.dnd.has_active();
+        self.apply_dnd_dirty();
+        self.dispatch_dnd_actions();
         if scrub_dirty {
             self.tree_generation = self.tree_generation.wrapping_add(1);
             self.layout = None;
@@ -1789,6 +1875,7 @@ impl App {
             interaction.focus_visible = self.focus_visible;
             interaction.input_selections = self.input_selections.clone();
             interaction.ime_preedit = self.ime_preedit.clone();
+            interaction.textarea_scroll = self.textarea_scroll.clone();
         }
 
         if let Some(prev) = self.layout.as_ref() {
@@ -2040,10 +2127,30 @@ impl App {
         // Borrow split: paint_layout takes `&LayoutPass` while the
         // painter takes `&mut self.painter`; both fields live on
         // `self`, so we lift the immutable borrow up first.
+        // The lifted drag item (and its subtree) paints LAST so the ghost
+        // floats above its siblings; empty in the no-drag frame.
+        self.painter.set_raised(self.dnd.raised_ids(&self.tree));
         let pass = self.layout.as_ref().expect("layout populated above");
         #[cfg(feature = "dev-overlay")]
         self.painter
             .set_dev_overlay(self.dev_overlay.label(), self.dev_overlay_top);
+        // Device host UI: laid out with the painter's text metrics and
+        // painted last, over everything the app draws.
+        self.device_overlay.sync();
+        let overlay = {
+            let painter = &mut self.painter;
+            self.device_overlay.layout(
+                (w, h),
+                scale,
+                std::time::Instant::now(),
+                &mut |text: &str, size: f32, wrap: Option<f32>, weight: u16| {
+                    painter
+                        .text_engine_mut()
+                        .measure_weighted_line_height(text, size, wrap, weight, size * 1.2)
+                },
+            )
+        };
+        self.painter.set_device_overlay(overlay);
         let scene = self.painter.build_scene(pass, (w, h), scale, self.scroll_y);
         let new_scroll = clamp_scroll(self.scroll_y, pass.content_size.1, h as f32);
         if (new_scroll - self.scroll_y).abs() > f32::EPSILON {
@@ -2144,11 +2251,89 @@ impl App {
         // layout) are the one post-tick animator mutation — they OR in
         // via `flips_played` so a batch whose only motion is a FLIP
         // still arms the ticker.
-        if frame.rearm || flips_played || scrub_active {
+        if frame.rearm || flips_played || scrub_active || dnd_active {
             if let Some(win) = self.window.as_ref() {
                 win.request_redraw();
             }
         }
+    }
+
+    /// Route an input event to the device overlay first. `true` = the
+    /// overlay consumed it (a modal takes every pointer and key event; the
+    /// indicators take the pointer over themselves and the keyboard after
+    /// F6).
+    fn intercept_device_overlay(&mut self, event: &WindowEvent) -> bool {
+        self.device_overlay.sync();
+        if self.device_overlay.is_empty() {
+            return false;
+        }
+        let now = std::time::Instant::now();
+        let consumed = match event {
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = *position;
+                let covered = self
+                    .device_overlay
+                    .pointer_move(position.x as f32, position.y as f32);
+                if covered {
+                    if let Some(w) = self.window.as_ref() {
+                        w.set_cursor(CursorIcon::Default);
+                    }
+                }
+                covered
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => {
+                let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+                let consumed = match state {
+                    ElementState::Pressed => self.device_overlay.pointer_down(x, y, now),
+                    ElementState::Released => self.device_overlay.pointer_up(x, y, now),
+                };
+                if consumed {
+                    // The app never sees half a click.
+                    self.pressed = None;
+                }
+                consumed
+            }
+            WindowEvent::MouseInput { .. } => self
+                .device_overlay
+                .covers(self.cursor.x as f32, self.cursor.y as f32),
+            WindowEvent::MouseWheel { delta, .. } => {
+                let dy = match delta {
+                    MouseScrollDelta::LineDelta(_, y) => -y,
+                    MouseScrollDelta::PixelDelta(p) => -p.y as f32,
+                };
+                self.device_overlay
+                    .wheel(self.cursor.x as f32, self.cursor.y as f32, dy)
+            }
+            WindowEvent::KeyboardInput { event: ev, .. } => {
+                use crate::device::overlay::OverlayKey;
+                let key = match ev.logical_key.as_ref() {
+                    Key::Named(NamedKey::Tab) => OverlayKey::Tab {
+                        shift: self.modifiers.shift_key(),
+                    },
+                    Key::Named(NamedKey::Enter) => OverlayKey::Enter,
+                    Key::Named(NamedKey::Space) => OverlayKey::Space,
+                    Key::Character(" ") => OverlayKey::Space,
+                    Key::Named(NamedKey::Escape) => OverlayKey::Escape,
+                    Key::Named(NamedKey::ArrowUp) => OverlayKey::Up,
+                    Key::Named(NamedKey::ArrowDown) => OverlayKey::Down,
+                    Key::Named(NamedKey::F6) => OverlayKey::F6,
+                    _ => OverlayKey::Other,
+                };
+                self.device_overlay
+                    .key(key, ev.state == ElementState::Pressed, ev.repeat, now)
+            }
+            // Text input never reaches an app field behind a device modal.
+            WindowEvent::Ime(_) => self.device_overlay.has_keyboard(),
+            _ => false,
+        };
+        if consumed {
+            self.request_redraw_full();
+        }
+        consumed
     }
 
     /// Mark the whole surface dirty and ask winit to redraw. Used by
@@ -2248,11 +2433,14 @@ impl App {
     }
 
     fn publish_accessibility(&mut self) {
+        // The device overlay changes independently of the app layout.
+        let overlay_fp = self.device_overlay.fingerprint(std::time::Instant::now());
+        let overlay_changed = Some(overlay_fp) != self.last_overlay_a11y;
         // Coarse gate: skip entirely on frames where the layout
         // wasn't re-emitted. Hover / press / focus / IME / caret-
         // only frames don't bump `layout_generation`, so the
         // O(n_visible) fingerprint hash never runs on those.
-        if self.layout_generation == self.last_a11y_layout_generation {
+        if self.layout_generation == self.last_a11y_layout_generation && !overlay_changed {
             return;
         }
         self.last_a11y_layout_generation = self.layout_generation;
@@ -2273,15 +2461,37 @@ impl App {
             .map(|it| it.node_id.clone())
             .collect();
         let fp = a11y_fingerprint(layout, &exit_excluded);
-        if Some(fp) == self.last_a11y_fingerprint {
+        if Some(fp) == self.last_a11y_fingerprint && !overlay_changed {
             return;
         }
         self.last_a11y_fingerprint = Some(fp);
+        self.last_overlay_a11y = Some(overlay_fp);
         let Some(adapter) = self.ak.as_mut() else {
             return;
         };
+        let overlay = &self.device_overlay;
         adapter.update_if_active(|| {
-            tree_update_for_layout_excluding(layout, &|id| exit_excluded.iter().any(|e| e == id))
+            let mut update =
+                tree_update_for_layout_excluding(layout, &|id| exit_excluded.iter().any(|e| e == id));
+            // Device host UI: its nodes join the window root; a modal
+            // dialog (or F6 into the indicators) takes the focus.
+            let (nodes, roots, focus) = overlay.a11y_nodes();
+            if !roots.is_empty() {
+                if let Some((_, root)) = update
+                    .nodes
+                    .iter_mut()
+                    .find(|(id, _)| *id == crate::accessibility::ROOT_NODE_ID)
+                {
+                    let mut children = root.children().to_vec();
+                    children.extend(roots);
+                    root.set_children(children);
+                }
+                update.nodes.extend(nodes);
+            }
+            if let Some(f) = focus {
+                update.focus = f;
+            }
+            update
         });
     }
 
@@ -2327,6 +2537,151 @@ impl App {
         }
     }
 
+    /// Topmost chart mark under the cursor carrying at least one of the
+    /// event applicators `pick` selects. Chart marks are not in the
+    /// actionable / hoverable indexes unless they carry `.onClick` /
+    /// `.onHover`, so `.onMove`-only and `.onMouseLeave`-only marks are
+    /// found with their own reverse (topmost-first) walk.
+    fn hit_chart_mark(
+        &self,
+        x: f32,
+        y: f32,
+        pick: fn(&crate::chart::MarkEvents) -> bool,
+    ) -> Option<String> {
+        let layout = self.layout.as_ref()?;
+        layout
+            .items
+            .iter()
+            .rev()
+            .find(|item| match &item.kind {
+                ItemKind::ChartMark(mark) => {
+                    pick(&mark.events)
+                        && item.hit_contains(x, y)
+                        && !self.exit_excluded(&item.node_id)
+                }
+                _ => false,
+            })
+            .map(|item| item.node_id.clone())
+    }
+
+    /// Dispatch one chart-mark event: the mark's static action arguments
+    /// with `{series, index, x, y, datum}` merged on top, resolved from
+    /// the pointer position (`None` for an activation that carries none).
+    /// Returns whether anything was dispatched.
+    fn dispatch_chart_mark_event(
+        &self,
+        id: &str,
+        pick: fn(&crate::chart::MarkEvents) -> Option<&(String, serde_json::Value)>,
+        pointer: Option<(f32, f32)>,
+    ) -> bool {
+        let Some(item) = self.layout.as_ref().and_then(|l| l.item_by_id(id)) else {
+            return false;
+        };
+        let ItemKind::ChartMark(mark) = &item.kind else {
+            return false;
+        };
+        let Some((action, args)) = pick(&mark.events) else {
+            return false;
+        };
+        let mut payload = match args {
+            serde_json::Value::Object(map) => map.clone(),
+            _ => serde_json::Map::new(),
+        };
+        for (key, value) in mark.payload(pointer.map(|(x, y)| item.to_local(x, y))) {
+            payload.insert(key, value);
+        }
+        log::debug!("dispatch (chart): {action} node={id} payload={payload:?}");
+        self.module
+            .dispatch_ui_action(id, action, Some(serde_json::Value::Object(payload)));
+        true
+    }
+
+    /// Pointer-motion bookkeeping for chart marks: the `.onMove` /
+    /// `.onMouseLeave` pair. Moving off a mark fires its leave; moving
+    /// across one fires `.onMove` at most once per
+    /// [`crate::chart::defaults::MOVE_THROTTLE_MS`], which is what keeps a
+    /// tooltip bound to `onMove` from queueing a module round trip per
+    /// motion event.
+    fn update_chart_pointer(&mut self, x: f32, y: f32) {
+        let subject = self.hit_chart_mark(x, y, |events| {
+            events.mouse_move.is_some() || events.mouse_leave.is_some()
+        });
+        if subject.as_deref() != self.chart_move_subject.as_deref() {
+            if let Some(previous) = self.chart_move_subject.take() {
+                self.dispatch_chart_mark_event(
+                    &previous,
+                    |events| events.mouse_leave.as_ref(),
+                    Some((x, y)),
+                );
+            }
+            self.chart_move_subject = subject.clone();
+            // A fresh subject always gets its first move immediately;
+            // the throttle only rate-limits motion WITHIN one mark.
+            self.chart_move_at = None;
+        }
+        let Some(id) = subject else { return };
+        let now = std::time::Instant::now();
+        let due = crate::chart::move_due(
+            self.chart_move_at
+                .map(|last| now.duration_since(last).as_millis() as u64),
+        );
+        if !due {
+            return;
+        }
+        if self.dispatch_chart_mark_event(&id, |events| events.mouse_move.as_ref(), Some((x, y))) {
+            self.chart_move_at = Some(now);
+        }
+    }
+
+    /// Fire `.onMouseLeave` for whatever chart mark the pointer was on and
+    /// forget it — the pointer left the window, or the tree changed under
+    /// it. Also cancels any pending long press.
+    fn clear_chart_pointer(&mut self) {
+        if let Some(previous) = self.chart_move_subject.take() {
+            let (x, y) = (self.cursor.x as f32, self.cursor.y as f32);
+            self.dispatch_chart_mark_event(
+                &previous,
+                |events| events.mouse_leave.as_ref(),
+                Some((x, y)),
+            );
+        }
+        self.chart_move_at = None;
+        self.chart_press = None;
+    }
+
+    /// Arm `.onLongPress` if the press landed on a chart mark wired for
+    /// it. The event loop is demand-driven (`ControlFlow::Wait`), so a
+    /// one-shot timer thread wakes it when the hold matures — the same
+    /// proxy pattern the image worker and the screenshot timer use.
+    fn arm_chart_long_press(&mut self, x: f32, y: f32) {
+        let Some(id) = self.hit_chart_mark(x, y, |events| events.long_press.is_some()) else {
+            self.chart_press = None;
+            return;
+        };
+        self.chart_press = Some((id, std::time::Instant::now(), (x, y)));
+        let proxy = self.proxy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::chart::defaults::LONG_PRESS_MS,
+            ));
+            let _ = proxy.send_event(AppEvent::Wake);
+        });
+    }
+
+    /// Fire a matured long press. Called from every event that can run
+    /// after the hold started — the timer wake, the idle drain, and
+    /// pointer motion — so the dispatch never waits on a later event.
+    fn check_chart_long_press(&mut self) {
+        let Some((id, at, pointer)) = self.chart_press.clone() else {
+            return;
+        };
+        if !crate::chart::long_press_matured(at.elapsed().as_millis() as u64) {
+            return;
+        }
+        self.chart_press = None;
+        self.dispatch_chart_mark_event(&id, |events| events.long_press.as_ref(), Some(pointer));
+    }
+
     /// Look up the hover action + payload for a node, merge the
     /// runtime `hovered` flag into the payload, and dispatch.
     /// Silently no-ops if the node disappeared between the hover
@@ -2345,10 +2700,18 @@ impl App {
             Some(serde_json::Value::Object(m)) => m,
             _ => serde_json::Map::new(),
         };
+        // A chart mark's hover carries the datum under the pointer, in
+        // data units, exactly like its click does.
+        if let ItemKind::ChartMark(mark) = &item.kind {
+            let (cx, cy) = item.to_local(self.cursor.x as f32, self.cursor.y as f32);
+            for (key, value) in mark.payload(Some((cx, cy))) {
+                payload_obj.insert(key, value);
+            }
+        }
         payload_obj.insert("hovered".into(), serde_json::Value::Bool(hovered));
-        log::debug!("dispatch hover: {action} payload={payload_obj:?}");
+        log::debug!("dispatch hover: {action} node={id} payload={payload_obj:?}");
         self.module
-            .dispatch_action(action, Some(serde_json::Value::Object(payload_obj)));
+            .dispatch_ui_action(id, action, Some(serde_json::Value::Object(payload_obj)));
     }
 
     /// Forward every `.onAnimationComplete` dispatch the animator queued at
@@ -2363,8 +2726,11 @@ impl App {
                 completion.action,
                 completion.payload
             );
-            self.module
-                .dispatch_action(&completion.action, Some(completion.payload));
+            self.module.dispatch_ui_action(
+                &completion.node,
+                &completion.action,
+                Some(completion.payload),
+            );
         }
     }
 
@@ -2373,10 +2739,103 @@ impl App {
     /// {path, value})` — the same channel a bound `Input` uses. The `value`
     /// is the winning pose LABEL. Called after every scrubber interaction
     /// (flush / pointer release / redraw tick); empty and cheap otherwise.
+    /// Forward every dispatch the drag-and-drop runtime queued — the
+    /// reserved `__hypen_reorder` / `__hypen_pin` writes and the opted-in
+    /// `.onDragStart` / `.onDragOver` / `.onSort` / `.onPin` / `.onDrop` /
+    /// `.onDragEnd` events — to the module, in the §4.2 order the runtime
+    /// queued them. Empty and cheap outside a drop / claim / dwell.
+    /// Re-resolve the OS file hover's zone at `pos` (physical px; `None`
+    /// keeps the last position seen during the hover) and fold its pose
+    /// writes / `.onFileDragEnter` dispatches into the frame.
+    fn update_file_hover(&mut self, pos: Option<(f64, f64)>) {
+        self.device_overlay.sync();
+        if self.device_overlay.is_modal() {
+            // A host modal covers the app: no app zone is under the drag.
+            // The file drop surface tracks it instead.
+            self.dnd.file_hover_suspend(&mut self.tree);
+            let now = std::time::Instant::now();
+            if self
+                .device_overlay
+                .file_drag_move(pos.map(|(x, y)| (x as f32, y as f32)), now)
+            {
+                self.request_redraw_full();
+            }
+        } else {
+            self.dnd
+                .file_hover_update(&mut self.tree, self.layout.as_ref(), pos);
+        }
+        if self.dnd.take_file_drag_signal() {
+            // The app was just told about the drag and may ask for a pick:
+            // the device host should offer its drop surface.
+            self.device_overlay.hub().note_file_drag_signal();
+        }
+        self.apply_dnd_dirty();
+        self.dispatch_dnd_actions();
+    }
+
+    /// Hand a finished `DroppedFile` burst to the device overlay's file
+    /// drop surface (armed, entered, released over its drop area — see
+    /// `device::overlay`), or drop it on the floor: files released on the
+    /// app are never delivered (dnd.md "Files from the OS").
+    fn flush_dropped_files(&mut self) {
+        if self.dropped_files.is_empty() {
+            return;
+        }
+        let paths = std::mem::take(&mut self.dropped_files);
+        let pos = self.dropped_pos.take().map(|(x, y)| (x as f32, y as f32));
+        self.device_overlay.sync();
+        let taken = self
+            .device_overlay
+            .file_drop(paths, pos, std::time::Instant::now());
+        log::debug!("os file drop: taken by the device host = {taken}");
+        self.request_redraw_full();
+    }
+
+    fn dispatch_dnd_actions(&mut self) {
+        for d in self.dnd.take_dispatches() {
+            log::debug!("dispatch (dnd): {} payload={:?}", d.action, d.payload);
+            self.module.dispatch_action(&d.action, Some(d.payload));
+        }
+    }
+
+    /// Fold the drag-and-drop runtime's tree writes into the frame. Local
+    /// offset writes (the ghost / sibling shifts) only move transforms, so
+    /// the cached layout keeps its rects and gets its per-item transforms
+    /// refreshed in place (paint AND hit-testing follow this same frame);
+    /// pose overlays / restores and deferred-write replays may touch
+    /// layout-affecting props and take the wholesale drop.
+    fn apply_dnd_dirty(&mut self) {
+        let dirty = self.dnd.take_dirty();
+        if !dirty.any() {
+            return;
+        }
+        if dirty.props || self.layout.is_none() {
+            self.tree_generation = self.tree_generation.wrapping_add(1);
+            self.layout = None;
+        } else {
+            let scale = self
+                .window
+                .as_ref()
+                .map(|w| w.scale_factor() as f32)
+                .unwrap_or(1.0);
+            let viewport = self.logical_viewport();
+            if let Some(pass) = self.layout.as_mut() {
+                pass.refresh_transforms(&self.tree, viewport, scale);
+            }
+            self.layout_generation = self.layout_generation.wrapping_add(1);
+        }
+        self.painter.invalidate_subtree_cache();
+        self.damage.add_full();
+        if let Some(w) = self.window.as_ref() {
+            w.request_redraw();
+        }
+    }
+
     fn dispatch_scrub_binds(&mut self) {
         for bind in self.scrubber.take_binds() {
             log::debug!("dispatch (scrub bind): {} = {}", bind.path, bind.value);
-            self.module.dispatch_action(
+            self.module.dispatch_ui_action(
+                &bind.node,
                 "__hypen_bind",
                 Some(json!({ "path": bind.path, "value": bind.value })),
             );
@@ -2542,6 +3001,13 @@ impl ApplicationHandler<AppEvent> for App {
         let gpu = pollster::block_on(Gpu::new(Arc::clone(&window)));
         window.set_visible(true);
 
+        // The device host presents its consent / capture / chooser UI and
+        // activity indicators in this window from now on.
+        let proxy = self.proxy.clone();
+        self.device_overlay.hub().attach_window(Arc::new(move || {
+            let _ = proxy.send_event(AppEvent::Wake);
+        }));
+
         self.window = Some(window);
         self.gpu = Some(gpu);
     }
@@ -2553,7 +3019,22 @@ impl ApplicationHandler<AppEvent> for App {
                     self.request_redraw_full();
                 }
                 AkWindowEvent::ActionRequested(req) => {
-                    if matches!(req.action, AkAction::Click) {
+                    let click = matches!(req.action, AkAction::Click);
+                    if (click || matches!(req.action, AkAction::Focus))
+                        && self.device_overlay.a11y_action(
+                            req.target_node,
+                            click,
+                            std::time::Instant::now(),
+                        )
+                    {
+                        self.request_redraw_full();
+                        return;
+                    }
+                    // The app behind a device modal is inert.
+                    if self.device_overlay.is_modal() {
+                        return;
+                    }
+                    if click {
                         // Renderer-local `.videoIntent(...)`: performed
                         // right here, exactly as on the pointer and
                         // keyboard paths — assistive tech activating the
@@ -2581,11 +3062,16 @@ impl ApplicationHandler<AppEvent> for App {
                             {
                                 if let Some(item) = layout.item_by_id(&rid) {
                                     if let Some(action) = item.action.clone() {
-                                        let payload = item.action_payload.clone();
+                                        // No pointer on this path: a chart
+                                        // mark resolves its series and
+                                        // nothing else, matching the
+                                        // contract for an event with
+                                        // neither a target nor coordinates.
+                                        let payload = item.action_payload_at(None);
                                         log::debug!(
                                             "dispatch (a11y): {action} payload={payload:?}"
                                         );
-                                        self.module.dispatch_action(&action, payload);
+                                        self.module.dispatch_ui_action(&rid, &action, payload);
                                         self.focused = Some(rid);
                                         // Assistive-tech focus shows the ring.
                                         self.focus_visible = true;
@@ -2604,6 +3090,8 @@ impl ApplicationHandler<AppEvent> for App {
                 AkWindowEvent::AccessibilityDeactivated => {}
             },
             AppEvent::Wake => {
+                // A chart long-press timer may be what woke us.
+                self.check_chart_long_press();
                 // Re-arm the media wake gate FIRST — before reading
                 // frames or events — so a frame landing from here on
                 // sends a fresh wake instead of being coalesced into
@@ -2668,8 +3156,14 @@ impl ApplicationHandler<AppEvent> for App {
         if !matches!(&event, WindowEvent::RedrawRequested) {
             self.dev_overlay_only_redraw = false;
         }
+        // Device host UI takes its input before the app (RFC 001 §2.6).
+        if self.intercept_device_overlay(&event) {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
+                // Recordings / scans end (their UI can no longer be seen).
+                self.device_overlay.hub().detach_window();
                 // Feature `video`: tear down playback pipelines before
                 // the window goes away so GStreamer streaming threads
                 // stop touching the (about to vanish) waker proxy.
@@ -2737,6 +3231,36 @@ impl ApplicationHandler<AppEvent> for App {
                 self.cursor = position;
                 let (px, py) = (position.x as f32, position.y as f32);
 
+                // An OS file drag that does deliver motion (not macOS /
+                // X11 — see `dnd::files`) re-resolves its files zone here.
+                if self.dnd.is_file_hovering() {
+                    self.update_file_hover(Some((position.x, position.y)));
+                }
+
+                // Drag-and-drop: a pending drag claims on its activation
+                // rule, a claimed one moves the ghost + re-resolves the
+                // drop target (zero engine traffic — only an opted-in
+                // `.onDragStart` may dispatch here). A claim consumes the
+                // press: the pressed tint and any Input drag-select end.
+                {
+                    let viewport = self.logical_viewport();
+                    self.dnd.pointer_move(
+                        &mut self.tree,
+                        self.layout.as_ref(),
+                        viewport,
+                        position.x,
+                        position.y,
+                    );
+                    if self.dnd.is_active() {
+                        if let Some(prev) = self.pressed.take() {
+                            self.mark_interaction_damage(Some(&prev), None);
+                        }
+                        self.dragging_input = None;
+                    }
+                    self.apply_dnd_dirty();
+                    self.dispatch_dnd_actions();
+                }
+
                 // Scrub gesture: route the move to any active drag first. It
                 // claims on slop and interpolates the pose props straight
                 // into the tree, so a dirty move invalidates layout/paint
@@ -2765,24 +3289,18 @@ impl ApplicationHandler<AppEvent> for App {
                 // While drag-selecting, every move updates the head of
                 // the selection without touching the anchor.
                 if let Some(drag_id) = self.dragging_input.clone() {
-                    if let Some((value, font_size, rect)) = self.lookup_input(&drag_id) {
-                        // Caret math lives in the item's LOCAL (layout
-                        // rect) space; inverse-transform the pointer
-                        // first so drag-select stays correct on a
-                        // transformed Input.
-                        let (lx, _) = self.pointer_to_item_local(&drag_id, px, py);
-                        let local_x = (lx - rect.x - 12.0).max(0.0);
-                        let new_head = self
-                            .painter
-                            .text_engine_mut()
-                            .byte_offset_at_x(&value, local_x, font_size);
+                    if let Some((value, new_head)) = self.input_offset_at_pointer(&drag_id, px, py)
+                    {
                         let sel = self.selection_of(&drag_id, &value);
                         let new_sel = Selection::range(sel.anchor, new_head).clamped(value.len());
                         if new_sel != sel {
                             // Selection band paints inside the input's
                             // rect; nothing else changed.
                             let dmg = self.item_damage_rect(&drag_id);
-                            self.input_selections.insert(drag_id, new_sel);
+                            self.input_selections.insert(drag_id.clone(), new_sel);
+                            // Dragging past a Textarea's visible lines
+                            // scrolls it along with the selection head.
+                            self.reveal_textarea_caret(&drag_id, &value, new_sel.head);
                             if let Some(r) = dmg {
                                 self.damage.add_region(r);
                             } else {
@@ -2818,6 +3336,12 @@ impl ApplicationHandler<AppEvent> for App {
                 // independently of the actionable-tint path above —
                 // hover-trackable subjects aren't gated to Buttons.
                 self.update_hover_subject(px, py);
+                // Chart marks add `.onMove` (throttled) and
+                // `.onMouseLeave`, both carrying the datum under the
+                // pointer. A press held still can also mature into a long
+                // press while the pointer wanders inside the same mark.
+                self.update_chart_pointer(px, py);
+                self.check_chart_long_press();
             }
             WindowEvent::CursorLeft { .. } => {
                 if let Some(window) = self.window.as_ref() {
@@ -2837,6 +3361,8 @@ impl ApplicationHandler<AppEvent> for App {
                 if let Some(id) = self.hover_subject.take() {
                     self.dispatch_hover(&id, false);
                 }
+                // Same for a chart mark's `.onMouseLeave`.
+                self.clear_chart_pointer();
             }
             WindowEvent::MouseInput {
                 state: ElementState::Pressed,
@@ -2853,20 +3379,57 @@ impl ApplicationHandler<AppEvent> for App {
                 );
                 let mut needs_redraw = false;
 
+                // Drag-and-drop: a press inside an enabled `.draggable`
+                // source opens a PENDING drag (an `immediate` activation
+                // claims at once). It stays pending until its activation
+                // rule fires, so the press/focus bookkeeping below still
+                // runs — a tap is a total no-op. The scrub source stands
+                // down on the same press (dnd > scrub).
+                let dnd_opened = match self.layout.as_ref() {
+                    Some(layout) => {
+                        let scale = self
+                            .window
+                            .as_ref()
+                            .map(|w| w.scale_factor() as f32)
+                            .unwrap_or(1.0);
+                        self.dnd.pointer_down(
+                            &mut self.tree,
+                            layout,
+                            self.cursor.x,
+                            self.cursor.y,
+                            scale,
+                        )
+                    }
+                    None => false,
+                };
+                if dnd_opened {
+                    needs_redraw = true;
+                    self.apply_dnd_dirty();
+                    self.dispatch_dnd_actions();
+                }
+
                 // Scrub gesture: open a PENDING drag if the press is inside a
                 // gesture-scrub node's bounds (a mid-settle catch claims
                 // immediately). It stays pending until slop is exceeded, so
                 // the normal press/focus bookkeeping below still runs — a
                 // below-slop tap remains an ordinary click (suppressed only
                 // when the drag actually claims, at release).
-                if let Some(layout) = self.layout.as_ref() {
-                    if self
-                        .scrubber
-                        .pointer_down(layout, self.cursor.x, self.cursor.y)
-                    {
-                        needs_redraw = true;
+                if !dnd_opened {
+                    if let Some(layout) = self.layout.as_ref() {
+                        if self
+                            .scrubber
+                            .pointer_down(layout, self.cursor.x, self.cursor.y)
+                        {
+                            needs_redraw = true;
+                        }
                     }
                 }
+
+                // A press on a chart mark wired to `.onLongPress` starts
+                // the 500ms hold. It coexists with the ordinary click
+                // bookkeeping below: a short press still dispatches
+                // `.onClick` on release.
+                self.arm_chart_long_press(cx, cy);
 
                 // Video v2 `Scrubber`: a press on the timeline opens a
                 // local drag (preview only). It coexists with the
@@ -2906,16 +3469,7 @@ impl ApplicationHandler<AppEvent> for App {
                 // to the word at that byte; triple-click selects the
                 // entire input value.
                 if let Some(id) = focus_target.as_deref() {
-                    if let Some((value, font_size, rect)) = self.lookup_input(id) {
-                        // Same local-space mapping as drag-select: the
-                        // click position must be inverse-transformed
-                        // before caret byte-offset math.
-                        let (lx, _) = self.pointer_to_item_local(id, cx, cy);
-                        let local_x = (lx - rect.x - 12.0).max(0.0);
-                        let byte = self
-                            .painter
-                            .text_engine_mut()
-                            .byte_offset_at_x(&value, local_x, font_size);
+                    if let Some((value, byte)) = self.input_offset_at_pointer(id, cx, cy) {
                         let sel = match click_count {
                             2 => {
                                 let (s, e) = crate::text_nav::word_range_at(&value, byte);
@@ -2955,6 +3509,30 @@ impl ApplicationHandler<AppEvent> for App {
                 button: MouseButton::Left,
                 ..
             } => {
+                // Drag-and-drop release: a claimed drag drops on its target
+                // (reserved write → `.onSort`/`.onPin`/`.onDrop` →
+                // `.onDragEnd`, then the no-flash hold) or cancels over
+                // nothing, and the click is SUPPRESSED — a drag is not a
+                // tap. A pending (below-slop / pre-press) drag is a total
+                // no-op, so the ordinary click path runs untouched.
+                if let DndPointerUp::Claimed =
+                    self.dnd.pointer_up(&mut self.tree, self.layout.as_ref())
+                {
+                    if let Some(prev) = self.pressed.take() {
+                        self.mark_interaction_damage(Some(&prev), None);
+                    }
+                    self.chart_press = None;
+                    self.dragging_input = None;
+                    self.apply_dnd_dirty();
+                    self.dispatch_dnd_actions();
+                    self.request_redraw_full();
+                    return;
+                }
+                // A press that matured into a long press fires here at the
+                // latest (the timer wake usually beat us to it); a shorter
+                // one is simply cancelled and stays an ordinary click.
+                self.check_chart_long_press();
+                self.chart_press = None;
                 // A claimed scrub drag consumes the release: it begins the
                 // settle (or, under reduced motion, arrives instantly) and
                 // the click is SUPPRESSED — a drag is not a tap. A below-slop
@@ -2990,7 +3568,12 @@ impl ApplicationHandler<AppEvent> for App {
                     MouseScrollDelta::LineDelta(_, y) => -y * 32.0,
                     MouseScrollDelta::PixelDelta(p) => -p.y as f32,
                 };
-                if dy.abs() > f32::EPSILON {
+                // A Textarea whose content overflows consumes the wheel
+                // first (inner scroll), like a DOM `<textarea>`; once it
+                // is at its limit the gesture chains to the page as usual.
+                if dy.abs() > f32::EPSILON
+                    && !self.textarea_wheel(self.cursor.x as f32, self.cursor.y as f32, dy)
+                {
                     let cx = self.cursor.x as f32;
                     let cy = self.cursor.y as f32;
                     // The innermost scrollable that can actually consume this
@@ -3132,7 +3715,41 @@ impl ApplicationHandler<AppEvent> for App {
                     }
                 }
             }
+            // OS file drags (`.dropZone(files: true)`, see `dnd::files`).
+            // Entry only records the file's type; the idle loop resolves
+            // the zone once the whole per-file burst has arrived. A release
+            // delivers nothing — it just clears the `over` pose.
+            WindowEvent::HoveredFile(path) => {
+                self.dnd.file_hover_enter(&path);
+                self.device_overlay.hub().set_file_hovering(true, false);
+            }
+            WindowEvent::HoveredFileCancelled => {
+                self.dnd.file_hover_end(&mut self.tree);
+                self.device_overlay.hub().set_file_hovering(false, false);
+                if self.device_overlay.file_drag_left() {
+                    self.request_redraw_full();
+                }
+                self.apply_dnd_dirty();
+            }
+            // The release: the app never gets the files; a device file
+            // drop surface may (`flush_dropped_files`, once the burst is in).
+            WindowEvent::DroppedFile(path) => {
+                if self.dropped_files.is_empty() {
+                    // Where the release happened: the live OS cursor (a
+                    // pre-drag `CursorMoved` position is never trusted).
+                    self.dropped_pos = self
+                        .window
+                        .as_ref()
+                        .and_then(|w| crate::os_cursor::cursor_in_window(w));
+                }
+                self.dropped_files.push(path);
+                self.dnd.file_hover_end(&mut self.tree);
+                self.device_overlay.hub().set_file_hovering(false, true);
+                self.apply_dnd_dirty();
+            }
             WindowEvent::Focused(true) => {
+                // Input protection restarts on the device UI's controls.
+                self.device_overlay.hub().rearm();
                 // macOS can restore focus without a matching
                 // `Occluded(false)`. Give the swapchain a fresh bounded
                 // recovery budget and force a frame even for a static scene.
@@ -3140,6 +3757,13 @@ impl ApplicationHandler<AppEvent> for App {
                 self.request_redraw_full();
             }
             WindowEvent::Focused(false) => {
+                // Drag-and-drop has no OS pointer capture either: a focus
+                // loss mid-drag is its `pointercancel` — a claimed drag
+                // cancels (`.onDragEnd {dropped: false}`), a pending one is
+                // discarded, a post-drop hold runs on.
+                self.dnd.pointer_cancel(&mut self.tree);
+                self.apply_dnd_dirty();
+                self.dispatch_dnd_actions();
                 // A claimed scrub drag has no OS pointer-capture on desktop
                 // (winit exposes none — see anim.rs' scrub narrowings), so a
                 // focus loss mid-drag is the winit analog of the DOM's
@@ -3159,7 +3783,9 @@ impl ApplicationHandler<AppEvent> for App {
                     self.painter.invalidate_subtree_cache();
                     self.damage.add_full();
                     self.dispatch_scrub_binds();
-                    self.animator.set_scrub_active(self.scrubber.owned_ids());
+                    let mut owned = self.scrubber.owned_ids();
+                    owned.extend(self.dnd.owned_ids());
+                    self.animator.set_scrub_active(owned);
                 }
                 // Clear `pressed` too — losing focus mid-press would
                 // otherwise leave a stale pressed id that the next
@@ -3180,6 +3806,20 @@ impl ApplicationHandler<AppEvent> for App {
                 }
                 self.is_occluded = occluded;
                 self.surface_recovery.recovered();
+                // Device indicators cannot be seen while the window is
+                // minimized: recordings stop, scans end; modals re-arm when
+                // shown again. A window merely covered by another one (or
+                // on another Space) is still reachable — the user brings it
+                // forward to reach Stop — so occlusion alone doesn't end
+                // device work; otherwise switching apps would cut a
+                // recording short.
+                let minimized = occluded
+                    && self
+                        .window
+                        .as_ref()
+                        .and_then(|w| w.is_minimized())
+                        .unwrap_or(false);
+                self.device_overlay.hub().set_visible(!minimized);
                 if occluded {
                     // Drain whatever's in the queue right now so its
                     // Arc'd props release; clear the paint-side raster
@@ -3227,7 +3867,32 @@ impl ApplicationHandler<AppEvent> for App {
         }
     }
 
-    fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // A chart long press can mature while the loop is otherwise idle.
+        self.check_chart_long_press();
+
+        // A `DroppedFile` burst arrived in full (winit delivers it within
+        // one event batch): offer it to the device host's drop surface.
+        self.flush_dropped_files();
+
+        // OS file hover: winit gives no drag position, so poll the OS
+        // cursor at ~60 Hz while it lasts (cheap: a hit test; a redraw only
+        // when the `over` pose moves), then drop back to pure `Wait`.
+        if self.dnd.is_file_hovering() {
+            let pos = self
+                .window
+                .as_ref()
+                .and_then(|w| crate::os_cursor::cursor_in_window(w));
+            self.update_file_hover(pos);
+            self.file_hover_polling = true;
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                std::time::Instant::now() + std::time::Duration::from_millis(16),
+            ));
+        } else if self.file_hover_polling {
+            self.file_hover_polling = false;
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+
         // Drop entries whose owning Input node no longer exists. The
         // engine cycles Input nodes on form rerenders / list re-keys;
         // without this, every transient Input that ever held a
@@ -3238,6 +3903,8 @@ impl ApplicationHandler<AppEvent> for App {
         self.input_selections
             .retain(|id, _| self.tree.get(id).is_some());
         self.optimistic_inputs
+            .retain(|id, _| self.tree.get(id).is_some());
+        self.textarea_scroll
             .retain(|id, _| self.tree.get(id).is_some());
 
         // No value-clamping pass here. The previous version walked
@@ -3276,6 +3943,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        self.device_overlay.hub().detach_window();
         // Feature `video`: tear down every playback pipeline so the
         // process exits without live GStreamer streaming threads.
         #[cfg(feature = "video")]
@@ -3371,10 +4039,9 @@ pub(crate) fn drive_animation_frame(
         && outcome.finalized.is_empty()
         && outcome.restyle.is_empty()
         && !writes.is_empty()
-        && writes
-            .iter()
-            .all(|(_, key)| !crate::layout::is_layout_prop_key(key))
-    {
+        && writes.iter().all(|(id, key)| {
+            !crate::layout::is_layout_prop_key(key) && !crate::chart::is_chart_family_node(tree, id)
+        }) {
         let mut affected: HashSet<String> = HashSet::new();
         let mut capped = false;
         // Writes repeat (one entry per prop per node per tick) —
@@ -3484,7 +4151,7 @@ pub(crate) fn clear_focus_if_exiting(
 }
 
 /// Pure scan behind [`App::dispatch_media_poster_errors`]: walk the
-/// tree's Video nodes and produce the `(action, payload)` dispatches
+/// tree's Video nodes and produce the `(node_id, action, payload)` dispatches
 /// for posters whose fetch failed with an HTTP status, deduped through
 /// `dispatched` (`"node_id\u{0}poster"` keys, mutated in place).
 /// `lookup_failure` is injected so tests don't depend on the global
@@ -3494,7 +4161,7 @@ pub(crate) fn collect_media_error_dispatches(
     viewport: Viewport,
     dispatched: &mut HashSet<String>,
     lookup_failure: &dyn Fn(&str) -> Option<crate::paint::image::LoadFailure>,
-) -> Vec<(String, serde_json::Value)> {
+) -> Vec<(String, String, serde_json::Value)> {
     let mut pending = Vec::new();
     for node in tree.nodes() {
         if !crate::layout::MEDIA_TYPES
@@ -3537,7 +4204,7 @@ pub(crate) fn collect_media_error_dispatches(
         obj.insert("index".to_string(), json!(index));
         obj.insert("status".to_string(), json!(failure.status));
         obj.insert("message".to_string(), json!(failure.message));
-        pending.push((action, serde_json::Value::Object(obj)));
+        pending.push((node.id.clone(), action, serde_json::Value::Object(obj)));
     }
     pending
 }
@@ -3593,6 +4260,13 @@ pub(crate) fn paint_only_affected_ids(
         let id = match patch {
             Patch::SetProp { id, name, .. } | Patch::RemoveProp { id, name } => {
                 if crate::layout::is_layout_prop_key(name) {
+                    return None;
+                }
+                // A chart resolves its domains and every mark's geometry
+                // from props the shared classifier calls paint-only
+                // (`points`, `stroke`, `highlight`, …). They move pixels
+                // AND hit targets, so the whole chart re-lays out.
+                if crate::chart::is_chart_family_node(tree, id) {
                     return None;
                 }
                 id

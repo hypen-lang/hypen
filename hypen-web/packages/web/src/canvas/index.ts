@@ -36,13 +36,4 @@ export type {
   LayoutFunction,
 } from "./types.js";
 
-
-
-
-
-
-
-
-
-
-
+export { CanvasDnd, type CanvasDndHost } from "./dnd.js";

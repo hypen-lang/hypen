@@ -80,8 +80,19 @@ struct HypenElementContentView: View {
             // element, and the pose/glide/exclusion state sits outside so
             // an exiting subtree's accessibility exclusion outranks the
             // element's own semantics block.
+            //
+            // The `__dnd.*` layer sits between them: the ghost / sibling
+            // offsets, the z-raise, the drag gesture and the frame anchor
+            // live INSIDE the exiting-subtree exclusion (an exiting node
+            // cannot be grabbed) and outside the element's own transforms
+            // (so the ghost / shift offsets compose over the engine
+            // translate, and the measured frame is the stable layout rect —
+            // the coordinator adds the node's own translate on read). Only
+            // nodes with a DnD role — or rows of a sortable / pinboard —
+            // pay for it.
             renderVisibleElement(element)
                 .applyHypenSemantics(element.semantics)
+                .hypenDndState(element, coordinator: renderer.dnd)
                 .hypenAnimatePreset(element, animator: renderer.animator)
                 .hypenAnimationState(element)
         }
@@ -110,9 +121,18 @@ struct HypenElementContentView: View {
             viewportSize: CGSize(width: screenWidth, height: viewportHeight)
         )
 
-        // Build modifier and variants from applicators
-        let applicatorResult = applicatorRegistry.applyAllWithVariants(
+        // Build modifier and variants from applicators. A live DnD runtime
+        // label (`lifted` / `over`, §2.1) overlays `__anim.statePoses[label]`
+        // onto the memoized base result through the same per-prop applicator
+        // path; the element's own props stay the untouched base, so clearing
+        // the label restores it by construction.
+        let applicatorResult = renderer.dnd.overlayingPose(
+            onto: applicatorRegistry.applyAllWithVariants(
+                element: element,
+                context: applicatorContext
+            ),
             element: element,
+            registry: applicatorRegistry,
             context: applicatorContext
         )
 

@@ -188,7 +188,9 @@ The renderer implements the Hypen Remote UI protocol:
 ### Server → Client Messages
 
 - **initialTree**: Sent on connection with initial UI tree
-- **patch**: Sent when UI updates (after state changes)
+- **patch**: Sent when UI updates (after state changes). `module` / `state` are
+  informational here: a message without them is still applied, and a message that
+  cannot be parsed or handled is logged and skipped without affecting later ones.
 - **stateUpdate**: Sent when state changes
 
 ### Client → Server Messages
@@ -212,10 +214,48 @@ Two consequences worth knowing:
   `RemoteServerConfig`) when you need to read raw frames in a proxy or capture. A
   server that declines the extension just gets uncompressed frames, and the
   client falls back transparently.
+- **Device access works on a compressed socket only when compression is per
+  message.** The device plane (below) is enabled when the server declined the
+  extension or negotiated it with BOTH `server_no_context_takeover` and
+  `client_no_context_takeover` — every message compressed on its own, so device
+  data never shares a compression history with other messages. That is what the
+  Hypen servers negotiate. With context takeover in either direction the hello
+  omits `device`, that connection runs UI-only, and one warning is logged.
 - **Outbound messages under 1 KB are not compressed.** That is OkHttp's
   `minWebSocketMessageToCompress` default, which the engine leaves alone —
   client→server traffic is small hello/action JSON, where deflate framing costs
   more than it saves.
+
+### Device capabilities (RFC 001, provisional)
+
+Pass a `DeviceHost` (`AndroidDeviceHost.create(activity, url)`) to `HypenApp` or
+`RemoteEngine` to let the server use device capabilities (gallery picker,
+permissions, Bluetooth scan). Things an app has to know:
+
+- **Admission.** A device-enabled server refuses a WebSocket upgrade without an
+  `Origin` header unless its authenticator accepts it; `Origin` is a browser-only
+  defence and authenticates nothing. The Android client sends **no** `Origin` by
+  default and authenticates with app credentials sent as upgrade headers:
+
+  ```kotlin
+  HypenApp(
+      url = "wss://app.example/ws",
+      config = RemoteEngineConfig(headersProvider = { mapOf("Authorization" to "Bearer ${tokens.current()}") }),
+      deviceHost = device,
+  )
+  ```
+
+  `RemoteEngineConfig.origin` sends an explicit (allowlisted) `Origin` for servers
+  that route by it. Header values never appear in logs or `toString()`.
+- **Origin binding.** Prompts, indicators, consent grants and cooldowns use the
+  origin of the URL each socket connects to, so one Application-scoped host can
+  serve several servers safely.
+- **Recreation.** `HypenApp` keeps its connection across Activity recreation
+  (rotation, or the system destroying the Activity behind a system picker), so an
+  in-flight pick still delivers its result and the server session is kept.
+- **Sizes.** Picked items announce their exact size when the provider knows it;
+  otherwise they are streamed without a declaration (never spooled to disk just to
+  learn the size). A zero-byte item sends no frames.
 
 ## Supported Components
 

@@ -66,11 +66,16 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          # winit/wgpu build headers, plus libfuse2 for the AppImage tooling.
+          # winit/wgpu build headers, the device-capability backends of
+          # hypen-renderer-desktop (default features `mic`, `bluetooth`,
+          # `camera`: ALSA for cpal, D-Bus for btleplug/BlueZ, libclang for
+          # nokhwa's V4L2 bindgen, a C++ compiler for OpenH264's bundled
+          # source), plus libfuse2 for the AppImage tooling.
           sudo apt-get install -y \
             libx11-dev libxcursor-dev libxi-dev libxrandr-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libfuse2t64 || sudo apt-get install -y libfuse2
+            pkg-config libasound2-dev libdbus-1-dev libclang-dev g++
+          sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
 
       - name: Install cargo-packager
         shell: bash

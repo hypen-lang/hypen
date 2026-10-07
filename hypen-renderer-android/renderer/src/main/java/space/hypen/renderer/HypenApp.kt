@@ -13,9 +13,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.DpSize
-import space.hypen.renderer.anim.AnimationCoordinator
 import space.hypen.renderer.anim.ClearFocusOnExit
-import space.hypen.renderer.anim.SettingsMotionPreference
 import space.hypen.renderer.anim.rememberHypenAnimation
 import space.hypen.renderer.components.HypenSafeAreaInsets
 import space.hypen.renderer.components.LocalColumnScope
@@ -27,11 +25,15 @@ import space.hypen.renderer.components.LocalStretchCrossAxis
 import space.hypen.renderer.components.isManagedRowChild
 import space.hypen.renderer.components.permittedFillMaxWidthFraction
 import space.hypen.renderer.components.videoIntentClickable
+import space.hypen.renderer.device.DeviceHost
+import space.hypen.renderer.device.normalizeOrigin
+import space.hypen.renderer.device.android.ComposeDeviceActivityIndicator
+import space.hypen.renderer.device.android.DeviceActivityOverlay
+import space.hypen.renderer.dnd.rememberHypenDnd
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.navigation.BackNavigationDispatcher
 import space.hypen.renderer.navigation.NavigationOptions
 import space.hypen.renderer.remote.ConnectionState
-import space.hypen.renderer.remote.RemoteEngine
 import space.hypen.renderer.remote.RemoteEngineConfig
 import space.hypen.renderer.render.ActionDispatcher
 import space.hypen.renderer.render.ComposeRenderer
@@ -64,6 +66,22 @@ val LocalHypenViewport = compositionLocalOf { DpSize.Unspecified }
  *   merged over the platform default, so `HypenSafeAreaInsets(bottom = 0.dp)` keeps the real
  *   top inset and zeroes only the bottom. Null (default) means every edge uses
  *   `WindowInsets.safeDrawing`.
+ * @param deviceHost Optional Device Capability Protocol host (RFC 001), e.g.
+ *   `AndroidDeviceHost.create(activity, url)`. Application-scoped and owned by the caller.
+ *   HypenApp draws its host-owned overlay above the app (outside the patch tree): the
+ *   `bluetooth.scan` and `mic.record` (recording) indicators with their Stop control, and
+ *   a development-mode notice for `ws://` origins (RFC 001 §5). Prompts, grants and cooldowns use the origin of [url].
+ * @param disposeDeviceHost Bind [deviceHost] to this HypenApp: dispose it when the
+ *   connection is finally torn down (HypenApp leaves for good, or is given a different
+ *   host). Leave false (default) for an Application-scoped host shared across screens.
+ *
+ * The connection (socket, session and rendered tree) survives Activity recreation: when
+ * the hosting Activity is recreated (a configuration change, or the system destroying it
+ * behind a system picker) the replacement Activity's HypenApp re-attaches to the same
+ * connection, so in-flight device work can still deliver its result. A connection nobody
+ * re-attaches to is closed after a short grace (longer while a system picker or
+ * permission dialog of a device operation is up). Leaving the screen or finishing the
+ * Activity closes it at once.
  * @param loadingContent Content to show while connecting
  * @param errorContent Content to show on error
  */
@@ -74,29 +92,30 @@ fun HypenApp(
     config: RemoteEngineConfig = RemoteEngineConfig.DEFAULT,
     navigation: NavigationOptions? = null,
     safeAreaInsets: HypenSafeAreaInsets? = null,
+    deviceHost: DeviceHost? = null,
+    disposeDeviceHost: Boolean = false,
     loadingContent: @Composable () -> Unit = { DefaultLoadingContent() },
     errorContent: @Composable (String) -> Unit = { DefaultErrorContent(it) },
 ) {
-    // Live reduced-motion preference: Android's "Remove animations" switch
-    // (ANIMATOR_DURATION_SCALE == 0), observed so a mid-session toggle takes
-    // effect without a reconnect.
+    // The connection lives in a retained session (see HypenSessions): a new
+    // url or host means a new session; Activity recreation re-attaches.
     val context = LocalContext.current
-    val motion = remember(context) { SettingsMotionPreference(context) }
-    DisposableEffect(motion) {
-        onDispose { motion.dispose() }
+    val activity = remember(context) { context.findActivity() }
+    val session = remember(url, deviceHost) { HypenSessions.acquire(url, config, deviceHost, context) }
+    session.disposeDeviceHost = disposeDeviceHost
+    DisposableEffect(session) {
+        onDispose { HypenSessions.release(session, activity) }
     }
-
-    // Use url as key to recreate engine when URL changes
-    val renderer = remember(url, motion) { ComposeRenderer(animation = AnimationCoordinator(motion)) }
-    val remoteEngine = remember(url) { RemoteEngine(url, config) }
+    val renderer = session.renderer
+    val remoteEngine = session.engine
 
     HypenLoggers.app.debug("HypenApp composing: renderer=%s, engine=%s", System.identityHashCode(renderer), System.identityHashCode(remoteEngine))
 
     // Connection state
     val connectionState by remoteEngine.connectionState.collectAsState()
 
-    // Error state
-    var lastError by remember { mutableStateOf<Throwable?>(null) }
+    // Error state (kept by the session across Activity recreation)
+    val lastError = session.lastError
 
     // Create action dispatcher - memoized to avoid recreating on recomposition
     val actionDispatcher = remember(remoteEngine) {
@@ -111,39 +130,9 @@ fun HypenApp(
         onDispose { }
     }
 
-    // Connect and handle patches
-    LaunchedEffect(remoteEngine) {
-        // Connect
-        try {
-            remoteEngine.connect()
-        } catch (e: Exception) {
-            HypenLoggers.app.error("Connection failed", e)
-            lastError = e
-        }
-
-        // Collect patches — MUST use collect (not collectLatest) to ensure
-        // every patch batch is processed. collectLatest skips intermediate values
-        // which causes missing elements when the server sends multiple batches rapidly.
-        remoteEngine.patches.collect { patches ->
-            HypenLoggers.app.debug { "Received ${patches.size} patches" }
-            renderer.applyPatches(patches)
-        }
-    }
-
-    // Handle errors
-    LaunchedEffect(Unit) {
-        remoteEngine.errors.collect { error ->
-            HypenLoggers.app.error("Remote engine error", error)
-            lastError = error
-        }
-    }
-
-    // Cleanup — keyed on remoteEngine so old engine is destroyed when URL changes
-    DisposableEffect(remoteEngine) {
-        onDispose {
-            remoteEngine.destroy()
-        }
-    }
+    // Connecting, collecting every patch batch in order (collect, never
+    // collectLatest) and error handling are owned by the session, so they
+    // continue between Activity instances.
 
     // Render based on connection state, providing action dispatcher and renderer to children
     // Root element has no parent restricting it, so allow expansion
@@ -201,6 +190,18 @@ fun HypenApp(
                     }
                 }
             }
+            }
+
+            // Host-owned device UI, drawn above (and independent of) the
+            // server's patch tree: stream indicators with Stop, and the
+            // ws:// development-mode notice (RFC 001 §5).
+            if (deviceHost != null) {
+                DeviceActivityOverlay(
+                    indicator = deviceHost.activityIndicator as? ComposeDeviceActivityIndicator,
+                    // The origin this connection talks to (not the host's default).
+                    origin = remember(url) { normalizeOrigin(url) },
+                    modifier = Modifier.align(Alignment.TopCenter),
+                )
             }
         }
     }
@@ -333,22 +334,50 @@ internal fun HypenElement(
     ClearFocusOnExit(animation.exiting)
     finalModifier = animation.modifier.then(finalModifier)
 
+    // Drag-and-drop (`__dnd.*`), in two halves around the chain built so far.
+    // OUTER (outermost of all): the ghost translation and the sibling
+    // gap-opening shift move the whole element — playback pose, hit target,
+    // focus and accessibility node included — and the layout-rect report.
+    // INNER (innermost, below the applicators and so below the element's own
+    // engine `translateX`/`translateY` layers): the lift surface and the
+    // pointer-mapping coordinates, so a pinned note is lifted where it is
+    // drawn and its reported rect is its rendered rect (plan §6.11). The
+    // gesture still sits above every child, so a drag starts from anywhere
+    // on the lift surface; a tap below the activation threshold consumes
+    // nothing. Both halves are `Modifier` (no-op) for every element the
+    // runtime has no role for.
+    val dnd = rememberHypenDnd(element, renderer.getDndCoordinator())
+    finalModifier = dnd.outer.then(finalModifier).then(dnd.inner)
+
     // Renderer-local video intents (`.videoIntent("fullscreen")`): handled
     // here rather than by an applicator, because the intent needs the
     // enclosing Video's controller off the composition (applicators run
     // outside composition). Innermost in the chain, so the intent takes the
     // tap; a no-op for every node that does not carry the prop or does not
     // sit inside a Video subtree. See components/VideoFullscreen.kt.
-    finalModifier = finalModifier.videoIntentClickable(element)
+    // Component-level events (Button's positional action, input/bind
+    // writes, chart/video/scrubber callbacks, the video-intent companion)
+    // read LocalActionDispatcher. Re-provide it node-addressed and
+    // exit-gated for this element — the same wrapper applicators get — so
+    // the engine resolves the owning module from the node instead of a bare
+    // (multi-module-ambiguous) action name. Children re-wrap with their own
+    // id; envelopes pass through, so the innermost node wins.
+    val baseDispatcher = LocalActionDispatcher.current
+    val nodeDispatcher = remember(renderer, element.id, baseDispatcher) {
+        baseDispatcher?.let { renderer.nodeActionDispatcher(element.id, it) }
+    }
+    CompositionLocalProvider(LocalActionDispatcher provides nodeDispatcher) {
+        val renderModifier = finalModifier.videoIntentClickable(element)
 
-    // Render the component
-    handler.Render(
-        element = element,
-        modifier = finalModifier,
-        renderChildren = {
-            RenderChildren(element, renderer)
-        },
-    )
+        // Render the component
+        handler.Render(
+            element = element,
+            modifier = renderModifier,
+            renderChildren = {
+                RenderChildren(element, renderer)
+            },
+        )
+    }
 }
 
 /**

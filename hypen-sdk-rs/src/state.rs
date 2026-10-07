@@ -32,6 +32,7 @@ pub(crate) struct StateContainer<S: State> {
     /// JSON snapshot taken *before* the most recent handler ran.
     /// Used to compute changed paths after mutation.
     snapshot: Value,
+    reserved: serde_json::Map<String, Value>,
 }
 
 impl<S: State> StateContainer<S> {
@@ -41,6 +42,7 @@ impl<S: State> StateContainer<S> {
             serde_json::to_value(&initial).map_err(|e| SdkError::StateSerde(e.to_string()))?;
         Ok(Self {
             value: initial,
+            reserved: reserved_fields(&snapshot),
             snapshot,
         })
     }
@@ -57,8 +59,7 @@ impl<S: State> StateContainer<S> {
 
     /// Take a snapshot of the current state (call *before* a handler mutates it).
     pub fn take_snapshot(&mut self) -> Result<()> {
-        self.snapshot =
-            serde_json::to_value(&self.value).map_err(|e| SdkError::StateSerde(e.to_string()))?;
+        self.snapshot = self.to_json()?;
         Ok(())
     }
 
@@ -72,8 +73,7 @@ impl<S: State> StateContainer<S> {
     /// exactly one implementation of this algorithm across all Hypen
     /// SDKs, and it lives in the engine crate.
     pub fn changed_paths(&self) -> Result<Vec<String>> {
-        let current =
-            serde_json::to_value(&self.value).map_err(|e| SdkError::StateSerde(e.to_string()))?;
+        let current = self.to_json()?;
         Ok(hypen_engine::diff_paths(&self.snapshot, &current)
             .into_iter()
             .map(|e| e.path)
@@ -82,7 +82,21 @@ impl<S: State> StateContainer<S> {
 
     /// Get the current state as a JSON value (for the engine).
     pub fn to_json(&self) -> Result<Value> {
-        serde_json::to_value(&self.value).map_err(|e| SdkError::StateSerde(e.to_string()))
+        let mut json =
+            serde_json::to_value(&self.value).map_err(|e| SdkError::StateSerde(e.to_string()))?;
+        if let Some(map) = json.as_object_mut() {
+            for (key, value) in &self.reserved {
+                map.entry(key.clone()).or_insert_with(|| value.clone());
+            }
+        }
+        Ok(json)
+    }
+
+    pub(crate) fn replace_json(&mut self, json: Value) -> Result<()> {
+        let value = decode_state(&json)?;
+        self.reserved = reserved_fields(&json);
+        self.value = value;
+        Ok(())
     }
 
     /// Build a JSON patch object that the engine's `update_state`
@@ -100,8 +114,7 @@ impl<S: State> StateContainer<S> {
     /// `Engine::update_state_sparse`; this method is for the
     /// object-merge variant used by `sync_state_to_engine`.)
     pub fn diff_patch(&self) -> Result<Value> {
-        let current =
-            serde_json::to_value(&self.value).map_err(|e| SdkError::StateSerde(e.to_string()))?;
+        let current = self.to_json()?;
         let mut patch = serde_json::Map::new();
         let Value::Object(current_map) = &current else {
             return Ok(Value::Object(patch));
@@ -122,6 +135,108 @@ impl<S: State> StateContainer<S> {
     }
 }
 
+fn reserved_fields(json: &Value) -> serde_json::Map<String, Value> {
+    json.as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| k.starts_with("__"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Typed models need not declare runtime-owned state (even with deny_unknown_fields).
+pub(crate) fn decode_state<S: State>(json: &Value) -> Result<S> {
+    if let Ok(value) = serde_json::from_value(json.clone()) {
+        return Ok(value);
+    }
+    let mut user = json.clone();
+    if let Some(map) = user.as_object_mut() {
+        map.retain(|key, _| !key.starts_with("__"));
+    }
+    serde_json::from_value(user).map_err(|e| SdkError::StateSerde(e.to_string()))
+}
+
+pub(crate) fn encode_state<S: State>(state: &S, previous: &Value) -> Result<Value> {
+    let mut json = serde_json::to_value(state).map_err(|e| SdkError::StateSerde(e.to_string()))?;
+    if let Some(map) = json.as_object_mut() {
+        for (key, value) in reserved_fields(previous) {
+            map.entry(key).or_insert(value);
+        }
+    }
+    Ok(json)
+}
+
+/// Calculate and validate the entire outcome before committing either axis/list.
+pub(crate) fn apply_dnd_to_json<S: State>(
+    current: &Value,
+    action: &str,
+    payload: Option<&Value>,
+) -> Result<Value> {
+    use hypen_engine::action_routing::safe_state_path;
+    let invalid = || SdkError::StateSerde(format!("{action}: invalid or incompatible outcome"));
+    let p = payload.and_then(Value::as_object).ok_or_else(invalid)?;
+    let mut next = current.clone();
+    let mut written = Vec::new();
+    if action == "__hypen_reorder" {
+        let from_path = p
+            .get("fromPath")
+            .or_else(|| p.get("path"))
+            .and_then(Value::as_str)
+            .ok_or_else(invalid)?;
+        let to_path = p.get("toPath").and_then(Value::as_str).unwrap_or(from_path);
+        let from = p
+            .get("from")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(invalid)?;
+        let to = p
+            .get("to")
+            .and_then(Value::as_u64)
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(invalid)?;
+        if !safe_state_path(from_path) || !safe_state_path(to_path) {
+            return Err(invalid());
+        }
+        if !hypen_engine::path_move(&mut next, from_path, from, to_path, to) {
+            return Ok(current.clone());
+        }
+    } else if action == "__hypen_pin" {
+        let path = p
+            .get("path")
+            .and_then(Value::as_str)
+            .filter(|p| safe_state_path(p))
+            .ok_or_else(invalid)?;
+        for (axis, field) in [("x", "xKey"), ("y", "yKey")] {
+            let key = p
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|k| !k.is_empty())
+                .unwrap_or(axis);
+            if !safe_state_path(key) || key.contains('.') {
+                return Err(invalid());
+            }
+            let value = p
+                .get(axis)
+                .filter(|v| v.as_f64().is_some_and(f64::is_finite))
+                .ok_or_else(invalid)?
+                .clone();
+            let path = format!("{path}.{key}");
+            hypen_engine::path_set(&mut next, &path, value.clone());
+            written.push((path, value));
+        }
+    } else {
+        return Err(invalid());
+    }
+    let typed: S = decode_state(&next)?;
+    let encoded = encode_state(&typed, &next)?;
+    for (path, value) in written {
+        if hypen_engine::path_get(&encoded, &path) != Some(value) {
+            return Err(invalid());
+        }
+    }
+    Ok(encoded)
+}
+
 // ---------------------------------------------------------------------------
 // __hypen_bind two-way binding helpers
 // ---------------------------------------------------------------------------
@@ -133,22 +248,8 @@ impl<S: State> StateContainer<S> {
 //
 // See ENGINE_CONTRACT.md §13 for the cross-SDK contract.
 
-/// Apply a `__hypen_bind` payload to a typed state value via JSON round-trip.
-///
-/// Serializes `current` to JSON, calls [`hypen_engine::path_set`], and
-/// deserializes back to `S`. Errors out if the resulting JSON doesn't
-/// fit the type.
-pub(crate) fn apply_bind<S: State>(current: &S, path: &str, value: Value) -> Result<S> {
-    let mut json =
-        serde_json::to_value(current).map_err(|e| SdkError::StateSerde(e.to_string()))?;
-    hypen_engine::path_set(&mut json, path, value);
-    serde_json::from_value(json)
-        .map_err(|e| SdkError::StateSerde(format!("__hypen_bind apply at '{path}': {e}")))
-}
-
-/// JSON-side variant of [`apply_bind`] for the remote session. Returns
-/// `None` if the bind would produce a shape `S` cannot accept (silently
-/// dropped, mirroring TS/JS proxy semantics).
+/// Apply a binding through JSON while retaining runtime-owned state. Returns
+/// `None` when the resulting value cannot be represented by the typed model.
 pub(crate) fn apply_bind_to_json<S: State>(
     state_json: &Value,
     path: &str,
@@ -156,8 +257,8 @@ pub(crate) fn apply_bind_to_json<S: State>(
 ) -> Option<Value> {
     let mut new_json = state_json.clone();
     hypen_engine::path_set(&mut new_json, path, value);
-    let typed: S = serde_json::from_value(new_json.clone()).ok()?;
-    serde_json::to_value(&typed).ok()
+    let typed: S = decode_state(&new_json).ok()?;
+    encode_state(&typed, &new_json).ok()
 }
 
 #[cfg(test)]
@@ -374,5 +475,65 @@ mod tests {
         let json = container.to_json().unwrap();
         assert_eq!(json["count"], 42);
         assert_eq!(json["name"], "Bob");
+    }
+}
+
+#[cfg(test)]
+mod dnd_regressions {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use serde_json::json;
+
+    #[derive(Clone, Default, Serialize, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct StrictState {
+        count: i32,
+        items: Vec<String>,
+    }
+
+    #[test]
+    fn reserved_pin_survives_typed_mutation_snapshot_and_restore() {
+        let mut state = StateContainer::new(StrictState {
+            count: 0,
+            items: vec!["a".into(), "b".into()],
+        })
+        .unwrap();
+        state.take_snapshot().unwrap();
+        let next = apply_dnd_to_json::<StrictState>(
+            &state.to_json().unwrap(),
+            "__hypen_pin",
+            Some(&json!({"path":"__dnd.board.n1","x":0.5,"y":0.25,"xKey":"left","yKey":"top"})),
+        )
+        .unwrap();
+        state.replace_json(next).unwrap();
+        assert_eq!(
+            state.diff_patch().unwrap(),
+            json!({"__dnd":{"board":{"n1":{"left":0.5,"top":0.25}}}})
+        );
+        state.take_snapshot().unwrap();
+        state.get_mut().count += 1;
+        assert_eq!(state.changed_paths().unwrap(), vec!["count"]);
+        let snapshot = state.to_json().unwrap();
+        let mut restored = StateContainer::new(StrictState::default()).unwrap();
+        restored.replace_json(snapshot.clone()).unwrap();
+        assert_eq!(restored.to_json().unwrap(), snapshot);
+    }
+
+    #[test]
+    fn bound_pin_rejects_missing_fields_without_committing_either_axis() {
+        let before = json!({"count":0,"items":["a","b"]});
+        assert!(apply_dnd_to_json::<StrictState>(
+            &before,
+            "__hypen_pin",
+            Some(&json!({"path":"point","x":3,"y":4}))
+        )
+        .is_err());
+        let after = apply_dnd_to_json::<StrictState>(
+            &before,
+            "__hypen_reorder",
+            Some(&json!({"path":"items","from":0,"to":1})),
+        )
+        .unwrap();
+        assert_eq!(after["items"], json!(["b", "a"]));
     }
 }

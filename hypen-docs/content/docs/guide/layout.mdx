@@ -186,12 +186,6 @@ Grid(@state.cells, key: "id") {
 }
 .gridColumns(2)
 
-// Custom column template (Web)
-Grid(@state.cells, key: "id") {
-    Card { Text("@{item.label}") }
-}
-.gridTemplateColumns("1fr 2fr 1fr")
-
 // Separate row and column gaps
 Grid(@state.cells, key: "id") {
     Card { Text("@{item.label}") }

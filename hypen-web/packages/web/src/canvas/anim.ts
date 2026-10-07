@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * Canvas animation runtime for the `__anim.*` prop channel.
  *
@@ -1564,7 +1565,7 @@ export class CanvasAnimator {
     const resolved = resolveEventAction(spec);
     if (!resolved) return;
     try {
-      this.host.dispatchAction(resolved.actionName, { ...resolved.payload, ...completion });
+      dispatchUIAction(this.host, node.id, resolved.actionName, { ...resolved.payload, ...completion });
     } catch (err) {
       log.error(`Error dispatching action "${resolved.actionName}":`, err);
     }

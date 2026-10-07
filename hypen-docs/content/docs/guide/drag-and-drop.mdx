@@ -1,0 +1,309 @@
+---
+title: Drag and Drop
+description: Declarative drag-and-drop in Hypen — sortable lists, drop zones, pinboards, the .bind write, event payloads, keyboard operation, and per-platform support
+---
+
+# Drag and Drop
+
+Hypen does drag-and-drop declaratively: four *role* applicators say what a node is in the gesture, `.bind()` says which state the drop writes, and six event applicators say which action to dispatch. The renderer runs the drag preview locally — ghost, sibling shifts, zone highlight. It dispatches the final write and events at drop; opted-in start and hover events can also call your module during the gesture. No per-frame drag position enters state, and a renderer that doesn't implement dragging shows the same list, static and correct.
+
+| Construct | Declares |
+|-----------|----------|
+| `.draggable()` | A node the user can pick up |
+| `.dropZone()` | A target a compatible drag can be dropped *into* |
+| `.sortable()` | A container whose `ForEach` children reorder by dragging |
+| `.pinboard()` | A `Stack` whose `ForEach` children can be dropped anywhere and stay there |
+| `.bind(@state.path)` | The state the drop mutates — applied for you, before any event |
+| `.onDragStart` `.onDragOver` `.onDrop` `.onSort` `.onPin` `.onDragEnd` | Actions to dispatch |
+| `.states { onState(lifted) … onState(over) … }` | Looks driven by the drag itself |
+
+## Setup and Host Support
+
+Use an engine, host SDK, and renderer built with DnD support. Standard DOM, Canvas, SwiftUI, Compose, and desktop renderers attach their coordinator automatically; there is no plugin registration or feature flag. Put a stable `key:` on the `ForEach`, `.draggable()` on the lift surface, and `.sortable().bind(@state.tasks)` on the container. The TypeScript, Go, Kotlin, Swift, and Rust hosts register the outcome handlers automatically. Add `.onSort` only when you need application work such as saving to a server; define that action in the module as usual.
+
+**Ownership and versions:** Use matching engine, host, and renderer builds. Renderers send the originating node with each UI action; the engine resolves its live module and invokes that module's handler. Bind, reorder, pin, and DnD callbacks can safely reuse names and paths across modules. Stale or detached nodes and ambiguous legacy dispatches are rejected. Upgrade all three layers together: older engines do not recognize the new internal dispatch envelope.
+
+Automatic list transfers require both lists to belong to the **same module**. For a cross-module transfer, handle the destination's `.onSort` and mutate both modules through the application context. Its payload includes `fromScope` and `toScope` (lowercase module names; empty string for the primary slot). The automatic write is rejected and the drag preview expires without changing either list.
+
+All five hosts — TypeScript, Go, Kotlin, Swift, and Rust — register automatic reorder/pin handlers. Fractional pins and custom coordinate field names work in reserved and bound modes. No extra module action registration is needed.
+
+## Quick Start
+
+```hypen
+// Reorder a list: two applicators, no handler
+Column {
+    ForEach(items: @state.tasks, key: "id") {
+        TaskRow("@{item.title}").draggable()
+    }
+}
+    .sortable(axis: y)
+    .bind(@state.tasks)                              // the engine reorders state.tasks for you
+
+// Kanban: sort within a column AND move between columns, then tell the server
+Column { ForEach(items: @state.todo,  key: "id") { Card("@{item.title}").draggable() } }
+    .sortable(group: "board").bind(@state.todo).onSort(@actions.persistBoard)
+Column { ForEach(items: @state.doing, key: "id") { Card("@{item.title}").draggable() } }
+    .sortable(group: "board").bind(@state.doing).onSort(@actions.persistBoard)
+
+// Drop onto a target — your module owns the mutation
+Row { Text("Trash") }
+    .dropZone(group: "board", id: "trash")
+    .onDrop(@actions.deleteCard)
+    .states { onState(over).backgroundColor("#fee2e2") }
+
+// Pinboard: drop anywhere, stay there
+Stack {
+    ForEach(items: @state.notes, key: "id") {
+        StickyNote("@{item.text}").draggable()
+    }
+}
+    .size(1200, 800)
+    .pinboard(group: "board", grid: 8)
+```
+
+**Identity is the `ForEach` key.** `.draggable()` takes no id: the engine knows each row's key (`key:` field, else the item's `id`, else `<itemName>-<index>` — so a primitive-array row is `"item-0"`), and that key is the `item` in every event payload and the key the pinboard stores positions under.
+
+## Lift Surfaces — `.draggable()`
+
+```hypen
+.draggable()                                     // inherits group and axis from the enclosing .sortable / .pinboard
+.draggable(group: "cards", payload: @item)       // group restricts where it can land; payload rides in every event
+.draggable(handle: true)                         // informational — a .draggable always lifts from its own subtree; the row moves
+.draggable(activation: press)                    // auto | slop | press | immediate
+.draggable(enabled: @state.canEdit)              // bindable
+```
+
+- Arguments are named-only (a positional `.draggable("cards")` warns and is ignored). `group:` and `activation:` are static; `payload:` and `enabled:` may bind.
+- `group:` defaults to the enclosing sortable's or pinboard's group. An ungrouped source lands only on ungrouped zones and its own container.
+- The grip pattern is the "just make it unambiguous" answer on touch: put `.draggable()` on the grip node and only the grip lifts, so buttons in the row stay buttons and scrolling stays scrolling. The lift surface of any `.draggable` is its own subtree on every renderer; `handle: true` documents the intent but **no renderer reads it in v1** — it never restricts or extends the lift surface.
+- A disabled source never claims the pointer and is skipped by keyboard lift.
+
+**Platform Support:** Web, Canvas, Desktop, iOS, Android
+
+## Drop Targets — `.dropZone()`
+
+```hypen
+.dropZone(group: "fs", id: "trash")              // id is what from.zone / to.zone carry
+.dropZone(group: "fs", id: "@{item.id}", enabled: @item.isFolder)
+.dropZone(band: 0.3)                             // narrower "into" band on a sortable item
+```
+
+- `id:` defaults to the node's `id` prop, else the node id; templates like `"zone-@{item.id}"` re-resolve.
+- `enabled:` (bindable, default `true`) — a disabled zone is transparent to drags.
+- `band:` (0..1, default `0.5`) — the middle fraction of a *sortable item* that means "into"; see the band rule below.
+- The innermost enabled, group-compatible zone under the pointer wins. A source is never a zone for itself.
+
+**Platform Support:** Web, Canvas, Desktop, iOS, Android
+
+### Files from the OS
+
+Add `files: true` and a zone also reacts while files dragged in from outside the app hover it: from the desktop, a file manager, or another app.
+
+```hypen
+Column { Text("Drop photos here") }
+    .dropZone(group: "uploads", files: true, accept: "image/*")
+    .onFileDragEnter(@actions.upload)
+    .states { onState(over).backgroundColor("#eef2ff").borderColor("#6366f1") }
+```
+
+- While matching files hover the zone, it gets the same `over` pose an in-app drag gives it. The innermost zone that accepts the drag wins; a zone that rejects it (disabled, or `accept` doesn't match) lets an enclosing one light up instead.
+- `accept:` takes an `<input accept>` filter: MIME types, `type/*` wildcards, `.ext`. Platforms that can't tell the types before the drop treat them as a match, and an extension (`.pdf`) can only be checked where file names are known early (desktop).
+- `.onFileDragEnter` fires once per entry, only when the zone would light up. Its payload is `{type: "filedragenter", timestamp, items}` with an item count, never names or contents.
+- The files themselves never reach your module. Answer `.onFileDragEnter` with a pick, and the host's dialog takes the drop:
+
+```typescript
+.onAction("upload", async ({ context }) => {
+  const res = await context.device.request("file.pick", { accept: ["image/*"], maxCount: 8 });
+  // res.value.items: the files the user dropped (or chose) in the host dialog
+})
+```
+
+- Give the zone its own `group:` when it wraps in-app draggables, so dragging your own items doesn't light it up (an ungrouped zone accepts ungrouped sources and its descendants).
+
+## Reorderable Lists — `.sortable()`
+
+```hypen
+Column { ForEach(items: @state.tasks, key: "id") { TaskRow("@{item.title}").draggable() } }
+    .sortable()                                  // group from the node's static id (else self-only); axis y
+    .sortable(group: "board", axis: x)           // accepts drops from sibling lists of the same group
+    .bind(@state.tasks)                          // the write target — omit it to own the mutation
+```
+
+- `group:` defaults to the node's **static** `id` (the `id` argument or `.id("…")`), else `null` — a self-only list. Lists sharing a group transfer items between each other.
+- `axis:` (`x` | `y`, default `y`) is the sort axis and drives the touch activation rule.
+- Siblings shift to open the gap while the drag is live; on drop the local preview is held until the engine's `Move` patches land, so nothing flashes.
+- The element that moves is the sortable's direct child containing the source — `ForEach { Row { Icon().draggable(handle: true) Text() } }` moves the whole row.
+
+**Platform Support:** Web, Canvas, Desktop, iOS, Android
+
+## Free Placement — `.pinboard()`
+
+```hypen
+// Reserved-state mode: positions live in module state under __dnd.<group>.<key>
+Stack { ForEach(items: @state.notes, key: "id") { StickyNote("@{item.text}").draggable() } }
+    .size(1200, 800)
+    .pinboard(group: "board", grid: 8)
+
+// User-field mode: positions ARE your data
+Stack { ForEach(items: @state.seats, key: "id") {
+    Seat("@{item.label}").translateX(@item.x).translateY(@item.y).draggable()
+} }
+    .pinboard(x: "x", y: "y")
+    .bind(@state.seats)
+    .onPin(@actions.seatMoved)
+```
+
+- `group:` (defaults to the static `id`) — **required in reserved-state mode**; without it the board warns once and lowers nothing.
+- `x:` / `y:` name the fields (default `"x"` / `"y"`); `grid:` snaps; `bounds:` is `clamp` (default) or `free`; `units:` is `px` (default) or `fraction` (normalized coordinates automatically projected against the current content-box size).
+- **Mode is decided by `.bind`.** Without it, position is presentation state: the engine injects `translateX`/`translateY` bindings to the reserved `__dnd.<group>.<key>` subtree of the module's state, your item type grows no coordinates, and an unpinned item sits at the origin. With `.bind(@state.list)` and `units: px`, author `.translateX(@item.x).translateY(@item.y)` and the drop writes your fields. With `units: fraction`, omit these translates: the engine supplies normalized positions from your item fields. An explicit translate on an axis overrides the automatic position on that axis.
+- Coordinates are the item's top-left relative to the board's content box (inside padding), after grid snap, clamp, and the units conversion.
+
+**Platform Support:** Web, Canvas, Desktop, iOS, Android
+
+### Fractional coordinates and custom fields
+
+```hypen
+Stack { ForEach(items: @state.notes, key: "id") {
+    StickyNote("@{item.text}").draggable()
+} }
+    .pinboard(group: "board", x: "left", y: "top", units: fraction)
+```
+
+This stores `state.__dnd.board.<key>.left` and `.top`. A value of `0.5` means half the board's content width/height, including after resize. Add `.bind(@state.notes)` to store those fields on each note instead. In fraction mode, omit authored pixel translates unless you intend to override an axis. Coordinate fields must be nonempty leaf names (no dots); `__proto__`, `prototype`, and `constructor` are not allowed.
+
+## The Write — `.bind()`
+
+`.bind(@state.path)` on a sortable or pinboard names the state the drop mutates, and the SDK applies that mutation *before* any event fires — through the module's tracked state, so it invalidates dependents, persists with `.persist(...)`, and streams under Remote UI like any mutation of your own.
+
+| Role | What the drop does |
+|------|--------------------|
+| `.sortable().bind(@state.tasks)` | `path_move`: the item is spliced out and re-inserted at its final index. Same-list reorders and transfers between two bound lists of one group both work. |
+| `.pinboard(...)` | Two field sets (`x`, `y`), batched into one flush — your fields in user-field mode, `__dnd.<group>.<key>` in reserved mode. |
+
+- **An unbound sortable does not write state.** Handle `.onSort` to own the mutation. An unbound pinboard is different: it automatically writes reserved `__dnd` positions.
+- A drop back on the origin slot writes nothing and fires only `.onDragEnd { dropped: true }`.
+- Drops *into* a `.dropZone` never write — a zone is an event target; your `.onDrop` handler moves the data.
+
+The reserved `__dnd` subtree is ordinary module state: it persists, restores before `onCreated`, and can be seeded in `defineState` for initial positions. On typed hosts (Kotlin, Swift, Rust) top-level `__` keys are preserved across the typed round-trip, so the reserved form is safe with no schema obligation; for the `.bind` form the fields named by `x:`/`y:` must exist on the item type (the SDK warns once per dropped path). Sort is immune — it adds no keys.
+
+## Events
+
+```hypen
+.onDragStart(@actions.dragBegan)                 // on the draggable, or on the container to cover all children
+.onDragOver(@actions.openFolder, dwell: 600)     // on a zone: fires once per entry after dwell ms (default 500)
+.onDrop(@actions.moveInto)                       // on a zone: the drop resolved INTO it
+.onSort(@actions.persistBoard)                   // on a sortable: fires on the DESTINATION list, after the write
+.onPin(@actions.seatMoved)                       // on a pinboard: after the write
+.onDragEnd(@actions.dragEnded)                   // drop AND cancel: payload.dropped is true | false
+```
+
+Every event receives the same payload, so one handler can serve many zones:
+
+```typescript
+{
+  item: string,                            // the ForEach key of the dragged node
+  payload?: unknown,                       // .draggable(payload:)
+  from: { zone: string, index: number | null },
+  to:   { zone: string, index: number | null },   // index null = "into", not "at"
+  x?: number, y?: number,                  // .onPin only — board content-box units
+  dropped?: boolean,                       // .onDragEnd only
+}
+```
+
+`zone` is a sortable's/pinboard's group (else its `id`, else the node id) or a `.dropZone`'s `id:`. **Order on drop:** the write, then `.onSort` / `.onPin` / `.onDrop`, then `.onDragEnd { dropped: true }`. A cancel fires only `.onDragEnd { dropped: false }`; a node removed mid-drag fires nothing.
+
+```typescript
+import { app, type DndEventPayload } from "@hypen-space/core";
+
+type Card = { id: string; title: string };
+
+export default app
+  .defineState<{ todo: Card[]; doing: Card[] }>({ todo: [], doing: [] })
+  .onAction<DndEventPayload>("deleteCard", ({ action, state }) => {
+    if (!action.payload) return;
+    // Both lists share group "board", so from.zone cannot identify the list.
+    // Stable item keys identify the card across the two lists.
+    const id = action.payload.item;
+    state.todo = state.todo.filter(card => card.id !== id);
+    state.doing = state.doing.filter(card => card.id !== id);
+  })
+  .onAction("persistBoard", async ({ state }) => {
+    // .bind already applied the move. Replace with your persistence call.
+    console.log({ todo: state.todo.map(card => card.id), doing: state.doing.map(card => card.id) });
+  })
+  .build();
+```
+
+## Drag-Driven Looks — `.states { }` without a state path
+
+A header-less `.states` block on a node with a DnD role is driven by the drag itself, not by state: **`lifted`** applies to the source while it is in the air, **`over`** to a zone while a compatible drag hovers it. They are ordinary `.states` poses — cross-renderer looks, not CSS — with the usual pose rules (static values only).
+
+```hypen
+Card("@{item.title}")
+    .draggable()
+    .states { onState(lifted).opacity(0.6).scale(1.04).tw("shadow-xl") }
+
+Column { ... }
+    .dropZone(group: "cards", id: "doing")
+    .states(transition: easeOut, duration: 120) { onState(over).backgroundColor("#eef2ff") }
+```
+
+The synthesized transition glides the switch on the web and iOS; desktop and Android snap it. A `.states(@state.x) { … }` with a header on the same node behaves exactly as before.
+
+**Platform Support:** Web, Canvas, Desktop, iOS, Android
+
+## Activation and Handles
+
+A drag that starts on pointer-down steals scrolling, so the default `auto` picks the rule per input:
+
+| Input | `auto` means |
+|-------|--------------|
+| Mouse / pen | 6px of travel along any axis — a tap is a total no-op and child clicks pass through |
+| Touch inside an axis-constrained `.sortable` | slop on the *cross* axis: sideways lifts, along-the-list scrolls |
+| Touch elsewhere (pinboards, loose draggables) | a ~300ms long-press; moving first scrolls |
+| `.draggable()` on a grip node | the same rules, on the grip's subtree only — the enclosing row moves |
+
+Override per source with `activation: slop | press | immediate`. **Prefer a grip on mobile** — it removes the ambiguity entirely. The grip works because the lift surface is always the `.draggable` node's own subtree; `handle: true` changes nothing by itself.
+
+## The Band Rule
+
+An item that is both a sortable row and a `.dropZone` (a folder in a file list) is split along the sort axis: the middle `band` fraction (default 50%) means *into* (`.onDrop`), the outer parts mean insert before/after (a reorder). A zone with `enabled: false` has no inner band and is an ordinary row.
+
+```hypen
+Column {
+    ForEach(items: @state.entries, key: "id") {
+        Row { Icon("@{item.kind}") Text("@{item.name}") }
+            .draggable(group: "fs")
+            .dropZone(group: "fs", id: "@{item.id}", enabled: @item.isFolder)
+            .onDrop(@actions.moveInto)
+            .onDragOver(@actions.openFolder, dwell: 600)    // spring-loaded folders
+    }
+}
+    .sortable(group: "fs").bind(@state.entries)
+```
+
+Rows inserted mid-drag (the folder opening) become live targets immediately. The renderer never rejects a semantically invalid drop (a folder into its own descendant) — check that in your handler.
+
+## Keyboard
+
+DOM and Canvas sortable drags are keyboard-operable with no extra markup, and it emits the identical events: `Tab` to a draggable, `Space` to lift, arrow keys to move within the list, `Tab`/`Shift+Tab` to move between zones, `Space` to drop, `Esc` to cancel. The web renderer announces each step through a polite live region — the sentence names the item by its `ForEach` **key**, not a title (`"t3, position 2 of 5"`), so choose readable keys or supply an accessible name yourself; Canvas keyboard drag sets `aria-grabbed` on the accessibility mirror but has no announcements in v1 (its `describeKeyboard()` names foreign zones by node id); Android exposes "Move up/down" TalkBack actions instead. iOS and desktop have no keyboard drag path; provide ordinary move controls for users who cannot drag. Pinboard items cannot be lifted from the keyboard in v1, the machine's zone counts are snapshotted at lift (a keyboard drop after a mid-drag row insert may carry an index the host clamps), and tabbing to another list opens its gap without previewing the item inside it.
+
+## Degradation
+
+Two mid-drag edge rules to know: a new press during the post-drop hold window (until the engine's re-render lands, at most 500ms) is ignored — no events; and a draggable whose `enabled:` binding flips to `false` while it is in the air cancels silently, with no `.onDragEnd`, exactly like a mid-drag `Remove`.
+
+Malformed input warns once and falls back — never an error: positional arguments are ignored, unknown tokens take their default, an out-of-range `band:` becomes `0.5`, a reserved-mode pinboard with no group lowers nothing (its draggables still work as loose sources), and a renderer that doesn't implement the channel shows a static, correct list. Reduced motion never affects the drag itself (direct manipulation); only the sibling shift and pose transitions snap.
+
+## Platform Support Summary
+
+| Channel | Web (DOM) | Canvas 2D | Desktop | iOS | Android |
+|---------|-----------|-----------|---------|-----|---------|
+| `.draggable` activation | Mouse + touch rules | Mouse only | Mouse only | Touch rules (`DragGesture` / long press) | Mouse + touch rules |
+| `.sortable` preview | Yes (150ms shift) | Yes (shift snaps) | Yes (shift snaps) | Yes (150ms shift) | Yes (150ms shift) |
+| `.dropZone` + band | Yes | Yes | Yes | Yes | Yes |
+| `.pinboard` (both modes) | Yes | Yes | Yes | Yes | Yes |
+| `lifted` / `over` poses | Glide | Yes | Snap | Glide | Snap |
+| Keyboard drag | Yes (live region) | Yes (`aria-grabbed` only, no announcements) | No | No | TalkBack custom actions |
+| `.bind` writes + events | Automatic host writes | Automatic host writes | Rust host | Swift host | Kotlin/Go/TS/Swift host |
+
+There is no autoscroll in v1. `handle: true` is informational; put `.draggable()` on the grip itself. Swift renderer and server tests, an iOS Simulator build, and Android renderer unit tests were verified on a Mac. These checks do not replace device testing of gesture competition, VoiceOver/TalkBack, and scroll containers. The full matrices and wire contract live in the SDK reference, `hypen-web/docs/dnd.md`.

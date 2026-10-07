@@ -1,0 +1,63 @@
+{
+  "name": "cancel-race",
+  "description": "Server cancellation races the client's in-flight success. The server retires id 3 at send and settles locally as cancelled; the late terminal response is ignored under the unknown/stale-id rule. Both sides settle exactly once and the server never sends a deviceResponse.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 3,
+        "capability": "permission.request",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "settings-1",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "notifications"
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 3,
+        "control": {
+          "cancel": true
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 3,
+        "result": {
+          "status": "granted"
+        }
+      },
+      "ignored": true
+    }
+  ]
+}

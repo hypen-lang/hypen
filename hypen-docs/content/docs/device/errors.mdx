@@ -1,0 +1,154 @@
+---
+title: Errors
+description: The ten device error codes, when each occurs, the platformDetail values you will see, and how to handle errors in each SDK
+---
+
+# Errors
+
+Device operations fail with **values, not exceptions**. A user dismissing a
+picker is an ordinary outcome, and your handler deals with it like any other
+result. Every failure carries one of ten codes. The set is closed: a new code
+would require a new protocol version.
+
+| Code | Meaning | Typical causes |
+|------|---------|----------------|
+| `unsupported` | The capability, or the requested revision, isn't available on this connection | The client doesn't offer it (no Web Bluetooth, no camera, a missing `Info.plist` key or manifest entry, the indicator not ready); `lifetime: "background"`; a host that can't represent a permission (`contacts` on the web) |
+| `unavailable` | The capability exists, but the current host state or policy prevents it | No device plane (`device-disabled`); a call from `onCreated` before activation or from a deactivation or destroy handler (`owner-inactive`); a replayed dispatch (`syncActions.replay`); an undeclared native permission (`not-declared:<name>`); Bluetooth off (`adapter-off`); a host that can't show its UI right now |
+| `denied` | The user or the OS refused | Cancel in the host consent dialog; a refused OS permission prompt |
+| `revoked` | A permission that was granted was withdrawn while the operation ran | The user turns off camera or microphone access mid-recording. Stop the affected work. |
+| `cancelled` | An admitted operation was abandoned | The user dismissed the system picker, capture UI or chooser; you called `cancel()` or aborted the `signal`; the handler returned with the request still pending; the module deactivated; the user tapped Stop on a scan |
+| `timeout` | The overall deadline expired | The user left the picker open past `timeoutMs` |
+| `throttled` | A prompt, rate or resource limit stopped the operation | Another prompt is already open (`prompt-in-progress`); a refusal cooldown is active (`cooldown`); the connection's upload budget is full; a live capture filled its bounded buffer while your consumer was slow |
+| `connectionLost` | The transport, the server broker or the lease was lost | The socket closed; the lease wasn't renewed for 15 s; a Cloudflare Durable Object woke without its broker; the server process restarted |
+| `invalidParams` | Parameters, or data on the wire, violated the capability's schema | A bad argument (the detail names the field, e.g. `params $.maxCount: …`); `initialCredit: 0`; an uploaded item larger than 64 MiB or its declared size; a byte count or SHA-256 mismatch; a malformed message from the client |
+| `internal` | An unexpected failure in the platform driver or the host | A bug or an unexpected platform error |
+
+## platformDetail
+
+`error.platformDetail` is short diagnostic text: either the server's reason
+for refusing a request locally, or the client's description of what happened.
+It helps with logging and debugging. **Portable code must not branch on it.**
+The values differ between platforms and aren't part of the protocol. Text
+that comes from the client is also untrusted input.
+
+Values you'll commonly see:
+
+| Detail | Code | Meaning |
+|--------|------|---------|
+| `device-disabled` | `unavailable` | No device plane on this connection (the server called `disableDevice()` or uses allow-multiple sessions, the client has no device host, or the socket is compressed with shared history) |
+| `owner-inactive` | `unavailable` | The module isn't in an active activation (see [Lifetimes](/docs/device/lifetimes)) |
+| `syncActions.replay` | `unavailable` | The call came from a replayed or broadcast dispatch |
+| `not-declared:<name>` | `unavailable` | A native app didn't declare the permission |
+| `cooldown` | `throttled` | The user recently refused this capability |
+| `prompt-in-progress` | `throttled` | Another host prompt is open |
+| `picker-dismissed` | `cancelled` | The user closed the web file chooser |
+
+## Handling errors
+
+A missing capability is best handled **before** the request: check
+`supports()` and hide the button. For everything else, treat `cancelled`
+as quiet, show the rest, and log `platformDetail`:
+
+```typescript
+.onAction("addPhoto", async ({ state, context }) => {
+  const res = await context.device.request("gallery.pick", { mediaTypes: ["photo"], maxCount: 1 });
+  if (res.ok) {
+    state.photos.push(await storage.upload(res.value.items[0].bytes));
+    return;
+  }
+  switch (res.error.code) {
+    case "cancelled":
+      return; // the user changed their mind
+    case "denied":
+      state.notice = "Photo access was declined.";
+      break;
+    case "throttled":
+      state.notice = "Please try again in a moment.";
+      break;
+    case "unsupported":
+    case "unavailable":
+      state.notice = "This device can't pick photos right now.";
+      break;
+    default:
+      state.notice = "Something went wrong.";
+  }
+  console.warn("gallery.pick failed", res.error.code, res.error.platformDetail);
+})
+```
+
+### Go
+
+Errors are `*device.Error` values with a `Code` and a `Detail`. Match them
+with `errors.Is` and the sentinels (`device.ErrDenied`, `device.ErrCancelled`,
+…), or read the code with `device.CodeOf(err)`. If your `context.Context`
+ends, the request is cancelled. The error is then `cancelled`, or `timeout`
+for a context deadline, and it unwraps to `ctx.Err()`.
+
+```go
+items, err := ctx.Device().Gallery().Pick(reqCtx, params)
+switch {
+case err == nil:
+    // use items
+case errors.Is(err, device.ErrCancelled):
+    return
+case errors.Is(err, device.ErrDenied):
+    ctx.State.Notice = "Photo access was declined."
+default:
+    ctx.State.Notice = "Couldn't pick a photo (" + string(device.CodeOf(err)) + ")"
+}
+```
+
+### Kotlin
+
+Calls return `DeviceResult<T>`, either `Ok(value, simulated)` or
+`Err(DeviceFailure(code, platformDetail))`. Helpers: `getOrNull()`,
+`errorOrNull()`, `map`, `onOk`, `onErr`, and `getOrThrow()`, which throws
+`DeviceException`. Only coroutine cancellation throws on its own. A failed
+`events(...)` or `data(...)` flow fails with `DeviceException`.
+
+```kotlin
+when (val r = ctx.device.gallery.pick(GalleryPickParams(listOf(MediaType.PHOTO), 1))) {
+    is DeviceResult.Ok -> save(r.value.single().bytes)
+    is DeviceResult.Err -> when (r.error.code) {
+        DeviceErrorCode.CANCELLED -> Unit
+        DeviceErrorCode.DENIED -> ctx.state.set("notice", "Photo access was declined.")
+        else -> ctx.state.set("notice", "Couldn't pick a photo (${r.error.code.wireName})")
+    }
+}
+```
+
+### Swift
+
+Calls return `Result<DeviceValue<T>, DeviceError>`. `DeviceError` has `code`
+(`.denied`, `.cancelled`, …) and `platformDetail`.
+
+```swift
+switch await ctx.device.gallery.pick([.photo]) {
+case .success(let picked):
+    await save(picked.items[0].bytes)
+case .failure(let error) where error.code == .cancelled:
+    break
+case .failure(let error):
+    ctx.state.set("notice", "Couldn't pick a photo (\(error.code.rawValue))")
+}
+```
+
+### Rust
+
+Local refusals come back at once as `Err(DeviceError)` from the call itself;
+everything else arrives as `DeviceResult<Delivered<T>>` when the call
+settles. `DeviceError` has `code` (a `DeviceErrorCode`), `detail` (the
+`platformDetail` or the broker's reason) and `code_str()` for the wire name.
+Nothing panics.
+
+```rust
+match ctx.expect("remote handler").device().gallery_pick(&[MediaType::Photo], 1) {
+    Ok(call) => call.then(|s: &mut State, res| match res {
+        Ok(items) => s.photo_len = items[0].bytes.len(),
+        Err(e) if e.code == DeviceErrorCode::Cancelled => {}
+        Err(e) if e.code == DeviceErrorCode::Denied => s.notice = "Photo access was declined.".into(),
+        Err(e) => s.notice = format!("Couldn't pick a photo ({})", e.code_str()),
+    }),
+    Err(e) => state.notice = format!("Couldn't pick a photo ({})", e.code_str()),
+}
+```

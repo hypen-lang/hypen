@@ -1,0 +1,39 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-array-element-key-swap",
+  "description": "An element object replacing one key with another emits a removal and an addition under the element's index.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "xs": [
+        {
+          "a": 1
+        },
+        {
+          "a": 2
+        }
+      ]
+    },
+    "new": {
+      "xs": [
+        {
+          "a": 1
+        },
+        {
+          "b": 3
+        }
+      ]
+    }
+  },
+  "expected": [
+    {
+      "path": "xs.1.a",
+      "value": null
+    },
+    {
+      "path": "xs.1.b",
+      "value": 3
+    }
+  ]
+}

@@ -346,6 +346,26 @@ Card { }.elevation(16)  // Modal/dialog
 
 **Platform Support:** Android, iOS (Web: use boxShadow)
 
+### glow
+
+A soft light around whatever the element paints — a chart line, an icon, a
+button. Takes a colour, a radius, or both; defaults to the element's text
+colour at 6px. It is a `drop-shadow` filter underneath, so it follows the
+painted shape rather than a box, and it composes with `blur`, `saturate`
+and the other filter functions.
+
+```hypen
+Line(points: @state.revenue).stroke("#10b981").glow("#10b981")
+Icon("star").glow(radius: 10)
+Button { Text("Go") }.glow(color: "#f59e0b", radius: 12)
+```
+
+On SVG content (chart marks, icons) `shadow`, `boxShadow` and `elevation`
+also render as a `drop-shadow` filter, since a stroked path has no box for a
+box shadow to fall from.
+
+**Platform Support:** Web
+
 ### blur
 
 Applies a blur effect to the component's content.
@@ -735,7 +755,7 @@ The following Tailwind utility categories are supported:
 
 **Typography:** `text-xs`, `text-sm`, `text-base`, `text-lg`, `text-xl`, `text-2xl`, `font-thin`, `font-light`, `font-normal`, `font-medium`, `font-semibold`, `font-bold`, `leading-*`, `tracking-*`, `text-left`, `text-center`, `text-right`
 
-**Layout:** `flex`, `grid`, `justify-*`, `items-*`, `grid-cols-*`, `flex-row`, `flex-col`
+**Layout:** `flex`, `justify-*`, `items-*`, `flex-row`, `flex-col`. On a `Grid`: `grid-cols-N` (1–12, the column count, same as `.gridColumns(N)`; `md:`-style variants apply on web and desktop only, iOS and Android use the base count) and `col-span-N` on its items. Other Tailwind grid utilities are ignored
 
 **Borders:** `border`, `border-*`, `rounded`, `rounded-*`
 

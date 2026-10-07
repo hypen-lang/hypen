@@ -63,6 +63,13 @@ export class FocusManager {
   private engine: DispatchEngine;
   private hooks: FocusManagerHooks;
   private focusedNode: VirtualNode | null = null;
+  /**
+   * Optional first look at mirror key events (the drag-and-drop runtime's
+   * Space/Arrow/Tab/Esc handling). Returning `true` consumes the event: it
+   * is not dispatched to the node's `onKeyDown`/`onKeyUp` applicators.
+   */
+  private keyInterceptor: ((node: VirtualNode, type: "keydown" | "keyup", e: KeyboardEvent) => boolean) | null =
+    null;
 
   private boundFocusIn = (e: Event) => this.onFocusIn(e as FocusEvent);
   private boundFocusOut = (e: Event) => this.onFocusOut(e as FocusEvent);
@@ -225,10 +232,21 @@ export class FocusManager {
     dispatchNodeEvent(this.engine, node, "click", {});
   }
 
+  /**
+   * Install (or clear) the key interceptor consulted before applicator
+   * dispatch — see {@link keyInterceptor}.
+   */
+  setKeyInterceptor(
+    fn: ((node: VirtualNode, type: "keydown" | "keyup", e: KeyboardEvent) => boolean) | null,
+  ): void {
+    this.keyInterceptor = fn;
+  }
+
   private onMirrorKey(type: "keydown" | "keyup", e: KeyboardEvent): void {
     const node = this.resolveNode(e.target);
     if (!node) return;
     if (inExitingSubtree(node)) return;
+    if (this.keyInterceptor?.(node, type, e)) return;
     // Space/Enter on a toggle, arrows on a slider. Consumed keys still
     // dispatch onKeyDown below: an author who wired both gets both.
     if (type === "keydown" && handleControlKey(this.engine, node, e.key)) {
@@ -254,5 +272,6 @@ export class FocusManager {
       root.removeEventListener("keyup", this.boundKeyUp);
     }
     this.focusedNode = null;
+    this.keyInterceptor = null;
   }
 }

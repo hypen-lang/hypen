@@ -59,4 +59,14 @@ export type {
   SessionHost,
   RemoteSessionOptions,
   OutgoingMessage,
+  DeviceOutgoing,
 } from "./remote-session.js";
+
+// Negotiated WebSocket extensions vs the device plane (RFC 001 §2.3):
+// permessage-deflate is device-safe only with no context takeover both ways.
+export {
+  parseWebSocketExtensions,
+  deflateContextPolicy,
+  deviceSafeExtensions,
+} from "./ws-extensions.js";
+export type { WebSocketExtension, DeflateContextPolicy } from "./ws-extensions.js";

@@ -322,6 +322,119 @@ for stmt in imports {
 }
 ```
 
+## Agent Surface (Attach Mode)
+
+Callers that are not the rendered UI — an MCP server, an operator route, an
+LLM agent — reach a session through the engine's **guarded** external surface
+(`NativeEngine.dispatchExternal`, never `dispatchAction`): only declared
+`.onAction()` names, `Router { Route }` targets and `.bind()` fields are
+dispatchable, and only the state paths the template renders are readable.
+`RemoteServer.attach(_:)` binds such a caller to a **live user session**, so the
+dispatch runs on that user's engine and the user's own transport receives the
+result:
+
+```swift
+// From a request handler that has already authenticated the caller for
+// sessionID — attach(_:) does no authorization of its own and has no HTTP
+// route; whoever calls it is the authorizer.
+guard let handle = server.attach(sessionID) else {
+    return // unknown id, hello not yet completed, or destroyed — indistinguishable
+}
+
+let actions = try handle.listActions()                       // declared surface only
+try handle.dispatch("addToCart", payload: ["sku": "A1"])     // user's transport re-renders
+let total = try handle.getState(module: "Cart", path: "total") // bounded to rendered paths
+let revision = try handle.revision
+let manifest = try handle.manifest()                         // MCP manifest JSON, verbatim
+```
+
+A successful `dispatch` emits on the user's transport exactly what a click
+does: `patch` at revision N+1, then `stateUpdate` at N+2. A guard refusal
+throws the engine's `HypenError.ActionError` before anything is queued —
+no traffic, no revision bump. The handle holds the session weakly and
+**never owns it**: it cannot destroy, suspend or close the session, and once
+the user's session is gone `isAlive` is `false` and every member throws
+`AgentHandleError.sessionGone`. `attach` returns `nil` until the session has
+completed hello → initialTree (`RemoteSession.isReady`), because before the
+initial render the engine's declaration tables are empty.
+
+Attach requires a typed module (`module(_:_:)` with a `ModuleDefinition`,
+or `.app(myApp)`). The legacy `withState` + `onAction` shim never registers
+engine handlers or declares actions, so under it the guard refuses every
+attached dispatch.
+
+## Device Capabilities (RFC 001, provisional)
+
+Module handlers can use the connected client's device — permissions, photo/file
+pickers, camera, microphone, Bluetooth, file downloads — through `ctx.device`.
+The protocol itself (request ids, leases, credit, blob verification, scheduling)
+runs in the Rust device broker shared by every Hypen server SDK; the Swift
+server adds the handshake and an async API. The device plane is **on by
+default**: any client whose `hello` offers `device` gets one, with no call.
+
+```swift
+let app = HypenApp.shared.module("App").defineState(["status": ""])
+    .onActionAsync("checkCamera") { ctx in
+        switch await ctx.device.permissions.query(.camera) {      // typed Permission enum
+        case .success(let v): ctx.state.set("status", v.status.rawValue)
+        case .failure(let e): ctx.state.set("status", e.code.rawValue) // denied, unsupported, …
+        }
+    }
+    .onActionAsync("upload") { ctx in
+        if case .success(let picked) = await ctx.device.gallery.pick([.photo]) {
+            store(picked.items[0].bytes)                            // sha256-verified bytes
+        }
+    }
+    .onActionAsync("scan") { ctx in
+        for await device in ctx.device.bluetooth.scan() {           // AsyncSequence, credit-paced
+            if device.rssi > -50 { break }                          // leaving the loop cancels
+        }
+    }
+    .onActionAsync("export") { ctx in
+        _ = await ctx.device.files.save(reportData, name: "report.csv", contentType: "text/csv")
+    }
+    .build()
+
+RemoteServer()
+    .module("App", app)
+    .ui(ui)
+    .config(ServerConfig(                                           // recommended in production
+        allowedOrigins: ["https://app.example.com"],                // browsers
+        authenticate: { req in req.header("Authorization") == "Bearer …" } // every client
+    ))
+    .listen(3000)
+```
+
+Every call returns `Result<DeviceValue<T>, DeviceError>` and never throws;
+cancelling the calling `Task` cancels the request on the device. Requests are
+owned by the module's current activation: navigating away cancels them.
+Replayed or broadcast dispatches (`broadcastAction`) cannot start device work.
+
+- **Options**: `configureDevice(DeviceServerOptions(...), processRetainedBytes:)`
+  changes limits, budgets, the clock or revision overrides (defaults otherwise);
+  options the broker refuses make `prepare()` throw `invalidDeviceOptions`.
+- **Opt out**: `disableDevice()` makes the server UI-only.
+- **Admission**: `allowedOrigins` and `authenticate` are enforced exactly when
+  configured (native clients send no `Origin`, so they need `authenticate`).
+  With neither, every client is admitted and one startup warning is logged.
+- **Incompatible settings** never stop the server: `RemoteServer(sessionConfig:
+  SessionConfig(concurrent: .allowMultiple))` runs with the device plane off and
+  one startup warning.
+- **Legacy clients**: a hello grace (`createSession(transport:helloGraceMs:)`)
+  still auto-initialises clients that never send `hello` (without a device
+  plane). Every `sessionAck` carries a `resumeToken`; it is required to resume a
+  session that had a device plane, while a UI-only session resumes by id.
+
+Work that should outlive navigation uses the `background` lifetime, which a
+revision must allow — configure it with
+`configureDevice(DeviceServerOptions(revisionOverrides: [DeviceRevisionOverride(capability:
+"bluetooth.scan", version: 1, lifetimes: [.activation, .background])]))`. It is
+owned by the module instance (swept when it is destroyed), and at most
+`maxBackgroundOwners` modules (default 2) per connection may hold it; a further
+module's request fails `throttled`. For capability names only known at runtime,
+`ctx.device.requestUntyped("permission.query", paramsJSON: #"{"permission":"camera"}"#)`
+returns the validated result as JSON (`.resultJSON`, `.decode(_:)`).
+
 ## Connecting Clients
 
 ### iOS (HypenSwift)
@@ -369,6 +482,7 @@ engine.connect();
 | `ComponentDiscovery` | Filesystem scanning for `.hypen` files |
 | `ComponentResolver` | Import resolution from local files and URLs |
 | `RemoteServer` | WebSocket server streaming state/patches to clients |
+| `AgentHandle` | Attach mode: guarded, non-owning agent view of one live session (`RemoteServer.attach(_:)`) |
 | `RemoteEngine` | WebSocket client with auto-reconnect |
 
 ## WebSocket Protocol

@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Video + Scrubber through the DOM renderer's TEMPLATE INSTANTIATION path.
  *
@@ -31,7 +32,7 @@ ensureFakeDomGlobals();
 class RecordingEngine {
   actions: Array<{ name: string; payload: any }> = [];
   dispatchAction(name: string, payload?: any): void {
-    this.actions.push({ name, payload });
+    this.actions.push(semanticAction(name, payload));
   }
   actionsNamed(name: string): Array<{ name: string; payload: any }> {
     return this.actions.filter((a) => a.name === name);

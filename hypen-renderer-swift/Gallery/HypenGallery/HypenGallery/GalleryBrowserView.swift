@@ -155,6 +155,10 @@ struct GalleryBrowserView: View {
             // onChange does not fire for a value supplied during process launch.
             // Route launch arguments as soon as the root browser is mounted.
             presentGalleryItem(deepLinkItem)
+            if let url = previewUrl {
+                connect(to: url)
+                previewUrl = nil
+            }
         }
         .onChange(of: previewUrl) { _, newValue in
             if let url = newValue {
@@ -196,6 +200,7 @@ struct GalleryBrowserView: View {
         case .app(let url):
             HypenView(
                 url: url,
+                device: url.contains("device-lab") ? DeviceHost.iOS() : nil,
                 loadingContent: {
                     VStack(spacing: 16) {
                         ProgressView().scaleEffect(1.5)

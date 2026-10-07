@@ -145,7 +145,12 @@ fn paint_gate_class(key: &str) -> (bool, bool) {
         key.starts_with("translateX")
             || key.starts_with("translateY")
             || key.starts_with("scale")
-            || key.starts_with("rotate"),
+            || key.starts_with("rotate")
+            // The drag-and-drop runtime's local offsets ride the same
+            // transform post-pass (`layout::node_local_transform`), so
+            // they must open the gate too.
+            || key.starts_with(crate::dnd::LOCAL_PROP_PREFIX)
+            || key == "__dnd.pinX" || key == "__dnd.pinY",
     )
 }
 
@@ -393,6 +398,10 @@ impl Tree {
                 id,
                 before_id,
             } => {
+                if self.would_cycle(parent_id, id) {
+                    log::warn!("Insert of {id} under {parent_id} would create a cycle; skipping");
+                    return;
+                }
                 // Detach from any prior parent in case the host
                 // re-inserts without an explicit Move (defensive).
                 if let Some(prev_parent) = self.parent_by_child.get(id.as_ref()).cloned() {
@@ -411,6 +420,10 @@ impl Tree {
                 id,
                 before_id,
             } => {
+                if self.would_cycle(parent_id, id) {
+                    log::warn!("Move of {id} under {parent_id} would create a cycle; skipping");
+                    return;
+                }
                 // Unlink from old parent (O(1) parent lookup, then
                 // O(n_siblings) retain on just that one parent).
                 if let Some(prev_parent) = self.parent_by_child.get(id.as_ref()).cloned() {
@@ -451,6 +464,10 @@ impl Tree {
                 id,
                 before_id,
             } => {
+                if self.would_cycle(parent_id, id) {
+                    log::warn!("Attach of {id} under {parent_id} would create a cycle; skipping");
+                    return;
+                }
                 // Defensive unlink, mirroring Insert/Move: a healthy
                 // Attach targets a detached root (already out of every
                 // children list), but a buggy host attaching a live
@@ -482,6 +499,29 @@ impl Tree {
                 log::warn!("unexpanded template patch reached Tree::apply; skipping");
             }
         }
+    }
+
+    /// Whether linking `id` under `parent_id` would put a cycle in the tree:
+    /// the synthetic root never gets a parent, and a node never becomes its
+    /// own ancestor. A cycle reachable from the root would send every
+    /// recursive walk (layout, paint, accessibility) into unbounded
+    /// recursion, so a hostile or buggy host's patch is refused instead.
+    fn would_cycle(&self, parent_id: &str, id: &str) -> bool {
+        if id == ROOT_ID {
+            return true;
+        }
+        let mut cur = parent_id;
+        // Bounded: an existing (unreachable) cycle cannot loop us forever.
+        for _ in 0..=self.parent_by_child.len() {
+            if cur == id {
+                return true;
+            }
+            match self.parent_by_child.get(cur) {
+                Some(p) => cur = p.as_str(),
+                None => return false,
+            }
+        }
+        true
     }
 
     /// Insert `id` into `siblings` before `before_id` (append when the
@@ -1055,5 +1095,30 @@ mod tests {
 
         // Under-cap eviction is a no-op.
         assert!(tree.evict_detached_over(2).is_empty());
+    }
+
+    #[test]
+    fn hostile_reparenting_never_creates_a_cycle() {
+        let mut tree = Tree::new();
+        tree.apply(&create("a", "Column", &[]));
+        tree.apply(&create("b", "Column", &[]));
+        tree.apply(&insert(ROOT_ID, "a", None));
+        tree.apply(&insert("a", "b", None));
+        // The root under its own descendant, a node under itself, a node
+        // under its own child: each refused, the tree unchanged.
+        tree.apply(&insert("b", ROOT_ID, None));
+        tree.apply(&insert("a", "a", None));
+        tree.apply(&move_patch("b", "a", None));
+        tree.apply(&Patch::Attach {
+            parent_id: "b".into(),
+            id: "a".into(),
+            before_id: None,
+        });
+        assert_eq!(tree.root_children(), ["a".to_string()]);
+        assert_eq!(tree.children_of("a"), ["b".to_string()]);
+        assert!(tree.children_of("b").is_empty());
+        // Legitimate moves still work.
+        tree.apply(&move_patch(ROOT_ID, "b", None));
+        assert_eq!(tree.root_children(), ["a".to_string(), "b".to_string()]);
     }
 }

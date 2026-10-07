@@ -90,7 +90,35 @@ const HORIZONTAL_DEMAND_PROP = /^(?:width|size|fillMaxWidth|fillMaxSize|horizont
 const bothSpellings = (names: string[]): Set<string> =>
   new Set(names.flatMap((name) => [name, `${name}.0`]));
 
+/**
+ * A renderer-owned host element. Hypen nodes are HTML elements, except the
+ * chart family whose host is an `<svg>` (and whose marks are `<g>`s), which
+ * is not an HTMLElement in a browser — but has the same dataset/style
+ * surface and needs the same child-change notifications.
+ */
+function isHostElement(node: unknown): node is HTMLElement {
+  if (node instanceof HTMLElement) return true;
+  const SVG = (globalThis as any).SVGElement;
+  return typeof SVG === "function" && node instanceof SVG;
+}
+
 const COMPONENT_HTML_ATTRS: Record<string, Set<string>> = {
+  // Chart family: every data/geometry prop must reach the handler so a
+  // reactive SetProp re-lays the chart out (the CSS fallback would write
+  // `style.points`, a no-op). Style props (`stroke`, `fill`, …) stay on
+  // the CSS path on purpose — SVG inherits them into the geometry.
+  chart: bothSpellings(["x", "y", "width", "height", "padding"]),
+  line: bothSpellings(["0", "points", "data", "values", "x", "y", "smooth", "series", "name"]),
+  area: bothSpellings(["0", "points", "data", "values", "x", "y", "smooth", "series", "name"]),
+  bars: bothSpellings([
+    "0", "points", "data", "values", "x", "y", "label", "value",
+    "highlight", "barWidth", "radius", "series", "name",
+  ]),
+  points: bothSpellings(["0", "points", "data", "values", "x", "y", "radius", "highlight", "series", "name"]),
+  axis: bothSpellings(["0", "axis", "ticks", "label", "grid"]),
+  rule: bothSpellings(["x", "y"]),
+  marker: bothSpellings(["x", "y", "anchor"]),
+  path: bothSpellings(["0", "d"]),
   image: bothSpellings(["src", "alt", "url", "0", "srcset"]),
   input: bothSpellings(["type", "placeholder", "value", "disabled", "readonly", "name", "checked"]),
   textarea: bothSpellings(["placeholder", "value", "rows", "cols", "disabled", "readonly", "name"]),
@@ -161,7 +189,9 @@ import { ComponentRegistry, aliasApplicatorSpellings } from "./components/index.
 import { ApplicatorRegistry } from "./applicators/index.js";
 import { DomAnimator } from "./anim.js";
 import { DomScrubber } from "./scrub.js";
+import { DomDnd } from "./dnd.js";
 import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
+import { DND_PROP_PREFIX } from "@hypen-space/core/dnd";
 import { applySemantics } from "./semantics.js";
 import {
   makeKeyboardActivatable,
@@ -183,6 +213,7 @@ import { ensureAnimStyles } from "./anim-styles.js";
 import type { SafeAreaInsetOverrides } from "../safe-area.js";
 import { createSafeAreaHandler } from "./components/safearea.js";
 import { createImageHandler } from "./components/image.js";
+import { createHypenAppHandler, type HypenAppDeviceFactory } from "./components/hypenapp.js";
 import { reconcileColumnWidthDemandFrom } from "./cross-axis-width.js";
 
 // Interface for the engine that renderer needs
@@ -217,6 +248,61 @@ export interface DOMRendererOptions {
    * from the shell that happens to host the embed.
    */
   assetBaseUrl?: string;
+
+  /**
+   * Device plane for `HypenApp` embeds (RFC 001): called with each embedded
+   * app's WebSocket URL, it returns that embed's device endpoint — normally
+   * `(url) => new WebDeviceHost({ origin: new URL(url).origin })` from
+   * `@hypen-space/device-web`. The renderer itself has no device behavior;
+   * it only hands the factory to the embeds it creates. Absent ⇒ embedded
+   * apps run UI-only.
+   */
+  hypenAppDevice?: HypenAppDeviceFactory;
+}
+
+/**
+ * The node id, stamped on the element object itself beside `dataset.hypenId`
+ * for the teardown sweep. Reading `dataset.hypenId` back off every
+ * descendant of a removed subtree is a DOM attribute lookup per node (a
+ * 1,000-row clear sweeps ~17k); a symbol-keyed expando is a plain property
+ * read. Not a WeakMap: `WeakMap.set` is a V8 runtime call, and one per
+ * created node cost a 1,000-row create ~40 ms — more than the sweep saved.
+ */
+const ELEMENT_ID: unique symbol = Symbol("hypen.elementId");
+type ElementWithId = HTMLElement & { [ELEMENT_ID]?: string };
+
+/**
+ * How one template node's `subs` prop is applied on instantiation — see
+ * `DOMRenderer.resolveSubApplier`. `demand` marks applicator props that
+ * can change horizontal width demand (`HORIZONTAL_DEMAND_PROP`).
+ */
+type SubApplier =
+  | { kind: "generic" }
+  | { kind: "text" }
+  | { kind: "applicator"; demand: boolean };
+const GENERIC_SUB: SubApplier = { kind: "generic" };
+const TEXT_SUB: SubApplier = { kind: "text" };
+
+/**
+ * Pre-order walk of `root` and every descendant element, by
+ * `firstElementChild` / `nextElementSibling` / climb. Never touches
+ * `children`: a live `HTMLCollection` is an object per element to build,
+ * and its `length` is recomputed by walking every child after any mutation
+ * in the subtree — the sweep of a removed 1,000-row list and the walk of
+ * each freshly cloned row both hit that.
+ */
+function walkElements(root: HTMLElement, visit: (element: HTMLElement) => void): void {
+  let el: HTMLElement = root;
+  for (;;) {
+    visit(el);
+    let next = el.firstElementChild as HTMLElement | null;
+    while (next === null) {
+      if (el === root) return;
+      next = el.nextElementSibling as HTMLElement | null;
+      if (next === null) el = el.parentNode as HTMLElement;
+    }
+    el = next;
+  }
 }
 
 export class DOMRenderer {
@@ -231,6 +317,31 @@ export class DOMRenderer {
       deferred: Array<Array<[string, any]>>;
       /** Per-node static props, for seeding each clone's handlerProps. */
       statics: Array<Record<string, any>>;
+      /** Lower-cased element type per template node, in engine (DFS) order. */
+      types: string[];
+      /**
+       * For every element of the prototype in DFS order (component-internal
+       * wrappers included), whether it is a template node. A clone has the
+       * same shape, so this maps a clone walk onto `types`/`statics`
+       * without a `dataset` read per element — see `onInstantiate`.
+       */
+      mask: boolean[];
+      /**
+       * Template nodes whose text carries a client-side `@{state.…}`
+       * template, with the segments compiled once: every clone registers
+       * exactly these bindings, so instantiation does not probe each Text
+       * node's `data-text-template` (9 per row in a typical list).
+       */
+      textBindings: Array<{ index: number; template: string; segments: TemplateSegment[] }>;
+      /**
+       * Per template node, the resolved way to apply each `subs` prop —
+       * see [`SubApplier`]. Filled lazily on first use: the `(node, prop)`
+       * pairs are the same for every instantiation of a template, and
+       * resolving them once replaces the generic `onSetProp` dispatch
+       * (map lookup, animation/scrub probes, name matching, registry
+       * dispatch) with a direct write per sub.
+       */
+      subAppliers: Array<Map<string, SubApplier> | undefined>;
     }
   > = new Map();
   private rootId: string | null = null;
@@ -335,6 +446,19 @@ export class DOMRenderer {
     resumePresets: (element) => this.animator.resumePresetsAfterScrub(element),
   });
 
+  /**
+   * `__dnd.*` runtime: renderer-resident drag-and-drop (activation, ghost,
+   * sortable preview, zone resolution, pinboard math, keyboard) that
+   * dispatches only the drop outcome. See `dnd.ts`. Deferred engine writes
+   * flush back through `onSetProp` (the runtime is idle by then, so nothing
+   * re-defers); runtime `.states` poses go straight to the applicators.
+   */
+  private dnd = new DomDnd({
+    applyProp: (id, name, value) => this.onSetProp(id, name, value),
+    removeProp: (id, name) => this.onRemoveProp(id, name),
+    applyApplicator: (element, name, value) => this.applicators.apply(element, name, value),
+  });
+
   constructor(
     container: HTMLElement,
     engine: IEngine,
@@ -348,9 +472,12 @@ export class DOMRenderer {
     this.debugTracker = new RerenderTracker({ ...defaultDebugConfig, ...debugConfig });
     this.routeFocus = options?.routeFocus ?? "auto";
 
-    // Option G precedence: a scrub-active node is excluded from transaction
-    // application and enter/FLIP participation (scrub owns it).
-    this.animator.setScrubActiveCheck((id) => this.scrubber.ownsNode(id));
+    // Ownership precedence (normative): dnd > scrub > structural playbacks >
+    // transaction > `.transition`. A node owned by either gesture runtime is
+    // excluded from transaction application and enter/FLIP participation,
+    // and a node the DnD runtime is interacting with suspends its scrub.
+    this.animator.setScrubActiveCheck((id) => this.dnd.ownsNode(id) || this.scrubber.ownsNode(id));
+    this.scrubber.suspended = (id) => this.dnd.isInteracting(id);
 
     // Inject the global reduced-motion + focus-visible stylesheet once.
     ensureA11yStyles();
@@ -373,6 +500,9 @@ export class DOMRenderer {
     }
     if (options?.assetBaseUrl) {
       this.components.register("image", createImageHandler(options.assetBaseUrl));
+    }
+    if (options?.hypenAppDevice) {
+      this.components.register("hypenapp", createHypenAppHandler({ device: options.hypenAppDevice }));
     }
 
     // Register canvas component and applicators
@@ -570,6 +700,11 @@ export class DOMRenderer {
     // Dialog mount focus runs last: a dialog opened by this batch takes
     // focus even when the batch was also a navigation (modal wins).
     this.flushDialogMounts();
+
+    // DnD post-batch hook: lists an insert/remove dirtied mid-drag are
+    // rebuilt ONCE here (one measure pass after all the batch's DOM writes),
+    // before the animator measures Last.
+    this.dnd.flushStructural();
 
     // Animation post-batch hook: play queued enters and FLIP moves now that
     // the whole batch (including late-arriving descendants) is in the DOM.
@@ -841,10 +976,12 @@ export class DOMRenderer {
     // handlerProps cache. Without it a templated list row starts with an
     // empty set and the first SetProp recomputes from handler defaults.
     const statics: Array<Record<string, any>> = [];
+    const types: string[] = [];
     const build = (node: TemplateSkeletonNode): HTMLElement => {
       const index = deferred.length;
       const mine: Array<[string, any]> = [];
       deferred.push(mine);
+      types[index] = node.elementType.toLowerCase();
 
       const staticProps: Record<string, any> = {};
       for (const [key, value] of Object.entries(node.props ?? {})) {
@@ -886,7 +1023,50 @@ export class DOMRenderer {
       return element;
     };
 
-    this.templateProtos.set(templateId, { proto: build(root), deferred, statics });
+    const proto = build(root);
+    const mask: boolean[] = [];
+    const textBindings: Array<{ index: number; template: string; segments: TemplateSegment[] }> = [];
+    let index = 0;
+    walkElements(proto, (el) => {
+      const isTemplateNode = el.dataset.hypenType !== undefined;
+      mask.push(isTemplateNode);
+      if (!isTemplateNode) return;
+      const template = types[index] === "text" ? el.dataset.textTemplate : undefined;
+      if (template && template.includes("@{")) {
+        textBindings.push({ index, template, segments: compileTextTemplate(template) });
+      }
+      index++;
+    });
+    this.templateProtos.set(templateId, {
+      proto,
+      deferred,
+      statics,
+      types,
+      mask,
+      textBindings,
+      subAppliers: [],
+    });
+  }
+
+  /**
+   * Resolve how a template node's `subs` prop is applied, once per
+   * `(node, prop)` per template. Mirrors the branches of `onSetProp` for a
+   * freshly cloned, not-yet-inserted node: a plain text write or a plain
+   * applicator call is done directly; everything with per-node state or a
+   * component hook (animation channels, slots, SafeArea edges, handler
+   * attributes, actionable `action`, canvas sizing) keeps the generic path.
+   */
+  private resolveSubApplier(type: string, prop: string): SubApplier {
+    if (prop.startsWith(ANIM_PROP_PREFIX)) return GENERIC_SUB;
+    if (prop === "slot" || prop === "slot.0") return GENERIC_SUB;
+    if ((prop === "edges" || prop === "edges.0") && type === "safearea") return GENERIC_SUB;
+    if (prop === "action" && ACTIONABLE_TYPES.has(type)) return GENERIC_SUB;
+    if (COMPONENT_HTML_ATTRS[type]?.has(prop)) return GENERIC_SUB;
+    if (prop === "0" || prop === "text") {
+      return type === "input" ? GENERIC_SUB : TEXT_SUB;
+    }
+    if (prop === "width" || prop === "height") return GENERIC_SUB; // canvas resize hook
+    return { kind: "applicator", demand: HORIZONTAL_DEMAND_PROP.test(prop) };
   }
 
   /**
@@ -907,20 +1087,25 @@ export class DOMRenderer {
 
     const clone = entry.proto.cloneNode(true) as HTMLElement;
     // Collect the clone's template elements in the same depth-first order
-    // the engine assigned ids in. Only elements stamped with hypenType
-    // count — a component's internal wrapper elements are skipped, though
-    // the walk still descends through them.
-    const elements: HTMLElement[] = [];
-    const collect = (el: HTMLElement): void => {
-      if (el.dataset?.hypenType) {
-        elements.push(el);
-      }
-      const kids = el.children as unknown as ArrayLike<HTMLElement> | undefined;
-      if (kids?.length) {
-        for (const child of Array.from(kids)) collect(child);
-      }
-    };
-    collect(clone);
+    // the engine assigned ids in. Only template nodes count — a
+    // component's internal wrapper elements are skipped, though the walk
+    // still descends through them. The clone has the prototype's shape, so
+    // the prototype's precomputed mask says which elements those are
+    // without a `dataset` read per element (17k per 1,000-row create); a
+    // shape mismatch (a prototype mutated after registration) falls back
+    // to reading the markers.
+    const { mask, types } = entry;
+    let elements: HTMLElement[] = [];
+    let position = 0;
+    walkElements(clone, (el) => {
+      if (mask[position++]) elements.push(el);
+    });
+    if (position !== mask.length) {
+      elements = [];
+      walkElements(clone, (el) => {
+        if (el.dataset?.hypenType) elements.push(el);
+      });
+    }
     if (elements.length !== ids.length) {
       log.warn(
         `instantiate node count mismatch for "${patch.templateId}": ` +
@@ -932,14 +1117,16 @@ export class DOMRenderer {
     for (let i = 0; i < elements.length; i++) {
       const element = elements[i];
       element.dataset.hypenId = ids[i];
-      setEngine(element, this.engine);
+      (element as ElementWithId)[ELEMENT_ID] = ids[i];
+      // No `setEngine` per node: `getEngine` resolves through the mounted
+      // ancestors, and the per-element WeakMap write was ~17k per create.
       this.nodes.set(ids[i], element);
       // Seed the prop cache from the prototype's static props, exactly as
       // onCreate does from a Create patch. A clone that skipped this had an
       // empty set, so the first SetProp on it recomputed every other prop
       // from the handler's defaults -- ProgressBar losing its `max`, Icon
       // losing its resolved paths.
-      const cloneType = element.dataset.hypenType;
+      const cloneType = types[i];
       if (cloneType && COMPONENT_HTML_ATTRS[cloneType]) {
         this.handlerProps.set(
           ids[i],
@@ -955,8 +1142,8 @@ export class DOMRenderer {
     // passes below — deferred event props, `subs` — assume a live component.
     // Parents adopt before children (depth-first collect order), so a
     // Scrubber finds its enclosing Video already wired.
-    for (const element of elements) {
-      this.components.adopt(element);
+    for (let i = 0; i < elements.length; i++) {
+      this.components.adopt(elements[i], types[i]);
     }
     for (const [index, semantics] of patch.nodeSemantics ?? []) {
       applySemantics(elements[index], semantics);
@@ -965,12 +1152,49 @@ export class DOMRenderer {
       for (const [key, value] of entry.deferred[i] ?? []) {
         this.onSetProp(ids[i], key, value);
       }
-      if (elements[i].dataset.hypenType === "text") {
-        this.syncTextBinding(ids[i], elements[i]);
-      }
     }
+    for (const { index, template, segments } of entry.textBindings) {
+      this.textBindings.set(ids[index], { element: elements[index], template, segments });
+    }
+
+    // `subs`: the item-dependent props, already resolved by the engine.
+    // Applied through per-template resolved appliers rather than the
+    // generic `onSetProp` (see `resolveSubApplier`). A stamped
+    // (transaction) batch keeps the generic path so its glide rules apply;
+    // otherwise a fresh clone has no scrub or animation state to consult.
+    // Width-demand reconciles once per affected element after all subs,
+    // not once per sub.
+    const generic = this.animator.transactionActive;
+    let demandDirty: HTMLElement[] | null = null;
+    const { subAppliers } = entry;
     for (const [index, prop, value] of patch.subs ?? []) {
-      this.onSetProp(ids[index], prop, value);
+      let appliers = subAppliers[index];
+      if (!appliers) subAppliers[index] = appliers = new Map();
+      let applier = appliers.get(prop);
+      if (!applier) {
+        applier = this.resolveSubApplier(types[index], prop);
+        appliers.set(prop, applier);
+      }
+      if (generic || applier.kind === "generic") {
+        this.onSetProp(ids[index], prop, value);
+        continue;
+      }
+      const element = elements[index];
+      if (applier.kind === "text") {
+        // A value that is itself a template must go through the generic
+        // path, which records it for client-side re-interpolation.
+        if (typeof value === "string" && value.includes("@{")) {
+          this.onSetProp(ids[index], prop, value);
+        } else {
+          setElementText(element, String(value));
+        }
+        continue;
+      }
+      this.applicators.apply(element, prop, value);
+      if (applier.demand) (demandDirty ??= []).push(element);
+    }
+    if (demandDirty) {
+      for (const element of new Set(demandDirty)) reconcileColumnWidthDemandFrom(element);
     }
 
     this.onInsert(patch.parentId!, ids[0], patch.beforeId);
@@ -1003,18 +1227,23 @@ export class DOMRenderer {
 
     let propsObj = props instanceof Map ? Object.fromEntries(props) : props;
 
-    // Split off `__anim.*` channel props: they configure the animator, and
-    // must never reach the applicators (or their CSS fallback).
+    // Split off `__anim.*` / `__dnd.*` channel props: they configure the
+    // animator / scrubber / DnD runtime, and must never reach the
+    // applicators (or their CSS fallback).
     let animProps: Record<string, any> | null = null;
+    let hasDndProps = false;
     for (const key of Object.keys(propsObj)) {
       if (key.startsWith(ANIM_PROP_PREFIX)) {
         (animProps ??= {})[key] = propsObj[key];
+      } else if (key.startsWith(DND_PROP_PREFIX)) {
+        hasDndProps = true;
       }
     }
-    if (animProps) {
+    const fullProps = propsObj;
+    if (animProps || hasDndProps) {
       const rest: Record<string, any> = {};
       for (const [key, value] of Object.entries(propsObj)) {
-        if (!key.startsWith(ANIM_PROP_PREFIX)) rest[key] = value;
+        if (!key.startsWith(ANIM_PROP_PREFIX) && !key.startsWith(DND_PROP_PREFIX)) rest[key] = value;
       }
       propsObj = rest;
     }
@@ -1034,6 +1263,7 @@ export class DOMRenderer {
 
     element.dataset.hypenType = elementType.toLowerCase();
     element.dataset.hypenId = id;
+    (element as ElementWithId)[ELEMENT_ID] = id;
     setEngine(element, this.engine);
 
     // Slot marker: `.slot("name")` lowers to the `slot.0` prop. The engine
@@ -1079,6 +1309,13 @@ export class DOMRenderer {
       makeRovingListbox(element);
     }
 
+    // DnD registers FIRST: its pointerdown listener must precede the
+    // scrubber's (dnd > scrub on a shared pointerdown), and the `bind`
+    // applicator below must already see the sortable/pinboard write-target
+    // marker so it leaves the reorder path alone.
+    if (hasDndProps || animProps) {
+      this.dnd.registerCreate(id, element, fullProps, animProps);
+    }
     if (animProps) {
       this.animator.registerCreate(id, element, animProps);
       this.scrubber.registerCreate(id, element, animProps);
@@ -1148,22 +1385,39 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (!element) return;
 
-    // `__anim.*` channel props route to the animator + scrubber, never to
-    // applicators. The scrubber consumes the `__anim.scrub*` channels and
-    // watches `__anim.states` (its cleanup signal); the animator ignores
-    // the scrub channels.
+    // `__dnd.*` channel props route to the DnD runtime, never to applicators.
+    if (name.startsWith(DND_PROP_PREFIX)) {
+      if ((name === "__dnd.pinX" || name === "__dnd.pinY") && this.dnd.deferEngineProp(id, name, value)) return;
+      this.dnd.setDndProp(id, element, name, value);
+      return;
+    }
+
+    // `__anim.*` channel props route to the animator + scrubber (+ the DnD
+    // runtime for `__anim.statePoses`), never to applicators. The scrubber
+    // consumes the `__anim.scrub*` channels and watches `__anim.states` (its
+    // cleanup signal); the animator ignores the scrub channels.
     if (name.startsWith(ANIM_PROP_PREFIX)) {
+      this.dnd.setAnimProp(id, element, name, value);
       this.scrubber.setAnimProp(id, element, name, value);
       this.animator.setAnimProp(id, element, name, value);
       return;
     }
 
-    // Scrub conflict rule (Option G, gesture wins): while a drag/settle is
-    // active on this node, engine writes to its SCRUBBED prop keys are
-    // deferred — latest value stored, applied at cleanup. Other props flow
-    // normally.
+    // Gesture conflict rules (gesture wins; dnd > scrub): while a drag owns
+    // this node, engine writes to its translate keys (or to the props a
+    // runtime `.states` label overrides) are deferred — latest value stored,
+    // applied at release. Likewise a scrub's SCRUBBED keys during a
+    // drag/settle. Other props flow normally.
+    if (this.dnd.deferEngineProp(id, name, value)) {
+      return;
+    }
     if (this.scrubber.deferEngineProp(id, name, value)) {
       return;
+    }
+    // The DnD runtime reads a sortable/pinboard's `bind` and a zone's `id`
+    // off the node; keep it current (no-op for non-DnD nodes).
+    if (name === "bind" || name === "id" || name === "id.0") {
+      this.dnd.noteProp(id, name, value);
     }
 
     // Transaction-scoped animation (Option D): in a batch stamped by a
@@ -1369,10 +1623,27 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (!element) return;
 
+    if (name.startsWith(DND_PROP_PREFIX)) {
+      if ((name === "__dnd.pinX" || name === "__dnd.pinY") && this.dnd.deferEngineRemoveProp(id, name)) return;
+      this.dnd.removeDndProp(id, element, name);
+      return;
+    }
+
     if (name.startsWith(ANIM_PROP_PREFIX)) {
+      this.dnd.setAnimProp(id, element, name, undefined);
       this.scrubber.removeAnimProp(id, element, name);
       this.animator.removeAnimProp(id, element, name);
       return;
+    }
+
+    // Drag wins (dnd > scrub): a RemoveProp of a transform key on the
+    // dragged node, or of a pose-overridden key on a labelled node, is
+    // deferred exactly like a SetProp and replayed at release.
+    if (this.dnd.deferEngineRemoveProp(id, name)) {
+      return;
+    }
+    if (name === "bind" || name === "id" || name === "id.0") {
+      this.dnd.noteProp(id, name, undefined);
     }
 
     this.debugTracker.trackRerender(id, element, `removeProp:${name}`);
@@ -1437,7 +1708,7 @@ export class DOMRenderer {
   /**
    * Insert an element into the tree
    */
-  private onInsert(parentId: string, id: string, beforeId?: string): void {
+  private onInsert(parentId: string, id: string, beforeId?: string, isMove = false): void {
     const parent = parentId === "root" ? this.container : this.nodes.get(parentId);
     const child = this.nodes.get(id);
     const previousParent = child?.parentNode;
@@ -1459,6 +1730,15 @@ export class DOMRenderer {
       this.rootId = id;
     }
 
+    // Re-inserting a focused element (or an ancestor of one) drops focus to
+    // <body> in every browser: a keyboard-reordered row, a focused input in
+    // a keyed list the engine re-sorted. Remember and restore after the
+    // move, so keyboard users are not dumped to the top of the document.
+    const doc = (child.ownerDocument ?? (typeof document !== "undefined" ? document : null)) as Document | null;
+    const active = (doc?.activeElement ?? null) as HTMLElement | null;
+    const focusedWithin =
+      active !== null && previousParent != null && (child === active || child.contains?.(active) === true);
+
     if (beforeId) {
       const before = this.nodes.get(beforeId);
       if (before && before.parentNode === parent) {
@@ -1466,17 +1746,24 @@ export class DOMRenderer {
       } else if (!parent.contains(child)) {
         parent.appendChild(child);
       }
-    } else {
-      if (!parent.contains(child)) {
-        parent.appendChild(child);
-      }
+    } else if (!parent.contains(child)) {
+      parent.appendChild(child);
+    } else if (isMove && child.parentNode === parent && parent.lastChild !== child) {
+      // A Move with no anchor means "to the end" (the keyed reconciler
+      // emits it for the item that lands last). The child is already in
+      // this parent, so the containment check above would skip it.
+      parent.appendChild(child);
     }
 
-    if (previousParent instanceof HTMLElement && previousParent !== parent) {
+    if (focusedWithin && doc && doc.activeElement !== active) {
+      active!.focus?.({ preventScroll: true });
+    }
+
+    if (isHostElement(previousParent) && previousParent !== parent) {
       this.components.notifyChildrenChanged(previousParent);
       reconcileColumnWidthDemandFrom(previousParent);
     }
-    if (parent instanceof HTMLElement) {
+    if (isHostElement(parent)) {
       this.components.notifyChildrenChanged(parent);
       reconcileColumnWidthDemandFrom(child);
     }
@@ -1496,13 +1783,22 @@ export class DOMRenderer {
     // Scroll-source scrubs resolve their container at insert time (their
     // ancestors don't exist before this).
     this.scrubber.noteInsert(id, child);
+
+    // DnD: an insert under a hovered list mid-drag invalidates its cached
+    // geometry; during a post-drop hold an insert under the origin or
+    // destination list is the re-render landing.
+    this.dnd.noteStructural(parentId, id);
   }
 
   /**
    * Move an element within the tree
    */
   private onMove(parentId: string, id: string, beforeId?: string): void {
-    this.onInsert(parentId, id, beforeId);
+    this.onInsert(parentId, id, beforeId, true);
+    // DnD no-flash contract: the engine's Move for a dropped reorder releases
+    // the held local transforms (before the animator's flush measures Last,
+    // so the `.layout()` FLIP animates from the ghost's on-screen rect).
+    this.dnd.noteMove(parentId, id);
   }
 
   /**
@@ -1552,6 +1848,8 @@ export class DOMRenderer {
     // persistent app-shell scroller must not keep scrubbing an off-document
     // route. Entries survive for a cached re-attach (see onAttach).
     this.scrubber.cancelSubtree(element);
+    // A detach mid-drag cancels the drag cleanly and dispatches NOTHING.
+    this.dnd.cancelSubtree(element);
 
     // Remember where focus was inside the leaving route, so a cached
     // re-`attach` of this subtree can restore it (route-focus contract).
@@ -1564,7 +1862,7 @@ export class DOMRenderer {
     if (element.parentNode) {
       element.parentNode.removeChild(element);
     }
-    if (previousParent instanceof HTMLElement) {
+    if (isHostElement(previousParent)) {
       this.components.notifyChildrenChanged(previousParent);
       reconcileColumnWidthDemandFrom(previousParent);
     }
@@ -1622,6 +1920,8 @@ export class DOMRenderer {
     // and the exit never fight and a mid-settle arrival cannot write into a
     // dead node's bind path.
     this.scrubber.cancel(id);
+    // Likewise a Remove mid-drag: cancel, release capture, dispatch nothing.
+    this.dnd.cancel(id);
 
     if (
       transition &&
@@ -1666,7 +1966,7 @@ export class DOMRenderer {
     if (element.parentNode) {
       element.parentNode.removeChild(element);
     }
-    if (previousParent instanceof HTMLElement) {
+    if (isHostElement(previousParent)) {
       this.components.notifyChildrenChanged(previousParent);
       reconcileColumnWidthDemandFrom(previousParent);
     }
@@ -1683,9 +1983,14 @@ export class DOMRenderer {
     this.animator.forget(id);
     // A remove mid-drag cancels everything and releases capture cleanly.
     this.scrubber.forget(id);
+    this.dnd.forget(id);
     // Router LRU eviction: this subtree is gone for good — focus restore
     // must never target it again (route-focus contract).
     this.routeFocusMemory.delete(id);
+    // A removed row under a hovered/held list is a structural change too.
+    if (previousParent instanceof HTMLElement) {
+      this.dnd.noteStructural(previousParent.dataset?.hypenId ?? null, id);
+    }
 
     // The engine emits ONE Remove for a removed subtree's root on the keyed
     // and ForEach-rebuild paths (descendants get no Removes of their own),
@@ -1705,40 +2010,27 @@ export class DOMRenderer {
    * walking up to `root` (fake-dom has no `closest`/`contains`).
    */
   private sweepDetachedDescendants(root: HTMLElement): void {
-    // Leaf roots have nothing to sweep (`children`, not `firstChild` —
-    // fake-dom only models element children).
-    if (!root.children?.length) return;
+    // Leaf roots have nothing to sweep.
+    if (!root.firstElementChild) return;
     // Walk *down* the removed subtree. The previous implementation scanned
     // every tracked node in the renderer and walked each one's parentNode
     // chain looking for `root`, which is O(removes × total nodes): tearing
     // down a 1,000-row list touched ~17M entries. Descending costs
     // O(subtree) and reaches exactly the same set, since every element this
-    // renderer tracks carries `dataset.hypenId` and children/parentNode are
-    // consistent in both real DOM and fake-dom.
-    //
-    // Indexed reads over the live HTMLCollection, deliberately: an earlier
-    // version materialized `Array.from(children)` per visited node, which
-    // made this sweep the hottest frame of a full-list clear (~34k array
-    // allocations for 1,000 rows). The collections aren't mutated during
-    // the walk, so index access is stable.
-    const pushKids = (stack: HTMLElement[], el: HTMLElement): void => {
-      const kids = el.children as unknown as ArrayLike<HTMLElement> | undefined;
-      if (!kids) return;
-      for (let i = kids.length - 1; i >= 0; i--) {
-        stack.push(kids[i]!);
-      }
-    };
-
-    const stack: HTMLElement[] = [];
-    pushKids(stack, root);
-    while (stack.length > 0) {
-      const desc = stack.pop()!;
-      pushKids(stack, desc);
-      const descId = (desc as { dataset?: Record<string, string | undefined> })
-        .dataset?.hypenId;
+    // renderer tracks carries its id and children/parentNode are consistent
+    // in both real DOM and fake-dom. Sibling traversal, not `children`: an
+    // earlier version materialized `Array.from(children)` per node (~34k
+    // array allocations per 1,000-row clear), and an indexed loop over the
+    // live collection still built an HTMLCollection per element.
+    walkElements(root, (desc) => {
+      if (desc === root) return;
+      // Component-internal wrapper elements are never registered and fall
+      // through to the (empty) attribute read.
+      const descId = (desc as ElementWithId)[ELEMENT_ID] ??
+        (desc as { dataset?: Record<string, string | undefined> }).dataset?.hypenId;
       // Only forget the id if it still maps to *this* element: a recycled id
       // pointing elsewhere must not be swept out from under its live node.
-      if (descId === undefined || this.nodes.get(descId) !== desc) continue;
+      if (descId === undefined || this.nodes.get(descId) !== desc) return;
       disposeHypenElement(desc);
       this.nodes.delete(descId);
       this.handlerProps.delete(descId);
@@ -1746,8 +2038,9 @@ export class DOMRenderer {
       this.dialogIds.delete(descId);
       this.animator.forget(descId);
       this.scrubber.forget(descId);
+      this.dnd.forget(descId);
       this.routeFocusMemory.delete(descId);
-    }
+    });
   }
 
   /**
@@ -1757,7 +2050,7 @@ export class DOMRenderer {
    */
   private notifyParentChildrenChanged(element: HTMLElement): void {
     const parent = element.parentNode;
-    if (parent instanceof HTMLElement) {
+    if (isHostElement(parent)) {
       this.components.notifyChildrenChanged(parent);
     }
   }
@@ -1776,6 +2069,15 @@ export class DOMRenderer {
    */
   getScrubber(): DomScrubber {
     return this.scrubber;
+  }
+
+  /**
+   * The `__dnd.*` runtime — exposed for tests, which override its timing
+   * fields (`cleanupTimeoutMs`, `pressDelayMs`) to drive holds and presses
+   * deterministically.
+   */
+  getDnd(): DomDnd {
+    return this.dnd;
   }
 
   /**
@@ -1801,6 +2103,7 @@ export class DOMRenderer {
     this.textBindings.clear();
     this.animator.reset();
     this.scrubber.reset();
+    this.dnd.reset();
     this.rootId = null;
     this.dialogIds.clear();
     this.dialogOpeners.clear();

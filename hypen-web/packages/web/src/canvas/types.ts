@@ -48,6 +48,18 @@ export interface VirtualNode {
   // mousedown/mouseup so `:active` paint variants can resolve.
   pressed?: boolean;
 
+  // --- Drag-and-drop visual state (managed by CanvasDnd, never serialised) ---
+  // Renderer-local translation applied to this node's WHOLE subtree, on top
+  // of its author transform: the ghost's drag delta on the lifted item, the
+  // gap-opening shift on a sortable sibling, the held post-drop position.
+  // Paint applies it as an outer `ctx.translate`; hit-testing offsets the
+  // subtree by the same amount. Absent/undefined = no offset.
+  dndOffset?: { x: number; y: number };
+  // The lifted item: skipped by the in-tree paint pass and by hit-testing
+  // (the pointer must see what is UNDER the ghost), painted last by the
+  // renderer's ghost pass so it sits above every sibling.
+  dndGhost?: boolean;
+
   // --- Variant resolution bookkeeping (managed by applyVariants) ---
   // Set of applicator base names that have at least one `@bp`/`:state` variant
   // key on this node. Computed lazily; null means "not yet scanned", an empty

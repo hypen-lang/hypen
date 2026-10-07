@@ -208,7 +208,9 @@ export class DevServerError extends Error {
  * session's engine — so two browser tabs (or a tab + a native runner on
  * the same port) mirror each other. That differs from the old browser-SPA
  * dev server, where tabs were fully independent. Deliberate for now:
- * remove the `.syncActions()` call below to get per-tab isolation.
+ * remove the `.syncActions()` call below to get per-tab isolation. Device
+ * access (`context.device`) still works: only the tab that dispatched can
+ * start device work; the mirrored copies refuse with `syncActions.replay`.
  *
  * File changes hot-reload by briefly disconnecting every client: each one
  * auto-reconnects (~0.5s), resumes its session against the freshly loaded

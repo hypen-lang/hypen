@@ -1,3 +1,5 @@
+import { testActionHandler } from "./helpers";
+import { semanticAction } from "./helpers";
 /**
  * Transaction-scoped animation (Option D cheap subset, issue #153) — the SDK
  * and dispatch-boundary half:
@@ -72,7 +74,7 @@ class FakeEngine {
 
   /** Fire a registered action the way the engine boundary would. */
   dispatch(name: string, animate?: unknown, payload?: unknown): Promise<void> | void {
-    const handler = this.actionHandlers.get(name);
+    const handler = testActionHandler(this.actionHandlers, name);
     if (!handler) throw new Error(`no handler for ${name}`);
     const action: Action = { name, payload };
     if (animate !== undefined) action.animate = animate;
@@ -400,7 +402,7 @@ class StubEngine {
   public dispatchCalls: Array<{ name: string; payload: any }> = [];
 
   dispatchAction(name: string, payload: any): void {
-    this.dispatchCalls.push({ name, payload });
+    this.dispatchCalls.push(semanticAction(name, payload));
   }
 }
 

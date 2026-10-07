@@ -86,6 +86,19 @@ public struct IconComponent: ComponentHandler {
     }
 }
 
+/// SVG `d` parsing, shared with the Chart family's `Path` mark.
+///
+/// The parser itself lives in this file's `IconShape`, which is file-private;
+/// this is the only door out of it. See `ChartComponents.swift`
+/// (`ChartPathBuilder.transformed`).
+enum HypenSVGPath {
+    /// Parse an SVG path `d` attribute into a `CGPath`. Nil when `d` is
+    /// unparseable.
+    static func parse(_ d: String) -> CGPath? {
+        IconShape.parseSVGPathStatic(d)
+    }
+}
+
 /// A SwiftUI Shape that draws SVG path data.
 private struct IconShape: Shape, @unchecked Sendable {
     let paths: [[String: Any]]

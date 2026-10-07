@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Keyboard operability: actionable elements that render a non-native host
  * (e.g. Card → <div>) are made focusable, given a button role, and activated
@@ -16,7 +17,7 @@ ensureFakeDomGlobals();
 class RecordingEngine {
   actions: Array<{ name: string; payload?: any }> = [];
   dispatchAction(name: string, payload?: any): void {
-    this.actions.push({ name, payload });
+    this.actions.push(semanticAction(name, payload));
   }
 }
 

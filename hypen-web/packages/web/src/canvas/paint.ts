@@ -1,3 +1,5 @@
+import { dispatchUIAction } from "@hypen-space/core";
+import { pinOffset } from "./pin-position";
 /**
  * Paint System
  *
@@ -23,6 +25,7 @@ import {
   inheritedTextProp,
   ownTextColor,
 } from "./utils.js";
+import { paintChartMark } from "./chart.js";
 import {
   PLAYBACK_REPORT_INTERVAL_MS,
   PLAYBACK_SEEK_EPSILON_S,
@@ -123,12 +126,22 @@ const STATE_UNSAFE_TYPES = new Set([
   "avatar",
   "icon",
   "link",
+  // Chart marks set lineWidth, dashes, shadows, font and textAlign.
+  "chart",
+  "line",
+  "area",
+  "bars",
+  "points",
+  "axis",
+  "rule",
+  "path",
 ]);
 
 /** Whether any transform-related prop is present on the node. */
 function hasTransformProps(props: Record<string, any>): boolean {
   return (
     props.transform !== undefined ||
+    props["__dnd.pinX"] !== undefined || props["__dnd.pinY"] !== undefined ||
     props.translateX !== undefined ||
     props.translateY !== undefined ||
     props.rotate !== undefined ||
@@ -170,7 +183,7 @@ function shadowExtent(shadow: any): number {
  */
 function canCullSubtree(node: VirtualNode, cull: Rectangle): boolean {
   const layout = node.layout!;
-  if (hasTransformProps(node.props)) return false;
+  if (hasTransformProps(node.props) || node.dndOffset !== undefined) return false;
   if (customPainters.has(node.type.toLowerCase())) return false;
 
   const shadow = node.props.shadow || node.props.boxShadow || node.props.textShadow;
@@ -206,6 +219,7 @@ export function paintNode(
   // layout pass already gave it a zero box, but a zero-box Text/Image still
   // paints its placeholder — skip the whole subtree instead.
   if (isLayoutHidden(node)) return;
+  if (node.dndGhost && node !== ghostPassNode) return;
   if (cull && canCullSubtree(node, cull)) return;
 
   const type = node.type.toLowerCase();
@@ -215,7 +229,9 @@ export function paintNode(
   // Transform, opacity and blur are subtree effects in every other renderer.
   // Keep the Canvas state alive while descendants paint as well; restoring it
   // immediately after the host box made child text escape those effects.
-  const hasSubtreeEffect = needsTransform || node.opacity < 1 || blurRadius > 0;
+  const dndOffset = node.dndOffset;
+  const hasDndOffset = !!dndOffset && (dndOffset.x !== 0 || dndOffset.y !== 0);
+  const hasSubtreeEffect = needsTransform || hasDndOffset || node.opacity < 1 || blurRadius > 0;
   const needsSave =
     customPainter !== undefined ||
     hasSubtreeEffect ||
@@ -223,6 +239,8 @@ export function paintNode(
 
   if (needsSave) {
     ctx.save();
+
+    if (hasDndOffset) ctx.translate(dndOffset!.x, dndOffset!.y);
 
     // Apply transforms
     if (needsTransform) {
@@ -321,6 +339,25 @@ export function paintNode(
       break;
     case "link":
       paintLink(ctx, node);
+      break;
+    // Chart host: its own box paints like any container; the marks are its
+    // children and paint themselves against the resolved plot rect.
+    case "chart":
+      paintContainer(ctx, node);
+      break;
+    // Chart marks. Outside a Chart these types mean nothing and draw
+    // nothing — `paintChartMark` returns early unless the parent is a Chart.
+    // A Marker draws nothing itself; its Hypen children are ordinary nodes
+    // and paint normally at the box the chart layout placed them in.
+    case "line":
+    case "area":
+    case "bars":
+    case "points":
+    case "axis":
+    case "rule":
+    case "path":
+    case "marker":
+      if (!paintChartMark(ctx, node)) paintContainer(ctx, node);
       break;
     case "app":
     case "container":
@@ -1416,7 +1453,7 @@ function writePlaybackField(
   value: unknown,
 ): void {
   if (!videoActionDispatcher || !entry.bindPath) return;
-  videoActionDispatcher("__hypen_bind", {
+  dispatchUIAction({ dispatchAction: videoActionDispatcher }, entry.node.id, "__hypen_bind", {
     path: `${entry.bindPath}.${field}`,
     value,
   });
@@ -1679,7 +1716,7 @@ function dispatchVideoAction(
   if (!videoActionDispatcher) return;
   const resolved = resolveVideoEventAction(entry.node.props[propName]);
   if (!resolved) return;
-  videoActionDispatcher(resolved.actionName, {
+  dispatchUIAction({ dispatchAction: videoActionDispatcher }, entry.node.id, resolved.actionName, {
     nodeId: entry.node.id,
     timestamp: Date.now(),
     ...resolved.payload,
@@ -2386,14 +2423,14 @@ export function commitScrubberDrag(node: VirtualNode): number | null {
   const ownBind = typeof node.props.bind === "string" && node.props.bind ? node.props.bind : null;
   const bindPath = ownBind ?? entry.bindPath;
   if (bindPath && videoActionDispatcher) {
-    videoActionDispatcher("__hypen_bind", {
+    dispatchUIAction({ dispatchAction: videoActionDispatcher }, (ownBind ? node : entry.node).id, "__hypen_bind", {
       path: `${bindPath}.position`,
       value: position,
     });
   } else if (videoActionDispatcher) {
     const resolved = resolveVideoEventAction(node.props.onSeek);
     if (resolved) {
-      videoActionDispatcher(resolved.actionName, {
+      dispatchUIAction({ dispatchAction: videoActionDispatcher }, node.id, resolved.actionName, {
         nodeId: node.id,
         timestamp: Date.now(),
         ...resolved.payload,
@@ -2944,8 +2981,8 @@ function applyTransforms(ctx: CanvasRenderingContext2D, node: VirtualNode): void
   const centerY = layout.y + layout.height * originY;
 
   // Check for individual transform properties
-  const translateX = parseFloat(props.translateX) || 0;
-  const translateY = parseFloat(props.translateY) || 0;
+  const translateX = (parseFloat(props.translateX) || 0) + pinOffset(node).x;
+  const translateY = (parseFloat(props.translateY) || 0) + pinOffset(node).y;
   const rotate = parseFloat(props.rotate) || 0; // in degrees
   const scaleX = parseFloat(props.scaleX) || parseFloat(props.scale) || 1;
   const scaleY = parseFloat(props.scaleY) || parseFloat(props.scale) || 1;
@@ -3770,3 +3807,44 @@ function drawStar(
   ctx.lineTo(cx, cy - outerRadius);
   ctx.closePath();
 }
+
+/**
+ * The node currently being painted by {@link paintDndGhost}. `paintNode`
+ * skips `dndGhost` nodes in the ordinary tree walk unless it is this one.
+ */
+let ghostPassNode: VirtualNode | null = null;
+
+/**
+ * Drag-and-drop ghost pass: paint the lifted item ABOVE the whole tree, at
+ * the position the in-tree pass would have given it (ancestor scroll
+ * offsets and ancestor translations re-applied) plus its `dndOffset`,
+ * which `paintNode` composes in itself. Called by the renderer after the
+ * root paint so the ghost is never covered by a later sibling or by an
+ * overlay — and it is not clipped by an `overflow: hidden` ancestor list,
+ * so a card dragged out of one column into another stays visible. Ancestor
+ * `scale`/`rotate` are not replicated (translation only).
+ */
+export function paintDndGhost(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
+  if (!node.visible || !node.layout || !node.dndGhost) return;
+  let dx = 0;
+  let dy = 0;
+  for (let a = node.parent; a; a = a.parent) {
+    const ss = a.scrollState;
+    if (ss) {
+      dx -= ss.scrollX;
+      dy -= ss.scrollY;
+    }
+    dx += (parseFloat(a.props.translateX) || 0) + pinOffset(a).x + (a.dndOffset?.x ?? 0);
+    dy += (parseFloat(a.props.translateY) || 0) + pinOffset(a).y + (a.dndOffset?.y ?? 0);
+  }
+  ctx.save();
+  if (dx !== 0 || dy !== 0) ctx.translate(dx, dy);
+  ghostPassNode = node;
+  try {
+    paintNode(ctx, node);
+  } finally {
+    ghostPassNode = null;
+    ctx.restore();
+  }
+}
+

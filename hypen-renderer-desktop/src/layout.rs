@@ -113,9 +113,91 @@ const DEFAULT_INPUT_MIN_W_PX: f32 = 200.0;
 /// Element types whose `action` prop is dispatched on click.
 pub const ACTIONABLE_TYPES: &[&str] = &["Button", "Link", "Card"];
 
-/// Element types that accept keyboard text input. Phase 7 ships `Input`;
-/// `Textarea` will join when multi-line editing lands.
-pub const TEXT_INPUT_TYPES: &[&str] = &["Input"];
+/// Element types that accept keyboard text input. Both emit
+/// [`ItemKind::Input`]; `Textarea` sets `multiline` (soft wrap, hard
+/// newlines, inner scroll) — see [`is_multiline_text_input`].
+pub const TEXT_INPUT_TYPES: &[&str] = &["Input", "Textarea"];
+
+/// True for the multi-line text input (`Textarea`).
+pub fn is_multiline_text_input(element_type: &str) -> bool {
+    element_type.eq_ignore_ascii_case("Textarea")
+}
+
+/// Browser default `<textarea rows>`: two visible lines.
+const DEFAULT_TEXTAREA_ROWS: f32 = 2.0;
+/// CSS `line-height: normal` for the system sans fonts — what a
+/// `<textarea>` without an explicit line height uses.
+const TEXTAREA_NORMAL_LINE_HEIGHT: f32 = 1.2;
+
+/// Line height (logical px) of a Textarea's lines: an explicit
+/// `lineHeight` (tw `text-sm` carries `1.25rem`) wins through the same
+/// multiplier-or-length rule Text uses; otherwise CSS `normal`.
+fn textarea_line_height(raw: Option<f32>, font_size: f32) -> f32 {
+    match raw {
+        Some(value) if value <= 4.0 => (font_size * value).max(font_size),
+        Some(value) => value.max(font_size),
+        None => font_size * TEXTAREA_NORMAL_LINE_HEIGHT,
+    }
+}
+
+/// Base Taffy style shared by `Input` and `Textarea` (both leaf nodes,
+/// DOM-reset box: no implicit frame or padding; explicit padding /
+/// border / margin use the ordinary box model).
+///
+/// A `Textarea` sizes like a browser `<textarea>`: its intrinsic height
+/// is `rows` lines (default 2) of its line height plus padding and
+/// border, it does NOT grow with content (overflow scrolls inside, see
+/// [`crate::textarea`]), `min-h-*` raises it, and an explicit
+/// `height` / `size` / `fillMax*` replaces it.
+fn text_input_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style {
+    let pad = padding_with(node, vs);
+    let border = border_with(node, vs);
+    let mut style = Style {
+        display: Display::Flex,
+        min_size: Size {
+            width: length(DEFAULT_INPUT_MIN_W_PX * scale),
+            height: length((DEFAULT_FONT_SIZE_PX * 1.3 + pad.top + pad.bottom) * scale),
+        },
+        padding: Rect_ {
+            left: length(pad.left * scale),
+            right: length(pad.right * scale),
+            top: length(pad.top * scale),
+            bottom: length(pad.bottom * scale),
+        },
+        margin: margin_to_taffy(margin_with(node, vs), scale),
+        border: border_to_taffy(border, scale),
+        ..Default::default()
+    };
+    let declares = |keys: &[&str]| {
+        keys.iter()
+            .any(|k| prop_dim_with(node, k, vs).is_some() || prop_f32_with(node, k, vs).is_some())
+    };
+    if declares(&["width", "size", "fillMaxWidth", "fillMaxSize"]) {
+        // An explicit width wins over the renderer's default minimum
+        // (`w-[120px]` must not render 200px wide), as in the DOM.
+        style.min_size.width = Dimension::auto();
+    }
+    if is_multiline_text_input(&node.element_type) {
+        let font_size = prop_f32_with(node, "fontSize", vs).unwrap_or(DEFAULT_FONT_SIZE_PX);
+        let line_height = textarea_line_height(prop_f32_with(node, "lineHeight", vs), font_size);
+        let rows = prop_f32_with(node, "rows", vs)
+            .filter(|r| r.is_finite() && *r >= 1.0)
+            .map(f32::floor)
+            .unwrap_or(DEFAULT_TEXTAREA_ROWS);
+        let intrinsic = (rows * line_height + pad.top + pad.bottom) * scale
+            + border_side_px(border, crate::style::BORDER_SIDE_TOP, scale)
+            + border_side_px(border, crate::style::BORDER_SIDE_BOTTOM, scale);
+        if declares(&["height", "size", "fillMaxHeight", "fillMaxSize"]) {
+            // Explicit height wins outright (CSS: the automatic minimum
+            // of a sized item never exceeds its specified size).
+            style.min_size.height = Dimension::auto();
+        } else {
+            style.size.height = length(intrinsic);
+            style.min_size.height = length(intrinsic);
+        }
+    }
+    style
+}
 
 /// Element types painted as bitmap surfaces. `Image` carries a `src`
 /// URL/path; `Icon` resolves through the engine's resource registry
@@ -611,11 +693,20 @@ pub enum ItemKind {
     /// (cursor, selection) in `App`, keyed by `node_id` — this struct
     /// just carries the resolved value, the placeholder, and the
     /// dotted state-binding path for `__hypen_bind` dispatches.
+    ///
+    /// `Textarea` emits this same kind with `multiline: true`: the value
+    /// soft-wraps to the content width, Enter inserts `\n`, and content
+    /// taller than the box scrolls inside it (offset kept in `App`).
     Input {
         value: String,
         placeholder: Option<String>,
         bind_path: Option<String>,
         font_size: f32,
+        /// Logical line height. Equals `font_size` for a single-line
+        /// Input; a Textarea's explicit `lineHeight` or CSS `normal`.
+        line_height: f32,
+        /// `true` for `Textarea`.
+        multiline: bool,
         color: Rgba,
         /// `(left, top, right, bottom)` content padding in physical pixels.
         /// Inputs have no renderer default padding; explicit `.padding(...)`
@@ -692,6 +783,20 @@ pub enum ItemKind {
         /// release commits.
         preview: Option<f32>,
     },
+    /// A `Chart` host: the resolved plot rectangle, scales and device-pixel
+    /// draw list for its marks, built once per layout pass by
+    /// [`crate::chart::build_scene`]. Mark children are laid out BY the
+    /// chart rather than by Taffy, so they emit no items of their own —
+    /// with the single exception of [`ItemKind::ChartMark`] (interaction)
+    /// and `Marker`, whose ordinary Hypen children are real layout items
+    /// shifted onto their data point.
+    Chart(std::sync::Arc<crate::chart::ChartScene>),
+    /// One interactive mark inside a `Chart`. Paints nothing — the chart's
+    /// own item drew the geometry — and exists purely so the mark can be
+    /// hit-tested, focused and dispatched like any other actionable. A mark
+    /// with no event applicator emits NO item at all, which is what makes
+    /// decorative marks pointer-transparent.
+    ChartMark(std::sync::Arc<crate::chart::ResolvedMark>),
     /// Vector `Icon` whose `paths` were pre-resolved by the engine
     /// (`@resources.foo` → SVG path data). Painter rasterises the
     /// paths into the laid-out rect every frame; cheap because icons
@@ -1144,6 +1249,11 @@ pub struct TaffyState {
     /// per-edge over these.
     platform_safe_area: crate::style::Padding,
     image_load_generation: u64,
+    /// Scroll panes whose Taffy style [`TaffyState::reconcile_content_sized_scroll_panes`]
+    /// rewrote (content-resolving flex basis + `Clip` instead of
+    /// `Scroll`), keyed to the overflow the style was built with so the
+    /// pass can restore it when the pane stops qualifying.
+    scroll_pane_overrides: HashMap<NodeId, taffy::Point<Overflow>>,
 }
 
 impl TaffyState {
@@ -1177,6 +1287,7 @@ impl TaffyState {
             safe_area: SafeAreaInsets::default(),
             platform_safe_area: DESKTOP_SAFE_AREA_DEFAULT,
             image_load_generation: crate::paint::image::image_load_generation(),
+            scroll_pane_overrides: HashMap::new(),
         }
     }
 
@@ -2052,6 +2163,155 @@ impl TaffyState {
     /// Carry percentage/stretch demand through wrapping vertical containers.
     /// Patch-driven construction creates a parent before its descendants are
     /// attached, so the demand must be reconciled after the tree is complete.
+    /// Give a `flex-1` scroll pane CSS's intrinsic size inside a
+    /// *content-sized* column.
+    ///
+    /// CSS `flex: 1` is `1 1 0%`, and a percentage basis against an
+    /// indefinite container main size resolves to `content`. So in
+    ///
+    /// ```text
+    /// Column {                                   // height: auto
+    ///   Toolbar
+    ///   Column { Grid … }.tw("flex-1 min-h-[300px] overflow-y-auto")
+    ///   Status
+    /// }.tw("min-h-[460px]")
+    /// ```
+    ///
+    /// the browser sizes the pane to its content (floored by its
+    /// min-height) and the outer column grows to fit. Desktop lowers
+    /// `flex: N` to a *length* zero basis (see `set_flex_shorthand` for
+    /// why that is the right default), and Taffy 0.10's intrinsic
+    /// main-size pass short-circuits a scroll container's contribution to
+    /// exactly that basis — ignoring both its content and its `min-height`
+    /// (`determine_container_main_size`: `_ if item.is_scroll_container()
+    /// => item.flex_basis`). The column therefore stayed at its own
+    /// min-height, the pane got whatever was left, and the Files app's
+    /// Grid overflowed it: the last row's names were clipped under the
+    /// pane's bottom edge, and a pane shorter than its own `min-h` let
+    /// the rows below it overlap the window chrome.
+    ///
+    /// For panes whose parent column is genuinely content-sized (auto
+    /// height, not growing, laid out along a vertical main axis so it is
+    /// not cross-stretched either) this restores the CSS contribution:
+    ///
+    /// * `flex_basis: 0%` — resolves to `content` while the parent is
+    ///   being measured (CSS semantics) and to `0` in the final pass,
+    ///   where the parent's size is known, so the pane still fills
+    ///   exactly the leftover space;
+    /// * `Overflow::Clip` for Taffy instead of `Scroll` — same clipping
+    ///   and content-size behaviour for the renderer (which reads
+    ///   scrolling from the props, never the Taffy style), but Taffy then
+    ///   measures the pane's real content contribution clamped by its
+    ///   min/max instead of the bare basis. The automatic minimum size
+    ///   stays zero because `apply_overflow_props` already wrote an
+    ///   explicit one.
+    ///
+    /// Panes under a growing / fixed-height / row parent keep the plain
+    /// zero basis, so the scroll-pane-fills-its-slot layouts that motivated
+    /// it are untouched.
+    fn reconcile_content_sized_scroll_panes(&mut self) {
+        let Self {
+            tree: taffy,
+            renderer_for_taffy,
+            scroll_pane_overrides,
+            ..
+        } = self;
+
+        fn is_column(style: &Style) -> bool {
+            style.display == Display::Flex
+                && matches!(
+                    style.flex_direction,
+                    FlexDirection::Column | FlexDirection::ColumnReverse
+                )
+        }
+
+        // Parent is sized by its own content along a vertical main axis.
+        let content_sized_column_parent = |taffy: &TaffyTree<NodeContext>, node: NodeId| {
+            let Some(parent) = taffy.parent(node) else {
+                return false;
+            };
+            let Some(grand) = taffy.parent(parent) else {
+                return false;
+            };
+            let (Ok(p), Ok(g)) = (taffy.style(parent), taffy.style(grand)) else {
+                return false;
+            };
+            is_column(p)
+                && p.position != Position::Absolute
+                && p.size.height.is_auto()
+                && p.flex_grow == 0.0
+                && p.aspect_ratio.is_none()
+                && is_column(g)
+        };
+
+        // Restore panes that no longer qualify. A restyle rebuilt the
+        // node's style from scratch (zero basis + `Scroll` again), in
+        // which case there is nothing to undo, only bookkeeping.
+        let tracked: Vec<NodeId> = scroll_pane_overrides.keys().copied().collect();
+        for node in tracked {
+            let Ok(style) = taffy.style(node) else {
+                scroll_pane_overrides.remove(&node);
+                continue;
+            };
+            if style.flex_basis != Dimension::percent(0.0) {
+                scroll_pane_overrides.remove(&node);
+                continue;
+            }
+            if style.flex_grow > 0.0
+                && style.position != Position::Absolute
+                && content_sized_column_parent(taffy, node)
+            {
+                continue;
+            }
+            let Some(original) = scroll_pane_overrides.remove(&node) else {
+                continue;
+            };
+            let mut next = style.clone();
+            next.flex_basis = Dimension::length(0.0);
+            next.overflow = original;
+            let _ = taffy.set_style(node, next);
+        }
+
+        for &node in renderer_for_taffy.keys() {
+            if scroll_pane_overrides.contains_key(&node) {
+                continue;
+            }
+            // Reject by reference before cloning: almost no node is a
+            // growing vertical scroll pane.
+            match taffy.style(node) {
+                Ok(style)
+                    if style.overflow.y == Overflow::Scroll
+                        && style.flex_grow > 0.0
+                        && style.flex_basis == Dimension::length(0.0)
+                        && style.position != Position::Absolute => {}
+                _ => continue,
+            }
+            if !content_sized_column_parent(taffy, node) {
+                continue;
+            }
+            let Ok(style) = taffy.style(node) else {
+                continue;
+            };
+            let original = style.overflow;
+            let mut next = style.clone();
+            next.flex_basis = Dimension::percent(0.0);
+            let clip = |o: Overflow| {
+                if o == Overflow::Scroll {
+                    Overflow::Clip
+                } else {
+                    o
+                }
+            };
+            next.overflow = taffy::Point {
+                x: clip(original.x),
+                y: clip(original.y),
+            };
+            if taffy.set_style(node, next).is_ok() {
+                scroll_pane_overrides.insert(node, original);
+            }
+        }
+    }
+
     fn reconcile_cross_axis_width_demand(&mut self, tree: &Tree) {
         // Disjoint field borrows so the walk can read `renderer_for_taffy`
         // while mutating the Taffy tree. The previous version sidestepped
@@ -2623,6 +2883,7 @@ impl LayoutPass {
         let style_inputs_dirty = std::mem::take(&mut state.fit_pass_dirty);
         if style_inputs_dirty {
             state.reconcile_cross_axis_width_demand(tree);
+            state.reconcile_content_sized_scroll_panes();
         }
         let root = state.root;
         let fit_pass_dirty = style_inputs_dirty;
@@ -3314,7 +3575,7 @@ impl LayoutItem {
     pub fn is_focusable(&self) -> bool {
         self.action.is_some()
             || self.video_intent.is_some()
-            || matches!(self.kind, ItemKind::Input { .. })
+            || (matches!(self.kind, ItemKind::Input { .. }) && !self.state_variants.disabled)
             || matches!(
                 self.kind,
                 ItemKind::Scrubber {
@@ -3360,15 +3621,60 @@ impl LayoutItem {
             }
         }
         if self.transform.is_identity() {
-            return self.rect.contains(x, y);
+            return self.rect.contains(x, y) && self.hit_geometry(x, y);
         }
         match self.transform.inverse() {
             Some(inv) => {
                 let (lx, ly) = inv.apply(x, y);
-                self.rect.contains(lx, ly)
+                self.rect.contains(lx, ly) && self.hit_geometry(lx, ly)
             }
             None => false,
         }
+    }
+
+    /// Sub-rectangle refinement of [`LayoutItem::hit_contains`]. Every
+    /// ordinary item fills its rect, so this is `true`; a chart mark is a
+    /// polyline / bar / circle inside the chart's box and answers from its
+    /// own device-pixel geometry, so the pointer lands on the mark the user
+    /// can actually see rather than anywhere in the plot.
+    fn hit_geometry(&self, x: f32, y: f32) -> bool {
+        match &self.kind {
+            ItemKind::ChartMark(mark) => mark.hit(x, y).is_some(),
+            _ => true,
+        }
+    }
+
+    /// The payload to dispatch for a pointer event on this item at
+    /// `pointer` (viewport-space device pixels; `None` for an
+    /// assistive-technology activation, which carries no position).
+    ///
+    /// Ordinary items just carry their static action arguments. A chart
+    /// mark merges `{series, index, x, y, datum}` — the datum in DATA
+    /// units — on top of them, and the chart host merges the pointer
+    /// position `{x, y}` in data units. Static args always win nothing:
+    /// the contract puts the resolved datum on top.
+    pub fn action_payload_at(&self, pointer: Option<(f32, f32)>) -> Option<serde_json::Value> {
+        let chart_fields = match &self.kind {
+            ItemKind::ChartMark(mark) => {
+                Some(mark.payload(pointer.map(|(x, y)| self.to_local(x, y))))
+            }
+            ItemKind::Chart(scene) => pointer.map(|(x, y)| {
+                let (lx, ly) = self.to_local(x, y);
+                scene.payload(lx, ly)
+            }),
+            _ => None,
+        };
+        let Some(fields) = chart_fields else {
+            return self.action_payload.clone();
+        };
+        let mut obj = match self.action_payload.clone() {
+            Some(serde_json::Value::Object(map)) => map,
+            _ => serde_json::Map::new(),
+        };
+        for (key, value) in fields {
+            obj.insert(key, value);
+        }
+        Some(serde_json::Value::Object(obj))
     }
 
     /// Map a viewport-space point into this item's LOCAL (layout-rect)
@@ -3833,66 +4139,8 @@ fn build_subtree(
 
     match node.element_type.as_str() {
         et if IMAGE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
-            // Images sized by `width` / `height` (px or %), with
-            // `.size(N)` as the square-fallback (icons use this).
-            // Percent maps to Taffy's `Dimension::Percent` so an
-            // Image with `.width("100%")` fills its parent column.
-            let size_fallback = prop_f32_with(node, "size", &vs);
-            let w_dim = prop_dim_with(node, "width", &vs);
-            let h_dim = prop_dim_with(node, "height", &vs);
-            let natural_size = if et.eq_ignore_ascii_case("Image") {
-                node.props
-                    .get("src")
-                    .or_else(|| node.props.get("0"))
-                    .and_then(|value| value.as_str())
-                    .and_then(crate::paint::image::loaded_natural_size)
-            } else {
-                None
-            };
-            let aspect_ratio = crate::style::prop_aspect_ratio_with(node, "aspectRatio", &vs)
-                .or_else(|| natural_size.map(|(w, h)| w / h));
-
-            // When neither axis is set, fall back to .size or default.
-            let component_default = if et.eq_ignore_ascii_case("Avatar") {
-                40.0
-            } else {
-                DEFAULT_IMAGE_SIZE_PX
-            };
-            let default_len = size_fallback.unwrap_or(component_default);
-            let width = match w_dim {
-                Some(Dim::Length(v)) => Dimension::length(v * scale),
-                Some(Dim::Percent(p)) => Dimension::percent(p),
-                None => Dimension::length(
-                    size_fallback
-                        .or(natural_size.map(|(w, _)| w))
-                        .unwrap_or(default_len)
-                        * scale,
-                ),
-            };
-            let height = match h_dim {
-                Some(Dim::Length(v)) => Dimension::length(v * scale),
-                Some(Dim::Percent(p)) => Dimension::percent(p),
-                None if w_dim.is_some() && aspect_ratio.is_some() => Dimension::auto(),
-                None => Dimension::length(
-                    size_fallback
-                        .or(natural_size.map(|(_, h)| h))
-                        .unwrap_or(default_len)
-                        * scale,
-                ),
-            };
-            // `flex_shrink: 0` keeps the image from being shrunk to 0
-            // by sibling flex children when its width is `Percent` —
-            // without this an image with `.width("100%")` collapses to
-            // its content size (0) inside a horizontal flex parent.
-            let mut style = Style {
-                display: Display::Flex,
-                size: Size { width, height },
-                aspect_ratio,
-                flex_shrink: 0.0,
-                margin: margin_to_taffy(margin_with(node, &vs), scale),
-                border: border_to_taffy(border_with(node, &vs), scale),
-                ..Default::default()
-            };
+            // See `image_style` for the sizing rules.
+            let mut style = image_style(node, &vs, scale);
             apply_flex_props(&mut style, node, &vs, scale);
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
@@ -3979,6 +4227,97 @@ fn build_subtree(
             renderer_for_taffy.insert(id, node_id.to_string());
             Some(id)
         }
+        et if crate::chart::is_chart_type(et) => {
+            // A chart is a leaf-like block: default height 200, width
+            // fills the parent. Its MARKS are laid out by the chart
+            // itself (see `crate::chart::build_scene`), so none of them
+            // is built into the Taffy tree — with the single exception
+            // of `Marker`, whose children are ordinary Hypen components
+            // that need a real box. Those are built as absolutely-
+            // positioned children here and moved onto their data point
+            // by the emit pass, so they contribute nothing to the
+            // chart's own size.
+            let mut style = chart_style(node, &vs, scale);
+            apply_flex_props(&mut style, node, &vs, scale);
+            apply_alignment_props(&mut style, node, viewport);
+            apply_size_props(&mut style, node, &vs, scale);
+            let mut children = Vec::new();
+            for child_id in tree.children_of(node_id) {
+                if let Some(c) = build_subtree(
+                    taffy,
+                    tree,
+                    child_id,
+                    scale,
+                    viewport,
+                    renderer_for_taffy,
+                    interaction,
+                    safe_area,
+                ) {
+                    children.push(c);
+                }
+            }
+            let id = taffy.new_with_children(style, &children).ok()?;
+            renderer_for_taffy.insert(id, node_id.to_string());
+            Some(id)
+        }
+        et if crate::chart::MarkKind::from_element_type(et).is_some() => {
+            // Marks are the chart's business, not Taffy's. A `Marker`
+            // directly under a chart is the exception: it hosts real
+            // Hypen children, so it builds like an out-of-flow container
+            // (the chart pins it to its data point at emit time). Every
+            // other mark — and any mark that strayed outside a chart —
+            // contributes no box at all, which is also what makes a
+            // decorative mark pointer-transparent.
+            let is_marker = crate::chart::MarkKind::from_element_type(et)
+                == Some(crate::chart::MarkKind::Marker);
+            let inside_chart = tree
+                .parent_of(node_id)
+                .and_then(|parent| tree.get(parent))
+                .is_some_and(|parent| crate::chart::is_chart_type(&parent.element_type));
+            if !(is_marker && inside_chart) {
+                return None;
+            }
+            let pad = padding_with(node, &vs);
+            let mut style = Style {
+                display: Display::Flex,
+                flex_direction: FlexDirection::Column,
+                position: Position::Absolute,
+                inset: Rect_ {
+                    top: LengthPercentageAuto::length(0.0),
+                    right: LengthPercentageAuto::auto(),
+                    bottom: LengthPercentageAuto::auto(),
+                    left: LengthPercentageAuto::length(0.0),
+                },
+                padding: Rect_ {
+                    left: length(pad.left * scale),
+                    right: length(pad.right * scale),
+                    top: length(pad.top * scale),
+                    bottom: length(pad.bottom * scale),
+                },
+                border: border_to_taffy(border_with(node, &vs), scale),
+                ..Default::default()
+            };
+            apply_flex_props(&mut style, node, &vs, scale);
+            apply_size_props(&mut style, node, &vs, scale);
+            let mut children = Vec::new();
+            for child_id in tree.children_of(node_id) {
+                if let Some(c) = build_subtree(
+                    taffy,
+                    tree,
+                    child_id,
+                    scale,
+                    viewport,
+                    renderer_for_taffy,
+                    interaction,
+                    safe_area,
+                ) {
+                    children.push(c);
+                }
+            }
+            let id = taffy.new_with_children(style, &children).ok()?;
+            renderer_for_taffy.insert(id, node_id.to_string());
+            Some(id)
+        }
         et if SCRUBBER_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
             let mut style = scrubber_style(node, &vs, scale);
             apply_flex_props(&mut style, node, &vs, scale);
@@ -3989,26 +4328,10 @@ fn build_subtree(
             Some(id)
         }
         et if TEXT_INPUT_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
-            // Inputs are leaf flex nodes. Match the DOM reset: there is no
-            // implicit frame or padding, but explicit `.padding(...)` and
-            // `.border(...)` use the ordinary box model.
-            let pad = padding_with(node, &vs);
-            let mut style = Style {
-                display: Display::Flex,
-                min_size: Size {
-                    width: length(DEFAULT_INPUT_MIN_W_PX * scale),
-                    height: length((DEFAULT_FONT_SIZE_PX * 1.3 + pad.top + pad.bottom) * scale),
-                },
-                padding: Rect_ {
-                    left: length(pad.left * scale),
-                    right: length(pad.right * scale),
-                    top: length(pad.top * scale),
-                    bottom: length(pad.bottom * scale),
-                },
-                margin: margin_to_taffy(margin_with(node, &vs), scale),
-                border: border_to_taffy(border_with(node, &vs), scale),
-                ..Default::default()
-            };
+            // Inputs / Textareas are leaf flex nodes. Match the DOM reset:
+            // there is no implicit frame or padding, but explicit
+            // `.padding(...)` and `.border(...)` use the ordinary box model.
+            let mut style = text_input_style(node, &vs, scale);
             apply_flex_props(&mut style, node, &vs, scale);
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
@@ -4253,6 +4576,7 @@ fn build_subtree(
             apply_flex_props(&mut style, node, &vs, scale);
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
+            apply_stack_fill_min_size(&mut style);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -4538,8 +4862,17 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
             | "font-size"
             | "fontweight"
             | "font-weight"
+            // Textarea intrinsic height is `rows` lines of its line height.
+            | "rows"
+            | "lineheight"
+            | "line-height"
             | "maxlines" // re-shapes wrap → measured height
             | "max-lines"
+            // `line-clamp-N` aliases of `maxLines` (`resolve_max_lines`).
+            | "webkitlineclamp"
+            | "-webkit-line-clamp"
+            | "lineclamp"
+            | "line-clamp"
             | "gap"
             | "flex"
             | "flexgrow"
@@ -4627,36 +4960,7 @@ pub(crate) fn node_style_with(
     let vs = VariantState::paint(viewport, active_states.to_vec());
     let et = node.element_type.as_str();
     let mut style = if IMAGE_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
-        let size_fallback = prop_f32_with(node, "size", &vs);
-        let w_dim = prop_dim_with(node, "width", &vs);
-        let h_dim = prop_dim_with(node, "height", &vs);
-        let aspect_ratio = crate::style::prop_aspect_ratio_with(node, "aspectRatio", &vs);
-        let component_default = if et.eq_ignore_ascii_case("Avatar") {
-            40.0
-        } else {
-            DEFAULT_IMAGE_SIZE_PX
-        };
-        let default_len = size_fallback.unwrap_or(component_default);
-        let width = match w_dim {
-            Some(Dim::Length(v)) => Dimension::length(v * scale),
-            Some(Dim::Percent(p)) => Dimension::percent(p),
-            None => Dimension::length(default_len * scale),
-        };
-        let height = match h_dim {
-            Some(Dim::Length(v)) => Dimension::length(v * scale),
-            Some(Dim::Percent(p)) => Dimension::percent(p),
-            None if aspect_ratio.is_some() => Dimension::auto(),
-            None => Dimension::length(default_len * scale),
-        };
-        Style {
-            display: Display::Flex,
-            size: Size { width, height },
-            aspect_ratio,
-            flex_shrink: 0.0,
-            margin: margin_to_taffy(margin_with(node, &vs), scale),
-            border: border_to_taffy(border_with(node, &vs), scale),
-            ..Default::default()
-        }
+        image_style(node, &vs, scale)
     } else if CONTROL_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
         let (default_width, default_height) = if et.eq_ignore_ascii_case("Audio") {
             (300.0, 54.0)
@@ -4686,26 +4990,12 @@ pub(crate) fn node_style_with(
         }
     } else if MEDIA_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
         media_style(node, &vs, scale)
+    } else if crate::chart::is_chart_type(et) {
+        chart_style(node, &vs, scale)
     } else if SCRUBBER_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
         scrubber_style(node, &vs, scale)
     } else if TEXT_INPUT_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
-        let pad = padding_with(node, &vs);
-        Style {
-            display: Display::Flex,
-            min_size: Size {
-                width: length(DEFAULT_INPUT_MIN_W_PX * scale),
-                height: length((DEFAULT_FONT_SIZE_PX * 1.3 + pad.top + pad.bottom) * scale),
-            },
-            padding: Rect_ {
-                left: length(pad.left * scale),
-                right: length(pad.right * scale),
-                top: length(pad.top * scale),
-                bottom: length(pad.bottom * scale),
-            },
-            margin: margin_to_taffy(margin_with(node, &vs), scale),
-            border: border_to_taffy(border_with(node, &vs), scale),
-            ..Default::default()
-        }
+        text_input_style(node, &vs, scale)
     } else if et == "Text" {
         let pad = padding_with(node, &vs);
         Style {
@@ -4906,6 +5196,9 @@ pub(crate) fn node_style_with(
     apply_flex_props(&mut style, node, &vs, scale);
     apply_alignment_props(&mut style, node, viewport);
     apply_size_props(&mut style, node, &vs, scale);
+    if et.eq_ignore_ascii_case("Stack") {
+        apply_stack_fill_min_size(&mut style);
+    }
     apply_divider_defaults(&mut style, node, &vs, scale);
     apply_overflow_props(&mut style, node, viewport);
     apply_position_props(&mut style, node, &vs, scale);
@@ -5120,6 +5413,36 @@ fn scrubber_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> St
         // space evenly rather than by content size (they have none).
         flex_grow: if w_dim.is_some() { 0.0 } else { 1.0 },
         flex_shrink: 1.0,
+        margin: margin_to_taffy(margin_with(node, vs), scale),
+        border: border_to_taffy(border_with(node, vs), scale),
+        ..Default::default()
+    }
+}
+
+/// `Chart` layout: a leaf-like block. Height defaults to
+/// [`crate::chart::defaults::HEIGHT`] (200 logical px) because a chart has
+/// no intrinsic content height; width fills the parent, like a `div` in the
+/// DOM renderer. Explicit `width` / `height` props override both through
+/// the shared `apply_size_props` pass, and `flex_shrink: 0` keeps a chart
+/// in a `Row` from collapsing to nothing when it declares a percentage
+/// width.
+fn chart_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style {
+    let width = match prop_dim_with(node, "width", vs) {
+        Some(d) => dim_to_dimension(d, scale),
+        None => Dimension::percent(1.0),
+    };
+    let height = match prop_dim_with(node, "height", vs) {
+        Some(d) => dim_to_dimension(d, scale),
+        None => Dimension::length(crate::chart::defaults::HEIGHT * scale),
+    };
+    Style {
+        display: Display::Flex,
+        size: Size { width, height },
+        min_size: Size {
+            width: Dimension::length(0.0),
+            height: Dimension::length(0.0),
+        },
+        flex_shrink: 0.0,
         margin: margin_to_taffy(margin_with(node, vs), scale),
         border: border_to_taffy(border_with(node, vs), scale),
         ..Default::default()
@@ -5378,10 +5701,19 @@ fn apply_overflow_props(style: &mut Style, node: &crate::tree::Node, viewport: V
     // clip the frame to its allocation. Only zero the side we
     // scroll on; the cross-axis keeps its content-based min so a
     // narrow scrollable still sizes correctly.
-    if style.overflow.x == Overflow::Scroll {
+    //
+    // Only replace the *automatic* minimum, though. An authored
+    // `min-h-[300px]` / `.minHeight(...)` (already written by
+    // `apply_size_props`, which runs first) is a real CSS constraint a
+    // scroll container honours — clobbering it to 0 let the Files
+    // app's `flex-1 min-h-[300px] overflow-y-auto` contents pane
+    // collapse to ~130px inside its content-sized window, so the Grid
+    // overflowed it and the last row's labels were cut off under the
+    // status/details rows below.
+    if style.overflow.x == Overflow::Scroll && style.min_size.width.is_auto() {
         style.min_size.width = length(0.0);
     }
-    if style.overflow.y == Overflow::Scroll {
+    if style.overflow.y == Overflow::Scroll && style.min_size.height.is_auto() {
         style.min_size.height = length(0.0);
     }
 }
@@ -5413,6 +5745,79 @@ pub(crate) fn node_context(
         }
     } else {
         NodeContext::default()
+    }
+}
+
+/// Decoded natural size of an `Image`'s `src` (logical px), once loaded.
+/// `Icon` / `Avatar` have no natural size here.
+fn image_natural_size(node: &crate::tree::Node) -> Option<(f32, f32)> {
+    if !node.element_type.eq_ignore_ascii_case("Image") {
+        return None;
+    }
+    node.props
+        .get("src")
+        .or_else(|| node.props.get("0"))
+        .and_then(|value| value.as_str())
+        .and_then(crate::paint::image::loaded_natural_size)
+        .filter(|(w, h)| *w > 0.0 && *h > 0.0)
+}
+
+/// Base Taffy style for an [`IMAGE_TYPES`] leaf, shared by the bulk
+/// build and the incremental restyle. Sized by `width` / `height` (px
+/// or %), with `.size(N)` as the square fallback (icons use this), then
+/// the decoded natural size, then the component default. The aspect
+/// ratio is the authored `aspectRatio`, else the natural one.
+fn image_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style {
+    let et = node.element_type.as_str();
+    let size_fallback = prop_f32_with(node, "size", vs);
+    let w_dim = prop_dim_with(node, "width", vs);
+    let h_dim = prop_dim_with(node, "height", vs);
+    let natural_size = image_natural_size(node);
+    let aspect_ratio = crate::style::prop_aspect_ratio_with(node, "aspectRatio", vs)
+        .or_else(|| natural_size.map(|(w, h)| w / h));
+
+    // When neither axis is set, fall back to .size or default.
+    let component_default = if et.eq_ignore_ascii_case("Avatar") {
+        40.0
+    } else {
+        DEFAULT_IMAGE_SIZE_PX
+    };
+    let default_len = size_fallback.unwrap_or(component_default);
+    // Percent maps to Taffy's `Dimension::Percent` so an Image with
+    // `.width("100%")` fills its parent column.
+    let width = match w_dim {
+        Some(Dim::Length(v)) => Dimension::length(v * scale),
+        Some(Dim::Percent(p)) => Dimension::percent(p),
+        None => Dimension::length(
+            size_fallback
+                .or(natural_size.map(|(w, _)| w))
+                .unwrap_or(default_len)
+                * scale,
+        ),
+    };
+    let height = match h_dim {
+        Some(Dim::Length(v)) => Dimension::length(v * scale),
+        Some(Dim::Percent(p)) => Dimension::percent(p),
+        None if w_dim.is_some() && aspect_ratio.is_some() => Dimension::auto(),
+        None => Dimension::length(
+            size_fallback
+                .or(natural_size.map(|(_, h)| h))
+                .unwrap_or(default_len)
+                * scale,
+        ),
+    };
+    // `flex_shrink: 0` keeps the image from being shrunk to 0 by
+    // sibling flex children when its width is `Percent` — without this
+    // an image with `.width("100%")` collapses to its content size (0)
+    // inside a horizontal flex parent.
+    Style {
+        display: Display::Flex,
+        size: Size { width, height },
+        aspect_ratio,
+        flex_shrink: 0.0,
+        margin: margin_to_taffy(margin_with(node, vs), scale),
+        border: border_to_taffy(border_with(node, vs), scale),
+        ..Default::default()
     }
 }
 
@@ -5448,9 +5853,24 @@ fn node_context_in_tree(
 /// the renderer should keep at most `n` rendered lines; `None` means
 /// "wrap freely". Falls back to `None` when the value isn't a positive
 /// integer.
+///
+/// Tailwind's `line-clamp-N` lowers to `-webkit-line-clamp: N` (the
+/// engine camel-cases it to `WebkitLineClamp`), which the DOM renderer
+/// honours natively. Read it — and the unprefixed `lineClamp` — as the
+/// same cap so a `line-clamp-2` label measures and paints at most two
+/// lines here too instead of growing its row to every wrapped line.
+/// `line-clamp-none` (`none`) is not a number and so stays unclamped.
 pub(crate) fn resolve_max_lines(node: &crate::tree::Node, viewport: Viewport) -> Option<u32> {
-    let v = prop_f32_at(node, "maxLines", viewport)
-        .or_else(|| prop_f32_at(node, "max-lines", viewport))?;
+    let v = [
+        "maxLines",
+        "max-lines",
+        "WebkitLineClamp",
+        "-webkit-line-clamp",
+        "lineClamp",
+        "line-clamp",
+    ]
+    .iter()
+    .find_map(|name| prop_f32_at(node, name, viewport))?;
     if v >= 1.0 {
         Some(v as u32)
     } else {
@@ -5556,6 +5976,37 @@ fn make_stack_overlay_absolute(s: &mut Style, center_in_parent: bool) {
         bottom: LengthPercentageAuto::length(0.0),
         left: LengthPercentageAuto::length(0.0),
     };
+}
+
+/// A growing Stack (`flex-1` / `grow`) drops its automatic minimum size
+/// — `min-width: 0; min-height: 0`, exactly what the DOM renderer's
+/// Stack stylesheet sets (`hypen-web/packages/web/src/dom/components/stack.ts`).
+///
+/// Without it the Stack's `min-height: auto` resolves to its content's
+/// min-content height, and a `w-full h-full` photo's min-content height
+/// is its natural, aspect-derived height (Taffy treats the percentage
+/// as `auto` while it can't resolve). The Hypengram story viewer's
+/// `Stack { Image.tw("w-full h-full") … }.tw("flex-1")` therefore
+/// refused to flex below 800 × 1920/1080 = 1422px inside a 700px
+/// column: the photo rendered hugely zoomed with a scrollbar instead
+/// of filling the viewport. With the minimum dropped the Stack flexes
+/// to the slot, its post-flex height is definite, and the photo's
+/// `h-full` resolves against it.
+///
+/// Scoped to growing Stacks: a content-sized Stack keeps `auto` so it
+/// is never squashed below its content (an avatar-with-badge in a Row,
+/// a card in an overflowing Column). An authored `min-w-*` / `min-h-*`
+/// (already applied by `apply_size_props`) wins.
+fn apply_stack_fill_min_size(style: &mut Style) {
+    if style.flex_grow <= 0.0 {
+        return;
+    }
+    if style.min_size.width.is_auto() {
+        style.min_size.width = length(0.0);
+    }
+    if style.min_size.height.is_auto() {
+        style.min_size.height = length(0.0);
+    }
 }
 
 fn apply_grid_image_stretch(node: &crate::tree::Node, style: &mut Style) {
@@ -5684,6 +6135,14 @@ fn apply_size_props(style: &mut Style, node: &crate::tree::Node, vs: &VariantSta
             Dim::Length(v) => Dimension::length(v * scale),
             Dim::Percent(p) => Dimension::percent(p),
         };
+    }
+    // `.aspectRatio(r)` on any element (Image/Video set theirs in
+    // `media_style`): with one definite axis, Taffy derives the other —
+    // a `w-full` square preview gets its height from its width.
+    if style.aspect_ratio.is_none() {
+        if let Some(r) = crate::style::prop_aspect_ratio_with(node, "aspectRatio", vs).filter(|r| r.is_finite() && *r > 0.0) {
+            style.aspect_ratio = Some(r);
+        }
     }
     if let Some(d) = prop_dim_with(node, "minWidth", vs) {
         style.min_size.width = match d {
@@ -5968,12 +6427,24 @@ fn margin_to_taffy(m: crate::style::Padding, scale: f32) -> Rect_<LengthPercenta
 }
 
 fn border_to_taffy(b: Border, scale: f32) -> Rect_<LengthPercentage> {
-    let w = if b.is_visible() { b.width * scale } else { 0.0 };
+    let side = |bit: u8| length(border_side_px(b, bit, scale));
     Rect_ {
-        left: length(w),
-        right: length(w),
-        top: length(w),
-        bottom: length(w),
+        left: side(crate::style::BORDER_SIDE_LEFT),
+        right: side(crate::style::BORDER_SIDE_RIGHT),
+        top: side(crate::style::BORDER_SIDE_TOP),
+        bottom: side(crate::style::BORDER_SIDE_BOTTOM),
+    }
+}
+
+/// Layout width (physical px) of one border side. A directional border
+/// (`border-t`, `border-b`) only occupies the sides it draws — inflating
+/// all four by the stroke width pushed content 1px in from the
+/// undrawn edges too.
+fn border_side_px(b: Border, side_bit: u8, scale: f32) -> f32 {
+    if b.is_visible() && b.sides & side_bit != 0 {
+        b.width * scale
+    } else {
+        0.0
     }
 }
 
@@ -6069,6 +6540,10 @@ fn emit_items(
     // children so the App can clamp the offset.
     let mut child_scroll_shift_y = parent_scroll_shift_y;
     let mut scrollable_idx: Option<usize> = None;
+    // Set when THIS node is a `Chart`: the resolved scene, so the child
+    // walk below can pin each visible `Marker` to its data point (and
+    // skip the ones the chart hid).
+    let mut chart_scene: Option<std::sync::Arc<crate::chart::ChartScene>> = None;
     // Clip rect handed down to children. Inherits `parent_clip_to`
     // by default; replaced with this node's own rect when the node
     // is itself scrollable, so descendants clip to *this* container.
@@ -6291,6 +6766,12 @@ fn emit_items(
                     let font_weight = resolve_font_weight(node, viewport);
                     let color = prop_color_at(node, "color", viewport).unwrap_or(Rgba::BLACK);
                     let pad = padding_at(node, viewport);
+                    let multiline = is_multiline_text_input(et);
+                    let line_height = if multiline {
+                        textarea_line_height(prop_f32_at(node, "lineHeight", viewport), font_size)
+                    } else {
+                        font_size
+                    };
                     out.push(LayoutItem {
                         node_id: rid.to_string(),
                         kind: ItemKind::Input {
@@ -6298,6 +6779,8 @@ fn emit_items(
                             placeholder,
                             bind_path,
                             font_size,
+                            line_height,
+                            multiline,
                             color,
                             padding: (
                                 pad.left * scale,
@@ -6473,6 +6956,91 @@ fn emit_items(
                             background_layers: background_layers.clone(),
                             background_image: background_image.clone(),
                             state_variants: item_state_variants.clone(),
+                            opacity: 1.0,
+                            transform: Affine2::IDENTITY,
+                        });
+                    }
+                }
+                et if crate::chart::is_chart_type(et) => {
+                    // The chart resolves its own domains, insets and mark
+                    // geometry against the box Taffy gave it. One item
+                    // carries the whole draw list; each INTERACTIVE mark
+                    // gets an item of its own so it can be hit-tested,
+                    // focused and dispatched through the ordinary paths.
+                    // Decorative marks emit nothing and are therefore
+                    // transparent to the pointer.
+                    let scene = std::sync::Arc::new(crate::chart::build_scene(
+                        tree, rid, rect, viewport, scale,
+                    ));
+                    chart_scene = Some(std::sync::Arc::clone(&scene));
+                    let marks: Vec<std::sync::Arc<crate::chart::ResolvedMark>> = scene
+                        .marks
+                        .iter()
+                        .cloned()
+                        .map(std::sync::Arc::new)
+                        .collect();
+                    out.push(LayoutItem {
+                        node_id: rid.to_string(),
+                        kind: ItemKind::Chart(scene),
+                        rect,
+                        action,
+                        action_payload: action_payload.clone(),
+                        hover_action: hover_action.clone(),
+                        hover_payload: hover_payload.clone(),
+                        video_intent,
+                        background: background_explicit,
+                        hover,
+                        shadow,
+                        border: item_border,
+                        scrollable: None,
+                        font_weight: 400,
+                        clip_to: parent_clip_to,
+                        clip_radius: parent_clip_radius,
+                        subtree_root: subtree_root.map(str::to_string),
+                        background_gradient: background_gradient.clone(),
+                        background_layers: background_layers.clone(),
+                        background_image: background_image.clone(),
+                        state_variants: item_state_variants.clone(),
+                        opacity: 1.0,
+                        transform: Affine2::IDENTITY,
+                    });
+                    for mark in marks {
+                        // The item's rect is the mark's own hit bounds so
+                        // damage and a11y bounds stay tight; the precise
+                        // geometry test lives in `hit_geometry`.
+                        let Some(mark_rect) = mark.hit_bounds() else {
+                            continue;
+                        };
+                        let (click_action, click_payload) = match mark.events.click.clone() {
+                            Some((name, payload)) => (Some(name), Some(payload)),
+                            None => (None, None),
+                        };
+                        let (mark_hover, mark_hover_payload) = match mark.events.hover.clone() {
+                            Some((name, payload)) => (Some(name), Some(payload)),
+                            None => (None, None),
+                        };
+                        out.push(LayoutItem {
+                            node_id: mark.node_id.clone(),
+                            kind: ItemKind::ChartMark(mark),
+                            rect: mark_rect,
+                            action: click_action,
+                            action_payload: click_payload,
+                            hover_action: mark_hover,
+                            hover_payload: mark_hover_payload,
+                            video_intent: None,
+                            background: None,
+                            hover: HoverStyle::default(),
+                            shadow: None,
+                            border: Border::default(),
+                            scrollable: None,
+                            font_weight: 400,
+                            clip_to: parent_clip_to,
+                            clip_radius: parent_clip_radius,
+                            subtree_root: subtree_root.map(str::to_string),
+                            background_gradient: None,
+                            background_layers: None,
+                            background_image: None,
+                            state_variants: crate::style::StateVariants::default(),
                             opacity: 1.0,
                             transform: Affine2::IDENTITY,
                         });
@@ -6766,6 +7334,35 @@ fn emit_items(
         } else {
             y_natural
         };
+        // Chart `Marker`: Taffy content-sized the box, the chart says where
+        // it belongs. Re-origin the child so its rect lands on the data
+        // point offset by the anchor rule — and skip it entirely when the
+        // chart placed no marker for it (both coordinates missing, e.g. a
+        // tooltip bound to a null hover), which is exactly "hidden".
+        let (child_parent_x, child_parent_y) = match chart_scene.as_deref() {
+            None => (child_parent_x, child_parent_y),
+            Some(scene) => {
+                let Some(place) = renderer_for_taffy
+                    .get(&child)
+                    .and_then(|child_rid| scene.marker(child_rid))
+                else {
+                    continue;
+                };
+                let Ok(child_layout) = taffy.layout(child) else {
+                    continue;
+                };
+                let (dx, dy) = crate::chart::anchor_offset(
+                    place.anchor,
+                    child_layout.size.width,
+                    child_layout.size.height,
+                    crate::chart::defaults::MARKER_GAP * scale,
+                );
+                (
+                    place.x + dx - child_layout.location.x,
+                    place.y + dy + child_scroll_shift_y - child_layout.location.y,
+                )
+            }
+        };
         // If THIS node is a scrollable container, each of its direct
         // children becomes a fresh painter-side cache unit (each Post
         // / each Grid cell). Otherwise the child inherits whatever
@@ -6917,6 +7514,14 @@ pub(crate) fn refresh_item_paint(
     // fallback (`onPlay`) is coupled to that machinery. The wholesale-
     // drop path owns Video repaints.
     if matches!(item.kind, ItemKind::Video { .. }) {
+        return;
+    }
+    // Charts never reach here either: `paint_only_affected_ids` refuses
+    // any batch touching a chart or a mark (`chart::is_chart_family_node`)
+    // because their "paint" props resolve domains and geometry. The guard
+    // is kept so a future classifier change degrades to a stale-free full
+    // pass rather than a silently stale scene.
+    if matches!(item.kind, ItemKind::Chart(_) | ItemKind::ChartMark(_)) {
         return;
     }
 
@@ -7074,6 +7679,9 @@ pub(crate) fn refresh_item_paint(
                 .unwrap_or(true);
         }
         ItemKind::Video { .. } => unreachable!("early-returned above"),
+        ItemKind::Chart(_) | ItemKind::ChartMark(_) => {
+            unreachable!("early-returned above")
+        }
         ItemKind::Button | ItemKind::Card | ItemKind::Container => {}
     }
 
@@ -7189,8 +7797,17 @@ fn node_local_transform(
     viewport: Viewport,
     scale: f32,
 ) -> Affine2 {
-    let tx = transform_f32(node, "translateX", viewport).unwrap_or(0.0) * scale;
-    let ty = transform_f32(node, "translateY", viewport).unwrap_or(0.0) * scale;
+    // `translateX` / `translateY` resolve to 0 when absent AND when the
+    // engine-injected pinboard binding resolves to JSON `null` (the
+    // reserved `__dnd.<group>.<key>` path unset — DnD plan §3): a `null`
+    // prop reads as `None` through `value_to_f32`, so it lands here as 0.
+    // The drag-and-drop runtime's local offsets (`__dndDesktop.dx/dy`,
+    // logical px — the ghost translate and sibling gap-opening shifts)
+    // compose ON TOP of the node's own translate so a lifted pinboard
+    // note keeps its base position under the drag.
+    let (ldx, ldy) = local_drag_offset(node);
+    let tx = (transform_f32(node, "translateX", viewport).unwrap_or(0.0) + ldx) * scale;
+    let ty = (transform_f32(node, "translateY", viewport).unwrap_or(0.0) + ldy) * scale;
     let s = transform_f32(node, "scale", viewport).unwrap_or(1.0);
     let rot = transform_f32(node, "rotate", viewport).unwrap_or(0.0);
     if tx == 0.0 && ty == 0.0 && s == 1.0 && rot == 0.0 {
@@ -7203,6 +7820,24 @@ fn node_local_transform(
         .mul(&Affine2::scale(s))
         .mul(&Affine2::rotate_deg(rot))
         .mul(&Affine2::translate(-cx, -cy))
+}
+
+/// The drag-and-drop runtime's renderer-private local offset for a node
+/// (logical px), `(0, 0)` for the overwhelmingly common node without one.
+/// Read raw (no variant chain — the runtime writes exactly these keys).
+fn local_drag_offset(node: &crate::tree::Node) -> (f32, f32) {
+    let read = |key: &str| {
+        node.props
+            .get(key)
+            .and_then(serde_json::Value::as_f64)
+            .filter(|v| v.is_finite())
+            .map(|v| v as f32)
+            .unwrap_or(0.0)
+    };
+    (
+        read(crate::dnd::LOCAL_DX_PROP),
+        read(crate::dnd::LOCAL_DY_PROP),
+    )
 }
 
 /// Cumulative transform for `id`: every ancestor's local transform (in
@@ -7230,7 +7865,41 @@ fn cumulative_transform(
         _ => Affine2::IDENTITY,
     };
     let local = match (tree.get(id), rects.get(id)) {
-        (Some(node), Some(rect)) => node_local_transform(node, *rect, viewport, scale),
+        (Some(node), Some(rect)) => {
+            let mut pin = (0.0, 0.0);
+            if node.props.contains_key("__dnd.pinX") || node.props.contains_key("__dnd.pinY") {
+                let mut parent = tree.parent_of(id);
+                while let Some(parent_id) = parent {
+                    if let Some(board) = tree.get(parent_id) {
+                        if board.props.contains_key("__dnd.pin") {
+                            if let Some(box_rect) = rects.get(parent_id) {
+                                let pad = crate::style::padding_at(board, viewport);
+                                let border =
+                                    crate::style::border_at(board, viewport).width.max(0.0);
+                                let w = (box_rect.w
+                                    - (pad.left + pad.right + 2.0 * border) * scale)
+                                    .max(0.0);
+                                let h = (box_rect.h
+                                    - (pad.top + pad.bottom + 2.0 * border) * scale)
+                                    .max(0.0);
+                                let read = |key: &str| {
+                                    node.props
+                                        .get(key)
+                                        .and_then(serde_json::Value::as_f64)
+                                        .filter(|v| v.is_finite())
+                                        .unwrap_or(0.0) as f32
+                                };
+                                pin = (read("__dnd.pinX") * w, read("__dnd.pinY") * h);
+                            }
+                            break;
+                        }
+                    }
+                    parent = tree.parent_of(parent_id);
+                }
+            }
+            Affine2::translate(pin.0, pin.1)
+                .mul(&node_local_transform(node, *rect, viewport, scale))
+        }
         _ => Affine2::IDENTITY,
     };
     let m = parent_m.mul(&local);
@@ -7558,7 +8227,7 @@ fn inherited_text_font_weight(tree: &Tree, id: &str, viewport: Viewport) -> u16 
     }
 }
 
-fn inherited_text_color(tree: &Tree, id: &str, viewport: Viewport) -> Rgba {
+pub(crate) fn inherited_text_color(tree: &Tree, id: &str, viewport: Viewport) -> Rgba {
     let mut cursor = Some(id);
     let mut in_link = false;
     let mut in_badge = false;

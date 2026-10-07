@@ -383,7 +383,7 @@ func TestNestedModule_BindActionWorks(t *testing.T) {
 	instance := NewModuleInstance(engine, feedDef, AsNested())
 
 	// Simulate a .bind() action from the UI
-	engine.TriggerAction("__hypen_bind", map[string]any{
+	engine.TriggerAction("__hypen_scoped:feed:__hypen_bind", map[string]any{
 		"path":  "query",
 		"value": "hello",
 	})

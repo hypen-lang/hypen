@@ -33,14 +33,27 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Build WASM (nodejs)
-        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
+        working-directory: hypen-engine-rs
+
+      # Cloudflare (@hypen-space/cf) runs the device broker from the
+      # web-target build; the browser bundle carries no broker.
+      - name: Build WASM (web, Cloudflare)
+        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker
+        working-directory: hypen-engine-rs
+
+      - name: Build WASM (browser, no device broker)
+        run: wasm-pack build --target web --out-dir pkg/browser --features js
         working-directory: hypen-engine-rs
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wasm-nodejs
-          path: hypen-engine-rs/pkg/nodejs/
+          name: wasm-js
+          path: |
+            hypen-engine-rs/pkg/nodejs/
+            hypen-engine-rs/pkg/web/
+            hypen-engine-rs/pkg/browser/
           retention-days: 1
 
   build-wasm-wasi:
@@ -145,15 +158,14 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: wasm-nodejs
-          path: hypen-engine-rs/pkg/nodejs
+          name: wasm-js
+          path: hypen-engine-rs/pkg
 
-      - name: Setup WASM symlink
-        run: |
-          cd hypen-web/packages/core
-          rm -rf wasm wasm-node
-          ln -sf ../../../hypen-engine-rs/pkg/nodejs wasm
-          ln -sf ../../../hypen-engine-rs/pkg/nodejs wasm-node
+      # The built engine goes where each package loads it (the same script
+      # build-wasm.sh runs): the server's wasm-node (device broker), the
+      # Cloudflare glue fixture paired with its wasm, the browser bundle.
+      - name: Setup WASM
+        run: bash hypen-engine-rs/copy-wasm-artifacts.sh
 
       - name: Install & test
         run: bun install && bun test
@@ -167,9 +179,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The toolchain follows go.mod's `go` directive (>= 1.22; wazero
+      # releases raise it), so CI never builds with a Go older than the
+      # module requires.
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.21"
+          go-version-file: hypen-golang/go.mod
           cache-dependency-path: hypen-golang/go.sum
 
       - uses: actions/download-artifact@v4
@@ -177,9 +192,33 @@ jobs:
           name: wasm-wasi
           path: hypen-engine-rs/pkg/wasi
 
+      # The Go SDK embeds hypen-golang/hypen_engine.wasm (go:embed): test
+      # the module built from this commit, not the committed copy.
+      - name: Install the WASI engine module
+        run: bash hypen-engine-rs/copy-wasm-artifacts.sh
+
+      # The cross-language device e2e runs the real TypeScript web client
+      # (bun) against the Go server; HYPEN_E2E_REQUIRE=1 makes a missing
+      # bun / hypen-web install fail the job instead of skipping the test.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install hypen-web dependencies (TS device client for the e2e)
+        run: bun install
+        working-directory: hypen-web
+
       - name: Run tests
-        run: go test -v ./...
+        run: go test -race -v ./...
         working-directory: hypen-golang
+        env:
+          HYPEN_E2E_REQUIRE: "1"
+
+      - name: Cross-language device e2e (Go server vs TypeScript client)
+        run: go test ./remote -run 'TestDeviceE2ETypeScriptClient' -count=1 -v
+        working-directory: hypen-golang
+        env:
+          HYPEN_E2E_REQUIRE: "1"
 
   # ── Downstream: Kotlin ───────────────────────────────────────────
   test-kotlin:
@@ -203,6 +242,24 @@ jobs:
 
       - name: Run tests
         run: ./gradlew test
+        working-directory: hypen-kotlin
+        env:
+          LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
+
+      # Cross-language device e2e (DeviceWebSocketE2ETest, tag `e2e`, not
+      # part of `test`): the real TypeScript web client (bun) against
+      # HypenServer over a real WebSocket. `deviceE2eTest` fails — never
+      # skips — when bun or hypen-web's node_modules are missing.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install hypen-web dependencies (TS device client for the e2e)
+        run: bun install
+        working-directory: hypen-web
+
+      - name: Cross-language device e2e (Kotlin server vs TypeScript client)
+        run: ./gradlew deviceE2eTest
         working-directory: hypen-kotlin
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
@@ -249,6 +306,24 @@ jobs:
         env:
           DYLD_LIBRARY_PATH: ${{ github.workspace }}/target/release
           LIBRARY_PATH: ${{ github.workspace }}/target/release
+
+      # Cross-language device e2e (Tests/DeviceE2E): the real TypeScript web
+      # client (bun) against HypenDeviceE2EServer over a real WebSocket.
+      # run.sh fails — never skips — when bun or hypen-web's node_modules
+      # are missing.
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install hypen-web dependencies (TS device client for the e2e)
+        run: bun install
+        working-directory: hypen-web
+
+      - name: Cross-language device e2e (Swift server vs TypeScript client)
+        run: Tests/DeviceE2E/run.sh
+        working-directory: hypen-server-swift
+        env:
+          HYPEN_ENGINE_LIB_DIR: ${{ github.workspace }}/target/release
 
   # ── Downstream: Android ──────────────────────────────────────────
   test-android:
@@ -308,8 +383,11 @@ jobs:
 
       - uses: actions/download-artifact@v4
         with:
-          name: wasm-nodejs
-          path: hypen-engine-rs/pkg/nodejs
+          name: wasm-js
+          path: hypen-engine-rs/pkg
+
+      - name: Setup WASM
+        run: bash hypen-engine-rs/copy-wasm-artifacts.sh
 
       - name: Install & test
         run: bun install && bun test

@@ -1,0 +1,81 @@
+{
+  "name": "violation-mic-declared-size-exceeded",
+  "description": "Stream revisions too: bytes beyond a declared mic.record item size terminate the request.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "mic.record",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 64,
+        "params": {
+          "sampleRate": 16000,
+          "format": "pcm16"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "audio/L16",
+          "bytes": 16
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 2,
+          "seq": 0
+        },
+        "hex": "010000000200000000000000000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+      },
+      "expectViolation": "blob"
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "cancel": true
+        }
+      },
+      "reaction": true
+    }
+  ]
+}

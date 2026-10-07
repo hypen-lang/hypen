@@ -361,3 +361,84 @@ export const VIDEO_SLOT_VISIBILITY: Record<
     error: true,
   },
 };
+
+
+// ---------------------------------------------------------------------------
+// External capability surface
+// (hypen-engine-rs/src/agent.rs §"The rule")
+//
+// The shapes the engine's `listActions` / `listRoutes` / `listBindings`
+// return. They describe what a caller that is NOT the rendered UI — an MCP
+// server, a REST endpoint, a CLI, an agent — may reach, and each list is an
+// allowlist derived from a developer declaration: `.onAction()` for actions,
+// `Router { Route }` for navigation, `.bind(@state.x)` for inputs. Nothing
+// else is externally reachable, so these types double as the tool schema a
+// transport publishes.
+// ---------------------------------------------------------------------------
+
+/**
+ * External name of the navigation built-in — dispatch it with `{ to }`.
+ * Maps to `router.push` inside the engine.
+ *
+ * The `hypen.` namespace is not decoration: a bare `navigate` collides with
+ * real module actions (core's own `Link` declares `.onAction("navigate")`),
+ * and the whole prefix is reserved so a module cannot shadow a built-in and
+ * change what a caller thinks it is invoking.
+ *
+ * These three mirror `NAVIGATE` / `BACK` / `SET_INPUT` in
+ * `hypen-engine-rs/src/agent.rs`, which stays the source of truth — the
+ * tests dispatch through these constants so a rename there fails loudly
+ * here rather than drifting.
+ */
+export const AGENT_NAVIGATE = "hypen.navigate";
+
+/** External name of the history-back built-in. Maps to `router.back`. */
+export const AGENT_BACK = "hypen.back";
+
+/**
+ * External name of the input-setting built-in — dispatch it with
+ * `{ field, value }`, where `field` must be a path `listBindings()` reports.
+ * Maps to `__hypen_bind`, but only after that validation.
+ */
+export const AGENT_SET_INPUT = "hypen.set_input";
+
+/** One externally dispatchable action, as `listActions()` reports it. */
+export type AgentAction = {
+  /**
+   * Name to pass to `dispatchExternal`. For module actions this is the
+   * declared action name; for built-ins it is the external alias
+   * ({@link AGENT_NAVIGATE} / {@link AGENT_BACK} / {@link AGENT_SET_INPUT}),
+   * never the internal `router.*` / `__hypen_bind` name behind it.
+   */
+  name: string;
+  /** Owning module scope (lowercased). `null` for the primary module and for built-ins. */
+  module: string | null;
+  /** True for framework-provided capabilities, false for module actions. */
+  builtin: boolean;
+};
+
+/** A declared route, as a target for the {@link AGENT_NAVIGATE} built-in. */
+export type AgentRoute = {
+  /** The pattern exactly as declared (e.g. `/user-profile/:id`). */
+  path: string;
+  /** Names of the `:param` segments, in order. Empty for a static route. */
+  params: string[];
+  /** Module scope of the enclosing `Router`, if any. */
+  moduleScope: string | null;
+};
+
+/** One `.bind()`-declared writable input — {@link AGENT_SET_INPUT}'s schema. */
+export type BoundInput = {
+  /** State path the bind writes — the exact string `field` must carry. */
+  path: string;
+  /**
+   * Prop the value lands on: `value`, `checked`, `on` or `playback`. Mirrored
+   * from the element type because it types the field without a state read —
+   * `checked` / `on` mean boolean.
+   */
+  prop: string;
+  /** Element type that declared the bind (`Input`, `Checkbox`, …). */
+  elementType: string;
+  /** Module scope of the declaring element, if any. */
+  moduleScope: string | null;
+};

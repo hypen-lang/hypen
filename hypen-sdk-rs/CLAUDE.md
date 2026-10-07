@@ -18,6 +18,13 @@ hypen-sdk-rs/src/
 ├── router.rs       # URL routing with pattern matching
 ├── context.rs      # GlobalContext for cross-module communication
 ├── events.rs       # Typed event emitter
+├── device/         # Device Capability Protocol (RFC 001): handler API + SessionTransport (mod.rs),
+│                   #   per-connection plane over hypen_engine::device::DeviceBroker (plane.rs),
+│                   #   DeviceServer: optional admission, device options/opt-out, resume tokens
+│                   #   (server.rs); wired into remote/session.rs. ON by default: a session built
+│                   #   with RemoteSession::connect(def, components, transport) negotiates it with
+│                   #   no enable call; disable_device() opts out; navigation (router.*/router())
+│                   #   deactivates the routed module leaving the screen (device work cancelled)
 ├── discovery.rs    # Component file discovery
 ├── error.rs        # Error types
 └── prelude.rs      # Common re-exports

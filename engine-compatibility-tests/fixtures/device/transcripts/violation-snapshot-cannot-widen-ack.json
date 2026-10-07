@@ -1,0 +1,190 @@
+{
+  "name": "violation-snapshot-cannot-widen-ack",
+  "description": "The negotiated ack is the ceiling for the whole connection (\u00a72.2): live selection = ack \u2229 latest snapshot. The client's hello lacked mic.record (its recording indicator was not ready yet), so the ack omits it although this server advertises it. A later snapshot lists mic.record; a snapshot can narrow the live selection or restore an entry it withdrew, never widen it, so mic.record stays unsupported until the next handshake and a mic.record request is refused with unsupported (a server broker refuses it locally). gallery.pick, withdrawn and restored within the ack, works again.",
+  "protocol": 1,
+  "ack": {
+    "protocolVersion": 1,
+    "binary": true,
+    "capabilities": [
+      {
+        "name": "core.capabilities",
+        "version": 1
+      },
+      {
+        "name": "gallery.pick",
+        "version": 1
+      },
+      {
+        "name": "permission.query",
+        "version": 1
+      }
+    ]
+  },
+  "serverCapabilities": [
+    {
+      "name": "core.capabilities",
+      "versions": [
+        1
+      ]
+    },
+    {
+      "name": "gallery.pick",
+      "versions": [
+        1
+      ]
+    },
+    {
+      "name": "mic.record",
+      "versions": [
+        1
+      ]
+    },
+    {
+      "name": "permission.query",
+      "versions": [
+        1
+      ]
+    }
+  ],
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 1,
+        "event": {
+          "capabilities": [
+            {
+              "name": "core.capabilities",
+              "versions": [
+                1
+              ]
+            },
+            {
+              "name": "permission.query",
+              "versions": [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 1,
+        "event": {
+          "capabilities": [
+            {
+              "name": "core.capabilities",
+              "versions": [
+                1
+              ]
+            },
+            {
+              "name": "permission.query",
+              "versions": [
+                1
+              ]
+            },
+            {
+              "name": "gallery.pick",
+              "versions": [
+                1
+              ]
+            },
+            {
+              "name": "mic.record",
+              "versions": [
+                1
+              ]
+            }
+          ]
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "mic.record",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 16,
+        "params": {
+          "sampleRate": 16000,
+          "format": "pcm16"
+        }
+      },
+      "expectViolation": "unsupported"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "error": {
+          "code": "unsupported"
+        }
+      },
+      "reaction": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 3,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 3,
+        "error": {
+          "code": "cancelled",
+          "platformDetail": "picker-dismissed"
+        }
+      }
+    }
+  ]
+}

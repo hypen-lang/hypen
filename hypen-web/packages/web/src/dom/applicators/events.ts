@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * Event Applicators
  *
@@ -24,9 +25,16 @@ import {
   setKeyTarget,
   getMeta,
   setMeta,
+  getPayloadResolver,
 } from "../element-data.js";
 import { isInExitingSubtree } from "../anim.js";
 import { setAnimationCompleteAction } from "../anim-complete.js";
+import { dragCarriesFiles, dragItemCount } from "../../file-drag.js";
+import {
+  DND_DRAG_OVER_DWELL_KEY,
+  DND_EVENT_NAMES,
+  type DndEventName,
+} from "@hypen-space/core/dnd";
 
 const log = frameworkLoggers.events;
 
@@ -51,6 +59,18 @@ interface EventHandlerOptions {
 // ============================================================================
 // Utility Functions
 // ============================================================================
+
+/**
+ * Stamp an element that carries at least one event applicator. Components
+ * whose geometry should be pointer-transparent unless it is interactive (a
+ * chart's decorative marks, a tooltip Marker) key CSS off this marker, so an
+ * `.onClick` added later flips them live without a re-layout.
+ */
+function markInteractive(element: HTMLElement): void {
+  if (element.dataset && element.dataset.hypenInteractive !== "true") {
+    element.dataset.hypenInteractive = "true";
+  }
+}
 
 /**
  * Convert Map or nested objects to plain objects
@@ -262,6 +282,7 @@ function createEventHandler(
       return;
     }
     registerEvent(element, eventKey);
+    markInteractive(element);
 
     // Create throttle state if needed
     let throttleTimer: Disposable | null = null;
@@ -296,18 +317,23 @@ function createEventHandler(
       }
 
       // Build payload
-      const payload =
+      const base =
         Object.keys(current.customPayload).length > 0
           ? { ...current.customPayload }
           : options.extractPayload
             ? options.extractPayload(event, element)
             : extractEventData(event, element);
+      // Components that know what an event *means* (a chart mark resolving
+      // the datum under the pointer) contribute on top of either branch.
+      const resolver = getPayloadResolver(element);
+      const resolved = resolver ? resolver(event) : undefined;
+      const payload = resolved ? { ...base, ...resolved } : base;
 
       // Dispatch to engine, catching any async rejections
       const engine = getEngine(element);
       if (engine) {
         try {
-          engine.dispatchAction(
+          dispatchUIAction(engine, element.dataset.hypenId,
             current.actionName,
             withAnimateStamp(payload, current.animate)
           );
@@ -335,6 +361,95 @@ function createEventHandler(
 }
 
 /**
+ * Element meta key under which the DnD runtime installs a files-zone gate
+ * (`(event) => boolean`) on a `.dropZone(files: true)` node. When present,
+ * `.onFileDragEnter` on that same node fires only if the gate passes (zone
+ * enabled, `accept:` matched) — the zone and the handler share ONE entry
+ * signal, so a node with both never double-fires. Absent ⇒ the node is not a
+ * files zone and `.onFileDragEnter` does nothing (same on every renderer).
+ */
+export const FILE_DRAG_GATE_META = "dnd:fileDragGate";
+
+/**
+ * `.onFileDragEnter(@actions.x)` — files dragged in from outside the page
+ * entered this `.dropZone(files: true)`. On a node that is not a files zone
+ * it is inert, as on every other renderer.
+ *
+ * This is a plain UI signal, never a file channel: the payload carries only
+ * how many items the drag holds, never names or contents (browsers hide both
+ * until drop anyway). An app answers it by asking the device plane for files
+ * (`context.device.request("file.pick", …)`); the DeviceHost's own dialog —
+ * which carries a host-owned drop zone — pops up under the still-held drag,
+ * and the user releases the files there. Renderers stay pure patch consumers.
+ *
+ * Fires once per entry (nested children's enter/leave pairs are counted, not
+ * re-fired). A drop that lands on this element instead is swallowed so the
+ * browser never navigates away to the dropped file.
+ */
+function createFileDragEnterHandler(): ApplicatorHandler {
+  const metaKey = "event:filedragenter";
+  return (element: HTMLElement, value: unknown) => {
+    const { actionName, payload: customPayload } = extractActionDetails(value);
+    if (!actionName) {
+      log.warn("onFileDragEnter requires an action reference starting with @, got:", value);
+      return;
+    }
+    setMeta(element, metaKey, { actionName, customPayload });
+
+    const eventKey = "filedragenter";
+    if (getRegisteredEvents(element).has(eventKey)) return;
+    registerEvent(element, eventKey);
+
+    const disposables = getElementDisposables(element);
+    let depth = 0;
+    const zoneGate = () => getMeta<(event: Event) => boolean>(element, FILE_DRAG_GATE_META);
+    const onEnter = (event: Event) => {
+      if (!dragCarriesFiles(event)) return;
+      const gate = zoneGate();
+      if (!gate) return;
+      event.preventDefault();
+      depth += 1;
+      if (depth > 1) return;
+      const current = getMeta<{ actionName: string; customPayload: Record<string, unknown> }>(element, metaKey);
+      if (!current || isInExitingSubtree(element)) return;
+      if (!gate(event)) return;
+      const items = dragItemCount(event);
+      const payload =
+        Object.keys(current.customPayload).length > 0
+          ? { ...current.customPayload }
+          : { type: "filedragenter", timestamp: Date.now(), items };
+      const engine = getEngine(element);
+      if (!engine) return;
+      try {
+        dispatchUIAction(engine, element.dataset.hypenId, current.actionName, payload);
+      } catch (err) {
+        log.error(`Error dispatching action "${current.actionName}":`, err);
+      }
+    };
+    const onLeave = () => {
+      depth = Math.max(0, depth - 1);
+    };
+    const onOver = (event: Event) => {
+      if (!dragCarriesFiles(event) || !zoneGate()) return;
+      // Not a drop target for the files themselves: show "none", but keep the
+      // default from running so a stray release is swallowed below.
+      event.preventDefault();
+      const dt = (event as DragEvent).dataTransfer;
+      if (dt) dt.dropEffect = "none";
+    };
+    const onDrop = (event: Event) => {
+      depth = 0;
+      if (dragCarriesFiles(event) && zoneGate()) event.preventDefault();
+    };
+    disposables.add(disposableListener(element, "dragenter", onEnter));
+    disposables.add(disposableListener(element, "dragleave", onLeave));
+    disposables.add(disposableListener(element, "dragover", onOver));
+    disposables.add(disposableListener(element, "drop", onDrop));
+    disposables.addCallback(() => unregisterEvent(element, eventKey));
+  };
+}
+
+/**
  * Dispatch the action encoded in an applicator value (e.g. `"@actions.save"`)
  * to the element's engine. Shared by click wiring and keyboard activation so
  * both routes dispatch identically. No-op if the value carries no action or
@@ -346,11 +461,112 @@ export function triggerElementAction(element: HTMLElement, value: unknown): void
   const engine = getEngine(element);
   if (!engine) return;
   try {
-    engine.dispatchAction(actionName, withAnimateStamp(payload, animate));
+    dispatchUIAction(engine, element.dataset.hypenId, actionName, withAnimateStamp(payload, animate));
   } catch (err) {
     log.error(`Error dispatching action "${actionName}":`, err);
   }
 }
+
+/**
+ * Dispatch an already-resolved action (name + payload) to the element's
+ * engine with the optional transaction-animation stamp attached. The
+ * renderer-resident runtimes (DnD) build their own payloads and route them
+ * here so a `.onSort(@a, animate: spring)` stamps exactly like a click.
+ */
+export function dispatchElementAction(
+  element: HTMLElement,
+  actionName: string,
+  payload: Record<string, unknown>,
+  animate?: unknown,
+  fromNode?: string
+): boolean {
+  const engine = getEngine(element);
+  if (!engine) return false;
+  try {
+    dispatchUIAction(engine, element.dataset.hypenId, actionName, withAnimateStamp(payload, animate), fromNode);
+    return true;
+  } catch (err) {
+    log.error(`Error dispatching action "${actionName}":`, err);
+    return false;
+  }
+}
+
+// ============================================================================
+// Drag & drop event applicators (DnD plan §2.2 / §4.2)
+// ============================================================================
+
+/**
+ * A stored DnD event applicator (`.onDragStart` … `.onDragEnd`). Unlike the
+ * DOM-listener events these attach NO listener: the drag runtime
+ * (`dom/dnd.ts`) owns the gesture and reads the binding at dispatch time,
+ * so a re-apply with a different action retargets it exactly like the
+ * click path. `dwell` is the reserved named argument of `.onDragOver`
+ * (stripped from the payload, like `animate:`); `null` for the others or
+ * when absent (the runtime applies the 500ms default).
+ */
+export interface DndEventBinding {
+  actionName: string;
+  /** Extra named arguments the author passed (merged UNDER the §4.2 payload). */
+  customPayload: Record<string, unknown>;
+  animate?: unknown;
+  dwell: number | null;
+}
+
+const dndMetaKey = (name: DndEventName): string => `dnd:${name}`;
+
+/** Read the stored `.on<DndEvent>` binding of an element, if any. */
+export function getDndEventBinding(
+  element: HTMLElement,
+  name: DndEventName
+): DndEventBinding | undefined {
+  return getMeta<DndEventBinding | null>(element, dndMetaKey(name)) ?? undefined;
+}
+
+function createDndEventHandler(name: DndEventName): ApplicatorHandler {
+  return (element: HTMLElement, value: unknown) => {
+    const { actionName, payload, animate } = extractActionDetails(value);
+    if (!actionName) {
+      // A value without an action (e.g. the removeProp path merging the
+      // args away) clears the stored binding.
+      setMeta(element, dndMetaKey(name), null);
+      return;
+    }
+    let dwell: number | null = null;
+    if (name === "onDragOver" && Object.prototype.hasOwnProperty.call(payload, DND_DRAG_OVER_DWELL_KEY)) {
+      const raw = payload[DND_DRAG_OVER_DWELL_KEY];
+      const n = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+      if (Number.isFinite(n) && n >= 0) {
+        dwell = n;
+      } else {
+        log.warn(`onDragOver dwell must be a non-negative number, got:`, raw);
+      }
+      delete payload[DND_DRAG_OVER_DWELL_KEY];
+    }
+    const binding: DndEventBinding = { actionName, customPayload: payload, dwell };
+    if (animate !== undefined) binding.animate = animate;
+    setMeta(element, dndMetaKey(name), binding);
+  };
+}
+
+const DND_WRITE_TARGET_META = "dnd:writeTarget";
+
+/**
+ * Mark an element as a DnD write target (`__dnd.sort` / `__dnd.pin`): its
+ * `bind` prop is the reorder/pin path the SDK writes, not a form-control
+ * two-way binding, so the `bind` applicator must leave it alone. Set by the
+ * renderer BEFORE the create-time applicators run.
+ */
+export function markDndWriteTarget(element: HTMLElement, isTarget: boolean): void {
+  setMeta(element, DND_WRITE_TARGET_META, isTarget ? true : undefined);
+}
+
+export function isDndWriteTarget(element: HTMLElement): boolean {
+  return getMeta<boolean>(element, DND_WRITE_TARGET_META) === true;
+}
+
+const dndEventHandlers: Record<string, ApplicatorHandler> = Object.fromEntries(
+  DND_EVENT_NAMES.map((name) => [name, createDndEventHandler(name)])
+);
 
 /**
  * Create a keyboard event handler that filters by key
@@ -371,6 +587,7 @@ function createKeyHandler(defaultKey: string = "Enter"): ApplicatorHandler {
       return;
     }
     registerEvent(element, eventKey);
+    markInteractive(element);
 
     // Get target key from element data or use default
     const targetKey = getKeyTarget(element) || defaultKey;
@@ -403,7 +620,7 @@ function createKeyHandler(defaultKey: string = "Enter"): ApplicatorHandler {
 
       const engine = getEngine(element);
       if (engine) {
-        engine.dispatchAction(actionName, withAnimateStamp(payload, animate));
+        dispatchUIAction(engine, element.dataset.hypenId, actionName, withAnimateStamp(payload, animate));
       }
     };
 
@@ -433,6 +650,7 @@ function createLongClickHandler(thresholdMs: number = 500): ApplicatorHandler {
       return;
     }
     registerEvent(element, eventKey);
+    markInteractive(element);
 
     let longClickTimer: Disposable | null = null;
 
@@ -452,7 +670,7 @@ function createLongClickHandler(thresholdMs: number = 500): ApplicatorHandler {
 
         const engine = getEngine(element);
         if (engine) {
-          engine.dispatchAction(actionName, withAnimateStamp(payload, animate));
+          dispatchUIAction(engine, element.dataset.hypenId, actionName, withAnimateStamp(payload, animate));
         }
 
         longClickTimer = null;
@@ -594,6 +812,17 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
   onMouseEnter: createEventHandler("mouseenter", { extractPayload: mousePayload }),
   onMouseLeave: createEventHandler("mouseleave", { extractPayload: mousePayload }),
   onHover: createEventHandler("mouseenter", { extractPayload: mousePayload }), // Alias for onMouseEnter
+  // Pointer tracking across an element (mouse, touch and pen alike), throttled
+  // to roughly a frame. `onHover` fires once on entry; this follows the pointer
+  // — a chart crosshair or a scrubbed tooltip wants this one.
+  // Files dragged in from outside the page entered the element (a UI signal
+  // only — see createFileDragEnterHandler).
+  onFileDragEnter: createFileDragEnterHandler(),
+  onMove: createEventHandler("pointermove", {
+    throttleMs: 32,
+    passive: true,
+    extractPayload: mousePayload,
+  }),
 
   // Animation completion (Option F). Registered here so the event-applicator
   // path (`/^on[A-Z]/`, aggregate arg merging) matches it, but unlike every
@@ -622,6 +851,7 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
     const eventKey = "videoIntent:fullscreen";
     if (getRegisteredEvents(element).has(eventKey)) return;
     registerEvent(element, eventKey);
+    markInteractive(element);
     ensureFullscreenStyles(element.ownerDocument);
     const disposables = getElementDisposables(element);
     disposables.add(
@@ -643,15 +873,26 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
     );
   }) as ApplicatorHandler,
 
+  // Drag & drop lifecycle events: stored on the element for the DnD runtime,
+  // no DOM listener (see createDndEventHandler).
+  ...dndEventHandlers,
+
   // Two-way binding for .bind(@state.x)
   bind: ((element: HTMLElement, value: unknown) => {
     const bindPath = typeof value === "string" ? value : null;
     if (!bindPath) return;
 
+    // `.sortable().bind(@state.list)` / `.pinboard().bind(@state.items)`:
+    // the path is the DnD write target the runtime dispatches
+    // `__hypen_reorder` / `__hypen_pin` against — not a form-control
+    // binding. Nothing to wire here (DnD plan §6 item 9).
+    if (isDndWriteTarget(element)) return;
+
     const disposables = getElementDisposables(element);
     const eventKey = `bind:${bindPath}`;
     if (getRegisteredEvents(element).has(eventKey)) return;
     registerEvent(element, eventKey);
+    markInteractive(element);
 
     // Determine the target element, event type, and value extractor based on component type
     const hypenType = element.dataset?.hypenType;
@@ -674,7 +915,7 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
       const listener = () => {
         const engine = getEngine(element);
         if (engine) {
-          engine.dispatchAction("__hypen_bind", {
+          dispatchUIAction(engine, element.dataset.hypenId, "__hypen_bind", {
             path: bindPath,
             value: input.checked,
           });
@@ -689,7 +930,7 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
       const listener = () => {
         const engine = getEngine(element);
         if (engine) {
-          engine.dispatchAction("__hypen_bind", {
+          dispatchUIAction(engine, element.dataset.hypenId, "__hypen_bind", {
             path: bindPath,
             value: element.value,
           });
@@ -707,7 +948,7 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
       const listener = () => {
         const engine = getEngine(element);
         if (engine) {
-          engine.dispatchAction("__hypen_bind", {
+          dispatchUIAction(engine, element.dataset.hypenId, "__hypen_bind", {
             path: bindPath,
             value: element.value,
           });

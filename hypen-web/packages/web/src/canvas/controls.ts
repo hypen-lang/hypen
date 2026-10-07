@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * Form-control interaction for the canvas renderer.
  *
@@ -171,7 +172,7 @@ function writeBind(engine: DispatchEngine, node: VirtualNode, value: boolean | n
   const props = node.props;
   const bindPath = props.bind ?? props["bind.0"];
   if (typeof bindPath === "string" && bindPath) {
-    engine.dispatchAction("__hypen_bind", { path: bindPath, value });
+    dispatchUIAction(engine, node.id, "__hypen_bind", { path: bindPath, value });
   }
 }
 

@@ -263,6 +263,13 @@ What this means in practice:
 | `hypen-server-swift` | Uncompressed. That server declines the extension (SwiftNIO and WebSocketKit have no RFC 7692 support); negotiation is per-connection, so this is a clean fallback, not an error. |
 | Any server, if you want compression *off* | Not possible from the client. Disable it server-side. |
 
+Device access (a `DeviceHost`) works on compressed connections as long as each
+message is compressed on its own: the server's response must carry both
+`server_no_context_takeover` and `client_no_context_takeover`, which the Hypen
+TypeScript and Go servers (and the Kotlin example's `HypenDeflate`) negotiate by
+default. With compression that shares history across messages, the connection
+runs UI-only and logs a warning.
+
 Switching to a third-party WebSocket client (Starscream, libwebsockets) to gain
 control here is explicitly out of scope for this package.
 

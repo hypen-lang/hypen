@@ -1,0 +1,89 @@
+{
+  "name": "violation-lease-ack-cross-request",
+  "description": "Lease sequences are per request: renewal 1 was sent on request 1, so a leaseAck 1 on request 2 is fabricated for request 2.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "bluetooth.scan",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 64,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 3,
+        "capability": "bluetooth.scan",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 64,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "renewLease": 1
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 3,
+        "control": {
+          "leaseAck": 1
+        }
+      },
+      "expectViolation": "lease"
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 3,
+        "control": {
+          "cancel": true
+        }
+      },
+      "reaction": true
+    }
+  ]
+}

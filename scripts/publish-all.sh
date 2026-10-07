@@ -222,6 +222,18 @@ echo -e "  Building @hypen-space/web-engine..."
 cd "$ROOT_DIR/hypen-web/packages/web-engine" && bun run build
 echo -e "  ${GREEN}✓ @hypen-space/web-engine built${NC}"
 
+echo -e "  Building @hypen-space/device-web..."
+cd "$ROOT_DIR/hypen-web/packages/device-web" && bun run build
+echo -e "  ${GREEN}✓ @hypen-space/device-web built${NC}"
+
+echo -e "  Building @hypen-space/device-fake..."
+cd "$ROOT_DIR/hypen-web/packages/device-fake" && bun run build
+echo -e "  ${GREEN}✓ @hypen-space/device-fake built${NC}"
+
+echo -e "  Building @hypen-space/agent..."
+cd "$ROOT_DIR/hypen-web/packages/agent" && bun run build
+echo -e "  ${GREEN}✓ @hypen-space/agent built${NC}"
+
 echo -e "  Building @hypen-space/cf..."
 cd "$ROOT_DIR/hypen-web/packages/cf" && bun run build
 echo -e "  ${GREEN}✓ @hypen-space/cf built${NC}"
@@ -302,6 +314,20 @@ else
   echo -e "  Publishing @hypen-space/web-engine..."
   cd "$ROOT_DIR/hypen-web/packages/web-engine" && npm publish --access public
   echo -e "  ${GREEN}✓ @hypen-space/web-engine published${NC}"
+
+  # device-web / device-fake / agent depend only on core (published above).
+  # device-web MUST publish before cf, which depends on it.
+  echo -e "  Publishing @hypen-space/device-web..."
+  cd "$ROOT_DIR/hypen-web/packages/device-web" && npm publish --access public
+  echo -e "  ${GREEN}✓ @hypen-space/device-web published${NC}"
+
+  echo -e "  Publishing @hypen-space/device-fake..."
+  cd "$ROOT_DIR/hypen-web/packages/device-fake" && npm publish --access public
+  echo -e "  ${GREEN}✓ @hypen-space/device-fake published${NC}"
+
+  echo -e "  Publishing @hypen-space/agent..."
+  cd "$ROOT_DIR/hypen-web/packages/agent" && npm publish --access public
+  echo -e "  ${GREEN}✓ @hypen-space/agent published${NC}"
 
   echo -e "  Publishing @hypen-space/cf..."
   cd "$ROOT_DIR/hypen-web/packages/cf" && npm publish --access public

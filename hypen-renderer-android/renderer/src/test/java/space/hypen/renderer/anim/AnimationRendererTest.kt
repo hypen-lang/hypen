@@ -142,7 +142,8 @@ class AnimationRendererTest {
         liveContext.actionDispatcher?.dispatch("duringExit", null)
         h.renderer.createApplicatorContext(h.renderer.getElement("btn")!!)
             .actionDispatcher?.dispatch("duringExit2", null)
-        assertEquals(listOf("beforeExit"), h.dispatched.map { it.first })
+        assertEquals(listOf("__hypen_dispatch"), h.dispatched.map { it.first })
+        assertEquals("beforeExit", (h.dispatched.single().second as Map<*, *>)["action"])
     }
 
     @Test
@@ -166,24 +167,121 @@ class AnimationRendererTest {
 
     // -------------------------------------------------------- completions
 
+    /** A node-addressed `__hypen_dispatch` envelope, as the engine expects it. */
+    private fun envelope(node: String, action: String, payload: Map<String, Any?>) =
+        "__hypen_dispatch" to mapOf("node" to node, "action" to action, "payload" to payload)
+
     @Test
-    fun `exit completion dispatches the exact payload through the action channel`() = runTest {
+    fun `exit completion is node-addressed to the exiting root's own id`() = runTest {
         val h = harness(scope = backgroundScope)
         h.renderer.applyPatches(
             listOf(
                 Patch.create(
                     "1",
-                    "text",
+                    "column",
                     mapOf(ANIM_EXIT_PROP to exitWire, "onAnimationComplete.0" to "@actions.faded"),
+                ),
+                Patch.create("2", "text", mapOf("onAnimationComplete.0" to "@actions.childDone")),
+                Patch.insert("root", "1"),
+                Patch.insert("1", "2"),
+            ),
+        )
+        h.renderer.applyPatches(listOf(Patch.remove("1", transition = true)))
+
+        // A non-root member of the exiting subtree is engine-side dead: its
+        // own settles dispatch nothing.
+        h.coordinator.notifyEnterSettled("2")
+        h.coordinator.notifyPresetCompleted("2", AnimatePreset.SHAKE)
+        runCurrent()
+        assertTrue(h.dispatched.isEmpty())
+
+        advanceTimeBy(231)
+        runCurrent()
+
+        assertEquals(listOf(envelope("1", "faded", mapOf("animation" to "exit"))), h.dispatched)
+    }
+
+    @Test
+    fun `enter completion is node-addressed`() = runTest {
+        val h = harness(scope = backgroundScope)
+        h.renderer.applyPatches(listOf(Patch.create("seed", "column"), Patch.insert("root", "seed")))
+        h.renderer.applyPatches(
+            listOf(
+                Patch.create(
+                    "2",
+                    "text",
+                    mapOf(
+                        ANIM_ENTER_PROP to mapOf("presets" to listOf("fade"), "duration" to 200.0, "curve" to "easeOut"),
+                        "onAnimationComplete.0" to "@actions.entered",
+                    ),
+                ),
+                Patch.insert("seed", "2"),
+            ),
+        )
+        h.coordinator.notifyEnterSettled("2")
+        runCurrent()
+
+        assertEquals(listOf(envelope("2", "entered", mapOf("animation" to "enter"))), h.dispatched)
+    }
+
+    @Test
+    fun `finite preset completion is node-addressed`() = runTest {
+        val h = harness(scope = backgroundScope)
+        h.renderer.applyPatches(
+            listOf(
+                Patch.create("1", "box", mapOf("onAnimationComplete.0" to "@actions.shook")),
+                Patch.insert("root", "1"),
+            ),
+        )
+        h.coordinator.notifyPresetCompleted("1", AnimatePreset.SHAKE)
+        runCurrent()
+
+        assertEquals(listOf(envelope("1", "shook", mapOf("animation" to "shake"))), h.dispatched)
+    }
+
+    @Test
+    fun `states completion is node-addressed`() = runTest {
+        val h = harness(scope = backgroundScope)
+        h.renderer.applyPatches(
+            listOf(
+                Patch.create(
+                    "1",
+                    "box",
+                    mapOf(
+                        ANIM_TRANSITION_PROP to transitionWire,
+                        ANIM_STATES_PROP to mapOf("label" to "closed"),
+                        "onAnimationComplete.0" to "@actions.posed",
+                    ),
                 ),
                 Patch.insert("root", "1"),
             ),
         )
-        h.renderer.applyPatches(listOf(Patch.remove("1", transition = true)))
-        advanceTimeBy(231)
+        h.renderer.applyPatches(listOf(Patch.setProp("1", ANIM_STATES_PROP, mapOf("label" to "open"))))
+        advanceTimeBy(181) // 100 + 0 + 80
         runCurrent()
 
-        assertEquals(listOf("faded" to mapOf<String, Any?>("animation" to "exit")), h.dispatched)
+        assertEquals(
+            listOf(envelope("1", "posed", mapOf("animation" to "states", "state" to "open"))),
+            h.dispatched,
+        )
+    }
+
+    @Test
+    fun `node dispatchers address the node and pass envelopes through`() = runTest {
+        val h = harness(scope = backgroundScope)
+        val base = ActionDispatcher { action, payload -> h.dispatched.add(action to payload) }
+        val outer = h.renderer.nodeActionDispatcher("parent", base)
+        val inner = h.renderer.nodeActionDispatcher("child", outer)
+        inner.dispatch("tap", mapOf("x" to 1))
+        outer.dispatch("__hypen_bind", mapOf("path" to "name", "value" to "a"))
+
+        assertEquals(
+            listOf(
+                envelope("child", "tap", mapOf("x" to 1)),
+                envelope("parent", "__hypen_bind", mapOf("path" to "name", "value" to "a")),
+            ),
+            h.dispatched,
+        )
     }
 
     @Test
@@ -209,8 +307,8 @@ class AnimationRendererTest {
         runCurrent()
 
         assertEquals(
-            mapOf<String, Any?>("source" to "card", "animation" to "exit"),
-            h.dispatched.single().second,
+            envelope("1", "faded", mapOf("source" to "card", "animation" to "exit")),
+            h.dispatched.single(),
         )
     }
 

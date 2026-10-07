@@ -4,7 +4,10 @@
  * This entry wires in the WASM engine and shared browser client explicitly.
  * The hosted client gives each browser session its own Durable Object. If a
  * session has multiple sockets, `syncActions: true` mirrors updates between
- * those sockets without mixing unrelated visitors' todo state.
+ * those sockets without mixing unrelated visitors' todo state. The device
+ * plane stays on with it: only the socket that dispatched an action can
+ * start device work (`context.device`); its mirrored copies are refused
+ * with `syncActions.replay`.
  */
 
 import { defineHypenWorker } from "@hypen-space/cf";

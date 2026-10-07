@@ -1,0 +1,33 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-empty-containers",
+  "description": "Empty containers: {}=={} and []==[] are no-ops; []→{} is a type change; adding a key to {} is granular.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "a": {},
+      "b": [],
+      "c": [],
+      "d": {}
+    },
+    "new": {
+      "a": {},
+      "b": [],
+      "c": {},
+      "d": {
+        "k": 1
+      }
+    }
+  },
+  "expected": [
+    {
+      "path": "c",
+      "value": {}
+    },
+    {
+      "path": "d.k",
+      "value": 1
+    }
+  ]
+}

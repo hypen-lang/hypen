@@ -5,7 +5,7 @@
 //! old-to-new position mappings.
 
 use super::diff::{
-    create_ir_node_tree_full, reconcile_ir_node_impl, root_remove_patch, ReconcileCtx,
+    create_ir_node_tree_full, reconcile_ir_node_impl, remove_child_subtree, ReconcileCtx,
 };
 use super::item_bindings::replace_ir_node_item_bindings;
 use super::tree::IterMemo;
@@ -555,19 +555,12 @@ pub(crate) fn reconcile_iterable_children_full(
         ));
     }
 
-    // Remove old children that weren't reused. The exit spec must be read
-    // (root_remove_patch) before `ctx.tree.remove` drops the node's props.
+    // Remove old children that weren't reused.
     for &old_id in old_keyed.values() {
-        let patch = root_remove_patch(ctx.tree, old_id);
-        ctx.dependencies.remove_node(old_id);
-        ctx.tree.remove(old_id);
-        ctx.patches.push(patch);
+        remove_child_subtree(ctx, old_id);
     }
     for &old_id in &old_unkeyed[unkeyed_idx..] {
-        let patch = root_remove_patch(ctx.tree, old_id);
-        ctx.dependencies.remove_node(old_id);
-        ctx.tree.remove(old_id);
-        ctx.patches.push(patch);
+        remove_child_subtree(ctx, old_id);
     }
 }
 

@@ -1,0 +1,33 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "event-applicators-passthrough",
+  "description": "The DnD event applicators (onDragStart/onDragOver/onDrop/onSort/onPin/onDragEnd) are ordinary event applicators: the __dnd interception does NOT swallow them, so they reach the create patch through the generic path as onX.0 action refs, with reserved named arguments (dwell on onDragOver) as sibling onX.<name> props. Renderers own dispatch and strip dwell from the payload; the engine never lowers them into a __dnd.* channel",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Column { Text(\"a\") }.sortable().onSort(@actions.reorder).onDragOver(@actions.peek, dwell: 200)",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": ["reorder", "peek"],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Column",
+        "props": {
+          "__dnd.sort": { "group": null, "axis": "y" },
+          "onSort.0": "@reorder",
+          "onDragOver.0": "@peek",
+          "onDragOver.dwell": 200
+        },
+        "absentProps": ["__dnd.onSort", "__dnd.onDragOver", "sortable.0"]
+      }
+    ]
+  }
+}

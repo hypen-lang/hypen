@@ -21,6 +21,19 @@ hypen-renderer-swift/
     │   ├── HypenElement.swift # Element data structure
     │   ├── Patch.swift        # Patch operations for tree updates
     │   └── ActionValue.swift  # Action parsing from props
+    ├── Device/                      # RFC 001 DeviceHost (separate from rendering)
+    │   ├── DeviceWire.swift         # Wire types, 12-byte frame codec, client registry subset
+    │   ├── DeviceStrictJSON.swift   # Strict JSON limits parser + tree decoder (no JSONDecoder on device input)
+    │   ├── DevicePayloads.swift     # Per-revision params/result/event validation
+    │   ├── RemoteHandshake.swift    # hello, resume credential, upgrade request, socket lifecycle
+    │   ├── DeviceHost.swift         # Protocol core: admission, leases, cancel, upload scheduler
+    │   ├── DeviceDrivers.swift      # Drivers + backend protocols (picker/consent/permissions/BLE)
+    │   ├── DeviceCaptureDrivers.swift # file.pick/file.save/camera.capture/mic.record/bluetooth.select + seams
+    │   ├── DeviceActivityOverlay.swift # Host-owned activity indicator (entries, Stop, lost overlay) over a surface seam
+    │   ├── DeviceFileClone.swift    # Coordinated, size-checked private mapped clones (never map a picked original)
+    │   ├── DeviceSupport.swift      # SHA-256, clocks, prompt gate, grant/cooldown store
+    │   ├── DeviceHostIOS.swift      # iOS backends (PHPicker, UIAlert, AV/Photos/UN/CB/CL/CN), factory, #if os(iOS)
+    │   └── DeviceHostIOSCapture.swift # iOS backends (UIDocumentPicker, UIImagePicker, AVAudioEngine, BLE chooser, indicator overlay)
     ├── Remote/
     │   ├── RemoteEngine.swift       # WebSocket client
     │   ├── RemoteEngineConfig.swift # Connection configuration
@@ -118,7 +131,10 @@ Hypen client SDKs do have one). Do not add one — there is nothing to wire it
 to. Whether a connection is compressed is decided by the server: enabled Hypen
 servers compress automatically, `hypen-server-swift` declines and the
 connection runs uncompressed. Switching to a third-party WebSocket client to
-regain control is out of scope. See the note in
+regain control is out of scope. The device plane is allowed on a compressed
+socket only when the 101 response carries both `server_no_context_takeover`
+and `client_no_context_takeover` (`RemoteDevicePlane.compressionSharesContext`,
+the same rule as the web and Android clients). See the note in
 `RemoteEngine.establishConnection()`.
 
 ### Key Protocols

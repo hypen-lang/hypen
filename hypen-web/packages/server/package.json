@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/server",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Hypen server runtime - Node.js WASM engine, component loader, discovery, and remote server",
   "type": "module",
   "main": "./dist/index.js",
@@ -57,7 +57,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@hypen-space/core": "^0.6.4"
+    "@hypen-space/core": "^0.6.5"
   },
   "devDependencies": {
     "@types/bun": "latest",

@@ -11,12 +11,27 @@ on:
     paths:
       - "hypen-renderer-swift/**"
       - "hypen-server-swift/**"
+      # Swift device conformance runners (iOS core + server) replay the shared
+      # schemas, corpus and transcripts (RFC 001).
+      - "engine-compatibility-tests/schema/device/**"
+      - "engine-compatibility-tests/fixtures/device/**"
+      # The server links the engine (UniFFI) and its device e2e drives the
+      # Rust broker with the TypeScript web client.
+      - "hypen-engine-rs/**"
+      - "Cargo.lock"
+      - "hypen-web/packages/core/src/**"
+      - "hypen-web/packages/device-fake/**"
       - ".github/workflows/swift-renderer-ci.yml"
   pull_request:
     paths:
       - "hypen-renderer-swift/**"
       - "hypen-server-swift/**"
       - "hypen-engine-rs/**"
+      - "Cargo.lock"
+      - "hypen-web/packages/core/src/**"
+      - "hypen-web/packages/device-fake/**"
+      - "engine-compatibility-tests/schema/device/**"
+      - "engine-compatibility-tests/fixtures/device/**"
       - ".github/workflows/swift-renderer-ci.yml"
   workflow_dispatch:
 
@@ -39,6 +54,8 @@ jobs:
             # job uses; without it the XCTest link dies with
             # `ld: library 'hypen_engine' not found`).
             needs_engine: true
+            # Cross-language device e2e (Tests/DeviceE2E/run.sh).
+            device_e2e: true
     steps:
       - uses: actions/checkout@v4
 
@@ -51,14 +68,37 @@ jobs:
         working-directory: hypen-engine-rs
 
       - name: Build ${{ matrix.name }}
-        run: swift build
+        # Explicit -L too: newer SwiftPM does not forward LIBRARY_PATH to the linker.
+        run: swift build ${{ matrix.needs_engine && format('-Xlinker -L{0}/target/release', github.workspace) || '' }}
         working-directory: ${{ matrix.package }}
         env:
           LIBRARY_PATH: ${{ github.workspace }}/target/release
 
       - name: Test ${{ matrix.name }}
-        run: swift test
+        # Explicit -L too: newer SwiftPM does not forward LIBRARY_PATH to the linker.
+        run: swift test ${{ matrix.needs_engine && format('-Xlinker -L{0}/target/release', github.workspace) || '' }}
         working-directory: ${{ matrix.package }}
         env:
           LIBRARY_PATH: ${{ github.workspace }}/target/release
           DYLD_LIBRARY_PATH: ${{ github.workspace }}/target/release
+
+      # Cross-language device e2e (Tests/DeviceE2E): the real TypeScript web
+      # client (bun) against HypenDeviceE2EServer over a real WebSocket.
+      # run.sh fails — never skips — when bun or hypen-web's node_modules
+      # are missing.
+      - uses: oven-sh/setup-bun@v2
+        if: ${{ matrix.device_e2e }}
+        with:
+          bun-version: latest
+
+      - name: Install hypen-web dependencies (TS device client for the e2e)
+        if: ${{ matrix.device_e2e }}
+        run: bun install
+        working-directory: hypen-web
+
+      - name: Device e2e ${{ matrix.name }} (Swift server vs TypeScript client)
+        if: ${{ matrix.device_e2e }}
+        run: Tests/DeviceE2E/run.sh
+        working-directory: ${{ matrix.package }}
+        env:
+          HYPEN_ENGINE_LIB_DIR: ${{ github.workspace }}/target/release

@@ -1,0 +1,63 @@
+{
+  "name": "violation-result-not-object",
+  "description": "result must be a JSON object. The malformed message is the client's terminal: the server settles locally with invalidParams and sends nothing.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": 5
+      },
+      "expectViolation": "malformed"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "progress",
+          "state": "running"
+        }
+      },
+      "ignored": true
+    }
+  ]
+}

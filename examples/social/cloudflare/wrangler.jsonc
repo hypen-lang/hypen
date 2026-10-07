@@ -3,7 +3,11 @@
   "name": "hypen-social",
   "main": "src/worker.ts",
   "compatibility_date": "2025-05-01",
-  "compatibility_flags": ["nodejs_compat"],
+  // `no_web_socket_compression`: since the 2023-08-15 compatibility date
+  // workerd negotiates permessage-deflate WITH context takeover, and a
+  // socket compressed that way stays UI-only (RFC 001 §2.3) — no device
+  // plane, so no uploads. Frames go uncompressed instead.
+  "compatibility_flags": ["nodejs_compat", "no_web_socket_compression"],
 
   "rules": [
     { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
@@ -15,6 +19,12 @@
       { "name": "SOCIAL_DO", "class_name": "SocialDO" }
     ]
   },
+
+  // Uploaded photos. `wrangler dev` emulates the bucket locally; before the
+  // first deploy create it once: `bunx wrangler r2 bucket create hypen-social-media`.
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "hypen-social-media" }
+  ],
 
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["SocialDO"] }

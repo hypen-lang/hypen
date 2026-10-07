@@ -9,6 +9,7 @@ import { describe, test, expect } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as wasm from "../../../hypen-web/packages/server/wasm-node/hypen_engine.js";
+import { diffJsonPaths } from "../../../hypen-web/packages/core/src/diff.ts";
 
 interface PortableFixture {
   name: string;
@@ -62,13 +63,17 @@ describe("portable helpers — cross-SDK fixtures", async () => {
           );
           const got = JSON.parse(raw);
           // Order-insensitive: sort by path.
-          const gotSorted = [...got].sort((a, b) =>
-            String(a.path).localeCompare(String(b.path)),
-          );
-          const wantSorted = [...(fx.expected as any[])].sort((a, b) =>
-            String(a.path).localeCompare(String(b.path)),
-          );
-          expect(canon(gotSorted)).toEqual(canon(wantSorted));
+          const byPath = (a: any, b: any) =>
+            String(a.path).localeCompare(String(b.path));
+          const wantSorted = [...(fx.expected as any[])].sort(byPath);
+          expect(canon([...got].sort(byPath))).toEqual(canon(wantSorted));
+
+          // The TypeScript SDK additionally ships a TS port of
+          // diff_paths (`@hypen-space/core/diff`) that runs on the
+          // mutation hot path without serializing the state. It is
+          // held to the same fixtures as the WASM binding.
+          const jsGot = diffJsonPaths(input.old, input.new);
+          expect(canon([...jsGot].sort(byPath))).toEqual(canon(wantSorted));
           break;
         }
         case "match_path": {

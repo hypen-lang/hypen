@@ -1,0 +1,431 @@
+---
+title: Capability Reference
+description: Parameters, results, consent, deadlines and platform support for gallery.pick, file.pick, file.save, camera.capture, mic.record, bluetooth.select, bluetooth.scan, permission.query and permission.request
+---
+
+# Capability Reference
+
+Every capability has a name and a revision number. All capabilities are at
+**revision 1**. The server validates parameters against the schema before
+sending anything, so a bad argument fails locally with `invalidParams`, and
+`platformDetail` names the offending field (for example
+`params $.services[0]: …`). The server validates results too, before your
+handler sees them.
+
+## At a glance
+
+| Capability | Kind | Consent gate | Max deadline | Web | iOS | Android | Desktop |
+|------------|------|--------------|--------------|-----|-----|---------|---------|
+| `gallery.pick` | request, upload | The picker | 300 s | Yes | Yes | Yes | Yes |
+| `file.pick` | request, upload | The picker | 300 s | Yes | Yes | Yes | Yes |
+| `file.save` | request, download | Host dialog, then destination picker | 300 s | Yes | Yes | Yes | Yes |
+| `camera.capture` | request, upload | The host's capture UI | 600 s | If `getUserMedia` | Camera + key | Camera | Camera |
+| `mic.record` | stream, upload | Host dialog; indicator with Stop | 600 s | If `getUserMedia` | Mic + key + indicator | Mic + permission + indicator | Mic + indicator |
+| `bluetooth.select` | request | Host chooser | 300 s | Chromium only | Key | BLE + permission | BLE |
+| `bluetooth.scan` | stream, JSON events | Host dialog (grant can persist, with expiry); indicator | 600 s | No | Key + indicator | BLE + permission + indicator | BLE + indicator |
+| `permission.query` | request | None, never prompts | 30 s | Yes | Yes | Yes | Yes |
+| `permission.request` | request | Host dialog, then the OS prompt | 300 s | Yes | Yes | Yes | Yes |
+
+"Key" means the `Info.plist` usage description, and "permission" means the
+manifest entry. "Desktop" is the native desktop renderer
+(`hypen-renderer-desktop`): the file capabilities go through the operating
+system's file dialogs, and camera, microphone and Bluetooth through the
+desktop's own capture panel, chooser and indicators, drawn over the app
+window. Camera, microphone and Bluetooth are cargo features that are on by
+default; a build without one doesn't offer it (`unsupported`). With no camera,
+microphone or adapter present, requests fail with `unavailable`. See [Client Setup](/docs/device/client-setup) for exactly
+what each platform requires.
+
+If you pass no `timeoutMs`, the deadline is 300 s, clamped to the maximum in
+the table. Every request is also bounded by the client's own ceiling (300 s
+by default on the web host).
+
+In every SDK, uploaded items reach your handler as **verified bytes** instead
+of the wire's size and hash. The server has already checked the item count,
+each size, and each SHA-256 before your handler runs.
+
+---
+
+## gallery.pick
+
+Pick photos and/or videos from the device's media library.
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `mediaTypes` | `("photo" \| "video")[]` | 1–2 entries, no duplicates |
+| `maxCount` | integer | 1–16 |
+
+**Result:** `{ items: [{ channel, contentType, bytes }] }`, with up to 16
+items of up to 64 MiB each.
+
+```typescript
+const res = await context.device.request("gallery.pick", { mediaTypes: ["photo"], maxCount: 4 });
+if (res.ok) for (const item of res.value.items) await save(item.bytes, item.contentType);
+```
+
+| SDK | Call |
+|-----|------|
+| Go | `ctx.Device().Gallery().Pick(ctx, device.GalleryPickParams{MediaTypes: []device.MediaType{device.MediaTypePhoto}, MaxCount: 4})` → `[]device.Blob` |
+| Kotlin | `ctx.device.gallery.pick(GalleryPickParams(listOf(MediaType.PHOTO), 4))` → `DeviceResult<List<VerifiedBlob>>` |
+| Swift | `await ctx.device.gallery.pick([.photo], maxCount: 4)` → `DeviceResult<DevicePickedItems>` |
+| Rust | `ctx.device().gallery_pick(&[MediaType::Photo], 4)` → `DeviceCall<Vec<DeviceBlob>>` |
+
+**Platforms:**
+
+- **Web:** the host dialog comes first, because the browser needs a fresh
+  gesture. Then `<input type=file>` opens with an `image/*` or `video/*`
+  filter. Cancel in the host dialog is `denied` and starts a cooldown.
+  Dismissing the browser's picker is `cancelled` (`picker-dismissed`).
+- **iOS:** PHPicker. It runs out of process and needs no photo-library
+  permission.
+- **Android:** the system Photo Picker, falling back to `ACTION_OPEN_DOCUMENT`.
+- **Desktop:** the OS open dialog, filtered to image and/or video file types
+  per `mediaTypes`; its title names the server origin. Files of another type
+  are skipped. Files stream from disk as credit allows.
+
+## file.pick
+
+Pick documents, optionally filtered by type.
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `accept` | `string[]` | Up to 32 MIME types or patterns (`"application/pdf"`, `"image/*"`), each up to 128 characters. `[]` means any type. |
+| `maxCount` | integer | 1–16 |
+
+**Result:** `{ items: [{ channel, name, contentType, bytes }] }`. Unlike
+`gallery.pick`, each item carries its file `name`.
+
+```typescript
+const res = await context.device.request("file.pick", { accept: ["application/pdf"], maxCount: 1 });
+if (res.ok) {
+  const [doc] = res.value.items;
+  state.fileName = doc.name;
+}
+```
+
+| SDK | Call |
+|-----|------|
+| Go | `ctx.Device().Files().Pick(ctx, device.FilePickParams{Accept: []string{"application/pdf"}, MaxCount: 1})` → `[]device.Blob` (with `Name`) |
+| Kotlin | `ctx.device.files.pick(FilePickParams(listOf("application/pdf"), 1))` → `DeviceResult<List<VerifiedBlob>>` |
+| Swift | `await ctx.device.files.pick(accept: ["application/pdf"], maxCount: 1)` → `DeviceResult<DevicePickedItems>` |
+| Rust | `ctx.device().file_pick(&["application/pdf"], 1)` → `DeviceCall<Vec<DeviceBlob>>` (with `name`) |
+
+**Platforms:** web `<input type=file>` (after the host dialog), iOS
+`UIDocumentPickerViewController` (open, security-scoped), Android
+`ACTION_OPEN_DOCUMENT`, desktop the OS open dialog (multi-select when
+`maxCount` > 1; `accept` becomes the dialog's file-type filter). The content
+type comes from the file extension on the desktop.
+
+### Dropping files
+
+The host prompt for `file.pick` and `gallery.pick` has a **drop area** on the
+web and on desktop. Dropping files onto it is the same per-use choice as
+picking them in the OS picker; files outside the `accept` filter (or the
+`mediaTypes`) are ignored, and only the first `maxCount` are kept. The drop
+area is armed like Continue: it ignores drops for `inputProtectionMs` after it
+appears and counts one only when the drag *entered* the armed area, so a drag
+the user was already holding when the prompt popped up can't land by accident.
+On desktop the prompt with a drop area appears when files are being dragged
+over the window; otherwise `file.pick` opens the OS Open panel.
+
+To let users drag files straight onto your UI, make the target a **files drop
+zone** and answer `.onFileDragEnter` with a pick. The zone lights up with its
+`over` pose while matching files hover it, and the prompt then appears under
+the drag that is still held, so the user releases the files onto its drop
+area. The files never pass through your UI or the event:
+
+```hypen
+Column { Text("Drop photos here") }
+    .dropZone(files: true, accept: "image/*")
+    .onFileDragEnter(@actions.upload)
+    .states { onState(over).backgroundColor("#eef2ff").borderColor("#6366f1") }
+    .onClick(@actions.upload)
+```
+
+```typescript
+.onAction("upload", async ({ state, context }) => {
+  const res = await context.device.request("file.pick", { accept: ["image/*"], maxCount: 16 });
+  if (res.ok) for (const item of res.value.items) await store(item.name, item.bytes);
+})
+```
+
+- `.onFileDragEnter` fires once per entry, only when the zone is enabled and
+  the drag matches `accept`. It carries `{type, timestamp, items}`: an item
+  count, never names or contents. On an element that is not a
+  `.dropZone(files: true)`, it does nothing.
+- `accept:` takes the same filter as `<input accept>` (`"image/*"`,
+  `"application/pdf"`, `".pdf"`). Where the platform can't tell the types
+  before the drop, the zone lights up anyway.
+- When zones are nested, the innermost one that accepts the drag lights up.
+- Files released on the zone itself (before the prompt is up) are swallowed,
+  never opened.
+
+This works the same on the web DOM and Canvas renderers, iOS, Android and
+desktop. See [Drag and drop](/docs/guide/drag-and-drop#files-from-the-os) for
+drop zones and the `over` pose.
+
+## file.save
+
+Send bytes to the device. The user chooses where they go. This is the one
+capability where data flows **from** the server **to** the device.
+
+```typescript
+const res = await context.device.save(pdfBytes, {
+  name: "invoice-1042.pdf",
+  contentType: "application/pdf",
+});
+if (res.ok) state.saved = res.value.bytesWritten;
+```
+
+`save(bytes, { name, contentType, timeoutMs?, signal? })` resolves to
+`{ bytesWritten }`. The file must be 1 byte to 64 MiB. `name` can be up to 512
+characters, and `contentType` up to 256. The SDK computes the SHA-256 and
+announces the file for you.
+
+| SDK | Call |
+|-----|------|
+| Go | `ctx.Device().Files().Save(ctx, "invoice.pdf", "application/pdf", data)` → `*device.SaveResult{BytesWritten}` |
+| Kotlin | `ctx.device.files.save(bytes, "invoice.pdf", "application/pdf")` → `DeviceResult<FileSaveResult>` |
+| Swift | `await ctx.device.files.save(data, name: "invoice.pdf", contentType: "application/pdf")` → `DeviceResult<FileSaveResult>` |
+| Rust | `ctx.device().save("invoice.pdf", "application/pdf", bytes)` → `DeviceCall<SaveReceipt>` |
+
+**How it's delivered:** the device first shows its consent and destination
+picker. Only after that does it grant credit, at most 256 KiB at a time, and
+the server sends 64 KiB frames within that credit. The device verifies the
+size and hash and finishes writing before it reports success. A device that
+never grants credit receives nothing, and the request ends at its deadline.
+
+**Platforms:**
+
+- **Web:** `showSaveFilePicker` streams straight to the file, which commits
+  only on close, so a failure leaves no partial file. Where that API is
+  missing, the web host falls back to a Blob and an `<a download>` link,
+  capped by `maxDownloadBytes`. In that case `bytesWritten` means the bytes
+  were handed to the browser's download manager, not that the user kept the
+  file.
+- **iOS:** the document export picker, fed from a temporary file.
+- **Android:** `ACTION_CREATE_DOCUMENT`. The partial file is deleted if the
+  write fails.
+- **Desktop:** the OS save dialog (titled with the origin and the file name)
+  is the consent and destination gate. Bytes go to a temporary file beside the
+  destination, which is renamed into place only after the size and SHA-256
+  verify; on failure, cancellation or disconnect the temporary file is
+  deleted and an existing destination is left untouched.
+
+## camera.capture
+
+Take one photo or record one video through the host's own capture UI, which
+serves as the consent gate.
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `mode` | `"photo"` or `"video"` | Required |
+| `facing` | `"front"` or `"back"` | Optional; the host may fall back when the device has one camera |
+| `maxDurationMs` | integer | Video only, 1–600000. A photo with `maxDurationMs` is a type error in TypeScript, and `invalidParams` everywhere. |
+
+**Result:** exactly one item, at most 64 MiB. A photo is `image/jpeg` or
+`image/heic`. A video is `video/mp4`, `video/quicktime` or `video/webm`.
+
+```typescript
+const res = await context.device.camera.capture({ mode: "photo", facing: "back" });
+if (res.ok) state.photoUrl = await storage.upload(res.value.items[0].bytes);
+
+const clip = await context.device.camera.capture({ mode: "video", maxDurationMs: 15_000 });
+```
+
+| SDK | Call |
+|-----|------|
+| Go | `ctx.Device().Camera().Photo(ctx, device.CameraFacingBack)`, `Camera().Video(ctx, facing, maxDurationMs)` or `Camera().Capture(ctx, params)` → `device.Blob` |
+| Kotlin | `ctx.device.camera.capture(CameraCaptureParams(CaptureMode.PHOTO, CameraFacing.BACK))` → `DeviceResult<VerifiedBlob>` |
+| Swift | `await ctx.device.camera.capture(.photo, facing: .back)` → `DeviceResult<DeviceReceivedBlob>` |
+| Rust | `ctx.device().camera_capture(CameraCaptureParams { mode: CaptureMode::Photo, facing: Some(CameraFacing::Back), max_duration_ms: None })` → `DeviceCall<DeviceBlob>` |
+
+A refused OS camera (or microphone) permission is `denied`. Closing the
+capture UI without capturing is `cancelled`. Video on native hosts also needs
+the microphone permission.
+
+**Platforms:**
+
+- **Web:** a host dialog with a live preview and Capture, Record/Stop and
+  Cancel buttons. A photo is the preview frame encoded as JPEG. A video is
+  `MediaRecorder` output (webm), streamed while it records, so its size isn't
+  known in advance.
+- **iOS:** `UIImagePickerController`.
+- **Android:** the system `TakePicture` / `CaptureVideo` activities, writing
+  into the renderer's private `FileProvider`.
+- **Desktop:** a capture panel over the app window with a live preview and
+  Capture, Record/Stop and Cancel. A photo is `image/jpeg`; a video is H.264
+  in a fragmented `video/mp4`, streamed while it records, with no audio track.
+
+## mic.record
+
+Record audio and stream it to your handler **while it's being captured**.
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `format` | `"pcm16"` | Required; the only format in revision 1 |
+| `sampleRate` | integer | 8000–192000 Hz |
+| `channels` | `1` or `2` | Optional, defaults to 1. Stereo is interleaved. |
+| `maxDurationMs` | integer | Optional, 1–600000 |
+
+**Data:** little-endian 16-bit PCM (`audio/L16`) at the requested rate,
+delivered to your callback in order.
+**Result:** `{ durationMs, item: { channel: 0, contentType, bytes, sha256 } }`.
+The server verifies `bytes` and `sha256` against everything it delivered.
+
+```typescript
+const recording = context.device.mic.record(
+  { format: "pcm16", sampleRate: 16000, maxDurationMs: 60_000 },
+  (chunk) => transcriber.push(chunk),   // may return a promise; the device waits for it
+);
+const res = await recording.settled;
+if (res.ok) state.transcript = await transcriber.finish();
+```
+
+| SDK | Call |
+|-----|------|
+| Go | `ctx.Device().Mic().Record(ctx, device.MicRecordParams{SampleRate: 16000}, func(chunk []byte) error { … })` → `*device.MicRecordResult` |
+| Kotlin | `ctx.device.mic.record(MicRecordParams(16000, MicFormat.PCM16)) { chunk -> … }.await()` |
+| Swift | `let rec = ctx.device.mic.record(sampleRate: 16000)`, then `for await chunk in rec { … }` and `await rec.result()` |
+| Rust | `ctx.device().mic_record(params)?.for_each(\|state: &mut S, item\| …)` with `StreamItem::Data { bytes, .. }` chunks, then `StreamItem::End(result)` |
+
+**How a recording ends:**
+
+- **Normally, with a success result containing what was captured:** the user
+  taps Stop on the recording indicator, `maxDurationMs` is reached, or the
+  app or page goes to the background.
+- **With an error, discarding the recording:** you call `cancel()`, the
+  deadline expires, the owner deactivates, the lease is lost, or the
+  permission is revoked.
+- **With `throttled`:** your consumer is so slow that the device's bounded
+  capture buffer fills while it waits for credit.
+
+**Platforms:** web `getUserMedia` with an AudioWorklet (or a ScriptProcessor
+fallback) that resamples to the requested rate, iOS `AVAudioEngine` with
+`AVAudioConverter`, Android `AudioRecord`. Every platform shows the host's
+recording indicator for the whole recording.
+
+## bluetooth.select
+
+Let the user choose **one** nearby Bluetooth LE device, and get its identity.
+There is no GATT access in revision 1.
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `services` | `string[]` | Optional, 1–16 unique service UUIDs in canonical lowercase 128-bit form |
+| `namePrefix` | string | Optional, 1–64 characters |
+
+A 16-bit SIG id must be sent expanded: heart rate `0x180d` is
+`"0000180d-0000-1000-8000-00805f9b34fb"`. Kotlin has
+`BluetoothSelectParams.expandShortUuid(0x180d)`, and Go has
+`ExpandBluetoothUUID16` in `remote/device`.
+
+**Result:** `{ device: { id, name? } }`. The `id` is 1–128 characters.
+
+```typescript
+const res = await context.device.bluetooth.select({
+  services: ["0000180d-0000-1000-8000-00805f9b34fb"],
+});
+if (res.ok) state.sensorId = res.value.device.id;
+```
+
+| SDK | Call |
+|-----|------|
+| Go | `ctx.Device().Bluetooth().Select(ctx, device.BluetoothSelectParams{Services: []string{hr}})` → `device.SelectedBluetoothDevice` |
+| Kotlin | `ctx.device.bluetooth.select(BluetoothSelectParams(services = listOf(hr)))` → `DeviceResult<SelectedBluetoothDevice>` |
+| Swift | `await ctx.device.bluetooth.select(services: [hr])` → `DeviceResult<SelectedBluetoothDevice>` |
+| Rust | `ctx.device().bluetooth_select(BluetoothSelectParams { services: Some(vec![hr]), name_prefix: None })` → `DeviceCall<SelectedBluetoothDevice>` |
+
+Dismissing the chooser is `cancelled`.
+
+**Platforms:**
+
+- **Web:** the host dialog, then the browser's Web Bluetooth chooser
+  (`navigator.bluetooth.requestDevice`). Web Bluetooth exists only in
+  Chromium-based browsers. Elsewhere the capability isn't offered, and a
+  request returns `unsupported`.
+- **iOS, Android and desktop:** a host-owned chooser listing a live scan.
+  While it's open, the chooser itself is the visible indicator.
+
+## bluetooth.scan
+
+Stream Bluetooth LE advertisements as the device sees them. **Native only.**
+The web doesn't offer it.
+
+**Params:** `{}`.
+**Events:** `{ device: { id, name?, rssi } }` (`rssi` is an integer).
+**Result:** `{}`.
+
+```typescript
+const scan = context.device.stream("bluetooth.scan", {}, {}, (event) => {
+  state.nearby[event.device.id] = { name: event.device.name ?? "", rssi: event.device.rssi };
+});
+// later, e.g. from another action or a timer:
+scan.cancel();
+```
+
+| SDK | Call |
+|-----|------|
+| Go | `ctx.Device().Bluetooth().Scan(ctx, func(d device.BluetoothDevice) error { … })`. Return `device.ErrStop` to end it. |
+| Kotlin | `ctx.device.bluetooth.scan { d -> … }`, or `ctx.device.events(Capability.BLUETOOTH_SCAN, BluetoothScanParams).take(10).collect { … }` |
+| Swift | `for await d in ctx.device.bluetooth.scan() { … }` |
+| Rust | `ctx.device().bluetooth_scan()?.for_each(\|state: &mut S, item\| …)`; keep the returned `DeviceHandle` to `cancel()` it |
+
+A scan runs until you cancel it, the user taps Stop on the indicator
+(`cancelled`), the deadline passes (600 s at most), or the owning module
+deactivates. Consent for scanning is *persistable*: the host can remember a
+grant for a limited time (24 hours on Android and 7 days on iOS by default),
+and then asks again. Grants persist only for authenticated `wss://` origins.
+The indicator stays visible for the whole scan either way. On Android the adapter must be on, and
+on some API levels Location Services too. Otherwise the request answers
+`unavailable`.
+
+## permission.query / permission.request
+
+Read or request **one** permission from a closed set.
+
+| Param | Type | Notes |
+|-------|------|-------|
+| `permission` | `"camera"`, `"microphone"`, `"photos"`, `"location"`, `"notifications"`, `"bluetooth"`, or `"contacts"` | Anything else (a typo, an alias such as `geolocation`, a different case) is a compile error in TypeScript and `invalidParams` everywhere |
+
+**Result:** `{ status: "granted" | "denied" | "prompt" }`.
+
+`permission.query` never prompts and returns the live status.
+`permission.request` shows the host's consent dialog, then the real OS
+prompt. If the permission has already been decided, it answers without a
+dialog.
+
+```typescript
+const cam = await context.device.permissions.query("camera");
+if (cam.ok && cam.value.status === "prompt") {
+  await context.device.permissions.request("camera");
+}
+context.device.permissions.query("camra"); // type error
+```
+
+| SDK | Call |
+|-----|------|
+| Go | `ctx.Device().Permissions().Query(ctx, device.PermissionCamera)` / `.Request(...)` → `device.PermissionStatus` |
+| Kotlin | `ctx.device.permissions.query(Permission.CAMERA)` / `.request(...)` → `DeviceResult<PermissionStatus>` |
+| Swift | `await ctx.device.permissions.query(.camera)` / `.request(...)` → `DeviceResult<PermissionResult>` |
+| Rust | `ctx.device().permission_query(Permission::Camera)` / `permission_request(...)` → `DeviceCall<PermissionStatus>` |
+
+Permission status is **not** the same as capability support. You can pick a
+photo on iOS with no photo-library permission at all, because PHPicker needs
+none. Use `supports()` to find out whether a capability can run, and
+`permission.*` only when your app needs the OS permission itself.
+
+**Per platform:**
+
+| Permission | Web | iOS | Android |
+|------------|-----|-----|---------|
+| `camera`, `microphone` | Permissions API; `request` calls `getUserMedia` and stops the tracks at once | System API (needs the usage key) | `CAMERA` / `RECORD_AUDIO` |
+| `location` | Permissions API; `request` calls `getCurrentPosition` | `NSLocationWhenInUseUsageDescription` | Fine or coarse location |
+| `notifications` | `Notification.requestPermission` | System API | `POST_NOTIFICATIONS` on API 33+. Before API 33 there is no runtime permission, and the status reflects whether notifications are enabled for the app. |
+| `photos` | Always `granted` (the file picker needs none) | `NSPhotoLibraryUsageDescription` | `READ_MEDIA_*` on API 33+, `READ_EXTERNAL_STORAGE` before that |
+| `bluetooth` | `prompt` where Web Bluetooth exists, otherwise `unsupported` | `NSBluetoothAlwaysUsageDescription` | `BLUETOOTH_SCAN` on API 31+, location before that |
+| `contacts` | `unsupported` | `NSContactsUsageDescription` | `READ_CONTACTS` |
+
+A host that can't represent a permission at all answers `unsupported`, with
+the permission name as `platformDetail`. A native permission whose key or
+manifest entry is missing answers `unavailable` with `not-declared:<name>`.

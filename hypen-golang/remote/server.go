@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"weak"
 
 	"github.com/gorilla/websocket"
 	core "github.com/hypen-space/core"
@@ -41,8 +43,8 @@ type RemoteServer struct {
 	config     ServerConfig
 	sourceDir  string // When set, use engine + component resolver for patches
 
-	sessions    map[*RemoteSession]struct{}
-	connToSess  map[*websocket.Conn]*RemoteSession
+	sessions   map[*RemoteSession]struct{}
+	connToSess map[*websocket.Conn]*RemoteSession
 
 	// sessionManager owns session lifecycle (create / suspend / resume /
 	// expire) so briefly-disconnected clients can reconnect to their
@@ -70,6 +72,28 @@ type RemoteServer struct {
 	server   *http.Server
 	upgrader websocket.Upgrader
 
+	// device is the device plane's settings (RFC 001). The plane is on
+	// by default: every connection whose hello offers `device` negotiates
+	// it. ConfigureDevice changes the options; DisableDevice turns it off.
+	device *deviceSettings
+	// deviceOff is DisableDevice(): the server behaves exactly like a
+	// UI-only server.
+	deviceOff bool
+	// Connection admission (RFC 001 §5), the app's ordinary connection
+	// policy for UI and device traffic alike, enforced only when
+	// configured (AllowedOrigins / Authenticate).
+	allowedOrigins []string
+	originsSet     bool
+	authenticate   func(r *http.Request) bool
+	// admitted records upgrade requests Admit accepted, so the upgrader's
+	// origin check and CreateSession reuse the verdict instead of running
+	// the authenticator again.
+	admitted admissions
+	// startup logs the one-time startup warnings (Prepare);
+	// startupWarnings records them (tests).
+	startup         sync.Once
+	startupWarnings []string
+
 	// Shutdown channel
 	done chan struct{}
 }
@@ -85,16 +109,19 @@ func NewRemoteServer() *RemoteServer {
 		},
 		resources:  make(map[string]string),
 		autoRouter: true,
+		device:     newDeviceSettings(DeviceConfig{}),
 		sessions:   make(map[*RemoteSession]struct{}),
 		connToSess: make(map[*websocket.Conn]*RemoteSession),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins
 			},
-			// permessage-deflate on by default; negotiated per
-			// connection, so non-supporting clients fall back
-			// automatically. Opt out via Config or
-			// DisableCompression().
+			// permessage-deflate on by default, device plane or not;
+			// negotiated per connection, so non-supporting clients fall
+			// back automatically. gorilla only implements no context
+			// takeover in both directions (every message deflated on its
+			// own), which is what the device plane requires. Opt out via
+			// Config or DisableCompression().
 			EnableCompression: true,
 		},
 		done: make(chan struct{}),
@@ -157,6 +184,15 @@ func (h serverSessionHost) SessionManager() *core.SessionManager {
 	return h.s.sessionManager
 }
 
+func (h serverSessionHost) deviceSettings() *deviceSettings {
+	h.s.mu.RLock()
+	defer h.s.mu.RUnlock()
+	if !h.s.deviceOnLocked() {
+		return nil
+	}
+	return h.s.device
+}
+
 func (h serverSessionHost) OnSessionReady(_ *RemoteSession, client *Client) {
 	h.s.mu.RLock()
 	cbs := make([]ServerConnectionCallback, len(h.s.onConnectionCallbacks))
@@ -197,7 +233,9 @@ func (s *RemoteServer) ModuleName() string {
 // if you're bypassing Listen(). Currently a lightweight validator because
 // the underlying session manager is created eagerly in NewRemoteServer;
 // it is exposed for parity with other SDKs and for future work.
-// Idempotent.
+// Idempotent. The first successful call logs the server's one-time
+// startup warnings (no admission configured; a setting that turned the
+// device plane off) — it never refuses to start over device settings.
 func (s *RemoteServer) Prepare() error {
 	s.mu.RLock()
 	mod := s.module
@@ -209,7 +247,45 @@ func (s *RemoteServer) Prepare() error {
 	if ui == "" {
 		return fmt.Errorf("remote: UI not set — call .UI() before Prepare()")
 	}
+	s.startup.Do(s.logStartup)
 	return nil
+}
+
+// Startup warning texts (tests match them).
+const (
+	warnNoAdmission         = "no AllowedOrigins/Authenticate configured — any client can connect; set them in production"
+	warnDeviceAllowMultiple = "device plane off: the session config allows multiple connections per session (ConcurrentAllowMultiple), which would fan one session's device work out across sockets — use kick-old/reject-new to enable it"
+)
+
+// logStartup logs the one-time startup warnings and, with the device
+// plane on, compiles the broker module off the hello path.
+func (s *RemoteServer) logStartup() {
+	s.mu.RLock()
+	admission := s.admissionConfiguredLocked()
+	deviceOn := s.deviceOnLocked()
+	allowMultiple := !s.deviceOff && s.allowMultipleLocked()
+	s.mu.RUnlock()
+	var warnings []string
+	if !admission {
+		warnings = append(warnings, warnNoAdmission)
+	}
+	if allowMultiple {
+		warnings = append(warnings, warnDeviceAllowMultiple)
+	}
+	s.mu.Lock()
+	s.startupWarnings = warnings
+	s.mu.Unlock()
+	for _, w := range warnings {
+		logServer.Warn("%s", w)
+	}
+	if deviceOn {
+		// Compile the broker module (once per process) off the hello path.
+		go func() {
+			if _, err := sharedBrokerModule(); err != nil {
+				logServer.Error("device broker module: %v", err)
+			}
+		}()
+	}
 }
 
 // CreateSession creates a RemoteSession driven by the supplied transport.
@@ -219,11 +295,35 @@ func (s *RemoteServer) Prepare() error {
 // messages to session.Receive(data) and call session.Destroy() when the
 // underlying connection closes.
 //
+// When connection admission is configured (AllowedOrigins /
+// Authenticate) the session gets a device plane only when its upgrade was
+// admitted: pass the upgrade request with WithUpgradeRequest (after
+// upgrading with Upgrader(), or after Admit). Without it, or when
+// admission refuses the request, the session is UI-only (fail closed).
+// With no admission configured every session may negotiate the device
+// plane (it is on by default).
+//
 // Returns an error if the server is not prepared.
 func (s *RemoteServer) CreateSession(transport SessionTransport, opts ...SessionOption) (*RemoteSession, error) {
 	if err := s.Prepare(); err != nil {
 		return nil, err
 	}
+	var o sessionOptions
+	for _, opt := range opts {
+		opt(&o)
+	}
+	admitted := true
+	if s.admissionConfigured() {
+		admitted = o.upgradeRequest != nil && s.Admit(o.upgradeRequest)
+		if o.upgradeRequest != nil {
+			// One admitted upgrade, one session.
+			s.admitted.take(o.upgradeRequest)
+		}
+		if !admitted && s.DeviceEnabled() {
+			logServer.Warn("CreateSession: upgrade not admitted (no WithUpgradeRequest, or refused) — device plane disabled for this session")
+		}
+	}
+	opts = append(opts, withDeviceAdmission(admitted))
 	sess := NewRemoteSession(serverSessionHost{s}, transport, opts...)
 	s.mu.Lock()
 	sess.AutoRouterEnabled = s.autoRouter
@@ -285,6 +385,60 @@ func (s *RemoteServer) Sessions() []*RemoteSession {
 		out = append(out, sess)
 	}
 	return out
+}
+
+// Attach returns a non-owning AgentHandle bound to the live user session
+// whose hello-acknowledged session id is sessionID. The session must have
+// completed its hello → initialTree flow (Ready closed), not be destroyed
+// (Closed open), and own an engine. Under a concurrent-connection policy
+// that lets several connections share one session id, the first ready
+// match is used.
+//
+// Returns ErrNoSuchSession when no ready, open session carries the id,
+// and ErrNoEngine when one does but the server runs the legacy no-engine
+// path (Source() and UI() not both configured).
+//
+// Ready closes only after the template's Router auto-wiring has installed
+// the `router.*` handlers behind hypen.navigate / hypen.back, so a handle
+// obtained here never lands in a window where the guard authorises a
+// navigation the host cannot yet execute. Ready also closes before
+// OnConnection callbacks fire, so attaching from one is supported. The
+// exception is bespoke wiring: a host that calls DisableAutoRouter and
+// starts its own ManagedRouter from an OnSessionCreate callback owns the
+// ordering between that wiring and any Attach it performs.
+//
+// Attach is an in-process call — the developer invoking it from their
+// own handler is the authorizer. It is deliberately not exposed as an
+// HTTP route; the handle never destroys, suspends, or closes the session.
+func (s *RemoteServer) Attach(sessionID string) (*AgentHandle, error) {
+	if sessionID == "" {
+		return nil, ErrNoSuchSession
+	}
+	var matchedWithoutEngine bool
+	for _, sess := range s.Sessions() {
+		if sess.SessionID() != sessionID {
+			continue
+		}
+		select {
+		case <-sess.Ready():
+		default:
+			continue // hello not complete yet
+		}
+		select {
+		case <-sess.Closed():
+			continue // already torn down
+		default:
+		}
+		if sess.Engine() == nil {
+			matchedWithoutEngine = true
+			continue
+		}
+		return newAgentHandle(sess), nil
+	}
+	if matchedWithoutEngine {
+		return nil, ErrNoEngine
+	}
+	return nil, ErrNoSuchSession
 }
 
 // Module sets the module for this app
@@ -467,6 +621,165 @@ func (s *RemoteServer) DisableAutoRouter() *RemoteServer {
 	return s
 }
 
+// ConfigureDevice sets the device plane's options (RFC 001): retained
+// budgets, item caps and broker overrides; zero fields keep the defaults.
+// The device plane itself needs no call — it is on by default, and every
+// connection whose hello offers `device` gets one backed by the Rust
+// device broker (the engine module's `hypen_device_*` ABI via wazero,
+// compiled once per process; each connection's broker runs in its own
+// module instance, so a trap resets only that connection). Handlers reach
+// it through ctx.Device(). Configuring does not re-enable a plane turned
+// off by DisableDevice.
+//
+// With the device plane on (the default):
+//   - WebSocket compression stays on (unless DisableCompression): gorilla
+//     negotiates permessage-deflate with server_no_context_takeover and
+//     client_no_context_takeover only, so every message is compressed on
+//     its own and device data never shares a compression history with
+//     other messages — clients accept the device plane on such a socket;
+//   - the socket read limit is 16 MiB (oversize device text reaches the
+//     broker's pre-parse limit check);
+//   - every acknowledged connection gets a resume token; resuming a
+//     session that negotiated a device plane requires it, while UI-only
+//     sessions keep the legacy id-only resume;
+//   - a session with a negotiated plane runs its dispatches off the socket
+//     reader, so handlers can block on device calls.
+//
+// Legacy clients are unaffected: one that never sends hello is still
+// initialised after the hello grace (without a device plane), and one
+// whose hello offers no `device` gets no device plane.
+func (s *RemoteServer) ConfigureDevice(cfg DeviceConfig) *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.device.cfg = cfg
+	s.device.agg.limit.Store(aggregateLimit(cfg.AggregateRetainedBytes))
+	return s
+}
+
+// DisableDevice turns the device plane off for this server — the single
+// opt-out. The server then behaves exactly like a UI-only server: no
+// device negotiation, no resume tokens, dispatches on the reader.
+// Compression is independent of it (see DisableCompression).
+func (s *RemoteServer) DisableDevice() *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.deviceOff = true
+	return s
+}
+
+// DeviceEnabled reports whether this server negotiates the device plane:
+// true by default; false after DisableDevice or when a setting that is
+// incompatible with it (a session config allowing multiple connections
+// per session) turned it off.
+func (s *RemoteServer) DeviceEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.deviceOnLocked()
+}
+
+func (s *RemoteServer) deviceOnLocked() bool {
+	return !s.deviceOff && !s.allowMultipleLocked()
+}
+
+func (s *RemoteServer) allowMultipleLocked() bool {
+	return s.sessionManager != nil && s.sessionManager.Config().Concurrent == core.ConcurrentAllowMultiple
+}
+
+// AllowedOrigins configures the Origin allowlist of connection admission
+// (RFC 001 §5): an upgrade request WITH an `Origin` header must name one
+// of these exact values (e.g. "https://app.example.com") or it is refused
+// 403 (cross-site WebSocket hijacking defence). Requests without an Origin
+// (native clients) are not affected by the allowlist — use Authenticate
+// for them. Admission applies to UI and device traffic alike.
+func (s *RemoteServer) AllowedOrigins(origins ...string) *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allowedOrigins = append([]string(nil), origins...)
+	s.originsSet = true
+	return s
+}
+
+// Authenticate configures the app authenticator of connection admission
+// (RFC 001 §5): when set it must return true for every upgrade, with or
+// without an Origin, or the upgrade is refused 403. Origin authenticates
+// nothing — native clients present app credentials (e.g. an
+// Authorization upgrade header).
+func (s *RemoteServer) Authenticate(fn func(r *http.Request) bool) *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authenticate = fn
+	return s
+}
+
+func (s *RemoteServer) admissionConfigured() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.admissionConfiguredLocked()
+}
+
+func (s *RemoteServer) admissionConfiguredLocked() bool {
+	return s.originsSet || s.authenticate != nil
+}
+
+// Admit applies connection admission (RFC 001 §5) to an upgrade request:
+// true when it may be upgraded. With neither AllowedOrigins nor
+// Authenticate configured every request is admitted (and Prepare logs one
+// startup warning). The verdict for r is remembered: the upgrader from
+// Upgrader() (whose origin check is Admit) and CreateSession(…,
+// WithUpgradeRequest(r)) reuse it, so the authenticator runs once per
+// request.
+//
+// Hosts upgrading on their own endpoint upgrade with Upgrader() (or call
+// Admit and refuse 403 themselves when using another WebSocket library)
+// and pass the request to CreateSession with WithUpgradeRequest: with
+// admission configured, a session whose upgrade was not admitted never
+// gets a device plane.
+func (s *RemoteServer) Admit(r *http.Request) bool {
+	s.mu.RLock()
+	origins, originsSet, auth := s.allowedOrigins, s.originsSet, s.authenticate
+	s.mu.RUnlock()
+	if !originsSet && auth == nil {
+		return true
+	}
+	if r == nil {
+		return false
+	}
+	if s.admitted.has(r) {
+		return true
+	}
+	if !admitRequest(r, origins, originsSet, auth) {
+		return false
+	}
+	s.admitted.add(r)
+	return true
+}
+
+// admitRequest applies the configured admission checks to r.
+func admitRequest(r *http.Request, origins []string, originsSet bool, auth func(*http.Request) bool) bool {
+	origin := r.Header.Get("Origin")
+	if originsSet && origin == "" && auth == nil {
+		// An allowlist admits browsers only: a request without Origin
+		// (a native client) needs the authenticator.
+		return false
+	}
+	if originsSet && origin != "" {
+		allowed := false
+		for _, o := range origins {
+			if o == origin {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	if auth != nil && !auth(r) {
+		return false
+	}
+	return true
+}
+
 // DisableCompression turns off WebSocket permessage-deflate (RFC 7692),
 // which every upgrade path in this server otherwise offers by default.
 // Equivalent to Config(ServerConfig{DisableCompression: true}); provided
@@ -483,12 +796,20 @@ func (s *RemoteServer) DisableCompression() *RemoteServer {
 }
 
 // CompressionEnabled reports whether this server offers permessage-deflate
-// during the WebSocket handshake. True unless compression was explicitly
-// disabled. Note that this is what the server *offers* — the extension is
-// only actually used on connections whose client advertises it too.
+// during the WebSocket handshake: true by default (device plane on or
+// off), false after DisableCompression / ServerConfig.DisableCompression.
+// The negotiated extension always carries server_no_context_takeover and
+// client_no_context_takeover (the only mode gorilla implements), so it is
+// safe for device traffic. Note that this is what the server *offers* —
+// the extension is only actually used on connections whose client
+// advertises it too.
 func (s *RemoteServer) CompressionEnabled() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	return s.compressionLocked()
+}
+
+func (s *RemoteServer) compressionLocked() bool {
 	return !s.config.DisableCompression
 }
 
@@ -497,10 +818,20 @@ func (s *RemoteServer) CompressionEnabled() bool {
 // compression and origin settings. Hosts wiring Hypen into their own
 // HTTP stack should upgrade with this (rather than a hand-rolled
 // Upgrader) so custom endpoints honour the same configuration.
+//
+// The upgrader admits per connection admission (RFC 001 §5): its
+// CheckOrigin is Admit, so with AllowedOrigins / Authenticate configured a
+// request with a foreign Origin, or one the authenticator refuses, is
+// refused 403 before any upgrade (with neither configured every request
+// is admitted). Pass the request on with CreateSession(…,
+// WithUpgradeRequest(r)).
 func (s *RemoteServer) Upgrader() websocket.Upgrader {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.upgrader
+	up := s.upgrader
+	up.EnableCompression = s.compressionLocked()
+	up.CheckOrigin = s.Admit
+	return up
 }
 
 // OnSessionCreate registers a callback that fires the instant a
@@ -580,6 +911,8 @@ func (s *RemoteServer) Stop() {
 	s.server = nil
 	s.mu.Unlock()
 
+	// Each session's device plane (its broker and engine-module instance)
+	// closes with the session.
 	for _, sess := range sessions {
 		_ = sess.Destroy()
 	}
@@ -630,6 +963,12 @@ func (s *RemoteServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 // request, wraps the connection as a SessionTransport, creates a
 // RemoteSession, and starts the message-pumping goroutine.
 func (s *RemoteServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Connection admission (RFC 001 §5) before upgrading.
+	if !s.Admit(r) {
+		logServer.Warn("WebSocket upgrade refused (Origin %q)", r.Header.Get("Origin"))
+		http.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
 	// Snapshot under the lock: Config()/DisableCompression() may mutate
 	// the upgrader while connections are being served.
 	up := s.Upgrader()
@@ -642,7 +981,7 @@ func (s *RemoteServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		"WebSocket upgraded (compression offered: %v, client extensions: %q)",
 		up.EnableCompression, r.Header.Get("Sec-WebSocket-Extensions"),
 	)
-	s.handleOpen(conn)
+	s.handleOpen(conn, WithUpgradeRequest(r))
 	go s.readMessages(conn)
 }
 
@@ -653,9 +992,9 @@ func (s *RemoteServer) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 // Compression is a property of the already-completed handshake, so a
 // caller upgrading on its own endpoint controls it via its own Upgrader
 // — use RemoteServer.Upgrader() to inherit this server's settings.
-func (s *RemoteServer) handleOpen(conn *websocket.Conn) {
+func (s *RemoteServer) handleOpen(conn *websocket.Conn, opts ...SessionOption) {
 	transport := NewGorillaWebSocketTransport(conn)
-	sess, err := s.CreateSession(transport, WithSocketHandle(conn))
+	sess, err := s.CreateSession(transport, append([]SessionOption{WithSocketHandle(conn)}, opts...)...)
 	if err != nil {
 		logServer.Error("CreateSession failed: %v", err)
 		_ = conn.Close()
@@ -673,10 +1012,21 @@ func (s *RemoteServer) readMessages(conn *websocket.Conn) {
 		return
 	}
 	defer func() { _ = sess.Destroy() }()
+	if s.DeviceEnabled() {
+		// Device plane on (the default): oversize device text must
+		// reach the broker's pre-parse limit
+		// check (a counted violation), not kill the socket; beyond this
+		// the connection is closed (1009).
+		conn.SetReadLimit(16 << 20)
+	}
 	for {
-		_, message, err := conn.ReadMessage()
+		kind, message, err := conn.ReadMessage()
 		if err != nil {
 			return
+		}
+		if kind == websocket.BinaryMessage {
+			sess.ReceiveBinary(message)
+			continue
 		}
 		if err := sess.Receive(message); err != nil {
 			logServer.Error("Receive on %s failed: %v", sess.ID, err)
@@ -800,7 +1150,6 @@ func (s *RemoteServer) BroadcastState(state map[string]any) {
 	}
 }
 
-
 // Serve is a convenience function to create and start a RemoteServer
 func Serve(options ServeOptions) *RemoteServer {
 	server := NewRemoteServer().
@@ -840,4 +1189,53 @@ type ServeOptions struct {
 	OnAction        ActionHandler
 	OnConnection    ServerConnectionCallback
 	OnDisconnection ServerConnectionCallback
+}
+
+// admissions is the set of upgrade requests Admit accepted, held weakly:
+// an entry disappears when CreateSession consumes it or when the request
+// is garbage collected (an upgrade that failed after admission).
+type admissions struct {
+	mu  sync.Mutex
+	set map[weak.Pointer[http.Request]]struct{}
+}
+
+func (a *admissions) add(r *http.Request) {
+	k := weak.Make(r)
+	a.mu.Lock()
+	if a.set == nil {
+		a.set = make(map[weak.Pointer[http.Request]]struct{})
+	}
+	_, dup := a.set[k]
+	a.set[k] = struct{}{}
+	a.mu.Unlock()
+	if !dup {
+		runtime.AddCleanup(r, func(k weak.Pointer[http.Request]) { a.remove(k) }, k)
+	}
+}
+
+func (a *admissions) has(r *http.Request) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.set[weak.Make(r)]
+	return ok
+}
+
+// take removes r's admission, reporting whether it was recorded.
+func (a *admissions) take(r *http.Request) bool {
+	return a.remove(weak.Make(r))
+}
+
+func (a *admissions) remove(k weak.Pointer[http.Request]) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	_, ok := a.set[k]
+	delete(a.set, k)
+	return ok
+}
+
+// size is the number of recorded admissions (tests).
+func (a *admissions) size() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return len(a.set)
 }

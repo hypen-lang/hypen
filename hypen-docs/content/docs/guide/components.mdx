@@ -676,6 +676,22 @@ If(condition: @state.hasNotifications) {
 - Main content (rendered when truthy)
 - `Else`: Optional fallback (rendered when falsy)
 
+## Charts
+
+`Chart` opens a coordinate space; its children (`Line`, `Area`, `Bars`,
+`Points`, `Axis`, `Rule`, `Marker`, `Path`) are marks positioned in data
+units, and their events carry the datum rather than a pixel. See the
+[Charts guide](/docs/guide/charts).
+
+```hypen
+Chart(y: [0, 100]) {
+    Axis(x)
+    Axis(y)
+    Bars(data: @state.units, x: "month", y: "count").onClick(@actions.selectMonth)
+}
+.height(220)
+```
+
 ## Platform Support
 
 | Component | Web | Android | iOS |
@@ -695,6 +711,7 @@ If(condition: @state.hasNotifications) {
 | Video playback bind, slots, Scrubber | Yes | Yes | Yes |
 | Link, Router, Route | Yes | Yes | Yes |
 | ForEach, When, If | Yes | Yes | Yes |
+| Chart, Axis, Line, Area, Bars, Points, Rule, Marker, Path | Yes | Yes | Yes |
 
 Video's playback bind, composition slots, and `Scrubber` ship on all five
 renderers — web DOM, web canvas, Android, iOS, and desktop. On desktop the

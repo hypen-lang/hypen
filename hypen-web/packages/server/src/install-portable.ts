@@ -13,33 +13,26 @@
  */
 
 import { setPortableImpl, type PortableImpl } from "@hypen-space/core/portable";
+import {
+  diffStateJs,
+  diffOracleEnabled,
+  checkDiffOracle,
+} from "@hypen-space/core/diff";
 import * as wasm from "../wasm-node/hypen_engine.js";
 
-// `StatePath` is just a string in core; we mirror the engine's
-// { path, value }[] output into the { paths[], newValues{} } shape
-// that `@hypen-space/core/state` expects.
-function diffState(oldState: any, newState: any, _basePath?: string) {
-  // JSON.stringify throws on BigInt / circular refs. The engine sees
-  // state as JSON only, so values it can't represent are opaque to
-  // reactivity anyway — fall back to an empty StateChange in that
-  // case, matching what a JSON-only reactive graph could ever see.
-  let oldJson: string;
-  let newJson: string;
-  try {
-    oldJson = JSON.stringify(oldState ?? null);
-    newJson = JSON.stringify(newState ?? null);
-  } catch {
-    return { paths: [], newValues: {} };
+// `diffState` is the one portable helper NOT routed through WASM: it
+// runs on every mutation flush, and the stringify→parse round trip of
+// the entire state made it Θ(|state| bytes) per mutation (70–90 µs/KB
+// measured). `diffStateJs` is the TS port of the same canonical
+// algorithm, pinned to `diff.rs` by the cross-SDK fixtures and the
+// differential fuzz suite; set HYPEN_DIFF_ORACLE=1 to cross-check
+// every diff against the WASM implementation at runtime.
+function diffState(oldState: any, newState: any, basePath?: string) {
+  const change = diffStateJs(oldState, newState, basePath);
+  if (diffOracleEnabled()) {
+    checkDiffOracle(change, oldState, newState, wasm.diffPaths);
   }
-  const raw = wasm.diffPaths(oldJson, newJson);
-  const entries: Array<{ path: string; value: any }> = JSON.parse(raw);
-  const paths: string[] = [];
-  const newValues: Record<string, any> = {};
-  for (const e of entries) {
-    paths.push(e.path);
-    newValues[e.path] = e.value;
-  }
-  return { paths, newValues };
+  return change;
 }
 
 function matchPath(pattern: string, path: string) {

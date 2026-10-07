@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+
+	"github.com/hypen-space/core/device"
 )
 
 // TypedActionContext is the context passed to a typed action handler.
@@ -20,6 +22,17 @@ type TypedActionContext[T any] struct {
 	State *T
 	// Context provides cross-module communication (events, router, other modules).
 	Context GlobalContext
+
+	device *device.Device
+}
+
+// Device returns the handler's scoped device plane (RFC 001); see
+// ActionHandlerContext.Device. Never nil.
+func (c TypedActionContext[T]) Device() *device.Device {
+	if c.device == nil {
+		return device.Unavailable("device-disabled")
+	}
+	return c.device
 }
 
 // TypedActionHandler is the signature of an action handler for a typed module.
@@ -172,6 +185,7 @@ func (b *TypedAppBuilder[T]) OnAction(name string, fn TypedActionHandler[T]) *Ty
 			Action:  ctx.Action,
 			State:   &typed,
 			Context: ctx.Context,
+			device:  ctx.device,
 		})
 		commitTypedChanges(ctx.State, typed, before)
 	})

@@ -67,9 +67,9 @@ describe("Error Handling", () => {
 
       // Now invoke the handler - with Result-based error handling, it doesn't throw
       // but instead logs the error and handles it gracefully
-      if (handlers["increment"]) {
+      if (handlers["__hypen_scoped::increment"]) {
         // The handler should complete without throwing (errors are captured in Result)
-        await handlers["increment"]({ name: "increment", payload: undefined });
+        await handlers["__hypen_scoped::increment"]({ name: "increment", payload: undefined });
       }
 
       // Verify error was logged (Result-based error handling logs errors)
@@ -104,8 +104,8 @@ describe("Error Handling", () => {
 
       new HypenModuleInstance(fakeEngine, definition);
 
-      if (handlers["increment"]) {
-        await handlers["increment"]({ name: "increment", payload: undefined });
+      if (handlers["__hypen_scoped::increment"]) {
+        await handlers["__hypen_scoped::increment"]({ name: "increment", payload: undefined });
       }
 
       // Verify onError was called with correct context
@@ -179,9 +179,9 @@ describe("Error Handling", () => {
 
       new HypenModuleInstance(fakeEngine, definition);
 
-      if (handlers["increment"]) {
+      if (handlers["__hypen_scoped::increment"]) {
         // Should throw because handler returned { rethrow: true }
-        await expect(handlers["increment"]({ name: "increment", payload: undefined }))
+        await expect(handlers["__hypen_scoped::increment"]({ name: "increment", payload: undefined }))
           .rejects.toThrow("Critical error");
       }
 
@@ -215,8 +215,8 @@ describe("Error Handling", () => {
 
       new HypenModuleInstance(fakeEngine, definition);
 
-      if (handlers["fail"]) {
-        await handlers["fail"]({ name: "fail", payload: undefined });
+      if (handlers["__hypen_scoped::fail"]) {
+        await handlers["__hypen_scoped::fail"]({ name: "fail", payload: undefined });
       }
 
       expect(capturedState).toEqual({ count: 42, name: "test" });

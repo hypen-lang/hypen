@@ -1,0 +1,30 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-type-change-object-to-array",
+  "description": "Object vs array at the same path is a type change: emit the new container wholesale, never recurse across kinds.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "x": {
+        "0": "a",
+        "1": "b"
+      }
+    },
+    "new": {
+      "x": [
+        "a",
+        "b"
+      ]
+    }
+  },
+  "expected": [
+    {
+      "path": "x",
+      "value": [
+        "a",
+        "b"
+      ]
+    }
+  ]
+}

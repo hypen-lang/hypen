@@ -1,5 +1,7 @@
 package space.hypen.core
 
+import space.hypen.remote.device.DeviceContext
+
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
@@ -69,7 +71,7 @@ object PatchType {
      * Honored by renderers at batch index 0 ONLY (protocol invariant 3,
      * "first-patch-only preludes") — a prelude anywhere else, or inside a
      * replayed initialTree, is not a stamp. See
-     * `.notes/ANIMATION_ANDROID.md`.
+     * `hypen-web/docs/animation.md`.
      */
     const val BATCH_ANIMATION = "batchAnimation"
 }
@@ -167,7 +169,15 @@ data class ActionHandlerContext<T : Any>(
     val action: Action,
     val state: ObservableState<T>,
     val context: GlobalContext?,
-    val router: HypenRouter? = null
+    val router: HypenRouter? = null,
+    /**
+     * Device Capability Protocol access (RFC 001 §4), scoped to this
+     * invocation's module activation. Always present: on a connection
+     * without a device plane, outside an activation, or from a replayed
+     * dispatch, every call returns an `unavailable` error value. See
+     * [space.hypen.remote.device.DeviceContext].
+     */
+    val device: DeviceContext = DeviceContext.disabled(),
 )
 
 /**

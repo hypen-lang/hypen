@@ -1,0 +1,14 @@
+{
+  "title": "Device Capabilities",
+  "pages": [
+    "index",
+    "server-setup",
+    "client-setup",
+    "capabilities",
+    "requests-and-streams",
+    "errors",
+    "lifetimes",
+    "security",
+    "limits"
+  ]
+}

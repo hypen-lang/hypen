@@ -3,7 +3,7 @@
  * Implements the stateful module system from RFC-0001
  */
 
-import type { Action } from "./types.js";
+import type { Action, AgentAction, AgentRoute, BoundInput } from "./types.js";
 import type { Session } from "./remote/types.js";
 import { type Result, Ok, Err, fromPromise, ActionError, HypenError } from "./result.js";
 import { DataSourceManager, type DataSourcePlugin, type IDataSourceEngine } from "./datasource.js";
@@ -33,11 +33,55 @@ export interface IEngine {
     values: Record<string, unknown>,
     animation?: unknown
   ): void;
+
+  // ── External capability surface ──────────────────────────────────────
+  //
+  // For callers that are NOT the rendered UI: MCP servers, REST APIs,
+  // CLIs, agents. `dispatchAction` above reaches every registered handler
+  // — including `__hypen_bind`, which writes an arbitrary state path — so
+  // external callers get these guarded entry points instead. The rule and
+  // its rationale live in `hypen-engine-rs/src/agent.rs`; never
+  // reimplement the guard on this side of the boundary.
+  //
+  // Optional because `IEngine` is a structural contract that hosts and
+  // test doubles implement directly, and the surface is additive: an
+  // engine predating it stays assignable. `BaseEngine` implements all of
+  // them, so anything built on a real WASM engine always has them.
+
+  /** Every action an external caller may dispatch right now. */
+  listActions?(): AgentAction[];
+  /**
+   * The MCP handshake for this app, composed by the engine from the same
+   * declaration tables `listActions` reads. `null` when the underlying
+   * engine predates it. Opaque here: transports forward it verbatim.
+   */
+  mcpManifest?(): unknown;
+  /** Every route the app declares, backing `hypen.navigate`'s schema. */
+  listRoutes?(): AgentRoute[];
+  /** Every `.bind()`-declared writable input, backing `hypen.set_input`. */
+  listBindings?(): BoundInput[];
+  /**
+   * Dispatch on behalf of a caller that is not the rendered UI. Accepts
+   * exactly what `listActions` advertises and throws otherwise.
+   */
+  dispatchExternal?(name: string, payload?: unknown): void;
+  /** Read module state, whole or at a path. `null` module = primary module. */
+  getStateAt?(module: string | null, path: string | null): unknown;
+  /**
+   * Drop a module and every action it declared.
+   *
+   * **Destroy only.** Under the default `persist: true` an off-screen
+   * module stays registered on purpose — see `ManagedRouter`.
+   */
+  unregisterModule?(name: string): void;
 }
 
-import { createObservableState, type StateChange, getStateSnapshot } from "./state.js";
+import { createObservableState, type StateChange, getStateSnapshot, batchStateUpdates } from "./state.js";
+import { DND_REORDER_ACTION, DND_PIN_ACTION, applyPathMove } from "./dnd.js";
 import type { HypenRouter } from "./router.js";
-import type { HypenGlobalContext, ModuleReference } from "./context.js";
+import { HypenGlobalContext, type ModuleReference } from "./context.js";
+import { DeviceContext } from "./remote/device/context.js";
+import type { DevicePlane } from "./remote/device/plane.js";
 import { createLogger } from "./logger.js";
 
 const log = createLogger("ModuleInstance");
@@ -56,6 +100,20 @@ export type GlobalContext = {
   emit: (event: string, payload?: unknown) => void;
   on: (event: string, handler: (payload?: unknown) => void) => () => void;
   router: HypenRouter | null;
+  /**
+   * Device Capability Protocol access (RFC 001 §4). Always present; scoped to
+   * this invocation's owner/activation and provenance. Without a negotiated
+   * device plane, or from a replayed dispatch, every request returns
+   * `unavailable` as a value — never throws, never opens a request.
+   *
+   * Typed per capability: `device.request("permission.query", { permission:
+   * "camera" })`, `device.stream("mic.record", params, {}, { onData })`,
+   * and the wrappers `device.camera.capture`, `device.mic.record`,
+   * `device.bluetooth.select`, `device.permissions.query/request`; unknown
+   * names or ill-typed params are compile errors (`requestUntyped` /
+   * `streamUntyped` for names only known at runtime).
+   */
+  device: DeviceContext;
 };
 
 export type LifecycleHandler<T> = (
@@ -647,6 +705,22 @@ export class HypenModuleInstance<T extends object = any> {
   private state: T;
   private isDestroyed = false;
   /**
+   * Device Capability Protocol identity (RFC 001 §2.7): an opaque,
+   * connection-local instance id that is never reassigned, and an activation
+   * counter incremented on every `activate()`. Together they form the owner
+   * of every device request this module issues; deactivation sweeps exactly
+   * that `{instance, activation}` pair, destruction sweeps the instance.
+   */
+  readonly deviceInstanceId: string;
+  private activationId = 0;
+  private deviceBroker: DevicePlane | null = null;
+  /**
+   * > 0 while a dispatch replayed from another session (syncActions) is
+   * running synchronously inside this instance. `createGlobalContextAPI`
+   * captures it at construction, so the replay firewall survives `await`.
+   */
+  private replayDepth = 0;
+  /**
    * True when the module is currently the active route target (i.e.
    * `onActivated` has fired more recently than `onDeactivated`).
    * Used to make `activate()` / `deactivate()` idempotent so the
@@ -694,9 +768,16 @@ export class HypenModuleInstance<T extends object = any> {
     this.engine = engine;
     this.definition = definition;
     this.router = router ?? null;
-    this.globalContext = globalContext;
+    // Always-present context (RFC 001 §6 Phase 2): a module constructed
+    // without a shared global context still gets a private one, so handler
+    // `context` is never undefined and `context.device` always exists.
+    this.globalContext = globalContext ?? new HypenGlobalContext();
     this.sessionId = sessionId ?? crypto.randomUUID();
     this.stateStore = definition.stateStore;
+    // Opaque and random: sent to the client in every request owner, so it
+    // must reveal neither module names nor how many instances this process
+    // has created (RFC 001 §2.7 "opaque connection-local ids").
+    this.deviceInstanceId = `mi-${crypto.randomUUID()}`;
 
     // Lowercase module name — used as the engine-side scope key. Empty for
     // anonymous modules (which become the engine's primary module).
@@ -749,11 +830,11 @@ export class HypenModuleInstance<T extends object = any> {
     // Register action handlers with flexible parameter support
     for (const [actionName, handler] of definition.handlers.onAction) {
       log.debug(`Registering action handler: ${actionName} for module ${definition.name}`);
-      this.engine.onAction(actionName, async (action: Action) => {
+      this.engine.onAction(`__hypen_scoped:${this.moduleKey}:${actionName}`, async (action: Action) => {
         log.debug(`Action handler fired: ${actionName}`, action);
 
         const actionCtx: ActionContext = {
-          name: action.name,
+          name: actionName,
           payload: action.payload,
           sender: action.sender,
         };
@@ -761,6 +842,10 @@ export class HypenModuleInstance<T extends object = any> {
         const context: GlobalContext | undefined = this.globalContext
           ? this.createGlobalContextAPI()
           : undefined;
+        // Handler scope (RFC 001 §2.4): unary device requests still pending
+        // when this handler settles are cancelled, and results it received
+        // stop counting toward the connection quota only then.
+        context?.device.beginHandlerScope();
 
         // Transaction-scoped animation (Option D cheap subset): the action's
         // `animate` stamp becomes pending BEFORE the handler runs, so the
@@ -817,6 +902,7 @@ export class HypenModuleInstance<T extends object = any> {
         }
 
         const result = await resultPromise;
+        context?.device.endHandlerScope();
 
         // Belt-and-braces for handler completion (async handlers outlive the
         // microtask above only via awaits, whose mutations must be unstamped
@@ -837,7 +923,8 @@ export class HypenModuleInstance<T extends object = any> {
     }
 
     // Auto-register __hypen_bind for .bind() two-way binding support
-    this.engine.onAction("__hypen_bind", (action: Action) => {
+    this.engine.onAction(`__hypen_scoped:${this.moduleKey}:${"__hypen_bind"}`, (action: Action) => {
+      if (this.isDestroyed) return;
       const payload = action.payload as { path?: string; value?: unknown } | null;
       if (!payload?.path) return;
 
@@ -852,8 +939,96 @@ export class HypenModuleInstance<T extends object = any> {
       target[lastSeg] = payload.value;
     });
 
+    // Auto-register the two reserved drag-and-drop outcome actions
+    // (hypen-web/docs/dnd.md). Both MUST write through
+    // `this.state` (the Proxy) so dependency tracking, persistence, and
+    // Remote UI streaming all fire — never through engine state directly.
+    // Malformed payloads warn and degrade to a no-op (repo rule).
+    //
+    // The engine resolves the owning module before invoking this scoped handler.
+    this.engine.onAction(`__hypen_scoped:${this.moduleKey}:${DND_REORDER_ACTION}`, (action: Action) => {
+      if (this.isDestroyed) return;
+      const payload = action.payload as Record<string, unknown> | null | undefined;
+      if (!payload || typeof payload !== "object") {
+        log.warn(`${DND_REORDER_ACTION}: missing payload`);
+        return;
+      }
+      // `path` is shorthand for fromPath == toPath.
+      const fromPath =
+        typeof payload.fromPath === "string"
+          ? payload.fromPath
+          : typeof payload.path === "string"
+            ? payload.path
+            : null;
+      const toPath = typeof payload.toPath === "string" ? payload.toPath : fromPath;
+      const { from, to } = payload;
+      if (fromPath === null || toPath === null || typeof from !== "number" || typeof to !== "number") {
+        log.warn(`${DND_REORDER_ACTION}: malformed payload`, payload);
+        return;
+      }
+      if (!applyPathMove(this.state, fromPath, from, toPath, to)) {
+        log.warn(
+          `${DND_REORDER_ACTION}: no-op — "${fromPath}"[${from}] → "${toPath}"[${to}] does not resolve to arrays / in-range index`
+        );
+      }
+    });
+
+    this.engine.onAction(`__hypen_scoped:${this.moduleKey}:${DND_PIN_ACTION}`, (action: Action) => {
+      if (this.isDestroyed) return;
+      const payload = action.payload as Record<string, unknown> | null | undefined;
+      if (!payload || typeof payload !== "object") {
+        log.warn(`${DND_PIN_ACTION}: missing payload`);
+        return;
+      }
+      const { path, x, y } = payload;
+      if (
+        typeof path !== "string" ||
+        path.length === 0 ||
+        typeof x !== "number" ||
+        !Number.isFinite(x) ||
+        typeof y !== "number" ||
+        !Number.isFinite(y)
+      ) {
+        log.warn(`${DND_PIN_ACTION}: malformed payload`, payload);
+        return;
+      }
+      const xKey = typeof payload.xKey === "string" && payload.xKey.length > 0 ? payload.xKey : "x";
+      const yKey = typeof payload.yKey === "string" && payload.yKey.length > 0 ? payload.yKey : "y";
+      // Two path sets, batched into one observable flush. Missing
+      // intermediate objects auto-vivify (mirrors `portable::path_set`), so
+      // the first pin of a reserved-mode key creates `__dnd.<group>.<key>`.
+      batchStateUpdates(this.state, () => {
+        this.setStatePathVivify(`${path}.${xKey}`, x);
+        this.setStatePathVivify(`${path}.${yKey}`, y);
+      });
+    });
+
     // Call onCreated — store the promise so callers can await initialization
     this._readyPromise = this.callCreatedHandler();
+  }
+
+  /**
+   * Set a dotted state path through the Proxy, creating missing
+   * intermediate objects on the way down (`portable::path_set` semantics).
+   * A primitive standing where a container is needed cannot be descended
+   * into: warn and leave state untouched.
+   */
+  private setStatePathVivify(path: string, value: unknown): void {
+    const segments = path.split(".");
+    let target: any = this.state;
+    for (let i = 0; i < segments.length - 1; i++) {
+      const seg = segments[i]!;
+      let next = target[seg];
+      if (next === null || next === undefined) {
+        target[seg] = {};
+        next = target[seg];
+      } else if (typeof next !== "object") {
+        log.warn(`cannot set "${path}": "${segments.slice(0, i + 1).join(".")}" is not an object`);
+        return;
+      }
+      target = next;
+    }
+    target[segments[segments.length - 1]!] = value;
   }
 
   /** Promise that resolves when onCreated handler has completed */
@@ -885,8 +1060,15 @@ export class HypenModuleInstance<T extends object = any> {
     await this._readyPromise;
     if (this.isDestroyed || this.isActive) return;
     this.isActive = true;
+    // Activation authority becomes available BEFORE onActivated runs
+    // (RFC 001 §2.7): a fresh activation id owns this activation's work,
+    // registered with the connection's broker (which only admits requests
+    // for a module instance's live activation).
+    this.activationId += 1;
+    this.deviceBroker?.ownerActivated(this.deviceInstanceId, this.activationId);
     if (this.definition.handlers.onActivated) {
       const context = this.globalContext ? this.createGlobalContextAPI() : undefined;
+      context?.device.beginHandlerScope();
       try {
         await this.definition.handlers.onActivated(this.state, context);
       } catch (e) {
@@ -895,6 +1077,8 @@ export class HypenModuleInstance<T extends object = any> {
         if (shouldRethrow) {
           throw error;
         }
+      } finally {
+        context?.device.endHandlerScope();
       }
     }
   }
@@ -910,6 +1094,9 @@ export class HypenModuleInstance<T extends object = any> {
   async deactivate(): Promise<void> {
     if (this.isDestroyed || !this.isActive) return;
     this.isActive = false;
+    // Authority is revoked BEFORE onDeactivated executes (RFC 001 §2.7):
+    // every device request owned by this exact activation is cancelled.
+    this.deviceBroker?.ownerDeactivated(this.deviceInstanceId, this.activationId);
     if (this.definition.handlers.onDeactivated) {
       const context = this.globalContext ? this.createGlobalContextAPI() : undefined;
       try {
@@ -922,6 +1109,75 @@ export class HypenModuleInstance<T extends object = any> {
         }
       }
     }
+  }
+
+  /** True once `destroy()` has run; a destroyed instance is never reused. */
+  get destroyed(): boolean {
+    return this.isDestroyed;
+  }
+
+  /**
+   * Bind this instance to a connection's device plane (RFC 001 §2.7). The
+   * broker is the connection's; the instance only contributes ownership: a
+   * currently active instance registers its live activation right away.
+   */
+  attachDevice(plane: DevicePlane | null): void {
+    this.deviceBroker = plane;
+    if (plane && this.isActive && !this.isDestroyed) {
+      plane.ownerActivated(this.deviceInstanceId, this.activationId);
+    }
+  }
+
+  /**
+   * Run `fn` as a replayed dispatch (syncActions fan-out). Any handler
+   * context constructed synchronously inside carries replay provenance, so
+   * its `context.device` refuses to open requests — even after `await`.
+   */
+  runReplayed<R>(fn: () => R): R {
+    this.replayDepth += 1;
+    try {
+      return fn();
+    } finally {
+      this.replayDepth -= 1;
+    }
+  }
+
+  /**
+   * Build the device surface for a handler context constructed right now.
+   * Owner and provenance are fixed at this moment (RFC 001 §4/§7).
+   */
+  private createDeviceContext(): DeviceContext {
+    const provenance = this.replayDepth > 0 ? "replay" : "origin";
+    const owner = {
+      moduleInstanceId: this.deviceInstanceId,
+      activationId: this.activationId,
+    };
+    if (!this.deviceBroker) {
+      return new DeviceContext(null, owner, provenance, "device-disabled");
+    }
+    if (!this.isActive) {
+      // Calls from onCreated before the first activation, or from
+      // deactivation/destruction handlers, return unavailable immediately
+      // rather than waiting for activation and deadlocking (RFC 001 §2.7).
+      return new DeviceContext(this.deviceBroker, owner, provenance, "owner-inactive");
+    }
+    // The captured activation stays authoritative only while it is the live
+    // one: an `await` resuming after deactivation cannot start new device
+    // work (RFC 001 §2.7).
+    const activationId = this.activationId;
+    const ownerLive = () =>
+      !this.isDestroyed && this.isActive && this.activationId === activationId;
+    return new DeviceContext(this.deviceBroker, owner, provenance, null, ownerLive);
+  }
+
+  /**
+   * True while this instance owns live `background`-lifetime device work
+   * (RFC 001 §2.7). Such an instance is pinned: `ManagedRouter` skips it
+   * when evicting persisted modules, within a hard pin cap.
+   */
+  get hasLiveBackgroundDeviceWork(): boolean {
+    if (this.isDestroyed || !this.deviceBroker) return false;
+    return this.deviceBroker.hasBackgroundWork(this.deviceInstanceId);
   }
 
   /**
@@ -942,6 +1198,7 @@ export class HypenModuleInstance<T extends object = any> {
       on: (event: string, handler: (payload?: any) => void) =>
         ctx.on(event, handler),
       router: this.router,
+      device: this.createDeviceContext(),
     };
 
     // Expose hypen engine for built-in components (if available)
@@ -1175,6 +1432,11 @@ export class HypenModuleInstance<T extends object = any> {
     if (this.isActive) {
       await this.deactivate();
     }
+
+    // Destruction sweeps every device request this instance owns, including
+    // background-lifetime work that deactivation deliberately spared
+    // (RFC 001 §2.7).
+    this.deviceBroker?.ownerDestroyed(this.deviceInstanceId);
 
     // Flush any pending persistence writes before shutdown
     if (this.currentPersistKey && this.stateStore) {

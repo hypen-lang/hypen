@@ -1,0 +1,118 @@
+{
+  "name": "bluetooth-select-success",
+  "description": "bluetooth.select@1 (C4): the host-owned chooser lists a live BLE scan filtered by services / namePrefix; it is the per-use consent gate and the visible UI (with Cancel) while the scan runs. No data plane: the chosen device's identity is the JSON result (no GATT, no rssi).",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "bluetooth.select",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 0,
+        "params": {
+          "services": [
+            "0000180d-0000-1000-8000-00805f9b34fb"
+          ],
+          "namePrefix": "Polar"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "progress",
+          "state": "pendingConsent"
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "renewLease": 1
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "leaseAck": 1
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "device": {
+            "id": "dev-7f3a",
+            "name": "Polar H10"
+          }
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 3,
+        "capability": "bluetooth.select",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 0,
+        "params": {}
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 3,
+        "result": {
+          "device": {
+            "id": "dev-anonymous"
+          }
+        }
+      }
+    }
+  ]
+}

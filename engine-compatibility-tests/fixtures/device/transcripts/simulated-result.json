@@ -1,0 +1,53 @@
+{
+  "name": "simulated-result",
+  "description": "A fake host stamps every result simulated:true; the flag has a protocol-level schema shared by every capability and is never omitted by fakes.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 7,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "settings-1",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 7,
+        "result": {
+          "status": "prompt"
+        },
+        "simulated": true
+      }
+    }
+  ]
+}

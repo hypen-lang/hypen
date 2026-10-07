@@ -188,12 +188,109 @@ export class WasmEngine {
         }
     }
     /**
+     * Dispatch on behalf of an external caller.
+     *
+     * Authorises against exactly what `listActions` advertises, then routes
+     * through the same handler path a UI dispatch would take. Throws when
+     * the name is not externally dispatchable, when a built-in is used in an
+     * app that does not declare it, or when `set_input` names an undeclared
+     * field.
+     * @param {string} name
+     * @param {any} payload
+     */
+    dispatchExternal(name, payload) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_dispatchExternal(this.__wbg_ptr, ptr0, len0, payload);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * The built-in external action names, as
+     * `{ navigate, back, setInput, bindAction }`.
+     *
+     * Exported so SDKs bind to these rather than hardcoding the literals.
+     * They were hardcoded in four SDKs at once, which is why renaming
+     * `navigate` to `hypen.navigate` (to stop it colliding with `Link`'s own
+     * declared action) broke all four silently instead of at the call site.
+     * @returns {any}
+     */
+    externalBuiltinNames() {
+        const ret = wasm.wasmengine_externalBuiltinNames(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * Get the current revision number.
      * @returns {bigint}
      */
     getRevision() {
         const ret = wasm.wasmengine_getRevision(this.__wbg_ptr);
         return BigInt.asUintN(64, ret);
+    }
+    /**
+     * Read module state, whole or at a path.
+     *
+     * Pass `null`/`undefined` for `module` to read the primary module, or a
+     * registered module's name (case-insensitive). Returns `null` when the
+     * module is unknown or the path is absent.
+     * @param {string | null} [module]
+     * @param {string | null} [path]
+     * @returns {any}
+     */
+    getStateAt(module, path) {
+        var ptr0 = isLikeNone(module) ? 0 : passStringToWasm0(module, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(path) ? 0 : passStringToWasm0(path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_getStateAt(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        return ret;
+    }
+    /**
+     * List every action an external caller may dispatch, as
+     * `[{ name, module, builtin }]`.
+     *
+     * Module-declared actions plus `navigate` / `back` / `set_input`, the
+     * last three only when the app declares the backing `Router` or
+     * `.bind()`. Framework internals never appear.
+     * @returns {any}
+     */
+    listActions() {
+        const ret = wasm.wasmengine_listActions(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * List `.bind()`-declared writable inputs as
+     * `[{ path, prop, elementType, moduleScope }]`, backing `set_input`'s
+     * argument schema. `prop` is `checked` / `on` for boolean controls.
+     * @returns {any}
+     */
+    listBindings() {
+        const ret = wasm.wasmengine_listBindings(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * List the app's declared routes as `[{ path, params, moduleScope }]`,
+     * backing `navigate`'s argument schema.
+     * @returns {any}
+     */
+    listRoutes() {
+        const ret = wasm.wasmengine_listRoutes(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * The full MCP handshake for this app: `{ protocolVersion, instructions,
+     * tools, resources, resourceTemplates, degraded }`.
+     *
+     * Copy the fields straight into `initialize.instructions`, `tools/list`
+     * and `resources/list`. Composed in the engine so five SDKs transport
+     * bytes and hand-write no prose — re-deriving or re-describing any of it
+     * host-side is what the shape exists to prevent.
+     * @returns {any}
+     */
+    mcpManifest() {
+        const ret = wasm.wasmengine_mcpManifest(this.__wbg_ptr);
+        return ret;
     }
     /**
      * Create a new engine instance with an empty tree and no module.
@@ -339,6 +436,21 @@ export class WasmEngine {
         wasm.wasmengine_reset(this.__wbg_ptr);
     }
     /**
+     * Resolve session-local node identity before trusted server fan-out.
+     * @param {string} name
+     * @param {any} payload
+     * @returns {any}
+     */
+    resolveUIAction(name, payload) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_resolveUIAction(this.__wbg_ptr, ptr0, len0, payload);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * Set the component resolver callback
      * @param {Function} resolver
      */
@@ -391,6 +503,21 @@ export class WasmEngine {
     treeSize() {
         const ret = wasm.wasmengine_treeSize(this.__wbg_ptr);
         return ret >>> 0;
+    }
+    /**
+     * Drop a module and every action it declared.
+     *
+     * **Call on destroy only**, never on unmount: under the default
+     * `persist: true` an off-screen module stays registered on purpose, so
+     * siblings can still read its state. The SDK's three destroy sites —
+     * full stop, `persist: false` unmount, LRU eviction — are the correct
+     * call sites.
+     * @param {string} name
+     */
+    unregisterModule(name) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmengine_unregisterModule(this.__wbg_ptr, ptr0, len0);
     }
     /**
      * Apply a state patch and re-render affected nodes.
@@ -731,6 +858,42 @@ export function pathHas(value_json, path) {
         return getStringFromWasm0(ptr3, len3);
     } finally {
         wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
+    }
+}
+
+/**
+ * Move element `from` of the array at `from_path` to index `to` of the
+ * array at `to_path` (the `__hypen_reorder` primitive); returns JSON
+ * `{"json": <updated>, "moved": bool}`. See [`crate::portable::path_move`].
+ * @param {string} value_json
+ * @param {string} from_path
+ * @param {number} from
+ * @param {string} to_path
+ * @param {number} to
+ * @returns {string}
+ */
+export function pathMove(value_json, from_path, from, to_path, to) {
+    let deferred5_0;
+    let deferred5_1;
+    try {
+        const ptr0 = passStringToWasm0(value_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(from_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(to_path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.pathMove(ptr0, len0, ptr1, len1, from, ptr2, len2, to);
+        var ptr4 = ret[0];
+        var len4 = ret[1];
+        if (ret[3]) {
+            ptr4 = 0; len4 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred5_0 = ptr4;
+        deferred5_1 = len4;
+        return getStringFromWasm0(ptr4, len4);
+    } finally {
+        wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
     }
 }
 

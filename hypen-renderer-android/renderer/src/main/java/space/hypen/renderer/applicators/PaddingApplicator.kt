@@ -3,8 +3,17 @@ package space.hypen.renderer.applicators
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 
+/**
+ * Components that consume `padding` themselves rather than as a box inset.
+ *
+ * `Card` bakes it into its own content padding; `Chart` spends it on the plot
+ * insets (`padding` is how a chart says how much room to leave around its
+ * marks), so letting the modifier inset the host box too would apply it
+ * twice — once shrinking the canvas, once shrinking the plot inside it.
+ */
 private fun ApplicatorContext.cardOwnsContentPadding(): Boolean =
-    element.elementType.equals("card", ignoreCase = true)
+    element.elementType.equals("card", ignoreCase = true) ||
+        element.elementType.equals("chart", ignoreCase = true)
 
 /**
  * Applicator for padding.

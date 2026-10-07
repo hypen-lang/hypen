@@ -303,6 +303,57 @@ pub fn build_evaluator(
     Evaluator::new(context, builtin_functions())
 }
 
+/// Upper bound on memoized context-free expressions; the memo is cleared
+/// wholesale when it fills, so a pathological stream of unique expressions
+/// can't grow it without bound.
+const CONTEXT_FREE_MEMO_CAP: usize = 1024;
+
+/// Evaluate a template string whose `@{...}` segments reference NO state,
+/// item, or data source — the shape the item-binding substitution passes
+/// leave behind once every `item.x` is inlined, e.g.
+/// `@{false ? '#1d2433' : '#12151d'}`.
+///
+/// Evaluating one is a pure function of its text: the empty context has
+/// nothing to look up and the only builtin (`length`) is pure. So the
+/// result is memoized per thread, keyed by the template. That matters
+/// because exprimo re-parses the expression through a full JavaScript
+/// parser on every `evaluate` call: a 1,000-row list whose rows carry two
+/// such ternaries paid 2,000 parses per render — a third of all engine
+/// work on the react-vs-hypen create-1k — for what is, per distinct item
+/// value, the same two strings over and over. The shared evaluator also
+/// stops rebuilding the builtin-function table per call.
+pub fn evaluate_context_free_template(template: &str) -> Result<String, EngineError> {
+    use std::cell::RefCell;
+
+    thread_local! {
+        static EVALUATOR: Evaluator = Evaluator::new(HashMap::new(), builtin_functions());
+        static MEMO: RefCell<HashMap<String, Result<String, String>>> =
+            RefCell::new(HashMap::new());
+    }
+
+    if let Some(hit) = MEMO.with(|m| m.borrow().get(template).cloned()) {
+        return hit.map_err(EngineError::ExpressionError);
+    }
+
+    let result = EVALUATOR.with(|evaluator| evaluate_template_string(template, evaluator));
+
+    MEMO.with(|m| {
+        let mut memo = m.borrow_mut();
+        if memo.len() >= CONTEXT_FREE_MEMO_CAP {
+            memo.clear();
+        }
+        memo.insert(
+            template.to_string(),
+            match &result {
+                Ok(s) => Ok(s.clone()),
+                Err(e) => Err(e.to_string()),
+            },
+        );
+    });
+
+    result
+}
+
 /// Evaluate a template string against a pre-built [`Evaluator`].
 ///
 /// Substitutes every `@{...}` segment with the evaluator's result. Callers
@@ -395,6 +446,60 @@ pub fn evaluate_template_string(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The memoized context-free path must be observationally identical
+    /// to a fresh evaluator with an empty context — first call (fills the
+    /// memo) and second call (served from it) alike.
+    #[test]
+    fn context_free_template_matches_direct_evaluation() {
+        let cases = [
+            "@{false ? '#1d2433' : '#12151d'}",
+            "@{true ? '1px solid #3b82f6' : '1px solid #222836'}",
+            "@{1 + 2}",
+            "@{'a' + 'b'} and @{2 > 1 ? 'yes' : 'no'}",
+            "@{length('héllo')}",
+            "@{null == null ? 'n' : 'x'}",
+            "plain text, no expressions",
+        ];
+        let direct = build_evaluator(&Value::Null, None, None);
+        for template in cases {
+            let expected = evaluate_template_string(template, &direct).unwrap();
+            assert_eq!(
+                evaluate_context_free_template(template).unwrap(),
+                expected,
+                "{template}"
+            );
+            assert_eq!(
+                evaluate_context_free_template(template).unwrap(),
+                expected,
+                "{template} (memo hit)"
+            );
+        }
+    }
+
+    #[test]
+    fn context_free_template_memoizes_errors_too() {
+        let template = "@{unclosed";
+        assert!(evaluate_context_free_template(template).is_err());
+        assert!(evaluate_context_free_template(template).is_err());
+    }
+
+    /// Overflowing the memo clears it; correctness must not depend on a
+    /// hit. Every result is checked against direct evaluation.
+    #[test]
+    fn context_free_memo_survives_overflow() {
+        let direct = build_evaluator(&Value::Null, None, None);
+        for i in 0..(CONTEXT_FREE_MEMO_CAP * 2 + 5) {
+            let template = format!("@{{{i} + 1}}");
+            let expected = evaluate_template_string(&template, &direct).unwrap();
+            assert_eq!(evaluate_context_free_template(&template).unwrap(), expected);
+        }
+        let expected = evaluate_template_string("@{1 + 1}", &direct).unwrap();
+        assert_eq!(
+            evaluate_context_free_template("@{1 + 1}").unwrap(),
+            expected
+        );
+    }
 
     #[test]
     fn test_simple_expression() {

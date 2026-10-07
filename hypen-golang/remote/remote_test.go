@@ -825,17 +825,29 @@ func TestServer_ConcurrentAccess(t *testing.T) {
 
 // ============ Compression Tests ============
 
+// Compression is on by default, device plane or not: gorilla negotiates
+// it with no context takeover in both directions (every message deflated
+// on its own), which the device plane allows.
 func TestRemoteServer_CompressionEnabledByDefault(t *testing.T) {
 	server := NewRemoteServer()
 
 	if server.config.DisableCompression {
 		t.Error("expected compression to be enabled by default")
 	}
+	if !server.DeviceEnabled() {
+		t.Error("expected the device plane to be on by default")
+	}
 	if !server.CompressionEnabled() {
-		t.Error("expected CompressionEnabled() to report true by default")
+		t.Error("expected CompressionEnabled() to report true by default (device plane on)")
 	}
 	if !server.Upgrader().EnableCompression {
-		t.Error("expected upgrader to offer permessage-deflate by default")
+		t.Error("expected upgrader to offer permessage-deflate by default (device plane on)")
+	}
+
+	// Turning the device plane off does not change compression.
+	server.DisableDevice()
+	if !server.CompressionEnabled() || !server.Upgrader().EnableCompression {
+		t.Error("expected compression to stay on with the device plane off")
 	}
 }
 
@@ -975,6 +987,7 @@ func readUntil(t *testing.T, conn *websocket.Conn, want MessageType) map[string]
 }
 
 func TestIntegration_CompressedHandshakeAndRoundTrip(t *testing.T) {
+	// Default server: device plane on, compression offered.
 	server, httpServer, _ := compressionTestServer(t, nil)
 	defer httpServer.Close()
 	defer server.Stop()
@@ -990,14 +1003,17 @@ func TestIntegration_CompressedHandshakeAndRoundTrip(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// The server must have echoed the extension back in the 101 response;
-	// gorilla only implements the no-context-takeover modes.
+	// The server must have echoed the extension back in the 101 response
+	// with no context takeover in BOTH directions (the only mode gorilla
+	// implements, and the one the device plane requires).
 	negotiated := resp.Header.Get("Sec-WebSocket-Extensions")
 	if !strings.Contains(negotiated, "permessage-deflate") {
 		t.Fatalf("expected permessage-deflate to be negotiated, got %q", negotiated)
 	}
-	if !strings.Contains(negotiated, "no_context_takeover") {
-		t.Errorf("expected a no-context-takeover mode, got %q", negotiated)
+	for _, param := range []string{"server_no_context_takeover", "client_no_context_takeover"} {
+		if !strings.Contains(negotiated, param) {
+			t.Errorf("expected %s in the negotiated extension, got %q", param, negotiated)
+		}
 	}
 
 	// The protocol must still work end-to-end over the compressed
@@ -1144,14 +1160,36 @@ func TestIntegration_RemoteEngineCompressedRoundTrip(t *testing.T) {
 	}
 	defer client.Disconnect()
 
+	// waitForUpdates polls until n state updates arrived. A fixed sleep
+	// raced the server: the grace-timer initialisation compiles the WASM
+	// engine before it sends initialTree, which can take longer than the
+	// old 1.5 s window, so the dispatch then took the legacy path and the
+	// initialTree arrived after the assertion.
+	waitForUpdates := func(n int, within time.Duration) {
+		t.Helper()
+		deadline := time.Now().Add(within)
+		for {
+			mu.Lock()
+			got := len(stateUpdates)
+			mu.Unlock()
+			if got >= n {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected at least %d state updates over a compressed connection, got %d", n, got)
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
 	// The engine client doesn't send hello, so the server falls back to
 	// its 1s legacy grace timer before sending initialTree.
-	time.Sleep(1500 * time.Millisecond)
+	waitForUpdates(1, 30*time.Second)
 
 	if err := client.DispatchAction("increment", nil); err != nil {
 		t.Fatalf("failed to dispatch action: %v", err)
 	}
-	time.Sleep(300 * time.Millisecond)
+	waitForUpdates(2, 10*time.Second)
 
 	mu.Lock()
 	defer mu.Unlock()

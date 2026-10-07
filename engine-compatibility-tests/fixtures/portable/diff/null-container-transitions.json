@@ -1,0 +1,33 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-null-container-transitions",
+  "description": "null→container emits the container; container→null emits null; both are plain value changes at the path.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "a": null,
+      "b": {
+        "k": 1
+      }
+    },
+    "new": {
+      "a": {
+        "k": 1
+      },
+      "b": null
+    }
+  },
+  "expected": [
+    {
+      "path": "a",
+      "value": {
+        "k": 1
+      }
+    },
+    {
+      "path": "b",
+      "value": null
+    }
+  ]
+}

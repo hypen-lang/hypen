@@ -27,7 +27,7 @@ pub mod variant;
 
 pub use diff::{diff_paths, DiffEntry};
 pub use patch_expand::TemplateExpander;
-pub use path::{path_delete, path_get, path_has, path_set};
+pub use path::{path_delete, path_get, path_has, path_move, path_set};
 pub use route::{match_path, RouteMatch};
 pub use session::{session_step, SessionEffect, SessionEvent, SessionPolicy, SessionState};
 pub use url::{build_url, decode_uri_component, encode_uri_component, parse_query};

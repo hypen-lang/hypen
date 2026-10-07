@@ -819,6 +819,32 @@ impl BrowserModule {
         true
     }
 
+    /// Deliver a `__hypen_dispatch` envelope to the stream that owns its
+    /// `node` (see [`route_ui_envelope`]), with renderer-side prefixes
+    /// stripped back to the engine's own ids.
+    fn dispatch_ui_envelope(&self, envelope: Value) {
+        let route = {
+            let g = self.inner.lock().expect("inner poisoned");
+            route_ui_envelope(&g, envelope)
+        };
+        let action = hypen_engine::action_routing::UI_ACTION;
+        match route {
+            UiRoute::Shell(payload) => {
+                if let Err(e) = self.shell.dispatch_action(action, Some(payload)) {
+                    log::warn!("hypen-browser: shell UI dispatch: {e:?}");
+                }
+            }
+            UiRoute::Remote(remote, payload) => {
+                let summary = payload.to_string();
+                remote.dispatch_action(action, Some(payload));
+                record_console(&self.shell, format!("▶ out  action {action} {summary}"));
+            }
+            UiRoute::Drop(why) => {
+                log::debug!("hypen-browser: UI envelope dropped — {why}");
+            }
+        }
+    }
+
     /// Snapshot the current tab list + active id and push it into the
     /// shell so the strip re-renders.
     fn publish_tabs(&self) {
@@ -848,6 +874,16 @@ impl HypenModule for BrowserModule {
     }
 
     fn dispatch_action(&self, name: &str, payload: Option<Value>) {
+        // Node-addressed UI envelopes (`__hypen_dispatch`: drag-and-drop
+        // events and writes, `.onFileDragEnter`, two-way binds) name a
+        // renderer node, and renderer ids carry this wrapper's stream
+        // prefix. Route by that prefix and strip it, or the owning
+        // engine can't resolve the node ("stale UI action target").
+        if name == hypen_engine::action_routing::UI_ACTION {
+            self.dispatch_ui_envelope(payload.unwrap_or(Value::Null));
+            self.drain_commands();
+            return;
+        }
         // HypenApp embeds first: action names (and `__hypen_bind`
         // paths) from embedded subtrees carry the embed's marker —
         // spliced in by `rewrite_embed_patch_actions` — because the
@@ -896,6 +932,90 @@ impl HypenModule for BrowserModule {
         self.drain_commands();
         log::debug!("hypen-browser: dispatch_action {name} done");
     }
+}
+
+/// Where a `__hypen_dispatch` envelope goes, with its ids already
+/// rewritten into the owning engine's own namespace.
+enum UiRoute {
+    Shell(Value),
+    Remote(Arc<RemoteModule>, Value),
+    Drop(&'static str),
+}
+
+/// Route a node-addressed UI envelope by its `node`'s stream prefix: no
+/// prefix ⇒ the shell (its ids pass through verbatim); a tab's `a<n>:`
+/// ⇒ that tab's remote; an embed's `e<n>:` ⇒ that embed's remote. See
+/// [`localize_ui_envelope`] for the rewrite.
+fn route_ui_envelope(g: &Inner, envelope: Value) -> UiRoute {
+    let Some(node) = envelope.get("node").and_then(Value::as_str) else {
+        return UiRoute::Drop("envelope without a node");
+    };
+    let Some(prefix) = stream_prefix_of(node) else {
+        return UiRoute::Shell(envelope);
+    };
+    if let Some(embed) = g.embeds.get(&prefix) {
+        let Some(remote) = embed.remote.as_ref() else {
+            return UiRoute::Drop("embed has no live connection");
+        };
+        return match localize_ui_envelope(&envelope, &prefix, Some(&embed.id_prefix)) {
+            Some(p) => UiRoute::Remote(Arc::clone(remote), p),
+            None => UiRoute::Drop("malformed envelope"),
+        };
+    }
+    let Some(tab) = g.tabs.values().find(|t| t.id_prefix == prefix) else {
+        return UiRoute::Drop("node from a closed tab or embed");
+    };
+    let Some(remote) = tab.remote.as_ref() else {
+        return UiRoute::Drop("tab has no live connection");
+    };
+    match localize_ui_envelope(&envelope, &prefix, None) {
+        Some(p) => UiRoute::Remote(Arc::clone(remote), p),
+        None => UiRoute::Drop("malformed envelope"),
+    }
+}
+
+/// Rewrite a renderer-side `__hypen_dispatch` envelope into the id space
+/// of the stream that owns `prefix`:
+///
+/// * `node` loses the stream prefix (`"e1:42"` → `"42"`), the engine's
+///   own NodeId string;
+/// * `fromNode` (a drag's origin list) loses it too when it belongs to
+///   the same stream; a node from another stream can't be resolved by
+///   this engine, so it becomes `null`;
+/// * for an embed (`marker`), the action name and any write path
+///   (`path` / `fromPath` / `toPath` — they come from `bind` props,
+///   which `rewrite_embed_patch_actions` marked) lose the marker.
+///
+/// `None` when `node` isn't in `prefix`'s stream.
+fn localize_ui_envelope(envelope: &Value, prefix: &str, marker: Option<&str>) -> Option<Value> {
+    let mut out = envelope.as_object()?.clone();
+    let node = out.get("node")?.as_str()?.strip_prefix(prefix)?.to_string();
+    out.insert("node".into(), Value::String(node));
+    if let Some(from) = out.get("fromNode").and_then(Value::as_str) {
+        let local = from
+            .strip_prefix(prefix)
+            .map(|s| Value::String(s.to_string()))
+            .unwrap_or(Value::Null);
+        out.insert("fromNode".into(), local);
+    }
+    if let Some(marker) = marker {
+        let strip = |v: &mut Value| {
+            if let Some(rest) = v.as_str().and_then(|s| s.strip_prefix(marker)) {
+                *v = Value::String(rest.to_string());
+            }
+        };
+        if let Some(action) = out.get_mut("action") {
+            strip(action);
+        }
+        if let Some(payload) = out.get_mut("payload").and_then(Value::as_object_mut) {
+            for key in ["path", "fromPath", "toPath"] {
+                if let Some(v) = payload.get_mut(key) {
+                    strip(v);
+                }
+            }
+        }
+    }
+    Some(Value::Object(out))
 }
 
 /// Where an inbound action should be routed. Decided by name (and, for
@@ -2218,6 +2338,142 @@ mod tests {
         assert!(dump.contains("<Column #col>"), "got:\n{dump}");
         assert!(dump.contains("  <Text #t> \"Hello\""), "got:\n{dump}");
         assert_eq!(serialize_tree(&Tree::new()), "(empty)\n");
+    }
+
+    /// Render `source` through a real engine (one `uploadFiles` handler)
+    /// and return it with the raw patch stream.
+    fn engine_with_patches(source: &str) -> (hypen_engine::Engine, Vec<Patch>) {
+        use hypen_engine::lifecycle::{Module, ModuleInstance as EngineModule};
+        let mut engine = hypen_engine::Engine::new();
+        engine.set_module(EngineModule::new(Module::new("Files"), json!({})));
+        engine.on_action("uploadFiles", |_| {});
+        let collected: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&collected);
+        engine.set_render_callback(move |patches| {
+            sink.lock().unwrap().extend(patches.iter().cloned());
+        });
+        let ast = hypen_parser::parse_component(source).expect("parse");
+        engine.render_ir_node(&hypen_engine::ast_to_ir_node(&ast));
+        let raw = std::mem::take(&mut *collected.lock().unwrap());
+        (engine, hypen_engine::TemplateExpander::new().expand(raw))
+    }
+
+    /// Regression (desktop "highlights but files don't upload"): an OS
+    /// file drag over a `files: true` zone inside a HypenApp embed (the
+    /// home screen's Files app) dispatched `.onFileDragEnter` as a
+    /// `__hypen_dispatch` envelope naming the RENDERER id (`e1:<id>`).
+    /// The browser forwarded it verbatim to the active TAB's server,
+    /// whose engine can't parse that id: "stale UI action target".
+    /// Runs the real engine, the browser's embed rewrite, and the
+    /// desktop dnd runtime end to end.
+    #[test]
+    fn embedded_file_drag_enter_envelope_resolves_in_the_owning_engine() {
+        use hypen_renderer_desktop::dnd::DesktopDnd;
+        use hypen_renderer_desktop::layout::LayoutPass;
+        use hypen_renderer_desktop::text::TextEngine;
+
+        let (engine, raw) = engine_with_patches(
+            r#"Column {
+                Column { Text("Drop files") }
+                    .size(300, 200)
+                    .dropZone(group: "os-files", files: true)
+                    .onFileDragEnter(@actions.uploadFiles)
+            }"#,
+        );
+        // The embed's stream as the renderer sees it: `e1:` ids,
+        // re-rooted onto the HypenApp host, action refs marked.
+        let mut roots = Vec::new();
+        let rewritten: Vec<Patch> = rewrite_tab_batch(raw, "e1:", "host", &mut roots)
+            .into_iter()
+            .map(|p| rewrite_embed_patch_actions(p, "e1:"))
+            .collect();
+        let mut tree = Tree::new();
+        let mut dnd = DesktopDnd::new();
+        let mut host = vec![
+            Patch::Create {
+                id: "host".into(),
+                element_type: "Column".into(),
+                props: Arc::new(IndexMap::new()),
+                semantics: None,
+            },
+            Patch::Insert {
+                parent_id: ROOT_ID.into(),
+                id: "host".into(),
+                before_id: None,
+            },
+        ];
+        host.extend(rewritten);
+        dnd.pre_ingest(&mut host, &mut tree);
+        tree.apply_batch(&host);
+        let pass = LayoutPass::compute(&tree, &mut TextEngine::new(), (800, 600), 1.0);
+
+        dnd.file_hover_enter(std::path::Path::new("/tmp/photo.png"));
+        dnd.file_hover_update(&mut tree, Some(&pass), None);
+        let mut sent = dnd.take_dispatches();
+        assert_eq!(sent.len(), 1, "one .onFileDragEnter");
+        let d = sent.remove(0);
+        assert_eq!(d.action, hypen_engine::action_routing::UI_ACTION);
+        assert!(d.payload["node"].as_str().unwrap().starts_with("e1:"));
+
+        // What used to reach the server: rejected.
+        let verbatim = engine.resolve_ui_action(
+            hypen_engine::dispatch::Action::new(d.action.clone()).with_payload(d.payload.clone()),
+        );
+        assert!(verbatim.is_err(), "a prefixed renderer id must not resolve");
+
+        // What the browser now sends to the embed's remote: resolves to
+        // the module's handler.
+        let local = localize_ui_envelope(&d.payload, "e1:", Some("e1:")).expect("same stream");
+        let routed = engine
+            .resolve_ui_action(hypen_engine::dispatch::Action::new(d.action).with_payload(local))
+            .expect("the localized envelope resolves");
+        assert_eq!(routed.name, "uploadFiles");
+        assert_eq!(routed.payload.as_ref().unwrap()["items"], json!(1));
+    }
+
+    #[test]
+    fn localize_ui_envelope_strips_prefixes_and_embed_marks() {
+        let env = json!({
+            "node": "e2:7", "fromNode": "e2:5", "action": "e2:__hypen_reorder",
+            "payload": {"fromPath": "e2:tasks", "toPath": "e2:done", "from": 0, "to": 1}
+        });
+        let out = localize_ui_envelope(&env, "e2:", Some("e2:")).unwrap();
+        assert_eq!(
+            out,
+            json!({
+                "node": "7", "fromNode": "5", "action": "__hypen_reorder",
+                "payload": {"fromPath": "tasks", "toPath": "done", "from": 0, "to": 1}
+            })
+        );
+        // Tabs: ids only (their action names / bind paths are unmarked);
+        // a source from another stream can't resolve there → null.
+        let env = json!({"node": "a1:9", "fromNode": "a3:4", "action": "drop", "payload": {"path": "x"}});
+        let out = localize_ui_envelope(&env, "a1:", None).unwrap();
+        assert_eq!(out, json!({"node": "9", "fromNode": null, "action": "drop", "payload": {"path": "x"}}));
+        // A node outside the stream is refused.
+        assert!(localize_ui_envelope(&json!({"node": "a2:1"}), "a1:", None).is_none());
+    }
+
+    #[test]
+    fn ui_envelopes_route_by_node_prefix() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-A", "a1:", &["a1:1"], true);
+        let g = module.inner.lock().unwrap();
+        // Shell ids carry no prefix: the shell's own engine resolves them.
+        assert!(matches!(
+            route_ui_envelope(&g, json!({"node": "12", "action": "x"})),
+            UiRoute::Shell(_)
+        ));
+        // A tab with no live connection (test install) / an unknown
+        // stream: dropped, never sent to some other server.
+        assert!(matches!(
+            route_ui_envelope(&g, json!({"node": "a1:12", "action": "x"})),
+            UiRoute::Drop(_)
+        ));
+        assert!(matches!(
+            route_ui_envelope(&g, json!({"node": "e9:12", "action": "x"})),
+            UiRoute::Drop(_)
+        ));
     }
 
     #[test]

@@ -27,7 +27,7 @@ export function setTransformFunction(
 }
 
 const lengthFn = (fn: string): ApplicatorHandler => (el, value) =>
-  setTransformFunction(el, fn, value === undefined ? undefined : toCssLength(value));
+  setTransformFunction(el, fn, value === undefined ? undefined : toCssLength(value ?? 0));
 const rawFn = (fn: string): ApplicatorHandler => (el, value) =>
   setTransformFunction(el, fn, value === undefined ? undefined : String(value));
 

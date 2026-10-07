@@ -18,7 +18,7 @@ public struct ApplicatorContext: @unchecked Sendable {
         viewportSize: CGSize = .zero
     ) {
         self.element = element
-        self.actionDispatcher = actionDispatcher
+        self.actionDispatcher = NodeActionDispatcher(base: actionDispatcher, node: element.id)
         self.viewportSize = viewportSize
     }
 }
@@ -400,5 +400,64 @@ extension ApplicatorRegistry {
         registry.register(ColorApplicator())
 
         return registry
+    }
+}
+
+// MARK: - Lowered-prop overlays
+
+extension ApplicatorRegistry {
+    /// Build a modifier from a flat map of LOWERED prop keys (`opacity.0`,
+    /// `scale.0`, `padding.top`, …) by running each base applicator's
+    /// handler — the same grouping `computeApplicatorResult` applies to an
+    /// element's props, without the variant routing. Used by the DnD runtime
+    /// to overlay a header-less `.states` pose (`__anim.statePoses[label]`)
+    /// onto a node's resolved result; callers merge it over the base with
+    /// `HypenModifier.mergeOverride`. Variant-qualified keys must be
+    /// filtered out by the caller.
+    public func buildModifier(loweredProps: [String: Any], context: ApplicatorContext) -> HypenModifier {
+        var grouped: [String: Any] = [:]
+        var order: [String] = []
+        for key in loweredProps.keys.sorted() {
+            guard let value = loweredProps[key] else { continue }
+            let baseName: String
+            let suffix: String?
+            if let dotIndex = key.lastIndex(of: ".") {
+                baseName = String(key[..<dotIndex])
+                suffix = String(key[key.index(after: dotIndex)...])
+            } else {
+                baseName = key
+                suffix = nil
+            }
+            if grouped[baseName] == nil {
+                order.append(baseName)
+            }
+            if suffix == nil || suffix == "0" {
+                if var existing = grouped[baseName] as? [String: Any] {
+                    existing["0"] = value
+                    grouped[baseName] = existing
+                } else {
+                    grouped[baseName] = value
+                }
+            } else if let suffix = suffix {
+                var existing: [String: Any]
+                if let dict = grouped[baseName] as? [String: Any] {
+                    existing = dict
+                } else if let existingValue = grouped[baseName] {
+                    existing = ["0": existingValue]
+                } else {
+                    existing = [:]
+                }
+                existing[suffix] = value
+                grouped[baseName] = existing
+            }
+        }
+
+        var modifier = HypenModifier()
+        for name in order {
+            if let value = grouped[name], let handler = getHandler(for: name) {
+                handler.apply(modifier: &modifier, value: value, context: context)
+            }
+        }
+        return modifier
     }
 }

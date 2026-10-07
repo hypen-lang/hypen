@@ -45,7 +45,7 @@ failure modes:
 
 1. **Build artifacts must exist first.** Examples depend on
    `hypen-engine: file:../../../hypen-engine-rs/pkg/web` — built by
-   `wasm-pack build --target web --out-dir pkg/web --features js` in
+   `wasm-pack build --target web --out-dir pkg/web --features js,device-broker` in
    `hypen-engine-rs/`. The `@hypen-space/*` packages also need their `dist/`
    built (`bun run build:core && bun run build:web` in `hypen-web/`, plus
    `bun run build` in `hypen-web/packages/cf`) because wrangler's esbuild
@@ -63,6 +63,24 @@ failure modes:
 3. **Concurrent `wrangler dev` instances collide on inspector port 9230.**
    Pass a distinct `--inspector-port` per instance or the second one dies
    with `Address already in use (127.0.0.1:9230)`.
+
+4. **wrangler dev's ProxyWorker compresses WebSockets with context
+   takeover.** It is pinned to compatibility date 2023-12-18, so it ignores
+   the examples' `no_web_socket_compression` flag, and browsers then refuse
+   the device plane (the console warns "device plane disabled on this
+   connection"; uploads are unavailable). The script adds the flag to the
+   installed wrangler's ProxyWorker (`patch_wrangler_proxy`). Deployed
+   Workers take it from `wrangler.jsonc`.
+
+The social and home-screen examples also bind R2 buckets (`MEDIA`,
+`FILES`). `wrangler dev` emulates them under `.wrangler/state`; a deploy needs
+`wrangler r2 bucket create` once per bucket (see each README).
+
+To test the device plane headlessly: a picker is `page.waitForEvent("filechooser")`
+after a trusted click on `[data-hypen-device="continue"]`; an OS file drop is
+CDP `Input.dispatchDragEvent` with `data.files`. For `file.save`, delete
+`window.showSaveFilePicker` in an init script so the `<a download>` fallback
+runs.
 
 Also: after rebuilding the engine WASM, refresh each example's
 `node_modules/hypen-engine` copy (the script always re-copies it) and

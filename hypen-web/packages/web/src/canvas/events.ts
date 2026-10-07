@@ -1,3 +1,4 @@
+import { pinOffset } from "./pin-position";
 /**
  * Event System
  *
@@ -5,7 +6,7 @@
  */
 
 import type { VirtualNode, Point, Rectangle } from "./types.js";
-import { isPointInRoundedRect } from "./utils.js";
+import { isLayoutHidden, isPointInRoundedRect } from "./utils.js";
 import { dispatchNodeEvent } from "./dispatch.js";
 import {
   isFormControl,
@@ -31,7 +32,31 @@ import {
   updateScrubberDrag,
   visibleVideoSlotChildren,
 } from "./paint.js";
+import {
+  CHART_POINTER_KEY,
+  chartMarkKind,
+  isChartNode,
+  isInteractiveMark,
+  markContainsPoint,
+} from "./chart.js";
 import type { FocusManager } from "./focus.js";
+import type { CanvasDnd } from "./dnd.js";
+import { dragCarriesFiles, dragFileTypes, dragItemCount, transferOf } from "../file-drag.js";
+
+/** `onMove` is throttled to roughly a frame, matching the DOM applicator. */
+const MOVE_THROTTLE_MS = 32;
+
+/** How long a press must be held before `onLongPress` fires. */
+const LONG_PRESS_MS = 500;
+
+/** How far the pointer may drift during a press before it stops being one. */
+const LONG_PRESS_SLOP_PX = 10;
+
+/** Does this node declare a long-press handler? */
+function hasLongPress(node: VirtualNode): boolean {
+  const p = node.props;
+  return p.onLongPress != null || p["onLongPress.0"] != null || p.onlongpress != null;
+}
 
 /** `controls` may arrive as a boolean or a "true"/"false" string. */
 function hasVideoControls(node: VirtualNode): boolean {
@@ -64,6 +89,9 @@ interface IEngine {
  * truth. Keyboard events likewise arrive via the mirror (a canvas without
  * tabindex never receives them), so this class attaches no key listeners.
  */
+/** Native drag events the canvas listens to for OS file drags. */
+const FILE_DRAG_EVENTS = ["dragenter", "dragover", "dragleave", "drop", "dragend"] as const;
+
 export class CanvasEventManager {
   private canvas: HTMLCanvasElement;
   private engine: IEngine;
@@ -76,6 +104,24 @@ export class CanvasEventManager {
   private slidingNode: VirtualNode | null = null;
   private focusManager: FocusManager | null = null;
   private editablePointerHandler: ((node: VirtualNode, point: Point) => void) | null = null;
+  /** Drag-and-drop runtime (`__dnd.*`); owns the pointer once a drag claims it. */
+  private dnd: CanvasDnd | null = null;
+  /**
+   * A completed drag (or an `immediate` lift) is not a click: the browser
+   * still fires `click` after `mouseup`, so the next click is swallowed.
+   * Reset on the next press so a missed click can never eat a later one.
+   */
+  private suppressClick = false;
+
+  /** `onMove` throttling state — the last node the pointer tracked, and when. */
+  private lastMoveNode: VirtualNode | null = null;
+  private lastMoveTime = 0;
+
+  /** Live long-press candidate: the pressed node, its timer and its origin. */
+  private longPressTimer: ReturnType<typeof setTimeout> | null = null;
+  private longPressNode: VirtualNode | null = null;
+  private longPressPoint: Point | null = null;
+  private longPressData: Record<string, any> = {};
 
   // Reused for the per-node rounded-rect test so hit testing allocates
   // nothing per visited node.
@@ -89,6 +135,8 @@ export class CanvasEventManager {
   private boundOnDoubleClick!: (e: MouseEvent) => void;
   private boundOnContextMenu!: (e: MouseEvent) => void;
   private boundOnWindowRelease!: (e: MouseEvent) => void;
+  private boundOnPointerMove!: (e: PointerEvent) => void;
+  private boundOnFileDrag!: (e: DragEvent) => void;
   /** True while the drag-scoped window release listeners are registered. */
   private windowReleaseArmed = false;
 
@@ -115,6 +163,21 @@ export class CanvasEventManager {
   }
 
   /**
+   * Wire the drag-and-drop runtime. The pointer handlers offer every
+   * press/move/release to it first; while it owns the pointer, hover,
+   * `:active`, click dispatch and the scrubber stand down (precedence:
+   * dnd > scrub, plan §6.6).
+   */
+  setDnd(dnd: CanvasDnd | null): void {
+    this.dnd = dnd;
+  }
+
+  /** Is a drag pending or live (the phases that own the pointer)? */
+  private dndOwnsPointer(): boolean {
+    return this.dnd !== null && (this.dnd.isPending() || this.dnd.isDragging());
+  }
+
+  /**
    * Called with (node, point) when a mousedown lands on a focusable node —
    * the renderer maps the point to a caret position for editable nodes.
    */
@@ -135,13 +198,50 @@ export class CanvasEventManager {
     this.boundOnDoubleClick = this.onDoubleClick.bind(this);
     this.boundOnContextMenu = this.onContextMenu.bind(this);
     this.boundOnWindowRelease = this.onWindowRelease.bind(this);
+    this.boundOnPointerMove = this.onPointerMove.bind(this);
+    this.boundOnFileDrag = this.onFileDrag.bind(this);
 
     this.canvas.addEventListener("mousemove", this.boundOnMouseMove);
+    // `onMove` is a pointer-level applicator (mouse, touch and pen alike),
+    // so it rides `pointermove` rather than `mousemove` — same choice the
+    // DOM renderer's applicator makes.
+    this.canvas.addEventListener("pointermove", this.boundOnPointerMove);
     this.canvas.addEventListener("mousedown", this.boundOnMouseDown);
     this.canvas.addEventListener("mouseup", this.boundOnMouseUp);
     this.canvas.addEventListener("click", this.boundOnClick);
     this.canvas.addEventListener("dblclick", this.boundOnDoubleClick);
     this.canvas.addEventListener("contextmenu", this.boundOnContextMenu);
+    // OS file drags (`.dropZone(files: true)` / `.onFileDragEnter`): the
+    // canvas element is the only native drag target (the accessibility
+    // mirror is `pointer-events: none`).
+    for (const type of FILE_DRAG_EVENTS) this.canvas.addEventListener(type, this.boundOnFileDrag as EventListener);
+  }
+
+  /**
+   * Native drag events carrying OS files. Hit-tests the pointer and hands
+   * the node to the DnD runtime, which lights the innermost files zone and
+   * fires its `.onFileDragEnter`; over an enabled files zone the default is
+   * swallowed with `dropEffect: "none"`, so a release never opens the file.
+   * The canvas has no child elements, so a `dragleave` means the drag left
+   * the canvas (or was cancelled).
+   */
+  private onFileDrag(e: DragEvent): void {
+    if (!this.dnd || !dragCarriesFiles(e)) return;
+    if (e.type === "dragleave" || e.type === "dragend") {
+      this.dnd.fileDragEnd();
+      return;
+    }
+    const point = this.getCanvasCoordinates(e);
+    const hit = this.hitTest(point);
+    if (e.type === "drop") {
+      if (this.dnd.fileDrop(hit)) e.preventDefault?.();
+      return;
+    }
+    if (this.dnd.fileDragOver(hit, dragFileTypes(e), dragItemCount(e))) {
+      e.preventDefault?.();
+      const dt = transferOf(e);
+      if (dt) dt.dropEffect = "none";
+    }
   }
 
   /**
@@ -163,9 +263,10 @@ export class CanvasEventManager {
   }
 
   /**
-   * Find node at canvas coordinates
+   * Find node at canvas coordinates (the lifted drag ghost excluded). Public
+   * so the DnD runtime can re-resolve its target after a mid-drag rebuild.
    */
-  private hitTest(point: Point): VirtualNode | null {
+  hitTest(point: Point): VirtualNode | null {
     if (!this.rootNode) return null;
     return this.hitTestNode(this.rootNode, point);
   }
@@ -180,16 +281,29 @@ export class CanvasEventManager {
    * recursion (the translation paint applies) so no per-node ancestor walk
    * is needed. Subtrees behind a clipping container are pruned when the
    * point falls outside the container — nothing inside can be visible there.
+   *
+   * `offsetX`/`offsetY` likewise accumulate the ancestors' translations:
+   * paint applies `translateX`/`translateY` (and the drag-and-drop
+   * `dndOffset`) as a subtree transform, so a translated node receives
+   * hits where it PAINTS, not at its untransformed layout box — a pinned
+   * note dragged to `x: 240` must be grabbable at 240 (plan §6.10). `null`
+   * or absent translate is 0. Rotation/scale are not modelled here.
    */
   private hitTestNode(
     node: VirtualNode,
     point: Point,
     scrollX: number = 0,
     scrollY: number = 0,
+    offsetX: number = 0,
+    offsetY: number = 0,
   ): VirtualNode | null {
     // Exit-animating subtrees are pruned wholesale: the corpse is painted
     // while its exit plays, but engine-side those ids are already dead.
     if (!node.visible || !node.layout || node.exiting) return null;
+
+    // The lifted drag item floats above the tree under the pointer; the
+    // pointer must see what is BENEATH it (the drop target), never itself.
+    if (node.dndGhost) return null;
 
     // A Video's slot children are only hittable while the normative
     // visibility table shows them (a `controls` overlay must not swallow
@@ -197,8 +311,10 @@ export class CanvasEventManager {
     if (!isVideoSlotChildVisible(node)) return null;
 
     const layout = node.layout;
-    const x = layout.x - scrollX;
-    const y = layout.y - scrollY;
+    const tx = offsetX + (parseFloat(node.props.translateX) || 0) + pinOffset(node).x + (node.dndOffset?.x ?? 0);
+    const ty = offsetY + (parseFloat(node.props.translateY) || 0) + pinOffset(node).y + (node.dndOffset?.y ?? 0);
+    const x = layout.x - scrollX + tx;
+    const y = layout.y - scrollY + ty;
     const inBounds =
       point.x >= x && point.x <= x + layout.width &&
       point.y >= y && point.y <= y + layout.height;
@@ -213,7 +329,13 @@ export class CanvasEventManager {
     const childScrollX = scrollX + (node.scrollState?.scrollX ?? 0);
     const childScrollY = scrollY + (node.scrollState?.scrollY ?? 0);
 
-    if (isVideoNode(node)) {
+    if (isChartNode(node)) {
+      // A Chart positions its own marks in data units, so hit testing them
+      // is geometric rather than box-based (every mark's box is the chart's
+      // own). Decorative marks stay pointer-transparent.
+      const markHit = this.hitTestChartMarks(node, point, childScrollX, childScrollY);
+      if (markHit) return markHit;
+    } else if (isVideoNode(node)) {
       // A Video's children paint in NORMATIVE slot order (poster → loading
       // → controls → error, bottom-to-top), not declaration order — so hit
       // testing walks the same list topmost-first. Without this, a `poster`
@@ -223,7 +345,7 @@ export class CanvasEventManager {
       // be reachable to start first play.
       const slots = visibleVideoSlotChildren(node);
       for (let i = slots.length - 1; i >= 0; i--) {
-        const hit = this.hitTestNode(slots[i]!, point, childScrollX, childScrollY);
+        const hit = this.hitTestNode(slots[i]!, point, childScrollX, childScrollY, tx, ty);
         if (hit) return hit;
       }
     } else {
@@ -232,13 +354,13 @@ export class CanvasEventManager {
       for (let i = node.children.length - 1; i >= 0; i--) {
         const child = node.children[i];
         if (child.props.position !== "absolute") continue;
-        const hit = this.hitTestNode(child, point, childScrollX, childScrollY);
+        const hit = this.hitTestNode(child, point, childScrollX, childScrollY, tx, ty);
         if (hit) return hit;
       }
       for (let i = node.children.length - 1; i >= 0; i--) {
         const child = node.children[i];
         if (child.props.position === "absolute") continue;
-        const hit = this.hitTestNode(child, point, childScrollX, childScrollY);
+        const hit = this.hitTestNode(child, point, childScrollX, childScrollY, tx, ty);
         if (hit) return hit;
       }
     }
@@ -258,6 +380,99 @@ export class CanvasEventManager {
     }
 
     return null;
+  }
+
+  /**
+   * Topmost interactive mark under the pointer, or null.
+   *
+   * Marks are tested front-to-back (last declared paints on top). A `Marker`
+   * hosts ordinary Hypen children with real boxes, so it recurses through
+   * the normal path; every other mark is tested against its drawn geometry,
+   * with a 12px touch radius around points and line vertices.
+   */
+  private hitTestChartMarks(
+    chart: VirtualNode,
+    point: Point,
+    scrollX: number,
+    scrollY: number,
+  ): VirtualNode | null {
+    const localX = point.x + scrollX;
+    const localY = point.y + scrollY;
+    for (let i = chart.children.length - 1; i >= 0; i--) {
+      const mark = chart.children[i]!;
+      if (!mark.visible || !mark.layout || mark.exiting || isLayoutHidden(mark)) continue;
+      const kind = chartMarkKind(mark);
+      if (kind === null) continue;
+      if (kind === "marker") {
+        const hit = this.hitTestNode(mark, point, scrollX, scrollY);
+        // The Marker box itself is transparent unless it carries an event;
+        // an interactive child inside it always wins.
+        if (hit && (hit !== mark || isInteractiveMark(mark))) return hit;
+        continue;
+      }
+      if (!isInteractiveMark(mark)) continue;
+      if (markContainsPoint(mark, localX, localY)) return mark;
+    }
+    return null;
+  }
+
+  /**
+   * Pointer tracking (`onMove`): fires as the pointer crosses a node,
+   * throttled to roughly a frame so a module handler is not flooded.
+   */
+  private onPointerMove(e: PointerEvent): void {
+    if (this.scrubbingNode || this.slidingNode) return;
+    const point = this.getCanvasCoordinates(e as unknown as MouseEvent);
+    this.noteLongPressMove(point);
+    const hit = this.hitTest(point);
+    if (!hit) {
+      this.lastMoveNode = null;
+      return;
+    }
+    const now = Date.now();
+    if (hit === this.lastMoveNode && now - this.lastMoveTime < MOVE_THROTTLE_MS) return;
+    this.lastMoveNode = hit;
+    this.lastMoveTime = now;
+    this.dispatchNodeEvent(hit, "pointermove", {
+      clientX: e.clientX,
+      clientY: e.clientY,
+      [CHART_POINTER_KEY]: point,
+    });
+  }
+
+  /** Start the long-press clock for a press that landed on `node`. */
+  private armLongPress(node: VirtualNode | null, point: Point, data: Record<string, any>): void {
+    this.cancelLongPress();
+    if (!node || !hasLongPress(node)) return;
+    this.longPressNode = node;
+    this.longPressPoint = point;
+    this.longPressData = data;
+    this.longPressTimer = setTimeout(() => {
+      this.longPressTimer = null;
+      const target = this.longPressNode;
+      const payload = this.longPressData;
+      this.longPressNode = null;
+      this.longPressPoint = null;
+      if (target) this.dispatchNodeEvent(target, "longpress", payload);
+    }, LONG_PRESS_MS);
+  }
+
+  private cancelLongPress(): void {
+    if (this.longPressTimer !== null) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = null;
+    }
+    this.longPressNode = null;
+    this.longPressPoint = null;
+  }
+
+  /** A press that drifts more than the slop is a drag, not a long press. */
+  private noteLongPressMove(point: Point): void {
+    const origin = this.longPressPoint;
+    if (!origin) return;
+    if (Math.hypot(point.x - origin.x, point.y - origin.y) > LONG_PRESS_SLOP_PX) {
+      this.cancelLongPress();
+    }
   }
 
   /**
@@ -404,6 +619,28 @@ export class CanvasEventManager {
    * already consumed leaves scrubbingNode null; then this only tidies up.
    */
   private onWindowRelease(e: MouseEvent): void {
+    // A drag released anywhere drops where the pointer is. In a browser the
+    // window `pointerup` fires BEFORE the canvas `mouseup` listener, so an
+    // on-canvas release of a claimed drag normally completes HERE — a drop
+    // must therefore end `:active` and swallow the trailing `click` exactly
+    // as the canvas mouseup path does (§6.11), or the pressed node's onClick
+    // would fire after the drop. (When the canvas mouseup fired first it
+    // already consumed the drag — then this only tidies up.)
+    if (this.dndOwnsPointer()) {
+      const point = this.getCanvasCoordinates(e);
+      const dropped = this.dnd!.pointerUp(point, this.hitTest(point));
+      this.disarmWindowRelease();
+      if (dropped) {
+        if (this.mouseDownNode && this.mouseDownNode.pressed) {
+          this.mouseDownNode.pressed = false;
+        }
+        this.mouseDownNode = null;
+        this.suppressClick = true;
+      }
+      this.updateCursor(this.hoveredNode);
+      this.requestRedraw();
+      return;
+    }
     if (this.scrubbingNode) {
       this.finishScrubberDrag(e);
       return;
@@ -453,6 +690,7 @@ export class CanvasEventManager {
    */
   private onMouseMove(e: MouseEvent): void {
     const point = this.getCanvasCoordinates(e);
+    this.noteLongPressMove(point);
 
     // A scrub in flight owns the pointer: preview locally (no dispatch, no
     // hover churn) until release commits.
@@ -480,6 +718,23 @@ export class CanvasEventManager {
       } else {
         updateSliderDrag(this.engine, this.slidingNode, point.x);
         this.requestRedraw();
+      }
+      return;
+    }
+
+    // A pending/live drag gets the move first: below the activation
+    // threshold it declines and hover proceeds as usual; once claimed it
+    // owns the pointer (no hover churn, no dispatch) until release.
+    if (this.dndOwnsPointer()) {
+      const dndHit = this.hitTest(point);
+      if (this.dnd!.pointerMove(point, dndHit, e.buttons)) {
+        if (this.dnd!.isDragging()) {
+          this.canvas.style.cursor = "grabbing";
+        } else {
+          // The move finished the drag (missed release): pointer is free.
+          this.disarmWindowRelease();
+          this.updateCursor(this.hoveredNode);
+        }
         return;
       }
     }
@@ -495,14 +750,16 @@ export class CanvasEventManager {
       // Leave old node
       if (this.hoveredNode) {
         this.hoveredNode.hovered = false;
-        this.dispatchNodeEvent(this.hoveredNode, "mouseleave", {});
+        this.dispatchNodeEvent(this.hoveredNode, "mouseleave", {
+          [CHART_POINTER_KEY]: point,
+        });
       }
 
       // Enter new node
       this.hoveredNode = node;
       if (node) {
         node.hovered = true;
-        this.dispatchNodeEvent(node, "mouseenter", {});
+        this.dispatchNodeEvent(node, "mouseenter", { [CHART_POINTER_KEY]: point });
       }
 
       // Update cursor
@@ -525,15 +782,37 @@ export class CanvasEventManager {
     e.preventDefault?.();
 
     const point = this.getCanvasCoordinates(e);
+    // A new press is a new gesture: a stale click suppression (release that
+    // never produced a click) must not eat this one.
+    this.suppressClick = false;
     // Same lift-to-clickable as hover so a click on a Button's Icon child
     // dispatches against the Button (where `onClick` actually lives).
     const hit = this.hitTest(point);
     const node = this.findClickableAncestor(hit) ?? hit;
 
+    // Drag-and-drop gets the press first (dnd > scrub). A press on a source
+    // opens a PENDING drag — the ordinary press handling below still runs,
+    // so a tap stays a click; only an `immediate` activation claims here.
+    if (this.dnd) {
+      const claimed = this.dnd.pointerDown(hit, point, e.button);
+      if (this.dndOwnsPointer()) {
+        // The release may land anywhere — arm window-level listeners for
+        // the lifetime of this gesture so an off-canvas release still drops.
+        this.armWindowRelease();
+      }
+      if (claimed) {
+        this.mouseDownNode = null;
+        this.suppressClick = true;
+        this.canvas.style.cursor = "grabbing";
+        this.requestRedraw();
+        return;
+      }
+    }
+
     // Press on a live Scrubber starts a local scrub: the thumb follows the
     // pointer renderer-side and nothing is dispatched until release.
     const scrubber = this.findScrubberAncestor(hit);
-    if (scrubber && isScrubberLive(scrubber)) {
+    if (scrubber && isScrubberLive(scrubber) && !this.dndOwnsPointer()) {
       this.scrubbingNode = scrubber;
       beginScrubberDrag(scrubber, scrubberFractionAt(scrubber, point.x));
       // The release may land anywhere — arm window-level listeners for the
@@ -562,11 +841,21 @@ export class CanvasEventManager {
       this.requestRedraw();
     }
 
+    // A long press is armed on the hit itself (a chart mark is not
+    // clickable unless it also wired `onClick`).
+    this.armLongPress(hit, point, {
+      button: e.button,
+      clientX: e.clientX,
+      clientY: e.clientY,
+      [CHART_POINTER_KEY]: point,
+    });
+
     if (node && node.clickable) {
       this.dispatchNodeEvent(node, "mousedown", {
         button: e.button,
         clientX: e.clientX,
         clientY: e.clientY,
+        [CHART_POINTER_KEY]: point,
       });
     }
 
@@ -588,6 +877,7 @@ export class CanvasEventManager {
    */
   private onMouseUp(e: MouseEvent): void {
     const point = this.getCanvasCoordinates(e);
+    this.cancelLongPress();
 
     // Release commits the scrub exactly once (seek + `position` bind write
     // or `onSeek`), then the pointer goes back to normal handling. (With a
@@ -599,6 +889,25 @@ export class CanvasEventManager {
     // A slider drag ends on release too (click may not follow if press and
     // release straddled the canvas edge).
     this.finishSliderDrag();
+
+    // Release under a drag: a pending (never-claimed) drag is abandoned and
+    // the tap proceeds as an ordinary click below; a live drag DROPS, and
+    // the release/click are the drag's, not the node's.
+    if (this.dndOwnsPointer()) {
+      const dndHit = this.hitTest(point);
+      const dropped = this.dnd!.pointerUp(point, dndHit);
+      this.disarmWindowRelease();
+      if (dropped) {
+        if (this.mouseDownNode && this.mouseDownNode.pressed) {
+          this.mouseDownNode.pressed = false;
+        }
+        this.mouseDownNode = null;
+        this.suppressClick = true;
+        this.updateCursor(this.hoveredNode);
+        this.requestRedraw();
+        return;
+      }
+    }
 
     const hit = this.hitTest(point);
     const node = this.findClickableAncestor(hit) ?? hit;
@@ -615,6 +924,7 @@ export class CanvasEventManager {
         button: e.button,
         clientX: e.clientX,
         clientY: e.clientY,
+        [CHART_POINTER_KEY]: point,
       });
     }
 
@@ -629,6 +939,13 @@ export class CanvasEventManager {
    * Handle click
    */
   private onClick(e: MouseEvent): void {
+    // The click that trails a drop (or an `immediate` lift) belongs to the
+    // drag: no video intent, no tap-to-toggle, no onClick.
+    if (this.suppressClick) {
+      this.suppressClick = false;
+      this.mouseDownNode = null;
+      return;
+    }
     const point = this.getCanvasCoordinates(e);
     const hit = this.hitTest(point);
     const node = this.findClickableAncestor(hit) ?? hit;
@@ -686,6 +1003,7 @@ export class CanvasEventManager {
         button: e.button,
         clientX: e.clientX,
         clientY: e.clientY,
+        [CHART_POINTER_KEY]: point,
       });
     }
     this.mouseDownNode = null;
@@ -703,6 +1021,7 @@ export class CanvasEventManager {
         button: e.button,
         clientX: e.clientX,
         clientY: e.clientY,
+        [CHART_POINTER_KEY]: point,
       });
     }
   }
@@ -723,6 +1042,7 @@ export class CanvasEventManager {
           button: e.button,
           clientX: e.clientX,
           clientY: e.clientY,
+          [CHART_POINTER_KEY]: point,
         });
       }
     }
@@ -798,24 +1118,31 @@ export class CanvasEventManager {
       this.mouseDownNode = null;
     }
     if (within(this.hoveredNode)) this.hoveredNode = null;
+    if (within(this.lastMoveNode)) this.lastMoveNode = null;
+    if (within(this.longPressNode)) this.cancelLongPress();
   }
 
   destroy(): void {
     this.canvas.removeEventListener("mousemove", this.boundOnMouseMove);
+    this.canvas.removeEventListener("pointermove", this.boundOnPointerMove);
     this.canvas.removeEventListener("mousedown", this.boundOnMouseDown);
     this.canvas.removeEventListener("mouseup", this.boundOnMouseUp);
     this.canvas.removeEventListener("click", this.boundOnClick);
     this.canvas.removeEventListener("dblclick", this.boundOnDoubleClick);
     this.canvas.removeEventListener("contextmenu", this.boundOnContextMenu);
+    for (const type of FILE_DRAG_EVENTS) this.canvas.removeEventListener(type, this.boundOnFileDrag as EventListener);
     if (this.mouseDownNode) this.mouseDownNode.pressed = false;
     if (this.scrubbingNode) cancelScrubberDrag();
     this.scrubbingNode = null;
     this.slidingNode = null;
     this.disarmWindowRelease();
+    this.cancelLongPress();
     this.rootNode = null;
     this.hoveredNode = null;
     this.mouseDownNode = null;
+    this.lastMoveNode = null;
     this.focusManager = null;
+    this.dnd = null;
   }
 }
 

@@ -1,0 +1,41 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-array-same-length-granular",
+  "description": "Same-length arrays recurse per index and emit only the leaf that changed.",
+  "function": "diff_paths",
+  "priority": "P0",
+  "input": {
+    "old": {
+      "rows": [
+        {
+          "n": 1
+        },
+        {
+          "n": 2
+        },
+        {
+          "n": 3
+        }
+      ]
+    },
+    "new": {
+      "rows": [
+        {
+          "n": 1
+        },
+        {
+          "n": 99
+        },
+        {
+          "n": 3
+        }
+      ]
+    }
+  },
+  "expected": [
+    {
+      "path": "rows.1.n",
+      "value": 99
+    }
+  ]
+}

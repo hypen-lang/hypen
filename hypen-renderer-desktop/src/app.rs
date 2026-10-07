@@ -244,8 +244,36 @@ impl DesktopApp {
     ///     .connect("ws://localhost:3000", "Counter")
     ///     .run();
     /// ```
+    ///
+    /// The connection carries the desktop DeviceHost (RFC 001: `file.pick`,
+    /// `gallery.pick`, `file.save` behind native dialogs; camera,
+    /// microphone and Bluetooth behind host UI drawn in this window); use
+    /// [`Self::connect_with`] for upgrade headers (a device-enabled server
+    /// admits native clients only through its authenticator) or to connect
+    /// UI-only.
     pub fn connect(self, url: impl Into<String>, module_name: impl Into<String>) -> Self {
         let remote = RemoteModule::connect(url, module_name);
+        self.module(Arc::new(remote))
+    }
+
+    /// [`Self::connect`] with explicit [`crate::RemoteOptions`]:
+    ///
+    /// ```rust,ignore
+    /// DesktopApp::new()
+    ///     .connect_with(
+    ///         "wss://app.example.com/ws",
+    ///         "App",
+    ///         RemoteOptions::default().header("Authorization", "Bearer …"),
+    ///     )
+    ///     .run();
+    /// ```
+    pub fn connect_with(
+        self,
+        url: impl Into<String>,
+        module_name: impl Into<String>,
+        options: crate::RemoteOptions,
+    ) -> Self {
+        let remote = RemoteModule::connect_with(url, module_name, options);
         self.module(Arc::new(remote))
     }
 

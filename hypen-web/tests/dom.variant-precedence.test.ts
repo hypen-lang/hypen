@@ -220,9 +220,9 @@ describe("arrival order does not matter", () => {
     const element = makeElement();
 
     registry.applyAll(element, {
-      "gridColumns@md.0": "repeat(2, 1fr)",
-      "gridColumns@xl.0": "repeat(3, 1fr)",
-      "gridColumns.0": "repeat(1, 1fr)",
+      "gridColumns@md.0": 2,
+      "gridColumns@xl.0": 3,
+      "gridColumns.0": 1,
     });
 
     const base = ruleIndex("repeat(1, 1fr)");

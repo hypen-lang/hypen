@@ -1,0 +1,92 @@
+{
+  "name": "violation-camera-result-two-items",
+  "description": "A camera.capture@1 success with two items fails the result schema (exactly one item): the server settles locally with invalidParams (the offending message is the client's terminal).",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "camera.capture",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 65536,
+        "params": {
+          "mode": "photo"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "image/jpeg",
+          "bytes": 23
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 2,
+          "seq": 0
+        },
+        "hex": "010000000200000000000000ffd8ffe0687970656e2d63616d6572612d6a706567ffd9"
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "items": [
+            {
+              "channel": 0,
+              "contentType": "image/jpeg",
+              "bytes": 23,
+              "sha256": "a6713a8ceec9584a67c1bb65fd3655813c4ef2bd215caf6f5e617601a70af0b2"
+            },
+            {
+              "channel": 1,
+              "contentType": "image/jpeg",
+              "bytes": 23,
+              "sha256": "a6713a8ceec9584a67c1bb65fd3655813c4ef2bd215caf6f5e617601a70af0b2"
+            }
+          ]
+        }
+      },
+      "expectViolation": "invalidPayload"
+    }
+  ]
+}

@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * Scrubber Component (Video v2)
  *
@@ -322,7 +323,7 @@ function commit(el: HTMLElement, entry: ScrubberParts, seconds: number): void {
 
   try {
     if (bindPath) {
-      engine.dispatchAction("__hypen_bind", {
+      dispatchUIAction(engine, (entry.bindPath ? el : entry.videoRoot)?.dataset.hypenId, "__hypen_bind", {
         path: `${bindPath}.position`,
         value: target,
       });
@@ -332,7 +333,7 @@ function commit(el: HTMLElement, entry: ScrubberParts, seconds: number): void {
     if (raw === undefined || raw === null) return;
     const { actionName, payload } = extractActionDetails(raw);
     if (!actionName) return;
-    engine.dispatchAction(actionName, { ...payload, type: "seek", position: target });
+    dispatchUIAction(engine, el.dataset.hypenId, actionName, { ...payload, type: "seek", position: target });
   } catch (err) {
     log.error("Error committing scrubber seek:", err);
   }

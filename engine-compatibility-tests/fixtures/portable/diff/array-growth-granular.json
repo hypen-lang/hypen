@@ -1,0 +1,33 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-array-growth-granular",
+  "description": "A growing array emits only the new indices as additions — never a whole-array replacement (push(x) must produce a single items.<newIdx> path).",
+  "function": "diff_paths",
+  "priority": "P0",
+  "input": {
+    "old": {
+      "items": [
+        "a",
+        "b"
+      ]
+    },
+    "new": {
+      "items": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ]
+    }
+  },
+  "expected": [
+    {
+      "path": "items.2",
+      "value": "c"
+    },
+    {
+      "path": "items.3",
+      "value": "d"
+    }
+  ]
+}

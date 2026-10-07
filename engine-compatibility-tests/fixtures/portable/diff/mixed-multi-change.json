@@ -1,0 +1,58 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-mixed-multi-change",
+  "description": "One diff carrying a recursion, a removal, an addition, an array growth and a nested leaf change at once.",
+  "function": "diff_paths",
+  "priority": "P0",
+  "input": {
+    "old": {
+      "keep": {
+        "deep": 1
+      },
+      "gone": "bye",
+      "list": [
+        1
+      ],
+      "user": {
+        "name": "A",
+        "age": 1
+      }
+    },
+    "new": {
+      "keep": {
+        "deep": 2
+      },
+      "born": "hi",
+      "list": [
+        1,
+        2
+      ],
+      "user": {
+        "name": "A",
+        "age": 2
+      }
+    }
+  },
+  "expected": [
+    {
+      "path": "gone",
+      "value": null
+    },
+    {
+      "path": "keep.deep",
+      "value": 2
+    },
+    {
+      "path": "list.1",
+      "value": 2
+    },
+    {
+      "path": "user.age",
+      "value": 2
+    },
+    {
+      "path": "born",
+      "value": "hi"
+    }
+  ]
+}

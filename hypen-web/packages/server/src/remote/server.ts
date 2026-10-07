@@ -40,6 +40,11 @@ import { readFile, readdir } from "fs/promises";
 import { resolve, join, extname, basename } from "path";
 import type { ServerWebSocket } from "bun";
 import { SessionManager } from "@hypen-space/core/remote";
+import {
+  DEFAULT_PROCESS_RETAINED_BYTES,
+  type DeviceBrokerConfig,
+} from "@hypen-space/core/remote/device";
+import { createWasmDeviceBrokerFactory, type WasmDeviceBrokerFactory } from "../device-broker.js";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 import {
   discoverComponents,
@@ -58,8 +63,97 @@ import {
   renderClientHtml,
   renderFallbackHtml,
 } from "./web-client.js";
+import { AgentSurface, type AgentOptions } from "./agent-http.js";
+import { AgentHandle } from "./agent-handle.js";
 
 const log = frameworkLoggers.remote;
+
+/**
+ * Device Capability Protocol (RFC 001) tuning for a `RemoteServer` — see
+ * `RemoteServer.configureDevice()`. Every field is optional; the defaults
+ * are the protocol's.
+ */
+export interface RemoteDeviceOptions {
+  /**
+   * Aggregate retained device upload bytes across every connection of this
+   * process (default 1 GiB), next to each connection's own budget.
+   */
+  processRetainedBytes?: number;
+  /** Retained device upload bytes per connection (default 128 MiB). */
+  connectionRetainedBytes?: number;
+  /**
+   * Extra broker configuration for every device connection: bulk
+   * scheduling, rates, violation budget, revision overrides. A per-session
+   * `createSession(…, { deviceBrokerConfig })` takes precedence.
+   */
+  broker?: Omit<DeviceBrokerConfig, "ack" | "serverCapabilities" | "maxRetainedBytes">;
+}
+
+/** Logged once at startup when the upgrade admits every client. */
+export const OPEN_ADMISSION_WARNING =
+  "no allowedOrigins/authenticate configured — any client can connect; set them in production";
+
+/**
+ * Normalize an Origin for allowlist comparison: lowercase scheme + host,
+ * default ports dropped, no path. Invalid input normalizes to itself so it
+ * simply never matches.
+ */
+function normalizeOrigin(origin: string): string {
+  try {
+    const url = new URL(origin);
+    return `${url.protocol}//${url.host}`.toLowerCase();
+  } catch {
+    return origin.trim().toLowerCase();
+  }
+}
+
+/**
+ * WebSocket upgrade admission (RFC 001 §5, decision D1). `Origin` is a
+ * browser-only defence (cross-site WebSocket hijacking); native clients send
+ * none and authenticate through the app's `authenticate` hook instead.
+ * Enforced exactly when configured, independent of the device plane:
+ *
+ *   - an allowlist is configured → an `Origin` must be in it, else 403; a
+ *     request without `Origin` is admitted only by `authenticate` returning
+ *     true (no authenticator ⇒ 403, fail closed);
+ *   - a configured `authenticate` runs for every upgrade (also those WITH an
+ *     allowed Origin);
+ *   - neither configured → every upgrade is admitted (the server logs one
+ *     startup warning, {@link OPEN_ADMISSION_WARNING}).
+ *
+ * Returns null to admit, or the refusal response.
+ */
+export async function admitUpgrade(
+  req: Request,
+  policy: {
+    allowedOrigins: ReadonlySet<string> | null;
+    authenticate?: (request: Request) => boolean | Promise<boolean>;
+  }
+): Promise<Response | null> {
+  const origin = req.headers.get("origin");
+  const forbidden = (why: string) => {
+    log.warn(`Rejected WebSocket upgrade: ${why}`);
+    return new Response("Forbidden", { status: 403 });
+  };
+  if (origin !== null) {
+    if (policy.allowedOrigins && !policy.allowedOrigins.has(normalizeOrigin(origin))) {
+      return forbidden(`origin ${origin} not allowed`);
+    }
+  } else if (!policy.authenticate && policy.allowedOrigins) {
+    return forbidden("no Origin and no authenticator configured");
+  }
+  if (policy.authenticate) {
+    let ok = false;
+    try {
+      ok = (await policy.authenticate(req)) === true;
+    } catch (err) {
+      log.warn("authenticate() threw — upgrade refused", err);
+      ok = false;
+    }
+    if (!ok) return forbidden("authenticate() refused the connection");
+  }
+  return null;
+}
 
 /**
  * Builder pattern for hosting Hypen apps over WebSocket.
@@ -92,6 +186,19 @@ export class RemoteServer {
   private _sessionManager: SessionManager | null = null;
   private _prepared = false;
   private _syncActions: boolean = false;
+  /**
+   * Device Capability Protocol (RFC 001) opt-out — the plane is on by
+   * default. See `disableDevice()`.
+   */
+  private _deviceDisabled: boolean = false;
+  /**
+   * Why the device plane is off for this server (`disableDevice()` or an
+   * incompatible setting), resolved at `prepare()` / `listen()`; null while
+   * it is on.
+   */
+  private _deviceOffReason: string | null = null;
+  private _deviceOptions: RemoteDeviceOptions = {};
+  private _deviceBrokerFactory: WasmDeviceBrokerFactory | null = null;
   private _resources: Record<string, string> = {};
   private _app: HypenApp | null = null;
   private _host: SessionHost | null = null;
@@ -101,6 +208,15 @@ export class RemoteServer {
    * off via `disableAutoRouter()` when the host wants bespoke wiring.
    */
   private _autoRouter: boolean = true;
+  /**
+   * Options for the agent REST surface, or `null` — which is the default and
+   * stays the default until `agent()` is called. See `agent-http.ts` for why
+   * nothing enables it implicitly. Held separately from `_agent` so a
+   * `stop()` / `listen()` cycle keeps the grant the caller made instead of
+   * silently dropping the surface on restart.
+   */
+  private _agentOptions: AgentOptions | null = null;
+  private _agent: AgentSurface | null = null;
 
   /**
    * Build (once) the `SessionHost` adapter that `RemoteSession` consumes.
@@ -122,6 +238,12 @@ export class RemoteServer {
       get resources() { return server._resources; },
       get app() { return server._app; },
       get syncActions() { return server._syncActions; },
+      get deviceDisabled() { return server._deviceOffReason !== null; },
+      get deviceMaxRetainedBytes() { return server._deviceOptions.connectionRetainedBytes; },
+      // The Rust device broker, one per device connection; the factory's pool
+      // is one aggregate retained-bytes budget for every device connection
+      // this server hosts (RFC 001 §2.4/§5), next to each connection's own.
+      get deviceBrokerFactory() { return server.deviceBrokerFactory(); },
       get sessionManager() {
         if (!server._sessionManager) {
           throw new Error(
@@ -243,9 +365,38 @@ export class RemoteServer {
    * Enable action synchronization across all connected clients.
    * When enabled, an action dispatched by any client is also dispatched
    * to every other client's engine, keeping all clients in sync.
+   *
+   * The device plane stays on. Replayed dispatches must never initiate
+   * device work (RFC 001 §1.7): a dispatch replayed onto another session
+   * runs with replay provenance, so its `context.device` refuses with
+   * `unavailable` (`syncActions.replay`). Only the client that actually
+   * dispatched can start device work.
    */
   syncActions(): this {
     this._syncActions = true;
+    return this;
+  }
+
+  /**
+   * Tune the Device Capability Protocol (RFC 001). The device plane is on by
+   * default — every session whose client's hello offers `device` gets one and
+   * module handlers reach it through `context.device` — so this is only for
+   * budgets and broker limits; omitted fields keep their defaults. Merges
+   * with earlier calls.
+   */
+  configureDevice(options: RemoteDeviceOptions): this {
+    this._deviceOptions = { ...this._deviceOptions, ...options };
+    return this;
+  }
+
+  /**
+   * Opt out of the Device Capability Protocol (RFC 001): no session gets a
+   * device plane, whatever its client offers, and the server behaves exactly
+   * like a UI-only server (Bun's default payload cap). Compression is the
+   * same either way: on by default, one message at a time.
+   */
+  disableDevice(): this {
+    this._deviceDisabled = true;
     return this;
   }
 
@@ -318,8 +469,74 @@ export class RemoteServer {
   }
 
   /**
-   * Register disconnection callback
+   * Enable the agent REST surface under `/__hypen__/agent`.
+   *
+   * Off until this is called, and off in every mode — there is no dev-mode
+   * default-on. The surface lets an HTTP caller drive the app, so it is a
+   * capability grant, and a grant nobody made is not a grant. Without this
+   * call `/__hypen__/agent/*` is indistinguishable from any other unknown
+   * path, so a probe cannot even learn the surface exists.
+   *
+   * Every dispatch goes through the engine's external guard
+   * (`agent_core::resolve_external`), so enabling this exposes exactly what
+   * the app declared — `.onAction()` names, `Router { Route }` targets,
+   * `.bind()` fields, and the state paths the template renders — and nothing
+   * the framework owns.
+   *
+   * @example
+   * ```typescript
+   * new RemoteServer()
+   *   .module("App", appModule)
+   *   .ui(template)
+   *   .agent()
+   *   .listen(3000);
+   * ```
    */
+  agent(options: AgentOptions = {}): this {
+    this._agentOptions = options;
+    this._agent = new AgentSurface(this, options);
+    return this;
+  }
+
+  /**
+   * Bind the agent surface to a live user session — attach mode.
+   *
+   * Returns an `AgentHandle` over the first session with this id that has
+   * completed its hello handshake (`isReady`) and is not destroyed, or
+   * `null` when there is none. Under `allow-multiple` several sessions may
+   * share an id; the first ready one is chosen, and its streaming callback
+   * already fans every patch out to its peers, so all of them see the
+   * result.
+   *
+   * **No authorisation happens here.** The caller is the authoriser: a
+   * server-side handler that holds this `RemoteServer` already holds every
+   * session on it, and on a server without the device plane the session id
+   * is also the resume credential of a UI-only session (a session with a
+   * device plane is resumed only with its separate `resumeToken`, RFC 001
+   * §5), so accept it only from a channel
+   * you trust. The REST route
+   * (`.agent({ authorize })`) is the one place a *remote* caller can reach
+   * this, and it refuses unless an `authorize` callback says otherwise.
+   *
+   * The handle never owns the session: dropping it, sweeping it, or
+   * stopping the agent surface leaves the user's session exactly as it was.
+   *
+   * @example
+   * ```typescript
+   * const handle = server.attach(sessionIdFromTrustedChannel);
+   * handle?.dispatch("addToCart", { sku: "A1" }); // the user's browser re-renders
+   * ```
+   */
+  attach(sessionId: string): AgentHandle | null {
+    const host = this.getHost();
+    for (const session of host.sessionsForId(sessionId)) {
+      if (session.isReady && !session.isDestroyed) {
+        return new AgentHandle(session, host);
+      }
+    }
+    return null;
+  }
+
   /**
    * Turn off automatic ManagedRouter wiring for new sessions. Use when
    * the host wants to construct its own `ManagedRouter` inside
@@ -382,8 +599,40 @@ export class RemoteServer {
       throw new Error("UI not set. Call .ui() or .source() before prepare()/listen()");
     }
     this._sessionManager = new SessionManager(this._sessionConfig);
+    this.resolveDevicePolicy();
     this._prepared = true;
     return this;
+  }
+
+  /**
+   * Decide (and log once) whether the device plane is on for this server.
+   * It is on by default; `disableDevice()` turns it off, and so does
+   * `allow-multiple` session fan-out, which it cannot coexist with. Never
+   * throws: an incompatible setting keeps working, the device plane is
+   * simply off, and one warning names the setting.
+   *
+   * Neither `syncActions()` (replayed dispatches carry replay provenance and
+   * cannot start device work) nor compression (negotiated one message at a
+   * time, see `listen()`) turns the device plane off.
+   */
+  private resolveDevicePolicy(): void {
+    let reason: string | null = null;
+    if (this._deviceDisabled) reason = "disableDevice()";
+    else if ((this._sessionConfig.concurrent ?? "kick-old") === "allow-multiple") {
+      reason = 'session({ concurrent: "allow-multiple" })';
+    }
+    const changed = reason !== this._deviceOffReason;
+    this._deviceOffReason = reason;
+    if (!changed || reason === null) return;
+    if (reason === "disableDevice()") {
+      log.info("Device plane disabled (disableDevice()) — UI-only server");
+    } else {
+      log.warn(
+        `Device plane off: ${reason} is incompatible with the device plane ` +
+          "(RFC 001 §1.7: fanned-out dispatches must never initiate device work) — " +
+          "sessions stay UI-only"
+      );
+    }
   }
 
   /**
@@ -410,14 +659,26 @@ export class RemoteServer {
    */
   createSession(
     transport: SessionTransport,
-    options?: { clientId?: string; helloGraceMs?: number | null; socketHandle?: unknown }
+    options?: {
+      clientId?: string;
+      helloGraceMs?: number | null;
+      socketHandle?: unknown;
+      deviceBrokerConfig?: RemoteDeviceOptions["broker"];
+    }
   ): RemoteSession {
     if (!this._prepared) {
       throw new Error(
         "RemoteServer not prepared. Call `await server.prepare()` before `createSession()`."
       );
     }
-    const session = new RemoteSession(this.getHost(), transport, options);
+    const broker = this._deviceOptions.broker;
+    const session = new RemoteSession(
+      this.getHost(),
+      transport,
+      broker && options?.deviceBrokerConfig === undefined
+        ? { ...options, deviceBrokerConfig: broker }
+        : options
+    );
     session.autoRouterEnabled = this._autoRouter;
     this._sessions.add(session);
     for (const cb of this._onSessionCreateCallbacks) {
@@ -475,22 +736,55 @@ export class RemoteServer {
 
     const finalPort = port ?? this._config.port ?? 3000;
     const hostname = this._config.hostname ?? "0.0.0.0";
-    // permessage-deflate is on unless explicitly disabled. Bun negotiates it
-    // during the upgrade handshake, so clients that don't offer the extension
-    // just get uncompressed frames.
+    // The device plane is on by default (RFC 001).
+    this.resolveDevicePolicy();
+    const deviceOn = this._deviceOffReason === null;
+    // permessage-deflate, on unless `compression: false`: Bun negotiates it
+    // during the upgrade handshake, so clients that don't offer the
+    // extension just get uncompressed frames. It is negotiated ONE MESSAGE
+    // AT A TIME — "shared" (de)compressors mean Bun answers with both
+    // `server_no_context_takeover` and `client_no_context_takeover`, so no
+    // message (device data included) ever shares a DEFLATE history with
+    // another (RFC 001 §2.3: the CRIME/BREACH concern is cross-message
+    // context). Never "dedicated": that is context takeover, and clients
+    // then keep the connection UI-only.
     const compression = this._config.compression ?? true;
+    const perMessageDeflate = compression
+      ? ({ compress: "shared", decompress: "shared" } as const)
+      : false;
+    const allowedOrigins =
+      this._config.allowedOrigins && this._config.allowedOrigins.length > 0
+        ? new Set(this._config.allowedOrigins.map(normalizeOrigin))
+        : null;
+    const authenticate = this._config.authenticate;
+    if (!allowedOrigins && typeof authenticate !== "function") {
+      log.warn(OPEN_ADMISSION_WARNING);
+    }
+    // Device messages are capped at 1 MiB before parsing (RFC 001 §2.1); the
+    // socket-level cap bounds what JSON.parse ever sees on a device server.
+    const maxPayloadLength =
+      this._config.maxPayloadLength ?? (deviceOn ? 4 * 1024 * 1024 : undefined);
 
     this.server = Bun.serve({
       port: finalPort,
       hostname,
       websocket: {
-        perMessageDeflate: compression,
+        perMessageDeflate,
+        ...(maxPayloadLength !== undefined ? { maxPayloadLength } : {}),
         open: (ws) => this.handleOpen(ws),
         message: (ws, message) => this.handleMessage(ws, message),
         close: (ws) => this.handleClose(ws),
       },
       fetch: async (req, server) => {
         const url = new URL(req.url);
+
+        // Upgrade admission (RFC 001 §5, decision D1): Origin allowlist for
+        // browsers, the app's authenticator for everyone else — before any
+        // session exists.
+        if (req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          const refused = await admitUpgrade(req, { allowedOrigins, authenticate });
+          if (refused) return refused;
+        }
 
         // Upgrade to WebSocket
         if (server.upgrade(req, { data: undefined })) {
@@ -512,6 +806,15 @@ export class RemoteServer {
           return new Response(JSON.stringify(stats), {
             headers: { "Content-Type": "application/json" },
           });
+        }
+
+        // Agent REST surface. `null` unless `.agent()` was called, and
+        // `handle()` returns null for any path outside its own mount point,
+        // so a disabled surface falls through to the catch-all below exactly
+        // as an unknown path does.
+        if (this._agent) {
+          const agentResponse = await this._agent.handle(req, url);
+          if (agentResponse) return agentResponse;
         }
 
         // Default browser client (on unless config.webClient === false):
@@ -548,7 +851,9 @@ export class RemoteServer {
       const displayHost = hostname === "0.0.0.0" ? "localhost" : hostname;
       log.info(`Web client at http://${displayHost}:${finalPort}`);
     }
-    log.debug(`permessage-deflate ${compression ? "enabled" : "disabled"}`);
+    log.debug(
+      `permessage-deflate ${compression ? "enabled (no context takeover)" : "disabled"}`
+    );
 
     return this;
   }
@@ -560,6 +865,18 @@ export class RemoteServer {
     if (this.server) {
       this.server.stop();
       this.server = null;
+    }
+    if (this._agent) {
+      // Fire-and-forget: `stop()` is synchronous by contract, and every agent
+      // session teardown is local bookkeeping plus the module's own destroy.
+      this._agent
+        .dispose()
+        .catch((err) => log.error("Agent surface teardown failed:", err));
+      // A disposed surface answers nothing, so a restart gets a fresh one
+      // built from the same grant rather than a dead one.
+      this._agent = this._agentOptions
+        ? new AgentSurface(this, this._agentOptions)
+        : null;
     }
     if (this._sessionManager) {
       this._sessionManager.destroy();
@@ -624,11 +941,30 @@ export class RemoteServer {
   }
 
   /**
+   * The Rust device broker factory (lazily created): one `WasmDeviceBroker`
+   * per device connection, all sharing one process-wide retained-bytes pool.
+   */
+  private deviceBrokerFactory(): WasmDeviceBrokerFactory {
+    this._deviceBrokerFactory ??= createWasmDeviceBrokerFactory({
+      poolBytes: this._deviceOptions.processRetainedBytes ?? DEFAULT_PROCESS_RETAINED_BYTES,
+    });
+    return this._deviceBrokerFactory;
+  }
+
+  /**
    * Bun WebSocket `message` adapter. Forwards raw messages to the session.
    */
   private handleMessage(ws: ServerWebSocket<unknown>, message: string | Buffer): void {
     const session = this._wsToSession.get(ws);
     if (!session) return;
+    // Bun delivers text frames as strings and binary frames as Buffers. A
+    // binary frame is device-plane data (RFC 001 §2.3) when the session has a
+    // broker; legacy clients never send binary, so the JSON path stays
+    // exactly as before for strings.
+    if (typeof message !== "string" && session.deviceBroker) {
+      session.receiveBinary(new Uint8Array(message.buffer, message.byteOffset, message.byteLength));
+      return;
+    }
     session.receive(message).catch((err) =>
       log.error("Error handling WebSocket message:", err)
     );

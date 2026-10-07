@@ -152,3 +152,44 @@ func TestChannelTransport_CloseDrainsOut(t *testing.T) {
 		t.Fatalf("close again: %v", err)
 	}
 }
+
+// Regression (review2-go, tooling): NewRemoteSession assigned
+// s.helloTimeout without holding s.mu while the grace-timer callback
+// clears it under s.mu, which the race detector reported in
+// TestIntegration_RemoteEngineCompressedRoundTrip. A 1 ms grace makes the
+// callback fire while the constructor is still around; run under -race.
+func TestHelloGraceTimerAssignmentIsRaceFree(t *testing.T) {
+	s := NewRemoteServer().
+		WithState("Counter", map[string]any{"count": 0}).
+		UI(`Text("hi")`)
+	if err := s.Prepare(); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		transport := NewChannelTransport(64)
+		sess, err := s.CreateSession(transport, WithHelloGraceMs(1))
+		if err != nil {
+			t.Fatalf("CreateSession: %v", err)
+		}
+		// Touch nothing guarded by sess.mu until the timer has fired, so
+		// the race detector sees no happens-before edge from this
+		// goroutine's constructor write to the callback's write.
+		time.Sleep(20 * time.Millisecond)
+		deadline := time.Now().Add(5 * time.Second)
+		for !sess.HelloReceived() {
+			if time.Now().After(deadline) {
+				t.Fatal("grace callback never marked hello received")
+			}
+			time.Sleep(time.Millisecond)
+		}
+		sess.mu.Lock()
+		pending := sess.helloTimeout
+		sess.mu.Unlock()
+		if pending != nil {
+			t.Fatal("a fired grace timer must be cleared")
+		}
+		if err := sess.Destroy(); err != nil {
+			t.Fatalf("Destroy: %v", err)
+		}
+	}
+}

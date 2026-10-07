@@ -1,0 +1,114 @@
+{
+  "name": "violation-permission-unknown-name",
+  "description": "Typed permissions (P1): a permission outside the closed enum (a typo, the old \"geolocation\" alias) fails the revision's params schema; the client refuses it with invalidParams before touching any platform API, and the connection carries on.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "camra"
+        }
+      },
+      "expectViolation": "invalidPayload"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "error": {
+          "code": "invalidParams"
+        }
+      },
+      "reaction": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 3,
+        "capability": "permission.request",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "geolocation"
+        }
+      },
+      "expectViolation": "invalidPayload"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 3,
+        "error": {
+          "code": "invalidParams"
+        }
+      },
+      "reaction": true
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 4,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "camera"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 4,
+        "result": {
+          "status": "prompt"
+        }
+      }
+    }
+  ]
+}

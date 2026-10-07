@@ -1035,6 +1035,9 @@ pub struct IngestOutcome {
 /// `dispatchAnimationComplete` contract (Option F / Shipped v1).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AnimationCompletion {
+    /// The node whose playback settled — the dispatch is node-addressed
+    /// so a multi-module app routes it to the owning module.
+    pub node: String,
     pub action: String,
     pub payload: serde_json::Value,
 }
@@ -1253,8 +1256,11 @@ impl DesktopAnimator {
                 obj.insert("state".to_string(), Value::String(s.to_string()));
             }
         }
-        self.pending_completions
-            .push(AnimationCompletion { action, payload });
+        self.pending_completions.push(AnimationCompletion {
+            node: id.to_string(),
+            action,
+            payload,
+        });
     }
 
     /// Current animator clock in milliseconds.
@@ -3356,6 +3362,7 @@ const SCRUB_DEFAULT_REST_DEBOUNCE_MS: f64 = 150.0;
 /// path, drained by the window into the `__hypen_bind` channel.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ScrubBind {
+    pub node: String,
     pub path: String,
     pub value: String,
 }
@@ -3690,6 +3697,7 @@ fn scrub_apply_progress(entry: &mut ScrubEntry, id: &str, tree: &mut Tree, p: f6
 /// Settle arrival: queue the winning pose LABEL through the `.bind` channel,
 /// hold the settled props, and open the no-flash cleanup window.
 fn scrub_arrive(
+    id: &str,
     entry: &mut ScrubEntry,
     label: String,
     now: f64,
@@ -3698,10 +3706,11 @@ fn scrub_arrive(
     entry.phase = ScrubPhase::AwaitingCleanup;
     entry.pending_label = Some(label.clone());
     entry.cleanup_deadline = Some(now + cleanup_ms);
-    entry
-        .bind
-        .clone()
-        .map(|path| ScrubBind { path, value: label })
+    entry.bind.clone().map(|path| ScrubBind {
+        node: id.to_string(),
+        path,
+        value: label,
+    })
 }
 
 /// Hand the node back to the engine: apply deferred engine writes (else
@@ -4253,7 +4262,7 @@ impl DesktopScrubber {
         // animates normally.
         if (reduced && !essential) || duration <= 0.0 {
             scrub_apply_progress(entry, id, tree, target);
-            return scrub_arrive(entry, label, now, cleanup_ms);
+            return scrub_arrive(id, entry, label, now, cleanup_ms);
         }
         entry.phase = ScrubPhase::Settling;
         entry.settle_from = entry.progress;
@@ -4427,7 +4436,7 @@ impl DesktopScrubber {
                     dirty = true;
                     if t >= 1.0 {
                         let label = entry.settle_label.clone().unwrap_or_default();
-                        if let Some(b) = scrub_arrive(entry, label, now, cleanup_ms) {
+                        if let Some(b) = scrub_arrive(id, entry, label, now, cleanup_ms) {
                             binds.push(b);
                         }
                     }
@@ -4454,7 +4463,7 @@ impl DesktopScrubber {
                             spec.from.clone()
                         };
                         entry.last_scroll_write = Some(label.clone());
-                        if let Some(b) = scrub_arrive(entry, label, now, cleanup_ms) {
+                        if let Some(b) = scrub_arrive(id, entry, label, now, cleanup_ms) {
                             binds.push(b);
                         }
                         dirty = true;

@@ -18,6 +18,8 @@ import commentsTpl from "./components/Comments.hypen";
 // @ts-ignore
 import conversationTpl from "./components/Conversation.hypen";
 // @ts-ignore
+import createPostTpl from "./components/CreatePost.hypen";
+// @ts-ignore
 import homePageTpl from "./components/HomePage.hypen";
 // @ts-ignore
 import messagesTpl from "./components/Messages.hypen";
@@ -45,6 +47,7 @@ export const templates: Record<string, string> = {
   BottomNav: bottomNavTpl as string,
   Comments: commentsTpl as string,
   Conversation: conversationTpl as string,
+  CreatePost: createPostTpl as string,
   HomePage: homePageTpl as string,
   Messages: messagesTpl as string,
   Notifications: notificationsTpl as string,

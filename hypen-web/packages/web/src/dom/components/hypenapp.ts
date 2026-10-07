@@ -41,6 +41,7 @@ import { getElementDisposables } from "@hypen-space/core/disposable";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 import { slotChildren, setVisible } from "../slots.js";
 import type { DOMRenderer } from "../renderer.js";
+import type { DeviceEndpoint } from "@hypen-space/core/remote/device";
 
 const log = frameworkLoggers.remote;
 
@@ -188,7 +189,25 @@ class SlotVisibilityController {
   }
 }
 
-export const hypenAppHandler: ComponentHandler = {
+/**
+ * Supplies the device endpoint (normally a `WebDeviceHost` from
+ * `@hypen-space/device-web`) for one embedded app, keyed by its WebSocket
+ * URL — so the host's consent UI names the EMBEDDED app's origin, not the
+ * shell's. Return `undefined` to keep that embed UI-only.
+ */
+export type HypenAppDeviceFactory = (remoteUrl: string) => DeviceEndpoint | undefined;
+
+export interface HypenAppHandlerOptions {
+  /** Device plane for embedded apps (RFC 001). Absent ⇒ embeds are UI-only. */
+  device?: HypenAppDeviceFactory;
+}
+
+/**
+ * Build the `HypenApp` handler. The renderer registers one bound to its
+ * `hypenAppDevice` option; the default registration has no device plane.
+ */
+export function createHypenAppHandler(options: HypenAppHandlerOptions = {}): ComponentHandler {
+  return {
   create(): HTMLElement {
     const el = document.createElement("div");
     el.dataset.hypenType = "hypenapp";
@@ -238,15 +257,24 @@ export const hypenAppHandler: ComponentHandler = {
     const { DOMRenderer: Renderer } =
       require("../renderer.js") as typeof import("../renderer.js");
 
+    let device: DeviceEndpoint | undefined;
+    try {
+      device = options.device?.(url);
+    } catch (error) {
+      log.error("HypenApp: device host factory failed; embed stays UI-only", error);
+    }
     const engine = new RemoteEngine(url, {
       autoReconnect: props.autoReconnect ?? true,
       reconnectInterval: props.reconnectInterval ?? 3000,
       maxReconnectAttempts: props.maxReconnectAttempts ?? 10,
+      ...(device ? { device } : {}),
     });
 
     const renderer = new Renderer(contentHost, engine, undefined, {
       routeFocus: "off",
       assetBaseUrl: remoteAssetBaseUrl(url),
+      // Apps embedded inside this embed get their own hosts the same way.
+      ...(options.device ? { hypenAppDevice: options.device } : {}),
     });
     const instance: HypenAppInstance = {
       engine,
@@ -322,7 +350,10 @@ export const hypenAppHandler: ComponentHandler = {
   onChildrenChanged(element: HTMLElement): void {
     activeInstances.get(element)?.visibility.refresh();
   },
-};
+  };
+}
+
+export const hypenAppHandler: ComponentHandler = createHypenAppHandler();
 
 /**
  * Disconnect a HypenApp instance

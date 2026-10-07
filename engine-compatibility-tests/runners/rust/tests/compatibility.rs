@@ -160,16 +160,24 @@ fn collect_fixtures(dir: &Path, results: &mut Vec<PathBuf>) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
-                // Skip `portable/` and `variant/` — different schema, their own
-                // runners (`tests/portable.rs`, `tests/variant.rs`).
+                // Skip `portable/`, `variant/` and `device/` — different
+                // schemas with their own runners (`tests/portable.rs`,
+                // `tests/variant.rs`; the device corpus is replayed by the
+                // engine crate and every SDK's device suite).
                 if path
                     .file_name()
-                    .map_or(false, |n| n == "portable" || n == "variant")
+                    .map_or(false, |n| n == "portable" || n == "variant" || n == "device")
                 {
                     continue;
                 }
                 collect_fixtures(&path, results);
             } else if path.extension().map_or(false, |e| e == "json") {
+                // `dnd/path-move.json` is a state-transform fixture (see
+                // fixtures/dnd/README.md), not a test-case.schema.json case;
+                // it is replayed by the engine crate and the host SDKs.
+                if path.file_name().map_or(false, |n| n == "path-move.json") {
+                    continue;
+                }
                 results.push(path);
             }
         }

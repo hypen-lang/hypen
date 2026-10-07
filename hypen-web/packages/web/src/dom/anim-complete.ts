@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * `.onAnimationComplete(@actions.x)` — completion-event dispatch (Option F).
  *
@@ -6,7 +7,7 @@
  * {@link dispatchAnimationComplete} when a playback settles NATURALLY.
  * Interrupted, superseded, and reduced-motion-skipped playbacks fire nothing
  * — that contract removes most completion races by construction. Firing
- * points and payloads (normative, .notes/ANIMATION_API_DESIGN.md §3 Option F):
+ * points and payloads (normative, hypen-web/docs/animation.md §3 Option F):
  *
  *   - finite `.animate` preset completes → `{ animation: "<presetName>" }`
  *   - `.enter` settles                   → `{ animation: "enter" }`
@@ -74,7 +75,7 @@ export function dispatchAnimationComplete(
   if (!engine) return;
   const payload: Record<string, unknown> = { ...action.customPayload, ...completion };
   try {
-    engine.dispatchAction(action.actionName, payload);
+    dispatchUIAction(engine, element.dataset.hypenId, action.actionName, payload);
   } catch (err) {
     log.error(`Error dispatching action "${action.actionName}":`, err);
   }

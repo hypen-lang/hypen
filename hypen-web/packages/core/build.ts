@@ -29,6 +29,7 @@ const entrypoints = [
   "./src/datasource.ts",
   "./src/remote/index.ts",
   "./src/remote/client.ts",
+  "./src/remote/device/index.ts",
   "./src/remote/types.ts",
   "./src/remote/session.ts",
   "./src/resolver.ts",
@@ -37,10 +38,12 @@ const entrypoints = [
   "./src/logger.ts",
   "./src/types.ts",
   "./src/animation.ts",
+  "./src/dnd.ts",
   "./src/result.ts",
   "./src/retry.ts",
   "./src/engine-base.ts",
   "./src/portable.ts",
+  "./src/diff.ts",
   "./src/patch-expand.ts",
 ];
 

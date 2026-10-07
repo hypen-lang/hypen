@@ -42,6 +42,26 @@ public struct RemoteEngineConfig: Sendable {
     /// closes the socket, which autoReconnect then retries forever.
     public let maximumMessageSize: Int
 
+    /// Extra headers on the WebSocket upgrade request, e.g.
+    /// `["Authorization": "Bearer …"]`. Device-enabled servers admit a
+    /// client that sends no `Origin` only when their authenticator accepts
+    /// the upgrade request (RFC 001 §5, decision D1), so native clients
+    /// authenticate here. Handshake-owned headers (`Host`, `Upgrade`,
+    /// `Connection`, `Sec-WebSocket-*`, `Content-Length`) and `Origin` are
+    /// never taken from this dictionary.
+    public let upgradeHeaders: [String: String]
+
+    /// Called for every connection attempt (including reconnects) to supply
+    /// fresh upgrade headers, e.g. a short-lived token; merged over
+    /// `upgradeHeaders`.
+    public let upgradeHeaderProvider: (@Sendable (URL) -> [String: String])?
+
+    /// `Origin` header for the upgrade request. Nil (the default) sends none:
+    /// `Origin` is a browser-only CSWSH defence, and a native client is not a
+    /// browser (RFC 001 §5). Set it only for a server that admits this app by
+    /// an allowlisted origin.
+    public let origin: String?
+
     public init(
         autoReconnect: Bool = true,
         reconnectInterval: TimeInterval = 3.0,
@@ -51,7 +71,10 @@ public struct RemoteEngineConfig: Sendable {
         writeTimeout: TimeInterval = 10.0,
         pingInterval: TimeInterval = 30.0,
         debugLogging: Bool = false,
-        maximumMessageSize: Int = 32 * 1024 * 1024
+        maximumMessageSize: Int = 32 * 1024 * 1024,
+        upgradeHeaders: [String: String] = [:],
+        upgradeHeaderProvider: (@Sendable (URL) -> [String: String])? = nil,
+        origin: String? = nil
     ) {
         self.autoReconnect = autoReconnect
         self.reconnectInterval = reconnectInterval
@@ -62,6 +85,9 @@ public struct RemoteEngineConfig: Sendable {
         self.pingInterval = pingInterval
         self.debugLogging = debugLogging
         self.maximumMessageSize = maximumMessageSize
+        self.upgradeHeaders = upgradeHeaders
+        self.upgradeHeaderProvider = upgradeHeaderProvider
+        self.origin = origin
     }
 
     /// Default configuration

@@ -1,0 +1,64 @@
+{
+  "name": "@hypen-space/agent",
+  "version": "0.6.5",
+  "description": "Hypen MCP server - exposes a running Hypen app's declared actions, routes, inputs and state to an AI agent over MCP",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "bun": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "bun": "./src/server.ts",
+      "import": "./dist/server.js",
+      "default": "./dist/server.js"
+    },
+    "./stdio": {
+      "types": "./dist/stdio.d.ts",
+      "bun": "./src/stdio.ts",
+      "import": "./dist/stdio.js",
+      "default": "./dist/stdio.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "bun run build.ts",
+    "build:types": "tsc --emitDeclarationOnly",
+    "prepublishOnly": "bun run build",
+    "typecheck": "bunx tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@hypen-space/core": "^0.6.5"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5"
+  },
+  "keywords": [
+    "hypen",
+    "mcp",
+    "agent",
+    "model-context-protocol",
+    "ai"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "author": "Hypen",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-web/packages/agent"
+  }
+}

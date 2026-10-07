@@ -40,6 +40,17 @@ pub const DEFAULT_PRIMITIVES: &[&str] = &[
     "Paragraph",
     "Icon",
     "SafeArea",
+    // Chart family: a data-space host and its marks. Positioned in data
+    // units; events carry the datum (see hypen-docs guide/charts).
+    "Chart",
+    "Axis",
+    "Line",
+    "Area",
+    "Bars",
+    "Points",
+    "Rule",
+    "Marker",
+    "Path",
 ];
 
 /// Result from component resolution

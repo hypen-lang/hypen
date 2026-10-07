@@ -1,0 +1,56 @@
+{
+  "name": "violation-mic-max-duration-out-of-range",
+  "description": "mic.record maxDurationMs is a recording limit in 1..600000 ms.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "mic.record",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 16,
+        "params": {
+          "sampleRate": 16000,
+          "format": "pcm16",
+          "maxDurationMs": 600001
+        }
+      },
+      "expectViolation": "invalidPayload"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "error": {
+          "code": "invalidParams"
+        }
+      },
+      "reaction": true
+    }
+  ]
+}

@@ -268,6 +268,12 @@ impl Props {
     pub fn inner(&self) -> &PropsMap {
         &self.0
     }
+
+    /// The shared map itself, for callers that layer per-node overrides
+    /// over it (see `reconcile::layered`).
+    pub fn into_arc(self) -> Arc<PropsMap> {
+        self.0
+    }
 }
 
 impl Default for Props {

@@ -1,0 +1,172 @@
+{
+  "name": "mic-record-undeclared-stream",
+  "description": "Live microphone capture (decision D5): params carry an optional maxDurationMs recording limit, never a size; blobStart omits `bytes`; chunks stream under credit with a paused/resumed transition; the user stops early (durationMs below the limit) and the terminal item states the actual byte count and sha256 of what was sent.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "mic.record",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 16,
+        "params": {
+          "sampleRate": 16000,
+          "format": "pcm16",
+          "maxDurationMs": 60000
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "renewLease": 1
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "leaseAck": 1
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "progress",
+          "state": "running"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "audio/L16"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 2,
+          "seq": 0
+        },
+        "hex": "010000000200000000000000000102030405060708090a0b0c0d0e0f"
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "paused": true
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "grant": 64
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "paused": false
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 2,
+          "seq": 1
+        },
+        "hex": "010000000200000001000000101112131415161718191a1b1c1d1e1f"
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 2,
+          "seq": 2
+        },
+        "hex": "0100000002000000020000000001020304050607"
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "durationMs": 1250,
+          "item": {
+            "channel": 0,
+            "contentType": "audio/L16",
+            "bytes": 40,
+            "sha256": "95e8b5b8c2a408aea5f28804395ade785a0e380c0e9cf3c12ee487f54538308d"
+          }
+        }
+      }
+    }
+  ]
+}

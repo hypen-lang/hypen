@@ -1,0 +1,31 @@
+{
+  "name": "handshake-no-common-protocol",
+  "description": "No common protocol version: device access is disabled entirely and UI-only operation continues. No device traffic may be sent.",
+  "hello": {
+    "protocolVersions": [
+      2
+    ],
+    "binary": true,
+    "capabilities": [
+      {
+        "name": "core.capabilities",
+        "versions": [
+          1
+        ]
+      }
+    ]
+  },
+  "serverProtocolVersions": [
+    1
+  ],
+  "serverBinary": true,
+  "serverCapabilities": [
+    {
+      "name": "core.capabilities",
+      "versions": [
+        1
+      ]
+    }
+  ],
+  "expectAck": null
+}

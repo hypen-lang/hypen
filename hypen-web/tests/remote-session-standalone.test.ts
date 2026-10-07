@@ -1,3 +1,4 @@
+import { app } from "../packages/core/src/app";
 import { describe, it, expect } from "bun:test";
 import {
   RemoteSession,
@@ -241,5 +242,32 @@ describe("RemoteSession inline router (no app registry)", () => {
 
     // The router action handlers must be installed despite app:null.
     expect(engine.actions.has("router.push")).toBe(true);
+  });
+});
+
+describe("scoped UI action fan-out", () => {
+  it("resolves session-local node identity once before forwarding", async () => {
+    class RoutingEngine extends FakeEngine {
+      calls: Array<{ name: string; payload: unknown }> = [];
+      resolved: unknown[] = [];
+      override resolveUIAction(name: string, payload: unknown) {
+        this.resolved.push({ name, payload });
+        return { name: "__hypen_scoped:board:__hypen_pin", payload: { path: "__dnd.board.a", x: .5, y: .25 } };
+      }
+      override dispatchAction(name: string, payload: unknown) { this.calls.push({ name, payload }); }
+    }
+    const aEngine = new RoutingEngine(), bEngine = new RoutingEngine();
+    let count = 0;
+    const sessions: RemoteSession[] = [];
+    const host = makeHost(() => count++ === 0 ? aEngine : bEngine);
+    Object.assign(host, { module: app.defineState({}).build(), syncActions: true, otherSessions: (current: RemoteSession) => sessions.filter(s => s !== current) });
+    for (let i = 0; i < 2; i++) sessions.push(new RemoteSession(host, new AsyncQueueTransport(), { helloGraceMs: null }));
+    await Promise.all(sessions.map(async s => { await s.receive({ type: "hello" } as never); await s.ready; }));
+    await sessions[0]!.receive({ type: "dispatchAction", module: "Board", action: "__hypen_dispatch", payload: { node: "source-session-only", action: "__hypen_pin", payload: { path: "__dnd.board.a", x: .5, y: .25 } } });
+    expect(aEngine.resolved).toHaveLength(1);
+    expect(bEngine.resolved).toHaveLength(0);
+    expect(aEngine.calls).toEqual(bEngine.calls);
+    expect(bEngine.calls).toEqual([{ name: "__hypen_scoped:board:__hypen_pin", payload: { path: "__dnd.board.a", x: .5, y: .25 } }]);
+    await Promise.all(sessions.map(s => s.destroy()));
   });
 });

@@ -1,0 +1,79 @@
+{
+  "name": "file-save-download",
+  "description": "Server-to-client download: initialCredit MUST be zero; the client grants credit only after consent and destination selection; the terminal response is the client-verified write receipt.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 5,
+        "capability": "file.save",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "reports-1",
+          "activationId": 2
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 0,
+        "params": {
+          "channel": 0,
+          "name": "report.txt",
+          "contentType": "text/plain",
+          "bytes": 11,
+          "sha256": "835218591566a3364d9258fcbf2074d19415dacc756ad7fb707119069f07e1e5"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 5,
+        "control": {
+          "grant": 65536
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 5,
+          "seq": 0
+        },
+        "hex": "010000000500000000000000687970656e2d7361766564"
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 5,
+        "result": {
+          "bytesWritten": 11
+        }
+      }
+    }
+  ]
+}
