@@ -1,0 +1,488 @@
+---
+title: Client Setup
+description: Attach a device host to the web, iOS, Android and desktop clients, declare the permissions each capability needs, and use the fake host during development
+---
+
+# Client Setup
+
+On the client, a **DeviceHost** receives device requests, runs them, and owns
+everything the user sees: consent dialogs, pickers, the capture screen and
+the recording indicator. The renderer isn't involved. It stays a pure patch
+consumer, and device requests never touch the UI tree.
+
+A client without a device host connects as before and simply offers no
+capabilities. On such a connection, `supports()` returns `false` on the
+server, and requests fail with `unavailable`.
+
+## What a client offers
+
+A native host advertises a capability only when **all three** of these hold:
+
+1. **The hardware exists**: a camera, a microphone, a Bluetooth LE adapter.
+2. **The app declared what the OS requires**: the `Info.plist` usage
+   description on iOS, the `<uses-permission>` entry on Android.
+3. **For `mic.record` and `bluetooth.scan`, the host's indicator can be shown
+   right now.** Scans and recordings must run under a visible indicator with a
+   Stop button (see [Consent & Security](/docs/device/security#indicators)).
+
+Whether the user has *granted* a permission is never part of this rule. A
+permission nobody has asked for yet is still advertised, so your app can
+prompt for it. A refused permission doesn't disappear either, so the
+advertisement reveals nothing about the user's permission history.
+
+When conditions 1 or 3 change while connected (for example, the app goes to
+the background or the indicator overlay is removed), the host sends a fresh
+capability list, and `supports()` on the server follows it. A request that
+races such a change fails with `unavailable` before any hardware opens.
+The capabilities negotiated when the connection opened are its ceiling: a
+fresh list can withdraw a capability and bring it back, but it can't add
+one that the connection didn't negotiate. Such a capability stays
+unsupported on both sides until the next connection.
+
+The web host feature-detects browser APIs instead. For example, it offers
+`bluetooth.select` only where Web Bluetooth exists. The desktop host offers
+only what it implements (the file capabilities), and only when a file dialog
+can be shown.
+
+## Web
+
+Install the browser device host:
+
+```bash
+bun add @hypen-space/device-web
+```
+
+Pass a `WebDeviceHost` to `RemoteEngine`:
+
+```typescript
+import { RemoteEngine } from "@hypen-space/core";
+import { WebDeviceHost } from "@hypen-space/device-web";
+
+const url = "wss://app.example.com/ws";
+
+// `origin` is the server origin the consent dialogs name, and the key that
+// cooldowns and grants are stored under.
+const device = new WebDeviceHost({ origin: new URL(url).origin });
+
+const remote = new RemoteEngine(url, { device });
+remote.onPatches((patches) => renderer.applyPatches(patches));
+await remote.connect();
+```
+
+`RemoteEngine` sends the host's advertisement in `hello`, routes device
+messages and binary frames to it, and detaches it whenever the socket closes.
+All of the host's UI (the consent dialog, the capture dialog, the recording
+indicator) is mounted outside your app's DOM tree, under `document.body` by
+default.
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `origin` | required | The authenticated server origin. Prompts name it, and cooldowns are stored under it. They persist only for `https:`/`wss:` origins; plaintext origins keep them for the page session only. |
+| `capabilities` | every built-in driver | Limit what the host offers |
+| `denialCooldownMs` | `30000` | How long after a refusal the same capability can't prompt again |
+| `maxTimeoutMs` | `300000` | The client's own ceiling on any request deadline |
+| `maxDownloadBytes` | 64 MiB | Largest `file.save` accepted |
+| `inputProtectionMs` | `500` | How long Continue stays disabled after the dialog appears, or after the page regains focus |
+| `stopRecordingWhenHidden` | `true` | End a recording normally when the page becomes hidden |
+| `captureBufferBytes` | mic 1 MiB, video 8 MiB | Bytes a live capture may hold while the server grants no credit, before it ends `throttled` |
+| `mount` | `document.body` | Where the host's UI mounts |
+| `theme` | follows the system light/dark setting | Look of the consent and camera dialogs (see below) |
+
+### Styling the dialogs
+
+The consent and camera dialogs follow the system's light or dark setting.
+Pass `theme` to match your app:
+
+```ts
+const host = new WebDeviceHost({
+  origin,
+  theme: {
+    accent: "#e11d48",       // Continue button, drop-zone highlight
+    radius: "12px",          // panel corners
+    fontFamily: "Inter, system-ui, sans-serif",
+    colorScheme: "auto",     // "auto" | "light" | "dark"
+  },
+});
+```
+
+The other fields are `accentText`, `background`, `text`, `muted`, `surface`,
+`border` and `backdrop`. Each one is also a CSS custom property, so you can
+set them from your own stylesheet instead:
+
+```css
+:root {
+  --hypen-device-accent: #e11d48;
+  --hypen-device-radius: 12px;
+}
+```
+
+For deeper changes, the dialogs carry stable class names:
+`hypen-device-panel`, `hypen-device-title`, `hypen-device-origin`,
+`hypen-device-detail`, `hypen-device-drop` (its `data-state` is `disarmed`,
+`armed` or `hot`), `hypen-device-actions`, `hypen-device-btn` and
+`hypen-device-btn-primary`.
+
+Styling is client-side only: the app's server can't change how the dialogs
+look. Keep the origin line readable when you restyle, since it tells the user
+which app is asking. The recording indicator has a fixed look so that it's
+always visible.
+
+What each capability needs in the browser:
+
+| Capability | Offered when |
+|------------|--------------|
+| `gallery.pick`, `file.pick`, `file.save`, `permission.query`, `permission.request` | Always |
+| `camera.capture` | `getUserMedia` exists |
+| `mic.record` | `getUserMedia` and an audio capture backend (AudioWorklet, or the ScriptProcessor fallback) exist |
+| `bluetooth.select` | `navigator.bluetooth.requestDevice` exists (Chromium-based browsers) |
+| `bluetooth.scan` | Never: the web has no unrestricted BLE scanning |
+
+<Callout type="info">
+Browsers can't set custom headers on a WebSocket upgrade. If your server
+configures an `authenticate` hook, it must accept a credential the browser
+sends automatically, such as a session cookie. Camera and microphone access
+also require a secure context (`https:`).
+</Callout>
+
+The Cloudflare prebuilt client (the `serveClient` bundle, also used by
+`defineHypenWorker({ clients })` with `@hypen-space/cf/client`) attaches a
+`WebDeviceHost` for you. The prebuilt client that `RemoteServer` serves over
+HTTP (`webClient`) doesn't; build your own client entry as shown above.
+
+### Embedded apps (`HypenApp`)
+
+Each `HypenApp` embed runs its own `RemoteEngine`. Give embeds a device
+plane with the renderer's `hypenAppDevice` option, a factory called with each
+embedded app's WebSocket URL. Create one host per embed, so its dialogs name
+the **embedded** app's origin rather than the page that hosts it:
+
+```typescript
+import { DOMRenderer } from "@hypen-space/web";
+import { WebDeviceHost } from "@hypen-space/device-web";
+
+const renderer = new DOMRenderer(mount, remote, undefined, {
+  hypenAppDevice: (url) => new WebDeviceHost({ origin: new URL(url).origin }),
+});
+```
+
+Return `undefined` to keep an embed UI-only. Apps embedded inside an embed
+inherit the factory. The Cloudflare prebuilt client sets this up.
+
+## iOS
+
+`DeviceHost.iOS()` builds a host with the native drivers. Create it once and
+pass it to `HypenView` (or to `RemoteEngine`):
+
+```swift
+import SwiftUI
+import HypenSwift
+
+@main
+struct MyApp: App {
+    // One host for the app's lifetime: it owns cooldowns, grants and the
+    // one-prompt-at-a-time gate.
+    let device = DeviceHost.iOS()
+
+    var body: some Scene {
+        WindowGroup {
+            HypenView(
+                url: "wss://app.example.com/ws",
+                config: RemoteEngineConfig(
+                    // Native clients send no Origin; the server's authenticator admits them.
+                    upgradeHeaders: ["Authorization": "Bearer \(AppAuth.token)"]
+                ),
+                device: device
+            )
+        }
+    }
+}
+```
+
+For credentials that rotate, use `upgradeHeaderProvider`. It's called on
+every connection attempt, including reconnects. By default the host takes
+its origin from the socket it's attached to. If you pass
+`DeviceHost.iOS(origin: "https://app.example.com")`, the host refuses any
+socket whose origin differs.
+
+The iOS drivers: PHPicker (`gallery.pick`), `UIDocumentPickerViewController`
+(`file.pick`, and the export picker for `file.save`), `UIImagePickerController`
+(`camera.capture`), `AVAudioEngine` with `AVAudioConverter` (`mic.record`),
+and CoreBluetooth behind a host-owned chooser sheet (`bluetooth.select`) and
+the host indicator (`bluetooth.scan`).
+
+### Info.plist keys
+
+Asking iOS for a permission without its usage description terminates the
+app, so the host checks declarations before offering anything:
+
+| Capability | Requires |
+|------------|----------|
+| `gallery.pick`, `file.pick`, `file.save` | Nothing. PHPicker and the document pickers run out of process. |
+| `camera.capture` | A camera and `NSCameraUsageDescription`. Video also needs `NSMicrophoneUsageDescription` (checked per request). |
+| `mic.record` | An audio input, `NSMicrophoneUsageDescription`, and a showable indicator |
+| `bluetooth.select` | `NSBluetoothAlwaysUsageDescription` |
+| `bluetooth.scan` | `NSBluetoothAlwaysUsageDescription` and a showable indicator |
+| `permission.query` / `permission.request` | Always offered. Asking about a permission whose key is missing answers `unavailable` with `platformDetail` `not-declared:<name>`. |
+
+Keys used by `permission.*`: `camera` → `NSCameraUsageDescription`,
+`microphone` → `NSMicrophoneUsageDescription`, `photos` →
+`NSPhotoLibraryUsageDescription`, `bluetooth` →
+`NSBluetoothAlwaysUsageDescription`, `location` →
+`NSLocationWhenInUseUsageDescription`, `contacts` →
+`NSContactsUsageDescription`. `notifications` needs no key.
+
+```xml
+<key>NSCameraUsageDescription</key>
+<string>Take a photo for your profile.</string>
+<key>NSMicrophoneUsageDescription</key>
+<string>Record voice notes.</string>
+<key>NSBluetoothAlwaysUsageDescription</key>
+<string>Connect to your heart-rate sensor.</string>
+```
+
+### The activity indicator
+
+Scans and recordings run under the host's own indicator, which shows the
+origin and a Stop button. iOS has no system indicator the host can rely on
+for a Bluetooth scan, so by default the indicator is a pass-through overlay
+window above your app's UI. If the overlay can't be seen (for example, the
+scene is in the background), `mic.record` and `bluetooth.scan` are withdrawn,
+and a running stream stops. To replace the indicator, pass
+`activityIndicator:`. A custom indicator must stay visible with a Stop control
+for the whole stream and report whether it can be shown. `bluetoothChooser:`
+replaces the chooser sheet used by `bluetooth.select`.
+
+## Android
+
+`AndroidDeviceHost.create(...)` builds the host. It is **Application-scoped**:
+it registers activity lifecycle callbacks, follows whichever Activity is in the
+foreground, and survives rotation. Create it once and reuse it:
+
+```kotlin
+import android.os.Bundle
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.setContent
+import space.hypen.renderer.HypenApp
+import space.hypen.renderer.device.DeviceHost
+import space.hypen.renderer.device.android.AndroidDeviceHost
+import space.hypen.renderer.remote.RemoteEngineConfig
+
+const val SERVER_URL = "wss://app.example.com/ws"
+
+object AppDevice {
+    @Volatile private var host: DeviceHost? = null
+    fun get(activity: ComponentActivity): DeviceHost =
+        host ?: synchronized(this) {
+            host ?: AndroidDeviceHost.create(activity, serverUrl = SERVER_URL).also { host = it }
+        }
+}
+
+class MainActivity : ComponentActivity() {
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val device = AppDevice.get(this)
+        setContent {
+            HypenApp(
+                url = SERVER_URL,
+                // Native clients send no Origin; the server's authenticator admits them.
+                config = RemoteEngineConfig(headers = mapOf("Authorization" to "Bearer ${AppAuth.token}")),
+                deviceHost = device,  // HypenApp also renders the indicator overlay
+            )
+        }
+    }
+}
+```
+
+`create` takes these arguments:
+
+| Argument | Default | Meaning |
+|----------|---------|---------|
+| `activity` | required | Supplies the Application and the initial foreground Activity. No strong reference to it is kept. |
+| `serverUrl` | required | Sets the default origin. Each connection is bound to the origin of the URL its engine connects to. |
+| `capabilities` | all nine | Limit what the host offers |
+| `activityIndicator` | `ComposeDeviceActivityIndicator()` | The indicator for scans and recordings. Pass `null` to never offer `mic.record` or `bluetooth.scan`. |
+| `configure` | identity | Adjust `DeviceHostConfig` (for example `denialCooldownMs`, 30 s by default) |
+
+Nothing disposes the host implicitly. Call `device.dispose()` when device
+access is no longer needed. Alternatively, pass
+`HypenApp(deviceHost = …, disposeDeviceHost = true)` if you really want a
+host scoped to one screen. For rotating credentials, use
+`RemoteEngineConfig(headersProvider = { … })`. It's evaluated on every
+connection attempt.
+
+`HypenApp` composes the default indicator overlay for you. If you use
+`RemoteEngine(url, deviceHost = device)` directly, place
+`DeviceActivityOverlay(...)` in your UI yourself. `mic.record` and
+`bluetooth.scan` are offered only while such an overlay is composed on a
+started screen. The capabilities in the hello are fixed for the whole
+connection, so when the socket opens in the foreground before the overlay
+has attached, the engine waits up to 2 seconds for it before sending the
+hello. A capability that only becomes available after the hello (for
+example, the socket reconnected while the app was in the background) is
+unsupported until the next connection. The server agrees: `supports()` is
+`false` for it and a request fails with `unsupported` on the server, without
+a round trip. The next connection offers it.
+
+### Manifest permissions
+
+The renderer library declares **no** permissions. Its manifest only adds a
+private `FileProvider` (authority `${applicationId}.hypen.device.files`,
+not exported, with its `android.support.FILE_PROVIDER_PATHS` meta-data),
+which hands the system camera app a temporary file for `camera.capture`.
+You don't need to declare it yourself. If your manifest overrides that
+provider entry (`tools:node="replace"`), keep the meta-data, or every
+capture fails with `internal` (`capture-file-provider-misconfigured`).
+
+Add the permissions for the capabilities you use. If one is undeclared, the
+capability isn't offered at all:
+
+| Capability | Declare |
+|------------|---------|
+| `gallery.pick`, `file.pick`, `file.save` | Nothing. The system pickers need no permission. |
+| `camera.capture` | Nothing. The system capture app records under its own permissions. If you do declare `CAMERA` (or `RECORD_AUDIO`, for video), the user must grant it before capture, and the host asks through the OS flow. Offered when the device has a camera (`FEATURE_CAMERA_ANY`). |
+| `mic.record` | `RECORD_AUDIO`. Offered when the device has a microphone and the indicator is ready. |
+| `bluetooth.select` | `BLUETOOTH_SCAN` on API 31+ (ideally with `neverForLocation`), plus `ACCESS_FINE_LOCATION` with `maxSdkVersion="30"` for older devices |
+| `bluetooth.scan` | Same as `bluetooth.select`, and the indicator must be ready |
+| `permission.*` | Each runtime permission you'll ask about. Undeclared ones answer `unavailable` (`not-declared:<name>`). |
+
+```xml
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- mic.record -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- bluetooth.select / bluetooth.scan -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission
+        android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+    <!-- Android's legacy install-time Bluetooth permissions for API ≤ 30 -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+
+    <!-- permission.request("notifications") on API 33+ -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+</manifest>
+```
+
+Without `neverForLocation`, a scan on API 31+ also needs
+`ACCESS_FINE_LOCATION` (declared without `maxSdkVersion`) and Location
+Services turned on. On API 30 and below, Location Services must always be on.
+Otherwise the scan answers `unavailable` (`location-services-off`). A
+Bluetooth adapter that is switched off answers `unavailable` (`adapter-off`)
+at request time. It doesn't change what's advertised.
+
+The Android permission names behind the portable ones: `camera` → `CAMERA`,
+`microphone` → `RECORD_AUDIO`, `location` → `ACCESS_FINE_LOCATION` or
+`ACCESS_COARSE_LOCATION`, `notifications` → `POST_NOTIFICATIONS` (API 33+;
+earlier versions have no runtime permission), `bluetooth` → `BLUETOOTH_SCAN`
+(API 31+) or location before that, `photos` → `READ_MEDIA_IMAGES` /
+`READ_MEDIA_VIDEO` (API 33+; `READ_EXTERNAL_STORAGE` before that),
+`contacts` → `READ_CONTACTS`.
+
+## Desktop
+
+The native desktop renderer (`hypen-renderer-desktop`) is a device host
+whenever it runs in **remote mode**: `RemoteModule` (and
+`DesktopApp::connect`) attach the native host by default. Its `hello`
+advertises what the desktop implements, it accepts the server's selection,
+and it routes device messages and binary frames to the host, never to the
+patch path.
+
+```rust
+use hypen_renderer_desktop::{DesktopApp, RemoteModule, RemoteOptions};
+use std::sync::Arc;
+
+let remote = RemoteModule::connect_with(
+    "wss://app.example.com/ws",
+    "App",
+    // Native clients send no Origin; the server's authenticator admits them.
+    RemoteOptions::default().header("Authorization", format!("Bearer {token}")),
+);
+DesktopApp::new().module(Arc::new(remote)).run();
+```
+
+| Capability | Desktop driver |
+|------------|----------------|
+| `gallery.pick` | The OS open dialog, filtered to image / video files per `mediaTypes`; files stream from disk as credit allows |
+| `file.pick` | The OS open dialog (multi-select for `maxCount` > 1); `accept` becomes the file-type filter; each item carries its file name |
+| `file.save` | The OS save dialog is the consent and destination gate; bytes go to a temporary file beside the destination, renamed into place only after the size and SHA-256 verify |
+| `camera.capture` | A capture panel over the window with a live preview. Photo: Capture sends one `image/jpeg`. Video: Record, then Stop, sends H.264 in a fragmented `video/mp4`, streamed as it is encoded, **without an audio track**. Cancel is `cancelled` |
+| `mic.record` | A consent dialog, then a recording indicator (origin, elapsed time, Stop) in the window's top-right corner while `audio/L16` PCM16 streams at the requested rate and channels. Stop or `maxDurationMs` ends it as a success |
+| `bluetooth.scan` | A consent dialog (remembered for 24 h on `wss://` origins), then a scanning indicator with Stop while advertisements stream |
+| `bluetooth.select` | A chooser listing a live scan, filtered by `namePrefix` and `services`; returns the chosen device |
+| `permission.query`, `permission.request` | macOS reads the OS privacy status for camera, microphone and Bluetooth, and `request` shows the OS prompt after a consent dialog. Windows reads the Settings › Privacy camera and microphone switches. Linux has no per-app permissions. `location`, `notifications` and `contacts` are `unsupported` |
+
+The dialogs come from `rfd`: the XDG desktop portal on Linux (no GTK build
+dependency; the portal service must be running), `NSOpenPanel` /
+`NSSavePanel` on macOS, and the common item dialogs on Windows. Their titles
+name the server origin (`wss://app.example.com wants to save "report.pdf"`).
+The camera panel, consent dialogs and Bluetooth chooser are modal: they dim
+the window, take all input, ignore clicks for 500 ms after appearing (so a
+stray click can't approve them), and are reachable by keyboard and screen
+readers. The app can't draw over or restyle them. Minimizing the window ends
+a recording (as a success) or a scan (`cancelled`), because its indicator is no
+longer visible; a window that is only covered by another one keeps recording. Bluetooth device ids are derived per install and per server
+origin, never the raw hardware address.
+
+With no display (no `DISPLAY` / `WAYLAND_DISPLAY` on Linux) the host offers
+nothing. One dialog is open at a time: a second request meanwhile is
+`throttled`. Dismissing a dialog is `cancelled`, and a dialog answer that
+arrives after the server cancelled the request is thrown away.
+
+| `RemoteOptions` | Default | Meaning |
+|-----------------|---------|---------|
+| `headers` / `.header(name, value)` | none | Extra upgrade headers on every connection attempt, e.g. `Authorization` |
+| `device` / `.device(Some(DeviceConfig))` | `DeviceConfig::native()` | The device host; `.device(None)` connects UI-only |
+
+`DeviceConfig::with_dialogs(...)` replaces the dialogs and offers the file
+capabilities only; `.with_capture(ui, hardware)` adds the camera, microphone
+and Bluetooth drivers with your own UI and hardware (tests, kiosks,
+automation), and `.capabilities(&[...])` narrows what is offered.
+
+Build requirements: the `camera`, `mic` and `bluetooth` cargo features are on
+by default. On Linux they need `pkg-config libasound2-dev libdbus-1-dev
+libclang-dev g++` to build, and ALSA, BlueZ (`bluetoothd`) and V4L2 drivers at
+runtime. macOS needs no extra packages, but an app bundle must declare
+`NSCameraUsageDescription`, `NSMicrophoneUsageDescription` and
+`NSBluetoothAlwaysUsageDescription`; without them requests answer
+`unavailable` (`not-declared:…`). Windows needs the MSVC C++ toolchain. The desktop
+also stores the server's rotating `resumeToken` and presents it on reconnect.
+
+In **in-process mode** (`DesktopApp::module(...)` with a local
+`ModuleInstance`) there is no connection and no device plane: the module's
+`ctx.device()` answers every call `unavailable` (`device-disabled`). To use
+device capabilities from a desktop app, run the module behind a
+server with a device plane (the Rust SDK's `RemoteSession` works in-process on
+`localhost`) and connect to it.
+
+## Development: the fake host
+
+`@hypen-space/device-fake` provides a scripted host for development and
+tests. It never touches real hardware:
+
+```typescript
+import { RemoteEngine } from "@hypen-space/core";
+import { FakeDeviceHost } from "@hypen-space/device-fake";
+
+const fake = new FakeDeviceHost()
+  .galleryReturns(jpegBytes)
+  .permissionsReturn({ camera: "granted", microphone: "denied" })
+  .micRecords([chunk1, chunk2], { chunkDelayMs: 10 })
+  .bluetoothSelects({ id: "sensor-1", name: "HR Strap" });
+
+const remote = new RemoteEngine(url, { device: fake.endpoint() });
+```
+
+The fake host makes itself obvious:
+
+- It refuses to initialize when `NODE_ENV=production`.
+- It marks every result `simulated: true`. Handlers see this as
+  `res.simulated` in TypeScript, and as the equivalent flag in the other SDKs.
+- It shows a "Simulated device" banner whenever a DOM exists.
+
+Built-in simulations cover `gallery.pick`, `camera.capture`, `mic.record`,
+`bluetooth.select` and both permission capabilities. For `file.pick`,
+`file.save` and `bluetooth.scan`, register a driver with
+`.driver(capability, driver)`.

@@ -1,0 +1,39 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "draggable-malformed-degrade",
+  "description": "Malformed .draggable input warns and degrades, never hard-errors: a positional group (arguments are named-only), an unknown activation token and a non-boolean handle all fall back to the defaults {group: null, handle: false, activation: \"auto\"}. Nothing leaks as a generic draggable.* prop",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Card(\"x\").draggable(\"cards\", activation: warp, handle: 1)",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Card",
+        "props": {
+          "__dnd.source": { "group": null, "handle": false, "activation": "auto" }
+        },
+        "absentProps": [
+          "draggable.0",
+          "draggable.activation",
+          "draggable.handle",
+          "__dnd.sourcePayload",
+          "__dnd.sourceEnabled"
+        ]
+      },
+      { "type": "insert" }
+    ]
+  }
+}

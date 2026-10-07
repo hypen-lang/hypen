@@ -1,0 +1,6 @@
+{
+  "name": "hypen-stock-lab",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "bun server.ts", "web": "bun web/serve.ts", "test": "bun test" }
+}

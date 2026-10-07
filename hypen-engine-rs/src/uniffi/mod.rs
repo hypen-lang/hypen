@@ -9,14 +9,18 @@
 //! # Build the native library
 //! cargo build --release --features uniffi
 //!
-//! # Generate Kotlin bindings
-//! cargo run --features uniffi --bin uniffi-bindgen generate \
-//!     --library target/release/libhypen_engine.so \
+//! # Generate Kotlin bindings (the workspace target dir is one level up)
+//! cargo run --features uniffi-cli --bin uniffi-bindgen -- generate \
+//!     --library ../target/release/libhypen_engine.so \
 //!     --language kotlin \
 //!     --out-dir ../hypen-kotlin/src/main/kotlin
 //! ```
 
 use std::sync::{Arc, Mutex};
+
+/// Device broker (RFC 001) bindings: `DeviceBroker`, `DeviceRetainedBytesPool`
+/// and the `device*` handshake helpers.
+pub mod device;
 
 use crate::{
     engine_core::EngineCore,
@@ -143,6 +147,28 @@ pub fn portable_path_set(
     crate::portable::path_set(&mut v, &path, nv);
     serde_json::to_string(&v)
         .map_err(|e| HypenError::StateError(format!("path_set: serialise: {e}")))
+}
+
+/// Move element `from` of the array at `from_path` to index `to` of the
+/// array at `to_path` (the `__hypen_reorder` primitive; see
+/// [`crate::portable::path_move`] for the exact semantics — `to` is the
+/// final index, clamped after removal). Returns
+/// `{"json": <updated>, "moved": bool}`; on `moved: false` the JSON is the
+/// input unchanged.
+#[uniffi::export]
+pub fn portable_path_move(
+    value_json: String,
+    from_path: String,
+    from: u32,
+    to_path: String,
+    to: u32,
+) -> Result<String, HypenError> {
+    let mut v: serde_json::Value = serde_json::from_str(&value_json)
+        .map_err(|e| HypenError::StateError(format!("path_move: bad JSON: {e}")))?;
+    let moved =
+        crate::portable::path_move(&mut v, &from_path, from as usize, &to_path, to as usize);
+    serde_json::to_string(&serde_json::json!({ "json": v, "moved": moved }))
+        .map_err(|e| HypenError::StateError(format!("path_move: serialise: {e}")))
 }
 
 /// Delete the value at `path`. Returns `{"json": <updated>, "removed": bool}`.
@@ -555,6 +581,12 @@ impl From<crate::error::EngineError> for HypenError {
             crate::error::EngineError::ActionNotFound(name) => {
                 HypenError::ActionError(format!("No handler registered for action: {}", name))
             }
+            // A refusal, not a missing handler. Kept distinct in the message so
+            // a host can tell "not allowed" from "no such thing" — the two map
+            // to different HTTP statuses and different agent behaviour.
+            crate::error::EngineError::NotDeclared(detail) => {
+                HypenError::ActionError(format!("Not declared by this app: {}", detail))
+            }
             crate::error::EngineError::StateError(msg) => HypenError::StateError(msg),
             crate::error::EngineError::ExpressionError(msg) => {
                 HypenError::RenderError(format!("Expression error: {}", msg))
@@ -883,7 +915,7 @@ impl HypenEngine {
     /// Register an action handler name
     pub fn register_action(&self, action_name: String) {
         if let Ok(mut state) = self.state.lock() {
-            state.core.registered_actions.push(action_name);
+            state.core.note_handler(&action_name);
         }
     }
 
@@ -898,14 +930,178 @@ impl HypenEngine {
             .lock()
             .map_err(|e| HypenError::ActionError(e.to_string()))?;
 
-        if state.core.registered_actions.contains(&action_name) {
+        let payload = payload_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| HypenError::ActionError(format!("invalid payload: {e}")))?;
+        let mut action = crate::dispatch::Action::new(action_name);
+        action.payload = payload;
+        let action = state
+            .core
+            .route_ui_action(action)
+            .map_err(|e| HypenError::ActionError(e.to_string()))?;
+        if state.core.registered_actions.contains(&action.name) {
             state.pending_actions.push(Action {
-                name: action_name,
-                payload_json,
+                name: action.name,
+                payload_json: action.payload.map(|p| p.to_string()),
             });
         }
 
         Ok(())
+    }
+
+    // ── External capability surface ─────────────────────────────────
+    //
+    // For callers that are NOT the rendered UI. `dispatch_action` above
+    // queues any registered action; these guarded entry points accept only
+    // what the app declares. Implementation is shared with every other
+    // binding via `crate::agent_core`, so the rule cannot drift per SDK.
+    // Collections are returned as JSON strings, matching this binding's
+    // existing payload convention.
+
+    /// The built-in external action names, as JSON
+    /// `{ navigate, back, setInput, bindAction }`.
+    ///
+    /// Exported so SDKs bind to these rather than hardcoding the literals —
+    /// hardcoding is why one rename broke four SDKs silently.
+    pub fn external_builtin_names(&self) -> String {
+        serde_json::json!({
+            "navigate": crate::agent::NAVIGATE,
+            "back": crate::agent::BACK,
+            "setInput": crate::agent::SET_INPUT,
+            "bindAction": crate::agent::BIND_ACTION,
+        })
+        .to_string()
+    }
+
+    /// The full MCP handshake for this app, as a JSON string.
+    ///
+    /// Composed in the engine so every SDK transports the same bytes rather
+    /// than writing its own prose and drifting.
+    pub fn mcp_manifest(&self) -> String {
+        self.state
+            .lock()
+            .ok()
+            .map(|s| {
+                serde_json::to_string(&crate::agent_manifest::mcp_manifest(&s.core))
+                    .unwrap_or_else(|_| "null".to_string())
+            })
+            .unwrap_or_else(|| "null".to_string())
+    }
+
+    /// List every action an external caller may dispatch, as a JSON array of
+    /// `{ name, module, builtin }`.
+    pub fn list_external_actions(&self) -> String {
+        self.state
+            .lock()
+            .ok()
+            .map(|s| {
+                serde_json::to_string(&crate::agent_core::list_actions(&s.core))
+                    .unwrap_or_else(|_| "[]".to_string())
+            })
+            .unwrap_or_else(|| "[]".to_string())
+    }
+
+    /// List declared routes as a JSON array of `{ path, params, moduleScope }`,
+    /// backing `navigate`'s argument schema.
+    pub fn list_routes(&self) -> String {
+        self.state
+            .lock()
+            .ok()
+            .map(|s| {
+                serde_json::to_string(&crate::agent_core::list_routes(&s.core))
+                    .unwrap_or_else(|_| "[]".to_string())
+            })
+            .unwrap_or_else(|| "[]".to_string())
+    }
+
+    /// List `.bind()`-declared writable inputs as a JSON array of
+    /// `{ path, prop, elementType, moduleScope }`, backing `set_input`'s
+    /// argument schema.
+    pub fn list_bindings(&self) -> String {
+        self.state
+            .lock()
+            .ok()
+            .map(|s| {
+                serde_json::to_string(&crate::agent_core::list_bindings(&s.core))
+                    .unwrap_or_else(|_| "[]".to_string())
+            })
+            .unwrap_or_else(|| "[]".to_string())
+    }
+
+    /// Dispatch on behalf of an external caller.
+    ///
+    /// Authorises against exactly what `list_external_actions` advertises,
+    /// then queues the *resolved* internal action for the host to poll — so
+    /// `navigate` arrives as `router.push` and `set_input` as `__hypen_bind`
+    /// with a payload built here, never one the caller supplied.
+    pub fn dispatch_external(
+        &self,
+        action_name: String,
+        payload_json: Option<String>,
+    ) -> Result<(), HypenError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| HypenError::ActionError(e.to_string()))?;
+
+        let payload: Option<serde_json::Value> = match payload_json.as_deref() {
+            None => None,
+            Some(raw) => Some(
+                serde_json::from_str(raw)
+                    .map_err(|e| HypenError::ActionError(format!("invalid payload: {e}")))?,
+            ),
+        };
+
+        // One construction site for every binding (`agent_core::external_action`);
+        // the FFI `Action` carries name + payload JSON only, so the `sender`
+        // stamp stays engine-side for now.
+        let resolved = crate::agent_core::external_action(&state.core, &action_name, payload, None)
+            .map_err(|e| HypenError::ActionError(e.to_string()))?;
+        let queued = Action {
+            name: resolved.name,
+            payload_json: resolved.payload.map(|p| p.to_string()),
+        };
+
+        state.pending_actions.push(queued);
+        Ok(())
+    }
+
+    /// Read module state, whole or at a path, as a JSON string.
+    ///
+    /// `module` is `None` for the primary module or a registered module's
+    /// name (case-insensitive). Returns `None` when the module is unknown or
+    /// the path is absent.
+    pub fn get_state_at(&self, module: Option<String>, path: Option<String>) -> Option<String> {
+        let state = self.state.lock().ok()?;
+        crate::agent_core::get_state(&state.core, module.as_deref(), path.as_deref())
+            .map(|v| v.to_string())
+    }
+
+    /// Drop a module and every action it declared.
+    ///
+    /// **Call on destroy only**, never on unmount: under the default
+    /// `persist: true` an off-screen module stays registered on purpose so
+    /// siblings can read its state.
+    pub fn unregister_module(&self, name: String) {
+        if let Ok(mut state) = self.state.lock() {
+            // Snapshot then diff, rather than capturing this scope's names: a
+            // scope-match misses the PRIMARY module, whose actions carry scope
+            // `None`, so once the shared implementation learned to clear the
+            // primary slot a scope-only capture left its `registered_actions`
+            // entries behind — still passing `dispatch_action`'s own check
+            // after the module was destroyed.
+            let before: Vec<String> = state.core.action_module_map.keys().cloned().collect();
+
+            crate::agent_core::unregister_module(&mut state.core, &name);
+
+            let gone: Vec<String> = before
+                .into_iter()
+                .filter(|a| !state.core.action_module_map.contains_key(a))
+                .collect();
+            state.core.registered_actions.retain(|a| !gone.contains(a));
+        }
     }
 
     /// Get pending actions (clears the queue)
@@ -1055,7 +1251,7 @@ mod tests {
     #[test]
     fn test_flagged_remove_carries_transition() {
         let patch = Patch::from_internal(InternalPatch::Remove {
-            id: "n7".to_string(),
+            id: "n7".into(),
             transition: true,
         });
 
@@ -1072,7 +1268,7 @@ mod tests {
     #[test]
     fn test_unflagged_remove_is_unchanged() {
         let patch = Patch::from_internal(InternalPatch::Remove {
-            id: "n7".to_string(),
+            id: "n7".into(),
             transition: false,
         });
 
@@ -1125,48 +1321,46 @@ mod tests {
                 spec: serde_json::json!({ "curve": "linear", "duration": 100 }),
             },
             InternalPatch::Create {
-                id: "n1".to_string(),
+                id: "n1".into(),
                 element_type: "text".to_string(),
                 props: Default::default(),
                 semantics: None,
             },
             InternalPatch::SetProp {
-                id: "n1".to_string(),
+                id: "n1".into(),
                 name: "0".to_string(),
                 value: serde_json::json!("hi"),
             },
             InternalPatch::RemoveProp {
-                id: "n1".to_string(),
+                id: "n1".into(),
                 name: "0".to_string(),
             },
             InternalPatch::SetText {
-                id: "n1".to_string(),
+                id: "n1".into(),
                 text: "hi".to_string(),
             },
             InternalPatch::SetSemantics {
-                id: "n1".to_string(),
+                id: "n1".into(),
                 semantics: None,
             },
             InternalPatch::Insert {
-                parent_id: "root".to_string(),
-                id: "n1".to_string(),
+                parent_id: "root".into(),
+                id: "n1".into(),
                 before_id: None,
             },
             InternalPatch::Move {
-                parent_id: "root".to_string(),
-                id: "n1".to_string(),
+                parent_id: "root".into(),
+                id: "n1".into(),
                 before_id: None,
             },
             InternalPatch::Remove {
-                id: "n1".to_string(),
+                id: "n1".into(),
                 transition: true,
             },
-            InternalPatch::Detach {
-                id: "n1".to_string(),
-            },
+            InternalPatch::Detach { id: "n1".into() },
             InternalPatch::Attach {
-                parent_id: "root".to_string(),
-                id: "n1".to_string(),
+                parent_id: "root".into(),
+                id: "n1".into(),
                 before_id: None,
             },
         ];

@@ -7544,3 +7544,937 @@ fn card_gets_dom_default_background_and_radius_but_can_override_radius() {
     assert_eq!(card.border.radius, 8.0);
     assert_eq!(find_item(&pass, "square").border.radius, 0.0);
 }
+
+// ---------------------------------------------------------------
+// Files app Grid: rows / scroll pane shorter than their content.
+// ---------------------------------------------------------------
+
+/// Render `source` through the real parser + engine (so `.tw(...)`
+/// lowers exactly the way the app sees it, `line-clamp-2` →
+/// `WebkitLineClamp` and all) under a module with `state`, and apply the
+/// template-expanded patches to a fresh renderer `Tree`.
+fn tree_from_dsl(source: &str, state: Value) -> Tree {
+    use hypen_engine::lifecycle::{Module, ModuleInstance};
+    use std::sync::Mutex;
+    let mut engine = hypen_engine::Engine::new();
+    let keys = state
+        .as_object()
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    engine.set_module(ModuleInstance::new(
+        Module::new("TestModule").with_state_keys(keys),
+        state,
+    ));
+    let collected: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = collected.clone();
+    engine.set_render_callback(move |patches| {
+        sink.lock().unwrap().extend(patches.iter().cloned());
+    });
+    let ast = hypen_parser::parse_component(source).expect("parse");
+    engine.render_ir_node(&hypen_engine::ast_to_ir_node(&ast));
+    let raw = std::mem::take(&mut *collected.lock().unwrap());
+    let mut tree = Tree::new();
+    tree.apply_batch(&hypen_engine::TemplateExpander::new().expand(raw));
+    tree
+}
+
+/// The Files app's browser window, trimmed to what drives its geometry:
+/// a content-sized window (`min-h` only) holding a toolbar, the
+/// `flex-1 min-h-[300px] overflow-y-auto` contents pane with the
+/// 4-column tile Grid, and a status row underneath.
+fn files_window_source() -> &'static str {
+    r#"Column {
+  Column {
+    Row {
+      Text("Toolbar")
+    }
+    .tw("px-3 py-2 w-full items-center")
+    Column {
+      Grid(@state.entries, key: "id") {
+        Column {
+          Column {
+            Text("ic")
+          }
+          .tw("w-[84px] h-[80px] rounded-xl items-center justify-center")
+          Text("@{item.name}")
+            .tw("mt-1 px-1.5 py-[1px] rounded-[5px] text-[12px] leading-[1.3] text-center line-clamp-2 break-words max-w-full")
+        }
+        .tw("items-center px-1 pt-1.5 pb-2 rounded-xl cursor-pointer select-none")
+      }
+      .gridColumns(4)
+      .tw("w-full gap-1 p-3")
+    }
+    .tw("w-full flex-1 min-h-[300px] overflow-y-auto")
+    Text("Uploaded 1 file.")
+      .tw("px-4 py-2 text-xs w-full")
+  }
+  .tw("w-full min-h-[200px] rounded-2xl")
+}
+.tw("flex-1 w-full overflow-auto pb-8")"#
+}
+
+fn files_entries(names: &[&str]) -> Value {
+    Value::Array(
+        names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| json!({"id": format!("e{i}"), "name": n}))
+            .collect(),
+    )
+}
+
+/// `(window, [toolbar, pane, status], grid)` ids of [`files_window_source`].
+fn files_window_ids(tree: &Tree) -> (String, Vec<String>, String) {
+    let outer = tree.children_of(ROOT_ID)[0].clone();
+    let window = tree.children_of(&outer)[0].clone();
+    let kids = tree.children_of(&window).to_vec();
+    let grid = tree.children_of(&kids[1])[0].clone();
+    (window, kids, grid)
+}
+
+const SHORT_NAME: &str = "a.png";
+const TWO_LINE_NAME: &str = "a-rather-long-file-name-number.png";
+const LONG_NAME: &str = "an-extremely-long-file-name-that-wraps-many-many-times-over.png";
+
+#[test]
+fn flex1_scroll_pane_in_content_sized_window_grows_to_fit_its_grid() {
+    // Regression: Taffy sizes a content-sized column from a scroll
+    // container's bare flex basis (0 for `flex-1`), ignoring both its
+    // content and its `min-h`. The window stayed at its own min-height,
+    // the pane got the leftover, the Grid overflowed it and the last
+    // row's names were clipped while the status row overlapped the
+    // window edge. CSS (`flex: 1 1 0%` in an auto-height column) sizes
+    // the pane to its content and grows the window.
+    let names: Vec<&str> = [SHORT_NAME, TWO_LINE_NAME, LONG_NAME]
+        .iter()
+        .cycle()
+        .take(10)
+        .copied()
+        .collect();
+    let tree = tree_from_dsl(
+        files_window_source(),
+        json!({ "entries": files_entries(&names) }),
+    );
+    let (window, kids, grid) = files_window_ids(&tree);
+    let mut text = TextEngine::new();
+    for (w, scale) in [(400u32, 1.0f32), (700, 1.0), (700, 2.0)] {
+        let pass = LayoutPass::compute(
+            &tree,
+            &mut text,
+            ((w as f32 * scale) as u32, (900.0 * scale) as u32),
+            scale,
+        );
+        let rect = |id: &str| pass.item_by_id(id).unwrap().rect;
+        let (win, pane, status, g) = (rect(&window), rect(&kids[1]), rect(&kids[2]), rect(&grid));
+        assert!(
+            g.h > 300.0 * scale,
+            "fixture must overflow the pane's min-height: grid={g:?}"
+        );
+        assert!(
+            pane.h + 0.5 >= g.h,
+            "w={w} scale={scale}: pane {pane:?} must fit its grid {g:?}"
+        );
+        assert!(
+            status.y + 0.5 >= pane.y + pane.h,
+            "w={w} scale={scale}: status {status:?} must sit below the pane {pane:?}"
+        );
+        assert!(
+            win.y + win.h + 0.5 >= status.y + status.h,
+            "w={w} scale={scale}: window {win:?} must contain the status row {status:?}"
+        );
+        for tile in tree.children_of(&grid) {
+            let label = rect(&tree.children_of(tile)[1]);
+            assert!(
+                label.y + label.h <= pane.y + pane.h + 0.5,
+                "w={w} scale={scale}: label {label:?} clipped by pane {pane:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn scroll_pane_keeps_its_authored_min_height() {
+    // `apply_overflow_props` zeroes a scroll container's *automatic*
+    // minimum so `flex-1` panes can shrink — it used to zero an
+    // authored `min-h-[300px]` too, collapsing the pane to its slot.
+    let tree = tree_from_dsl(
+        r#"Column {
+  Column {
+    Column { Text("x") }.tw("w-full h-[50px]")
+  }
+  .tw("w-full flex-1 min-h-[300px] overflow-y-auto")
+}
+.tw("w-full h-[200px]")"#,
+        json!({}),
+    );
+    let outer = tree.children_of(ROOT_ID)[0].clone();
+    let pane = tree.children_of(&outer)[0].clone();
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (600, 900), 1.0);
+    let h = pass.item_by_id(&pane).unwrap().rect.h;
+    assert!((h - 300.0).abs() < 0.5, "pane min-h must win: got {h}");
+}
+
+#[test]
+fn flex1_scroll_pane_still_fills_a_fixed_height_parent() {
+    // Guard for the content-sized-pane reconciliation: under a parent of
+    // definite height the pane must keep filling exactly its slot (and
+    // scroll its overflow) rather than growing to its content.
+    let tree = tree_from_dsl(
+        r#"Column {
+  Text("Header")
+  Column {
+    Column { Text("x") }.tw("w-full h-[1000px]")
+  }
+  .tw("w-full flex-1 overflow-y-auto")
+}
+.tw("w-full h-[400px]")"#,
+        json!({}),
+    );
+    let outer = tree.children_of(ROOT_ID)[0].clone();
+    let header = tree.children_of(&outer)[0].clone();
+    let pane = tree.children_of(&outer)[1].clone();
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (600, 900), 1.0);
+    let header_h = pass.item_by_id(&header).unwrap().rect.h;
+    let pane_rect = pass.item_by_id(&pane).unwrap().rect;
+    assert!(
+        (pane_rect.h - (400.0 - header_h)).abs() < 0.5,
+        "pane must fill the 400px parent minus the header, got {pane_rect:?}"
+    );
+}
+
+#[test]
+fn scroll_pane_override_reverts_when_parent_gains_a_fixed_height() {
+    // The reconciliation persists in the Taffy tree between passes; a
+    // later SetProp that makes the parent definite must hand the pane
+    // back its plain zero basis so it fits the parent again.
+    let patches = vec![
+        create_patch("win", "Column", &[("width", json!("100%"))]),
+        insert_patch(ROOT_ID, "win"),
+        create_patch(
+            "pane",
+            "Column",
+            &[
+                ("width", json!("100%")),
+                ("flex", json!("1")),
+                ("overflowY", json!("auto")),
+            ],
+        ),
+        insert_patch("win", "pane"),
+        create_patch("body", "Container", &[("height", json!(380))]),
+        insert_patch("pane", "body"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut taffy = TaffyState::new();
+    let viewport = (600u32, 900u32);
+    let vp_logical = crate::layout::logical_viewport(viewport, 1.0);
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, vp_logical));
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, viewport, 1.0, 0.0, &scrolls, 0,
+    );
+    let pane_h = pass.item_by_id("pane").unwrap().rect.h;
+    assert!(
+        (pane_h - 380.0).abs() < 0.5,
+        "content-sized parent: pane sized to content, got {pane_h}"
+    );
+
+    let set = vec![Patch::SetProp {
+        id: "win".into(),
+        name: "height".into(),
+        value: json!(120),
+    }];
+    tree.apply_batch(&set);
+    assert!(taffy.apply_patches(&set, &tree, 1.0, vp_logical));
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, viewport, 1.0, 0.0, &scrolls, 0,
+    );
+    let pane_h = pass.item_by_id("pane").unwrap().rect.h;
+    assert!(
+        (pane_h - 120.0).abs() < 0.5,
+        "fixed-height parent: pane must fit its 120px slot, got {pane_h}"
+    );
+}
+
+#[test]
+fn grid_rows_fit_the_tallest_tile_including_a_two_line_clamped_name() {
+    let tree = tree_from_dsl(
+        files_window_source(),
+        json!({ "entries": files_entries(&[SHORT_NAME, TWO_LINE_NAME, LONG_NAME, SHORT_NAME, TWO_LINE_NAME]) }),
+    );
+    let (_, kids, grid) = files_window_ids(&tree);
+    let tiles = tree.children_of(&grid).to_vec();
+    let mut text = TextEngine::new();
+    for (w, scale) in [(420u32, 1.0f32), (600, 1.0), (600, 2.0)] {
+        let pass = LayoutPass::compute(
+            &tree,
+            &mut text,
+            ((w as f32 * scale) as u32, (900.0 * scale) as u32),
+            scale,
+        );
+        let rect = |id: &str| pass.item_by_id(id).unwrap().rect;
+        let label_of = |tile: &str| tree.children_of(tile)[1].clone();
+        let line_h = 12.0 * 1.3 * scale;
+        let pad_bottom = 8.0 * scale;
+
+        // The long name is clamped to two lines — same box as the name
+        // that wraps to exactly two — and the short one is one line.
+        let short = rect(&label_of(&tiles[0]));
+        let two = rect(&label_of(&tiles[1]));
+        let long = rect(&label_of(&tiles[2]));
+        assert!(
+            two.h > 1.5 * line_h && two.h < 2.5 * line_h + 4.0 * scale,
+            "w={w} scale={scale}: two-line label {two:?}"
+        );
+        assert!(
+            (long.h - two.h).abs() < 1.0,
+            "w={w} scale={scale}: line-clamp-2 must cap the long label {long:?} at {two:?}"
+        );
+        assert!(
+            short.h < 1.5 * line_h + 4.0 * scale,
+            "short label {short:?}"
+        );
+        if let ItemKind::Text { max_lines, .. } =
+            &pass.item_by_id(&label_of(&tiles[2])).unwrap().kind
+        {
+            assert_eq!(*max_lines, Some(2), "line-clamp-2 → max_lines");
+        }
+
+        // First row: four equal tiles, each tall enough for its label
+        // plus its bottom padding; the grid holds both rows.
+        let row: Vec<_> = tiles[..4].iter().map(|t| rect(t)).collect();
+        for t in &row {
+            assert!(
+                (t.y - row[0].y).abs() < 0.5 && (t.h - row[0].h).abs() < 0.5,
+                "w={w} scale={scale}: row tiles must share y/height: {row:?}"
+            );
+        }
+        for tile in &tiles {
+            let t = rect(tile);
+            let l = rect(&label_of(tile));
+            assert!(
+                l.y + l.h + pad_bottom <= t.y + t.h + 0.5,
+                "w={w} scale={scale}: label {l:?} overflows tile {t:?}"
+            );
+        }
+        let g = rect(&grid);
+        let last = rect(tiles.last().unwrap());
+        assert!(last.y > row[0].y + row[0].h, "fifth tile wraps to row two");
+        assert!(
+            last.y + last.h <= g.y + g.h + 0.5,
+            "w={w} scale={scale}: grid {g:?} shorter than its last row {last:?}"
+        );
+        let pane = rect(&kids[1]);
+        assert!(pane.h + 0.5 >= g.h, "pane {pane:?} clips grid {g:?}");
+    }
+}
+
+/// `.aspectRatio(r)` on a container (not just Image/Video): a `w-full`
+/// square preview (Hypengram's New post) takes its height from its width
+/// instead of collapsing to its content.
+#[test]
+fn aspect_ratio_sizes_a_full_width_container() {
+    let src = r#"Column {
+        Column {
+            Column { Text("Choose a photo to share") }
+                .aspectRatio("1")
+                .tw("w-full items-center justify-center")
+            Column { Text("wide") }
+                .aspectRatio(2)
+                .tw("w-full")
+            Row { Text("Choose") }.tw("w-full mt-4")
+        }
+        .tw("w-full max-w-[600px] px-4 py-4")
+    }
+    .tw("w-full")"#;
+    let tree = tree_from_dsl(src, json!({}));
+    let mut text = TextEngine::new();
+    for scale in [1.0f32, 2.0] {
+        let pass = LayoutPass::compute(&tree, &mut text, ((640.0 * scale) as u32, (900.0 * scale) as u32), scale);
+        let page = &tree.children_of(&tree.children_of("root")[0])[0];
+        let kids = tree.children_of(page);
+        let rect = |id: &str| pass.item_by_id(id).unwrap().rect;
+        let (square, wide, row) = (rect(&kids[0]), rect(&kids[1]), rect(&kids[2]));
+        assert!((square.w - 568.0 * scale).abs() < 1.0, "scale={scale}: {square:?}");
+        assert!((square.h - square.w).abs() < 1.0, "scale={scale}: square must be square: {square:?}");
+        assert!((wide.h * 2.0 - wide.w).abs() < 1.0, "scale={scale}: 2:1 container: {wide:?}");
+        assert!(row.y + 0.5 >= wide.y + wide.h, "scale={scale}: row {row:?} below {wide:?}");
+    }
+}
+
+// ---------------------------------------------------------------
+// Textarea: multi-line text input sharing `ItemKind::Input`.
+// ---------------------------------------------------------------
+
+/// The social example's post composer, verbatim.
+const CREATE_POST_TEXTAREA: &str = r#"Column {
+    Textarea(placeholder: "Write a caption...").bind(@state.caption).tw("w-full mt-5 pt-4 text-sm border-0 border-t border-gray-200 bg-transparent min-h-[64px]")
+}"#;
+
+#[test]
+fn textarea_emits_multiline_input_with_placeholder_and_bind() {
+    let tree = tree_from_dsl(CREATE_POST_TEXTAREA, json!({ "caption": "" }));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let item = pass
+        .items
+        .iter()
+        .find(|it| matches!(it.kind, ItemKind::Input { multiline: true, .. }))
+        .expect("Textarea must emit a multi-line Input item, not an empty box");
+    match &item.kind {
+        ItemKind::Input {
+            value,
+            placeholder,
+            bind_path,
+            font_size,
+            line_height,
+            ..
+        } => {
+            assert_eq!(value, "");
+            assert_eq!(placeholder.as_deref(), Some("Write a caption..."));
+            assert_eq!(bind_path.as_deref(), Some("caption"));
+            assert_eq!(*font_size, 14.0, "tw text-sm");
+            assert_eq!(*line_height, 20.0, "tw text-sm carries line-height 1.25rem");
+        }
+        _ => unreachable!(),
+    }
+    assert!(item.is_focusable(), "a Textarea takes focus like an Input");
+    // `min-h-[64px]` beats the 2-row intrinsic height (2×20 + pt-4 16 +
+    // the 1px top border = 57).
+    assert!((item.rect.h - 64.0).abs() < 0.5, "min-h-[64px]: {:?}", item.rect);
+    assert!((item.rect.w - 400.0).abs() < 0.5, "w-full: {:?}", item.rect);
+}
+
+#[test]
+fn textarea_height_is_rows_of_line_height_and_ignores_content() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("plain", "Textarea", &[]));
+    tree.apply(&insert_patch("root", "plain"));
+    tree.apply(&create_patch("four", "Textarea", &[("rows", json!(4))]));
+    tree.apply(&insert_patch("root", "four"));
+    tree.apply(&create_patch(
+        "full",
+        "Textarea",
+        &[("value", json!("one\ntwo\nthree\nfour\nfive\nsix\nseven"))],
+    ));
+    tree.apply(&insert_patch("root", "full"));
+    tree.apply(&create_patch("fixed", "Textarea", &[("height", json!(30))]));
+    tree.apply(&insert_patch("root", "fixed"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    // Browser default: rows = 2 at `line-height: normal` (1.2 × 16px).
+    let two_rows = 2.0 * 16.0 * 1.2;
+    // (Taffy rounds layout to whole pixels.)
+    assert!((find_item(&pass, "plain").rect.h - two_rows).abs() <= 1.0);
+    assert!((find_item(&pass, "four").rect.h - 2.0 * two_rows).abs() <= 1.0);
+    // Like a DOM `<textarea>`, content does not grow the box — it
+    // scrolls inside it.
+    assert!((find_item(&pass, "full").rect.h - two_rows).abs() <= 1.0);
+    // An explicit height wins outright, even below the rows height.
+    assert!((find_item(&pass, "fixed").rect.h - 30.0).abs() < 0.5);
+}
+
+#[test]
+fn textarea_value_soft_wraps_to_the_box_width() {
+    let tree = tree_from_dsl(
+        r#"Column { Textarea(placeholder: "Bio").bind(@state.bio).tw("w-[120px] p-2") }"#,
+        json!({ "bio": "the quick brown fox jumps over the lazy dog again and again\nsecond paragraph" }),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = pass
+        .items
+        .iter()
+        .find(|it| matches!(it.kind, ItemKind::Input { multiline: true, .. }))
+        .expect("textarea item");
+    let ItemKind::Input { value, .. } = &item.kind else {
+        unreachable!()
+    };
+    let frame = crate::textarea::FieldFrame::of(item, 1.0).expect("frame");
+    assert!((frame.inner_w - 104.0).abs() < 0.5, "120 - 2×8 padding: {frame:?}");
+    let lines = frame.lines(&mut text, value);
+    assert!(lines.len() >= 4, "long line must wrap + hard newline: {lines:?}");
+    for line in &lines {
+        assert!(
+            line.width() <= frame.inner_w + 0.5,
+            "every visual line fits the content width: {line:?}"
+        );
+    }
+    // Wrapped content is taller than the 2-row box, so it scrolls.
+    let content_h = crate::textarea::content_height(&lines);
+    assert!(content_h > frame.view_h, "{content_h} vs {}", frame.view_h);
+    // The painter's measure agrees with the caret geometry's height.
+    let (_, measured_h) = text.measure_weighted_line_height(
+        value,
+        frame.font_px,
+        Some(frame.inner_w),
+        frame.weight,
+        frame.line_px,
+    );
+    assert!((measured_h - content_h).abs() <= 1.0, "{measured_h} vs {content_h}");
+}
+
+#[test]
+fn disabled_textarea_is_not_focusable() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "ta",
+        "Textarea",
+        &[("bind", json!("bio")), ("disabled", json!(true))],
+    ));
+    tree.apply(&insert_patch("root", "ta"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    assert!(!find_item(&pass, "ta").is_focusable());
+}
+
+#[test]
+fn border_0_then_border_t_keeps_the_top_hairline() {
+    // tw `border-0 border-t border-gray-200` = `border-width: 0px` +
+    // `border-top-width: 1px`. CSS: the per-side width overrides the
+    // shorthand for its edge. Desktop used to let the uniform 0 win, so
+    // the composer's divider above the Textarea / Input never drew.
+    let tree = tree_from_dsl(
+        r#"Column {
+            Textarea(placeholder: "Caption").tw("w-full border-0 border-t border-gray-200")
+            Input(placeholder: "Comment").tw("w-full border-0 border-t border-gray-200")
+            Row { Text("x") }.tw("border-0 border-t border-gray-200")
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let bordered: Vec<&LayoutItem> = pass
+        .items
+        .iter()
+        .filter(|it| it.border.width > 0.0)
+        .collect();
+    assert_eq!(bordered.len(), 3, "all three carry the hairline");
+    for item in bordered {
+        assert_eq!(item.border.sides, crate::style::BORDER_SIDE_TOP, "{:?}", item.kind);
+        assert!(item.border.is_visible());
+        assert_eq!(item.border.width, 1.0);
+        assert_eq!(item.border.color, Rgba(0xe5, 0xe7, 0xeb, 0xff));
+    }
+}
+
+#[test]
+fn per_side_border_overrides_uniform_width_for_its_edge() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "c",
+        "Container",
+        &[("borderWidth", json!(2)), ("borderBottomWidth", json!(0))],
+    ));
+    tree.apply(&insert_patch("root", "c"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    use crate::style::{BORDER_SIDE_BOTTOM, BORDER_SIDES_ALL};
+    let b = find_item(&pass, "c").border;
+    assert_eq!(b.sides, BORDER_SIDES_ALL & !BORDER_SIDE_BOTTOM);
+    assert_eq!(b.width, 2.0);
+}
+
+#[test]
+fn directional_border_only_insets_its_own_edge() {
+    // A `border-t` box insets its content by the stroke on the top edge
+    // only — the undrawn left edge must not shift the child.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "box",
+        "Column",
+        &[("borderTopWidth", json!(4)), ("borderColor", json!("#000"))],
+    ));
+    tree.apply(&insert_patch("root", "box"));
+    add_text(&mut tree, "box", "t", "hi");
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let parent = find_item(&pass, "box").rect;
+    let child = find_item(&pass, "t").rect;
+    assert!((child.y - (parent.y + 4.0)).abs() < 0.5, "{parent:?} {child:?}");
+    assert!((child.x - parent.x).abs() < 0.5, "{parent:?} {child:?}");
+}
+
+/// Patches the engine emits for `source` (template-expanded), so a test
+/// can drive the incremental `TaffyState::apply_patches` path with the
+/// same nodes `tree_from_dsl` builds.
+fn patches_from_dsl(source: &str) -> Vec<Patch> {
+    use hypen_engine::lifecycle::{Module, ModuleInstance};
+    use std::sync::Mutex;
+    let mut engine = hypen_engine::Engine::new();
+    engine.set_module(ModuleInstance::new(Module::new("TestModule"), json!({})));
+    let collected: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = collected.clone();
+    engine.set_render_callback(move |patches| {
+        sink.lock().unwrap().extend(patches.iter().cloned());
+    });
+    let ast = hypen_parser::parse_component(source).expect("parse");
+    engine.render_ir_node(&hypen_engine::ast_to_ir_node(&ast));
+    let raw = std::mem::take(&mut *collected.lock().unwrap());
+    hypen_engine::TemplateExpander::new().expand(raw)
+}
+
+/// First node of `element_type` in document order.
+fn first_of_type(tree: &Tree, element_type: &str) -> String {
+    fn walk(tree: &Tree, id: &str, ty: &str) -> Option<String> {
+        if tree.get(id).is_some_and(|n| n.element_type == ty) {
+            return Some(id.to_string());
+        }
+        tree.children_of(id).iter().find_map(|c| walk(tree, c, ty))
+    }
+    walk(tree, "root", element_type).unwrap_or_else(|| panic!("no {element_type} in tree"))
+}
+
+fn seed_tall_story_photo(src: &str) {
+    crate::paint::image::test_seed_decoded(
+        src,
+        std::sync::Arc::new(tiny_skia::Pixmap::new(1080, 1920).unwrap()),
+    );
+}
+
+/// The Hypengram story viewer (`Story.hypen` under `App.hypen`'s
+/// `h-screen` root), trimmed to what drives the photo's geometry.
+fn story_viewer_source(src: &str) -> String {
+    format!(
+        r#"Column {{
+        Column {{
+            Stack {{
+                Image(src: "{src}")
+                    .tw("w-full h-full")
+                    .objectFit("cover")
+                Row {{ Text("user") }}.tw("py-3 px-4 items-center w-full")
+            }}
+            .tw("flex-1 w-full bg-black")
+        }}
+        .tw("flex-1 w-full h-full min-h-0 overflow-hidden")
+    }}
+    .tw("flex-1 w-full h-screen min-h-0 overflow-hidden bg-white")"#
+    )
+}
+
+fn assert_story_fills_viewport(tree: &Tree, pass: &LayoutPass, label: &str) {
+    let stack = pass.item_by_id(&first_of_type(tree, "Stack")).expect("stack").rect;
+    let image = pass.item_by_id(&first_of_type(tree, "Image")).expect("image").rect;
+    assert!(
+        (stack.h - 700.0).abs() < 0.5 && (stack.w - 800.0).abs() < 0.5,
+        "{label}: the flex-1 Stack must fill the 700px column, got {stack:?}"
+    );
+    assert!(
+        (image.h - 700.0).abs() < 0.5 && (image.w - 800.0).abs() < 0.5,
+        "{label}: the h-full photo must fill the Stack (cropped by objectFit), \
+         not its 1422px natural height; got {image:?}"
+    );
+    assert!(
+        pass.content_size.1 <= 700.5,
+        "{label}: the cropped photo must not report overflow (page scroll); \
+         content_size = {:?}",
+        pass.content_size
+    );
+}
+
+/// CSS Sizing 3 §5.2.2: a replaced element with a percentage height is
+/// compressible — its min-content height contribution is 0, so the
+/// `flex-1` Stack's automatic minimum doesn't pin it to the photo's
+/// natural height and the photo's `h-full` resolves against the 700px
+/// slot. Previously Taffy's aspect ratio sized the photo (and so the
+/// Stack) at 800 × 1920/1080 = 1422px: a hugely zoomed photo plus a
+/// scrollbar.
+#[test]
+fn story_viewer_h_full_photo_fills_flex_slot_instead_of_natural_height() {
+    let src = "test://story-tall-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(&story_viewer_source(src), json!({}));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 700), 1.0);
+    assert_story_fills_viewport(&tree, &pass, "bulk build");
+}
+
+/// The incremental path — every node Created / Inserted through
+/// `TaffyState::apply_patches` (`node_style_with`), then a full
+/// `restyle_all` — must build what the bulk build does, and an authored
+/// `min-h-*` on the Stack still wins over the dropped minimum.
+#[test]
+fn story_viewer_incremental_patches_match_bulk_build() {
+    let src = "test://story-tall-incremental-1080x1920";
+    seed_tall_story_photo(src);
+    let patches = patches_from_dsl(&story_viewer_source(src));
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    assert!(state.apply_patches(&patches, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute_with_state(
+        &mut state, &tree, &mut text, (800, 700), 1.0, 0.0, &HashMap::new(), 1,
+    );
+    assert_story_fills_viewport(&tree, &pass, "incremental build");
+
+    state.restyle_all(&tree, 1.0, (800, 700));
+    let pass = LayoutPass::compute_with_state(
+        &mut state, &tree, &mut text, (800, 700), 1.0, 0.0, &HashMap::new(), 2,
+    );
+    assert_story_fills_viewport(&tree, &pass, "restyle_all");
+
+    // A geometry SetProp on the Stack restyles it through
+    // `resolve_node_style`; an authored minimum is honoured.
+    let stack_id = first_of_type(&tree, "Stack");
+    let set_min = vec![Patch::SetProp {
+        id: stack_id.as_str().into(),
+        name: "minHeight.0".into(),
+        value: json!(900),
+    }];
+    tree.apply_batch(&set_min);
+    assert!(state.apply_patches(&set_min, &tree, 1.0, vp(800.0)));
+    let pass = LayoutPass::compute_with_state(
+        &mut state, &tree, &mut text, (800, 700), 1.0, 0.0, &HashMap::new(), 3,
+    );
+    let stack = pass.item_by_id(&stack_id).expect("stack").rect;
+    assert!((stack.h - 900.0).abs() < 0.5, "authored min-h wins: {stack:?}");
+
+    let unset_min = vec![Patch::RemoveProp {
+        id: stack_id.as_str().into(),
+        name: "minHeight.0".into(),
+    }];
+    tree.apply_batch(&unset_min);
+    assert!(state.apply_patches(&unset_min, &tree, 1.0, vp(800.0)));
+    let pass = LayoutPass::compute_with_state(
+        &mut state, &tree, &mut text, (800, 700), 1.0, 0.0, &HashMap::new(), 4,
+    );
+    assert_story_fills_viewport(&tree, &pass, "min-h removed");
+
+    // A bulk rebuild of the same tree lands on the same geometry.
+    state.mark_needs_rebuild();
+    let rebuilt = LayoutPass::compute_with_state(
+        &mut state, &tree, &mut text, (800, 700), 1.0, 0.0, &HashMap::new(), 5,
+    );
+    assert_story_fills_viewport(&tree, &rebuilt, "bulk rebuild");
+}
+
+/// A Stack that does NOT grow keeps `min-height: auto`: in a column that
+/// overflows it is not squashed below its content.
+#[test]
+fn content_sized_stack_keeps_automatic_minimum() {
+    let src = "test://stack-content-sized-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+            Stack {{
+                Image(src: "{src}").tw("w-full")
+                Text("overlay")
+            }}
+            .tw("w-full")
+            Column {{}}.tw("h-[400px] w-full")
+        }}
+        .tw("w-full h-screen")"#
+        ),
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 700), 1.0);
+    let stack = pass.item_by_id(&first_of_type(&tree, "Stack")).unwrap().rect;
+    let natural = 800.0 * 1920.0 / 1080.0;
+    assert!(
+        (stack.h - natural).abs() < 1.0,
+        "a content-sized Stack stays at its content height; got {stack:?}"
+    );
+}
+
+/// The bitmap decoding AFTER the first layout (the real-world order)
+/// bumps the image-load generation, and the relayout that follows must
+/// land on the same geometry as a build that saw the natural size up
+/// front.
+#[test]
+fn story_viewer_natural_size_arriving_later_still_fills_slot() {
+    let src = "test://story-tall-late-1080x1920";
+    let tree = tree_from_dsl(&story_viewer_source(src), json!({}));
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let before = LayoutPass::compute_with_state(
+        &mut state, &tree, &mut text, (800, 700), 1.0, 0.0, &HashMap::new(), 1,
+    );
+    let stack = before.item_by_id(&first_of_type(&tree, "Stack")).unwrap().rect;
+    assert!((stack.h - 700.0).abs() < 0.5, "unloaded: {stack:?}");
+
+    seed_tall_story_photo(src);
+    crate::paint::image::bump_image_load_generation_for_test();
+    let after = LayoutPass::compute_with_state(
+        &mut state, &tree, &mut text, (800, 700), 1.0, 0.0, &HashMap::new(), 1,
+    );
+    assert_story_fills_viewport(&tree, &after, "after load");
+}
+
+/// CSS: a percentage height against an indefinite containing block
+/// behaves as `auto`, so the photo keeps its natural (aspect-derived)
+/// height — the min-content-0 rule must not collapse it to 0.
+#[test]
+fn h_full_image_in_indefinite_height_parent_keeps_natural_height() {
+    let src = "test://h-full-indefinite-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+            Image(src: "{src}").tw("w-full h-full")
+            Text("below")
+        }}
+        .tw("w-full")"#
+        ),
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 700), 1.0);
+    let image = pass.item_by_id(&first_of_type(&tree, "Image")).unwrap().rect;
+    let natural = 800.0 * 1920.0 / 1080.0;
+    // (Taffy then re-resolves the percentage against the Column's
+    // post-flex height, which also holds the Text — so ≥ natural.)
+    assert!(
+        (image.w - 800.0).abs() < 0.5 && image.h >= natural - 1.0,
+        "indefinite parent: h-full → auto → natural height {natural}; got {image:?}"
+    );
+    let below = pass.item_by_id(&first_of_type(&tree, "Text")).unwrap().rect;
+    assert!(below.y >= image.y + image.h - 0.5, "Text flows below the photo: {below:?}");
+    assert!(
+        pass.content_size.1 >= natural - 1.0,
+        "the tall photo still scrolls the page: {:?}",
+        pass.content_size
+    );
+}
+
+/// Sizing paths the percentage-height fix must leave alone: px sizes,
+/// `.size(N)` icons, Avatar's default, authored `aspect-square`, and a
+/// `w-full` image deriving its height from the natural ratio.
+#[test]
+fn non_percent_height_images_keep_their_sizing() {
+    let src = "test://non-percent-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+            Image(src: "{src}").tw("w-[200px] h-[100px]")
+            Image(src: "{src}").size(24)
+            Avatar(src: "{src}")
+            Image(src: "{src}").tw("w-full aspect-square")
+            Image(src: "{src}").tw("w-full")
+            Image(src: "{src}").tw("w-[90px]").aspectRatio(3)
+        }}
+        .tw("w-full")"#
+        ),
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 700), 1.0);
+    let column = first_of_type(&tree, "Column");
+    let rects: Vec<Rect> = tree
+        .children_of(&column)
+        .iter()
+        .map(|id| pass.item_by_id(id).expect("laid out").rect)
+        .collect();
+    let expect = [
+        (200.0, 100.0),
+        (24.0, 24.0),
+        (40.0, 40.0),
+        (800.0, 800.0),
+        (800.0, 800.0 * 1920.0 / 1080.0),
+        (90.0, 30.0),
+    ];
+    for (i, (rect, (w, h))) in rects.iter().zip(expect).enumerate() {
+        assert!(
+            (rect.w - w).abs() < 1.0 && (rect.h - h).abs() < 1.0,
+            "image #{i}: expected {w}x{h}, got {rect:?}"
+        );
+    }
+}
+
+/// The Profile grid: `aspect-square w-full object-cover` thumbnails in
+/// a 3-column Grid stay square at the track width, whatever their
+/// natural ratio.
+#[test]
+fn grid_of_aspect_square_thumbnails_unchanged() {
+    let src = "test://grid-thumb-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+            Grid(@state.posts, key: "id") {{
+                Image(src: "{src}")
+                    .objectFit("cover")
+                    .tw("aspect-square w-full")
+            }}
+            .gridColumns(3)
+            .gap(2)
+        }}
+        .tw("w-full")"#
+        ),
+        json!({ "posts": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}] }),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 700), 1.0);
+    let grid = first_of_type(&tree, "Grid");
+    let track = (800.0 - 2.0 * 2.0) / 3.0;
+    let mut count = 0;
+    fn images(tree: &Tree, id: &str, out: &mut Vec<String>) {
+        if tree.get(id).is_some_and(|n| n.element_type == "Image") {
+            out.push(id.to_string());
+        }
+        for c in tree.children_of(id) {
+            images(tree, c, out);
+        }
+    }
+    let mut ids = Vec::new();
+    images(&tree, &grid, &mut ids);
+    for id in ids {
+        let r = pass.item_by_id(&id).expect("thumb").rect;
+        assert!(
+            (r.w - track).abs() < 1.0 && (r.h - track).abs() < 1.0,
+            "thumbnail {id} should be a {track}px square; got {r:?}"
+        );
+        count += 1;
+    }
+    assert_eq!(count, 4);
+}
+
+
+/// An Image Created through the incremental path whose bitmap is
+/// already decoded (e.g. navigating back to a cached route — no load
+/// generation bump follows) sizes from its natural size exactly like
+/// the bulk build: `w-full` derives its height from the natural ratio,
+/// an unsized one takes its natural size.
+#[test]
+fn incremental_image_create_uses_loaded_natural_size_like_bulk() {
+    let src = "test://incremental-natural-1080x1920";
+    seed_tall_story_photo(src);
+    let source = format!(
+        r#"Column {{
+        Image(src: "{src}").tw("w-full")
+        Image(src: "{src}")
+    }}
+    .tw("w-full")"#
+    );
+    let patches = patches_from_dsl(&source);
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    assert!(state.apply_patches(&patches, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let incremental = LayoutPass::compute_with_state(
+        &mut state, &tree, &mut text, (800, 700), 1.0, 0.0, &HashMap::new(), 1,
+    );
+    let bulk = LayoutPass::compute(&tree, &mut text, (800, 700), 1.0);
+    let column = first_of_type(&tree, "Column");
+    let ids = tree.children_of(&column).to_vec();
+    let expect = [(800.0, 800.0 * 1920.0 / 1080.0), (1080.0, 1920.0)];
+    for (id, (w, h)) in ids.iter().zip(expect) {
+        let a = incremental.item_by_id(id).unwrap().rect;
+        let b = bulk.item_by_id(id).unwrap().rect;
+        assert!(
+            (a.w - w).abs() < 1.0 && (a.h - h).abs() < 1.0,
+            "incremental {id}: expected {w}x{h}, got {a:?}"
+        );
+        assert!(
+            (a.w - b.w).abs() < 0.5 && (a.h - b.h).abs() < 0.5,
+            "incremental {a:?} != bulk {b:?}"
+        );
+    }
+}

@@ -9,7 +9,7 @@ public struct ComponentContext: @unchecked Sendable {
     public init(element: HypenElement, renderer: HypenRenderer, actionDispatcher: ActionDispatcher) {
         self.element = element
         self.renderer = renderer
-        self.actionDispatcher = actionDispatcher
+        self.actionDispatcher = NodeActionDispatcher(base: actionDispatcher, node: element.id)
     }
 }
 
@@ -131,6 +131,14 @@ extension ComponentRegistry {
 
         // Icon component (renders server-resolved SVG path data)
         registry.register(IconComponent())
+
+        // Chart family: the host owns the coordinate space and draws every
+        // mark itself, so the marks register as no-op handlers — that keeps a
+        // stray mark out of the container fallback in HypenElementView.
+        registry.register(ChartComponent())
+        for mark in ChartMarkComponent.all() {
+            registry.register(mark)
+        }
 
         // Remote embedding
         registry.register(HypenAppComponent())

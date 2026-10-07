@@ -58,6 +58,14 @@ fun ComponentRegistry.registerDefaults(): ComponentRegistry {
     // Icon component (renders server-resolved SVG path data)
     register(IconComponent())
 
+    // Chart family. The Chart owns the coordinate space and draws every mark
+    // itself; the mark handlers exist so Line/Bars/… are known types rather
+    // than unknown-type fallbacks, and paint nothing of their own.
+    register(ChartComponent())
+    for (kind in ChartMarkKind.entries) {
+        register(ChartMarkComponent(kind))
+    }
+
     // Embedded remote app (HypenApp("ws://...")) with loading/error slots
     register(HypenAppComponent())
 

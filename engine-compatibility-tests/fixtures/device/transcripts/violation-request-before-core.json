@@ -1,0 +1,30 @@
+{
+  "name": "violation-request-before-core",
+  "description": "An app request before the connection-owned core.capabilities stream was opened (\u00a72.2: the stream opens before module callbacks can request device work). The connection's mandatory control is missing: the client closes the device connection.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "expectViolation": "connection"
+    }
+  ]
+}

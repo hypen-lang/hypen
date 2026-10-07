@@ -6,6 +6,14 @@ module HomePage {
 
             Row {
                 Button {
+                    Icon(@resources.plus-square)
+                        .size(26)
+                        .color("#262626")
+                }
+                .tw("bg-transparent border-0 p-2 shrink-0")
+                .onClick(@router.push, to: "/create")
+
+                Button {
                     Icon(@resources.heart)
                         .size(24)
                         .color("#262626")

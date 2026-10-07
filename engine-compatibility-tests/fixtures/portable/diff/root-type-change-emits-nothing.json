@@ -1,0 +1,14 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-root-type-change-emits-nothing",
+  "description": "The root itself has no path: a root-level type or scalar change produces an empty diff (hosts wrap state in an object).",
+  "function": "diff_paths",
+  "priority": "P2",
+  "input": {
+    "old": {
+      "anything": 1
+    },
+    "new": 42
+  },
+  "expected": []
+}

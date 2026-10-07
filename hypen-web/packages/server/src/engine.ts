@@ -31,6 +31,13 @@ export type {
   ActionHandler,
   ResolvedComponent,
   ComponentResolver,
+  // External capability surface — `listActions` / `listRoutes` /
+  // `listBindings` / `dispatchExternal` / `getStateAt` /
+  // `unregisterModule` are inherited from `BaseEngine`, so a Node host
+  // reaches the guarded surface through this `Engine` with no extra wiring.
+  AgentAction,
+  AgentRoute,
+  BoundInput,
 } from "@hypen-space/core/types";
 
 /**

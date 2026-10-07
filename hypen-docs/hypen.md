@@ -332,7 +332,7 @@ resourcesDir("./resources")          // Kotlin
 `.verticalAlignment("start"|"center"|"end"|"space-between"|"space-around")`
 `.weight(1)` `.flex(1)` `.flexDirection("row"|"column")` `.flexWrap("wrap")`
 `.overflow("hidden"|"scroll"|"auto")` `.scrollable(true)`
-`.gridColumns(3)` `.gridTemplateColumns("1fr 2fr 1fr")`
+`.gridColumns(3)`
 
 ### Positioning
 `.position("absolute"|"relative"|"fixed"|"sticky")`

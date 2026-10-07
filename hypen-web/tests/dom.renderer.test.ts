@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 import { describe, expect, test } from "bun:test";
 import { DOMRenderer } from "../packages/web/src/dom/renderer";
 import type { Patch } from "../packages/core/src/types";
@@ -152,6 +153,33 @@ describe("DOMRenderer patch handling", () => {
     expect(remoteAssetBaseUrl("ws://localhost:3177/ws")).toBe("http://localhost:3177/");
   });
 
+  test("HypenApp asks the renderer's hypenAppDevice factory for a host per embedded URL", () => {
+    const urls: string[] = [];
+    const container = document.createElement("div");
+    const renderer = new DOMRenderer(container, new StubEngine() as unknown as Engine, undefined, {
+      hypenAppDevice: (url) => {
+        urls.push(url);
+        return undefined; // UI-only: the embed still connects
+      },
+    });
+    renderer.applyPatches([
+      { type: "create", id: "app", elementType: "HypenApp", props: { "0": "ws://social.example/ws" } } as Patch,
+    ]);
+    expect(urls).toEqual(["ws://social.example/ws"]);
+
+    // A throwing factory never breaks the embed; without one nothing is asked.
+    const quiet = new DOMRenderer(document.createElement("div"), new StubEngine() as unknown as Engine, undefined, {
+      hypenAppDevice: () => {
+        throw new Error("boom");
+      },
+    });
+    expect(() =>
+      quiet.applyPatches([
+        { type: "create", id: "app", elementType: "HypenApp", props: { "0": "ws://x.example/ws" } } as Patch,
+      ]),
+    ).not.toThrow();
+  });
+
   test("insert respects before_id ordering", () => {
     const { renderer } = makeRenderer();
 
@@ -208,7 +236,7 @@ describe("DOMRenderer patch handling", () => {
       public dispatchCalls: Array<{ name: string; payload: any }> = [];
 
       dispatchAction(name: string, payload: any): void {
-        this.dispatchCalls.push({ name, payload });
+        this.dispatchCalls.push(semanticAction(name, payload));
       }
     }
 
@@ -381,6 +409,28 @@ describe("DOMRenderer patch field name robustness", () => {
     const parent = renderer.getNode("parent") as FakeElement;
     const order = parent.children.map((c) => c.dataset.hypenId);
     expect(order).toEqual(["b", "a"]);
+  });
+
+  test("move patch without beforeId moves an existing child to the end", () => {
+    const { renderer } = makeRenderer();
+
+    renderer.applyPatches([
+      { type: "create", id: "parent", elementType: "Column", props: {} } as Patch,
+      { type: "create", id: "a", elementType: "Text", props: {} } as Patch,
+      { type: "create", id: "b", elementType: "Text", props: {} } as Patch,
+      { type: "create", id: "c", elementType: "Text", props: {} } as Patch,
+      { type: "insert", parentId: "parent", id: "a" } as Patch,
+      { type: "insert", parentId: "parent", id: "b" } as Patch,
+      { type: "insert", parentId: "parent", id: "c" } as Patch,
+    ]);
+
+    // The keyed reconciler's "lands last" move carries no anchor.
+    renderer.applyPatches([
+      { type: "move", parentId: "parent", id: "a", beforeId: null } as unknown as Patch,
+    ]);
+
+    const parent = renderer.getNode("parent") as FakeElement;
+    expect(parent.children.map((c) => c.dataset.hypenId)).toEqual(["b", "c", "a"]);
   });
 
   test("insert into 'root' container appends to the renderer container", () => {

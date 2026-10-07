@@ -7,7 +7,7 @@ import space.hypen.renderer.model.ActionValue
  *
  * Unlike every other `on*` applicator it attaches nothing: the action is read
  * off the element's props when a playback settles NATURALLY. Firing points
- * and payloads are normative (.notes/ANIMATION_API_DESIGN.md §3 Option F):
+ * and payloads are normative (hypen-web/docs/animation.md §3 Option F):
  *
  *   - finite `.animate` preset completes → `{ animation: "<presetName>" }`
  *   - `.enter` settles                   → `{ animation: "enter" }`

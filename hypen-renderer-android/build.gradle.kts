@@ -9,5 +9,5 @@ plugins {
 
 allprojects {
     group = "space.hypen"
-    version = "0.6.4"
+    version = "0.6.5"
 }

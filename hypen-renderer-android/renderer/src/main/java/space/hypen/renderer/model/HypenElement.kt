@@ -54,9 +54,20 @@ class HypenElement(
      */
     private var animatedOverridesState: Map<String, Any?> by mutableStateOf(emptyMap())
 
+    /**
+     * A runtime `.states` pose overlaid by the drag-and-drop runtime
+     * (`lifted` on the dragged source, `over` on the hovered zone — plan
+     * §2.1), keyed by lowered prop name exactly like [animatedOverridesState]
+     * and layered ABOVE it: the drag owns the node while a label is live
+     * (`dnd > … > .transition`), so a glide landing on a pose-overridden key
+     * keeps running underneath and shows through when the label clears.
+     */
+    private var poseOverridesState: Map<String, Any?> by mutableStateOf(emptyMap())
+
     private class MergedProps(
         val raw: Map<String, Any?>,
         val overrides: Map<String, Any?>,
+        val poses: Map<String, Any?>,
         val merged: Map<String, Any?>,
     )
 
@@ -70,14 +81,16 @@ class HypenElement(
         get() {
             val raw = propsState
             val overrides = animatedOverridesState
-            if (overrides.isEmpty()) return raw
+            val poses = poseOverridesState
+            if (overrides.isEmpty() && poses.isEmpty()) return raw
             val cached = mergedCache
-            if (cached != null && cached.raw === raw && cached.overrides === overrides) {
+            if (cached != null && cached.raw === raw && cached.overrides === overrides && cached.poses === poses) {
                 return cached.merged
             }
             val merged = LinkedHashMap(raw)
             merged.putAll(overrides)
-            mergedCache = MergedProps(raw, overrides, merged)
+            merged.putAll(poses)
+            mergedCache = MergedProps(raw, overrides, poses, merged)
             return merged
         }
 
@@ -113,6 +126,26 @@ class HypenElement(
 
     /** True while [name] is shadowed by an in-flight glide. */
     fun hasAnimatedOverride(name: String): Boolean = animatedOverridesState.containsKey(name)
+
+    /**
+     * Overlay one runtime `.states` pose (lowered prop keys → values, from
+     * `__anim.statePoses[label]`). Replaces any previous overlay; every
+     * consumer sees the pose through [props] with no knowledge of DnD.
+     */
+    fun setPoseOverrides(pose: Map<String, Any?>) {
+        poseOverridesState = LinkedHashMap(pose)
+        bumpPropsRevision()
+    }
+
+    /** Drop the pose overlay; the base value (or absence) shows through again. */
+    fun clearPoseOverrides() {
+        if (poseOverridesState.isEmpty()) return
+        poseOverridesState = emptyMap()
+        bumpPropsRevision()
+    }
+
+    /** True while a runtime pose is overlaid. */
+    val hasPoseOverrides: Boolean get() = poseOverridesState.isNotEmpty()
 
     internal fun setProp(name: String, value: Any?) {
         val next = LinkedHashMap(propsState)

@@ -20,6 +20,9 @@
 //!
 //! For WASM/JavaScript usage, see the [`wasm`] module (enabled via the `js` feature).
 //!
+//! The server side of the Device Capability Protocol (RFC 001) is the
+//! sans-IO [`device::DeviceBroker`], shared by every server SDK.
+//!
 //! ## Internal Modules
 //!
 //! The following modules are exported for advanced use and testing but are
@@ -28,6 +31,11 @@
 //!
 //! `ir`, `reactive`, `reconcile`, `dispatch`, `render`, `serialize`
 
+pub mod action_routing;
+pub mod agent;
+pub(crate) mod agent_core;
+pub(crate) mod agent_manifest;
+pub mod device;
 pub mod dispatch;
 pub mod engine;
 pub(crate) mod engine_core;
@@ -68,6 +76,7 @@ pub mod uniffi;
 
 // ── Public API ─────────────────────────────────────────────────────────
 
+pub use agent::{AgentAction, AgentRoute, BoundInput, BACK, BIND_ACTION, NAVIGATE, SET_INPUT};
 pub use engine::Engine;
 pub use error::EngineError;
 
@@ -80,8 +89,8 @@ pub use ir::{parse_svg, resolve_icons_in_ir, IconData, IconPath, ResourceRegistr
 pub use lifecycle::{Module, ModuleInstance};
 pub use portable::{
     build_url, decode_uri_component, diff_paths, encode_uri_component, match_path, parse_query,
-    path_delete, path_get, path_has, path_set, session_step, DiffEntry, RouteMatch, SessionEffect,
-    SessionEvent, SessionPolicy, SessionState, TemplateExpander,
+    path_delete, path_get, path_has, path_move, path_set, session_step, DiffEntry, RouteMatch,
+    SessionEffect, SessionEvent, SessionPolicy, SessionState, TemplateExpander,
 };
 pub use reconcile::Patch;
 pub use state::StateChange;

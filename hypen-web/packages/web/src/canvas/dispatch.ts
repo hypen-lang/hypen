@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * Action Dispatch
  *
@@ -10,6 +11,7 @@
 import { ACTION_ANIMATE_KEY } from "@hypen-space/core/types";
 import type { VirtualNode } from "./types.js";
 import { resolveEventAction } from "./props.js";
+import { CHART_POINTER_KEY, chartEventPayload } from "./chart.js";
 
 /** Minimal engine surface needed for dispatch. */
 export interface DispatchEngine {
@@ -21,6 +23,13 @@ export interface DispatchEngine {
 // proper camelCase form (`onMouseEnter`) since the engine emits applicator
 // names verbatim. `mouseenter` also accepts `onHover` as an alias.
 const CANVAS_EVENT_PROP_NAMES: Record<string, string[]> = {
+  // `onPress` is the mobile-style alias the DOM applicator registry maps to
+  // `click`; chart marks (and Buttons) are documented with both spellings.
+  click: ["onClick", "onPress", "onclick", "click"],
+  // Pointer tracking across an element, throttled by the event manager —
+  // mouse, touch and pen alike. Mirrors the DOM's `onMove` applicator.
+  pointermove: ["onMove", "onPointerMove", "onpointermove", "pointermove"],
+  longpress: ["onLongPress", "onlongpress", "longpress"],
   mouseenter: ["onMouseEnter", "onHover", "onmouseenter", "mouseenter"],
   mouseleave: ["onMouseLeave", "onmouseleave", "mouseleave"],
   mousedown: ["onMouseDown", "onmousedown", "mousedown"],
@@ -103,18 +112,33 @@ export function dispatchNodeEvent(
     return;
   }
 
+  // The pointer position travels under a reserved key so the chart resolver
+  // can read it; it is renderer plumbing and never reaches a handler.
+  let extras = data;
+  let pointer: { x: number; y: number } | null = null;
+  if (data && typeof data === "object" && CHART_POINTER_KEY in data) {
+    extras = { ...data };
+    pointer = extras[CHART_POINTER_KEY] ?? null;
+    delete extras[CHART_POINTER_KEY];
+  }
+
   const payload: Record<string, any> = {
     type: eventType,
     nodeId: node.id,
     timestamp: Date.now(),
     ...resolved.payload,
-    ...data,
+    ...extras,
   };
+
+  // A chart mark's datum (or the Chart's own pointer position in data units)
+  // is merged LAST: it is the contract's payload and wins over static args.
+  const chart = chartEventPayload(node, pointer);
+  if (chart) Object.assign(payload, chart);
   // Transaction-animation stamp (Option D): carried across the dispatch
   // boundary under the reserved key; BaseEngine.onAction lifts it into
   // Action.animate, so handlers never see it in the payload.
   if (resolved.animate !== undefined) {
     payload[ACTION_ANIMATE_KEY] = resolved.animate;
   }
-  engine.dispatchAction(resolved.actionName, payload);
+  dispatchUIAction(engine, node.id, resolved.actionName, payload);
 }

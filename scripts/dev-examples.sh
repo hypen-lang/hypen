@@ -29,6 +29,14 @@
 #      concurrent instances need distinct --inspector-port values or the
 #      second one dies with "Address already in use (127.0.0.1:9230)".
 #
+#   4. wrangler dev fronts the Worker with its own ProxyWorker, pinned to
+#      compatibilityDate 2023-12-18 — so it re-negotiates permessage-deflate
+#      WITH context takeover toward the browser even when the example sets
+#      `no_web_socket_compression`. Browsers then keep the connection UI-only
+#      (RFC 001 §2.3: no device plane, no uploads). The script adds the same
+#      flag to the installed wrangler's ProxyWorker. Local dev only; deployed
+#      Workers take the flag from wrangler.jsonc.
+#
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -101,7 +109,7 @@ command -v bun >/dev/null || { echo "bun is required (https://bun.sh)" >&2; exit
 # ---- 1. Engine WASM (web target) ----------------------------------------
 if [[ $FRESH -eq 1 || ! -f "$ENGINE_DIR/pkg/web/package.json" ]]; then
   echo "==> Building engine WASM (pkg/web)..."
-  (cd "$ENGINE_DIR" && bun x wasm-pack build --target web --out-dir pkg/web --features js)
+  (cd "$ENGINE_DIR" && bun x wasm-pack build --target web --out-dir pkg/web --features js,device-broker)
 fi
 
 # ---- 2. hypen-web package dists ------------------------------------------
@@ -114,15 +122,17 @@ dists_stale() {
   # The cf client bundle (generic.js) bundles core+web sources, so EVERY
   # package's dist must be newer than EVERY package's src — a core/web
   # source change with an untouched cf/src still stales generic.js.
+  # device-web rides inside generic.js too (the client's DeviceHost).
   local markers=(
     "$WEB_DIR/packages/core/dist/index.js"
     "$WEB_DIR/packages/web/dist/index.js"
+    "$WEB_DIR/packages/device-web/dist/index.js"
     "$WEB_DIR/packages/cf/dist/index.js"
     "$WEB_DIR/packages/cf/dist/client/generic.js"
   )
   for marker in "${markers[@]}"; do
     [[ -f "$marker" ]] || return 0
-    for pkg in core web cf; do
+    for pkg in core web device-web cf; do
       src_dir="$WEB_DIR/packages/$pkg/src"
       if [[ -n "$(find "$src_dir" "$WEB_DIR/packages/cf/client" -type f -newer "$marker" -print -quit 2>/dev/null)" ]]; then
         return 0
@@ -132,8 +142,8 @@ dists_stale() {
   return 1
 }
 if [[ $FRESH -eq 1 ]] || dists_stale; then
-  echo "==> Building @hypen-space packages (core, web, cf)..."
-  (cd "$WEB_DIR" && bun install && bun run build:core && bun run build:web)
+  echo "==> Building @hypen-space packages (core, web, device-web, cf)..."
+  (cd "$WEB_DIR" && bun install && bun run build:core && bun run build:web && bun run build:device-web)
   (cd "$WEB_DIR/packages/cf" && bun run build)
 fi
 
@@ -150,6 +160,14 @@ dereference() {
     cp -rL "$src" "$src.real" 2>/dev/null || true
     rm -rf "$src" && mv "$src.real" "$src"
   done
+}
+
+# Gotcha 4: let the device plane through wrangler's dev ProxyWorker.
+patch_wrangler_proxy() {
+  local cli="$1/node_modules/wrangler/wrangler-dist/cli.js"
+  [[ -f "$cli" ]] || return 0
+  grep -q 'compatibilityDate: "2023-12-18",' "$cli" || return 0
+  perl -0777 -pi -e 's/(compatibilityDate: "2023-12-18",\s*compatibilityFlags: \["nodejs_compat")\]/$1, "no_web_socket_compression"]/g' "$cli"
 }
 
 # Overwrite an example's installed @hypen-space package with the freshly
@@ -178,6 +196,7 @@ for name in "${SELECTED[@]}"; do
   echo "==> Installing $name ($rel)..."
   (cd "$dir" && bun install --silent)
   dereference "$dir"
+  patch_wrangler_proxy "$dir"
   # Keep the engine + @hypen-space copies current with the local builds.
   rm -rf "$dir/node_modules/hypen-engine"
   cp -rL "$ENGINE_DIR/pkg/web" "$dir/node_modules/hypen-engine"

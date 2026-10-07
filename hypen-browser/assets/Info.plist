@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Merged into the bundle by cargo-packager. Without these keys macOS
+	     terminates the app on first camera / microphone / Bluetooth use; the
+	     desktop device host checks for them and answers
+	     `unavailable` (`not-declared:…`) instead. -->
+	<key>NSCameraUsageDescription</key>
+	<string>Apps you open in Hypen Browser can ask to take a photo or record a video.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Apps you open in Hypen Browser can ask to record audio.</string>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>Apps you open in Hypen Browser can ask to find nearby Bluetooth devices.</string>
+</dict>
+</plist>

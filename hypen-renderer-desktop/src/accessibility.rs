@@ -277,9 +277,19 @@ fn build_node_for(
             node
         }
         ItemKind::Input {
-            value, placeholder, ..
+            value,
+            placeholder,
+            multiline,
+            ..
         } => {
-            let mut node = Node::new(Role::TextInput);
+            let mut node = Node::new(if *multiline {
+                Role::MultilineTextInput
+            } else {
+                Role::TextInput
+            });
+            if item.state_variants.disabled {
+                node.set_disabled();
+            }
             node.set_value(value.clone());
             // Surface either the placeholder ("Email…") or the bind
             // path as the accessible label; without it screen readers
@@ -320,6 +330,24 @@ fn build_node_for(
             node
         }
         ItemKind::Spinner { .. } => Node::new(Role::ProgressIndicator),
+        ItemKind::Chart(_) => {
+            // A chart is a graphic: the marks inside carry the meaning, and
+            // an interactive one publishes itself below with its series
+            // name. AccessKit has no dedicated chart role, so `Graphic` is
+            // the closest honest answer.
+            Node::new(Role::Image)
+        }
+        ItemKind::ChartMark(mark) => {
+            // One interactive mark. Announced by its series so a screen
+            // reader says "units" rather than "group"; Click routes through
+            // the same `dispatch_action` path the pointer uses.
+            let mut node = Node::new(Role::Button);
+            node.set_label(mark.series.clone());
+            if item.action.is_some() {
+                node.add_action(Action::Click);
+            }
+            node
+        }
         ItemKind::Select { value, placeholder } => {
             let mut node = Node::new(Role::ComboBox);
             node.set_value(if value.is_empty() {

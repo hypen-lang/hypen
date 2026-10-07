@@ -556,7 +556,7 @@ fn test_router_evicts_least_recently_used_cache_entry() {
     // Find the Router node and inspect its cache.
     let router_id = tree.root().expect("router is the root instance node");
     let router = tree.get(router_id).expect("router node must exist");
-    match router.control_flow.as_ref() {
+    match router.control_flow.as_deref() {
         Some(ControlFlowKind::Router {
             cache,
             current_route_key,

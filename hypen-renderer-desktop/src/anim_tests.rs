@@ -2294,9 +2294,13 @@ fn enter_settle_fires_enter_completion() {
     // Natural settle → { animation: "enter" }.
     animator.set_manual_time_ms(100.0);
     animator.tick(&mut tree);
-    let (action, payload) = one_completion(&mut animator);
-    assert_eq!(action, "done");
-    assert_eq!(payload, json!({ "animation": "enter" }));
+    let c = animator.take_completions();
+    assert_eq!(c.len(), 1);
+    // Node-addressed: the window dispatches it via `dispatch_ui_action`
+    // so a multi-module app routes it to the owning module.
+    assert_eq!(c[0].node, "a");
+    assert_eq!(c[0].action, "done");
+    assert_eq!(c[0].payload, json!({ "animation": "enter" }));
 }
 
 #[test]

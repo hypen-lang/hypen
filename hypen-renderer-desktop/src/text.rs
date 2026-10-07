@@ -569,6 +569,94 @@ impl TextEngine {
     }
 }
 
+impl TextEngine {
+    /// Lay `text` out exactly as [`Self::draw_text_into_scene_line_height`]
+    /// paints it (same font, metrics, and `Wrap::Word` policy) and
+    /// return the visual lines with GLOBAL byte offsets. Backs Textarea
+    /// caret / hit-test / selection geometry ([`crate::textarea`]).
+    ///
+    /// Not cached: only the focused (or pointer-targeted) Textarea asks,
+    /// at most a few times per event / frame.
+    pub fn visual_lines(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
+    ) -> Vec<crate::textarea::VisualLine> {
+        use crate::textarea::{GlyphBox, VisualLine};
+        let metrics = Metrics::new(font_size, line_height.max(font_size));
+        let mut buffer = Buffer::new(&mut self.fonts, metrics);
+        let attrs = Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight(weight));
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.set_size(wrap_width, None);
+        buffer.set_wrap(Wrap::Word);
+        buffer.shape_until_scroll(&mut self.fonts, false);
+
+        // Global byte offset where each paragraph (BufferLine) starts:
+        // the previous paragraph's text plus its own line ending.
+        let mut para_start = Vec::with_capacity(buffer.lines.len());
+        let mut acc = 0usize;
+        for line in &buffer.lines {
+            para_start.push(acc);
+            acc += line.text().len() + line.ending().as_str().len();
+        }
+
+        let mut out: Vec<VisualLine> = Vec::new();
+        let mut para_of: Vec<usize> = Vec::new();
+        for run in buffer.layout_runs() {
+            let base = para_start.get(run.line_i).copied().unwrap_or(acc);
+            let mut glyphs: Vec<GlyphBox> = run
+                .glyphs
+                .iter()
+                .map(|g| GlyphBox {
+                    start: base + g.start,
+                    end: base + g.end,
+                    x: g.x,
+                    w: g.w,
+                })
+                .collect();
+            glyphs.sort_by(|a, b| a.x.total_cmp(&b.x));
+            let same_para_prev = para_of.last() == Some(&run.line_i);
+            let (start, end) = if glyphs.is_empty() {
+                // Empty paragraph (or a glyph-less wrapped continuation):
+                // anchor at the previous line's end within the same
+                // paragraph, else at the paragraph start.
+                let at = if same_para_prev {
+                    out.last().map(|p: &VisualLine| p.end).unwrap_or(base)
+                } else {
+                    base
+                };
+                (at, at)
+            } else {
+                let lo = glyphs.iter().map(|g| g.start).min().unwrap_or(base);
+                let hi = glyphs.iter().map(|g| g.end).max().unwrap_or(base);
+                // The first visual line of a paragraph always starts at
+                // the paragraph start.
+                (if same_para_prev { lo } else { base.min(lo) }, hi)
+            };
+            out.push(VisualLine {
+                start,
+                end,
+                top: run.line_top,
+                height: run.line_height,
+                para_end: true,
+                glyphs,
+            });
+            para_of.push(run.line_i);
+        }
+        for i in 1..out.len() {
+            if para_of[i] == para_of[i - 1] {
+                out[i - 1].para_end = false;
+            }
+        }
+        out
+    }
+}
+
 impl Default for TextEngine {
     fn default() -> Self {
         Self::new()

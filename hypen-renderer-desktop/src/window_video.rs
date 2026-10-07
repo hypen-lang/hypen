@@ -106,13 +106,20 @@ pub(crate) fn scrub_commit_dispatch(
     scrubber_id: &str,
     video_id: Option<&str>,
     position: f64,
-) -> Option<(String, serde_json::Value)> {
+) -> Option<(String, String, serde_json::Value)> {
     let own_bind = tree.get(scrubber_id).and_then(crate::video_v2::bind_path);
-    let video_bind = video_id
-        .and_then(|id| tree.get(id))
-        .and_then(crate::video_v2::bind_path);
-    if let Some(bind) = own_bind.or(video_bind) {
+    let video_bind = video_id.and_then(|id| {
+        tree.get(id)
+            .and_then(crate::video_v2::bind_path)
+            .map(|b| (id, b))
+    });
+    // The write is addressed to the node that DECLARES the bind (the
+    // engine validates `__hypen_bind` paths against that node's `bind`
+    // prop) — the Scrubber for its own bind, else the enclosing Video.
+    let target = own_bind.map(|b| (scrubber_id, b)).or(video_bind);
+    if let Some((node, bind)) = target {
         return Some((
+            node.to_string(),
             "__hypen_bind".to_string(),
             json!({ "path": format!("{bind}.position"), "value": position }),
         ));
@@ -125,7 +132,11 @@ pub(crate) fn scrub_commit_dispatch(
     };
     obj.insert("type".to_string(), json!("seek"));
     obj.insert("position".to_string(), json!(position));
-    Some((action, serde_json::Value::Object(obj)))
+    Some((
+        scrubber_id.to_string(),
+        action,
+        serde_json::Value::Object(obj),
+    ))
 }
 
 /// One field of the `playback` struct that changed and must be pushed
@@ -340,7 +351,8 @@ impl App {
                     report.path,
                     report.value
                 );
-                self.module.dispatch_action(
+                self.module.dispatch_ui_action(
+                    &node_id,
                     "__hypen_bind",
                     Some(json!({ "path": report.path, "value": report.value })),
                 );
@@ -564,7 +576,8 @@ impl App {
             if let Some((action, payload)) =
                 self.video_event_payload(node_id, event, typ, &src, index, &[])
             {
-                self.module.dispatch_action(&action, Some(payload));
+                self.module
+                    .dispatch_ui_action(node_id, &action, Some(payload));
             }
             self.request_redraw_full();
         }
@@ -929,9 +942,10 @@ impl App {
             self.seek_video(id, position);
         }
         let dispatch = scrub_commit_dispatch(&self.tree, scrubber_id, video_id, position);
-        if let Some((action, payload)) = dispatch {
-            log::debug!("dispatch (scrubber commit): {action} payload={payload:?}");
-            self.module.dispatch_action(&action, Some(payload));
+        if let Some((node, action, payload)) = dispatch {
+            log::debug!("dispatch (scrubber commit): {action} node={node} payload={payload:?}");
+            self.module
+                .dispatch_ui_action(&node, &action, Some(payload));
         }
         self.request_redraw_full();
     }

@@ -1,0 +1,28 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-numeric-like-string-keys",
+  "description": "Object keys that look numeric are strings: '10' and '2' are distinct sibling keys, and paths use them verbatim.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "2": "two",
+      "10": "ten"
+    },
+    "new": {
+      "2": "two",
+      "10": "TEN",
+      "030": "octal-ish"
+    }
+  },
+  "expected": [
+    {
+      "path": "10",
+      "value": "TEN"
+    },
+    {
+      "path": "030",
+      "value": "octal-ish"
+    }
+  ]
+}

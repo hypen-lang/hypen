@@ -44,6 +44,11 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+
+    packaging {
+        // Instrumentation dependencies carry duplicate JUnit notices.
+        resources.merges += setOf("META-INF/LICENSE.md", "META-INF/LICENSE-notice.md", "META-INF/NOTICE.md")
+    }
 }
 
 dependencies {

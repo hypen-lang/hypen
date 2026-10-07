@@ -1,0 +1,94 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "pinboard-reserved-lowering",
+  "description": "Reserved-state pinboard (no bind prop): the container lowers .pinboard to ONE static __dnd.pin object with defaults filled, and every draggable in its ForEach rows is stamped with __dnd.pinGroup = the board group plus INJECTED translate bindings on the ordinary translateX.0 / translateY.0 keys, bound to state __dnd.<group>.<key>.{x,y}. A pinned item resolves its numbers; an unpinned item's bindings resolve to explicit null (PRESENT on Create — renderers treat null as 0). When the host writes the reserved path (the __hypen_pin outcome), exactly that node re-resolves as SetProp translateX.0 / translateY.0 — no row rebuild",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Stack { ForEach(items: @state.notes, key: \"id\") { Note(\"@{item.text}\").draggable() } }.pinboard(group: \"board\")",
+    "initialState": {
+      "notes": [
+        { "id": "n1", "text": "one" },
+        { "id": "n2", "text": "two" }
+      ],
+      "__dnd": { "board": { "n1": { "x": 40, "y": 60 } } }
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["notes", "__dnd"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render: board spec on the container, pin group + translate bindings on each draggable",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Stack",
+          "props": {
+            "__dnd.pin": {
+              "group": "board",
+              "xKey": "x",
+              "yKey": "y",
+              "grid": null,
+              "bounds": "clamp",
+              "units": "px"
+            }
+          },
+          "absentProps": ["pinboard.0", "pinboard.group", "bind", "__dnd.pinGroup", "__dnd.source"]
+        },
+        {
+          "type": "create",
+          "elementType": "Note",
+          "props": {
+            "__dnd.key": "n1",
+            "__dnd.pinGroup": "board",
+            "__dnd.source": { "group": null, "handle": false, "activation": "auto" },
+            "translateX.0": 40,
+            "translateY.0": 60
+          }
+        },
+        {
+          "type": "create",
+          "elementType": "Note",
+          "props": {
+            "__dnd.key": "n2",
+            "__dnd.pinGroup": "board",
+            "translateX.0": null,
+            "translateY.0": null
+          }
+        }
+      ]
+    },
+    {
+      "description": "The host's __hypen_pin write lands on the reserved path: only the pinned node re-resolves",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["__dnd.board.n1.x", "__dnd.board.n1.y"],
+        "newValues": { "__dnd": { "board": { "n1": { "x": 120, "y": 80 } } } }
+      },
+      "expectedPatches": [
+        { "type": "setProp", "name": "translateX.0", "value": 120 },
+        { "type": "setProp", "name": "translateY.0", "value": 80 }
+      ],
+      "forbiddenPatchTypes": ["create", "insert", "remove", "move", "detach", "attach"]
+    },
+    {
+      "description": "A first position for a previously unpinned item flows the same way (null -> number)",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["__dnd.board.n2.x", "__dnd.board.n2.y"],
+        "newValues": { "__dnd": { "board": { "n2": { "x": 5, "y": 7 } } } }
+      },
+      "expectedPatches": [
+        { "type": "setProp", "name": "translateX.0", "value": 5 },
+        { "type": "setProp", "name": "translateY.0", "value": 7 }
+      ],
+      "forbiddenPatchTypes": ["create", "insert", "remove", "move", "detach", "attach"]
+    }
+  ]
+}

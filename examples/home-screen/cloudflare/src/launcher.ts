@@ -8,6 +8,35 @@ import {
   type UnsplashPhoto,
 } from "./unsplash";
 import { fetchWeather, getGeo } from "./geo";
+import {
+  cancelRename,
+  clearSelection,
+  closeSortMenu,
+  commitRename,
+  createFolder,
+  deleteEntry,
+  downloadFile,
+  filesRoute,
+  initialFilesState,
+  isFilesView,
+  isSortKey,
+  moveInto,
+  openEntry,
+  openParent,
+  refreshFiles,
+  setSort,
+  setSortDir,
+  setView,
+  startRename,
+  tapEntry,
+  toggleNewFolder,
+  toggleSortMenu,
+  uploadFiles,
+  type FilesState,
+  type FilesView,
+  type SortKey,
+} from "./files";
+import type { DndEventPayload } from "@hypen-space/core";
 
 // Hypen Home — a phone-style home screen that launches OTHER Hypen apps.
 //
@@ -194,6 +223,38 @@ export const resources: Record<string, string> = {
     stroke("M4 7h3M11 7h9M4 12h10M18 12h2M4 17h2M10 17h10") +
       stroke("M9 5v4M16 10v4M8 15v4"),
   ),
+  "folder": iconSvg(stroke("M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6a2 2 0 0 1 1.6.8l.9 1.2a2 2 0 0 0 1.6.8h5.3A2.5 2.5 0 0 1 21 10.3v6.2a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5v-9Z")),
+  "folder-plus": iconSvg(
+    stroke("M3 7.5A2.5 2.5 0 0 1 5.5 5h3.6a2 2 0 0 1 1.6.8l.9 1.2a2 2 0 0 0 1.6.8h5.3A2.5 2.5 0 0 1 21 10.3v6.2a2.5 2.5 0 0 1-2.5 2.5h-13A2.5 2.5 0 0 1 3 16.5v-9Z") +
+      stroke("M12 10.5v5M9.5 13h5"),
+  ),
+  "file": iconSvg(stroke("M14 3H7.5A2.5 2.5 0 0 0 5 5.5v13A2.5 2.5 0 0 0 7.5 21h9a2.5 2.5 0 0 0 2.5-2.5V8l-5-5Z") + stroke("M14 3v5h5") + stroke("M9 13h6M9 17h4")),
+  "upload": iconSvg(stroke("M12 15V4") + stroke("M7.5 8.5 12 4l4.5 4.5") + stroke("M5 15v2.5A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5V15")),
+  "download": iconSvg(stroke("M12 4v11") + stroke("M7.5 10.5 12 15l4.5-4.5") + stroke("M5 15v2.5A2.5 2.5 0 0 0 7.5 20h9a2.5 2.5 0 0 0 2.5-2.5V15")),
+  "trash": iconSvg(stroke("M4 7h16") + stroke("M10 11v6M14 11v6") + stroke("M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12") + stroke("M9 7V4.5A1.5 1.5 0 0 1 10.5 3h3A1.5 1.5 0 0 1 15 4.5V7")),
+  // ----- Files browser chrome -----
+  "view-grid": iconSvg(
+    stroke("M5 4h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z") +
+      stroke("M15 4h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1Z") +
+      stroke("M5 14h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1Z") +
+      stroke("M15 14h4a1 1 0 0 1 1 1v4a1 1 0 0 1-1 1h-4a1 1 0 0 1-1-1v-4a1 1 0 0 1 1-1Z"),
+  ),
+  "view-list": iconSvg(stroke("M9 6h11M9 12h11M9 18h11") + stroke("M4.5 6h.01M4.5 12h.01M4.5 18h.01")),
+  "sort": iconSvg(stroke("M7 4v16M3.5 7.5 7 4l3.5 3.5") + stroke("M17 20V4M13.5 16.5 17 20l3.5-3.5")),
+  "check": iconSvg(stroke("M5 12.5l4.5 4.5L19 7.5")),
+  "x": iconSvg(stroke("M6 6l12 12M18 6 6 18")),
+  "pencil": iconSvg(stroke("M16.5 3.5a2.12 2.12 0 0 1 3 3L8 18l-4 1 1-4 11.5-11.5Z")),
+  "arrow-up": iconSvg(stroke("M12 19V5M5.5 11.5 12 5l6.5 6.5")),
+  // Finder-style filled kind icons. Fixed colours (stroke="none"), so they
+  // look the same whatever `.color()` the template passes.
+  "folder-fill": iconSvg(
+    `<path d="M2 6.5A2.5 2.5 0 0 1 4.5 4h4.4a2 2 0 0 1 1.5.68L11.6 6h7.9A2.5 2.5 0 0 1 22 8.5V18a2.5 2.5 0 0 1-2.5 2.5h-15A2.5 2.5 0 0 1 2 18V6.5Z" fill="#4A9FEA" stroke="none"/>` +
+      `<path d="M2 10a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v8a2.5 2.5 0 0 1-2.5 2.5h-15A2.5 2.5 0 0 1 2 18v-8Z" fill="#7CC0F8" stroke="none"/>`,
+  ),
+  "doc-fill": iconSvg(
+    `<path d="M6.5 2h8.25L20 7.25V20.5a1.5 1.5 0 0 1-1.5 1.5h-12A1.5 1.5 0 0 1 5 20.5v-17A1.5 1.5 0 0 1 6.5 2Z" fill="#F3F4F6" stroke="none"/>` +
+      `<path d="M14.75 2 20 7.25h-3.75a1.5 1.5 0 0 1-1.5-1.5V2Z" fill="#C7CBD1" stroke="none"/>`,
+  ),
   "utensils": iconSvg(
     `<path d="M4 10h16a8 8 0 0 1-16 0Zm3 10h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>` +
       `<path d="M8 7c0-1.6 1.2-1.9 1.2-3.5M12 7c0-1.6 1.2-1.9 1.2-3.5M16 7c0-1.6 1.2-1.9 1.2-3.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>`,
@@ -209,6 +270,16 @@ const SETTINGS_ICON = {
   iconColor: "#F8FAFC",
   tile: "radial-gradient(circle at 27% 13%, rgba(255,255,255,0.46), transparent 29%), linear-gradient(145deg, #CBD5E1 0%, #64748B 48%, #334155 100%)",
   route: "/settings",
+};
+
+// The Files "app" — a personal drive that lives in the launcher itself.
+const FILES_ICON = {
+  slug: "files",
+  name: "Files",
+  resource: "folder",
+  iconColor: "#FFFBEB",
+  tile: "radial-gradient(circle at 27% 13%, rgba(255,255,255,0.46), transparent 29%), linear-gradient(145deg, #7DD3FC 0%, #0EA5E9 48%, #0369A1 100%)",
+  route: "/files",
 };
 
 interface Wallpaper {
@@ -345,7 +416,7 @@ const ACCENTS: Accent[] = [
   { id: "mint", color: "#6EE7B7", selected: false },
 ];
 
-export interface LauncherState {
+export interface LauncherState extends FilesState {
   location: string;
   /** Renderer hover target; transient and intentionally not persisted. */
   hoveredIcon: string;
@@ -759,6 +830,7 @@ export function buildLauncherTemplate(apps: LauncherApp[] = APPS): string {
   // remaining icons stay left-aligned on the same columns.
   const gridItems: Array<{ item: { name: string; resource: string; iconColor: string; tile: string }; to: string }> = [
     ...apps.map((a) => ({ item: a, to: `/app/${a.slug}` })),
+    { item: FILES_ICON, to: FILES_ICON.route },
     { item: SETTINGS_ICON, to: SETTINGS_ICON.route },
   ];
   const gridRows: (typeof gridItems)[] = [];
@@ -925,6 +997,7 @@ ${cells.join("\n")}
           .tw("flex-1 min-h-screen w-full items-center")
         }
 ${settingsRoute()}
+${filesRoute(WALLPAPER_BACKGROUND)}
 ${appRoutes}
       }
       .tw("flex-1 w-full")
@@ -959,6 +1032,7 @@ function initialLauncherState(): LauncherState {
     weatherDesc: "",
     weatherHiLo: "",
     weatherCity: "",
+    ...initialFilesState(),
   };
 }
 
@@ -972,6 +1046,10 @@ interface PersistedChoices {
   location: string;
   wallpaperId: string;
   accentId: string;
+  /** Files browser layout (optional: older saves predate it). */
+  filesView?: FilesView;
+  filesSortKey?: SortKey;
+  filesSortDesc?: boolean;
 }
 
 const baseStore = durableObjectStore<LauncherState>(withKey<LauncherState>(() => HOME_STATE_KEY));
@@ -1018,6 +1096,10 @@ const launcherStore: typeof baseStore = {
       accentId: accent.id,
       accent: accent.color,
       accents: ACCENTS.map((a) => ({ ...a, selected: a.id === accent.id })),
+      // onCreated's refreshFiles sorts the drive listing by these.
+      filesView: isFilesView(saved.filesView) ? saved.filesView : "grid",
+      filesSortKey: isSortKey(saved.filesSortKey) ? saved.filesSortKey : "name",
+      filesSortDesc: saved.filesSortDesc === true,
     };
   },
   async save(key, state) {
@@ -1025,6 +1107,9 @@ const launcherStore: typeof baseStore = {
       location: state.location,
       wallpaperId: state.wallpaperId,
       accentId: state.accentId,
+      filesView: state.filesView,
+      filesSortKey: state.filesSortKey,
+      filesSortDesc: state.filesSortDesc,
     };
     await settleWithin(baseStore.save(key, choices as unknown as LauncherState), undefined);
   },
@@ -1035,6 +1120,9 @@ export default app
   .defineState<LauncherState>(initialLauncherState())
   .persist(launcherStore)
   .onCreated((state) => {
+    // The visitor's drive (this Durable Object's own SQLite — see drive.ts).
+    refreshFiles(state);
+
     // Geo was parked by the DO's fetch before any handler runs, so the first
     // render already shows the viewer's local time; the ticker keeps the
     // minutes honest for as long as the session lives.
@@ -1106,4 +1194,27 @@ export default app
     state.accent = accent.color;
     state.accents = state.accents.map((a) => ({ ...a, selected: a.id === id }));
   })
+  // ----- Files -----
+  .onAction<{ id: string }>("openEntry", ({ action, state }) => openEntry(state, action.payload?.id))
+  .onAction("uploadFiles", ({ state, context }) => uploadFiles(state, context))
+  .onAction<{ id: string }>("downloadFile", ({ action, state, context }) =>
+    downloadFile(state, context, action.payload?.id),
+  )
+  .onAction<{ id: string }>("deleteEntry", ({ action, state }) => deleteEntry(state, action.payload?.id))
+  .onAction("toggleNewFolder", ({ state }) => toggleNewFolder(state))
+  .onAction("createFolder", ({ state }) => createFolder(state))
+  .onAction<DndEventPayload>("moveInto", ({ action, state }) => moveInto(state, action.payload))
+  .onAction("openParent", ({ state }) => openParent(state))
+  .onAction<{ id: string }>("tapEntry", ({ action, state }) => tapEntry(state, action.payload?.id))
+  .onAction("clearSelection", ({ state }) => clearSelection(state))
+  .onAction<{ view: string }>("setView", ({ action, state }) => setView(state, action.payload?.view))
+  .onAction<{ key: string; dir?: string }>("setSort", ({ action, state }) =>
+    setSort(state, action.payload?.key, action.payload?.dir),
+  )
+  .onAction<{ dir: string }>("setSortDir", ({ action, state }) => setSortDir(state, action.payload?.dir))
+  .onAction("toggleSortMenu", ({ state }) => toggleSortMenu(state))
+  .onAction("closeSortMenu", ({ state }) => closeSortMenu(state))
+  .onAction("startRename", ({ state }) => startRename(state))
+  .onAction("commitRename", ({ state }) => commitRename(state))
+  .onAction("cancelRename", ({ state }) => cancelRename(state))
   .ui(buildLauncherTemplate());

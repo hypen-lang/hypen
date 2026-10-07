@@ -1,0 +1,1568 @@
+{
+  "description": "Table-driven handshake selection cases (RFC 001 \u00a72.2) pinning the reference select_device_ack in every SDK. Inputs: `hello` (hello.device), the server's `serverCapabilities` advertisement, `serverBinary`, and optional `serverProtocolVersions` (default [1]). `expect` is the sessionAck.device object, or null when device access is disabled. The hello is validated first: a hello.device failing handshake-v1 (or repeating a name or value) disables device access. Duplicate server entries: first wins. Names compare by exact code points. Revision data planes and the set of declared revisions come from registry-v1.json.",
+  "cases": [
+    {
+      "name": "highest-common-revision",
+      "description": "Newer client offers gallery.pick 1 and 2; the server implements 1: revision 1 is pinned.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "gallery.pick",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "gallery.pick",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "names-on-one-side-only-are-dropped",
+      "description": "Client-only and server-only names are excluded from the intersection; ack order follows the server.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "mic.record",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "gallery.pick",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "file.save",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "gallery.pick",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "highest-common-protocol-version",
+      "description": "Highest protocol version both sides list. Selection is a pure function of its inputs: this pins the algorithm (3 beats 1) for a server that claims protocol versions 1 and 3, independent of which protocol versions any registry implements today.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1,
+          2,
+          3
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 3,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          }
+        ]
+      },
+      "serverProtocolVersions": [
+        1,
+        3
+      ]
+    },
+    {
+      "name": "no-common-protocol-disables-device",
+      "description": "No common protocol version: device access disabled (null), UI-only operation continues.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          2
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "binary-false-on-server-omits-binary-plane-revisions",
+      "description": "Rule (c): the negotiated binary is false, so binaryUpload/binaryDownload revisions are not selectable; JSON-plane and plane-less capabilities remain.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "bluetooth.scan",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "file.pick",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "file.save",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "gallery.pick",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "mic.record",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": false,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "bluetooth.scan",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "file.pick",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "file.save",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "mic.record",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": false,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "bluetooth.scan",
+            "version": 1
+          },
+          {
+            "name": "permission.query",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "binary-false-on-client-omits-binary-plane-revisions",
+      "description": "Rule (c) applies whichever side lacks binary.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "gallery.pick",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.request",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": false,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.request",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": false,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "permission.request",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "core-capabilities-missing-from-hello-disables-device",
+      "description": "Rule (b): core.capabilities revision 1 is mandatory on every enabled device connection.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "permission.query",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "core-capabilities-missing-on-server-disables-device",
+      "description": "Rule (b), server side.",
+      "serverCapabilities": [
+        {
+          "name": "permission.query",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "core-capabilities-v1-not-mutual-disables-device",
+      "description": "Rule (b): a client offering only a newer core.capabilities revision leaves revision 1 outside the intersection.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              2
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "capability-version-zero-is-never-selected",
+      "description": "A hello offering the reserved revision 0 fails handshake-v1 (versions are >= 1), and a hello.device that fails validation disables device access (decision D7: select_device_ack validates the hello first).",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            0,
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              0
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "protocol-version-zero-is-never-selected",
+      "description": "A hello listing the reserved protocol version 0 fails handshake-v1 and disables device access (decision D7), even though 1 would be common.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          0,
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null,
+      "serverProtocolVersions": [
+        0,
+        1
+      ]
+    },
+    {
+      "name": "protocol-version-zero-only-disables-device",
+      "description": "Invalid hello (reserved protocol version 0): device access disabled.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          0
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null,
+      "serverProtocolVersions": [
+        0,
+        1
+      ]
+    },
+    {
+      "name": "server-side-version-zero-is-filtered",
+      "description": "Rule (a) on the server side: the server's own reserved 0 (protocol or revision) is never selected; only the mutual 1s are.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            0,
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "permission.query",
+            "version": 1
+          }
+        ]
+      },
+      "serverProtocolVersions": [
+        0,
+        1
+      ]
+    },
+    {
+      "name": "server-only-version-zero-omits-the-capability",
+      "description": "A server offering only the reserved revision 0 for a name has nothing selectable for it.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            0
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "invalid-hello-too-many-protocol-versions-disables-device",
+      "description": "handshake-v1 bounds protocolVersions to 8 entries; a longer list fails validation and disables device access.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "invalid-hello-empty-capability-name-disables-device",
+      "description": "handshake-v1 requires 1..128 code-point names; an empty name fails validation and disables device access.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "duplicate-server-entries-first-wins",
+      "description": "Duplicate names in the server's own advertisement: the first entry wins and later ones are ignored, never merged (decision D7). The first permission.query entry offers only revision 2, which the registry does not declare, so permission.query is omitted even though a later entry offers 1.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            2
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-server-entries-first-wins-selectable",
+      "description": "First-wins, the other way round: the first entry offers 1 and is selected; the later entry is ignored.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            2
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "permission.query",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "canonically-equivalent-names-are-distinct",
+      "description": "Names compare by exact code points, never Unicode canonical equivalence: U+00E9 and U+0065 U+0301 are two different names, so this hello has no duplicate and device access stays enabled (neither name is implemented by the server).",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "\u00e9",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "\u00e9",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "e\u0301",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-capability-name-in-hello-disables-device",
+      "description": "Rule (d): conflicting offers for one name are never resolved by picking one.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "gallery.pick",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "duplicate-protocol-version-in-hello-disables-device",
+      "description": "Rule (d).",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1,
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "duplicate-version-in-offer-disables-device",
+      "description": "Rule (d), including for a name the server does not implement.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "client.only",
+            "versions": [
+              1,
+              1
+            ]
+          }
+        ]
+      },
+      "expect": null
+    },
+    {
+      "name": "revision-absent-from-registry-is-never-selected",
+      "description": "A revision the server's registry does not declare has no schema on the server, so it is never selected even if both sides list it.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "gallery.pick",
+          "versions": [
+            1,
+            2
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "gallery.pick",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "only-core-in-common",
+      "description": "An otherwise empty intersection still enables device access with the control stream alone.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "mic.record",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "full-registry-selects-every-revision",
+      "description": "Both sides implement the whole round-3 registry with binary: every capability is selected at revision 1, in the server's advertisement order.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "bluetooth.scan",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "bluetooth.select",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "camera.capture",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "file.pick",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "file.save",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "gallery.pick",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "mic.record",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.request",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.request",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "mic.record",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "file.save",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "file.pick",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "camera.capture",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "bluetooth.select",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "bluetooth.scan",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "bluetooth.scan",
+            "version": 1
+          },
+          {
+            "name": "bluetooth.select",
+            "version": 1
+          },
+          {
+            "name": "camera.capture",
+            "version": 1
+          },
+          {
+            "name": "file.pick",
+            "version": 1
+          },
+          {
+            "name": "file.save",
+            "version": 1
+          },
+          {
+            "name": "gallery.pick",
+            "version": 1
+          },
+          {
+            "name": "mic.record",
+            "version": 1
+          },
+          {
+            "name": "permission.query",
+            "version": 1
+          },
+          {
+            "name": "permission.request",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "binary-false-keeps-bluetooth-select-drops-camera-capture",
+      "description": "Rule (c) on the round-3 revisions: without binary, camera.capture@1 and mic.record@1 (binaryUpload) are not selectable, while bluetooth.select@1 (no data plane: the chosen device comes back as JSON) and the permission revisions stay.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "bluetooth.select",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "camera.capture",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "mic.record",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.query",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "permission.request",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": false,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "bluetooth.select",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "camera.capture",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "mic.record",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.query",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "permission.request",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": false,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "bluetooth.select",
+            "version": 1
+          },
+          {
+            "name": "permission.query",
+            "version": 1
+          },
+          {
+            "name": "permission.request",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "camera-capture-newer-client-pins-revision-1",
+      "description": "A newer client offering camera.capture 1 and 2 against a server with revision 1 pins 1; a bluetooth.select offered only by the client is dropped.",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "camera.capture",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "camera.capture",
+            "versions": [
+              1,
+              2
+            ]
+          },
+          {
+            "name": "bluetooth.select",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "camera.capture",
+            "version": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "bluetooth-select-without-bluetooth-scan",
+      "description": "bluetooth.select and bluetooth.scan are independent capabilities: a web host with Web Bluetooth offers select but not scan (scan stays native-only).",
+      "serverCapabilities": [
+        {
+          "name": "core.capabilities",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "bluetooth.scan",
+          "versions": [
+            1
+          ]
+        },
+        {
+          "name": "bluetooth.select",
+          "versions": [
+            1
+          ]
+        }
+      ],
+      "serverBinary": true,
+      "hello": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "bluetooth.select",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "expect": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "bluetooth.select",
+            "version": 1
+          }
+        ]
+      }
+    }
+  ]
+}

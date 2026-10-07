@@ -280,11 +280,34 @@ fn process_applicators(
                         props.insert(prop_name.to_string(), Value::Binding(binding));
                         props.insert(
                             "bind".to_string(),
+                            Value::Static(serde_json::Value::String(path.clone())),
+                        );
+                        // Reserved twin of `bind`, set ONLY here — i.e. only by
+                        // a real `.bind()` applicator. `bind` alone cannot be
+                        // trusted as a declaration: it is an ordinary prop name,
+                        // so `Text(bind: "authToken")` or any component
+                        // forwarding a `bind:` argument would otherwise announce
+                        // a writable field the developer never declared, and the
+                        // external `set_input` guard would honour it. Renderers
+                        // keep reading `bind`; the guard reads this.
+                        props.insert(
+                            "__bind".to_string(),
                             Value::Static(serde_json::Value::String(path)),
                         );
                     }
                 }
             }
+            continue;
+        }
+
+        // .draggable/.dropZone/.sortable/.pinboard → lower into the reserved
+        // "__dnd.*" prop channel (see `ir/dnd.rs`; contract in
+        // hypen-web/docs/dnd.md). Same discipline as the
+        // animation family: one static JSON object per role plus separate
+        // props for the bindable pieces, never a `<name>.<idx>` prop, and
+        // malformed arguments degrade to defaults with a warning. Must run
+        // BEFORE the variant-map branch below.
+        if crate::ir::dnd::lower_dnd_applicator(applicator, props) {
             continue;
         }
 
@@ -331,10 +354,7 @@ fn process_applicators(
                     Value::Static(serde_json::Value::String(_))
                     | Value::Binding(_)
                     | Value::TemplateString { .. } => {
-                        props.insert(
-                            crate::ir::anim::ANIM_SHARED_KEY_PROP.to_string(),
-                            key_value,
-                        );
+                        props.insert(crate::ir::anim::ANIM_SHARED_KEY_PROP.to_string(), key_value);
                         props.insert(
                             crate::ir::anim::ANIM_SHARED_PROP.to_string(),
                             Value::Static(spec),
@@ -422,6 +442,13 @@ fn process_applicators(
             }
         }
     }
+
+    // DnD end-phase — `.sortable`/`.pinboard` groups default to the node's
+    // static `id` prop (which may have been applied AFTER them in the
+    // chain), and a reserved-mode `.pinboard` that ends up without a group
+    // is dropped. Runs before `.states` so the header-less `.states` check
+    // (`__dnd.*` present on the node) sees the final DnD props.
+    crate::ir::dnd::finalize_dnd_props(props);
 
     // Deferred `.states` application — base values above are now final.
     // Only the first valid `.states` applies; extras warn and are dropped.
@@ -513,9 +540,7 @@ fn apply_scrub_applicators(
         Some(Value::StateSwitch { path, cases, .. }) => {
             (path.clone(), cases.keys().cloned().collect())
         }
-        _ => {
-            return omit("the node carries no .states block whose poses scrub could interpolate")
-        }
+        _ => return omit("the node carries no .states block whose poses scrub could interpolate"),
     };
     for (field, label) in [("from", &scrub.from), ("to", &scrub.to)] {
         if !labels.iter().any(|l| l == label) {
@@ -612,7 +637,11 @@ fn apply_states_applicator(
     use crate::ir::anim;
     use crate::logger::LogScope;
 
-    let Some(spec) = anim::collect_states(applicator) else {
+    // A header-less block is accepted only on a DnD node (the drag runtime
+    // drives the label); `finalize_dnd_props` already ran, so the check
+    // sees the node's final `__dnd.*` props.
+    let allow_headerless = crate::ir::dnd::has_dnd_props(props);
+    let Some(spec) = anim::collect_states(applicator, allow_headerless) else {
         return false;
     };
 
@@ -664,35 +693,39 @@ fn apply_states_applicator(
         union.extend(pose.keys().cloned());
     }
 
-    // Each overridden key becomes a StateSwitch whose default is the node's
-    // (final) static base value for that key, when it has one.
-    for key in &union {
-        let default = match props.get(key.as_str()) {
-            Some(Value::Static(v)) => Some(v.clone()),
-            Some(_) => {
-                crate::log_warn!(
-                    LogScope::Engine,
-                    ".states: base value of '{}' is not static; the pose switch replaces it without a default",
-                    key
-                );
-                None
+    // State-driven block: each overridden key becomes a StateSwitch whose
+    // default is the node's (final) static base value for that key, when it
+    // has one. Header-less (runtime-driven) block: the node's props stay the
+    // base; poses are materialized below for the renderer to overlay.
+    if let Some(path) = &spec.path {
+        for key in &union {
+            let default = match props.get(key.as_str()) {
+                Some(Value::Static(v)) => Some(v.clone()),
+                Some(_) => {
+                    crate::log_warn!(
+                        LogScope::Engine,
+                        ".states: base value of '{}' is not static; the pose switch replaces it without a default",
+                        key
+                    );
+                    None
+                }
+                None => None,
+            };
+            let mut cases = indexmap::IndexMap::new();
+            for (label, pose) in &poses {
+                if let Some(v) = pose.get(key.as_str()) {
+                    cases.insert(label.clone(), v.clone());
+                }
             }
-            None => None,
-        };
-        let mut cases = indexmap::IndexMap::new();
-        for (label, pose) in &poses {
-            if let Some(v) = pose.get(key.as_str()) {
-                cases.insert(label.clone(), v.clone());
-            }
+            props.insert(
+                key.clone(),
+                Value::StateSwitch {
+                    path: path.clone(),
+                    cases,
+                    default,
+                },
+            );
         }
-        props.insert(
-            key.clone(),
-            Value::StateSwitch {
-                path: spec.path.clone(),
-                cases,
-                default,
-            },
-        );
     }
 
     // Synthesize "__anim.transition" scoped to the animatable overridden
@@ -729,21 +762,47 @@ fn apply_states_applicator(
         );
     }
 
-    // Synthesize the "__anim.states" active-label prop: a StateSwitch over
-    // the labels themselves ({"label": <label>}, default null) so renderers
-    // see pose changes as an ordinary SetProp.
-    let mut label_cases = indexmap::IndexMap::new();
-    for (label, _) in &poses {
-        label_cases.insert(label.clone(), serde_json::json!({ "label": label }));
+    match &spec.path {
+        Some(path) => {
+            // Synthesize the "__anim.states" active-label prop: a StateSwitch
+            // over the labels themselves ({"label": <label>}, default null) so
+            // renderers see pose changes as an ordinary SetProp.
+            let mut label_cases = indexmap::IndexMap::new();
+            for (label, _) in &poses {
+                label_cases.insert(label.clone(), serde_json::json!({ "label": label }));
+            }
+            props.insert(
+                anim::ANIM_STATES_PROP.to_string(),
+                Value::StateSwitch {
+                    path: path.clone(),
+                    cases: label_cases,
+                    default: Some(serde_json::Value::Null),
+                },
+            );
+        }
+        None => {
+            // Header-less (DnD) block: the renderer's drag runtime owns the
+            // label. Emit the static marker and materialize every pose so
+            // the runtime can overlay `{propKey: value}` on the node's base
+            // props (and restore them when the label clears).
+            let mut pose_map = serde_json::Map::new();
+            for (label, pose) in &poses {
+                let mut entries = serde_json::Map::new();
+                for (key, value) in pose {
+                    entries.insert(key.clone(), value.clone());
+                }
+                pose_map.insert(label.clone(), serde_json::Value::Object(entries));
+            }
+            props.insert(
+                anim::ANIM_STATE_POSES_PROP.to_string(),
+                Value::Static(serde_json::Value::Object(pose_map)),
+            );
+            props.insert(
+                anim::ANIM_STATES_PROP.to_string(),
+                Value::Static(serde_json::json!({ "label": null, "runtime": true })),
+            );
+        }
     }
-    props.insert(
-        anim::ANIM_STATES_PROP.to_string(),
-        Value::StateSwitch {
-            path: spec.path.clone(),
-            cases: label_cases,
-            default: Some(serde_json::Value::Null),
-        },
-    );
 
     true
 }
@@ -864,6 +923,13 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
 
             // Convert children recursively as IRNodes to preserve ForEach/When/If
             element.ir_children = component.children.iter().map(ast_to_ir_node).collect();
+
+            // Reserved-mode `.pinboard` (no `.bind`): stamp `__dnd.pinGroup`
+            // onto every draggable descendant (through ForEach templates) so
+            // item expansion can inject the `__dnd.<group>.<key>.{x,y}`
+            // translate bindings. Children expanded first, so an inner
+            // pinboard's stamp already wins over this outer one.
+            crate::ir::dnd::propagate_pin_config(&mut element.ir_children, &element.props);
 
             // Derive accessibility semantics once, here in the engine, and
             // carry them to every renderer via the Create patch. Runs after
@@ -1091,7 +1157,9 @@ fn wire_list_items(element: &mut Element) {
     use crate::ir::semantics::{Role, Semantics};
 
     for child in &mut element.ir_children {
-        let IRNode::Element(item) = child else { continue };
+        let IRNode::Element(item) = child else {
+            continue;
+        };
         if item
             .semantics
             .as_ref()
@@ -1356,7 +1424,8 @@ fn convert_foreach(component: &ComponentSpecification) -> IRNode {
     if let Some(message) = process_applicators(&component.applicators, &mut props, "ForEach") {
         return error_element(message);
     }
-    let template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
+    let mut template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
+    crate::ir::dnd::propagate_pin_config(&mut template, &props);
 
     let Some(source) = source else {
         return error_element(
@@ -1411,13 +1480,14 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
     };
 
     // Build the ForEach IR node for iteration
-    let template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
+    let mut template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
     let mut foreach_props = Props::new();
     if let Some(message) =
         process_applicators(&component.applicators, &mut foreach_props, element_type)
     {
         return error_element(message);
     }
+    crate::ir::dnd::propagate_pin_config(&mut template, &foreach_props);
 
     let foreach_ir = IRNode::ForEach {
         source,
@@ -2234,7 +2304,11 @@ mod tests {
             Some(Value::Static(v)) => v.as_f64(),
             _ => None,
         };
-        assert_eq!(get("gridColumns.0"), Some(2.0), "default → unsuffixed base key");
+        assert_eq!(
+            get("gridColumns.0"),
+            Some(2.0),
+            "default → unsuffixed base key"
+        );
         assert_eq!(get("gridColumns@md.0"), Some(3.0));
         assert_eq!(get("gridColumns@lg.0"), Some(4.0));
     }
@@ -2314,7 +2388,8 @@ mod tests {
         // The DOM renderer appends one equal-specificity rule per variant and
         // lets the cascade pick the last match, so an arbitrary order would
         // let `sm` beat `lg` on a wide window — differently on each run.
-        let input = r#"Box {}.background({xl: "e", default: "a", hover: "f", md: "c", sm: "b", lg: "d"})"#;
+        let input =
+            r#"Box {}.background({xl: "e", default: "a", hover: "f", md: "c", sm: "b", lg: "d"})"#;
         let element = parse_to_element(input);
 
         let order: Vec<&str> = element
@@ -2821,6 +2896,85 @@ mod tests {
             Value::Action(name) => assert_eq!(name, "router.back"),
             other => panic!("Expected Value::Action(\"router.back\"), got: {:?}", other),
         }
+    }
+
+    // ---------------------------------------------------------------
+    // Drag & drop — `.draggable/.dropZone/.sortable/.pinboard` intercept
+    // before the generic path (`ir/dnd.rs`); `.bind` on a sortable keeps
+    // its existing lowering; header-less `.states` on a DnD node.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn test_dnd_applicators_never_lower_to_generic_props() {
+        let element = parse_to_element(
+            r#"Column { Text("a") }.sortable(axis: y).dropZone(group: "g").draggable().pinboard(group: "b")"#,
+        );
+        for name in ["sortable", "dropZone", "draggable", "pinboard"] {
+            assert!(
+                element.props.keys().all(|k| !k.starts_with(name)),
+                "{name} must not lower to a `{name}.<idx>` prop: {:?}",
+                element.props.keys().collect::<Vec<_>>()
+            );
+        }
+        for prop in ["__dnd.sort", "__dnd.zone", "__dnd.source", "__dnd.pin"] {
+            assert!(
+                matches!(element.props.get(prop), Some(Value::Static(_))),
+                "{prop}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_sortable_bind_coexists_with_dnd_sort() {
+        let element =
+            parse_to_element(r#"Column { Text("a") }.sortable(axis: y).bind(@state.tasks)"#);
+        match element.props.get("__dnd.sort").unwrap() {
+            Value::Static(v) => assert_eq!(v, &serde_json::json!({"group": null, "axis": "y"})),
+            other => panic!("expected static __dnd.sort, got {other:?}"),
+        }
+        match element.props.get("bind").unwrap() {
+            Value::Static(v) => assert_eq!(v, &serde_json::json!("tasks")),
+            other => panic!("expected static bind path, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_headerless_states_requires_dnd_props() {
+        // On a draggable: accepted as a runtime-driven pose set.
+        let element =
+            parse_to_element(r#"Card("x").draggable().states { onState(lifted).opacity(0.6) }"#);
+        match element.props.get("__anim.states").unwrap() {
+            Value::Static(v) => {
+                assert_eq!(v, &serde_json::json!({"label": null, "runtime": true}))
+            }
+            other => panic!("expected static runtime marker, got {other:?}"),
+        }
+        match element.props.get("__anim.statePoses").unwrap() {
+            Value::Static(v) => {
+                assert_eq!(v, &serde_json::json!({"lifted": {"opacity.0": 0.6}}))
+            }
+            other => panic!("expected static poses, got {other:?}"),
+        }
+        assert!(!element.props.contains_key("opacity.0"));
+
+        // Without any __dnd.* prop: ignored with the existing warning.
+        let element = parse_to_element(r#"Card("x").states { onState(lifted).opacity(0.6) }"#);
+        assert!(!element.props.contains_key("__anim.states"));
+        assert!(!element.props.contains_key("__anim.statePoses"));
+    }
+
+    #[test]
+    fn test_dnd_applicators_excluded_from_poses() {
+        let element = parse_to_element(
+            r#"Card("x").draggable().states { onState(lifted).opacity(0.6).dropZone(group: "g") }"#,
+        );
+        match element.props.get("__anim.statePoses").unwrap() {
+            Value::Static(v) => {
+                assert_eq!(v, &serde_json::json!({"lifted": {"opacity.0": 0.6}}))
+            }
+            other => panic!("expected static poses, got {other:?}"),
+        }
+        assert!(!element.props.contains_key("__dnd.zone"));
     }
 
     #[test]

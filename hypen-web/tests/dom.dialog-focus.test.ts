@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Dialog focus completion (operability.ts + DOMRenderer wiring) and the
  * route-focus opt-out.
@@ -31,7 +32,7 @@ ensureFakeDomGlobals();
 class RecordingEngine {
   actions: Array<{ name: string; payload?: any }> = [];
   dispatchAction(name: string, payload?: any): void {
-    this.actions.push({ name, payload });
+    this.actions.push(semanticAction(name, payload));
   }
 }
 
@@ -190,7 +191,12 @@ describe("DOMRenderer dialog close restores the trigger", () => {
 
     (renderer.getNode("trigger") as any).isConnected = false;
     renderer.applyPatches([{ type: "remove", id: "dlg" } as Patch]);
-    expect(active()).toBe(okButton);
+    // The trigger is never focused; the removed OK button cannot keep focus
+    // either (real-DOM focus fixup drops it to the body — fake-dom mirrors
+    // that on removeChild), so nothing holds focus.
+    expect(active()).not.toBe(renderer.getNode("trigger"));
+    expect(active()).not.toBe(okButton);
+    expect(active()).toBeNull();
   });
 
   test("detach restores the trigger; re-attach re-runs mount focus", () => {
@@ -255,6 +261,18 @@ describe("DOMRenderer dialog Escape", () => {
     const dialog = renderer.getNode("dlg") as any;
     dialog.dispatchEvent("keydown", { key: "Escape", preventDefault() {} });
     expect(engine.actions).toEqual([{ name: "close", payload: {} }]);
+  });
+
+  test("an Escape a descendant already consumed (defaultPrevented) does not close", () => {
+    const { renderer, engine } = makeRenderer();
+    buildPage(renderer);
+    engine.actions.length = 0;
+    openDialog(renderer, [{ id: "ok", type: "Button", props: { "0": "OK" } }], {
+      onClose: "@actions.dismiss",
+    });
+    const dialog = renderer.getNode("dlg") as any;
+    dialog.dispatchEvent("keydown", { key: "Escape", defaultPrevented: true, preventDefault() {} });
+    expect(engine.actions).toEqual([]);
   });
 
   test("without onClose, Escape does nothing (closing is app state)", () => {

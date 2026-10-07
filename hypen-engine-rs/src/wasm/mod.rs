@@ -27,12 +27,35 @@
 //! ## Feature Flags
 //!
 //! - `js` - Enable JavaScript bindings via wasm-bindgen (default for wasm-pack builds)
-//! - `wasi` - Enable WASI-compatible C FFI bindings
+//! - `wasi` - Enable WASI-compatible C FFI bindings (implies `device-broker`)
+//! - `device-broker` - Add the device broker (RFC 001) surface: `WasmDeviceBroker`
+//!   and the `device*` helpers with `js`, `hypen_device_*` with `wasi`. Server
+//!   builds (Node/Bun, Cloudflare, Go) enable it; the browser bundle does not.
 //!
 //! These features are mutually exclusive. If both are enabled, `js` takes precedence.
 
 // Shared FFI utilities (available on all platforms for testing)
 pub mod ffi;
+
+// Device broker (RFC 001) binding adapter: the JSON shapes, WASI framing and
+// handshake helpers every binding surface (JS, WASI, UniFFI) shares. Plain
+// Rust, compiled with the `device-broker` feature (implied by `wasi` and
+// `uniffi`) and for `cargo test`, so the shapes are unit-tested natively.
+#[cfg(any(test, feature = "device-broker"))]
+pub mod device_binding;
+
+// The WASI `hypen_device_*` C ABI. Compiled for the WASI build and for
+// native `cargo test` (the extern functions are exercised directly there).
+#[cfg(any(
+    test,
+    all(
+        target_arch = "wasm32",
+        feature = "wasi",
+        feature = "device-broker",
+        not(feature = "js")
+    )
+))]
+pub mod wasi_device;
 
 // Binding-agnostic helpers used by both the JS and WASI glue.
 // Compiled for wasm32 builds (where js.rs / wasi.rs consume them) and
@@ -51,6 +74,11 @@ pub mod js;
 // Re-export JS types at module root for backward compatibility
 #[cfg(all(target_arch = "wasm32", feature = "js"))]
 pub use js::*;
+
+// JavaScript device broker bindings (`WasmDeviceBroker`, `device*` helpers).
+// Server JS builds only (`js,device-broker`): the browser bundle omits them.
+#[cfg(all(target_arch = "wasm32", feature = "js", feature = "device-broker"))]
+pub mod js_device;
 
 // WASI bindings (C FFI)
 #[cfg(all(target_arch = "wasm32", feature = "wasi", not(feature = "js")))]

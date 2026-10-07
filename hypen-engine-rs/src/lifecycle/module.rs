@@ -110,6 +110,22 @@ pub struct ModuleInstance {
     /// Current state snapshot (Arc-wrapped for O(1) clone)
     state: Arc<serde_json::Value>,
 
+    /// The state the module was seeded with, retained unchanged for the life
+    /// of the instance.
+    ///
+    /// Anything that derives a *schema* — a published manifest, a tool
+    /// signature — has to read shapes from here, not from `state`. Live state
+    /// is whatever the user last typed, so deriving from it would let a
+    /// cleared text field retype a field as `null`, or an emptied list erase
+    /// its element shape, and the published contract would churn under the
+    /// caller with every keystroke. The seed is what the developer declared.
+    ///
+    /// Costs one deep copy per instance and no more: holding the second `Arc`
+    /// makes the first [`update_state`](Self::update_state) `Arc::make_mut`
+    /// clone (see the no-snapshot note there), after which `state` is uniquely
+    /// owned again and every later update mutates in place.
+    seeded: Arc<serde_json::Value>,
+
     /// Whether the module is currently mounted
     pub mounted: bool,
 
@@ -122,9 +138,11 @@ pub struct ModuleInstance {
 
 impl ModuleInstance {
     pub fn new(module: Module, initial_state: serde_json::Value) -> Self {
+        let state = Arc::new(initial_state);
         Self {
             module,
-            state: Arc::new(initial_state),
+            seeded: Arc::clone(&state),
+            state,
             mounted: false,
             on_created: None,
             on_destroyed: None,
@@ -232,6 +250,14 @@ impl ModuleInstance {
     /// when you don't need to store the state beyond the current scope.
     pub fn get_state(&self) -> &serde_json::Value {
         &self.state
+    }
+
+    /// Get a reference to the state the module was seeded with.
+    ///
+    /// Unaffected by every `update_state` since — see the `seeded` field for
+    /// why a derived schema must read this and not `get_state`.
+    pub fn seeded_state(&self) -> &serde_json::Value {
+        &self.seeded
     }
 
     /// Get a shared reference to the current state (O(1) clone)
@@ -393,6 +419,26 @@ mod tests {
 
         assert_eq!(target["user"]["name"], "Alice");
         assert_eq!(target["user"]["age"], 31);
+    }
+
+    #[test]
+    fn seeded_state_survives_every_update() {
+        // A derived schema reads the seed, so a user emptying a field must not
+        // be able to retype that field for everyone reading the manifest.
+        let mut instance = ModuleInstance::new(
+            Module::new("Profile"),
+            json!({"name": "Ada", "tags": ["admin"]}),
+        );
+
+        instance.update_state(json!({"name": ""}));
+        instance.update_state_sparse(
+            &["tags".to_string()],
+            &json!({"tags": []}),
+        );
+
+        assert_eq!(instance.get_state()["name"], "");
+        assert_eq!(instance.seeded_state()["name"], "Ada");
+        assert_eq!(instance.seeded_state()["tags"], json!(["admin"]));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Canvas animation runtime tests (`packages/web/src/canvas/anim.ts`).
  *
@@ -114,7 +115,7 @@ class MockCanvas {
 class MockEngine {
   dispatched: Array<{ name: string; payload: any }> = [];
   dispatchAction(name: string, payload?: any) {
-    this.dispatched.push({ name, payload });
+    this.dispatched.push(semanticAction(name, payload));
   }
 }
 

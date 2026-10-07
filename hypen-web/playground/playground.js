@@ -470,12 +470,8 @@ var init_grid = __esm(() => {
     },
     applyProps(el, props) {
       if (props.columns !== undefined) {
-        const columns = typeof props.columns === "number" ? `repeat(${props.columns}, 1fr)` : String(props.columns);
-        el.style.gridTemplateColumns = columns;
-      }
-      if (props.rows !== undefined) {
-        const rows = typeof props.rows === "number" ? `repeat(${props.rows}, 1fr)` : String(props.rows);
-        el.style.gridTemplateRows = rows;
+        const n = Number(props.columns);
+        if (Number.isInteger(n) && n >= 1) el.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
       }
       if (props.gap !== undefined) {
         const gap = typeof props.gap === "number" ? `${props.gap}px` : String(props.gap);
@@ -1951,32 +1947,9 @@ var init_advanced_layout = __esm(() => {
     order: (el, value) => {
       el.style.order = String(value);
     },
-    gridTemplateColumns: (el, value) => {
-      el.style.gridTemplateColumns = String(value);
-    },
-    gridTemplateRows: (el, value) => {
-      el.style.gridTemplateRows = String(value);
-    },
-    gridTemplateAreas: (el, value) => {
-      el.style.gridTemplateAreas = String(value);
-    },
     gridColumn: (el, value) => {
-      el.style.gridColumn = String(value);
-    },
-    gridRow: (el, value) => {
-      el.style.gridRow = String(value);
-    },
-    gridArea: (el, value) => {
-      el.style.gridArea = String(value);
-    },
-    gridAutoFlow: (el, value) => {
-      el.style.gridAutoFlow = String(value);
-    },
-    gridAutoColumns: (el, value) => {
-      el.style.gridAutoColumns = String(value);
-    },
-    gridAutoRows: (el, value) => {
-      el.style.gridAutoRows = String(value);
+      const n = Number(String(value).trim().replace(/^span\s+/i, ""));
+      if (Number.isInteger(n) && n >= 1) el.style.gridColumn = `span ${n}`;
     },
     rowGap: (el, value) => {
       el.style.rowGap = typeof value === "number" ? `${value}px` : String(value);

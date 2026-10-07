@@ -15,8 +15,7 @@ rust/Cargo.lock
 swift/.build/
 swift/Package.resolved
 
-# Go
-go/go.sum
+# Go (go.sum is tracked: modules must commit it for reproducible, -mod=readonly builds)
 
 # Kotlin
 kotlin/.gradle/

@@ -39,8 +39,15 @@ public final class HypenRenderer: ObservableObject {
 
     /// The `__anim.*` runtime: enter/exit playbacks, the deferred-remove
     /// contract, glide-animation resolution, and `.onAnimationComplete`
-    /// dispatch. See `.notes/ANIMATION_IOS.md`.
+    /// dispatch. See `hypen-web/docs/animation.md`.
     public private(set) lazy var animator = HypenAnimator(renderer: self)
+
+    /// The `__dnd.*` runtime: renderer-resident drag-and-drop (ghost,
+    /// sortable preview, zone resolution, `lifted` / `over` poses, the
+    /// post-drop hold, and the reserved `__hypen_reorder` / `__hypen_pin`
+    /// dispatch). One per renderer, i.e. per host view. See
+    /// `DragAndDrop/HypenDndCoordinator.swift`.
+    public private(set) lazy var dnd = HypenDndCoordinator(renderer: self)
 
     @Published private(set) public var rootId: String?
 
@@ -191,6 +198,7 @@ public final class HypenRenderer: ObservableObject {
         }
 
         animator.noteCreate(element)
+        dnd.noteNode(element)
 
         listener?.onElementCreated(element)
         log.debug("Created element: %@ (%@)", id, elementType)
@@ -224,6 +232,14 @@ public final class HypenRenderer: ObservableObject {
             return
         }
 
+        // dnd > everything else: while a drag (or its post-drop hold) owns
+        // this node, engine writes to its translate keys are deferred and
+        // applied at release (§6.6) — the pointer's transform wins.
+        if dnd.deferEngineProp(id: id, name: name, value: patch.value) {
+            log.debug("Deferred prop under drag: \(id).\(name)")
+            return
+        }
+
         // Handle special prop names
         if name == "0" || name == "text" {
             // Text content
@@ -234,8 +250,21 @@ public final class HypenRenderer: ObservableObject {
 
         element.setProp(name, value: patch.value)
         animator.noteProps(changedOn: element)
+        if name.hasPrefix(HypenDnd.propPrefix) {
+            dnd.noteNode(element)
+        }
         notifyHostAncestor(of: element)
         log.debug("Set prop: \(id).\(name)")
+    }
+
+    /// Re-apply an engine prop write the DnD runtime deferred while it owned
+    /// the node. Runs outside any patch batch (at release), so it snaps: the
+    /// animator's per-batch glide resolution does not see it.
+    func applyReleasedProp(id: String, name: String, value: Any?) {
+        guard let element = elements[id] else { return }
+        element.setProp(name, value: value)
+        notifyHostAncestor(of: element)
+        log.debug("Applied released prop: \(id).\(name)")
     }
 
     private func applyRemoveProp(_ patch: Patch) {
@@ -251,6 +280,9 @@ public final class HypenRenderer: ObservableObject {
 
         element.setProp(name, value: nil)
         animator.noteProps(changedOn: element)
+        if name.hasPrefix(HypenDnd.propPrefix) {
+            dnd.noteNode(element)
+        }
         notifyHostAncestor(of: element)
         log.debug("Removed prop: \(id).\(name)")
     }
@@ -316,6 +348,11 @@ public final class HypenRenderer: ObservableObject {
         element.parentId = parentId
         parent.addChild(id, beforeId: patch.beforeId)
         bubbleControlFlowChange(from: parent)
+        // A row inserted under a held list is the engine's re-render
+        // landing (release the hold); under a live cached list (the
+        // origin included) it rebuilds that list's geometry so the
+        // reserved write's `from` / `to` track the engine's array.
+        dnd.noteStructural(parentId: parentId, id: id)
         log.debug("Inserted: \(id) -> \(parentId)")
     }
 
@@ -356,6 +393,9 @@ public final class HypenRenderer: ObservableObject {
         element.parentId = parentId
         parent.addChild(id, beforeId: patch.beforeId)
         bubbleControlFlowChange(from: parent)
+        // The `Move` for a dropped reorder: the hold-until-Move contract
+        // (§6.3) releases the local transforms here — no flash.
+        dnd.noteStructural(parentId: parentId, id: id)
         log.debug("Moved: \(id) -> \(parentId)")
     }
 
@@ -370,6 +410,13 @@ public final class HypenRenderer: ObservableObject {
             return
         }
 
+        // A drag whose source or moving item sits at-or-under this subtree
+        // cancels cleanly and dispatches NOTHING (§6.6) — a dead interaction
+        // must never write state. Checked BEFORE the animator so an
+        // exit-flagged (deferred) remove cancels too, and while the parent
+        // chain is still intact.
+        dnd.noteRemove(id: id, parentId: element.parentId)
+
         // Deferred-remove contract: a `transition: true` flag means this id
         // roots a subtree whose node carried an exit animation, and the
         // engine-side id is already dead (no ack round-trip — the renderer
@@ -378,7 +425,7 @@ public final class HypenRenderer: ObservableObject {
         // the `duration + delay + 80ms` backbone. It also swallows plain
         // Removes for ids INSIDE an exiting subtree, which defer to the
         // root's finalize rather than tearing children out from under a
-        // playing exit. See `.notes/ANIMATION_IOS.md`,
+        // playing exit. See `hypen-web/docs/animation.md`,
         // ".enter / .exit — the deferred-remove contract".
         if animator.noteRemove(patch: patch, element: element) {
             return
@@ -451,6 +498,7 @@ public final class HypenRenderer: ObservableObject {
         // subtree while it was off-screen (e.g. Router LRU eviction).
         detachedIds.remove(id)
         animator.noteElementRemoved(id)
+        dnd.forget(id: id)
         listener?.onElementRemoved(id: id)
 
         // Clear root if this was the root
@@ -476,6 +524,10 @@ public final class HypenRenderer: ObservableObject {
             log.debug("DETACH: Element not found: %@", id)
             return
         }
+
+        // A route Detach mid-drag cancels the interaction with no dispatch
+        // (§6.6); the subtree itself survives for a later Attach.
+        dnd.noteDetach(id: id)
 
         // Unlink from parent. Descendants stay under this element
         // untouched — they remain reachable via `element.children`
@@ -602,6 +654,7 @@ public final class HypenRenderer: ObservableObject {
         detachedIds.removeAll()
         currentBatchAnimation = nil
         animator.reset()
+        dnd.reset()
         rootId = nil
         treeVersion += 1
         resetEpoch += 1

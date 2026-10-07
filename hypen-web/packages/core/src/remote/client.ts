@@ -38,6 +38,16 @@ import type {
   SessionAckMessage,
   SessionExpiredMessage,
 } from "./types.js";
+import type { DeviceEndpoint } from "./device/runtime.js";
+import {
+  decodeDeviceAck,
+  decodeDeviceMessage,
+  findTopLevelMember,
+  isOversizeDeviceText,
+} from "./device/strict-json.js";
+import { findRevision, needsBinary } from "./device/registry.js";
+import { deflateContextPolicy } from "./ws-extensions.js";
+import type { DeviceAck, DeviceEvent, DeviceRequest, DeviceResponse } from "./device/generated.js";
 import type { Patch } from "../types.js";
 import {
   type Result,
@@ -73,6 +83,12 @@ export interface SessionOptions {
   props?: Record<string, unknown>;
   /** Optional persist/routing key for Durable Object routing (withKey) */
   persistKey?: string;
+  /**
+   * Resume credential for `id`, as previously reported by
+   * `SessionInfo.resumeToken` (RFC 001 §5: distinct from the public session
+   * id). Sent as `hello.resumeToken` only when resuming. Treat as a secret.
+   */
+  resumeToken?: string;
 }
 
 /**
@@ -82,6 +98,12 @@ export interface SessionInfo {
   sessionId: string;
   isNew: boolean;
   isRestored: boolean;
+  /**
+   * Resume credential issued by servers that support it (RFC 001 §5). Persist
+   * it next to `sessionId` (and pass it back as `session.resumeToken`) to
+   * resume after a reload; never log it.
+   */
+  resumeToken?: string;
 }
 
 /**
@@ -113,6 +135,33 @@ export interface RemoteEngineOptions {
    * Pass `true` for defaults, or an object to customize action/key names.
    */
   navigation?: boolean | NavigationOptions;
+  /**
+   * Device Capability Protocol endpoint (RFC 001). When set, `hello`
+   * carries its advertisement, server → client device messages and binary
+   * frames are routed to it, and it is detached on every socket close.
+   * Absent ⇒ legacy wire, byte-identical.
+   */
+  device?: DeviceEndpoint;
+  /**
+   * Extra WebSocket upgrade headers, e.g. `{ Authorization: "Bearer …" }`
+   * for a server's connection authenticator (RFC 001 §5:
+   * `Origin` is a browser-only defence; non-browser clients authenticate).
+   * A function is called on every (re)connect, so a short-lived token can be
+   * refreshed. Only runtimes whose `WebSocket` accepts an init object honour
+   * it (Bun, Node ≥ 22, React Native); browsers cannot set upgrade headers —
+   * there the connection fails with a ConnectionError, so authenticate with
+   * a cookie instead. Non-browser clients send no `Origin` unless it is set
+   * here.
+   */
+  headers?: Record<string, string> | (() => Record<string, string> | Promise<Record<string, string>>);
+  /** WebSocket subprotocols offered on the upgrade. */
+  protocols?: string | string[];
+  /**
+   * Socket factory for runtimes/tests that construct sockets differently.
+   * Receives the resolved headers and protocols. Default: the global
+   * `WebSocket` (called with the URL alone when neither is configured).
+   */
+  webSocketFactory?: (url: string, init: { headers?: Record<string, string>; protocols?: string[] }) => WebSocket;
 }
 
 interface ResolvedNavigationOptions {
@@ -165,6 +214,27 @@ export class RemoteEngine implements Disposable {
   private lastViewValue: string | null = null;
   private handlingPopState = false;
 
+  /** Device Capability Protocol endpoint (RFC 001), or null for legacy wire. */
+  private device: DeviceEndpoint | null = null;
+  /**
+   * The socket the device endpoint is currently attached to. Device traffic
+   * from any other (older) socket is never routed into the endpoint (§2.5).
+   */
+  private deviceSocket: WebSocket | null = null;
+  /** Resume credential from the last `sessionAck` (never logged). */
+  private resumeToken: string | null = null;
+  /**
+   * Handshake outcome delivered to the device endpoint for `deviceSocket`
+   * (RFC 001 §2.2, decision D6): "none" yet, "absent" (an ack without
+   * `device`, which a later ack carrying `device` may still replace), or
+   * "final" (an ack carrying `device` was processed: later acks on this
+   * socket cannot change the selection).
+   */
+  private deviceAckState: "none" | "absent" | "final" = "none";
+  private readonly headersOption: RemoteEngineOptions["headers"];
+  private readonly protocolsOption: string[] | undefined;
+  private readonly webSocketFactory: RemoteEngineOptions["webSocketFactory"];
+
   constructor(url: string, options: RemoteEngineOptions = {}) {
     this.url = url;
     const navOpt = options.navigation;
@@ -183,10 +253,16 @@ export class RemoteEngine implements Disposable {
       navigation,
     };
     this.sessionOptions = options.session;
+    this.device = options.device ?? null;
+    this.headersOption = options.headers;
+    this.protocolsOption =
+      options.protocols === undefined ? undefined : Array.isArray(options.protocols) ? options.protocols : [options.protocols];
+    this.webSocketFactory = options.webSocketFactory;
 
     // If session ID was provided, use it as current
     if (options.session?.id) {
       this.currentSessionId = options.session.id;
+      this.resumeToken = options.session.resumeToken ?? null;
     }
   }
 
@@ -201,16 +277,37 @@ export class RemoteEngine implements Disposable {
 
     this.state = "connecting";
 
+    // Upgrade headers (e.g. a bearer token for the server's connection
+    // authenticator) are resolved per attempt so a token can be refreshed.
+    let headers: Record<string, string> | undefined;
+    try {
+      const h = this.headersOption;
+      headers = typeof h === "function" ? await h() : h;
+    } catch (e) {
+      this.state = "error";
+      return Err(new ConnectionError(this.url, e));
+    }
+
     return new Promise((resolve) => {
       try {
-        this.ws = new WebSocket(this.url);
+        this.ws = this.openSocket(headers);
+        // Binary device frames (RFC 001 §2.3) must arrive as ArrayBuffers —
+        // the default "blob" type reads asynchronously and would reorder
+        // frames relative to JSON messages.
+        this.ws.binaryType = "arraybuffer";
 
         // Track the WebSocket for cleanup
         this.disposables.add(disposableWebSocket(this.ws));
+        const ws = this.ws;
 
         // Set up message handler
         const messageHandler = (event: MessageEvent) => {
-          this.handleMessage(event.data);
+          if (typeof event.data === "string") {
+            this.handleMessage(event.data, ws);
+          } else if (this.device && this.deviceSocket === ws) {
+            const frame = binaryFrame(event.data);
+            if (frame) this.device.handleFrame(frame);
+          }
         };
         this.disposables.add(
           disposableListener(this.ws, "message", messageHandler as EventListener)
@@ -230,6 +327,9 @@ export class RemoteEngine implements Disposable {
         // Set up close handler
         const closeHandler = () => {
           this.state = "disconnected";
+          // Socket gone: the device endpoint tears down every operation,
+          // releases hardware and dismisses prompts (RFC 001 §2.5).
+          if (this.deviceSocket === ws) this.detachDevice();
           this.disconnectionCallbacks.forEach((cb) => cb());
           this.attemptReconnect();
         };
@@ -248,6 +348,14 @@ export class RemoteEngine implements Disposable {
             this.reconnectDisposable = null;
           }
 
+          // Attach the device endpoint to this socket's lifetime — unless
+          // the socket negotiated permessage-deflate WITH context takeover
+          // in either direction: device traffic must never share a DEFLATE
+          // history with other messages (RFC 001 §2.3), so that connection
+          // stays UI-only and hello carries no device extension. Per-message
+          // compression (both no-context-takeover params) is fine.
+          this.attachDevice(ws);
+
           // Send hello message with session info
           this.sendHello();
 
@@ -262,17 +370,89 @@ export class RemoteEngine implements Disposable {
     });
   }
 
+  /** Construct the socket: the URL alone unless headers/protocols/factory are configured. */
+  private openSocket(headers: Record<string, string> | undefined): WebSocket {
+    const protocols = this.protocolsOption;
+    if (this.webSocketFactory) {
+      return this.webSocketFactory(this.url, {
+        ...(headers ? { headers } : {}),
+        ...(protocols ? { protocols } : {}),
+      });
+    }
+    if (headers && Object.keys(headers).length > 0) {
+      // Bun / Node (undici) / React Native accept an init object; a browser
+      // WebSocket throws here (it cannot set upgrade headers).
+      const Ctor = WebSocket as unknown as new (url: string, init: unknown) => WebSocket;
+      return new Ctor(this.url, { headers, ...(protocols ? { protocols } : {}) });
+    }
+    return protocols ? new WebSocket(this.url, protocols) : new WebSocket(this.url);
+  }
+
+  /**
+   * Attach the device endpoint to `ws` if the socket is eligible:
+   * uncompressed, or permessage-deflate negotiated with BOTH
+   * `server_no_context_takeover` and `client_no_context_takeover` (each
+   * message compressed on its own, RFC 001 §2.3). Detaches it from any
+   * previous socket first.
+   */
+  private attachDevice(ws: WebSocket): void {
+    if (!this.device) return;
+    this.detachDevice();
+    const extensions = (ws as { extensions?: unknown }).extensions;
+    if (deflateContextPolicy(extensions) === "context-takeover") {
+      log.warn(
+        "WebSocket negotiated permessage-deflate with context takeover: device plane disabled on this connection"
+      );
+      return;
+    }
+    this.deviceSocket = ws;
+    this.deviceAckState = "none";
+    this.device.attach({
+      sendMessage: (m) => {
+        if (this.deviceSocket === ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m));
+      },
+      sendBinary: (frame) => {
+        if (this.deviceSocket === ws && ws.readyState === WebSocket.OPEN) ws.send(frame);
+      },
+      // Socket write capacity: device uploads wait while ≥ 256 KiB is
+      // pending (RFC 001 §2.3).
+      bufferedAmount: () => ws.bufferedAmount,
+      // The device connection's control plane broke (§2.2) or the peer kept
+      // violating the protocol: close this socket (the endpoint already
+      // stopped everything). A reconnect starts a fresh handshake.
+      close: (code, reason) => {
+        if (this.deviceSocket !== ws) return;
+        log.warn(`Closing the connection: ${reason}`);
+        this.detachDevice();
+        if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+          ws.close(code, reason.slice(0, 120));
+        }
+      },
+    });
+  }
+
+  /** Tear the device endpoint down (idempotent): prompts, drivers, leases. */
+  private detachDevice(): void {
+    if (!this.deviceSocket) return;
+    this.deviceSocket = null;
+    this.device?.detach();
+  }
+
   /**
    * Send hello message to establish session
    */
   private sendHello(): void {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
 
-    const hello: HelloMessage = {
+    const sessionId = this.currentSessionId ?? this.sessionOptions?.id;
+    // `resumeToken` is sent only when resuming the session it was issued for.
+    const hello: HelloMessage & { resumeToken?: string } = {
       type: "hello",
-      sessionId: this.currentSessionId ?? this.sessionOptions?.id,
+      sessionId,
       props: this.sessionOptions?.props,
       persistKey: this.sessionOptions?.persistKey,
+      ...(sessionId && this.resumeToken ? { resumeToken: this.resumeToken } : {}),
+      ...(this.device && this.deviceSocket === this.ws ? { device: this.device.advertisement } : {}),
     };
 
     this.ws.send(JSON.stringify(hello));
@@ -287,6 +467,10 @@ export class RemoteEngine implements Disposable {
       this.reconnectDisposable.dispose();
       this.reconnectDisposable = null;
     }
+
+    // Tear the device plane down first (RFC 001 §2.5): the socket's close
+    // event may never reach us once listeners are disposed.
+    this.detachDevice();
 
     // Close WebSocket if open
     if (this.ws) {
@@ -511,13 +695,21 @@ export class RemoteEngine implements Disposable {
     return this.currentSessionId;
   }
 
-  private handleMessage(data: string): void {
+  private handleMessage(data: string, ws: WebSocket | null = this.ws): void {
     try {
-      const message = JSON.parse(data) as RemoteMessage;
+      // Device messages obey the RFC 001 §2.1 JSON limits, the size limit
+      // (UTF-8 bytes, not UTF-16 units) BEFORE parsing: a text frame over it
+      // is inspected for its `type` with a linear scan and, when it is
+      // device traffic, never parsed.
+      if (this.device && isOversizeDeviceText(data)) {
+        if (this.deviceSocket !== null && this.deviceSocket === ws) this.routeDeviceText(data, null);
+        return;
+      }
+      const message = JSON.parse(data) as RemoteMessage | DeviceRequest;
 
       switch (message.type) {
         case "sessionAck":
-          this.handleSessionAck(message as SessionAckMessage);
+          this.handleSessionAck(message as SessionAckMessage, data, ws);
           break;
 
         case "sessionExpired":
@@ -537,6 +729,18 @@ export class RemoteEngine implements Disposable {
           this.trackViewChange(this.currentState);
           this.stateCallbacks.forEach((cb) => cb(this.currentState));
           break;
+
+        case "deviceRequest":
+        case "deviceEvent":
+        case "deviceResponse": {
+          // Device plane (RFC 001): routed to the endpoint attached to THIS
+          // socket, never into the patch/state path. Otherwise dropped. A
+          // server `deviceResponse` is routed too: on a live id it is a
+          // direction violation the endpoint answers (decision D8).
+          if (!this.device || this.deviceSocket === null || this.deviceSocket !== ws) break;
+          this.routeDeviceText(data, message);
+          break;
+        }
       }
     } catch (e) {
       log.error("Error handling remote message:", e);
@@ -545,20 +749,94 @@ export class RemoteEngine implements Disposable {
     }
   }
 
-  private handleSessionAck(message: SessionAckMessage): void {
+  /**
+   * Deliver one device text message to the endpoint: as exact text when it
+   * decodes strictly itself (`handleText`), else strictly decoded here. Text
+   * breaking the JSON limits is attributable to no request (D3/D8): it is
+   * discarded, never terminating the request its id seems to name.
+   */
+  private routeDeviceText(data: string, parsed: unknown): void {
+    const device = this.device;
+    if (!device) return;
+    if (device.handleText) {
+      device.handleText(data);
+      return;
+    }
+    const decoded = decodeDeviceMessage(data);
+    if (decoded.ok) {
+      device.handleMessage(decoded.message as DeviceRequest | DeviceEvent | DeviceResponse);
+    } else if (decoded.id !== null) {
+      device.handleMalformed?.(parsed ?? { type: decoded.type, id: decoded.id }, `malformed device message: ${decoded.reason.slice(0, 128)}`);
+    } else {
+      log.debug(`Discarding device text breaking the JSON limits: ${decoded.reason.slice(0, 128)}`);
+    }
+  }
+
+  private handleSessionAck(message: SessionAckMessage, raw: string, ws: WebSocket | null = this.ws): void {
     this.currentSessionId = message.sessionId;
+    const token = (message as { resumeToken?: unknown }).resumeToken;
+    this.resumeToken = typeof token === "string" && token.length > 0 ? token : null;
+    if (this.device && this.deviceSocket !== null && this.deviceSocket === ws) {
+      // The handshake is immutable per socket (RFC 001 §2.2): the first ack
+      // carrying `device` is final. An ack without it may be followed by
+      // one carrying it (a server that answered before seeing the hello,
+      // decision D6); every later ack leaves the selection alone.
+      const carries = message.device !== undefined && message.device !== null;
+      if (this.deviceAckState === "final") {
+        if (carries) log.warn("Ignoring sessionAck.device after the device handshake completed");
+      } else if (carries) {
+        this.deviceAckState = "final";
+        this.device.onAck(this.acceptDeviceAck(message.device, raw));
+      } else if (this.deviceAckState === "none") {
+        this.deviceAckState = "absent";
+        this.device.onAck(undefined);
+      }
+    }
 
     const info: SessionInfo = {
       sessionId: message.sessionId,
       isNew: message.isNew,
       isRestored: message.isRestored,
+      ...(this.resumeToken ? { resumeToken: this.resumeToken } : {}),
     };
 
     this.sessionEstablishedCallbacks.forEach((cb) => cb(info));
   }
 
+  /**
+   * Validate `sessionAck.device` and keep only selections this client
+   * actually advertised (RFC 001 §2.2). Anything malformed disables the
+   * device plane for this connection rather than guessing.
+   */
+  private acceptDeviceAck(ack: unknown, raw: string): DeviceAck | undefined {
+    if (ack === undefined || ack === null || !this.device) return undefined;
+    // Strict decoding of the member's exact text (JSON limits, handshake-v1,
+    // unique capability names — D4/D7); a duplicated `device` member is
+    // malformed too (the endpoints would disagree on which one counts).
+    const member = findTopLevelMember(raw, "device");
+    const decoded = member.found ? decodeDeviceAck(member.raw) : null;
+    if (!decoded || !decoded.ok) {
+      log.warn("Ignoring malformed sessionAck.device: device plane disabled on this connection");
+      return undefined;
+    }
+    const a = ack as DeviceAck;
+    const adv = this.device.advertisement;
+    if (!adv.protocolVersions.includes(a.protocolVersion)) return undefined;
+    const binary = a.binary && adv.binary;
+    const capabilities = a.capabilities.filter((c) => {
+      if (!adv.capabilities.some((o) => o.name === c.name && o.versions.includes(c.version))) return false;
+      // Without the binary profile, binary revisions are not selectable.
+      const rev = findRevision(c.name, c.version);
+      return binary || !rev || !needsBinary(rev);
+    });
+    // The mandatory control stream must be selected, else the plane is off.
+    if (!capabilities.some((c) => c.name === "core.capabilities" && c.version === 1)) return undefined;
+    return { protocolVersion: a.protocolVersion, binary, capabilities };
+  }
+
   private handleSessionExpired(message: SessionExpiredMessage): void {
     this.currentSessionId = null;
+    this.resumeToken = null;
     this.sessionExpiredCallbacks.forEach((cb) => cb(message.reason));
   }
 
@@ -635,4 +913,15 @@ export class RemoteEngine implements Disposable {
       });
     }, this.options.reconnectInterval);
   }
+}
+
+/** A binary WebSocket payload as bytes (ArrayBuffer or a typed-array view). */
+function binaryFrame(data: unknown): Uint8Array | null {
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (ArrayBuffer.isView(data)) return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+  // Cross-realm ArrayBuffer (e.g. a socket created in another frame/VM).
+  if (Object.prototype.toString.call(data) === "[object ArrayBuffer]") {
+    return new Uint8Array(data as ArrayBuffer);
+  }
+  return null;
 }

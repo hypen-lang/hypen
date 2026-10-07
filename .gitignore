@@ -96,3 +96,17 @@ Thumbs.db
 # Built Rust static libs — never commit; consumers run build-engine.sh
 **/libhypen_engine.a
 **/libhypen_engine.dylib
+
+# Device lab: binary run evidence (screenshots, recordings, uploads) stays local
+examples/device-lab/__pycache__/
+examples/device-lab/results*/**/*.png
+examples/device-lab/results*/**/*.mp4
+examples/device-lab/results*/**/*.bin
+examples/device-lab/results*/**/*.ips
+
+# --- Internal-only: excluded from the public hypen mirror ---
+docs/
+rfcs/
+examples/device-lab/results/
+examples/device-lab/results-*/
+examples/device-lab/sample.txt

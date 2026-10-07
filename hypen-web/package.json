@@ -9,16 +9,20 @@
     "example-bun"
   ],
   "scripts": {
-    "build": "bun run build:core && bun run build:web && bun run build:server && bun run build:web-engine",
+    "build": "bun run build:core && bun run build:web && bun run build:server && bun run build:web-engine && bun run build:agent && bun run build:device-web && bun run build:device-fake",
     "build:core": "cd packages/core && bun run build.ts",
     "build:web": "cd packages/web && bun run build.ts",
     "build:server": "cd packages/server && bun run build.ts",
+    "build:device-web": "cd packages/device-web && bun run build.ts",
+    "typecheck:device-web": "cd packages/device-web && bunx tsc --noEmit",
+    "build:device-fake": "cd packages/device-fake && bun run build.ts",
+    "typecheck:device-fake": "cd packages/device-fake && bunx tsc --noEmit",
     "build:web-engine": "cd packages/web-engine && bun run build.ts",
     "build:wasm": "cd ../hypen-engine-rs && ./build-wasm.sh && cd ../hypen-web && bun run setup:wasm",
     "setup:wasm": "echo 'WASM is now copied by server and web-engine build scripts'",
     "test": "bun test",
     "test:canvas": "bun test tests/canvas-renderer.test.ts",
-    "typecheck": "bun run typecheck:core && bun run typecheck:web && bun run typecheck:server && bun run typecheck:web-engine && bun run typecheck:cf",
+    "typecheck": "bun run typecheck:core && bun run typecheck:web && bun run typecheck:server && bun run typecheck:web-engine && bun run typecheck:cf && bun run typecheck:agent && bun run typecheck:device-web && bun run typecheck:device-fake",
     "typecheck:core": "cd packages/core && bunx tsc --noEmit",
     "typecheck:web": "cd packages/web && bunx tsc --noEmit",
     "typecheck:server": "cd packages/server && bunx tsc --noEmit",
@@ -37,13 +41,16 @@
     "publish:web": "cd packages/web && npm publish --access public",
     "publish:server": "cd packages/server && npm publish --access public",
     "publish:web-engine": "cd packages/web-engine && npm publish --access public",
-    "publish:all": "bun run build && bun run publish:core && bun run publish:web && bun run publish:server && bun run publish:web-engine"
+    "publish:all": "bun run build && bun run publish:core && bun run publish:web && bun run publish:server && bun run publish:web-engine",
+    "build:agent": "cd packages/agent && bun run build.ts",
+    "typecheck:agent": "cd packages/agent && bunx tsc --noEmit"
   },
   "devDependencies": {
     "@types/bun": "latest",
     "@types/jsdom": "^27.0.0",
     "axe-core": "^4.12.1",
     "jsdom": "^27.4.0",
+    "playwright-core": "^1.50.0",
     "typescript": "^5"
   },
   "keywords": [

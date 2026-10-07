@@ -1,0 +1,338 @@
+---
+title: Requests & Streams
+description: The handler-side device API — supports, request, stream, save, the result shape, options, abort signals, streams with onEvent and onData, and cancellation, with Go, Kotlin, Swift and Rust equivalents
+---
+
+# Requests & Streams
+
+Handlers reach the device through a **device context**. The examples on this
+page are TypeScript, and the last section maps each concept to Go, Kotlin,
+Swift and Rust.
+
+| SDK | Where the device context comes from |
+|-----|-------------------------------------|
+| TypeScript | `context.device` in action handlers, and `context?.device` in lifecycle handlers |
+| Go | `ctx.Device()` (never nil) |
+| Kotlin | `ctx.device` in `onActionAsync`, and `context.device` in lifecycle handlers |
+| Swift | `ctx.device` in `onActionAsync`, and the `device` argument of `onActivatedAsync` |
+| Rust | `ctx.device()` on the handler's `GlobalContext` (remote sessions always pass one), or `session.device(module)` outside handlers |
+
+The context belongs to the invocation that received it. It carries that
+module instance's current activation and the dispatch's origin. You can't
+hand it to another module or use it to start work for a different owner.
+
+## supports()
+
+```typescript
+context.device.supports("camera.capture"); // boolean
+```
+
+`supports()` reports **negotiated, live** support: the client offers the
+capability right now, and the server selected a revision of it. It isn't a
+permission grant, and it changes as the client updates its capability list,
+for example while the app is in the background. An update can only withdraw
+or restore a capability negotiated when the connection opened, never add a
+new one; that waits for the next connection. Use it to decide whether to
+show a "Take photo" button:
+
+```typescript
+.onActivated(async (state, context) => {
+  state.canScan = context?.device.supports("bluetooth.scan") ?? false;
+})
+```
+
+## request()
+
+```typescript
+request<C extends UnaryCapability>(
+  capability: C,
+  params: ParamsOf<C>,
+  init?: DeviceRequestInit,
+): Promise<DeviceResult<ResultOf<C>>>
+```
+
+`request()` runs one operation that has a single result. It is **typed per
+capability**: an unknown capability name, a misspelled permission, or a photo
+with `maxDurationMs` is a compile-time error. Streams (`mic.record`,
+`bluetooth.scan`) and `file.save` aren't accepted here. Use `stream()` and
+`save()` for those.
+
+The wrappers are thin aliases for the same call:
+
+| Wrapper | Same as |
+|---------|---------|
+| `device.camera.capture(params, init?)` | `request("camera.capture", params, init)` |
+| `device.bluetooth.select(params?, init?)` | `request("bluetooth.select", params ?? {}, init)` |
+| `device.permissions.query(permission, init?)` | `request("permission.query", { permission }, init)` |
+| `device.permissions.request(permission, init?)` | `request("permission.request", { permission }, init)` |
+| `device.mic.record(params, onData, init?)` | `stream("mic.record", params, init ?? {}, { onData })` |
+
+For capability names that are only known at runtime,
+`requestUntyped(name, params, init?)` and
+`streamUntyped(name, params, init, consumer)` skip the compile-time checks.
+The server still validates the name and params before it sends anything.
+
+### The result
+
+Every device call resolves to a value and **never throws**:
+
+```typescript
+type DeviceResult<T> =
+  | { ok: true; value: T; simulated?: true }
+  | { ok: false; error: { code: DeviceErrorCode; platformDetail?: string } };
+```
+
+- `error.code` is one of the ten [error codes](/docs/device/errors).
+- `platformDetail` is short diagnostic text, such as `"picker-dismissed"` or
+  `"not-declared:camera"`. Log it, but don't branch on it: it isn't portable
+  across platforms.
+- `simulated: true` means a [development fake](/docs/device/client-setup#development-the-fake-host)
+  produced the result.
+
+For uploads, `value` carries **verified bytes** instead of the wire's size and
+hash. Each item is `{ channel, contentType, bytes: Uint8Array }`, plus `name`
+for `file.pick`. The server has already checked the item set, every size and
+every SHA-256 against what the client declared.
+
+```typescript
+const res = await context.device.request("gallery.pick", { mediaTypes: ["photo", "video"], maxCount: 8 });
+if (!res.ok) {
+  if (res.error.code !== "cancelled") state.error = res.error.code;
+  return;
+}
+for (const item of res.value.items) {
+  await storage.put(crypto.randomUUID(), item.bytes, { contentType: item.contentType });
+}
+```
+
+<Callout type="warn">
+Device results are **untrusted input**. A matching hash proves the bytes
+arrived intact. It doesn't prove the file is really a JPEG, or that the client
+is honest. Validate content before you use it, as you would with any upload.
+</Callout>
+
+### Options
+
+Every call takes an optional `init` object:
+
+| Option | Meaning |
+|--------|---------|
+| `timeoutMs` | Overall deadline. Defaults to 300 s, clamped to the capability's maximum. |
+| `signal` | An `AbortSignal`. Aborting it cancels the request, which settles as `cancelled`. If the signal is already aborted, nothing is sent. |
+| `initialCredit` | Initial upload credit (bytes for uploads, events for JSON streams), clamped to the capability's maximum. The defaults are 256 KiB and 64 events. `0` is refused with `invalidParams`. |
+| `lifetime` | `"activation"` (the default). No revision-1 capability allows `"background"`, so that value returns `unsupported`. See [Lifetimes](/docs/device/lifetimes). |
+
+```typescript
+// One controller per module instance (per session), keyed by its state object.
+const pending = new WeakMap<object, AbortController>();
+
+app
+  .defineState({ status: "" })
+  .onAction("pickPhoto", async ({ state, context }) => {
+    const controller = new AbortController();
+    pending.set(state, controller);
+    const res = await context.device.request(
+      "gallery.pick",
+      { mediaTypes: ["photo"], maxCount: 1 },
+      { timeoutMs: 60_000, signal: controller.signal },
+    );
+    state.status = res.ok ? "picked" : res.error.code; // "cancelled" after abort
+  })
+  .onAction("cancelPick", ({ state }) => pending.get(state)?.abort());
+```
+
+### Keep the handler waiting
+
+A request belongs to the handler that started it. When an action or lifecycle
+handler returns, any request it started that is **still pending is
+cancelled**, because nothing is left to receive the result. Always `await`
+device calls inside the handler:
+
+```typescript
+// Wrong: the handler returns at once, and the request is cancelled.
+.onAction("pick", ({ context }) => {
+  void context.device.request("gallery.pick", { mediaTypes: ["photo"], maxCount: 1 });
+})
+
+// Right
+.onAction("pick", async ({ state, context }) => {
+  const res = await context.device.request("gallery.pick", { mediaTypes: ["photo"], maxCount: 1 });
+  // ...
+})
+```
+
+Received upload bytes count toward the connection's memory budget until the
+handler returns. Copy anything you want to keep, such as uploading it to
+storage, before the handler finishes. Streams aren't tied to the handler this
+way: they run until they end or their module deactivates.
+
+Your state may change while a handler waits for the device. Other actions
+can run, and the user can navigate away and back. Re-check it after the
+`await`.
+
+## save()
+
+```typescript
+save(bytes: Uint8Array, opts: {
+  name: string;
+  contentType: string;
+  timeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<DeviceResult<{ bytesWritten: number }>>
+```
+
+`save()` runs `file.save`. The SDK takes a copy of `bytes`, so you can reuse
+the buffer right away. It then computes the SHA-256, announces the file, and
+sends the data only after the user has chosen a destination. The result
+succeeds only if the device reports writing exactly `bytes.byteLength` bytes.
+
+```typescript
+.onAction("exportCsv", async ({ state, context }) => {
+  const csv = new TextEncoder().encode(toCsv(state.rows));
+  const res = await context.device.save(csv, { name: "report.csv", contentType: "text/csv" });
+  state.exported = res.ok;
+})
+```
+
+## stream()
+
+```typescript
+// JSON events (bluetooth.scan)
+stream(capability, params, init, onEvent: (event) => void | Promise<unknown>): DeviceStreamHandle
+// Bytes (mic.record)
+stream(capability, params, init, consumer: { onData(chunk: Uint8Array): void | Promise<unknown> }): DeviceStreamHandle
+```
+
+A stream returns a handle straight away:
+
+```typescript
+interface DeviceStreamHandle<R> {
+  readonly id: number | null;                 // null when refused locally
+  readonly settled: Promise<DeviceResult<R>>; // exactly one outcome; never rejects
+  cancel(): void;                             // idempotent
+}
+```
+
+- **Events and bytes arrive in order, one call at a time.** The server
+  validates each event against the capability's schema before your callback
+  sees it.
+- **Your callback sets the pace.** Credit goes back to the device when the
+  callback returns, or when its promise settles. A slow consumer therefore
+  slows the device down instead of filling server memory. For `mic.record`,
+  the device holds a bounded buffer while it waits. If that buffer fills, the
+  recording ends with `throttled`.
+- **If the callback throws, the chunk still counts as consumed.**
+- **`settled` resolves last**, after every accepted chunk or event has been
+  delivered. For `mic.record` it carries `{ durationMs, item }`. The server
+  verified the item's `bytes` and `sha256` against everything delivered, and
+  a mismatch settles as `invalidParams`.
+- **`cancel()`** (or aborting `init.signal`) tells the device to stop, and
+  `settled` resolves `{ ok: false, error: { code: "cancelled" } }`.
+
+Passing the wrong kind of consumer (an `onEvent` function for `mic.record`,
+or `{ onData }` for `bluetooth.scan`) fails locally with `invalidParams`.
+
+```typescript
+type Nearby = { id: string; name: string; rssi: number };
+const scans = new WeakMap<object, { cancel(): void }>(); // per module instance
+
+app
+  .defineState({ devices: [] as Nearby[], scanning: false, error: "" })
+  .onAction("startScan", ({ state, context }) => {
+    state.devices = [];
+    const handle = context.device.stream("bluetooth.scan", {}, { timeoutMs: 120_000 }, (ev) => {
+      const i = state.devices.findIndex((d) => d.id === ev.device.id);
+      const entry = { id: ev.device.id, name: ev.device.name ?? "Unknown", rssi: ev.device.rssi };
+      if (i >= 0) state.devices[i] = entry;
+      else state.devices.push(entry);
+    });
+    scans.set(state, handle);
+    void handle.settled.then((r) => {
+      state.scanning = false; // don't leave state saying the scan is live
+      if (!r.ok && r.error.code !== "cancelled") state.error = r.error.code;
+    });
+    state.scanning = handle.id !== null;
+  })
+  .onAction("stopScan", ({ state }) => scans.get(state)?.cancel());
+```
+
+Unlike a unary request, a stream keeps running after the handler that opened
+it returns. It ends when it settles, when you cancel it, or when its module
+deactivates.
+
+## Other SDKs
+
+The concepts carry over. Each SDK expresses them in its own idiom:
+
+| Concept | Go | Kotlin | Swift | Rust |
+|---------|----|--------|-------|------|
+| Result | `(value, error)`. `err` is a `*device.Error` with a `Code`. `errors.Is(err, device.ErrDenied)` works. | `DeviceResult.Ok(value, simulated)` / `DeviceResult.Err(DeviceFailure(code, platformDetail))` | `Result<DeviceValue<T>, DeviceError>`. `DeviceValue` exposes `.value` and `.simulated`. | `DeviceResult<Delivered<T>>` = `Result<Delivered<T>, DeviceError>`; `Delivered` derefs to the value and has `.simulated`; `DeviceError { code, detail }` |
+| Unary | `Device().Request(ctx, name, params, opts...)`, typed helpers (`Gallery().Pick`, …), `device.RequestAs[T]` | `device.request(Capability.GALLERY_PICK, params, options)` and the wrappers | `await device.request(GalleryPick(...))` and the wrappers | `device.request(name, json)` / `request_with(.., RequestOptions)` and typed helpers (`gallery_pick`, `file_pick`, …) return `Err` (refused locally) or a `DeviceCall` consumed with `then`, `on_settled` or `wait` |
+| Save | `Device().Save(ctx, name, contentType, data)` | `device.save(bytes, name, contentType)` | `await device.save(data, name:contentType:)` | `device.save(name, content_type, bytes)` → `DeviceCall<SaveReceipt>` |
+| Stream | `Device().Stream(...)`, then `Next(ctx)` until `io.EOF`, then `Result(ctx)` | `device.stream(cap, params) { … }.await()`, or a cold `Flow` via `events(...)` / `data(...)` | `DeviceEventStream` / `DeviceDataStream` are `AsyncSequence`s; `await stream.result()` | `device.stream(..)` → `DeviceStream`, consumed with `for_each::<S>(\|state, item\| ..)` or `on_item`; items are `Event`, `Data` then one `End` |
+| Cancel | Cancel the `context.Context`, or `Stream.Cancel()`. Return `device.ErrStop` from a callback to end a stream. | Cancel the coroutine (or `withTimeout`), or `DeviceStream.cancel()`. Stopping a `Flow` early cancels the stream. | Cancel the `Task`, or `stream.cancel()` | `call.cancel()`, a `DeviceHandle` (`call.handle()`, returned by `for_each`) `.cancel()`; dropping an unconsumed call cancels it |
+| Options | `device.WithTimeout(d)`, `device.WithInitialCredit(n)`, `device.WithLifetime(l)` | `DeviceRequestOptions(lifetime, timeoutMs, initialCredit)` | `DeviceRequestOptions` (`lifetime`, `timeoutMs`, `initialCredit`) | `RequestOptions { version, lifetime, timeout, initial_credit }` |
+| Supports | `Device().Supports(name)` | `device.supports(name)` or `supports(Capability.X)` | `device.supports(name)` or `supports(GalleryPick.self)` | `device.supports(name)`, `selected_version(name)`, `capabilities()` |
+
+In Go, a device call **blocks the goroutine**. While a handler waits, the
+session's dispatch slot is released, so the session's other actions keep
+running.
+
+```go
+OnAction("record", func(ctx core.TypedActionContext[State]) {
+    var pcm bytes.Buffer
+    res, err := ctx.Device().Mic().Record(context.Background(),
+        device.MicRecordParams{SampleRate: 16000},
+        func(chunk []byte) error { pcm.Write(chunk); return nil })
+    if err != nil {
+        ctx.State.Error = string(device.CodeOf(err))
+        return
+    }
+    ctx.State.Seconds = int(res.DurationMs / 1000)
+})
+```
+
+```kotlin
+.onActionAsync("scan") { ctx ->
+    try {
+        val first = ctx.device.events(Capability.BLUETOOTH_SCAN, BluetoothScanParams).take(5).toList()
+        ctx.state.set("devices", first.map { it.device.id })
+    } catch (e: DeviceException) {
+        ctx.state.set("error", e.failure.code.wireName)
+    }
+}
+```
+
+In Rust, handlers are synchronous and run with the session locked, so a call
+never blocks one: the result arrives later, and `then` applies it to the
+module's state (its patches ship like an action's).
+
+```rust
+.on_action::<()>("record", |state, _, ctx| {
+    let params = MicRecordParams { sample_rate: 16_000, format: MicFormat::Pcm16,
+                                   max_duration_ms: Some(30_000), channels: None };
+    match ctx.expect("remote handler").device().mic_record(params) {
+        Ok(stream) => {
+            stream.for_each(|s: &mut State, item| match item {
+                StreamItem::Data { bytes, .. } => s.pcm_bytes += bytes.len(),
+                StreamItem::End(Ok(r)) => s.duration_ms = r["durationMs"].as_u64().unwrap_or(0),
+                StreamItem::End(Err(e)) => s.error = e.code_str().into(),
+                StreamItem::Event(_) => {}
+            });
+        }
+        Err(e) => state.error = e.code_str().into(),
+    }
+})
+```
+
+```swift
+.onActionAsync("record") { ctx in
+    let recording = ctx.device.mic.record(sampleRate: 16000, maxDurationMs: 30_000)
+    var pcm = Data()
+    for await chunk in recording { pcm.append(chunk.bytes) }
+    switch await recording.result() {
+    case .success(let r): ctx.state.set("durationMs", Int(r.durationMs))
+    case .failure(let e): ctx.state.set("error", e.code.rawValue)
+    }
+}
+```

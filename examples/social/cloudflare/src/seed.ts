@@ -10,9 +10,11 @@ import schemaSql from "./schema.sql";
 import seedSql from "./seed.sql";
 
 import { db } from "./db";
+import { MEDIA_SCHEMA } from "./media";
 
 export function initSchema(): void {
   db.exec(schemaSql as string);
+  db.exec(MEDIA_SCHEMA);
 
   const stripped = (seedSql as string)
     .split("\n")

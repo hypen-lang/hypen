@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Canvas Video v2 Tests — player state machine, playback bind, composition
  * slots, Scrubber.
@@ -196,7 +197,7 @@ beforeEach(() => {
   ensureFakeDomGlobals();
   clearVideoCache();
   dispatched = [];
-  setVideoActionDispatcher((name, payload) => dispatched.push({ name, payload }));
+  setVideoActionDispatcher((name, payload) => dispatched.push(semanticAction(name, payload)));
 });
 
 afterEach(() => {
@@ -890,7 +891,7 @@ class MockCanvas {
 class MockEngine {
   actions: Array<{ name: string; payload: any }> = [];
   dispatchAction(name: string, payload?: any) {
-    this.actions.push({ name, payload });
+    this.actions.push(semanticAction(name, payload));
   }
 }
 

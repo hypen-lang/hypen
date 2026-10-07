@@ -349,3 +349,162 @@ fn route_param_match() {
     assert_eq!(mr.get_active_route_path(), Some("/users/:id".to_string()));
     assert_eq!(log.snapshot(), vec!["User:created", "User:activated"]);
 }
+
+// ---------------------------------------------------------------------------
+// External-surface teardown
+//
+// `unregister_external` drops the actions an external caller (MCP, REST, CLI,
+// agent) may dispatch by name — see `hypen_engine::agent`. It belongs at
+// destroy sites and nowhere else: a persisted module is off-screen, not gone,
+// and stays registered so sibling modules can keep reading its state and so a
+// revisit reuses the instance. These tests pin that asymmetry.
+// ---------------------------------------------------------------------------
+
+/// Records `destroy` and `unregister_external` separately so the two can be
+/// told apart per teardown site. A real `ModuleInstance` can't stand in here:
+/// the call it makes lands on its own private engine and is invisible from
+/// outside the instance.
+struct RecordingModule {
+    name: String,
+    log: LifecycleLog,
+}
+
+impl hypen_server::managed_router::ManagedModule for RecordingModule {
+    fn name(&self) -> &str {
+        &self.name
+    }
+    fn mount(&self) {
+        self.log.push(format!("{}:created", self.name));
+    }
+    fn activate(&self) {
+        self.log.push(format!("{}:activated", self.name));
+    }
+    fn deactivate(&self) {
+        self.log.push(format!("{}:deactivated", self.name));
+    }
+    fn destroy(&self) {
+        self.log.push(format!("{}:destroyed", self.name));
+    }
+    fn unregister_external(&self) {
+        self.log.push(format!("{}:unregistered", self.name));
+    }
+}
+
+fn recording_route(path: &str, component: &str, log: LifecycleLog) -> RouteDefinition {
+    let name = component.to_string();
+    RouteDefinition::factory(path, component, move || {
+        Ok(Arc::new(RecordingModule {
+            name: name.clone(),
+            log: log.clone(),
+        })
+            as Arc<dyn hypen_server::managed_router::ManagedModule>)
+    })
+}
+
+#[test]
+fn persisted_module_keeps_its_external_surface_destroyed_one_does_not() {
+    let log = LifecycleLog::default();
+    let ctx = Arc::new(GlobalContext::new());
+    let router = Arc::new(HypenRouter::new());
+    let mr = ManagedRouter::new(
+        Arc::clone(&router),
+        Arc::clone(&ctx),
+        ManagedRouterOptions::default(),
+    );
+    mr.add_route(recording_route("/", "Home", log.clone()).persist(true));
+    mr.add_route(recording_route("/about", "About", log.clone()));
+    mr.start();
+
+    log.inner.lock().unwrap().clear();
+    router.push("/about"); // Home leaves the screen but persists.
+
+    let snap = log.snapshot();
+    assert!(snap.contains(&"Home:deactivated".to_string()));
+    assert!(
+        !snap.contains(&"Home:destroyed".to_string()),
+        "persisted module must not be destroyed: {snap:?}"
+    );
+    assert!(
+        !snap.contains(&"Home:unregistered".to_string()),
+        "an off-screen module stays externally reachable so siblings can \
+         still read its state: {snap:?}"
+    );
+
+    log.inner.lock().unwrap().clear();
+    router.push("/"); // About does not persist — this is a real destroy.
+
+    assert_eq!(
+        log.snapshot(),
+        vec![
+            "About:deactivated",
+            "About:destroyed",
+            "About:unregistered",
+            "Home:activated",
+        ]
+    );
+}
+
+#[test]
+fn lru_eviction_unregisters_the_evicted_module() {
+    let log = LifecycleLog::default();
+    let ctx = Arc::new(GlobalContext::new());
+    let router = Arc::new(HypenRouter::new());
+    let mr = ManagedRouter::new(
+        Arc::clone(&router),
+        Arc::clone(&ctx),
+        ManagedRouterOptions {
+            max_persisted_modules: 1,
+            default_persist: true,
+        },
+    );
+    mr.add_route(recording_route("/a", "A", log.clone()));
+    mr.add_route(recording_route("/b", "B", log.clone()));
+    mr.add_route(recording_route("/c", "C", log.clone()));
+
+    router.push("/a");
+    mr.start();
+    router.push("/b"); // A → cache (lru: [a])
+
+    log.inner.lock().unwrap().clear();
+    router.push("/c"); // B → cache, cap 1 evicts A.
+
+    let snap = log.snapshot();
+    assert!(
+        snap.contains(&"A:destroyed".to_string()) && snap.contains(&"A:unregistered".to_string()),
+        "eviction is a destroy, so the surface goes with it: {snap:?}"
+    );
+    assert!(
+        !snap.contains(&"B:unregistered".to_string()),
+        "B is still cached: {snap:?}"
+    );
+}
+
+#[test]
+fn stop_unregisters_active_and_persisted_modules() {
+    let log = LifecycleLog::default();
+    let ctx = Arc::new(GlobalContext::new());
+    let router = Arc::new(HypenRouter::new());
+    let mr = ManagedRouter::new(
+        Arc::clone(&router),
+        Arc::clone(&ctx),
+        ManagedRouterOptions {
+            max_persisted_modules: 4,
+            default_persist: true,
+        },
+    );
+    mr.add_route(recording_route("/", "Home", log.clone()));
+    mr.add_route(recording_route("/a", "A", log.clone()));
+    mr.start();
+    router.push("/a"); // Home cached, A active.
+
+    log.inner.lock().unwrap().clear();
+    mr.stop(); // Full teardown: everything is destroyed, cache included.
+
+    let snap = log.snapshot();
+    for expected in ["A:unregistered", "Home:unregistered"] {
+        assert!(
+            snap.contains(&expected.to_string()),
+            "missing {expected}: {snap:?}"
+        );
+    }
+}

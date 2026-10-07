@@ -102,6 +102,14 @@ pub(crate) fn compile_iter_templates(
     templates: &[IRNode],
     item_name: &str,
 ) -> Option<Vec<CompiledTemplate>> {
+    // DnD generates item-dependent identity/position props during substitution.
+    // A binding-only update would miss those generated props.
+    if templates
+        .iter()
+        .any(crate::ir::dnd::template_needs_item_identity)
+    {
+        return None;
+    }
     fn walk(
         node: &IRNode,
         offsets: &mut Vec<usize>,
@@ -270,6 +278,12 @@ fn is_statically_resolvable(value: &Value) -> bool {
 /// Build an instantiation plan for one per-item template. `None` when the
 /// template's structure can vary with the item (any non-Element node).
 pub(crate) fn plan_instantiation(template: &IRNode) -> Option<InstantiationPlan> {
+    // Draggable rows carry per-row identity (`__dnd.key`, injected translate
+    // bindings) that only the substitution path stamps — a skeleton +
+    // `dynamic` subs would drop them from the wire. Unplannable.
+    if crate::ir::dnd::template_needs_item_identity(template) {
+        return None;
+    }
     fn walk(
         node: &IRNode,
         dfs: &mut usize,
@@ -519,8 +533,11 @@ pub(crate) fn apply_compiled_row(
                 if node.props.get(entry.prop.as_str()) == Some(&resolved) {
                     continue;
                 }
-                Arc::make_mut(&mut node.props).insert(entry.prop.clone(), resolved.clone());
-                node.raw_props.insert(entry.prop.clone(), new_raw);
+                // Both maps are layered: a prop already overridden on this
+                // node is replaced in place, so a row update touches no
+                // shared base and allocates nothing for the key.
+                node.props.insert(&entry.prop, resolved.clone());
+                node.raw_props.insert(&entry.prop, new_raw);
                 if !is_engine_internal_prop(&entry.prop) {
                     ctx.patches
                         .push(Patch::set_prop(node_id, entry.prop.clone(), resolved));
@@ -528,13 +545,10 @@ pub(crate) fn apply_compiled_row(
             }
             None => {
                 // `.states` switch resolving to ABSENT: drop the prop.
-                if Arc::make_mut(&mut node.props)
-                    .shift_remove(entry.prop.as_str())
-                    .is_none()
-                {
+                if node.props.shift_remove(entry.prop.as_str()).is_none() {
                     continue;
                 }
-                node.raw_props.insert(entry.prop.clone(), new_raw);
+                node.raw_props.insert(&entry.prop, new_raw);
                 if !is_engine_internal_prop(&entry.prop) {
                     ctx.patches
                         .push(Patch::remove_prop(node_id, entry.prop.clone()));
@@ -564,9 +578,12 @@ pub(crate) fn apply_compiled_row(
 // pass, and only the item-dependent props differ.
 //
 // A `RowPrototype` resolves the invariant part ONCE per pass; each row is
-// then materialized by Arc-cloning the prototype's resolved props and
-// overlaying just the item-dependent entries — plus the `Instantiate`
-// patch built directly, with no throwaway per-node `Create`/`Insert` run.
+// then materialized by *sharing* the prototype's resolved and raw bases
+// (an `Arc` bump each) and layering just the item-dependent entries on
+// top (`LayeredProps`) — plus the `Instantiate` patch built directly, with
+// no throwaway per-node `Create`/`Insert` run. No per-row node deep-copies
+// a prop map: the overlay holds only the one or two props that actually
+// vary with the item, under keys shared with the prototype.
 //
 // Fallback discipline mirrors the rest of this module: any template shape
 // the prototype can't faithfully reproduce (control flow, `__lazy`
@@ -576,21 +593,26 @@ pub(crate) fn apply_compiled_row(
 /// One element of a row prototype, in DFS preorder.
 pub(crate) struct ProtoNode {
     element_type: String,
-    /// Static + state/data-source props, resolved once per pass. Per-row
-    /// item values overlay copy-on-write, so item-free nodes share this
-    /// map across every row via `Arc`.
+    /// Static + state/data-source props, resolved once per pass and shared
+    /// by every row's node as the base of its layered props.
     base_resolved: super::tree::ResolvedProps,
-    /// Template raw props, item bindings intact — the per-row overlay
-    /// substitutes only the item-dependent keys, so state bindings stay
-    /// raw for later dirty re-resolution.
-    base_raw: crate::ir::Props,
-    /// `(prop key, pre-substitution value)` per item-dependent prop.
-    item_entries: Vec<(String, Value)>,
+    /// Template raw props, item bindings intact, shared the same way — the
+    /// per-row overlay substitutes only the item-dependent keys, so state
+    /// bindings stay raw for later dirty re-resolution.
+    base_raw: Arc<crate::ir::node::PropsMap>,
+    /// `(prop key, pre-substitution value)` per item-dependent prop. The
+    /// key is shared with every row's overlay entry.
+    item_entries: Vec<(Arc<str>, Value)>,
     /// State/data-source bindings to register on every created node —
     /// the same set `create_element_node` would register after
     /// substitution (item bindings excluded; they substitute away).
     bindings: Vec<crate::reactive::Binding>,
     semantics: Option<crate::ir::Semantics>,
+    /// `semantics` resolved against `base_resolved`, valid for every row
+    /// when no prop of this node depends on the item (then every row's
+    /// props ARE the base, so resolution is row-invariant). `None` when
+    /// `item_entries` is non-empty — those rows resolve per row.
+    static_semantics: Option<crate::ir::Semantics>,
     module_scope: Option<String>,
     /// DFS index of the parent element (`None` for the row root).
     parent: Option<usize>,
@@ -647,7 +669,7 @@ pub(crate) fn build_row_prototype(
                 _ => {}
             }
             if value_depends_on_item(value, item_name) {
-                item_entries.push((key.clone(), value.clone()));
+                item_entries.push((Arc::from(key.as_str()), value.clone()));
             } else if let Some(v) = resolve_single_value(
                 value,
                 effective_state,
@@ -658,13 +680,20 @@ pub(crate) fn build_row_prototype(
                 base.insert(key.clone(), v);
             }
         }
+        let base_resolved = Arc::new(base);
+        let static_semantics = if item_entries.is_empty() {
+            super::diff::resolve_semantics(element.semantics.as_ref(), &base_resolved)
+        } else {
+            None
+        };
         out.push(ProtoNode {
             element_type: element.element_type.clone(),
-            base_resolved: Arc::new(base),
-            base_raw: element.props.clone(),
+            base_resolved,
+            base_raw: element.props.clone().into_arc(),
             item_entries,
             bindings,
             semantics: element.semantics.clone(),
+            static_semantics,
             module_scope: element.module_scope.clone(),
             parent,
         });
@@ -676,14 +705,21 @@ pub(crate) fn build_row_prototype(
         true
     }
 
+    // Same refusal as `plan_instantiation`: the prototype overlays only
+    // item-dependent props, and `__dnd.key` / the translate bindings are
+    // stamped from the item KEY at substitution, not from an item binding.
+    if crate::ir::dnd::template_needs_item_identity(template) {
+        return None;
+    }
     let mut nodes = Vec::new();
     walk(ctx, template, item_name, None, &mut nodes).then_some(RowPrototype { nodes })
 }
 
-/// Materialize one row from its prototype: clone the resolved bases,
-/// overlay the item-dependent props, hang the subtree in the instance
-/// tree with dependencies registered, and emit `[RegisterTemplate?,
-/// Instantiate]` directly — no intermediate per-node patch run.
+/// Materialize one row from its prototype: share the resolved and raw
+/// bases, layer the item-dependent props over them, hang the subtree in
+/// the instance tree with dependencies registered, and emit
+/// `[RegisterTemplate?, Instantiate]` directly — no intermediate per-node
+/// patch run.
 ///
 /// The wire output is identical to what `emit_row_as_instantiate` would
 /// have collapsed: subs cover every `plan.dynamic` prop (engine-internal
@@ -706,23 +742,49 @@ pub(crate) fn instantiate_row_from_proto(
     let mut evaluator = None;
 
     for (index, proto_node) in proto.nodes.iter().enumerate() {
-        let mut props = proto_node.base_resolved.clone();
-        let mut raw = proto_node.base_raw.clone();
-        for (prop, raw_value) in &proto_node.item_entries {
-            let new_raw = replace_value_item_bindings(raw_value, item, item_name);
-            match resolve_single_value(&new_raw, ctx.state, None, ctx.data_sources, &mut evaluator)
-            {
-                Some(v) => {
-                    Arc::make_mut(&mut props).insert(prop.clone(), v);
+        let (props, raw) = if proto_node.item_entries.is_empty() {
+            // Nothing varies with the item: the node IS the shared base.
+            (
+                super::tree::NodeProps::flat(Arc::clone(&proto_node.base_resolved)),
+                super::tree::NodeRawProps::flat(Arc::clone(&proto_node.base_raw)),
+            )
+        } else {
+            // The resolved base never holds an item-dependent key (the
+            // prototype skips them), so each resolved entry APPENDS — the
+            // same position a fresh insert gave it before. A value that
+            // resolves to absent (`.states` miss) simply stays absent. The
+            // raw base holds every template key, so each raw entry
+            // SHADOWS its template value in place — the same position a
+            // re-insert of an existing key kept.
+            let mut resolved_overlay = Vec::with_capacity(proto_node.item_entries.len());
+            let mut raw_overlay = Vec::with_capacity(proto_node.item_entries.len());
+            for (prop, raw_value) in &proto_node.item_entries {
+                let new_raw = replace_value_item_bindings(raw_value, item, item_name);
+                if let Some(v) = resolve_single_value(
+                    &new_raw,
+                    ctx.state,
+                    None,
+                    ctx.data_sources,
+                    &mut evaluator,
+                ) {
+                    resolved_overlay.push((Arc::clone(prop), v));
                 }
-                None => {
-                    Arc::make_mut(&mut props).shift_remove(prop.as_str());
-                }
+                raw_overlay.push((Arc::clone(prop), new_raw));
             }
-            raw.insert(prop.clone(), new_raw);
-        }
+            (
+                super::tree::NodeProps::layered(
+                    Arc::clone(&proto_node.base_resolved),
+                    resolved_overlay,
+                ),
+                super::tree::NodeRawProps::layered(Arc::clone(&proto_node.base_raw), raw_overlay),
+            )
+        };
 
-        let resolved_semantics = super::diff::resolve_semantics(&proto_node.semantics, &props);
+        let resolved_semantics = if proto_node.item_entries.is_empty() {
+            proto_node.static_semantics.clone()
+        } else {
+            super::diff::resolve_semantics(proto_node.semantics.as_ref(), &props)
+        };
         if let Some(sem) = &resolved_semantics {
             wire_semantics.push((index, sem.clone()));
         }
@@ -746,8 +808,8 @@ pub(crate) fn instantiate_row_from_proto(
             parent: None,
             children: im::Vector::new(),
             module_scope: proto_node.module_scope.clone(),
-            semantics: proto_node.semantics.clone(),
-            last_semantics: resolved_semantics,
+            semantics: proto_node.semantics.clone().map(Box::new),
+            last_semantics: resolved_semantics.map(Box::new),
             iter_memo: None,
             iter_compiled: None,
             iter_fp_cache: None,

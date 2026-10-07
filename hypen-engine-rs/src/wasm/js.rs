@@ -3,7 +3,7 @@
 //! This module provides JavaScript-specific bindings via wasm-bindgen.
 //! For WASI/non-JS runtimes, see the `wasi` module.
 
-use serde_wasm_bindgen::from_value;
+use serde_wasm_bindgen::{from_value, to_value};
 use std::collections::HashSet;
 use wasm_bindgen::prelude::*;
 
@@ -790,6 +790,20 @@ impl WasmEngine {
 
     // ── Actions ─────────────────────────────────────────────────────
 
+    /// Resolve session-local node identity before trusted server fan-out.
+    #[wasm_bindgen(js_name = resolveUIAction)]
+    pub fn resolve_ui_action(&self, name: &str, payload: JsValue) -> Result<JsValue, JsValue> {
+        let payload: serde_json::Value =
+            from_value(payload).map_err(|e| structured_error("actionError", &e.to_string()))?;
+        let action = self
+            .core
+            .route_ui_action(Action::new(name).with_payload(payload))
+            .map_err(|e| structured_error("actionError", &e.to_string()))?;
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        serde::Serialize::serialize(&action, &serializer)
+            .map_err(|e| structured_error("actionError", &e.to_string()))
+    }
+
     /// Dispatch a named action, invoking the registered handler (if any).
     #[wasm_bindgen(js_name = dispatchAction)]
     pub fn dispatch_action(&mut self, name: &str, payload: JsValue) -> Result<(), JsValue> {
@@ -801,7 +815,14 @@ impl WasmEngine {
             })?)
         };
 
-        let payload = payload.unwrap_or(serde_json::Value::Null);
+        let routed = self
+            .core
+            .route_ui_action(
+                Action::new(name).with_payload(payload.unwrap_or(serde_json::Value::Null)),
+            )
+            .map_err(|e| structured_error("actionError", &e.to_string()))?;
+        let name = routed.name.as_str();
+        let payload = routed.payload.unwrap_or(serde_json::Value::Null);
 
         // 1. Try exact handler match first
         if let Some(handler) = self.action_handlers.get(name) {
@@ -826,9 +847,161 @@ impl WasmEngine {
         Ok(())
     }
 
+    // ── External capability surface ─────────────────────────────────
+    //
+    // For callers that are NOT the rendered UI: MCP servers, REST APIs,
+    // CLIs, agents. `dispatchAction` above reaches every registered
+    // handler — including `__hypen_bind`, which writes an arbitrary state
+    // path — so external callers get these guarded entry points instead.
+    // The rule and its rationale live in `crate::agent`; the implementation
+    // is shared with every other binding via `crate::agent_core`, so the
+    // guard cannot drift between SDKs.
+
+    /// The built-in external action names, as
+    /// `{ navigate, back, setInput, bindAction }`.
+    ///
+    /// Exported so SDKs bind to these rather than hardcoding the literals.
+    /// They were hardcoded in four SDKs at once, which is why renaming
+    /// `navigate` to `hypen.navigate` (to stop it colliding with `Link`'s own
+    /// declared action) broke all four silently instead of at the call site.
+    #[wasm_bindgen(js_name = externalBuiltinNames)]
+    pub fn external_builtin_names(&self) -> JsValue {
+        let names = serde_json::json!({
+            "navigate": crate::agent::NAVIGATE,
+            "back": crate::agent::BACK,
+            "setInput": crate::agent::SET_INPUT,
+            "bindAction": crate::agent::BIND_ACTION,
+        });
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        serde::Serialize::serialize(&names, &serializer).unwrap_or(JsValue::NULL)
+    }
+
+    /// The full MCP handshake for this app: `{ protocolVersion, instructions,
+    /// tools, resources, resourceTemplates, degraded }`.
+    ///
+    /// Copy the fields straight into `initialize.instructions`, `tools/list`
+    /// and `resources/list`. Composed in the engine so five SDKs transport
+    /// bytes and hand-write no prose — re-deriving or re-describing any of it
+    /// host-side is what the shape exists to prevent.
+    #[wasm_bindgen(js_name = mcpManifest)]
+    pub fn mcp_manifest(&self) -> JsValue {
+        let manifest = crate::agent_manifest::mcp_manifest(&self.core);
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        serde::Serialize::serialize(&manifest, &serializer).unwrap_or(JsValue::NULL)
+    }
+
+    /// List every action an external caller may dispatch, as
+    /// `[{ name, module, builtin }]`.
+    ///
+    /// Module-declared actions plus `navigate` / `back` / `set_input`, the
+    /// last three only when the app declares the backing `Router` or
+    /// `.bind()`. Framework internals never appear.
+    #[wasm_bindgen(js_name = listActions)]
+    pub fn list_actions(&self) -> JsValue {
+        let actions = crate::agent_core::list_actions(&self.core);
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        serde::Serialize::serialize(&actions, &serializer).unwrap_or(JsValue::NULL)
+    }
+
+    /// List the app's declared routes as `[{ path, params, moduleScope }]`,
+    /// backing `navigate`'s argument schema.
+    #[wasm_bindgen(js_name = listRoutes)]
+    pub fn list_routes(&self) -> JsValue {
+        let routes = crate::agent_core::list_routes(&self.core);
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        serde::Serialize::serialize(&routes, &serializer).unwrap_or(JsValue::NULL)
+    }
+
+    /// List `.bind()`-declared writable inputs as
+    /// `[{ path, prop, elementType, moduleScope }]`, backing `set_input`'s
+    /// argument schema. `prop` is `checked` / `on` for boolean controls.
+    #[wasm_bindgen(js_name = listBindings)]
+    pub fn list_bindings(&self) -> JsValue {
+        let bindings = crate::agent_core::list_bindings(&self.core);
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        serde::Serialize::serialize(&bindings, &serializer).unwrap_or(JsValue::NULL)
+    }
+
+    /// Dispatch on behalf of an external caller.
+    ///
+    /// Authorises against exactly what `listActions` advertises, then routes
+    /// through the same handler path a UI dispatch would take. Throws when
+    /// the name is not externally dispatchable, when a built-in is used in an
+    /// app that does not declare it, or when `set_input` names an undeclared
+    /// field.
+    #[wasm_bindgen(js_name = dispatchExternal)]
+    pub fn dispatch_external(&mut self, name: &str, payload: JsValue) -> Result<(), JsValue> {
+        let payload: Option<serde_json::Value> = if payload.is_undefined() || payload.is_null() {
+            None
+        } else {
+            Some(from_value(payload).map_err(|e| {
+                structured_error("actionError", &format!("Invalid action payload: {}", e))
+            })?)
+        };
+
+        // The one place a guard verdict becomes an action, shared with every
+        // binding — the bind payload's shape and the `sender` stamp are not
+        // rebuilt here. The JS handler signature carries (name, payload)
+        // only, so `sender` does not cross this boundary yet.
+        let resolved = crate::agent_core::external_action(&self.core, name, payload, None)
+            .map_err(|e| structured_error("actionError", &e.to_string()))?;
+
+        let payload_js = to_value(&resolved.payload.unwrap_or(serde_json::Value::Null))
+            .map_err(|e| structured_error("actionError", &format!("{}", e)))?;
+        self.dispatch_action(&resolved.name, payload_js)
+    }
+
+    /// Read module state, whole or at a path.
+    ///
+    /// Pass `null`/`undefined` for `module` to read the primary module, or a
+    /// registered module's name (case-insensitive). Returns `null` when the
+    /// module is unknown or the path is absent.
+    #[wasm_bindgen(js_name = getStateAt)]
+    pub fn get_state_at(&self, module: Option<String>, path: Option<String>) -> JsValue {
+        let state = crate::agent_core::get_state(&self.core, module.as_deref(), path.as_deref());
+        match state {
+            None => JsValue::NULL,
+            Some(v) => {
+                let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+                serde::Serialize::serialize(&v, &serializer).unwrap_or(JsValue::NULL)
+            }
+        }
+    }
+
+    /// Drop a module and every action it declared.
+    ///
+    /// **Call on destroy only**, never on unmount: under the default
+    /// `persist: true` an off-screen module stays registered on purpose, so
+    /// siblings can still read its state. The SDK's three destroy sites —
+    /// full stop, `persist: false` unmount, LRU eviction — are the correct
+    /// call sites.
+    #[wasm_bindgen(js_name = unregisterModule)]
+    pub fn unregister_module(&mut self, name: &str) {
+        // Snapshot every action name, then diff after eviction, rather than
+        // capturing this scope's names up front. A scope-match misses the
+        // PRIMARY module: its actions carry scope `None`, so once
+        // `agent_core::unregister_module` learned to clear the primary slot, a
+        // scope-only capture silently left its JS closures behind — reachable,
+        // and pinning the destroyed module's captured state alive. Diffing
+        // stays in step with whatever the shared implementation evicts without
+        // restating its rule here.
+        let before: Vec<String> = self.core.action_module_map.keys().cloned().collect();
+
+        crate::agent_core::unregister_module(&mut self.core, name);
+
+        for action in before {
+            if !self.core.action_module_map.contains_key(&action) {
+                self.action_handlers.remove(&action);
+            }
+        }
+    }
+
     /// Register a JavaScript function as the handler for a named action.
     #[wasm_bindgen(js_name = onAction)]
     pub fn on_action(&mut self, action_name: &str, handler: js_sys::Function) {
+        // Mirror into the core so the shared external surface can tell a
+        // declared action from a dispatchable one.
+        self.core.note_handler(action_name);
         self.action_handlers
             .insert(action_name.to_string(), handler);
     }
@@ -1077,6 +1250,24 @@ pub fn path_set_js(value_json: &str, path: &str, new_value_json: &str) -> Result
     crate::portable::path_set(&mut v, path, nv);
     serde_json::to_string(&v)
         .map_err(|e| structured_error("stateError", &format!("pathSet: serialise: {e}")))
+}
+
+/// Move element `from` of the array at `from_path` to index `to` of the
+/// array at `to_path` (the `__hypen_reorder` primitive); returns JSON
+/// `{"json": <updated>, "moved": bool}`. See [`crate::portable::path_move`].
+#[wasm_bindgen(js_name = pathMove)]
+pub fn path_move_js(
+    value_json: &str,
+    from_path: &str,
+    from: u32,
+    to_path: &str,
+    to: u32,
+) -> Result<String, JsValue> {
+    let mut v: serde_json::Value = serde_json::from_str(value_json)
+        .map_err(|e| structured_error("stateError", &format!("pathMove: bad JSON: {e}")))?;
+    let moved = crate::portable::path_move(&mut v, from_path, from as usize, to_path, to as usize);
+    serde_json::to_string(&serde_json::json!({ "json": v, "moved": moved }))
+        .map_err(|e| structured_error("stateError", &format!("pathMove: serialise: {e}")))
 }
 
 /// Delete whatever lives at `path`; returns JSON

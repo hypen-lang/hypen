@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Canvas form controls are operable.
  *
@@ -28,7 +29,7 @@ import { ensureFakeDomGlobals } from "./fake-dom";
 class MockEngine {
   dispatched: Array<{ name: string; payload: any }> = [];
   dispatchAction(name: string, payload?: any) {
-    this.dispatched.push({ name, payload });
+    this.dispatched.push(semanticAction(name, payload));
   }
 }
 

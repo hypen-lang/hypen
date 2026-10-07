@@ -70,6 +70,18 @@ pub trait ManagedModule: Send + Sync {
     fn activate(&self);
     fn deactivate(&self);
     fn destroy(&self);
+    /// Release the module's externally reachable surface — the actions an
+    /// external caller (MCP, REST, CLI, agent) may dispatch by name.
+    ///
+    /// **Called at destroy sites only**, never on plain unmount: an
+    /// off-screen persisted module stays registered on purpose so siblings
+    /// can keep reading its state, and dropping it there would break both
+    /// the persist cache and those cross-module reads. See
+    /// [`ModuleInstance::unregister_external`].
+    ///
+    /// Defaults to a no-op so custom module shells that don't own an engine
+    /// registration need not implement it.
+    fn unregister_external(&self) {}
     /// Whether this module's definition opted into persistence.
     /// Defaults to `false` — match the TS / Swift contract where
     /// persistence is opt-in via `.persist()`.
@@ -93,6 +105,9 @@ impl<S: State> ManagedModule for ModuleInstance<S> {
     }
     fn destroy(&self) {
         ModuleInstance::unmount(self)
+    }
+    fn unregister_external(&self) {
+        ModuleInstance::unregister_external(self)
     }
     fn is_persistent(&self) -> bool {
         // Reach into the definition via the public `is_mounted` accessor's
@@ -265,11 +280,16 @@ impl ManagedRouter {
         if let Some(m) = active {
             m.deactivate();
             m.destroy();
+            m.unregister_external();
             self.global_context
                 .unregister_module(&m.name().to_lowercase());
         }
+        // `stop()` is a full teardown, so the persisted entries are being
+        // destroyed too — this is the one place a cached module loses its
+        // external surface.
         for (key, m) in persisted {
             m.destroy();
+            m.unregister_external();
             self.global_context.unregister_module(&key);
         }
     }
@@ -457,12 +477,21 @@ fn unmount_active(
                 }
             }
         }
+        // Evicted entries are destroyed, not merely parked, so their
+        // external surface goes with them. The entries still in the cache
+        // keep theirs — see the note below.
         for (k, m) in evictees {
             m.destroy();
+            m.unregister_external();
             global_context.unregister_module(&k);
         }
     } else {
+        // Destroy path only. Note the asymmetry with the `persist` branch
+        // above, which deliberately calls neither: a persisted module is
+        // off-screen, not gone, and stays registered so sibling modules can
+        // still read its state and so a revisit reuses the instance.
         module.destroy();
+        module.unregister_external();
         global_context.unregister_module(&key);
     }
 }

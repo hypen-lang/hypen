@@ -2,6 +2,7 @@
 package remote
 
 import (
+	"encoding/json"
 	"time"
 )
 
@@ -94,6 +95,13 @@ type RawMessage struct {
 	Revision  int         `json:"revision,omitempty"`
 	SessionID string      `json:"sessionId,omitempty"`
 	Props     any         `json:"props,omitempty"`
+	// Device is hello.device (RFC 001 §2.2), kept as raw JSON: it is
+	// strictly decoded by the broker's handshake selection, never by
+	// encoding/json.
+	Device json.RawMessage `json:"device,omitempty"`
+	// ResumeToken is hello.resumeToken: the resume credential the server
+	// issued in an earlier sessionAck.
+	ResumeToken string `json:"resumeToken,omitempty"`
 }
 
 // Client represents a connected remote client

@@ -1,0 +1,79 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "sortable-lowering",
+  "description": "A sortable list: the container lowers .sortable to ONE static __dnd.sort object ({group, axis}) and keeps the ordinary bind prop (the dotted state path) as the reorder write target. Every draggable inside the ForEach row is stamped with __dnd.key = the row's item key (the key: field value) — including draggables nested below the template root — while the non-draggable Row wrapper gets no key. A bound payload: @item resolves to the item object. A sortable never injects translate bindings. After the host reorders the bound list, keyed reconciliation moves rows instead of rebuilding them",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Column { ForEach(items: @state.tasks, key: \"id\") { Row { Text(\"@{item.title}\").draggable(payload: @item) } } }.sortable(axis: y).bind(@state.tasks)",
+    "initialState": {
+      "tasks": [
+        { "id": "t1", "title": "A" },
+        { "id": "t2", "title": "B" }
+      ]
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["tasks"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render: container carries __dnd.sort + bind; each draggable carries its row key and payload",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Column",
+          "props": {
+            "__dnd.sort": { "group": null, "axis": "y" },
+            "bind": "tasks"
+          },
+          "absentProps": ["sortable.0", "sortable.axis", "__dnd.key", "__dnd.source", "__dnd.pin"]
+        },
+        {
+          "type": "create",
+          "elementType": "Row",
+          "absentProps": ["__dnd.key", "__dnd.source"]
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "__dnd.key": "t1",
+            "__dnd.source": { "group": null, "handle": false, "activation": "auto" },
+            "__dnd.sourcePayload": { "id": "t1", "title": "A" }
+          },
+          "absentProps": ["translateX.0", "translateY.0", "__dnd.pinGroup", "draggable.0", "draggable.payload"]
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "__dnd.key": "t2",
+            "__dnd.source": { "group": null, "handle": false, "activation": "auto" },
+            "__dnd.sourcePayload": { "id": "t2", "title": "B" }
+          },
+          "absentProps": ["translateX.0", "translateY.0", "__dnd.pinGroup"]
+        }
+      ]
+    },
+    {
+      "description": "The host applies the reorder (path_move) to the bound list: rows move, nothing is rebuilt",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["tasks"],
+        "newValues": {
+          "tasks": [
+            { "id": "t2", "title": "B" },
+            { "id": "t1", "title": "A" }
+          ]
+        }
+      },
+      "forbiddenPatchTypes": ["create", "insert", "remove"]
+    }
+  ]
+}

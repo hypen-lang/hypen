@@ -1,0 +1,504 @@
+---
+title: Server Setup
+description: The device plane is on by default in the TypeScript, Cloudflare, Go, Kotlin, Swift and Rust server SDKs. Configure connection admission, tune options, opt out, and make your first device call
+---
+
+# Server Setup
+
+Device access is **on by default** in every server SDK. There is nothing to
+enable: every connection whose client advertises device capabilities
+negotiates them, and your handlers reach them through the device context.
+A client without a device host (an older client, a plain browser page) gets
+an ordinary UI-only session.
+
+What you may want to set:
+
+- **Who may connect.** An `Origin` allowlist, an authenticator, or both. Each
+  is enforced when you configure it. With neither, the server admits every
+  client, as a UI-only server always did, and logs one startup warning. Set
+  them in production.
+- **Options.** `configureDevice(...)` tunes memory budgets and timeouts. The
+  defaults are listed per SDK below.
+- **Opting out.** `disableDevice()` (Cloudflare: `device: false`) turns the
+  device plane off for the whole server. It then behaves exactly like a
+  UI-only server.
+
+With the device plane on, some connection behavior differs, in every SDK:
+
+- **WebSocket compression compresses each message on its own.** Compression
+  (`permessage-deflate`) is on by default, negotiated with no context takeover
+  in both directions, so device data never shares a compression history with
+  other messages. A client that sees a socket compressed *with* shared history
+  keeps that connection UI-only.
+- **Sessions resume with a rotating token.** Each `sessionAck` carries a fresh
+  `resumeToken`. A session that negotiated a device plane only resumes with
+  the latest token: a client that reconnects without it gets a new session
+  instead of taking over the old one. UI-only sessions still resume by id, so
+  older clients are unaffected.
+- **`syncActions` keeps device access.** Only the client that actually
+  dispatched an action can start device work from it; the copies replayed onto
+  other sessions get `unavailable` (`syncActions.replay`). Allow-multiple
+  session modes, which fan one session out to several sockets, run without the
+  device plane and log one warning.
+
+## Connection admission
+
+Admission is the same in every SDK, and applies to UI and device traffic alike:
+
+| Configured | Upgrade request | Result |
+|------------|-----------------|--------|
+| Nothing | Any | Admitted (one startup warning) |
+| Allowlist | Has an `Origin` on the allowlist | Admitted, if the authenticator (when configured) also returns true |
+| Allowlist | Has an `Origin` that isn't on the allowlist | 403 |
+| Allowlist, no authenticator | Has no `Origin` (native iOS, Android and desktop clients) | 403 |
+| Authenticator | Any | Admitted only if the authenticator returns true |
+
+`Origin` is a defense browsers enforce against cross-site WebSocket hijacking.
+It doesn't authenticate anyone, because any non-browser client can send
+whatever header it likes. Native apps therefore send no `Origin` by default
+and prove who they are with app credentials, such as an `Authorization`
+header on the upgrade, which your authenticator checks.
+
+<Callout type="warn">
+A configured authenticator runs for **every** upgrade, including browser
+upgrades that already passed the `Origin` check. Browsers can't set custom
+upgrade headers, so if you configure an authenticator and also serve web
+clients, it must accept a credential browsers can send, such as a session
+cookie.
+</Callout>
+
+## TypeScript (Bun / Node)
+
+Nothing to enable. Set `allowedOrigins` and/or `authenticate` in `.config(...)`:
+
+```typescript
+import { app } from "@hypen-space/core";
+import { RemoteServer } from "@hypen-space/server";
+
+const profile = app
+  .defineState({ avatarUrl: "", error: "" })
+  .onAction("changePhoto", async ({ state, context }) => {
+    const res = await context.device.request("gallery.pick", {
+      mediaTypes: ["photo"],
+      maxCount: 1,
+    });
+    if (!res.ok) {
+      state.error = res.error.code;
+      return;
+    }
+    state.avatarUrl = await storage.upload(res.value.items[0].bytes);
+  })
+  .build();
+
+await new RemoteServer()
+  .module("Profile", profile)
+  .ui(profileTemplate)
+  .config({
+    port: 3000,
+    // Browsers: exact origins, compared as scheme://host[:port]
+    allowedOrigins: ["https://app.example.com"],
+    // Every client; the only admission for native apps (they send no Origin)
+    authenticate: (req) =>
+      isValidSession(req.headers.get("cookie")) ||
+      isValidToken(req.headers.get("authorization")),
+  })
+  .listen(3000);
+```
+
+`authenticate` receives the upgrade `Request` and may be async
+(`(request: Request) => boolean | Promise<boolean>`). If it throws, the
+upgrade is refused.
+
+`configureDevice({ ... })` tunes the device plane, and `disableDevice()`
+turns it off:
+
+| Option | Default | Meaning |
+|--------|---------|---------|
+| `processRetainedBytes` | 1 GiB | Upload bytes held across **all** connections of the process |
+| `connectionRetainedBytes` | 128 MiB | Upload bytes one connection may hold |
+| `broker` | | Advanced broker overrides, passed to every session |
+
+With the device plane on, `maxPayloadLength` (the largest WebSocket message
+accepted) defaults to 4 MiB. Device JSON messages are limited to 1 MiB
+before parsing regardless of this setting.
+
+Handlers reach the device through `context.device`. It's present in action
+handlers and in lifecycle handlers (`onActivated(async (state, context) => …)`).
+See [Requests & Streams](/docs/device/requests-and-streams).
+
+## Cloudflare Workers
+
+With `@hypen-space/cf`, `defineHypenWorker` turns the device plane on by
+default. Add admission as on any server:
+
+```typescript
+import { defineHypenWorker } from "@hypen-space/cf/worker";
+
+const worker = defineHypenWorker({
+  module: profile,
+  doClassName: "AppDO",
+  binding: "APP_DO",
+  allowedOrigins: ["https://app.example.com"],
+  // Native clients send no Origin; they are admitted by the authenticator.
+  authenticate: (req) => isValidToken(req.headers.get("authorization")),
+});
+
+export const AppDO = worker.AppDO;
+export default { fetch: worker.fetch };
+```
+
+Pass `device: false` to opt out. The batteries-included
+`@hypen-space/cf/worker` entry wires in the engine WASM, which also contains
+the Rust device broker. If you
+[bring your own engine](/docs/servers/cloudflare#advanced-bring-your-own-engine)
+without the `device-broker` feature, the Worker runs without the device plane
+and logs one warning.
+
+What's different about Cloudflare:
+
+- **Turn WebSocket compression off with `no_web_socket_compression`.** The
+  `web_socket_compression` compatibility flag is on by default for any
+  `compatibility_date` from 2023-08-15, and workerd then negotiates
+  permessage-deflate *with* context takeover, so every browser socket runs
+  UI-only (no device plane). Add the flag to `wrangler.jsonc`:
+
+  ```jsonc
+  "compatibility_flags": ["nodejs_compat", "no_web_socket_compression"]
+  ```
+
+  If you keep compression on, declare it with `webSocketCompression: true`;
+  a socket then gets a device plane only if it negotiated compression without
+  context takeover in both directions. Locally, `wrangler dev` puts its own
+  proxy in front of the Worker, pinned to an old compatibility date, which
+  compresses with context takeover whatever your flags say. The repo's
+  `scripts/dev-examples.sh` patches that proxy for the examples.
+- **Budgets are smaller.** A Durable Object shares one 128 MB isolate across
+  its sessions, so each connection may hold only **16 MiB** of upload bytes
+  (compared with 128 MiB on Node), and no single item may exceed that.
+  See [Limits](/docs/device/limits).
+- **Durable Objects don't hibernate while a device plane is live.** The
+  5-second lease renewals keep the object resident. UI-only sockets on the
+  same object keep hibernating normally. Budget for this in Durable Object
+  duration billing.
+- **Waking without the broker resets the socket.** If the object is evicted
+  anyway, a device socket that wakes up without its in-memory broker is closed
+  with code `1012`, before any message is processed. The client reconnects,
+  and any operation that was in flight fails with `connectionLost`.
+- With `syncActions`, replayed dispatches can't start device work
+  (`syncActions.replay`); the originating client's can.
+
+## Go
+
+Nothing to enable. Admission is set on the server:
+
+```go
+import (
+    "context"
+    "net/http"
+
+    core "github.com/hypen-space/core"
+    "github.com/hypen-space/core/device"
+    "github.com/hypen-space/core/remote"
+)
+
+type ProfileState struct {
+    AvatarURL string `json:"avatarUrl"`
+    Error     string `json:"error"`
+}
+
+profile := core.NewApp(ProfileState{}).
+    Name("Profile").
+    OnAction("changePhoto", func(ctx core.TypedActionContext[ProfileState]) {
+        items, err := ctx.Device().Gallery().Pick(context.Background(),
+            device.GalleryPickParams{MediaTypes: []device.MediaType{device.MediaTypePhoto}, MaxCount: 1})
+        if err != nil {
+            ctx.State.Error = string(device.CodeOf(err)) // denied, cancelled, … are ordinary values
+            return
+        }
+        ctx.State.AvatarURL = upload(items[0].Bytes) // hash-verified by the broker
+    }).
+    UI(profileTemplate) // UI finalizes the module definition
+
+server := remote.NewRemoteServer().
+    WithDefinition(profile).
+    AllowedOrigins("https://app.example.com").
+    Authenticate(func(r *http.Request) bool {
+        return isValidToken(r.Header.Get("Authorization"))
+    }).
+    Listen(3000)
+```
+
+`ConfigureDevice(remote.DeviceConfig{...})` tunes the device plane, and
+`DisableDevice()` turns it off:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `MaxRetainedBytes` | 128 MiB | Upload bytes one connection may hold |
+| `AggregateRetainedBytes` | 1 GiB | Upload bytes held across all connections of the server |
+| `MaxItemBytes` | registry limit (64 MiB) | Lower cap on a single uploaded item |
+
+`AllowedOrigins` compares the strings exactly, with no normalization. The
+startup warning about open admission is logged at Warn level, below the
+remote logger's default (Error) level.
+
+Device calls **block the calling goroutine** until the device answers. While a
+handler waits, the session's dispatch slot is released, so the session's
+later actions still run. The handler takes the slot back when the operation
+settles. Because other actions may have run in the meantime, re-check your
+state after a wait.
+
+If you create sessions on your own endpoint instead of the built-in one, pass
+the upgrade request with `CreateSession(..., WithUpgradeRequest(r))`.
+Otherwise the session gets no device plane.
+
+## Kotlin
+
+Nothing to enable. Add `allowedOrigins(...)` and/or `authenticate { }` to
+the `HypenServer` DSL, and `configureDevice { }` if you need other options:
+
+```kotlin
+import space.hypen.core.*
+import space.hypen.remote.device.*
+
+val profile = AppBuilder(mutableMapOf<String, Any?>("avatarUrl" to "", "error" to ""))
+    .onActionAsync("changePhoto") { ctx ->
+        when (val r = ctx.device.gallery.pick(GalleryPickParams(listOf(MediaType.PHOTO), 1))) {
+            is DeviceResult.Ok -> ctx.state.set("avatarUrl", upload(r.value.single().bytes))
+            is DeviceResult.Err -> ctx.state.set("error", r.error.code.wireName)
+        }
+    }
+    .build()
+
+val server = HypenServer {
+    module("Profile", profile)
+    allowedOrigins("https://app.example.com")
+    authenticate { req -> isValidToken(req.header("Authorization")) }
+    // Optional; these are the defaults.
+    configureDevice {
+        helloTimeoutMs = 30_000
+        maxRetainedBytes = null     // null = broker default (128 MiB per connection)
+    }
+}
+```
+
+`disableDevice()` turns the device plane off.
+
+`HypenServer` doesn't depend on a transport. Your Ktor route must do three
+things:
+
+- call `server.admit(...)` **before** accepting the upgrade, and answer 403
+  when it refuses;
+- open the connection with `server.openConnection(...)`;
+- forward binary frames with `server.handleBinary(...)`.
+
+```kotlin
+webSocket("/ws") {
+    val key = this
+    server.openConnection(key, object : HypenTransport {
+        override suspend fun sendText(text: String) = send(Frame.Text(text))
+        override suspend fun sendBinary(bytes: ByteArray) = send(Frame.Binary(true, bytes))
+        override suspend fun close(code: Int, reason: String) = close(CloseReason(code.toShort(), reason))
+    })
+    try {
+        for (frame in incoming) when (frame) {
+            is Frame.Text -> server.handleMessage(key, frame.readText()) {}
+            is Frame.Binary -> server.handleBinary(key, frame.readBytes())
+            else -> {}
+        }
+    } finally {
+        server.handleDisconnect(key)
+    }
+}
+```
+
+`admit` takes an `UpgradeRequest(headers, path, remoteAddress)` built from the
+HTTP upgrade and returns `Admission.Admitted` or `Admission.Rejected(status, reason)`.
+`server.compression` is `true` unless you set `compression = false`: read it
+where you install Ktor's `WebSockets` plugin. The deflate extension must
+compress each message on its own, and Ktor's `WebSocketDeflateExtension`
+can't be made to do that as a server (up to at least Ktor 3.1.1 it ignores its
+no-context-takeover settings and writes the negotiated header in a form
+clients reject). Copy `HypenDeflate.kt` from the Kotlin SDK's
+`example-server` instead, and tell `openConnection` what was negotiated so the
+server can refuse the device plane on a socket that shares compression
+history:
+
+```kotlin
+install(WebSockets) {
+    if (server.compression) {
+        extensions { install(HypenDeflate) }
+    }
+}
+
+// in the route:
+server.openConnection(key, transport,
+    webSocketExtensions = extensionOrNull(HypenDeflate)?.negotiated ?: "")
+```
+
+Suspend action handlers (`onActionAsync`) get `ctx.device`, and lifecycle
+handlers reach it through `context.device`. Cancelling the calling coroutine,
+or a surrounding `withTimeout`, cancels the device request.
+
+## Swift
+
+Nothing to enable. Configure admission with `ServerConfig`:
+
+```swift
+import HypenServer
+
+let app = HypenApp()
+
+let profile = app.module("Profile").defineState(["avatarUrl": "", "error": ""])
+    .onActionAsync("changePhoto") { ctx in
+        switch await ctx.device.gallery.pick([.photo], maxCount: 1) {
+        case .success(let picked):
+            ctx.state.set("avatarUrl", await upload(picked.items[0].bytes))
+        case .failure(let error):
+            ctx.state.set("error", error.code.rawValue)
+        }
+    }
+    .build()
+
+let server = RemoteServer()
+    .app(app)
+    .module("Profile", profile)
+    .ui(profileTemplate)
+    .config(ServerConfig(
+        port: 3000,
+        allowedOrigins: ["https://app.example.com"],
+        authenticate: { request in
+            isValidToken(request.header("Authorization"))
+        }
+    ))
+
+try server.listen(3000)
+```
+
+`configureDevice(_ options: DeviceServerOptions = DeviceServerOptions(), processRetainedBytes: UInt64 = 1 GiB)`
+takes per-connection options (for example `DeviceServerOptions(helloTimeoutMs: 10_000)`)
+and the process-wide upload budget; `disableDevice()` turns the device plane
+off. The authenticator is `@Sendable (DeviceUpgradeRequest) async -> Bool`.
+`DeviceUpgradeRequest` exposes `header(_:)` and `origin`. The Swift server
+never negotiates WebSocket compression.
+
+Async action handlers (`onActionAsync`) get `ctx.device`. To make device calls
+when a screen appears, use `onActivatedAsync { state, device in … }`.
+Cancelling the Swift `Task` cancels the device request.
+
+## Rust
+
+The Rust SDK (`hypen-server`) has no socket of its own: you feed
+`RemoteSession` the socket's messages. Build each connection's session with
+its transport, `RemoteSession::connect(definition, components, transport)`.
+That is the whole setup; there is no enable call.
+
+- `transport` implements `DeviceTransport` (`send_text`, `send_binary`,
+  `close`) and `SessionTransport::send_ui`, which carries the patches a device
+  result produces when it settles outside a `handle_message` call. Feed both,
+  and the replies `handle_message_with` emits, into **one** ordered socket
+  writer, so the `sessionAck` that selects the device plane reaches the
+  client before the first device request.
+- Admission and options live on a `DeviceServer`. Sessions use
+  `DeviceServer::shared()` unless you pass one with `.with_device_server(&server)`.
+  During the HTTP upgrade, call `device_server.admit(&UpgradeRequest)` and
+  answer 403 when it returns `Admission::Rejected`.
+- `server.configure_device(DeviceOptions { .. })` tunes the budgets;
+  `server.disable_device()` (or `session.disable_device()` for one
+  connection, before its hello) opts out.
+- A session built without a transport (`RemoteSession::from_definition`) is
+  UI-only.
+
+```rust
+use hypen_server::device::{DeviceServer, DeviceServerConfig};
+use hypen_server::prelude::*;
+
+#[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
+struct Profile { avatar_bytes: usize, error: String }
+
+let profile = Arc::new(
+    ModuleBuilder::<Profile>::new("Profile")
+        .state(Profile::default())
+        .ui(profile_template)
+        .on_action::<()>("changePhoto", |state, _, ctx| {
+            // Remote sessions always pass a context; its device is scoped to
+            // this invocation (module instance, activation, provenance).
+            let device = ctx.expect("remote handler").device();
+            match device.gallery_pick(&[MediaType::Photo], 1) {
+                // Settles later: `then` applies the verified result to this
+                // module's state and ships the patches like an action.
+                Ok(call) => call.then(|s: &mut Profile, res| match res {
+                    Ok(items) => s.avatar_bytes = items[0].bytes.len(),
+                    Err(e) => s.error = e.code_str().into(),
+                }),
+                // Refused before anything was sent: an ordinary value.
+                Err(e) => state.error = e.code_str().into(),
+            }
+        })
+        .build(),
+);
+
+// Optional: server-wide admission and options. Without it, sessions use
+// DeviceServer::shared(), which admits everyone (with one startup warning).
+let device_server = DeviceServer::new(
+    DeviceServerConfig::default()
+        .allow_origin("https://app.example.com")
+        .authenticate(|req| is_valid_token(req.header("authorization"))),
+);
+
+// Per connection, e.g. with tokio-tungstenite's `accept_hdr_async`:
+let ws = accept_hdr_async(stream, |req: &Request, resp: Response| {
+    match device_server.admit(&to_upgrade_request(req)) {
+        Admission::Admitted => Ok(resp),
+        Admission::Rejected { status, .. } => Err(forbidden(status)),
+    }
+}).await?;
+
+let session = RemoteSession::connect(profile.clone(), components, Arc::new(transport))
+    .with_device_server(&device_server);
+// then: Text → session.handle_message_with(..), Binary → session.handle_binary(..),
+// end of socket → session.handle_close()
+```
+
+`DeviceServerConfig` and `DeviceOptions` fields:
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `allowed_origins` | none | `Origin` values a browser upgrade may carry, compared as `scheme://host[:port]` (case-insensitive, default port removed) |
+| `authenticate` | none | `Fn(&UpgradeRequest) -> bool`. Runs for every upgrade; a panicking authenticator refuses. |
+| `max_retained_bytes` | 128 MiB | Upload bytes one connection may hold |
+| `aggregate_retained_bytes` | 1 GiB | Upload bytes held across all connections of the server |
+| `max_item_bytes` | registry limit (64 MiB) | Lower cap on a single uploaded item |
+
+Rust handlers are synchronous and run with the session locked, so a device
+call never blocks one. `request(...)` and the typed helpers
+(`gallery_pick`, `file_pick`, `save`, `camera_capture`, `bluetooth_select`,
+`permission_query`, `permission_request`) return `Err(DeviceError)` for a
+local refusal, or a `DeviceCall` you consume with `then` (apply to the
+module's state), `on_settled` (a callback), or `wait` (block — only from a
+thread that isn't running a handler; inside one it is refused with
+`unavailable`, `wait-in-handler`). Dropping a `DeviceCall` unconsumed cancels
+the request. Streams (`stream`, `mic_record`, `bluetooth_scan`) are consumed
+with `for_each` or `on_item`. For work outside handlers, `session.device(module)`
+returns the module's device. Navigating away from a route (through
+`@router.*` or `session.router()`) deactivates its module and cancels its
+device work, as in the other SDKs; `unregister_module` destroys a module and
+sweeps all of its device work.
+
+No Rust WebSocket stack negotiates `permessage-deflate`, so Rust servers are
+uncompressed.
+
+## Verify it's on
+
+From any handler, ask what the connected client negotiated:
+
+```typescript
+.onActivated(async (state, context) => {
+  state.canPick = context?.device.supports("gallery.pick") ?? false;
+})
+```
+
+`supports()` returns `false` in all of these cases: the server opted out with
+`disableDevice()`, the client has no device host, the socket negotiated
+compression with shared history, or the device doesn't offer the capability right now. When
+there's no device plane, every call returns an `unavailable` error value
+(`platformDetail: "device-disabled"`) instead of throwing.

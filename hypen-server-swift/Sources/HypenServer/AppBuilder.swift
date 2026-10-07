@@ -64,14 +64,31 @@ public struct ActionHandlerContext: @unchecked Sendable {
     public let state: ObservableState
     public let context: GlobalContext?
     public let router: HypenRouter?
+    /// Device Capability Protocol access (RFC 001) for this invocation:
+    /// scoped to the module instance's live activation and to the
+    /// dispatch's provenance (a replayed or broadcast-derived dispatch gets
+    /// `unavailable`). Without a negotiated device plane every call returns
+    /// `unavailable` ("device-disabled").
+    public let device: DeviceContext
 
-    public init(action: Action, state: ObservableState, context: GlobalContext? = nil, router: HypenRouter? = nil) {
+    public init(
+        action: Action,
+        state: ObservableState,
+        context: GlobalContext? = nil,
+        router: HypenRouter? = nil,
+        device: DeviceContext = .unavailable()
+    ) {
         self.action = action
         self.state = state
         self.context = context
         self.router = router
+        self.device = device
     }
 }
+
+/// Async lifecycle handler with device access, run after the synchronous
+/// handler of the same phase (see `AppBuilder.onActivatedAsync`).
+public typealias DeviceLifecycleHandler = @Sendable (ObservableState, DeviceContext) async -> Void
 
 /// Typed action handler for module-level dispatch.
 public typealias ModuleActionHandler = @Sendable (ActionHandlerContext) -> Void
@@ -145,6 +162,20 @@ public struct ModuleDefinition: @unchecked Sendable {
     public let onDisconnect: DisconnectHandler?
     public let onReconnect: ReconnectHandler?
     public let onExpire: ExpireHandler?
+    /// When a reconnect restore is expressed through a typed `Codable`
+    /// value (`TypedModuleBuilder.onReconnect`), the encoding cannot carry
+    /// runtime-owned top-level keys (`__dnd`, …). With this set,
+    /// `ModuleInstance.handleReconnect` keeps the live instance's reserved
+    /// keys that the restored map does not mention — the same
+    /// reserved-key exemption `encodeState` applies (plan §3). Raw
+    /// `[String: Any]` restores leave it `false` and replace exactly.
+    public let preservesReservedKeysOnRestore: Bool
+    /// Async activation handler with device access: runs every time the
+    /// module becomes active, with a `DeviceContext` owned by exactly that
+    /// activation (RFC 001 §2.7) — its unary device requests still pending
+    /// when it returns are cancelled, and deactivation cancels every
+    /// activation-owned request.
+    public let onActivatedAsync: DeviceLifecycleHandler?
 
     public init(
         name: String? = nil,
@@ -163,7 +194,9 @@ public struct ModuleDefinition: @unchecked Sendable {
         onError: ModuleErrorHandler? = nil,
         onDisconnect: DisconnectHandler? = nil,
         onReconnect: ReconnectHandler? = nil,
-        onExpire: ExpireHandler? = nil
+        onExpire: ExpireHandler? = nil,
+        preservesReservedKeysOnRestore: Bool = false,
+        onActivatedAsync: DeviceLifecycleHandler? = nil
     ) {
         self.name = name
         self.actions = actions
@@ -182,6 +215,8 @@ public struct ModuleDefinition: @unchecked Sendable {
         self.onDisconnect = onDisconnect
         self.onReconnect = onReconnect
         self.onExpire = onExpire
+        self.preservesReservedKeysOnRestore = preservesReservedKeysOnRestore
+        self.onActivatedAsync = onActivatedAsync
     }
 }
 
@@ -262,6 +297,7 @@ public final class AppBuilder: @unchecked Sendable {
     private var createdHandler: LifecycleHandler?
     private var activatedHandler: LifecycleHandler?
     private var deactivatedHandler: LifecycleHandler?
+    private var activatedAsyncHandler: DeviceLifecycleHandler?
     private var destroyedHandler: LifecycleHandler?
     private var _actionHandlers: [String: ModuleActionHandler] = [:]
     private var _asyncActionHandlers: [String: AsyncModuleActionHandler] = [:]
@@ -301,6 +337,17 @@ public final class AppBuilder: @unchecked Sendable {
     @discardableResult
     public func onActivated(_ handler: @escaping LifecycleHandler) -> AppBuilder {
         activatedHandler = handler
+        return self
+    }
+
+    /// Register an async activation handler with device access (RFC 001
+    /// §2.7). Runs after `onActivated` every time the module becomes active,
+    /// with a `DeviceContext` owned by exactly that activation: unary device
+    /// requests it leaves pending when it returns are cancelled, and
+    /// deactivation cancels every request that activation owns.
+    @discardableResult
+    public func onActivatedAsync(_ handler: @escaping DeviceLifecycleHandler) -> AppBuilder {
+        activatedAsyncHandler = handler
         return self
     }
 
@@ -462,7 +509,8 @@ public final class AppBuilder: @unchecked Sendable {
             onError: errorHandler,
             onDisconnect: disconnectHandler,
             onReconnect: reconnectHandler,
-            onExpire: expireHandler
+            onExpire: expireHandler,
+            onActivatedAsync: activatedAsyncHandler
         )
 
         // Auto-register in app when named

@@ -1,6 +1,7 @@
 package core
 
 import (
+	"strings"
 	"sync"
 )
 
@@ -146,6 +147,17 @@ func (e *MockEngine) TriggerAction(name string, payload any) {
 func (e *MockEngine) DispatchAction(name string, payload any) error {
 	e.mu.RLock()
 	handler, exists := e.actionHandlers[name]
+	if !exists {
+		for key, candidate := range e.actionHandlers {
+			if strings.HasPrefix(key, "__hypen_scoped:") && strings.HasSuffix(key, ":"+name) {
+				if exists {
+					handler = nil
+					break
+				}
+				handler, exists = candidate, true
+			}
+		}
+	}
 	e.mu.RUnlock()
 
 	action := Action{
@@ -206,6 +218,11 @@ func (e *MockEngine) HasAction(name string) bool {
 	defer e.mu.RUnlock()
 
 	_, exists := e.actionHandlers[name]
+	for key := range e.actionHandlers {
+		if strings.HasPrefix(key, "__hypen_scoped:") && strings.HasSuffix(key, ":"+name) {
+			return true
+		}
+	}
 	return exists
 }
 

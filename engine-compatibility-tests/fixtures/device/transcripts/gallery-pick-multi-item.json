@@ -1,0 +1,176 @@
+{
+  "name": "gallery-pick-multi-item",
+  "description": "Multi-item upload with credit pacing: both items are announced before their bytes, chunks interleave across channels with contiguous per-channel seq, the sender reports paused when credit is exhausted (and sends nothing until it reports paused:false), the receiver grants more, and the terminal item set is verified per channel (count, contentType, bytes, sha256).",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 16,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 2
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "image/jpeg",
+          "bytes": 17
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "event": {
+          "kind": "blobStart",
+          "channel": 1,
+          "contentType": "image/png",
+          "bytes": 12
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 2,
+          "seq": 0
+        },
+        "hex": "01000000020000000000000068656c6c6f2d687970656e2d"
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 1,
+          "requestId": 2,
+          "seq": 0
+        },
+        "hex": "0100010002000000000000007365636f"
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "paused": true
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "grant": 32
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 2,
+        "control": {
+          "paused": false
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 0,
+          "requestId": 2,
+          "seq": 1
+        },
+        "hex": "01000000020000000100000070686f746f"
+      }
+    },
+    {
+      "dir": "c2s",
+      "frame": {
+        "header": {
+          "version": 1,
+          "flags": 0,
+          "channel": 1,
+          "requestId": 2,
+          "seq": 1
+        },
+        "hex": "0100010002000000010000006e642d696d616765"
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "items": [
+            {
+              "channel": 1,
+              "contentType": "image/png",
+              "bytes": 12,
+              "sha256": "59144f7d2e329d14b075928057b60e1ae6c91d6c28e57905d8618acf9cb0c6fe"
+            },
+            {
+              "channel": 0,
+              "contentType": "image/jpeg",
+              "bytes": 17,
+              "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

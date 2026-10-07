@@ -1,3 +1,4 @@
+import { testActionHandler } from "./helpers";
 import { describe, expect, test, mock, beforeEach, spyOn } from "bun:test";
 import { app, HypenModuleInstance } from "../packages/core/src/app";
 import type { Action } from "../packages/core/src/types";
@@ -74,7 +75,7 @@ class FakeEngine {
   }
 
   async dispatchAction(name: string, payload?: any, sender?: string) {
-    const handler = this.actionHandlers.get(name);
+    const handler = testActionHandler(this.actionHandlers, name);
     if (handler) {
       await handler({ name, payload, sender });
     }

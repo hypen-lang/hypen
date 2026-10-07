@@ -1,4 +1,8 @@
 import Foundation
+#if canImport(FoundationNetworking)
+// Linux: URLSession / HTTPURLResponse live in FoundationNetworking.
+import FoundationNetworking
+#endif
 
 // MARK: - Import Types
 
@@ -234,17 +238,20 @@ public final class ComponentResolver: @unchecked Sendable {
         }
 
         let semaphore = DispatchSemaphore(value: 0)
-        var result: Result<String, Error>?
+        // The completion handler runs on URLSession's delegate queue; the
+        // outcome crosses threads through a locked box (Swift 6 strict
+        // concurrency: no captured `var` mutated concurrently).
+        let box = FetchResultBox()
 
         let task = URLSession.shared.dataTask(with: url) { data, response, error in
             if let error = error {
-                result = .failure(error)
+                box.set(.failure(error))
             } else if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
-                result = .failure(ComponentResolverError.httpError(httpResponse.statusCode, urlString))
+                box.set(.failure(ComponentResolverError.httpError(httpResponse.statusCode, urlString)))
             } else if let data = data, let body = String(data: data, encoding: .utf8) {
-                result = .success(body)
+                box.set(.success(body))
             } else {
-                result = .failure(ComponentResolverError.invalidResponse(urlString))
+                box.set(.failure(ComponentResolverError.invalidResponse(urlString)))
             }
             semaphore.signal()
         }
@@ -254,7 +261,7 @@ public final class ComponentResolver: @unchecked Sendable {
             throw ComponentResolverError.invalidResponse(urlString)
         }
 
-        switch result {
+        switch box.get() {
         case .success(let body): return body
         case .failure(let error): throw error
         case .none: throw ComponentResolverError.invalidResponse(urlString)
@@ -360,4 +367,13 @@ public enum ComponentResolverError: Error, CustomStringConvertible {
 
 extension HypenLoggers {
     public static let resolver = HypenLogger("HypenResolver")
+}
+
+/// One fetch outcome handed from URLSession's completion queue to the
+/// waiting caller.
+private final class FetchResultBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: Result<String, Error>?
+    func set(_ v: Result<String, Error>) { lock.lock(); value = v; lock.unlock() }
+    func get() -> Result<String, Error>? { lock.lock(); defer { lock.unlock() }; return value }
 }

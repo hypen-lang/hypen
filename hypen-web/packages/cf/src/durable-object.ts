@@ -13,19 +13,68 @@
  * lazily rebuilds on the next message; since the client won't re-send `hello`,
  * a non-hello first message synthesises one so the initial tree is re-sent
  * before the message is processed.
+ *
+ * Device plane (RFC 001 §2.5): hibernation restoration applies to UI-only
+ * sockets. A socket that negotiated the device plane carries a
+ * `deviceEnabled` marker in its hibernation attachment (written before the
+ * negotiating `sessionAck` leaves); when such a socket wakes with no live
+ * in-memory broker it is closed with 1012 before any message is processed —
+ * never re-helloed, never given a rebuilt broker.
+ *
+ * Hibernation vs leases: while a socket has a live device plane its
+ * connection-owned `core.capabilities` stream renews its lease every 5 s
+ * (RFC 001 §2.7), and those interval timers keep the DO resident — a
+ * DO does not hibernate while a device plane is live. That is
+ * deliberate (hibernating would lose the broker, i.e. reset the connection,
+ * §2.5); UI-only sockets on the same DO keep hibernating normally once no
+ * device plane is live. Budget for it in DO duration billing.
+ *
+ * The device plane is on by default (`device: false` opts out); it needs the
+ * device-broker WASM (`deviceWasm`, supplied automatically by
+ * `defineHypenWorker`) and is off — with one warning — when that is missing.
+ * `syncActions` keeps it on (a replayed dispatch's `context.device` refuses
+ * with `syncActions.replay`), and so does `webSocketCompression: true`:
+ * compression is judged per socket — a socket whose permessage-deflate has
+ * no context takeover in both directions keeps its device plane, any other
+ * compressed socket stays UI-only (RFC 001 §2.3).
+ *
+ * Admission (RFC 001 §5, decision D1), enforced exactly when configured: with
+ * `allowedOrigins` set, an upgrade's `Origin` must be listed and one without
+ * (native iOS/Android clients) is admitted only by `authenticate` (none ⇒
+ * 403); a configured `authenticate` runs for every upgrade. With neither,
+ * every client is admitted and one warning is logged.
  */
 
 import type { HypenApp, HypenModule, HypenModuleDefinition } from "@hypen-space/core/app";
+import { createLogger } from "@hypen-space/core/logger";
 import type { BaseEngine } from "@hypen-space/core/engine-base";
 import type { RemoteClient, RemoteMessage } from "@hypen-space/core/remote";
 import {
   RemoteSession,
   SessionManager,
+  deflateContextPolicy,
+  parseWebSocketExtensions,
   type SessionHost,
   type SessionTransport,
   type OutgoingMessage,
 } from "@hypen-space/core/remote";
+import {
+  DO_AGGREGATE_RETAINED_BYTES,
+  DO_MAX_RETAINED_BYTES,
+  isOversizeDeviceText,
+} from "@hypen-space/core/remote/device";
 import type { DurableObjectStorage, DurableObjectStateStore } from "./durable-object-store.js";
+import {
+  createCFDeviceBrokerFactory,
+  hasDeviceBroker,
+  type CFDeviceWasmExports,
+} from "./device-broker.js";
+
+const log = createLogger("HypenDurableObject");
+
+/** Logged once per Durable Object when the upgrade admits every client. */
+export const OPEN_ADMISSION_WARNING =
+  "no allowedOrigins/authenticate configured — any client can connect; set them in production";
 
 // Minimal Cloudflare type stubs — shadowed at runtime by `cloudflare:workers`
 // (which only resolves inside wrangler).
@@ -44,22 +93,188 @@ export interface DurableObjectState {
 // duplicate-declaration error) and cast locally instead.
 type WebSocketPairCtor = { new (): { 0: WebSocket; 1: WebSocket } };
 
-/** Data carried on a hibernatable socket across a DO eviction. */
-type HibernationAttachment = { hypenSessionId?: string };
+/**
+ * Data carried on a hibernatable socket across a DO eviction.
+ *
+ * - `hypenSessionId` — lets a UI-only socket RESUME its session on wake.
+ * - `deviceEnabled` — set (before the ack is sent) once this socket
+ *   negotiated the device plane. On wake a marked socket without its live
+ *   broker is reset with 1012 (RFC 001 §2.5) instead of being restored.
+ */
+export type HibernationAttachment = {
+  hypenSessionId?: string;
+  deviceEnabled?: true;
+  /**
+   * Set when this socket negotiated permessage-deflate WITH context takeover
+   * in either direction (or, with `webSocketCompression: true`, when its
+   * negotiation could not be observed and the client offered DEFLATE): the
+   * device plane is never admitted on it (RFC 001 §2.3). Per-message
+   * compression (both no-context-takeover params) is not marked.
+   */
+  compressed?: true;
+};
+
+/**
+ * Per-connection retained device upload bytes in a Durable Object: one
+ * 128 MB isolate is shared by every session in the DO, so the budget (and
+ * the per-item cap the DO honors) is 16 MiB rather than the Node default of
+ * 128 MiB (RFC 001 §2.4 "advertise only limits they can honor", §5).
+ */
+export const DO_DEVICE_MAX_RETAINED_BYTES = DO_MAX_RETAINED_BYTES;
+/**
+ * Aggregate retained device upload bytes across every connection of one DO
+ * (its sockets share one isolate, and the routing key is client-chosen, so
+ * any number of connections can land in one DO): three full per-connection
+ * budgets at most.
+ */
+export const DO_DEVICE_AGGREGATE_RETAINED_BYTES = DO_AGGREGATE_RETAINED_BYTES;
+
+/** The socket's negotiated `Sec-WebSocket-Extensions`, if the runtime reports it. */
+function negotiatedExtensions(ws: WebSocket): string | undefined {
+  const ext = (ws as unknown as { extensions?: unknown }).extensions;
+  return typeof ext === "string" ? ext : undefined;
+}
+
+/**
+ * Whether a socket's reported negotiation is permessage-deflate WITH context
+ * takeover in either direction (RFC 001 §2.3) — the only compression the
+ * device plane refuses. Uncompressed, or per-message (both
+ * no-context-takeover params), is fine.
+ */
+function contextTakeoverDeflate(ws: WebSocket): boolean {
+  return deflateContextPolicy(negotiatedExtensions(ws)) === "context-takeover";
+}
+
+/** Whether an upgrade request's `Sec-WebSocket-Extensions` offers any DEFLATE. */
+function offersDeflate(request: Request): boolean {
+  const offer = request.headers.get("Sec-WebSocket-Extensions");
+  if (offer === null || offer.trim() === "") return false;
+  const parsed = parseWebSocketExtensions(offer);
+  // Unparseable: fail closed (assume it may have negotiated DEFLATE).
+  if (parsed === null) return true;
+  return parsed.some((e) => e.name.includes("deflate") || e.name.includes("compress"));
+}
+
+/** Close code + reason for a surviving socket whose device broker is gone. */
+export const DEVICE_BROKER_LOST_CODE = 1012;
+export const DEVICE_BROKER_LOST_REASON = "device broker lost";
+
+/** A socket as seen through the (optional) Hibernation attachment API. */
+type AttachableSocket = WebSocket & {
+  serializeAttachment?: (value: unknown) => void;
+  deserializeAttachment?: () => unknown;
+};
+
+function supportsAttachment(ws: WebSocket): boolean {
+  const sock = ws as AttachableSocket;
+  return (
+    typeof sock.serializeAttachment === "function" &&
+    typeof sock.deserializeAttachment === "function"
+  );
+}
+
+/** Read the attachment; `{}` when absent, unsupported, or unreadable. */
+function readAttachment(ws: WebSocket): HibernationAttachment {
+  const sock = ws as AttachableSocket;
+  if (typeof sock.deserializeAttachment !== "function") return {};
+  try {
+    const value = sock.deserializeAttachment();
+    return value && typeof value === "object" ? (value as HibernationAttachment) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Merge `patch` into the socket attachment. Throws when the host lacks the
+ * API or the write fails — callers decide whether that is fatal.
+ */
+function writeAttachment(ws: WebSocket, patch: HibernationAttachment): void {
+  const sock = ws as AttachableSocket;
+  if (typeof sock.serializeAttachment !== "function") {
+    throw new Error("WebSocket attachment API unavailable");
+  }
+  sock.serializeAttachment({ ...readAttachment(ws), ...patch });
+}
+
+/** Whether this socket negotiated the device plane on some incarnation. */
+function isDeviceMarked(ws: WebSocket): boolean {
+  return readAttachment(ws).deviceEnabled === true;
+}
+
+/**
+ * Server → client device-plane message. Derived from `SessionTransport`
+ * because core's `DeviceOutgoing` is not re-exported from
+ * `@hypen-space/core/remote`.
+ */
+type DeviceOutgoing = Parameters<NonNullable<SessionTransport["sendDevice"]>>[0];
+
 function getWebSocketPair(): WebSocketPairCtor {
   return (globalThis as unknown as { WebSocketPair: WebSocketPairCtor }).WebSocketPair;
+}
+
+/** RFC 001 §5 origin normalisation — must match `RemoteServer`'s. */
+function normalizeOrigin(origin: string): string {
+  try {
+    const url = new URL(origin);
+    return `${url.protocol}//${url.host}`.toLowerCase();
+  } catch {
+    return origin.trim().toLowerCase();
+  }
 }
 
 /**
  * Wrap a Cloudflare (hibernatable) WebSocket as a `SessionTransport`. Each
  * outgoing protocol message is JSON-serialised. Closing is best-effort — a
  * socket already closed by the edge throws, which we swallow.
+ *
+ * Device plane (RFC 001): `sendDevice` (JSON) is present only when the socket
+ * exposes the Hibernation attachment API, because §2.5 requires the
+ * `deviceEnabled` marker to be recorded before negotiation is acknowledged —
+ * a socket that cannot carry the marker must never negotiate (core's
+ * admission check sees no `sendDevice` and leaves the device plane off).
+ * `sendBinary` ships raw device frames as binary WebSocket messages.
  */
 export class CFTransport implements SessionTransport {
-  constructor(private readonly ws: WebSocket) {}
+  /** Device-plane route (RFC 001 §5); absent ⇒ device plane never admitted. */
+  readonly sendDevice?: (message: DeviceOutgoing) => void;
+  /** The same route for the broker's own JSON text (no re-serialisation). */
+  readonly sendDeviceText?: (text: string) => void;
+
+  constructor(private readonly ws: WebSocket) {
+    // A socket that negotiated permessage-deflate with context takeover
+    // never carries the device plane (RFC 001 §2.3): no `sendDevice`, so
+    // core never admits it. Per-message compression (both
+    // no-context-takeover params) is fine.
+    const compressed = readAttachment(ws).compressed === true || contextTakeoverDeflate(ws);
+    if (supportsAttachment(ws) && !compressed) {
+      this.sendDevice = (message: DeviceOutgoing) => {
+        this.ws.send(JSON.stringify(message));
+      };
+      this.sendDeviceText = (text: string) => {
+        this.ws.send(text);
+      };
+    }
+  }
 
   send(message: OutgoingMessage): void {
+    // RFC 001 §2.5: persist the reset marker BEFORE the ack that selects a
+    // device plane leaves (covers both the initial and a late-hello re-ack).
+    // If it can't be written, the socket must not be allowed to negotiate:
+    // reset it rather than acknowledge a plane we could not reset on wake.
+    if (message.type === "sessionAck" && (message as { device?: unknown }).device) {
+      try {
+        writeAttachment(this.ws, { deviceEnabled: true });
+      } catch (err) {
+        this.close(1011, "device marker unavailable");
+        throw err;
+      }
+    }
     this.ws.send(JSON.stringify(message));
+  }
+
+  sendBinary(frame: Uint8Array): void {
+    this.ws.send(frame);
   }
 
   close(code?: number, reason?: string): void {
@@ -96,8 +311,69 @@ export interface HypenDurableObjectConfig {
    * SVG resource bundle for `Icon(@resources.foo)` references. Name → raw SVG.
    */
   resources?: Record<string, string>;
-  /** Mirror actions/state to other sockets sharing this DO (default false). */
+  /**
+   * Mirror actions/state to other sockets sharing this DO (default false).
+   * The device plane stays on: a mirrored dispatch runs with replay
+   * provenance, so its `context.device` refuses (`syncActions.replay`,
+   * RFC 001 §1.7) — only the socket that dispatched can start device work.
+   */
   syncActions?: boolean;
+  /**
+   * Device Capability Protocol (RFC 001). On by default: any client whose
+   * hello offers `device` gets a device plane. `false` opts out — the DO then
+   * behaves exactly like a UI-only host. The plane is also off (one warning)
+   * when `deviceWasm` lacks the broker. Neither `syncActions` nor
+   * `webSocketCompression` turns it off; compression is judged per socket.
+   *
+   * Hibernation: a socket that negotiated the device plane is reset with
+   * 1012 when the DO wakes without its broker (§2.5); UI-only sockets keep
+   * transparent restoration.
+   */
+  device?: boolean;
+  /**
+   * The device broker (RFC 001): the web-target `hypen-engine` exports built
+   * with `--features js,device-broker` (the same module object passed to
+   * `createCFEngine`), which carry `WasmDeviceBroker` — the Rust broker
+   * every server SDK shares. `defineHypenWorker` sets it from its `wasm`
+   * option. Missing (or a glue without the broker) ⇒ the device plane is
+   * off, with one warning.
+   */
+  deviceWasm?: CFDeviceWasmExports;
+  /**
+   * Declare whether the Worker enables the `web_socket_compression`
+   * compatibility flag (workerd then negotiates permessage-deflate with any
+   * client that offers it; a Durable Object has no per-socket way to
+   * decline). The flag is not observable from code, so it must be declared.
+   * Default `false`, matching workerd without the flag.
+   *
+   * It never turns the device plane off for the DO. Compression is judged
+   * per socket (RFC 001 §2.3): a socket whose negotiated extension carries
+   * both `server_no_context_takeover` and `client_no_context_takeover`
+   * (each message compressed on its own) keeps its device plane; one that
+   * negotiated context takeover in either direction stays UI-only. When the
+   * runtime does not report a socket's negotiated extensions, `true` makes
+   * that check fail closed: a socket whose client OFFERED permessage-deflate
+   * stays UI-only (a client that offered none cannot have negotiated it).
+   */
+  webSocketCompression?: boolean;
+  /**
+   * Browser `Origin` allowlist for the WebSocket upgrade (RFC 001 §5) — a
+   * browser CSWSH defence, not an authenticator. An upgrade carrying an
+   * unlisted `Origin` is rejected with 403; with an allowlist set, an
+   * upgrade without `Origin` is admitted only by `authenticate`. With
+   * neither this nor `authenticate`, every client is admitted (one warning —
+   * set them in production). Exact normalised origins
+   * (`scheme://host[:port]`), no wildcards.
+   */
+  allowedOrigins?: string[];
+  /**
+   * Application connection authenticator (RFC 001 §5, decision D1), called
+   * in `fetch` before the socket is accepted: return true to admit. Runs for
+   * every upgrade when configured (also those with an allowed Origin), and is
+   * the only admission for clients that send no Origin (native apps) when an
+   * allowlist is configured.
+   */
+  authenticate?: (request: Request) => boolean | Promise<boolean>;
 }
 
 export abstract class HypenDurableObject {
@@ -116,6 +392,13 @@ export abstract class HypenDurableObject {
   /** Built-once `SessionHost` shared across this DO's sessions. */
   private _host: SessionHost | null = null;
 
+  /** Whether the device plane is on for this DO; resolved (and logged) once. */
+  private _deviceOn: boolean | null = null;
+
+  /** Whether the open-admission warning was logged for this DO. */
+  private _admissionWarned = false;
+
+
   constructor(ctx: DurableObjectState, env: unknown) {
     this.ctx = ctx;
     this.env = env;
@@ -133,13 +416,21 @@ export abstract class HypenDurableObject {
       return new Response("Expected WebSocket upgrade", { status: 426 });
     }
 
+    // Admission (RFC 001 §5, decision D1): reject before any socket is
+    // accepted. Origin is checked against the allowlist when present; the
+    // app's authenticator admits Origin-less (native) clients and runs for
+    // every upgrade when configured.
+    const refused = await this.admit(request);
+    if (refused) return refused;
+
     // Create a WebSocketPair — client goes to the caller, server stays here.
     //
     // Compression: there is no per-socket knob here. workerd handles
     // permessage-deflate transparently when the Worker sets the
     // `web_socket_compression` compatibility flag in wrangler.jsonc; without
     // it, frames are always sent uncompressed. It is negotiated per-connection,
-    // so clients that don't offer the extension are unaffected.
+    // so clients that don't offer the extension are unaffected. What it
+    // negotiated decides this socket's device plane (below).
     const pair = new (getWebSocketPair())();
     const client = pair[0];
     const server = pair[1];
@@ -147,6 +438,28 @@ export abstract class HypenDurableObject {
     // Accept the server-side socket through the Hibernation API so CF can
     // evict this DO from memory while keeping the WebSocket alive at the edge.
     this.ctx.acceptWebSocket(server);
+
+    // RFC 001 §2.3: a socket whose DEFLATE keeps a context across messages
+    // (in either direction) never gets the device plane; remember it on the
+    // socket so the verdict survives hibernation. Per-message compression
+    // (both no-context-takeover params) is not marked.
+    if (this.deviceOn() && this.uiOnlyCompression(server, request)) {
+      if (supportsAttachment(server)) {
+        try {
+          writeAttachment(server, { compressed: true });
+        } catch {
+          // The verdict cannot be recorded, and CFTransport alone may not
+          // be able to see it: fail closed rather than risk a device plane
+          // on a context-takeover socket.
+          try {
+            server.close(1011, "compression marker unavailable");
+          } catch {
+            /* already closed */
+          }
+        }
+      }
+      /* no attachment API: CFTransport never offers a device route anyway */
+    }
 
     // Bind DO storage so persistence calls route to this DO's storage.
     this.bindStorage();
@@ -163,13 +476,54 @@ export abstract class HypenDurableObject {
    * `RemoteSession.receive`.
    */
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
+    // RFC 001 §2.5 — loss of broker state is a connection reset. A socket
+    // that negotiated the device plane on an earlier incarnation, but has no
+    // live session (and so no broker) here, woke from hibernation: close it
+    // BEFORE touching the message. No synthesised hello, no new broker, no
+    // dispatch; the client reconnects with a full advertisement. Unmarked
+    // (UI-only) sockets fall through to the restoration path below.
+    if (!this.sessions.has(ws) && isDeviceMarked(ws)) {
+      try {
+        ws.close(DEVICE_BROKER_LOST_CODE, DEVICE_BROKER_LOST_REASON);
+      } catch {
+        /* socket already closed at the edge */
+      }
+      return;
+    }
+
+    // Binary device frames (RFC 001 §2.3) route to the live broker. Without
+    // one, binary messages keep the legacy JSON-in-binary interpretation.
+    if (typeof message !== "string") {
+      const live = this.sessions.get(ws);
+      if (live?.deviceBroker) {
+        live.receiveBinary(toBytes(message));
+        return;
+      }
+    }
+
     const text = typeof message === "string" ? message : new TextDecoder().decode(message);
+
+    // Device JSON limits start before parsing (RFC 001 §2.1, decision D4):
+    // an over-1 MiB text that is a device message — `type` found by a linear
+    // scan wherever it sits — is never JSON.parsed here; a live device
+    // session counts it as a connection-level violation.
+    const live = this.sessions.get(ws);
+    if ((live?.deviceBroker || this.deviceOn()) && isOversizeDeviceText(text)) {
+      live?.deviceBroker?.reportViolation("device message over 1 MiB");
+      return;
+    }
 
     let msg: RemoteMessage;
     try {
       msg = JSON.parse(text) as RemoteMessage;
     } catch {
-      return; // ignore unparseable messages
+      // Unparseable text is ignored — except on a live device connection,
+      // where device text `JSON.parse` rejects (`NaN`, a bare token, …) is a
+      // JSON-limit breach the broker must count against the connection's
+      // violation budget (RFC 001 §2.1, decision D4): the session routes it
+      // by its raw `type`.
+      if (live?.deviceBroker) await live.receive(text);
+      return;
     }
 
     // Re-bind storage on every message — after a wake the storage handle may
@@ -192,13 +546,18 @@ export abstract class HypenDurableObject {
     // first batch, also suppresses every enter animation. With it, the
     // session RESUMES and the wake is invisible to the client.
     if (msg.type !== "hello" && !session.helloReceived) {
-      await session.receive({
-        type: "hello",
-        sessionId: this.rememberedSessionId(ws),
-      } as RemoteMessage);
+      // The legacy (no-hello) initialisation — a legacy client that never
+      // sends hello, or a UI-only socket waking from hibernation (with the
+      // server-authenticated id from the attachment). Whatever the device
+      // setting: such a session simply has no device plane, and a later real
+      // hello may still negotiate the device extension on this socket
+      // (RFC 001 §2.2).
+      await session.initializeLegacy(this.rememberedSessionId(ws));
     }
 
-    await session.receive(msg);
+    // The raw text (not the parsed value) goes to the session so device
+    // messages get their strict duplicate-key check (RFC 001 §1.9).
+    await session.receive(text);
 
     // Keep the id beside the socket so the NEXT hibernation can resume too.
     this.rememberSessionId(ws, session);
@@ -247,6 +606,7 @@ export abstract class HypenDurableObject {
 
     const config = this.getConfig();
     const self = this;
+    const deviceOn = this.deviceOn();
 
     const discoveredComponents = mergeComponentTemplates(
       config.app ?? null,
@@ -260,6 +620,18 @@ export abstract class HypenDurableObject {
       resources: config.resources ?? {},
       app: config.app ?? null,
       syncActions: config.syncActions ?? false,
+      deviceDisabled: !deviceOn,
+      deviceMaxRetainedBytes: DO_DEVICE_MAX_RETAINED_BYTES,
+      // One Rust broker per device socket; the factory's pool is the
+      // aggregate budget of this DO's connections (RFC 001 §2.4/§5).
+      ...(deviceOn && hasDeviceBroker(config.deviceWasm)
+        ? {
+            deviceBrokerFactory: createCFDeviceBrokerFactory(
+              config.deviceWasm,
+              DO_DEVICE_AGGREGATE_RETAINED_BYTES
+            ),
+          }
+        : {}),
       sessionManager: this.getSessionManager(),
       discoveredComponents,
       createEngine() {
@@ -297,18 +669,10 @@ export abstract class HypenDurableObject {
   private rememberSessionId(ws: WebSocket, session: RemoteSession): void {
     const id = session.sessionId;
     if (!id) return;
-    const sock = ws as WebSocket & {
-      serializeAttachment?: (value: unknown) => void;
-      deserializeAttachment?: () => unknown;
-    };
-    if (typeof sock.serializeAttachment !== "function") return;
+    if (!supportsAttachment(ws)) return;
     try {
-      const current =
-        typeof sock.deserializeAttachment === "function"
-          ? ((sock.deserializeAttachment() as HibernationAttachment | null) ?? {})
-          : {};
-      if (current.hypenSessionId === id) return; // already current
-      sock.serializeAttachment({ ...current, hypenSessionId: id });
+      if (readAttachment(ws).hypenSessionId === id) return; // already current
+      writeAttachment(ws, { hypenSessionId: id });
     } catch {
       // Attachment is an optimisation, never a correctness requirement.
     }
@@ -316,13 +680,81 @@ export abstract class HypenDurableObject {
 
   /** The session id stashed by [rememberSessionId], if this host supports it. */
   private rememberedSessionId(ws: WebSocket): string | undefined {
-    const sock = ws as WebSocket & { deserializeAttachment?: () => unknown };
-    if (typeof sock.deserializeAttachment !== "function") return undefined;
-    try {
-      return (sock.deserializeAttachment() as HibernationAttachment | null)?.hypenSessionId;
-    } catch {
-      return undefined;
+    return readAttachment(ws).hypenSessionId;
+  }
+
+  /**
+   * Whether this socket's compression keeps it UI-only (RFC 001 §2.3):
+   * the runtime reports a negotiated permessage-deflate with context
+   * takeover in either direction, or — when it reports nothing and the
+   * Worker declared `webSocketCompression: true` — the client offered
+   * DEFLATE, so the negotiation may have kept a context (fail closed).
+   */
+  private uiOnlyCompression(server: WebSocket, request: Request): boolean {
+    const negotiated = negotiatedExtensions(server);
+    if (negotiated !== undefined) return contextTakeoverDeflate(server);
+    return this.getConfig().webSocketCompression === true && offersDeflate(request);
+  }
+
+  /**
+   * Whether the device plane is on for this DO (RFC 001) — on by default.
+   * Resolved once; an opt-out is silent, a missing broker logs ONE warning.
+   * `syncActions` and `webSocketCompression` never turn it off (replay
+   * provenance and the per-socket compression check cover them). Never
+   * throws.
+   */
+  private deviceOn(): boolean {
+    if (this._deviceOn !== null) return this._deviceOn;
+    const config = this.getConfig();
+    let reason: string | null = null;
+    if (config.device === false) {
+      this._deviceOn = false;
+      return false;
     }
+    if (!hasDeviceBroker(config.deviceWasm)) {
+      reason =
+        "no device broker: deviceWasm is missing or lacks WasmDeviceBroker (pass the web-target " +
+        "hypen-engine exports built with --features js,device-broker; defineHypenWorker does this " +
+        "from its `wasm` option)";
+    }
+    this._deviceOn = reason === null;
+    if (reason !== null) {
+      log.warn(`Device plane off: ${reason} — sessions stay UI-only`);
+    }
+    return this._deviceOn;
+  }
+
+  /** D1 upgrade admission; null admits, else the 403 response. */
+  private async admit(request: Request): Promise<Response | null> {
+    const config = this.getConfig();
+    const allowedOrigins = this.getAllowedOrigins();
+    if (!allowedOrigins && !config.authenticate && !this._admissionWarned) {
+      this._admissionWarned = true;
+      log.warn(OPEN_ADMISSION_WARNING);
+    }
+    const origin = request.headers.get("Origin");
+    const forbidden = () => new Response("Forbidden", { status: 403 });
+    if (origin !== null) {
+      if (allowedOrigins && !allowedOrigins.has(normalizeOrigin(origin))) return forbidden();
+    } else if (!config.authenticate && allowedOrigins) {
+      return forbidden();
+    }
+    if (config.authenticate) {
+      let ok = false;
+      try {
+        ok = (await config.authenticate(request)) === true;
+      } catch {
+        ok = false;
+      }
+      if (!ok) return forbidden();
+    }
+    return null;
+  }
+
+  /** Normalised `allowedOrigins`, or null when no allowlist is configured. */
+  private getAllowedOrigins(): Set<string> | null {
+    const list = this.getConfig().allowedOrigins;
+    return list && list.length > 0 ? new Set(list.map(normalizeOrigin)) : null;
   }
 
   /** Get or lazily (re)create the session for a WebSocket. */
@@ -370,6 +802,15 @@ export abstract class HypenDurableObject {
   protected onStorageBound(_storage: DurableObjectStorage): void {
     // no-op by default
   }
+}
+
+/** View a binary WebSocket message as bytes without copying. */
+function toBytes(message: ArrayBuffer | ArrayBufferView): Uint8Array {
+  if (message instanceof Uint8Array) return message;
+  if (ArrayBuffer.isView(message)) {
+    return new Uint8Array(message.buffer, message.byteOffset, message.byteLength);
+  }
+  return new Uint8Array(message);
 }
 
 /** Bind DO storage into a state store if it exposes the `__bindStorage` channel. */

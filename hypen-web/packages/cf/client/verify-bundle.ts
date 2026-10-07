@@ -27,6 +27,8 @@ const REQUIRED: ReadonlyArray<{ marker: string; provides: string }> = [
   { marker: "__anim.", provides: "the __anim.* channel protocol" },
   { marker: "hypen-anim-styles", provides: "the animation keyframes stylesheet" },
   { marker: "hypen-a11y-styles", provides: "the reduced-motion / focus stylesheet" },
+  { marker: "data-hypen-device-dialog", provides: "the device host's consent dialog (RFC 001)" },
+  { marker: "drop-zone", provides: "the device host's picker drop zone" },
 ];
 
 const file = Bun.file(BUNDLE);

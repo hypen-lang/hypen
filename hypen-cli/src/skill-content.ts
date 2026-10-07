@@ -367,7 +367,6 @@ Applicators are chained with dot notation after components. Any unrecognized app
 
 \`\`\`hypen
 .gridColumns(3)
-.gridTemplateColumns("1fr 2fr 1fr")
 .gridColumn("span 2")
 \`\`\`
 

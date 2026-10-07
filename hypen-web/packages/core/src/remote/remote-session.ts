@@ -49,6 +49,19 @@ import type {
 } from "./types.js";
 import { SessionManager } from "./session.js";
 import type { Patch } from "../types.js";
+import type {
+  DeviceRequest as DeviceRequestMessage,
+  DeviceEvent as DeviceEventMessage,
+  DeviceAck,
+} from "./device/generated.js";
+import { DevicePlane, systemDeviceClock, type DeviceClock } from "./device/plane.js";
+import type { DeviceBrokerConfig, DeviceBrokerFactory } from "./device/port.js";
+import { DEFAULT_MAX_RETAINED_BYTES } from "./device/constants.js";
+import {
+  findTopLevelMember,
+  isDeviceTypedText,
+  isOversizeDeviceText,
+} from "./device/strict-json.js";
 import { TemplateExpander } from "../patch-expand.js";
 import { frameworkLoggers } from "../logger.js";
 import { BaseEngine } from "../engine-base.js";
@@ -74,8 +87,40 @@ export type OutgoingMessage =
  */
 export interface SessionTransport {
   send(message: OutgoingMessage): void;
+  /**
+   * Send a device-plane message (RFC 001 §5). Deliberately a separate method
+   * taking a separate union that is NOT assignable to `OutgoingMessage`, so
+   * `broadcast()` (typed on `OutgoingMessage`) can never carry a device
+   * request. Optional: transports without it do not enable the device plane.
+   */
+  sendDevice?(message: DeviceOutgoing): void;
+  /**
+   * Send one device-plane message as the JSON text the broker produced
+   * (preferred over `sendDevice` when present: no parse/stringify round
+   * trip). Same separation from `send`/`broadcast` as `sendDevice`.
+   */
+  sendDeviceText?(text: string): void;
+  /**
+   * Send a raw binary device frame (RFC 001 §2.3). Present only on transports
+   * that meet the binary profile; its absence means binary capabilities are
+   * not advertised.
+   */
+  sendBinary?(frame: Uint8Array): void;
+  /**
+   * Bytes accepted by the transport but not yet written to the network
+   * (e.g. Bun `ServerWebSocket.getBufferedAmount()`). The device scheduler
+   * stops handing bulk frames to the transport while this is ≥ 256 KiB
+   * (RFC 001 §2.3). Absent ⇒ treated as 0 (chunking/turn limits still apply).
+   */
+  bufferedAmount?(): number;
   close(code?: number, reason?: string): void;
 }
+
+/**
+ * Server → client device-plane messages. Kept as its own union, structurally
+ * disjoint from `OutgoingMessage`, so the UI broadcast path cannot emit one.
+ */
+export type DeviceOutgoing = DeviceRequestMessage | DeviceEventMessage;
 
 /**
  * The subset of `RemoteServer` state a session needs. Kept as an interface so
@@ -90,6 +135,35 @@ export interface SessionHost {
   readonly resources: Record<string, string>;
   readonly app: HypenApp | null;
   readonly syncActions: boolean;
+  /**
+   * Opt-out of the Device Capability Protocol (RFC 001). The device plane is
+   * on by default: any client whose hello offers `device` gets one, provided
+   * the host supplies a `deviceBrokerFactory`. `true` makes the host behave
+   * exactly like a UI-only server (`RemoteServer.disableDevice()`, a
+   * Cloudflare `device: false`, or a setting incompatible with the device
+   * plane such as `allow-multiple` session fan-out). `syncActions` is NOT
+   * one: replayed dispatches carry replay provenance, so their
+   * `context.device` refuses (`syncActions.replay`) while the originating
+   * client keeps its device plane.
+   */
+  readonly deviceDisabled?: boolean;
+  /**
+   * Per-connection budget of retained device upload bytes (RFC 001 §2.4/§5).
+   * Defaults to 128 MiB. A host with a smaller in-memory sink (a Cloudflare
+   * Durable Object: 16 MiB) sets it lower; revisions whose `maxItemBytes`
+   * exceed it are capped to it for this host, so `blobStart` admission and
+   * `device.save()` both honor what the host can actually hold.
+   */
+  readonly deviceMaxRetainedBytes?: number;
+  /**
+   * Creates the connection's device broker — the Rust `DeviceBroker` through
+   * the WASM-free port (RFC 001). Supplied by `@hypen-space/server`
+   * (`createWasmDeviceBrokerFactory`) and `@hypen-space/cf`; the factory owns
+   * the aggregate retained-bytes pool shared by this host's connections (a
+   * process, or one Durable Object). Absent ⇒ the device plane is never
+   * admitted (the host is UI-only).
+   */
+  readonly deviceBrokerFactory?: DeviceBrokerFactory;
   readonly sessionManager: SessionManager;
   readonly discoveredComponents: Map<
     string,
@@ -132,9 +206,20 @@ export interface RemoteSessionOptions {
    * is auto-initialised as a legacy (no-session-id) client. Set `null` to
    * disable the grace period entirely — useful for transports like SSE where
    * the first message may be deliberately delayed.
+   *
+   * Applies whether or not the host offers the device plane: a session
+   * initialised by the grace timer simply has no device plane (a later hello
+   * on it may still negotiate one, RFC 001 §2.2).
    * @default 1000
    */
   helloGraceMs?: number | null;
+  /**
+   * Handshake timeout: a connection that has not sent `hello` within this
+   * many ms is closed (1008). Applies only when no grace timer initialises
+   * the session (`helloGraceMs: null`). Off by default; `null` disables it
+   * (e.g. a Cloudflare DO, whose timers do not survive hibernation).
+   */
+  helloTimeoutMs?: number | null;
   /**
    * `socket` value stored on the `RemoteClient` record surfaced to
    * `onConnection`/`onDisconnection` callbacks. Pass through the raw
@@ -149,6 +234,28 @@ export interface RemoteSessionOptions {
    * Never populate this from an untrusted client hello payload.
    */
   recoverySessionId?: string;
+  /**
+   * Extra device broker configuration (RFC 001): bulk scheduling (64 KiB
+   * turns, 256 KiB pending, 8 MiB queued by default), rates, revision
+   * overrides. `ack` and the retained-bytes budget come from the handshake
+   * and the host; the advertisement is the Rust broker's own (the one the
+   * handshake selected against), never a per-session value.
+   */
+  deviceBrokerConfig?: Omit<DeviceBrokerConfig, "ack" | "serverCapabilities">;
+  /** Device clock/timer seam driving the broker (tests inject a fake clock). */
+  deviceClock?: DeviceClock;
+  /**
+   * Runs a bulk scheduling turn that is due now, after already-queued work
+   * (RFC 001 §2.3: UI traffic first). Defaults to a macrotask; tests inject
+   * a manual queue to step turns one at a time.
+   */
+  deviceDefer?: (fn: () => void) => void;
+  /**
+   * Overall deadline of the connection-owned `core.capabilities` stream.
+   * The session reopens it (fresh snapshot, old stream retired first)
+   * shortly before this expires. Defaults to the revision's 24 h maximum.
+   */
+  deviceControlStreamTimeoutMs?: number;
 }
 
 let nextSessionCounter = 1;
@@ -180,9 +287,53 @@ export class RemoteSession {
 
   private _sessionId: string | null = null;
   private _helloReceived = false;
+  /**
+   * True when the session was initialised by the legacy `helloGrace` timer
+   * rather than an explicit hello. Only then may a late hello negotiate the
+   * device extension (RFC 001 §2.2); after an explicit hello the device
+   * handshake — selected or disabled — is immutable for the socket.
+   */
+  private _initializedByGrace = false;
+  /** `isNew` of the acknowledged session, repeated by a late device re-ack. */
+  private _ackIsNew = true;
   private _stateSubscribed = false;
   private _revision = 0;
   private _destroyed = false;
+  /**
+   * Device Capability Protocol plane (RFC 001): the Rust broker of this
+   * connection and its host driver, attached once the handshake selects a
+   * common protocol. `null` when the device plane is disabled. Bound to this
+   * one connection; closed on `destroy()` (broker loss == connection reset,
+   * §2.5). The live capability selection (replaced by every
+   * `core.capabilities` snapshot) lives in the broker.
+   */
+  private _deviceBroker: DevicePlane | null = null;
+  /**
+   * Server-issued resume credential for this session, issued in every ack.
+   * Required on resume only for a session that negotiated a device plane.
+   */
+  private _resumeToken: string | null = null;
+  private readonly deviceClock: DeviceClock;
+  private readonly deviceDefer: ((fn: () => void) => void) | undefined;
+  private readonly deviceControlStreamTimeoutMs: number | undefined;
+  /** Extra broker configuration (tests inject small bounds / overrides). */
+  private readonly deviceBrokerConfig: Omit<DeviceBrokerConfig, "ack" | "serverCapabilities"> | undefined;
+  /**
+   * The session's shared global context, constructed unconditionally so every
+   * module instance — the primary included — always receives a handler
+   * `context` (RFC 001 §6 Phase 2). The auto-wired ManagedRouter reuses it.
+   */
+  private readonly _globalContext = new HypenGlobalContext();
+  /**
+   * True once the hello handshake, primary-module construction and the
+   * initial render have all completed — the point at which the engine's
+   * declaration tables (routes, bindings, rendered paths) exist. Distinct
+   * from `sessionId`, which is assigned earlier in `initializeSession`,
+   * before `renderSource` has run; anything that consults the guard (the
+   * agent surface's attach mode, for one) must gate on this, not on the id.
+   * Never reset: `destroy()` is the exit, reported by `isDestroyed`.
+   */
+  private _ready = false;
   private helloTimeout: ReturnType<typeof setTimeout> | null = null;
   /**
    * Per-session ManagedRouter auto-wired from `Router {}` blocks found
@@ -220,6 +371,10 @@ export class RemoteSession {
     this.connectedAt = new Date();
     this.socketHandle = options.socketHandle;
     this.recoverySessionId = options.recoverySessionId;
+    this.deviceBrokerConfig = options.deviceBrokerConfig;
+    this.deviceClock = options.deviceClock ?? systemDeviceClock;
+    this.deviceDefer = options.deviceDefer;
+    this.deviceControlStreamTimeoutMs = options.deviceControlStreamTimeoutMs;
 
     this.ready = new Promise<void>((resolve) => {
       this._resolveReady = resolve;
@@ -239,21 +394,52 @@ export class RemoteSession {
 
     log.info(`Session ${this.id} created, engine initialized`);
 
-    // Auto-initialise legacy clients that never send `hello`.
-    const graceMs = options.helloGraceMs ?? 1000;
+    // Auto-initialise legacy clients that never send `hello`, whatever the
+    // host's device support: a grace-initialised session simply has no
+    // device plane (a late hello may still negotiate one, RFC 001 §2.2).
+    const graceMs = options.helloGraceMs !== undefined ? options.helloGraceMs : 1000;
     if (graceMs !== null) {
       this.helloTimeout = setTimeout(() => {
         if (!this._helloReceived) {
+          this._initializedByGrace = true;
           this.initializeSession(undefined, undefined).catch((err) =>
             log.error("Error initializing legacy session:", err)
           );
         }
       }, graceMs);
+    } else {
+      const timeoutMs = options.helloTimeoutMs ?? null;
+      if (timeoutMs !== null) {
+        this.helloTimeout = setTimeout(() => {
+          this.helloTimeout = null;
+          if (this._helloReceived || this._destroyed) return;
+          log.warn(`Session ${this.id}: no hello within ${timeoutMs} ms — closing`);
+          try {
+            this.transport.close(1008, "hello timeout");
+          } catch (err) {
+            log.error(`Session ${this.id}: transport close failed`, err);
+          }
+        }, timeoutMs);
+      }
     }
   }
 
   get sessionId(): string | null {
     return this._sessionId;
+  }
+
+  /**
+   * Initialise a client that never sent `hello` (the legacy path) — what
+   * the `helloGrace` timer does, for transports that drive it explicitly
+   * (e.g. a Cloudflare DO whose first message is not a hello). `sessionId`
+   * must come from a server-authenticated channel (the hibernation
+   * attachment), never from client input. A later hello on such a session
+   * may still negotiate the device extension (RFC 001 §2.2).
+   */
+  async initializeLegacy(sessionId?: string): Promise<void> {
+    if (this._helloReceived || this._destroyed) return;
+    this._initializedByGrace = true;
+    await this.initializeSession(sessionId, undefined);
   }
 
   get moduleInstance(): HypenModuleInstance<any> | null {
@@ -274,6 +460,276 @@ export class RemoteSession {
 
   get isDestroyed(): boolean {
     return this._destroyed;
+  }
+
+  /**
+   * The device plane (Rust broker + driver) bound to this connection, or
+   * null when disabled.
+   */
+  get deviceBroker(): DevicePlane | null {
+    return this._deviceBroker;
+  }
+
+  /**
+   * Feed a client → server binary device frame (RFC 001 §2.3). Transport
+   * adapters call this for binary WebSocket frames; without a broker the
+   * frame is dropped (device plane disabled, no storage allocated).
+   */
+  receiveBinary(frame: Uint8Array): void {
+    if (this._destroyed) return;
+    this._deviceBroker?.receiveFrame(frame);
+  }
+
+  /**
+   * Admission for the device plane (RFC 001 §5 / Phase S). On by default:
+   * the host must not have opted out, the transport must carry a device
+   * route, the host must supply a broker, and `allow-multiple` must be off
+   * (it fans one session out across connections, which device work must
+   * never ride). `syncActions` is compatible: a dispatch replayed onto
+   * another session runs with replay provenance (`runReplayed`), so its
+   * `context.device` refuses with `unavailable` / `syncActions.replay`
+   * (RFC 001 §1.7) — only the client that dispatched can start device work.
+   */
+  private deviceAdmitted(): boolean {
+    if (this.host.deviceDisabled === true) return false;
+    if (
+      typeof this.transport.sendDevice !== "function" &&
+      typeof this.transport.sendDeviceText !== "function"
+    ) {
+      return false;
+    }
+    const factory = this.host.deviceBrokerFactory;
+    if (typeof factory !== "function") {
+      // A UI-only host (no broker): nothing to negotiate.
+      log.debug(`Session ${this.id}: device plane not offered — the host supplies no device broker`);
+      return false;
+    }
+    if (typeof factory.negotiate !== "function") {
+      // A factory without the (Rust) handshake cannot negotiate: fail closed.
+      log.warn(`Session ${this.id}: device plane refused — the device broker factory has no negotiate()`);
+      return false;
+    }
+    if (this.host.sessionManager.getConcurrentPolicy() === "allow-multiple") {
+      log.warn(`Session ${this.id}: device plane refused — allow-multiple is on`);
+      return false;
+    }
+    return true;
+  }
+
+  private deviceBudget(): number {
+    return this.host.deviceMaxRetainedBytes ?? DEFAULT_MAX_RETAINED_BYTES;
+  }
+
+  /**
+   * Negotiate an untrusted `hello.device` (RFC 001 §2.2, decision D7)
+   * through the host's broker port — the Rust handshake shared by every
+   * server SDK: the §2.1 JSON limits and the handshake-v1 schema with
+   * unique names are checked on the member's own RAW text when the hello
+   * arrived as text (so duplicate keys and number spellings are judged as
+   * sent), then the selection against the Rust broker's advertisement
+   * (every registry revision it has a consuming API for). Invalid or
+   * no common ground ⇒ `undefined`: the device plane is disabled for this
+   * socket, UI-only operation continues.
+   *
+   * Nothing is negotiated unless this host admits the device plane at all:
+   * a UI-only server never spends CPU on an extension it ignores. Pure (no
+   * side effects), never throws.
+   */
+  private negotiateDevice(device: unknown, text: string | null): DeviceAck | undefined {
+    if (device === undefined || !this.deviceAdmitted()) return undefined;
+    try {
+      let helloText: string;
+      if (text !== null) {
+        const member = findTopLevelMember(text, "device");
+        if (!member.found) {
+          log.warn(`Session ${this.id}: hello.device unreadable — device plane disabled`);
+          return undefined;
+        }
+        helloText = member.raw;
+      } else {
+        // A pre-parsed hello: its value, as JSON text (never a JS string
+        // handed over as if it were JSON text).
+        const serialized = JSON.stringify(device);
+        if (typeof serialized !== "string") return undefined;
+        helloText = serialized;
+      }
+      // No advertisement of our own: the Rust handshake selects against
+      // what the Rust broker consumes (`server_advertisement`).
+      const outcome = this.host.deviceBrokerFactory!.negotiate(
+        helloText,
+        typeof this.transport.sendBinary === "function"
+      );
+      if (outcome.ack === null) {
+        log.warn(`Session ${this.id}: ${outcome.reason} — device plane disabled`);
+        return undefined;
+      }
+      return outcome.ack;
+    } catch (err) {
+      log.warn(`Session ${this.id}: device negotiation failed — device plane disabled`, err);
+      return undefined;
+    }
+  }
+
+  /**
+   * Every live module instance on this connection: the primary plus the
+   * auto-wired router's active and persisted (cached) route modules.
+   */
+  private liveModuleInstances(): HypenModuleInstance<any>[] {
+    const out: HypenModuleInstance<any>[] = [];
+    if (this._moduleInstance) out.push(this._moduleInstance);
+    for (const instance of this._autoManagedRouter?.liveInstances() ?? []) {
+      if (!out.includes(instance)) out.push(instance);
+    }
+    return out;
+  }
+
+  /**
+   * Create the connection's broker (the Rust `DeviceBroker` through the
+   * host's factory) BEFORE the `sessionAck` is sent: nothing reaches the wire
+   * here. `null` when the host cannot build one — the caller then acks
+   * WITHOUT `device`, so the client never holds an advertised device plane
+   * that has no broker behind it (a device socket never survives
+   * without its broker; the plane is simply not negotiated, §2.2).
+   */
+  private buildDevicePlane(ack: DeviceAck): DevicePlane | null {
+    if (this._deviceBroker || this._destroyed) return null;
+    const transport = this.transport;
+    const budget = this.deviceBudget();
+    // `serverCapabilities` is left to the broker (dropped even if an untyped
+    // caller passed one): its default is the same Rust advertisement the
+    // handshake selected against, so snapshots intersect with what was acked.
+    const { serverCapabilities: _advertisement, ...extra } = (this.deviceBrokerConfig ?? {}) as Omit<DeviceBrokerConfig, "ack">;
+    void _advertisement;
+    const config: DeviceBrokerConfig = {
+      ...extra,
+      ack,
+      maxRetainedBytes: budget,
+      // Advertise only limits the host can honor (§2.4): a smaller retained
+      // budget also caps every revision's item size.
+      ...(budget < DEFAULT_MAX_RETAINED_BYTES ? { maxItemBytes: budget } : {}),
+      ...(this.deviceControlStreamTimeoutMs !== undefined
+        ? { controlStreamTimeoutMs: this.deviceControlStreamTimeoutMs }
+        : {}),
+    };
+    let plane: DevicePlane;
+    try {
+      const port = this.host.deviceBrokerFactory!(config, Math.max(0, this.deviceClock.now()));
+      plane = new DevicePlane(
+        port,
+        {
+          sendText: (text) => {
+            if (this._destroyed) return;
+            if (transport.sendDeviceText) transport.sendDeviceText(text);
+            // The broker only ever emits requests and events server → client.
+            else transport.sendDevice!(JSON.parse(text) as DeviceOutgoing);
+          },
+          ...(typeof transport.sendBinary === "function"
+            ? {
+                sendFrame: (frame: Uint8Array) => {
+                  if (this._destroyed) return;
+                  transport.sendBinary!(frame);
+                },
+              }
+            : {}),
+          // Transport write capacity for bulk scheduling (§2.3).
+          ...(transport.bufferedAmount ? { bufferedAmount: () => transport.bufferedAmount!() } : {}),
+          // The broker closed the plane (repeated violations, core.capabilities
+          // ended, id space exhausted): reset the socket.
+          closeConnection: (code, reason) => {
+            log.warn(`Session ${this.id}: ${reason} — closing`);
+            this.closeDevicePlane(reason, code);
+          },
+        },
+        {
+          clock: this.deviceClock,
+          ...(this.deviceDefer ? { defer: this.deviceDefer } : {}),
+          binary: ack.binary,
+          onError: (what, err) => log.error(`Session ${this.id}: ${what} failed:`, err),
+        }
+      );
+    } catch (err) {
+      log.error(`Session ${this.id}: device broker creation failed — device plane not negotiated`, err);
+      return null;
+    }
+    return plane;
+  }
+
+  /**
+   * Start a plane built by `buildDevicePlane`, AFTER the `sessionAck` that
+   * carries its `device` member: opens the connection-owned
+   * `core.capabilities` stream before any module callback can request device
+   * work (§2.2), then binds every live module instance to it.
+   */
+  private startDevicePlane(plane: DevicePlane, ack: DeviceAck): void {
+    if (this._destroyed || this._deviceBroker) {
+      plane.close("connectionLost");
+      return;
+    }
+    this._deviceBroker = plane;
+    if (!plane.start()) {
+      log.warn(`Session ${this.id}: core.capabilities could not open — device plane closed`);
+      this.closeDevicePlane("device plane closed: core.capabilities unavailable");
+      return;
+    }
+    // From now on a resume of this session must present its resume token
+    // (RFC 001 §5): the public id alone never reaches a device session.
+    if (this._sessionId) this.host.sessionManager.markDeviceSession(this._sessionId);
+    for (const instance of this.liveModuleInstances()) instance.attachDevice(plane);
+    log.info(
+      `Session ${this.id}: device plane enabled (${ack.capabilities.map((c) => c.name).join(", ")})`
+    );
+  }
+
+  /**
+   * Close the device connection (RFC 001 §2.2/§2.5): reject all live device
+   * work, detach every module instance, and reset the socket (1012) — a
+   * device socket never survives without its broker, and the client
+   * reconnects with a full advertisement.
+   */
+  private closeDevicePlane(reason: string, code = 1012): void {
+    const plane = this._deviceBroker;
+    if (!plane) return;
+    this._deviceBroker = null;
+    plane.close("connectionLost");
+    for (const instance of this.liveModuleInstances()) instance.attachDevice(null);
+    try {
+      this.transport.close(code, reason.slice(0, 120));
+    } catch (err) {
+      log.error(`Session ${this.id}: transport close failed`, err);
+    }
+  }
+
+  /** Late hello on an already-initialised session: negotiate + re-ack. */
+  private lateDeviceHello(rawDevice: unknown, rawText: string | null): void {
+    if (!this._initializedByGrace || rawDevice === undefined || this._deviceBroker || !this._sessionId) {
+      return;
+    }
+    const selected = this.negotiateDevice(rawDevice, rawText);
+    const plane = selected ? this.buildDevicePlane(selected) : null;
+    const ack = plane ? selected : undefined;
+    this.send({
+      type: "sessionAck",
+      sessionId: this._sessionId,
+      // The re-ack describes the same session the legacy ack announced; it
+      // never claims a resume the client did not get.
+      isNew: this._ackIsNew,
+      isRestored: false,
+      ...(this._resumeToken ? { resumeToken: this._resumeToken } : {}),
+      ...(ack ? { device: ack } : {}),
+    });
+    if (plane && ack) this.startDevicePlane(plane, ack);
+  }
+
+  /**
+   * True once hello → initialTree has completed and the engine has
+   * rendered. `ready` is the awaitable form; this is the synchronous check
+   * for callers that must not wait (a lookup of an *existing* live session
+   * has nothing to wait for — either it is ready now or it is not a match).
+   * Note `ready` also resolves on a destroy-before-hello, so "`ready`
+   * settled" is weaker than this flag.
+   */
+  get isReady(): boolean {
+    return this._ready;
   }
 
   /**
@@ -302,9 +758,36 @@ export class RemoteSession {
     // to `RemoteMessage` in the `else` branch under the current @types/node,
     // so we project the non-raw case through an explicit assertion.
     let msg: RemoteMessage;
+    // Raw text is kept for device messages: their strict decode (RFC 001
+    // §2.1 JSON limits) needs the text, which `JSON.parse` would normalize.
+    let text: string | null = null;
     try {
       if (typeof raw === "string" || raw instanceof Buffer) {
-        msg = JSON.parse(raw.toString()) as RemoteMessage;
+        text = raw.toString();
+        const plane = this._deviceBroker;
+        if (plane) {
+          // Device JSON limits start BEFORE parsing (§2.1): an over-limit
+          // text that announces itself as a device message is dropped
+          // unparsed — a connection-level violation, attributable to no
+          // request.
+          if (isOversizeDeviceText(text)) {
+            plane.reportViolation("device message over 1 MiB");
+            return;
+          }
+          // Device text is routed by its raw top-level `type` — never by
+          // what `JSON.parse` makes of it — to the broker, which strictly
+          // decodes EVERY device message type (a client `deviceRequest`
+          // included): a JSON-limit breach (`NaN`, `1.0`, a duplicate key,
+          // text `JSON.parse` rejects outright) counts against the
+          // connection's violation budget, a known-id message in the wrong
+          // direction or of the wrong shape terminates that request (D8),
+          // an unknown id is ignored.
+          if (isDeviceTypedText(text)) {
+            plane.receiveText(text);
+            return;
+          }
+        }
+        msg = JSON.parse(text) as RemoteMessage;
       } else {
         msg = raw as RemoteMessage;
       }
@@ -312,29 +795,87 @@ export class RemoteSession {
       log.error(`Invalid message on session ${this.id}:`, err);
       return;
     }
+    if (typeof msg !== "object" || msg === null) return;
+
+    // Device plane (RFC 001): routed to the broker, never through the
+    // action/state fan-out. Text messages on a live device connection were
+    // routed above by their raw `type`; what reaches here is a pre-parsed
+    // message from a custom transport (strictly decoded from its JSON form)
+    // or device text for a connection without a plane (dropped). EVERY
+    // device type goes to the broker — a client `deviceRequest` (which no
+    // client may send) on a live id is a wrong-direction violation that
+    // terminates that request (D8), on an unknown id it is ignored.
+    const type = (msg as { type?: unknown }).type;
+    if (type === "deviceRequest" || type === "deviceResponse" || type === "deviceEvent") {
+      try {
+        this._deviceBroker?.receiveText(text ?? JSON.stringify(msg));
+      } catch (err) {
+        log.error(`Error handling device message on session ${this.id}:`, err);
+      }
+      return;
+    }
 
     try {
       switch (msg.type) {
         case "hello": {
           const hello = msg as HelloMessage;
-          await this.initializeSession(hello.sessionId, hello.props);
+          if (this._helloReceived) {
+            // Late hello after the legacy grace path already initialised the
+            // session (RFC 001 §2.2): accept the device extension and re-ack
+            // without reinitialising app state. Never silently dropped.
+            this.lateDeviceHello(hello.device, text);
+            break;
+          }
+          // Everything in a hello is untrusted: shape-check it BEFORE any
+          // initializeSession side effect. An invalid device extension
+          // disables the device plane; it never throws mid-initialisation.
+          await this.initializeSession(
+            typeof hello.sessionId === "string" && hello.sessionId ? hello.sessionId : undefined,
+            hello.props !== null && typeof hello.props === "object" && !Array.isArray(hello.props)
+              ? hello.props
+              : undefined,
+            this.negotiateDevice(hello.device, text),
+            typeof hello.resumeToken === "string" ? hello.resumeToken : undefined
+          );
           break;
         }
 
         case "dispatchAction": {
+          // Security admission (RFC 001 §5/Phase S): a socket that has not
+          // completed the hello handshake may not dispatch — into this
+          // session or, via syncActions, into anyone else's.
+          if (!this._helloReceived) {
+            log.warn(`Session ${this.id}: dispatchAction before hello — rejected`);
+            break;
+          }
           const action = msg as DispatchActionMessage;
-          this.engine.dispatchAction(action.action, action.payload);
+          // Node ids are session-local. Resolve to an engine-validated scoped
+          // handler before sending the semantic outcome to another session.
+          const resolved = action.action === "__hypen_dispatch"
+            ? this.engine.resolveUIAction(action.action, action.payload)
+            : { name: action.action, payload: action.payload };
+          this.engine.dispatchAction(resolved.name, resolved.payload);
 
           if (this.host.syncActions) {
             for (const other of this.host.otherSessions(this)) {
               if (!other._helloReceived) continue;
-              other.engine.dispatchAction(action.action, action.payload);
+              // Replayed dispatch: handler contexts constructed inside carry
+              // replay provenance, so context.device refuses to open requests
+              // (RFC 001 §1.7) — the firewall at the dispatch layer.
+              const dispatch = () =>
+                other.engine.dispatchAction(resolved.name, resolved.payload);
+              if (other._moduleInstance) other._moduleInstance.runReplayed(dispatch);
+              else dispatch();
             }
           }
           break;
         }
 
         case "updateState": {
+          if (!this._helloReceived) {
+            log.warn(`Session ${this.id}: updateState before hello — rejected`);
+            break;
+          }
           const stateMsg = msg as UpdateStateMessage;
           this._moduleInstance?.updateState(stateMsg.state);
 
@@ -459,6 +1000,15 @@ export class RemoteSession {
           );
         }
       }
+    }
+
+    // Device broker teardown BEFORE module teardown: loss of broker state is a
+    // connection reset (RFC 001 §2.5). Rejects all in-flight device work
+    // locally with connectionLost; no cancellation is sent (socket is going).
+    if (this._deviceBroker) {
+      const plane = this._deviceBroker;
+      this._deviceBroker = null;
+      plane.close("connectionLost");
     }
 
     if (this._autoManagedRouter) {
@@ -587,9 +1137,14 @@ export class RemoteSession {
 
   private async initializeSession(
     requestedSessionId: string | undefined,
-    props: Record<string, any> | undefined
+    props: Record<string, any> | undefined,
+    deviceAck?: DeviceAck,
+    resumeToken?: string
   ): Promise<void> {
     if (this._helloReceived || this._destroyed) return;
+    // `deviceAck` is the handshake selection (RFC 001 §2.2), negotiated
+    // before any side effect: a negotiation failure only disables the
+    // device plane.
     this._helloReceived = true;
     log.info(
       `Initializing session for ${this.id} (sessionId: ${requestedSessionId ?? "new"})`
@@ -606,6 +1161,23 @@ export class RemoteSession {
     let restoredState: unknown = null;
 
     const sm = this.host.sessionManager;
+
+    // Resume credential (RFC 001 §5 / Phase S): the public session id alone
+    // never resumes (or, under kick-old, takes over) a session that
+    // negotiated a device plane — the hello must also present the
+    // server-issued resume token. A missing/mismatched token is a NEW
+    // session, never an error or a hijack. A UI-only session keeps the
+    // legacy id-only resume. The transport-owned recovery id (Cloudflare
+    // hibernation attachment) is server-authenticated and needs no token.
+    if (
+      requestedSessionId &&
+      sm.requiresResumeToken(requestedSessionId) &&
+      requestedSessionId !== this.recoverySessionId &&
+      !sm.verifyResumeToken(requestedSessionId, resumeToken)
+    ) {
+      log.info(`Session ${this.id}: resume of ${requestedSessionId} without a valid resume token — new session`);
+      requestedSessionId = undefined;
+    }
 
     if (requestedSessionId) {
       const resumed = sm.resumeSession(requestedSessionId);
@@ -640,28 +1212,51 @@ export class RemoteSession {
     }
 
     this._sessionId = session.id;
+    this._ackIsNew = isNew;
     sm.trackConnection(session.id, this);
+    // A fresh resume credential per acknowledged connection (rotated on
+    // every resume; the previous one stops working). Always issued; it is
+    // required on resume only once the session negotiated a device plane.
+    this._resumeToken = sm.issueResumeToken(session.id);
 
+    // The broker is built before the ack is sent: `device` is only
+    // acknowledged when a broker actually stands behind it.
+    const devicePlane = deviceAck ? this.buildDevicePlane(deviceAck) : null;
+    const ackedDevice = devicePlane ? deviceAck : undefined;
     const sessionAck: SessionAckMessage = {
       type: "sessionAck",
       sessionId: session.id,
       isNew,
       isRestored,
+      ...(this._resumeToken ? { resumeToken: this._resumeToken } : {}),
+      ...(ackedDevice ? { device: ackedDevice } : {}),
     };
-    this.send(sessionAck);
-    log.info(`Sent sessionAck to ${this.id} (session: ${session.id})`);
+    try {
+      this.send(sessionAck);
+      log.info(`Sent sessionAck to ${this.id} (session: ${session.id})`);
 
-    // Create ModuleInstance HERE (not in constructor) so that onCreated fires
-    // right before renderSource. See original server.ts comment for why.
-    if (!this._moduleInstance) {
-      this._moduleInstance = new HypenModuleInstance(
-        this.engine,
-        this.host.module,
-        undefined,
-        undefined,
-        session.id
-      );
+      // Create ModuleInstance HERE (not in constructor) so that onCreated fires
+      // right before renderSource. See original server.ts comment for why.
+      if (!this._moduleInstance) {
+        this._moduleInstance = new HypenModuleInstance(
+          this.engine,
+          this.host.module,
+          undefined,
+          this._globalContext,
+          session.id
+        );
+        this._globalContext.registerModule(
+          this.host.moduleName.toLowerCase(),
+          this._moduleInstance
+        );
+      }
+    } catch (err) {
+      // The built-but-unstarted broker owns WASM memory: release it.
+      devicePlane?.close("connectionLost");
+      throw err;
     }
+
+    if (devicePlane && ackedDevice) this.startDevicePlane(devicePlane, ackedDevice);
 
     if (isRestored) {
       await this.triggerReconnect(session, restoredState);
@@ -712,7 +1307,19 @@ export class RemoteSession {
     );
 
     this.host.onSessionReady(this, this.toRemoteClient());
+    this._ready = true;
     this._resolveReady();
+
+    // Activate the primary module so single-screen apps have a live
+    // activation authority for device work (RFC 001 §6 Phase 2). Under
+    // ManagedRouter, route modules are activated by the router as usual.
+    // (The core.capabilities stream already opened in startDevicePlane, before
+    // this or any other module callback can request device work.)
+    try {
+      await this._moduleInstance.activate();
+    } catch (err) {
+      log.error(`Primary module activate() failed on ${this.id}:`, err);
+    }
 
     // Auto-wire a ManagedRouter from the template's own Router {} blocks.
     // The user gets routing "for free" from the DSL — no addRoute calls
@@ -784,21 +1391,23 @@ export class RemoteSession {
     }
     if (discovered.length === 0) return;
 
-    const primaryScope = this.host.moduleName.toLowerCase();
-
     // Build a single top-level ManagedRouter covering every route from
     // every discovered router block (primary AND nested). Multiple
     // `Router {}` blocks flatten into one route list — the engine's
     // own Router IR still renders them independently, but the SDK only
     // needs a single `HypenRouter` per session.
     const router = new HypenRouter();
-    const globalContext = new HypenGlobalContext();
-    const managed = new ManagedRouter(router, this.engine, app, globalContext);
-
+    // Reuse the session's shared global context (the primary module is
+    // already registered in it) rather than minting a second one.
+    const globalContext = this._globalContext;
+    const managed = new ManagedRouter(router, this.engine, app, globalContext, {
+      // Routed modules share this connection's device broker (RFC 001 §2.7):
+      // each owns its own instance id / activations, swept by its lifecycle.
+      onModuleCreated: (instance) => {
+        if (this._deviceBroker) instance.attachDevice(this._deviceBroker);
+      },
+    });
     const primary = this._moduleInstance;
-    if (primary) {
-      globalContext.registerModule(primaryScope, primary);
-    }
 
     let added = 0;
     const seenPaths = new Set<string>();
@@ -900,12 +1509,13 @@ export class RemoteSession {
 
     // `start()` installs the `@router.push`/`@router.back`/... action handlers
     // and subscribes the router. Needed for both component and inline routes.
+    // Published before `start()` mounts the first route, so a late device
+    // hello racing initialisation still reaches every routed instance.
+    this._autoManagedRouter = managed;
     managed.start();
     // HypenRouter doesn't fire onNavigate on subscribe; kick an
     // explicit push so the initial route mounts.
     router.push(router.getCurrentPath());
-
-    this._autoManagedRouter = managed;
   }
 
   /** Pick the first element name that resolves to a registered module. */
@@ -1051,11 +1661,53 @@ export class RemoteSession {
  * on close.
  */
 export function createBunWebSocketTransport(
-  ws: { send(data: string): void; close(code?: number, reason?: string): void }
+  ws: {
+    /**
+     * Bun `ServerWebSocket.send`: bytes written, `-1` when queued under
+     * backpressure, `0` when the message was DROPPED (past Bun's
+     * backpressure limit, or the socket is closing).
+     */
+    send(data: string | Uint8Array): number | void;
+    close(code?: number, reason?: string): void;
+    /** Bun `ServerWebSocket.getBufferedAmount()`. */
+    getBufferedAmount?(): number;
+  }
 ): SessionTransport {
+  // A dropped message (UI patch, device control, lease or cancel) must never
+  // vanish silently: the connection is closed instead (RFC 001 §2.3 "slow
+  // receivers cannot cause unbounded queues … otherwise close the
+  // connection"), and the client reconnects with a full state.
+  let closedForBackpressure = false;
+  const write = (data: string | Uint8Array) => {
+    if (closedForBackpressure) return;
+    const r = ws.send(data);
+    if (r === 0) {
+      closedForBackpressure = true;
+      log.warn("WebSocket send dropped (backpressure limit) — closing the connection");
+      try {
+        ws.close(1013, "send buffer overflow");
+      } catch {
+        /* already closing */
+      }
+    }
+  };
   return {
     send(message) {
-      ws.send(JSON.stringify(message));
+      write(JSON.stringify(message));
+    },
+    // Transport write capacity for the device bulk scheduler (§2.3).
+    ...(typeof ws.getBufferedAmount === "function"
+      ? { bufferedAmount: () => ws.getBufferedAmount!() }
+      : {}),
+    // Device plane (RFC 001): its own route, never through `send`.
+    sendDevice(message) {
+      write(JSON.stringify(message));
+    },
+    sendDeviceText(text) {
+      write(text);
+    },
+    sendBinary(frame) {
+      write(frame);
     },
     close(code, reason) {
       ws.close(code, reason);

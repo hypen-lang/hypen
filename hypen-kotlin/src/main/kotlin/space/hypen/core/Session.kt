@@ -1,5 +1,8 @@
 package space.hypen.core
 
+import java.security.MessageDigest
+import java.security.SecureRandom
+import java.util.Base64
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.Timer
@@ -74,6 +77,9 @@ class SessionManager(val config: SessionConfig = SessionConfig()) {
     private val activeSessions = ConcurrentHashMap<String, Session>()
     private val pendingSessions = ConcurrentHashMap<String, PendingSession>()
     private val sessionConnections = ConcurrentHashMap<String, MutableSet<Any>>()
+    private val resumeTokens = ConcurrentHashMap<String, String>()
+    private val deviceSessions: MutableSet<String> = ConcurrentHashMap.newKeySet()
+    private val random = SecureRandom()
     private val timer = Timer("hypen-session-timer", true)
     private val log = HypenLoggers.session
 
@@ -116,6 +122,8 @@ class SessionManager(val config: SessionConfig = SessionConfig()) {
             override fun run() {
                 val pending = pendingSessions.remove(sessionId)
                 if (pending != null) {
+                    resumeTokens.remove(sessionId)
+                    deviceSessions.remove(sessionId)
                     log.info("Session $sessionId expired after ${config.ttl}s TTL")
                     onExpire()
                 }
@@ -143,9 +151,53 @@ class SessionManager(val config: SessionConfig = SessionConfig()) {
     }
 
     /**
+     * Issue a fresh resume credential for [sessionId] (RFC 001 §5 /
+     * Phase S): 256 random bits, base64url. It is distinct from the public
+     * session id, rotated on every acknowledged connection (the previous one
+     * stops working) and required to resume or take over a session that had
+     * a negotiated device plane ([markDeviceSession]); a UI-only session
+     * still resumes by id alone. Treat it as a secret.
+     */
+    fun issueResumeToken(sessionId: String): String {
+        val bytes = ByteArray(32)
+        random.nextBytes(bytes)
+        val token = Base64.getUrlEncoder().withoutPadding().encodeToString(bytes)
+        resumeTokens[sessionId] = token
+        return token
+    }
+
+    /**
+     * Record that [sessionId] negotiated a device plane (RFC 001 §5): from
+     * now on (for the session's whole life) its public id alone never
+     * resumes or takes it over — [requiresResumeToken] is `true`.
+     */
+    fun markDeviceSession(sessionId: String) {
+        deviceSessions.add(sessionId)
+    }
+
+    /**
+     * Whether resuming / taking over [sessionId] needs its current resume
+     * token: exactly when the session had a negotiated device plane. A
+     * UI-only (or unknown) session keeps the legacy id-only resume.
+     */
+    fun requiresResumeToken(sessionId: String): Boolean = sessionId in deviceSessions
+
+    /**
+     * Whether [token] is the current resume credential for [sessionId].
+     * Constant-time over the token contents (`MessageDigest.isEqual`).
+     */
+    fun verifyResumeToken(sessionId: String, token: String?): Boolean {
+        val expected = resumeTokens[sessionId] ?: return false
+        if (token == null) return false
+        return MessageDigest.isEqual(expected.toByteArray(Charsets.UTF_8), token.toByteArray(Charsets.UTF_8))
+    }
+
+    /**
      * Destroy a session completely (active or pending).
      */
     fun destroySession(sessionId: String) {
+        resumeTokens.remove(sessionId)
+        deviceSessions.remove(sessionId)
         activeSessions.remove(sessionId)
         pendingSessions.remove(sessionId)?.expiryTimer?.cancel()
         sessionConnections.remove(sessionId)
@@ -195,6 +247,8 @@ class SessionManager(val config: SessionConfig = SessionConfig()) {
         pendingSessions.clear()
         activeSessions.clear()
         sessionConnections.clear()
+        resumeTokens.clear()
+        deviceSessions.clear()
     }
 }
 

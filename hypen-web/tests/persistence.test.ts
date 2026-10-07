@@ -1,3 +1,4 @@
+import { testActionHandler } from "./helpers";
 import { describe, test, expect } from "bun:test";
 import { app, HypenModuleInstance, type HypenModuleDefinition } from "../packages/core/src/app";
 import type { StateStore } from "../packages/core/src/persistence";
@@ -28,7 +29,7 @@ class FakeEngine {
   }
 
   dispatchRegistered(name: string, payload?: unknown, sender?: string) {
-    const handler = this.actionHandlers.get(name);
+    const handler = testActionHandler(this.actionHandlers, name);
     if (!handler) throw new Error(`no handler for ${name}`);
     return handler({ name, payload, sender });
   }

@@ -386,10 +386,17 @@ private fun HypenAppContent(
     // Track if we've notified the parent about connection
     var hasNotifiedConnected by remember { mutableStateOf(false) }
 
+    val activity = LocalContext.current as ComponentActivity
+    val deviceHost = remember(url, activity) {
+        if (url.contains("device-lab")) space.hypen.renderer.device.android.AndroidDeviceHost.create(activity, url) else null
+    }
+
     HypenApp(
         url = url,
         modifier = modifier,
         config = RemoteEngineConfig.DEBUG,
+        deviceHost = deviceHost,
+        disposeDeviceHost = true,
         safeAreaInsets = safeAreaInsets,
         loadingContent = {
             Box(

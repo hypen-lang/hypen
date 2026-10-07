@@ -56,6 +56,7 @@ import { HypenModuleInstance, HypenApp } from "./app.js";
 import type { HypenRouter, RouteState } from "./router.js";
 import type { HypenGlobalContext } from "./context.js";
 import { createLogger } from "./logger.js";
+import { MAX_BACKGROUND_PINNED_MODULES } from "./remote/device/constants.js";
 
 const log = createLogger("ManagedRouter");
 
@@ -84,6 +85,19 @@ export interface ManagedRouterOptions {
    * eviction.
    */
   maxPersistedModules?: number;
+  /**
+   * Hard cap on persisted modules the LRU keeps past `maxPersistedModules`
+   * because they own live `background` device work (RFC 001 §2.7). Beyond
+   * it, the oldest pinned module is evicted anyway (destruction cancels its
+   * background work). Defaults to `MAX_BACKGROUND_PINNED_MODULES` (2).
+   */
+  maxPinnedModules?: number;
+  /**
+   * Called for every freshly constructed route module before it activates,
+   * so the host can bind it to the connection's device broker (RFC 001
+   * §2.7) — `RemoteSession` uses this to give routed modules device access.
+   */
+  onModuleCreated?: (instance: HypenModuleInstance) => void;
 }
 
 export class ManagedRouter {
@@ -110,7 +124,17 @@ export class ManagedRouter {
    * destroys the oldest entry.
    */
   private persistedModules = new Map<string, HypenModuleInstance>();
+  /**
+   * Every instance this router constructed that may still be live (active,
+   * persisted, or mid-transition between the two). Each destroy path
+   * (`unmountActive` without persistence, LRU eviction, `stop()`) removes
+   * its instance, so destroyed modules — their state, handlers and engine
+   * references — are never retained for the connection's lifetime.
+   */
+  private createdInstances = new Set<HypenModuleInstance>();
   private readonly maxPersistedModules: number;
+  private readonly maxPinnedModules: number;
+  private readonly onModuleCreated?: (instance: HypenModuleInstance) => void;
   /**
    * Serialized chain of in-flight route transitions. Because mount /
    * unmount are now async (they await `onActivated` / `onDeactivated`),
@@ -135,6 +159,9 @@ export class ManagedRouter {
     // mean "never persist", which the call site should express via
     // `persist: false` on definitions instead.
     this.maxPersistedModules = cap > 0 ? cap : DEFAULT_MAX_PERSISTED_MODULES;
+    const pinCap = options.maxPinnedModules ?? MAX_BACKGROUND_PINNED_MODULES;
+    this.maxPinnedModules = pinCap >= 0 ? pinCap : MAX_BACKGROUND_PINNED_MODULES;
+    this.onModuleCreated = options.onModuleCreated;
   }
 
   /**
@@ -225,7 +252,9 @@ export class ManagedRouter {
           } catch (e) {
             log.error(`Error destroying persisted module ${moduleId}:`, e);
           }
+          this.createdInstances.delete(instance);
           this.globalContext.unregisterModule(moduleId);
+          this.engine.unregisterModule?.(moduleId);
         }
         this.persistedModules.clear();
       });
@@ -255,6 +284,21 @@ export class ManagedRouter {
    */
   getActiveModule(): HypenModuleInstance | null {
     return this.activeModule;
+  }
+
+  /**
+   * Every live (not destroyed) module instance this router owns: the active
+   * one, the persisted cache, and any instance mid-transition. Used to bind
+   * connection-scoped facilities (e.g. a late-negotiated device broker,
+   * RFC 001 §2.2) to modules that were mounted before they existed.
+   */
+  liveInstances(): HypenModuleInstance[] {
+    const out: HypenModuleInstance[] = [];
+    for (const instance of this.createdInstances) {
+      if (instance.destroyed) this.createdInstances.delete(instance);
+      else out.push(instance);
+    }
+    return out;
   }
 
   /**
@@ -347,6 +391,17 @@ export class ManagedRouter {
       this.globalContext
     );
 
+    // Prune anything destroyed out-of-band (e.g. by its owner) first.
+    for (const known of this.createdInstances) {
+      if (known.destroyed) this.createdInstances.delete(known);
+    }
+    this.createdInstances.add(instance);
+    try {
+      this.onModuleCreated?.(instance);
+    } catch (e) {
+      log.error(`onModuleCreated hook failed for ${moduleId}:`, e);
+    }
+
     // Register in global context under the module name (lowercase)
     this.globalContext.registerModule(moduleId, instance);
 
@@ -405,8 +460,13 @@ export class ManagedRouter {
       this.persistedModules.delete(moduleId);
       this.persistedModules.set(moduleId, active);
       await this.evictPersistedOverflow();
-      // Keep registered in GlobalContext so other modules can still
-      // access its state while it's off-screen.
+      // Keep registered in GlobalContext — and in the engine — so other
+      // modules can still access its state while it's off-screen. This is
+      // why `engine.unregisterModule` is a DESTROY-path call and not an
+      // unmount-path one: dropping the engine registration here would take
+      // the module's state and actions with it, breaking both the persist
+      // cache and cross-module reads for a module that is merely
+      // off-screen.
     } else {
       log.debug(`Unmounting module: ${moduleId}`);
       try {
@@ -414,7 +474,11 @@ export class ManagedRouter {
       } catch (e) {
         log.error(`Error destroying module ${moduleId}:`, e);
       }
+      this.createdInstances.delete(active);
       this.globalContext.unregisterModule(moduleId);
+      // Destroyed, not persisted — so its actions must stop being
+      // externally dispatchable too.
+      this.engine.unregisterModule?.(moduleId);
     }
   }
 
@@ -424,24 +488,53 @@ export class ManagedRouter {
    * because `mount()` removes on restore and `unmountActive()` re-inserts
    * at the MRU end on every persist).
    *
+   * Modules with live `background` device work are pinned (RFC 001 §2.7)
+   * and skipped, up to `maxPinnedModules`; past that hard cap the oldest
+   * pinned entry is evicted too. When every candidate is pinned and within
+   * the cap, the loop logs and stops — each iteration either removes one
+   * entry or exits, so it can never spin.
+   *
    * Errors during eviction are logged — one misbehaving `onDestroyed` hook
    * must not block the router from shrinking the cache on the next
    * navigation.
    */
   private async evictPersistedOverflow(): Promise<void> {
     while (this.persistedModules.size > this.maxPersistedModules) {
-      const oldest = this.persistedModules.keys().next();
-      if (oldest.done) break;
-      const oldestId = oldest.value;
-      const evicted = this.persistedModules.get(oldestId)!;
-      this.persistedModules.delete(oldestId);
-      log.debug(`Evicting persisted module (LRU): ${oldestId}`);
+      let victimId: string | null = null;
+      let oldestPinned: string | null = null;
+      let pinned = 0;
+      for (const [id, instance] of this.persistedModules) {
+        if (instance.hasLiveBackgroundDeviceWork) {
+          pinned += 1;
+          oldestPinned ??= id;
+        } else if (victimId === null) {
+          victimId = id;
+        }
+      }
+      if (victimId === null) {
+        if (pinned > this.maxPinnedModules && oldestPinned !== null) {
+          log.warn(
+            `Pinned module cap (${this.maxPinnedModules}) exceeded; evicting ${oldestPinned} and its background device work`
+          );
+          victimId = oldestPinned;
+        } else {
+          log.warn(
+            `Persisted-module cache over cap (${this.persistedModules.size}/${this.maxPersistedModules}) but every candidate is pinned by background device work; stopping eviction`
+          );
+          break;
+        }
+      }
+      const evicted = this.persistedModules.get(victimId)!;
+      this.persistedModules.delete(victimId);
+      log.debug(`Evicting persisted module (LRU): ${victimId}`);
       try {
         await evicted.destroy();
       } catch (e) {
-        log.error(`Error destroying evicted module ${oldestId}:`, e);
+        log.error(`Error destroying evicted module ${victimId}:`, e);
       }
-      this.globalContext.unregisterModule(oldestId);
+      this.createdInstances.delete(evicted);
+      this.globalContext.unregisterModule(victimId);
+      this.engine.unregisterModule?.(victimId);
     }
   }
 }

@@ -26,6 +26,17 @@ Row {
     .onClick(@router.push, to: "/search")
 
     Button {
+        Icon(@resources.plus-square)
+            .size({default: 24, md: 30})
+            .color("@{state.location == '/create' ? '#262626' : '#8e8e8e'}")
+    }
+    .tw("flex-1 bg-transparent border-0 py-2 items-center justify-center")
+    .opacity({default: 1, active: 0.45})
+    .transform({default: "scale(1)", active: "scale(0.86)"})
+    .transition(duration: 140, curve: easeOut, props: [opacity, scale])
+    .onClick(@router.push, to: "/create")
+
+    Button {
         Icon(@resources.heart)
             .size({default: 22, md: 28})
             .color("@{state.location == '/notifications' ? '#262626' : '#8e8e8e'}")

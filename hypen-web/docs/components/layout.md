@@ -163,20 +163,6 @@ Grid(columns: 3, gap: 16) {
 }
 ```
 
-**Advanced Grid:**
-```hypen
-Grid()
-  .gridTemplateColumns("200px 1fr 1fr")
-  .gridTemplateRows("auto 1fr auto")
-  .gap(20) {
-  
-  // Grid items with specific placement
-  Box().gridColumn("1 / 4") { Text("Header") }
-  Box().gridColumn("1 / 2") { Text("Sidebar") }
-  Box().gridColumn("2 / 4") { Text("Main content") }
-}
-```
-
 **Rendered as:** `<div>` with `display: grid;`
 
 ---
@@ -344,10 +330,10 @@ Column()
 }
 ```
 
-### Responsive Grid
+### Product Grid
 ```hypen
 Grid()
-  .gridTemplateColumns("repeat(auto-fit, minmax(250px, 1fr))")
+  .gridColumns(3)
   .gap(16)
   .padding(20) {
   

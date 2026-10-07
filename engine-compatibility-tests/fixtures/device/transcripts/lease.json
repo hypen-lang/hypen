@@ -1,0 +1,113 @@
+{
+  "name": "lease",
+  "description": "Credit-independent liveness: renewals start at sequence 1 immediately after the request and continue every 5s; the client echoes each exactly, even while pending consent with no data flowing. Data frames and grants never refresh the lease. The final client terminal arrives after the server's cancel retired id 4: the server drops it under the unknown/stale-id rule (flagged ignored).",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 4,
+        "capability": "bluetooth.scan",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "devices-2",
+          "activationId": 5
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 64,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 4,
+        "control": {
+          "renewLease": 1
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 4,
+        "control": {
+          "leaseAck": 1
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 4,
+        "event": {
+          "device": {
+            "id": "aa:bb:cc:dd:ee:ff",
+            "name": "Speaker",
+            "rssi": -41
+          }
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 4,
+        "control": {
+          "renewLease": 2
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceEvent",
+        "id": 4,
+        "control": {
+          "leaseAck": 2
+        }
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceEvent",
+        "id": 4,
+        "control": {
+          "cancel": true
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 4,
+        "result": {}
+      },
+      "ignored": true
+    }
+  ]
+}

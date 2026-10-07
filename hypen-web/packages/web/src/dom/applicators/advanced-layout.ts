@@ -5,6 +5,7 @@
 import type { ApplicatorHandler } from "./index.js";
 import { mapAlignmentValue } from "./layout.js";
 import { toCssLength } from "./size.js";
+import { trackCount } from "../../grid-tracks.js";
 
 export const advancedLayoutHandlers: Record<string, ApplicatorHandler> = {
   // Flexbox properties
@@ -24,60 +25,18 @@ export const advancedLayoutHandlers: Record<string, ApplicatorHandler> = {
     el.style.order = String(value);
   },
 
-  // Grid properties
-  gridTemplateColumns: (el, value) => {
-    el.style.gridTemplateColumns = String(value);
-  },
-
-  gridTemplateRows: (el, value) => {
-    el.style.gridTemplateRows = String(value);
-  },
-
-  // Unified API aliases (simpler names)
+  // Grid: a column COUNT on the Grid and a column SPAN on its items — the
+  // only grid features every renderer (DOM, Canvas, iOS, Android, desktop)
+  // supports. The engine may deliver numbers as strings ("3").
   gridColumns: (el, value) => {
-    // Support number (repeat) or string (CSS value)
-    if (typeof value === "number") {
-      el.style.gridTemplateColumns = `repeat(${value}, 1fr)`;
-    } else {
-      el.style.gridTemplateColumns = String(value);
-    }
+    const n = trackCount(value);
+    if (n !== null) el.style.gridTemplateColumns = `repeat(${n}, 1fr)`;
   },
 
-  gridRows: (el, value) => {
-    // Support number (repeat) or string (CSS value)
-    if (typeof value === "number") {
-      el.style.gridTemplateRows = `repeat(${value}, 1fr)`;
-    } else {
-      el.style.gridTemplateRows = String(value);
-    }
-  },
-
-  gridTemplateAreas: (el, value) => {
-    el.style.gridTemplateAreas = String(value);
-  },
-
+  // "span N" or N, as on iOS/Android (a bare N is a span, not a grid line).
   gridColumn: (el, value) => {
-    el.style.gridColumn = String(value);
-  },
-
-  gridRow: (el, value) => {
-    el.style.gridRow = String(value);
-  },
-
-  gridArea: (el, value) => {
-    el.style.gridArea = String(value);
-  },
-
-  gridAutoFlow: (el, value) => {
-    el.style.gridAutoFlow = String(value);
-  },
-
-  gridAutoColumns: (el, value) => {
-    el.style.gridAutoColumns = String(value);
-  },
-
-  gridAutoRows: (el, value) => {
-    el.style.gridAutoRows = String(value);
+    const n = trackCount(String(value).trim().replace(/^span\s+/i, ""));
+    if (n !== null) el.style.gridColumn = `span ${n}`;
   },
 
   rowGap: (el, value) => {

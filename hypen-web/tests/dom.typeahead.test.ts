@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Typeahead (first-character navigation) for composite widgets: typing a
  * printable character inside a tablist/listbox roves focus to the next item
@@ -178,7 +179,7 @@ describe("listbox typeahead keydown handling", () => {
 class RecordingEngine {
   actions: Array<{ name: string; payload?: any }> = [];
   dispatchAction(name: string, payload?: any): void {
-    this.actions.push({ name, payload });
+    this.actions.push(semanticAction(name, payload));
   }
 }
 

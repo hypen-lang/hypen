@@ -481,7 +481,13 @@ public final class HypenAnimator {
         payload["animation"] = animation
         if let state = state { payload["state"] = state }
 
-        dispatcher.dispatch(action: action.actionName, payload: payload)
+        // Node-addressed, like every other element event: the engine resolves
+        // the owning module from `node` (a bare action name is ambiguous in
+        // multi-module apps). An exit completion addresses the exiting ROOT's
+        // own — already engine-removed — id; the engine's exit tombstone
+        // accepts it for that node's `onAnimationComplete` action.
+        NodeActionDispatcher(base: dispatcher, node: id)
+            .dispatch(action: action.actionName, payload: payload)
     }
 
     // MARK: - Teardown

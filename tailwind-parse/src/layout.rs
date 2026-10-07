@@ -10,8 +10,8 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
         "inline" => return Some(vec![CssProperty::new("display", "inline")]),
         "flex" => return Some(vec![CssProperty::new("display", "flex")]),
         "inline-flex" => return Some(vec![CssProperty::new("display", "inline-flex")]),
-        "grid" => return Some(vec![CssProperty::new("display", "grid")]),
-        "inline-grid" => return Some(vec![CssProperty::new("display", "inline-grid")]),
+        // `grid` / `inline-grid` are dropped: a grid is the `Grid` component
+        // (display:grid on another element is web-only).
         "contents" => return Some(vec![CssProperty::new("display", "contents")]),
         "hidden" => return Some(vec![CssProperty::new("display", "none")]),
         _ => {}
@@ -121,219 +121,26 @@ pub fn parse(utility: &str) -> Option<Vec<CssProperty>> {
         return Some(vec![CssProperty::new("align-content", value)]);
     }
 
-    // Grid columns
-    if let Some(val) = utility.strip_prefix("grid-cols-") {
-        let value = match val {
-            "1" => "repeat(1, minmax(0, 1fr))",
-            "2" => "repeat(2, minmax(0, 1fr))",
-            "3" => "repeat(3, minmax(0, 1fr))",
-            "4" => "repeat(4, minmax(0, 1fr))",
-            "5" => "repeat(5, minmax(0, 1fr))",
-            "6" => "repeat(6, minmax(0, 1fr))",
-            "7" => "repeat(7, minmax(0, 1fr))",
-            "8" => "repeat(8, minmax(0, 1fr))",
-            "9" => "repeat(9, minmax(0, 1fr))",
-            "10" => "repeat(10, minmax(0, 1fr))",
-            "11" => "repeat(11, minmax(0, 1fr))",
-            "12" => "repeat(12, minmax(0, 1fr))",
-            "none" => "none",
-            "subgrid" => "subgrid",
-            _ => return None,
-        };
-        return Some(vec![CssProperty::new("grid-template-columns", value)]);
-    }
-
-    // Grid rows
+    // Grid
     //
-    // Tailwind v3 supports grid-rows-1 through grid-rows-12 (parity with
-    // grid-cols). Previously this only went up to 6, so any layout that
-    // declared a 7+ row grid silently fell back to the browser default.
-    if let Some(val) = utility.strip_prefix("grid-rows-") {
-        let value = match val {
-            "1" => "repeat(1, minmax(0, 1fr))",
-            "2" => "repeat(2, minmax(0, 1fr))",
-            "3" => "repeat(3, minmax(0, 1fr))",
-            "4" => "repeat(4, minmax(0, 1fr))",
-            "5" => "repeat(5, minmax(0, 1fr))",
-            "6" => "repeat(6, minmax(0, 1fr))",
-            "7" => "repeat(7, minmax(0, 1fr))",
-            "8" => "repeat(8, minmax(0, 1fr))",
-            "9" => "repeat(9, minmax(0, 1fr))",
-            "10" => "repeat(10, minmax(0, 1fr))",
-            "11" => "repeat(11, minmax(0, 1fr))",
-            "12" => "repeat(12, minmax(0, 1fr))",
-            "none" => "none",
-            "subgrid" => "subgrid",
-            _ => return None,
+    // Only what every renderer (DOM, Canvas, iOS, Android, desktop) supports:
+    // a column COUNT on the `Grid` component and a column SPAN on its items.
+    // `grid-cols-N` is the `.gridColumns(N)` applicator (so `md:grid-cols-6`
+    // becomes `gridColumns@md`, a responsive count); `col-span-N` is
+    // `.gridColumn("span N")`. Track templates, rows, start/end lines,
+    // auto-flow and auto tracks are web-only CSS and are dropped like any
+    // unknown class.
+    if let Some(val) = utility.strip_prefix("grid-cols-") {
+        return match val.parse::<u8>() {
+            Ok(n @ 1..=12) => Some(vec![CssProperty::new("grid-columns", &n.to_string())]),
+            _ => None,
         };
-        return Some(vec![CssProperty::new("grid-template-rows", value)]);
     }
-
-    // Column span
     if let Some(val) = utility.strip_prefix("col-span-") {
-        let value = match val {
-            "1" => "span 1 / span 1",
-            "2" => "span 2 / span 2",
-            "3" => "span 3 / span 3",
-            "4" => "span 4 / span 4",
-            "5" => "span 5 / span 5",
-            "6" => "span 6 / span 6",
-            "7" => "span 7 / span 7",
-            "8" => "span 8 / span 8",
-            "9" => "span 9 / span 9",
-            "10" => "span 10 / span 10",
-            "11" => "span 11 / span 11",
-            "12" => "span 12 / span 12",
-            "full" => "1 / -1",
-            _ => return None,
+        return match val.parse::<u8>() {
+            Ok(n @ 1..=12) => Some(vec![CssProperty::new("grid-column", &format!("span {n}"))]),
+            _ => None,
         };
-        return Some(vec![CssProperty::new("grid-column", value)]);
-    }
-
-    // Column start
-    if let Some(val) = utility.strip_prefix("col-start-") {
-        let value = match val {
-            "1" => "1",
-            "2" => "2",
-            "3" => "3",
-            "4" => "4",
-            "5" => "5",
-            "6" => "6",
-            "7" => "7",
-            "8" => "8",
-            "9" => "9",
-            "10" => "10",
-            "11" => "11",
-            "12" => "12",
-            "13" => "13",
-            "auto" => "auto",
-            _ => return None,
-        };
-        return Some(vec![CssProperty::new("grid-column-start", value)]);
-    }
-
-    // Column end
-    if let Some(val) = utility.strip_prefix("col-end-") {
-        let value = match val {
-            "1" => "1",
-            "2" => "2",
-            "3" => "3",
-            "4" => "4",
-            "5" => "5",
-            "6" => "6",
-            "7" => "7",
-            "8" => "8",
-            "9" => "9",
-            "10" => "10",
-            "11" => "11",
-            "12" => "12",
-            "13" => "13",
-            "auto" => "auto",
-            _ => return None,
-        };
-        return Some(vec![CssProperty::new("grid-column-end", value)]);
-    }
-
-    // Row span — match col-span scale (1..=12)
-    if let Some(val) = utility.strip_prefix("row-span-") {
-        let value = match val {
-            "1" => "span 1 / span 1",
-            "2" => "span 2 / span 2",
-            "3" => "span 3 / span 3",
-            "4" => "span 4 / span 4",
-            "5" => "span 5 / span 5",
-            "6" => "span 6 / span 6",
-            "7" => "span 7 / span 7",
-            "8" => "span 8 / span 8",
-            "9" => "span 9 / span 9",
-            "10" => "span 10 / span 10",
-            "11" => "span 11 / span 11",
-            "12" => "span 12 / span 12",
-            "full" => "1 / -1",
-            _ => return None,
-        };
-        return Some(vec![CssProperty::new("grid-row", value)]);
-    }
-
-    // Row start — match col-start scale (1..=13)
-    if let Some(val) = utility.strip_prefix("row-start-") {
-        let value = match val {
-            "1" => "1",
-            "2" => "2",
-            "3" => "3",
-            "4" => "4",
-            "5" => "5",
-            "6" => "6",
-            "7" => "7",
-            "8" => "8",
-            "9" => "9",
-            "10" => "10",
-            "11" => "11",
-            "12" => "12",
-            "13" => "13",
-            "auto" => "auto",
-            _ => return None,
-        };
-        return Some(vec![CssProperty::new("grid-row-start", value)]);
-    }
-
-    // Row end — match col-end scale (1..=13)
-    if let Some(val) = utility.strip_prefix("row-end-") {
-        let value = match val {
-            "1" => "1",
-            "2" => "2",
-            "3" => "3",
-            "4" => "4",
-            "5" => "5",
-            "6" => "6",
-            "7" => "7",
-            "8" => "8",
-            "9" => "9",
-            "10" => "10",
-            "11" => "11",
-            "12" => "12",
-            "13" => "13",
-            "auto" => "auto",
-            _ => return None,
-        };
-        return Some(vec![CssProperty::new("grid-row-end", value)]);
-    }
-
-    // Grid auto flow
-    if let Some(val) = utility.strip_prefix("grid-flow-") {
-        let value = match val {
-            "row" => "row",
-            "col" => "column",
-            "dense" => "dense",
-            "row-dense" => "row dense",
-            "col-dense" => "column dense",
-            _ => return None,
-        };
-        return Some(vec![CssProperty::new("grid-auto-flow", value)]);
-    }
-
-    // Auto columns
-    if let Some(val) = utility.strip_prefix("auto-cols-") {
-        let value = match val {
-            "auto" => "auto",
-            "min" => "min-content",
-            "max" => "max-content",
-            "fr" => "minmax(0, 1fr)",
-            _ => return None,
-        };
-        return Some(vec![CssProperty::new("grid-auto-columns", value)]);
-    }
-
-    // Auto rows
-    if let Some(val) = utility.strip_prefix("auto-rows-") {
-        let value = match val {
-            "auto" => "auto",
-            "min" => "min-content",
-            "max" => "max-content",
-            "fr" => "minmax(0, 1fr)",
-            _ => return None,
-        };
-        return Some(vec![CssProperty::new("grid-auto-rows", value)]);
     }
 
     // Positioning (`static`/`absolute`/`relative`/…) and inset utilities are
@@ -697,10 +504,29 @@ mod tests {
         assert_eq!(props[0].value, "1");
     }
 
+    /// `grid-cols-N` is the cross-platform `.gridColumns(N)` count.
     #[test]
-    fn test_grid_cols() {
-        let props = parse("grid-cols-3").unwrap();
-        assert_eq!(props[0].property, "grid-template-columns");
+    fn test_grid_cols_is_a_column_count() {
+        for n in 1..=12 {
+            let props = parse(&format!("grid-cols-{n}")).unwrap();
+            assert_eq!(props.len(), 1);
+            assert_eq!(props[0].property, "grid-columns");
+            assert_eq!(props[0].value, n.to_string());
+        }
+        for dropped in ["grid-cols-0", "grid-cols-13", "grid-cols-none", "grid-cols-subgrid"] {
+            assert!(parse(dropped).is_none(), "{dropped} must be dropped");
+        }
+    }
+
+    /// `col-span-N` is `.gridColumn("span N")` — the form iOS/Android parse.
+    #[test]
+    fn test_col_span_is_a_span() {
+        for n in 1..=12 {
+            let props = parse(&format!("col-span-{n}")).unwrap();
+            assert_eq!(props[0].property, "grid-column");
+            assert_eq!(props[0].value, format!("span {n}"));
+        }
+        assert!(parse("col-span-full").is_none());
     }
 
     /// Positioning is not a layout utility in Hypen — it never maps to CSS.
@@ -748,45 +574,17 @@ mod tests {
         assert!(parse("z-1px").is_none());
     }
 
-    /// Regression: grid-rows used to stop at grid-rows-6, breaking layouts
-    /// that needed 7+ row tracks. Now matches grid-cols (1..=12).
+    /// Web-only grid CSS (track templates, rows, start/end lines, auto-flow,
+    /// auto tracks, display:grid) is dropped: a grid is the `Grid` component
+    /// with a column count, which every renderer supports.
     #[test]
-    fn test_grid_rows_full_scale() {
-        for n in 1..=12 {
-            let utility = format!("grid-rows-{n}");
-            let props =
-                parse(&utility).unwrap_or_else(|| panic!("missing grid-rows value: {utility}"));
-            assert_eq!(props[0].property, "grid-template-rows");
-            assert_eq!(props[0].value, format!("repeat({n}, minmax(0, 1fr))"));
-        }
-    }
-
-    /// Regression: row-span used to stop at row-span-6 even though col-span
-    /// went up to 12. Now they match.
-    #[test]
-    fn test_row_span_full_scale() {
-        for n in 1..=12 {
-            let utility = format!("row-span-{n}");
-            let props =
-                parse(&utility).unwrap_or_else(|| panic!("missing row-span value: {utility}"));
-            assert_eq!(props[0].property, "grid-row");
-            assert_eq!(props[0].value, format!("span {n} / span {n}"));
-        }
-    }
-
-    /// Regression: row-start/end used to stop at 7. Now matches col-start/end (1..=13).
-    #[test]
-    fn test_row_start_end_full_scale() {
-        for n in 1..=13 {
-            let start =
-                parse(&format!("row-start-{n}")).unwrap_or_else(|| panic!("missing row-start-{n}"));
-            assert_eq!(start[0].property, "grid-row-start");
-            assert_eq!(start[0].value, n.to_string());
-
-            let end =
-                parse(&format!("row-end-{n}")).unwrap_or_else(|| panic!("missing row-end-{n}"));
-            assert_eq!(end[0].property, "grid-row-end");
-            assert_eq!(end[0].value, n.to_string());
+    fn test_web_only_grid_utilities_are_dropped() {
+        for utility in [
+            "grid", "inline-grid", "grid-rows-3", "row-span-2", "row-start-1", "row-end-3",
+            "col-start-2", "col-end-4", "grid-flow-row", "grid-flow-col-dense", "auto-cols-fr",
+            "auto-rows-min",
+        ] {
+            assert!(parse(utility).is_none(), "{utility} must be dropped");
         }
     }
 }

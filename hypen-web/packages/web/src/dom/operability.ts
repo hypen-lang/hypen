@@ -306,6 +306,9 @@ export function installDialogEscape(dialog: HTMLElement, onCloseValue: unknown):
 
   dialog.addEventListener("keydown", (event: Event) => {
     if ((event as KeyboardEvent).key !== "Escape") return;
+    // Already consumed by a descendant (a lifted drag-and-drop item
+    // cancelling on Esc): the dialog must not also close.
+    if ((event as KeyboardEvent).defaultPrevented) return;
     event.preventDefault?.();
     triggerElementAction(dialog, onCloseValue);
   });

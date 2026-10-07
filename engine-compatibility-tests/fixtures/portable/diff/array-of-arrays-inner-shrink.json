@@ -1,0 +1,41 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-array-of-arrays-inner-shrink",
+  "description": "An inner array shrinking inside an outer array emits the whole-array replacement at the inner array's indexed path.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "grid": [
+        [
+          1,
+          2,
+          3
+        ],
+        [
+          4,
+          5
+        ]
+      ]
+    },
+    "new": {
+      "grid": [
+        [
+          1
+        ],
+        [
+          4,
+          5
+        ]
+      ]
+    }
+  },
+  "expected": [
+    {
+      "path": "grid.0",
+      "value": [
+        1
+      ]
+    }
+  ]
+}

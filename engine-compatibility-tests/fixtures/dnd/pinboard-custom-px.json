@@ -1,0 +1,172 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "pinboard-custom-px",
+  "description": "Custom coordinate fields read and write the same state paths; fractional positions remain normalized for renderer projection.",
+  "category": "dnd",
+  "priority": "P0",
+  "input": {
+    "source": "Stack { ForEach(items: @state.notes, key: \"id\") { Note(\"@{item.text}\").draggable() } }.pinboard(group: \"board\", x: \"left\", y: \"top\", units: px)",
+    "initialState": {
+      "notes": [
+        {
+          "id": "n1",
+          "text": "one"
+        },
+        {
+          "id": "n2",
+          "text": "two"
+        }
+      ],
+      "__dnd": {
+        "board": {
+          "n1": {
+            "left": 40,
+            "top": 60
+          }
+        }
+      }
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": [
+        "notes",
+        "__dnd"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "description": "Initial render: board spec on the container, pin group + translate bindings on each draggable",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Stack",
+          "props": {
+            "__dnd.pin": {
+              "group": "board",
+              "xKey": "left",
+              "yKey": "top",
+              "grid": null,
+              "bounds": "clamp",
+              "units": "px"
+            }
+          },
+          "absentProps": [
+            "pinboard.0",
+            "pinboard.group",
+            "bind",
+            "__dnd.pinGroup",
+            "__dnd.source"
+          ]
+        },
+        {
+          "type": "create",
+          "elementType": "Note",
+          "props": {
+            "__dnd.key": "n1",
+            "__dnd.pinGroup": "board",
+            "__dnd.source": {
+              "group": null,
+              "handle": false,
+              "activation": "auto"
+            },
+            "translateX.0": 40,
+            "translateY.0": 60
+          }
+        },
+        {
+          "type": "create",
+          "elementType": "Note",
+          "props": {
+            "__dnd.key": "n2",
+            "__dnd.pinGroup": "board",
+            "translateX.0": null,
+            "translateY.0": null
+          }
+        }
+      ]
+    },
+    {
+      "description": "The host's __hypen_pin write lands on the reserved path: only the pinned node re-resolves",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "__dnd.board.n1.left",
+          "__dnd.board.n1.top"
+        ],
+        "newValues": {
+          "__dnd": {
+            "board": {
+              "n1": {
+                "left": 120,
+                "top": 80
+              }
+            }
+          }
+        }
+      },
+      "expectedPatches": [
+        {
+          "type": "setProp",
+          "name": "translateX.0",
+          "value": 120
+        },
+        {
+          "type": "setProp",
+          "name": "translateY.0",
+          "value": 80
+        }
+      ],
+      "forbiddenPatchTypes": [
+        "create",
+        "insert",
+        "remove",
+        "move",
+        "detach",
+        "attach"
+      ]
+    },
+    {
+      "description": "A first position for a previously unpinned item flows the same way (null -> number)",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "__dnd.board.n2.left",
+          "__dnd.board.n2.top"
+        ],
+        "newValues": {
+          "__dnd": {
+            "board": {
+              "n2": {
+                "left": 5,
+                "top": 7
+              }
+            }
+          }
+        }
+      },
+      "expectedPatches": [
+        {
+          "type": "setProp",
+          "name": "translateX.0",
+          "value": 5
+        },
+        {
+          "type": "setProp",
+          "name": "translateY.0",
+          "value": 7
+        }
+      ],
+      "forbiddenPatchTypes": [
+        "create",
+        "insert",
+        "remove",
+        "move",
+        "detach",
+        "attach"
+      ]
+    }
+  ]
+}

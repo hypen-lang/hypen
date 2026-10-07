@@ -26,6 +26,7 @@ import { FORM_CONTROL_TYPES } from "./controls.js";
 import { clearTextCache } from "./text.js";
 import {
   paintNode,
+  paintDndGhost,
   registerPainter,
   clearCharAdvanceCache,
   setVideoActionDispatcher,
@@ -49,7 +50,9 @@ import {
 } from "./props.js";
 import { applyVariants, invalidateVariantCache, deriveNodeComputed } from "./variants.js";
 import { CanvasAnimator } from "./anim.js";
+import { CanvasDnd, ANIM_STATE_POSES_PROP } from "./dnd.js";
 import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
+import { DND_PROP_PREFIX, DND_SOURCE_PROP } from "@hypen-space/core/dnd";
 import { setSafeAreaInsetOverrides } from "../safe-area.js";
 
 const DEFAULT_OPTIONS: CanvasRendererOptions = {
@@ -101,6 +104,14 @@ export class CanvasRenderer implements Renderer {
    * via `getAnimator()` for deterministic clock control.
    */
   private animator: CanvasAnimator;
+
+  /**
+   * `__dnd.*` runtime: renderer-resident drag-and-drop (activation, ghost,
+   * sortable preview, zone resolution, poses) that dispatches only the drop
+   * outcome. See `dnd.ts`. Engine writes it owns are deferred through
+   * `deferEngineProp`; the ghost is painted last by `paintDndGhost`.
+   */
+  private dnd: CanvasDnd;
 
   private rafId: number | null = null;
   private needsRedraw = false;
@@ -182,8 +193,34 @@ export class CanvasRenderer implements Renderer {
     // Late-bound module hook, same pattern as the selection/edit hooks.
     setVideoActionDispatcher((name, payload) => this.engine.dispatchAction(name, payload));
 
+    // Drag-and-drop runtime: writes through the ordinary setProp/removeProp
+    // paths (bypassing its own deferral gate), repaints the whole canvas per
+    // drag frame, and dispatches outcomes through the engine channel.
+    this.dnd = new CanvasDnd({
+      dispatchAction: (name, payload) => this.engine.dispatchAction(name, payload),
+      scheduleRedraw: () => {
+        // Subtrees move without a layout change: per-node rects under-mark.
+        if (this.options.enableDirtyRects) this.dirtyTracker.markFullDirty();
+        this.scheduleRedraw();
+      },
+      applyProp: (node, name, value) => this.onSetProp(node.id, name, value, true),
+      removeProp: (node, name) => this.onRemoveProp(node.id, name, true),
+      setMirrorAttribute: (id, name, value) => {
+        const el = this.accessibilityLayer?.getElement(id) as
+          | { setAttribute?: (n: string, v: string) => void; removeAttribute?: (n: string) => void }
+          | undefined;
+        if (!el) return;
+        if (value === null) el.removeAttribute?.(name);
+        else el.setAttribute?.(name, value);
+      },
+      // Re-resolve the drop target after a mid-drag list rebuild (the event
+      // manager is constructed below; the closure binds at call time).
+      hitTest: (point) => this.eventManager.hitTest(point),
+    });
+
     // Initialize subsystems
     this.eventManager = new CanvasEventManager(canvas, engine);
+    this.eventManager.setDnd(this.dnd);
     this.scrollManager = new ScrollManager(canvas, () => this.scheduleRedraw());
     this.selectionManager = new SelectionManager(canvas, () => this.scheduleRedraw());
     setSelectionManager(this.selectionManager);
@@ -220,6 +257,8 @@ export class CanvasRenderer implements Renderer {
       isAuxFocusTarget: (el) => this.textEditor.isProxyElement(el),
       requestRedraw: () => this.scheduleRedraw(),
       onFocusChange: (next) => {
+        // A keyboard drag whose source loses focus cancels (§6.8).
+        this.dnd.noteFocusChange(next);
         if (next && isEditableNode(next)) {
           const el = this.accessibilityLayer.getElement(next.id);
           if (el) {
@@ -234,6 +273,17 @@ export class CanvasRenderer implements Renderer {
         // Repaint so focus styling (input border, button ring) updates.
         this.scheduleRedraw();
       },
+    });
+    // Keyboard drag-and-drop rides the mirror's key path: Space lifts a
+    // focused draggable, Arrows/Tab move, Space drops, Esc cancels (Esc also
+    // cancels a live pointer drag). Consumed keys never reach `onKeyDown`.
+    this.focusManager.setKeyInterceptor((node, type, e) => {
+      if (type !== "keydown") return false;
+      if (e.key === "Escape" && this.dnd.cancelPointer()) {
+        e.preventDefault?.();
+        return true;
+      }
+      return this.dnd.keyDown(node, e);
     });
     this.eventManager.setFocusManager(this.focusManager);
     this.eventManager.setEditablePointerHandler((node, point) => {
@@ -474,6 +524,7 @@ export class CanvasRenderer implements Renderer {
         (lowerType === "link" &&
           (rawProps["0"] != null || rawProps.to != null || rawProps.href != null)) ||
         rawProps.onClick != null ||
+        rawProps.onPress != null ||
         rawProps.onclick != null ||
         rawProps.action != null,
       hoverable: true,
@@ -481,7 +532,8 @@ export class CanvasRenderer implements Renderer {
         lowerType === "input" ||
         lowerType === "textarea" ||
         lowerType === "button" ||
-        FORM_CONTROL_TYPES.has(lowerType),
+        FORM_CONTROL_TYPES.has(lowerType) ||
+        rawProps[DND_SOURCE_PROP] !== undefined,
       focused: false,
       hovered: false,
     };
@@ -499,7 +551,11 @@ export class CanvasRenderer implements Renderer {
   /**
    * Set property on node
    */
-  private onSetProp(id: string, name: string, value: any): void {
+  /**
+   * `fromDnd`: the write comes from the drag-and-drop runtime itself (a pose
+   * overlay or a deferred flush) and must not be re-deferred.
+   */
+  private onSetProp(id: string, name: string, value: any, fromDnd = false): void {
     const node = this.nodes.get(id);
     if (!node) return;
 
@@ -507,10 +563,30 @@ export class CanvasRenderer implements Renderer {
     // route them there and skip the applicator/variant machinery (which
     // would otherwise synthesize a junk `__anim` aggregate).
     if (name.startsWith(ANIM_PROP_PREFIX)) {
+      // A re-lowered pose table clears an active runtime overlay first (its
+      // saved base is restored before the poses change under it).
+      if (name === ANIM_STATE_POSES_PROP) this.dnd.notePosesChanged(node);
       node.props[name] = value;
       this.animator.setAnimProp(node, name, value);
       return;
     }
+
+    // `__dnd.*` channel props configure the drag runtime, which reads them
+    // off the node on demand; never layout/paint.
+    if (name.startsWith(DND_PROP_PREFIX)) {
+      node.props[name] = value;
+      if (name === DND_SOURCE_PROP && !node.focusable) {
+        node.focusable = true;
+        this.accessibilityLayer.updateNode(node);
+      }
+      this.dnd.noteChannelChange(node);
+      return;
+    }
+
+    // Drag wins (§6.6): an engine write to a prop the drag owns — the
+    // dragged node's translate, a pose-overridden key — is deferred until
+    // release. The runtime's own writes bypass the gate.
+    if (!fromDnd && this.dnd.deferEngineProp(node, name, value)) return;
 
     // Applicator base (e.g. `flex.0` → `flex`) — computed up front so the
     // transition channel can capture the previous FLAT value (which, for a
@@ -545,11 +621,12 @@ export class CanvasRenderer implements Renderer {
       node.opacity = parseFloat(node.props.opacity) || 1;
     }
     if (
-      name === "onClick" || name === "onclick" || name === "action" ||
-      base === "onClick" || base === "onclick" || base === "action"
+      name === "onClick" || name === "onPress" || name === "onclick" || name === "action" ||
+      base === "onClick" || base === "onPress" || base === "onclick" || base === "action"
     ) {
       node.clickable =
         node.props.onClick != null ||
+        node.props.onPress != null ||
         node.props.onclick != null ||
         node.props.action != null;
     }
@@ -577,17 +654,27 @@ export class CanvasRenderer implements Renderer {
   /**
    * Remove a property from a node
    */
-  private onRemoveProp(id: string, name: string): void {
+  private onRemoveProp(id: string, name: string, fromDnd = false): void {
     const node = this.nodes.get(id);
     if (!node) return;
 
     // `__anim.*` channel props route to the animator (clearing `.animate`
     // stops playback and restores the touched props).
     if (name.startsWith(ANIM_PROP_PREFIX)) {
+      if (name === ANIM_STATE_POSES_PROP) this.dnd.notePosesChanged(node);
       delete node.props[name];
       this.animator.removeAnimProp(node, name);
       return;
     }
+
+    // `__dnd.*` channel props route to the drag runtime.
+    if (name.startsWith(DND_PROP_PREFIX)) {
+      delete node.props[name];
+      this.dnd.noteChannelChange(node);
+      return;
+    }
+
+    if (!fromDnd && this.dnd.deferEngineRemoveProp(node, name)) return;
 
     const base = parseApplicatorBase(name);
 
@@ -610,11 +697,12 @@ export class CanvasRenderer implements Renderer {
       node.opacity = parseFloat(node.props.opacity) || 1;
     }
     if (
-      name === "onClick" || name === "onclick" || name === "action" ||
-      base === "onClick" || base === "onclick" || base === "action"
+      name === "onClick" || name === "onPress" || name === "onclick" || name === "action" ||
+      base === "onClick" || base === "onPress" || base === "onclick" || base === "action"
     ) {
       node.clickable =
         node.props.onClick != null ||
+        node.props.onPress != null ||
         node.props.onclick != null ||
         node.props.action != null;
     }
@@ -702,6 +790,11 @@ export class CanvasRenderer implements Renderer {
       parent.children.push(child);
     }
 
+    // A structural change under a list the drag touches: releases a
+    // post-drop hold (the engine's re-render landed) or marks a cached
+    // list (origin included) for a rebuild after the next layout.
+    this.dnd.noteStructural(parent, id);
+
     // Mark parent dirty since its children changed
     if (this.options.enableDirtyRects) {
       this.dirtyTracker.markNodeDirty(parent);
@@ -729,6 +822,9 @@ export class CanvasRenderer implements Renderer {
       oldParent.children.splice(oldIndex, 1);
     }
 
+    // The engine moved the node: a held sortable preview releases (§6.3).
+    this.dnd.noteMove(oldParent, id);
+
     // Insert into new location (also marks new parent dirty)
     this.onInsert(parentId, id, beforeId);
   }
@@ -755,6 +851,10 @@ export class CanvasRenderer implements Renderer {
     this.textEditor.endIfWithin(node);
     this.focusManager.clearIfWithin(node);
     this.eventManager.clearIfWithin(node);
+
+    // A drag whose source/item lives in the detached subtree cancels
+    // cleanly and dispatches NOTHING (§6.6).
+    this.dnd.cancelSubtree(node);
 
     // Off-screen (cached-route) videos must stop playing audio, but their
     // offscreen elements stay alive so re-attach resumes from the same
@@ -811,6 +911,8 @@ export class CanvasRenderer implements Renderer {
       this.focusManager.clearIfWithin(node);
     this.eventManager.clearIfWithin(node);
       this.accessibilityLayer.markExiting(id);
+      // A drag rooted in the corpse is dead too: cancel, dispatch nothing.
+      this.dnd.cancelSubtree(node);
       return;
     }
     if (this.animator.deferToExitingAncestor(node, () => this.onRemove(id))) {
@@ -829,6 +931,11 @@ export class CanvasRenderer implements Renderer {
     // Drop all animator state for the id (specs, in-flight animations,
     // ambient playback, any exit bookkeeping).
     this.animator.forget(id);
+
+    // A drag rooted in the removed subtree cancels with NO dispatch; a
+    // removal under a list the drag touches releases a post-drop hold.
+    this.dnd.forget(node);
+    if (node.parent) this.dnd.noteStructural(node.parent, id);
 
     // End any edit session inside the removed subtree; focus state follows.
     this.textEditor.endIfWithin(node);
@@ -877,6 +984,7 @@ export class CanvasRenderer implements Renderer {
       // Guard against recycled ids mapping to a different live node.
       if (this.nodes.get(desc.id) === desc) {
         this.animator.forget(desc.id);
+        this.dnd.forget(desc);
         this.nodes.delete(desc.id);
         releaseVideo(desc.id);
       }
@@ -1014,6 +1122,11 @@ export class CanvasRenderer implements Renderer {
 
     ScrollManager.updateScrollBounds(this.rootNode);
     this.layoutDirty = false;
+
+    // Cached sortable slots an engine insert/remove touched mid-drag are
+    // rebuilt from the freshly laid-out children (the inserted rows had no
+    // layout when the patch landed) and the target re-resolved.
+    this.dnd.noteLayout();
   }
 
   /**
@@ -1034,11 +1147,21 @@ export class CanvasRenderer implements Renderer {
       this.runLayoutIfNeeded(dpr);
 
       paintNode(this.ctx, this.rootNode);
+      this.paintGhost();
 
       if (this.options.showLayoutBounds) {
         this.drawLayoutBounds(this.rootNode);
       }
     }
+  }
+
+  /**
+   * Drag-and-drop ghost pass: the lifted item paints LAST, above the whole
+   * tree (the in-tree pass skipped it).
+   */
+  private paintGhost(): void {
+    const ghost = this.dnd.ghostNode();
+    if (ghost) paintDndGhost(this.ctx, ghost);
   }
 
   /**
@@ -1076,6 +1199,7 @@ export class CanvasRenderer implements Renderer {
     // reach it are pruned from the traversal entirely.
     if (this.rootNode) {
       paintNode(this.ctx, this.rootNode, dirtyRegion);
+      this.paintGhost();
 
       if (this.options.showLayoutBounds) {
         this.drawLayoutBounds(this.rootNode);
@@ -1144,10 +1268,19 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * The `__dnd.*` drag-and-drop runtime — exposed for tests (timing knobs,
+   * keyboard path) and diagnostics.
+   */
+  getDnd(): CanvasDnd {
+    return this.dnd;
+  }
+
+  /**
    * Clear renderer
    */
   clear(): void {
     this.captureFrozen = false;
+    this.dnd.reset();
     this.animator.reset();
     this.textEditor.endEditing();
     this.releaseAllVideos();
@@ -1199,6 +1332,7 @@ export class CanvasRenderer implements Renderer {
   destroy(): void {
     this.releaseAllVideos();
     setVideoActionDispatcher(null);
+    this.dnd.destroy();
     this.animator.destroy();
     if (this.rafId !== null) {
       cancelAnimationFrame(this.rafId);

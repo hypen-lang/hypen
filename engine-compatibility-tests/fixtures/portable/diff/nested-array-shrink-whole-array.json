@@ -1,0 +1,39 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-nested-array-shrink-whole-array",
+  "description": "A nested array that shrinks emits exactly one whole-array replacement at the parent path — per-index nulls would leave phantom tail slots in hosts whose path-set cannot truncate arrays.",
+  "function": "diff_paths",
+  "priority": "P0",
+  "input": {
+    "old": {
+      "foods": [
+        {
+          "id": "1"
+        },
+        {
+          "id": "2"
+        },
+        {
+          "id": "3"
+        }
+      ]
+    },
+    "new": {
+      "foods": [
+        {
+          "id": "1"
+        }
+      ]
+    }
+  },
+  "expected": [
+    {
+      "path": "foods",
+      "value": [
+        {
+          "id": "1"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4814 @@
+{
+  "description": "Per-revision capability payload corpus. Validate `value` as the `kind` (params | result | event) of `capability` at `version` with the SDK's typed decoder + revision bounds (registry-v1.json). `valid` is the required verdict. Event validation covers the revision's whole event union: capability stream events, `blobStart` on binaryUpload revisions, and `progress` on every revision. `beyondSchema: true` marks rules the exported capability schema cannot express (unique channels, unique capability names); every other verdict matches the capability schema's `$defs/<kind>`. A revision absent from the registry is invalid.",
+  "cases": [
+    {
+      "name": "gallery-params-minimal",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo"
+        ],
+        "maxCount": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-params-both-media-max-count",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo",
+          "video"
+        ],
+        "maxCount": 16
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-params-media-types-empty",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [],
+        "maxCount": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-params-media-types-duplicate",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo",
+          "photo"
+        ],
+        "maxCount": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-params-media-types-triple",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo",
+          "photo",
+          "photo"
+        ],
+        "maxCount": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-params-media-types-null",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": null,
+        "maxCount": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-params-max-count-zero",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo"
+        ],
+        "maxCount": 0
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-params-max-count-over-max-items",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo"
+        ],
+        "maxCount": 17
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-params-max-count-40000",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo"
+        ],
+        "maxCount": 40000
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-params-missing-max-count",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-params-extra-key",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo"
+        ],
+        "maxCount": 1,
+        "x": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-one-item",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-result-no-items",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": []
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-result-item-at-max-item-bytes",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 67108864,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-result-item-over-max-item-bytes",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 67108865,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-item-one-tib",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 1099511627776,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-duplicate-channels",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false,
+      "beyondSchema": true
+    },
+    {
+      "name": "gallery-result-channel-over-max-items",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 16,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-sha256-uppercase",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ED7DDAB0FC86C9CADFCD6033E603644DB19C156E7167DCCED16B839F422A347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-sha256-garbage",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "DEADBEEF"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-sha256-empty",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": ""
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-content-type-257",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "ttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttttt",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-17-items",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 1,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 2,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 3,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 4,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 5,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 6,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 7,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 8,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 9,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 10,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 11,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 12,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 13,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 14,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 15,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 16,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-wrong-shape",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "bytesWritten": 3
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-event-blob-start",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg",
+        "bytes": 17
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-event-blob-start-over-max-item-bytes",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg",
+        "bytes": 1099511627776
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-event-blob-start-wrong-kind",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStrat",
+        "channel": 0,
+        "contentType": "image/jpeg",
+        "bytes": 17
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-event-blob-start-extra-key",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg",
+        "bytes": 17,
+        "x": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-event-progress-pending-consent",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "progress",
+        "state": "pendingConsent"
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-event-progress-running",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "progress",
+        "state": "running"
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-event-progress-unknown-state",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "progress",
+        "state": "paused"
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-event-unknown-kind",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "progress2"
+      },
+      "valid": false
+    },
+    {
+      "name": "file-pick-params",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "accept": [
+          "application/pdf",
+          "image/*"
+        ],
+        "maxCount": 2
+      },
+      "valid": true
+    },
+    {
+      "name": "file-pick-params-accept-empty",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "accept": [],
+        "maxCount": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "file-pick-params-accept-entry-129",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "accept": [
+          "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ],
+        "maxCount": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "file-pick-params-accept-33-entries",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "accept": [
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a",
+          "a"
+        ],
+        "maxCount": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "file-pick-params-accept-null-entry",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "accept": [
+          null
+        ],
+        "maxCount": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "file-pick-result",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "name": "doc.pdf",
+            "contentType": "application/pdf",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "file-pick-result-duplicate-channels",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 1,
+            "name": "doc.pdf",
+            "contentType": "application/pdf",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 1,
+            "name": "doc.pdf",
+            "contentType": "application/pdf",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false,
+      "beyondSchema": true
+    },
+    {
+      "name": "file-pick-result-name-513",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+            "contentType": "application/pdf",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "file-pick-event-blob-start",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "application/pdf",
+        "bytes": 3
+      },
+      "valid": true
+    },
+    {
+      "name": "file-save-params",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "channel": 0,
+        "name": "report.txt",
+        "contentType": "text/plain",
+        "bytes": 11,
+        "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+      },
+      "valid": true
+    },
+    {
+      "name": "file-save-params-channel-nonzero",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "channel": 9,
+        "name": "report.txt",
+        "contentType": "text/plain",
+        "bytes": 11,
+        "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+      },
+      "valid": false
+    },
+    {
+      "name": "file-save-params-bytes-zero",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "channel": 0,
+        "name": "report.txt",
+        "contentType": "text/plain",
+        "bytes": 0,
+        "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+      },
+      "valid": false
+    },
+    {
+      "name": "file-save-params-bytes-over-max-item-bytes",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "channel": 0,
+        "name": "report.txt",
+        "contentType": "text/plain",
+        "bytes": 67108865,
+        "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+      },
+      "valid": false
+    },
+    {
+      "name": "file-save-params-sha256-empty",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "channel": 0,
+        "name": "report.txt",
+        "contentType": "text/plain",
+        "bytes": 11,
+        "sha256": ""
+      },
+      "valid": false
+    },
+    {
+      "name": "file-save-params-content-type-null",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "channel": 0,
+        "name": "report.txt",
+        "contentType": null,
+        "bytes": 11,
+        "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+      },
+      "valid": false
+    },
+    {
+      "name": "file-save-result",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "bytesWritten": 11
+      },
+      "valid": true
+    },
+    {
+      "name": "file-save-result-over-max-item-bytes",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "bytesWritten": 67108865
+      },
+      "valid": false
+    },
+    {
+      "name": "file-save-event-blob-start-not-on-download",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "a",
+        "bytes": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "file-save-event-progress",
+      "capability": "file.save",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "progress",
+        "state": "running"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-params",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "microphone"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-params-unknown-64-chars",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-65",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "ppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-5000",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-null",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": null
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-missing",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {},
+      "valid": false
+    },
+    {
+      "name": "permission-query-result",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": "prompt"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-result-unknown-status",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": "maybe"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-event-blob-start",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "a",
+        "bytes": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-event-progress",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "progress",
+        "state": "pendingConsent"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-result-granted",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": "granted"
+      },
+      "valid": true
+    },
+    {
+      "name": "bluetooth-params-empty",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "params",
+      "value": {},
+      "valid": true
+    },
+    {
+      "name": "bluetooth-params-extra-key",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "x": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "bluetooth-event-device",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "device": {
+          "id": "aa:bb",
+          "name": "Speaker",
+          "rssi": -40
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "bluetooth-event-device-name-empty-string-is-present",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "device": {
+          "id": "aa:bb",
+          "name": "",
+          "rssi": -40
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "bluetooth-event-device-name-null",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "device": {
+          "id": "aa:bb",
+          "name": null,
+          "rssi": -40
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bluetooth-event-device-missing",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "event",
+      "value": {},
+      "valid": false
+    },
+    {
+      "name": "bluetooth-event-device-null",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "device": null
+      },
+      "valid": false
+    },
+    {
+      "name": "bluetooth-event-rssi-missing",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "device": {
+          "id": "a"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bluetooth-event-rssi-out-of-range",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "device": {
+          "id": "a",
+          "rssi": 32768
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bluetooth-event-blob-start-not-on-json-plane",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "a",
+        "bytes": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "bluetooth-result-empty",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "result",
+      "value": {},
+      "valid": true
+    },
+    {
+      "name": "mic-params",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 16000,
+        "format": "pcm16"
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-params-sample-rate-min",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 8000,
+        "format": "pcm16"
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-params-sample-rate-1",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 1,
+        "format": "pcm16"
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-sample-rate-over-max",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 192001,
+        "format": "pcm16"
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-unknown-format",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 16000,
+        "format": "opus"
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-result",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "durationMs": 1,
+        "item": {
+          "channel": 0,
+          "contentType": "audio/L16",
+          "bytes": 32,
+          "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-result-channel-1",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "durationMs": 1,
+        "item": {
+          "channel": 1,
+          "contentType": "audio/L16",
+          "bytes": 32,
+          "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-event-blob-start",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "audio/L16",
+        "bytes": 32
+      },
+      "valid": true
+    },
+    {
+      "name": "core-params-empty",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "params",
+      "value": {},
+      "valid": true
+    },
+    {
+      "name": "core-event-snapshot",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "core-event-empty-snapshot",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": []
+      },
+      "valid": true
+    },
+    {
+      "name": "core-event-version-zero",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "a",
+            "versions": [
+              0
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "core-event-duplicate-versions",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "a",
+            "versions": [
+              1,
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "core-event-duplicate-names",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "a",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "a",
+            "versions": [
+              2
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "beyondSchema": true
+    },
+    {
+      "name": "core-event-empty-name",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "core-event-33-versions",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "a",
+            "versions": [
+              1,
+              2,
+              3,
+              4,
+              5,
+              6,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              14,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              23,
+              24,
+              25,
+              26,
+              27,
+              28,
+              29,
+              30,
+              31,
+              32,
+              33
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "core-event-65-offers",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "c0",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c1",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c2",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c3",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c4",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c5",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c6",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c7",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c8",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c9",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c10",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c11",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c12",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c13",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c14",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c15",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c16",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c17",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c18",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c19",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c20",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c21",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c22",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c23",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c24",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c25",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c26",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c27",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c28",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c29",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c30",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c31",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c32",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c33",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c34",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c35",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c36",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c37",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c38",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c39",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c40",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c41",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c42",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c43",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c44",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c45",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c46",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c47",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c48",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c49",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c50",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c51",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c52",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c53",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c54",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c55",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c56",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c57",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c58",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c59",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c60",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c61",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c62",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c63",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c64",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "core-event-100-offers-versions-zero",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "c0",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c1",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c2",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c3",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c4",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c5",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c6",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c7",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c8",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c9",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c10",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c11",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c12",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c13",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c14",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c15",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c16",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c17",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c18",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c19",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c20",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c21",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c22",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c23",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c24",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c25",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c26",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c27",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c28",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c29",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c30",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c31",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c32",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c33",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c34",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c35",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c36",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c37",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c38",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c39",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c40",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c41",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c42",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c43",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c44",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c45",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c46",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c47",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c48",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c49",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c50",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c51",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c52",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c53",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c54",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c55",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c56",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c57",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c58",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c59",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c60",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c61",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c62",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c63",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c64",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c65",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c66",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c67",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c68",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c69",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c70",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c71",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c72",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c73",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c74",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c75",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c76",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c77",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c78",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c79",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c80",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c81",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c82",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c83",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c84",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c85",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c86",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c87",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c88",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c89",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c90",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c91",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c92",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c93",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c94",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c95",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c96",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c97",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c98",
+            "versions": [
+              0,
+              0
+            ]
+          },
+          {
+            "name": "c99",
+            "versions": [
+              0,
+              0
+            ]
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-v2-unknown-revision",
+      "capability": "gallery.pick",
+      "version": 2,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          "photo"
+        ],
+        "maxCount": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-event-blob-start-undeclared-size",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg"
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-event-blob-start-zero-bytes",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg",
+        "bytes": 0
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-event-blob-start-bytes-null",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg",
+        "bytes": null
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-event-blob-start-at-max-item-bytes",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg",
+        "bytes": 67108864
+      },
+      "valid": true
+    },
+    {
+      "name": "gallery-event-blob-start-max-item-bytes-plus-1",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg",
+        "bytes": 67108865
+      },
+      "valid": false
+    },
+    {
+      "name": "file-event-blob-start-undeclared-size",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "application/pdf"
+      },
+      "valid": true
+    },
+    {
+      "name": "file-event-blob-start-zero-bytes",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "application/pdf",
+        "bytes": 0
+      },
+      "valid": true
+    },
+    {
+      "name": "file-event-blob-start-bytes-null",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "application/pdf",
+        "bytes": null
+      },
+      "valid": false
+    },
+    {
+      "name": "file-event-blob-start-at-max-item-bytes",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "application/pdf",
+        "bytes": 67108864
+      },
+      "valid": true
+    },
+    {
+      "name": "file-event-blob-start-max-item-bytes-plus-1",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "application/pdf",
+        "bytes": 67108865
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-event-blob-start-undeclared-size",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "audio/L16"
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-event-blob-start-zero-bytes",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "audio/L16",
+        "bytes": 0
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-event-blob-start-bytes-null",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "audio/L16",
+        "bytes": null
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-event-blob-start-at-max-item-bytes",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "audio/L16",
+        "bytes": 67108864
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-event-blob-start-max-item-bytes-plus-1",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "audio/L16",
+        "bytes": 67108865
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-empty-item",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "text/plain",
+            "bytes": 0,
+            "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-params-max-duration-min",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 16000,
+        "format": "pcm16",
+        "maxDurationMs": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-params-max-duration-max",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 16000,
+        "format": "pcm16",
+        "maxDurationMs": 600000
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-params-max-duration-zero",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 16000,
+        "format": "pcm16",
+        "maxDurationMs": 0
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-max-duration-over-max",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 16000,
+        "format": "pcm16",
+        "maxDurationMs": 600001
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-max-duration-null",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 16000,
+        "format": "pcm16",
+        "maxDurationMs": null
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-max-bytes-is-not-a-param",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 16000,
+        "format": "pcm16",
+        "maxBytes": 1024
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-result-item-as-array",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          [
+            0,
+            "image/jpeg",
+            3,
+            "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          ]
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-result-item-as-array",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "durationMs": 5,
+        "item": [
+          0,
+          "audio/wav",
+          3,
+          "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "file-pick-result-item-as-array",
+      "capability": "file.pick",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          [
+            0,
+            "a",
+            "b",
+            3,
+            "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          ]
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bluetooth-event-device-as-array",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "device": [
+          "dev1",
+          "name",
+          -40
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "core-event-offer-as-array",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          [
+            "gallery.pick",
+            [
+              1
+            ]
+          ]
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-params-media-type-as-map",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mediaTypes": [
+          {
+            "photo": null
+          }
+        ],
+        "maxCount": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-result-status-as-map",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": {
+          "granted": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-format-as-map",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 8000,
+        "format": {
+          "pcm16": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "gallery-event-progress-state-as-map",
+      "capability": "gallery.pick",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "progress",
+        "state": {
+          "running": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-params-as-array",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": [
+        "photo"
+      ],
+      "valid": false
+    },
+    {
+      "name": "bluetooth-params-as-array",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "params",
+      "value": [],
+      "valid": false
+    },
+    {
+      "name": "core-params-as-array",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "params",
+      "value": [],
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-camera",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "camera"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-params-microphone",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "microphone"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-params-photos",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "photos"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-params-location",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "location"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-params-notifications",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "notifications"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-params-bluetooth",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "bluetooth"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-params-contacts",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "contacts"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-params-unknown-typo-camra",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "camra"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-alias-geolocation",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "geolocation"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-singular-photo",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "photo"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-singular-notification",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "notification"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-wrong-case-camera",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "Camera"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-upper-case-microphone",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "MICROPHONE"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-trailing-space",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "camera "
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-empty",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": ""
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-storage",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "storage"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-bluetooth-scan",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "bluetooth.scan"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-unknown-astral",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "😀"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-number",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-array",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": [
+          "camera"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-map-for-enum",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": {
+          "camera": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-params-extra-key",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "camera",
+        "reason": "x"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-query-result-status-granted",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": "granted"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-result-status-denied",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": "denied"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-result-status-prompt",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": "prompt"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-query-result-status-null",
+      "capability": "permission.query",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": null
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-camera",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "camera"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-params-microphone",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "microphone"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-params-photos",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "photos"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-params-location",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "location"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-params-notifications",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "notifications"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-params-bluetooth",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "bluetooth"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-params-contacts",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "contacts"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-params-unknown-typo-camra",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "camra"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-alias-geolocation",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "geolocation"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-singular-photo",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "photo"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-singular-notification",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "notification"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-wrong-case-camera",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "Camera"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-upper-case-microphone",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "MICROPHONE"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-trailing-space",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "camera "
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-empty",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": ""
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-storage",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "storage"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-bluetooth-scan",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "bluetooth.scan"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-unknown-astral",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "😀"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-number",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-array",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": [
+          "camera"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-map-for-enum",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": {
+          "camera": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-params-extra-key",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "permission": "camera",
+        "reason": "x"
+      },
+      "valid": false
+    },
+    {
+      "name": "permission-request-result-status-granted",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": "granted"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-result-status-denied",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": "denied"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-result-status-prompt",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": "prompt"
+      },
+      "valid": true
+    },
+    {
+      "name": "permission-request-result-status-null",
+      "capability": "permission.request",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "status": null
+      },
+      "valid": false
+    },
+    {
+      "name": "core-result-empty",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "result",
+      "value": {},
+      "valid": true
+    },
+    {
+      "name": "core-result-extra-key",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "capabilities": []
+      },
+      "valid": false
+    },
+    {
+      "name": "bluetooth-result-extra-key",
+      "capability": "bluetooth.scan",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "a",
+          "rssi": -1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-photo",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "photo"
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-params-photo-front",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "photo",
+        "facing": "front"
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-params-video",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "video"
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-params-video-back-max-duration",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "video",
+        "facing": "back",
+        "maxDurationMs": 15000
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-params-video-max-duration-min",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "video",
+        "maxDurationMs": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-params-video-max-duration-max",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "video",
+        "maxDurationMs": 600000
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-params-video-max-duration-zero",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "video",
+        "maxDurationMs": 0
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-video-max-duration-over-max",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "video",
+        "maxDurationMs": 600001
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-video-max-duration-null",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "video",
+        "maxDurationMs": null
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-photo-with-max-duration",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "photo",
+        "maxDurationMs": 1000
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-photo-with-max-duration-and-facing",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "photo",
+        "facing": "back",
+        "maxDurationMs": 1
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-mode-missing",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "facing": "front"
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-mode-unknown",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "audio"
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-mode-wrong-case",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "Photo"
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-mode-as-map",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": {
+          "photo": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-facing-unknown",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "photo",
+        "facing": "user"
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-facing-null",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "photo",
+        "facing": null
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-extra-key",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "mode": "photo",
+        "quality": 90
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-params-empty",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": {},
+      "valid": false
+    },
+    {
+      "name": "camera-params-as-array",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "params",
+      "value": [
+        "photo"
+      ],
+      "valid": false
+    },
+    {
+      "name": "camera-result-image-jpeg",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-event-blob-start-image-jpeg-undeclared",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg"
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-result-image-heic",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/heic",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-event-blob-start-image-heic-undeclared",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/heic"
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-result-video-mp4",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "video/mp4",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-event-blob-start-video-mp4-undeclared",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "video/mp4"
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-result-video-quicktime",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "video/quicktime",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-event-blob-start-video-quicktime-undeclared",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "video/quicktime"
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-result-video-webm",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "video/webm",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-event-blob-start-video-webm-undeclared",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "video/webm"
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-result-at-max-item-bytes",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "video/mp4",
+            "bytes": 67108864,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-result-over-max-item-bytes",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "video/mp4",
+            "bytes": 67108865,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-no-items",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": []
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-two-items",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 1,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-two-items-same-channel",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          },
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-channel-1",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 1,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-content-type-png",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/png",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-content-type-with-codecs",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "video/webm;codecs=vp8",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-content-type-upper-case",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "IMAGE/JPEG",
+            "bytes": 17,
+            "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-sha256-garbage",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          {
+            "channel": 0,
+            "contentType": "image/jpeg",
+            "bytes": 17,
+            "sha256": "DEADBEEF"
+          }
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-item-not-items",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "item": {
+          "channel": 0,
+          "contentType": "image/jpeg",
+          "bytes": 17,
+          "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-result-item-as-array",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "items": [
+          [
+            0,
+            "image/jpeg",
+            17,
+            "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+          ]
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-event-blob-start-declared",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/jpeg",
+        "bytes": 17
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-event-blob-start-channel-1",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 1,
+        "contentType": "image/jpeg"
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-event-blob-start-content-type-png",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "image/png"
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-event-blob-start-over-max-item-bytes",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "video/mp4",
+        "bytes": 67108865
+      },
+      "valid": false
+    },
+    {
+      "name": "camera-event-progress",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "progress",
+        "state": "pendingConsent"
+      },
+      "valid": true
+    },
+    {
+      "name": "camera-event-bluetooth-device",
+      "capability": "camera.capture",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "device": {
+          "id": "a",
+          "rssi": -1
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-channels-1",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": 1
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-params-channels-2",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": 2
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-params-channels-2-with-max-duration",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": 2,
+        "maxDurationMs": 500
+      },
+      "valid": true
+    },
+    {
+      "name": "mic-params-channels-0",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": 0
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-channels-3",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": 3
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-channels-256",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": 256
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-channels-negative",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": -1
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-channels-null",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": null
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-channels-string",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": "2"
+      },
+      "valid": false
+    },
+    {
+      "name": "mic-params-channels-array",
+      "capability": "mic.record",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "sampleRate": 48000,
+        "format": "pcm16",
+        "channels": [
+          2
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-empty",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {},
+      "valid": true
+    },
+    {
+      "name": "bt-select-params-services",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0000180d-0000-1000-8000-00805f9b34fb",
+          "0000180f-0000-1000-8000-00805f9b34fb"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-params-name-prefix",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "namePrefix": "Polar"
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-params-both",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0000180d-0000-1000-8000-00805f9b34fb"
+        ],
+        "namePrefix": "H"
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-params-16-services",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "00000000-0000-1000-8000-00805f9b34fb",
+          "00000001-0000-1000-8000-00805f9b34fb",
+          "00000002-0000-1000-8000-00805f9b34fb",
+          "00000003-0000-1000-8000-00805f9b34fb",
+          "00000004-0000-1000-8000-00805f9b34fb",
+          "00000005-0000-1000-8000-00805f9b34fb",
+          "00000006-0000-1000-8000-00805f9b34fb",
+          "00000007-0000-1000-8000-00805f9b34fb",
+          "00000008-0000-1000-8000-00805f9b34fb",
+          "00000009-0000-1000-8000-00805f9b34fb",
+          "0000000a-0000-1000-8000-00805f9b34fb",
+          "0000000b-0000-1000-8000-00805f9b34fb",
+          "0000000c-0000-1000-8000-00805f9b34fb",
+          "0000000d-0000-1000-8000-00805f9b34fb",
+          "0000000e-0000-1000-8000-00805f9b34fb",
+          "0000000f-0000-1000-8000-00805f9b34fb"
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-params-name-prefix-64-astral-code-points",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "namePrefix": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-params-17-services",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "00000000-0000-1000-8000-00805f9b34fb",
+          "00000001-0000-1000-8000-00805f9b34fb",
+          "00000002-0000-1000-8000-00805f9b34fb",
+          "00000003-0000-1000-8000-00805f9b34fb",
+          "00000004-0000-1000-8000-00805f9b34fb",
+          "00000005-0000-1000-8000-00805f9b34fb",
+          "00000006-0000-1000-8000-00805f9b34fb",
+          "00000007-0000-1000-8000-00805f9b34fb",
+          "00000008-0000-1000-8000-00805f9b34fb",
+          "00000009-0000-1000-8000-00805f9b34fb",
+          "0000000a-0000-1000-8000-00805f9b34fb",
+          "0000000b-0000-1000-8000-00805f9b34fb",
+          "0000000c-0000-1000-8000-00805f9b34fb",
+          "0000000d-0000-1000-8000-00805f9b34fb",
+          "0000000e-0000-1000-8000-00805f9b34fb",
+          "0000000f-0000-1000-8000-00805f9b34fb",
+          "00000010-0000-1000-8000-00805f9b34fb"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-services-empty",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": []
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-services-duplicate",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0000180d-0000-1000-8000-00805f9b34fb",
+          "0000180d-0000-1000-8000-00805f9b34fb"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-services-null",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": null
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-short-hex-0x180d",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0x180d"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-short-hex-180d",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "180d"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-upper-case",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0000180D-0000-1000-8000-00805F9B34FB"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-no-dashes",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0000180d00001000800000805f9b34fb"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-braced",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "{0000180d-0000-1000-8000-00805f9b34fb}"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-too-short",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0000180d-0000-1000-8000-00805f9b34f"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-too-long",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0000180d-0000-1000-8000-00805f9b34fbb"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-non-hex",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0000180g-0000-1000-8000-00805f9b34fb"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-underscore",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "0000180d_0000-1000-8000-00805f9b34fb"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-gatt-name",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          "heart_rate"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-number",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          6157
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-uuid-empty",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "services": [
+          ""
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-name-prefix-empty",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "namePrefix": ""
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-name-prefix-65",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "namePrefix": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-name-prefix-null",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "namePrefix": null
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-accept-all-devices-is-not-a-param",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": {
+        "acceptAllDevices": true
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-params-as-array",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "params",
+      "value": [],
+      "valid": false
+    },
+    {
+      "name": "bt-select-result",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "dev-1",
+          "name": "Polar H10"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-result-no-name",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "dev-1"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-result-name-empty-string-is-present",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "dev-1",
+          "name": ""
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-result-bounds",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+          "name": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+        }
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-result-id-empty",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": ""
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-result-id-129",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-result-name-257",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "a",
+          "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn"
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-result-name-null",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "a",
+          "name": null
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-result-rssi-is-scan-only",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "a",
+          "rssi": -40
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-result-device-missing",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {},
+      "valid": false
+    },
+    {
+      "name": "bt-select-result-device-null",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": null
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-result-device-as-array",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": [
+          "dev-1",
+          "Polar"
+        ]
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-result-extra-key",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "result",
+      "value": {
+        "device": {
+          "id": "a"
+        },
+        "services": []
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-event-progress",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "progress",
+        "state": "pendingConsent"
+      },
+      "valid": true
+    },
+    {
+      "name": "bt-select-event-scan-device-not-an-event",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "device": {
+          "id": "a",
+          "rssi": -40
+        }
+      },
+      "valid": false
+    },
+    {
+      "name": "bt-select-event-blob-start-not-on-json-plane",
+      "capability": "bluetooth.select",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "kind": "blobStart",
+        "channel": 0,
+        "contentType": "a"
+      },
+      "valid": false
+    },
+    {
+      "name": "core-event-canonically-equivalent-names-are-distinct",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "é",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "é",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "core-event-without-core-capabilities",
+      "capability": "core.capabilities",
+      "version": 1,
+      "kind": "event",
+      "value": {
+        "capabilities": [
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": true
+    }
+  ]
+}

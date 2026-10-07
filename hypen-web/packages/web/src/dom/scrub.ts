@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * DOM scrub-binding runtime (Option G — `__anim.scrub*` channel consumption).
  *
@@ -119,6 +120,15 @@ import {
 } from "@hypen-space/core/animation";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 import { getEngine } from "./element-data.js";
+import {
+  capturePointer,
+  isWithinSubtree,
+  releasePointer,
+  round3 as round,
+  stripTransformFns,
+  toPlain,
+  type PointerEventLike,
+} from "./gesture-utils.js";
 
 const log = frameworkLoggers.renderer;
 
@@ -199,34 +209,6 @@ function rubberBandProgress(raw: number, rubberBand: number): number {
   return raw;
 }
 
-/**
- * Remove the transform functions named in `fns` from a CSS transform
- * string, keeping everything else in order. Used to compose the scrub's
- * transform lanes with the element's static base transform (the base minus
- * the scrub-owned kinds is prepended), and to restore the base minus the
- * kinds a deferred engine write is about to re-append.
- */
-function stripTransformFns(transform: string, fns: ReadonlySet<string>): string {
-  if (!transform || fns.size === 0) return transform;
-  const parts = transform.match(/[a-zA-Z][a-zA-Z0-9]*\([^)]*\)/g);
-  if (!parts) return transform;
-  return parts.filter((part) => !fns.has(part.slice(0, part.indexOf("(")))).join(" ");
-}
-
-/**
- * Is `element` a strict descendant of `root`? Walks `parentNode` links —
- * fake-dom (tests) has no `closest`, and detached subtrees keep their
- * internal links.
- */
-function isWithinSubtree(element: HTMLElement, root: HTMLElement): boolean {
-  let node: unknown = (element as { parentNode?: unknown }).parentNode ?? null;
-  while (node) {
-    if (node === root) return true;
-    node = (node as { parentNode?: unknown }).parentNode ?? null;
-  }
-  return false;
-}
-
 interface DragState {
   pointerId: number | null;
   /** Pointer position along the axis at `pointerdown`. */
@@ -241,14 +223,6 @@ interface DragState {
   move: (event: PointerEventLike) => void;
   up: (event: PointerEventLike) => void;
   cancel: (event: PointerEventLike) => void;
-}
-
-/** The pointer-event surface the scrubber reads (fake-dom friendly). */
-interface PointerEventLike {
-  clientX?: number;
-  clientY?: number;
-  pointerId?: number;
-  target?: unknown;
 }
 
 interface ScrubEntry {
@@ -334,6 +308,16 @@ export class DomScrubber {
    * bounds mid-range deferral/ownership to active input.
    */
   public restDebounceMs = DEFAULT_REST_DEBOUNCE_MS;
+
+  /**
+   * Higher-precedence owner check (DnD > scrub, design §6.4), installed by
+   * the renderer: while it reports `true` for a node, that node's scrub
+   * sources are SUSPENDED — a pointerdown opens no pending drag, an
+   * in-flight pending drag never claims, and scroll ticks are ignored. The
+   * DnD runtime registers its pointerdown listener before the scrubber's,
+   * so a DnD source on a scrubbed node wins the same pointerdown.
+   */
+  public suspended: (id: string) => boolean = () => false;
 
   private entries = new Map<string, ScrubEntry>();
   private host: DomScrubberHost;
@@ -791,8 +775,9 @@ export class DomScrubber {
   }
 
   private onPointerDown(entry: ScrubEntry, event: PointerEventLike): void {
-    // One drag at a time: a second finger's pointerdown is noise.
-    if (!this.complete(entry) || entry.drag) return;
+    // One drag at a time: a second finger's pointerdown is noise. A node a
+    // higher-precedence runtime (DnD) is interacting with is suspended.
+    if (!this.complete(entry) || entry.drag || this.suspended(entry.id)) return;
     const pointerId = typeof event.pointerId === "number" ? event.pointerId : null;
     const move = (moveEvent: PointerEventLike) => this.onPointerMove(entry, moveEvent);
     const up = (upEvent: PointerEventLike) => this.onPointerUp(entry, upEvent);
@@ -836,16 +821,7 @@ export class DomScrubber {
     drag.claimed = true;
     drag.pAtGrab = entry.progress;
     drag.samples = [{ t: drag.downT, p: drag.pAtGrab }];
-    const element = entry.element as HTMLElement & {
-      setPointerCapture?: (pointerId: number) => void;
-    };
-    if (drag.pointerId !== null && typeof element.setPointerCapture === "function") {
-      try {
-        element.setPointerCapture(drag.pointerId);
-      } catch {
-        // Capture is best-effort (the pointer may already be gone).
-      }
-    }
+    capturePointer(entry.element, drag.pointerId);
   }
 
   private onPointerMove(entry: ScrubEntry, event: PointerEventLike): void {
@@ -855,6 +831,11 @@ export class DomScrubber {
     if (!scrub) return;
     const travel = this.axisPos(entry, event) - drag.startPos;
     if (!drag.claimed) {
+      if (this.suspended(entry.id)) {
+        // DnD took the pointer between our pointerdown and slop: stand down.
+        this.endDragListeners(entry);
+        return;
+      }
       if (Math.abs(travel) < SCRUB_SLOP_PX) return;
       this.claimDrag(entry, drag);
     }
@@ -908,20 +889,7 @@ export class DomScrubber {
     entry.element.removeEventListener("pointermove", drag.move as EventListener);
     entry.element.removeEventListener("pointerup", drag.up as EventListener);
     entry.element.removeEventListener("pointercancel", drag.cancel as EventListener);
-    const element = entry.element as HTMLElement & {
-      releasePointerCapture?: (pointerId: number) => void;
-    };
-    if (
-      drag.claimed &&
-      drag.pointerId !== null &&
-      typeof element.releasePointerCapture === "function"
-    ) {
-      try {
-        element.releasePointerCapture(drag.pointerId);
-      } catch {
-        // Already released (e.g. the element left the document).
-      }
-    }
+    if (drag.claimed) releasePointer(entry.element, drag.pointerId);
   }
 
   // --------------------------------------------------------------------------
@@ -979,7 +947,7 @@ export class DomScrubber {
     entry.pendingLabel = label;
     const engine = getEngine(entry.element);
     if (engine) {
-      engine.dispatchAction("__hypen_bind", { path: entry.bind, value: label });
+      dispatchUIAction(engine, entry.id, "__hypen_bind", { path: entry.bind, value: label });
     } else {
       log.warn(`scrub: no engine bound to element ${entry.id}; settle write dropped`);
     }
@@ -1188,7 +1156,7 @@ export class DomScrubber {
    */
   private onScroll(entry: ScrubEntry): void {
     const container = entry.scrollContainer;
-    if (!container || !this.complete(entry)) return;
+    if (!container || !this.complete(entry) || this.suspended(entry.id)) return;
     const scrub = entry.scrub!;
     entry.quiescent = false; // active input re-claims ownership
     const offset =
@@ -1275,27 +1243,4 @@ export class DomScrubber {
     this.detachGesture(entry);
     this.detachScroll(entry);
   }
-}
-
-/** Trim interpolation noise: 3 decimal places is sub-pixel on any display. */
-function round(v: number): number {
-  return Math.round(v * 1000) / 1000;
-}
-
-/**
- * WASM patches deliver nested prop values as Maps; the core parsers expect
- * plain objects. Normalize before parsing (DomAnimator parity).
- */
-function toPlain(value: unknown): unknown {
-  if (value instanceof Map) {
-    const obj: Record<string, unknown> = {};
-    for (const [key, entry] of value.entries()) {
-      obj[String(key)] = toPlain(entry);
-    }
-    return obj;
-  }
-  if (Array.isArray(value)) {
-    return value.map(toPlain);
-  }
-  return value;
 }

@@ -1,0 +1,103 @@
+{
+  "$defs": {
+    "capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "capabilities": {
+          "items": {
+            "$ref": "#/$defs/capabilityOffer"
+          },
+          "maxItems": 64,
+          "type": "array"
+        }
+      },
+      "required": [
+        "capabilities"
+      ],
+      "type": "object"
+    },
+    "capabilityOffer": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        },
+        "versions": {
+          "items": {
+            "maximum": 4294967295,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 32,
+          "minItems": 0,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "name",
+        "versions"
+      ],
+      "type": "object"
+    },
+    "event": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/capabilities"
+        },
+        {
+          "$ref": "#/$defs/progress"
+        }
+      ]
+    },
+    "params": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "progress": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "progress"
+        },
+        "state": {
+          "enum": [
+            "pendingConsent",
+            "running"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "state"
+      ],
+      "type": "object"
+    },
+    "result": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    }
+  },
+  "$id": "https://hypen.space/schemas/device/core.capabilities-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "$ref": "#/$defs/params"
+    },
+    {
+      "$ref": "#/$defs/result"
+    },
+    {
+      "$ref": "#/$defs/event"
+    }
+  ],
+  "description": "Provisional (RFC 001 §6): may change until the Phase 4 real-driver gate; after stabilization an optional addition creates a new revision. Bounds come from this revision's registry entry (registry-v1.json). Validate a payload against #/$defs/params, #/$defs/result or #/$defs/event; the document root only accepts a value matching any of them.",
+  "title": "core.capabilities capability, revision 1"
+}

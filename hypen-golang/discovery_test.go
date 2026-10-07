@@ -398,8 +398,14 @@ func TestComponentWatcher_DetectsUpdatedComponent(t *testing.T) {
 	// Wait for initial scan
 	time.Sleep(200 * time.Millisecond)
 
-	// Update the component
-	os.WriteFile(hypenPath, []byte(`Text("Modified")`), 0644)
+	// Update the component atomically (write + rename): a plain WriteFile
+	// truncates first, and a poll landing between the truncate and the
+	// write legitimately reports a second update (seen under -race load).
+	tmpPath := hypenPath + ".tmp"
+	os.WriteFile(tmpPath, []byte(`Text("Modified")`), 0644)
+	if err := os.Rename(tmpPath, hypenPath); err != nil {
+		t.Fatal(err)
+	}
 
 	// Poll until the update callback fires (up to 3s)
 	deadline := time.Now().Add(3 * time.Second)

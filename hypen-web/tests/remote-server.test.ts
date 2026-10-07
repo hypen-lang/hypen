@@ -331,14 +331,38 @@ describe("RemoteServer compression", () => {
     return captured;
   }
 
-  test("enables permessage-deflate by default", async () => {
+  // Per-message DEFLATE: "shared" (de)compressors = no context takeover in
+  // both directions (never "dedicated", which keeps a sliding window).
+  const PER_MESSAGE = { compress: "shared", decompress: "shared" };
+
+  test("per-message permessage-deflate by default (device plane on) with a 4 MiB payload cap", async () => {
     server = new RemoteServer().module("Counter", createCounterModule()).ui(UI);
 
     const options = await listenCapturingServeOptions(server);
-    expect(options.websocket.perMessageDeflate).toBe(true);
+    expect(options.websocket.perMessageDeflate).toEqual(PER_MESSAGE);
+    expect(options.websocket.maxPayloadLength).toBe(4 * 1024 * 1024);
   });
 
-  test("compression: false disables permessage-deflate", async () => {
+  test("disableDevice(): same per-message compression, Bun's payload cap (UI-only server)", async () => {
+    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI).disableDevice();
+
+    const options = await listenCapturingServeOptions(server);
+    expect(options.websocket.perMessageDeflate).toEqual(PER_MESSAGE);
+    expect(options.websocket.maxPayloadLength).toBeUndefined();
+  });
+
+  test("explicit compression: true is the default: per-message DEFLATE, device plane still on (4 MiB cap)", async () => {
+    server = new RemoteServer()
+      .module("Counter", createCounterModule())
+      .ui(UI)
+      .config({ compression: true });
+
+    const options = await listenCapturingServeOptions(server);
+    expect(options.websocket.perMessageDeflate).toEqual(PER_MESSAGE);
+    expect(options.websocket.maxPayloadLength).toBe(4 * 1024 * 1024);
+  });
+
+  test("compression: false disables permessage-deflate (device plane unaffected: 4 MiB cap)", async () => {
     server = new RemoteServer()
       .module("Counter", createCounterModule())
       .ui(UI)
@@ -346,10 +370,11 @@ describe("RemoteServer compression", () => {
 
     const options = await listenCapturingServeOptions(server);
     expect(options.websocket.perMessageDeflate).toBe(false);
+    expect(options.websocket.maxPayloadLength).toBe(4 * 1024 * 1024);
   });
 
   test("still serves the initial tree with compression enabled", async () => {
-    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI);
+    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI).config({ compression: true });
 
     await server.listen(PORT);
 

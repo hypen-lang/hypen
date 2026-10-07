@@ -1,0 +1,103 @@
+// New post. The photo never passes through this UI: "Choose from library"
+// and "Take photo" ask the device plane (gallery.pick / camera.capture) and
+// the visitor's DeviceHost shows its own consent dialog, picker or camera.
+module CreatePost {
+    Column {
+        Row {
+            Button {
+                Text("Cancel")
+                    .tw("text-[15px]")
+                    .color("#262626")
+            }
+            .tw("bg-transparent border-0 px-2 py-2 shrink-0")
+            .onClick(@actions.discardPost)
+
+            Text("New post")
+                .tw("text-base font-semibold flex-1 text-center")
+
+            Button {
+                Text("@{state.status == 'posting' ? 'Sharing…' : 'Share'}")
+                    .tw("text-[15px] font-semibold")
+                    .color("@{state.status == 'ready' ? '#0095f6' : '#b2dffc'}")
+            }
+            .tw("bg-transparent border-0 px-2 py-2 shrink-0")
+            .onClick(@actions.sharePost)
+        }
+        .tw("py-2 px-2 items-center bg-white border-b border-gray-200")
+
+        Column {
+            Column {
+                If(condition: "@{state.draftImageUrl != ''}") {
+                    Image(src: "@{state.draftImageUrl}")
+                        .objectFit("cover")
+                        .tw("w-full h-full")
+                        .enter(fade, duration: 220)
+                }
+                If(condition: "@{state.draftImageUrl == ''}") {
+                    Column {
+                        Icon(@resources.image)
+                            .size(56)
+                            .color("#9ca3af")
+                        Text("@{state.status == 'picking' ? 'Waiting for your photo…' : 'Choose a photo to share'}")
+                            .tw("mt-3 text-[15px] font-medium text-center")
+                            .color("#374151")
+                    }
+                    .tw("w-full h-full items-center justify-center")
+                }
+            }
+            .aspectRatio("1")
+            .tw("w-full bg-gray-100 overflow-hidden rounded-2xl items-center justify-center")
+
+            If(condition: "@{state.error != ''}") {
+                Text("@{state.error}")
+                    .tw("mt-3 text-sm text-center")
+                    .color("#ed4956")
+            }
+
+            Row {
+                Button {
+                    Row {
+                        Icon(@resources.image)
+                            .size(20)
+                            .color("#262626")
+                        Text("@{state.draftImageUrl == '' ? 'Choose from library' : 'Choose another'}")
+                            .tw("text-sm font-semibold ml-2")
+                    }
+                    .tw("items-center justify-center")
+                }
+                .tw("flex-1 py-2.5 bg-gray-100 border-0 rounded-lg")
+                .opacity({default: 1, active: 0.6})
+                .onClick(@actions.pickPhoto)
+
+                If(condition: "@{state.canUseCamera}") {
+                    Button {
+                        Row {
+                            Icon(@resources.camera)
+                                .size(20)
+                                .color("#262626")
+                            Text("Take photo")
+                                .tw("text-sm font-semibold ml-2")
+                        }
+                        .tw("items-center justify-center")
+                    }
+                    .tw("flex-1 py-2.5 bg-gray-100 border-0 rounded-lg")
+                    .opacity({default: 1, active: 0.6})
+                    .onClick(@actions.takePhoto)
+                }
+            }
+            .tw("w-full mt-4 gap-2")
+
+            Textarea(placeholder: "Write a caption...")
+                .bind(@state.caption)
+                .tw("w-full mt-5 pt-4 text-sm border-0 border-t border-gray-200 bg-transparent min-h-[64px]")
+
+            Input(placeholder: "Add location")
+                .bind(@state.location)
+                .tw("w-full mt-2 py-3 text-sm border-0 border-t border-gray-200 bg-transparent")
+        }
+        .tw("flex-1 w-full px-4 pt-4 pb-8")
+        .scrollable(true)
+    }
+    .tw("flex-1 w-full h-full min-h-0 bg-white md:max-w-[630px] md:mx-auto md:border-x md:border-gray-200")
+    .alignSelf("center")
+}

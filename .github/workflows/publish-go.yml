@@ -31,7 +31,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.21"
+          go-version-file: hypen-golang/go.mod
           cache-dependency-path: hypen-golang/go.sum
 
       # Build the WASI WASM the Go SDK loads at runtime

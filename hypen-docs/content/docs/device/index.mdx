@@ -1,0 +1,176 @@
+---
+title: Device Capabilities
+description: Let a server-side module pick photos, capture from the camera, record audio, save files, find Bluetooth devices and check permissions on the user's device, over the same socket as the UI
+---
+
+# Device Capabilities
+
+In a [Remote UI](/docs/concepts/remote-ui) app your module runs on the server
+and the UI streams to a thin client. The **device capability protocol** gives
+that module access to the hardware in the user's hand: a handler asks for a
+capability, the client runs it with the platform's own pickers, prompts and
+hardware, and the result, bytes included, comes back to the handler as a plain
+value.
+
+```hypen
+module Profile {
+    Column {
+        Image(src: "@{state.avatarUrl}")
+            .width(96)
+            .height(96)
+            .cornerRadius(48)
+        Button { Text("Change photo") }
+            .onClick(@actions.changePhoto)
+        Text("@{state.error}").color("#ff6b6b")
+    }
+    .gap(12)
+    .padding(24)
+}
+```
+
+```typescript
+import { app } from "@hypen-space/core";
+
+export default app
+  .defineState({ avatarUrl: "", error: "" })
+  .onAction("changePhoto", async ({ state, context }) => {
+    const res = await context.device.request("gallery.pick", {
+      mediaTypes: ["photo"],
+      maxCount: 1,
+    });
+    if (!res.ok) {
+      // denied, cancelled, unsupported, ...: errors are values, never throws
+      state.error = res.error.code;
+      return;
+    }
+    const photo = res.value.items[0]; // photo.bytes is a hash-verified Uint8Array
+    state.avatarUrl = await storage.upload(photo.bytes, photo.contentType);
+  })
+  .build();
+```
+
+You don't write an upload endpoint, presigned URLs or client-side code. When
+the user taps the button, the native photo picker opens on their phone (or a
+file dialog in their browser). The photo then streams to your server over the
+same WebSocket as the UI. It arrives in chunks, the server paces the transfer,
+and it checks the SHA-256 hash before your handler sees any bytes.
+
+## The server asks, the device decides
+
+A handler can *request* device work, but the device decides whether it
+happens:
+
+- **Consent comes from the device.** Every sensitive operation passes a
+  consent step that the app can't draw, click or hide. This is either the
+  platform's own picker or capture screen, or a dialog owned by the device
+  host that names the server asking.
+- **A request isn't tied to a UI element.** It can come from any action or
+  lifecycle handler. When the platform needs a fresh user gesture, the device
+  host shows its own Continue button. Your button doesn't need to stay visible
+  or enabled.
+- **Recordings and scans stay visible.** While a microphone recording or a
+  Bluetooth scan runs, the device shows an indicator with a Stop button.
+- **A capability is offered only when it can work.** A client advertises only
+  what it can actually do: the hardware exists, the app declared the
+  permission, and the indicator can be shown. `context.device.supports(...)`
+  tells your module what was negotiated.
+- **Work belongs to the screen that asked for it.** When the user navigates
+  away, pending operations are cancelled, and a late result is thrown away
+  instead of uploaded.
+
+See [Consent & Security](/docs/device/security) for the full model.
+
+## How it works
+
+```text
+ server (module handler)                         client (DeviceHost)
+ ───────────────────────                         ───────────────────
+ hello  ◄─────────── advertises what this device can do (camera, picker, …)
+ sessionAck ───────► picks a revision of each capability both sides know
+
+ context.device.request("gallery.pick", …)
+   deviceRequest ──────────────────────────────► validate, check cooldowns
+                                                  consent: system picker or
+                                                  host dialog (Continue/Cancel)
+   ◄──────── blobStart + binary frames (≤ 64 KiB each, paced by server credit)
+   ◄──────── deviceResponse { items: [{ bytes, sha256, … }] }
+ broker verifies byte count + SHA-256
+ handler gets { ok: true, value: { items: [{ bytes: Uint8Array, … }] } }
+```
+
+1. **Negotiation.** When the client connects, its `hello` advertises the
+   capabilities it can perform. The server picks one revision of each
+   capability that both sides support. The client can update its list while
+   connected (for example when the app goes to the background), and
+   `supports()` follows those updates.
+2. **Request.** Your handler calls `context.device.request(...)`, or the
+   equivalent in Go, Kotlin, Swift or Rust. The server validates the parameters
+   against the capability's schema before it sends anything, so a bad call
+   fails immediately with `invalidParams`.
+3. **Consent and execution.** The client's *DeviceHost* checks its own rules
+   (cooldowns, one prompt at a time), gets consent, and calls the platform
+   API.
+4. **Transfer.** Uploaded bytes travel as binary WebSocket frames of up to
+   64 KiB on the connection that carries the UI. The server grants credit to
+   pace them, so a large upload can't starve UI updates or flood server
+   memory.
+5. **Verification.** The server checks that the item set, sizes and SHA-256
+   hashes match what the client declared. Only then does your handler get the
+   bytes. A mismatch fails the request with `invalidParams`.
+6. **Liveness.** The server renews each running operation every 5 seconds. If
+   a connection goes silent for 15 seconds, both sides stop the operation
+   (`connectionLost`). Nothing is replayed after a reconnect.
+
+All server SDKs share the server side of the protocol: request tracking,
+leases, deadlines, credit, upload verification and memory budgets. It is
+written once in Rust, inside the Hypen engine; the TypeScript, Go, Kotlin
+and Swift servers run that same code through their existing engine bindings,
+and the Rust SDK links it directly. Each SDK wraps it in an API that fits the
+language.
+
+## Capabilities
+
+| Capability | What it does |
+|------------|--------------|
+| `gallery.pick` | Pick up to 16 photos or videos from the device library |
+| `file.pick` | Pick up to 16 documents, with MIME-type filters |
+| `file.save` | Send a file to the device, where the user chooses the destination |
+| `camera.capture` | Take one photo or record one video in the host's capture UI |
+| `mic.record` | Stream a PCM16 recording to the handler as it's captured |
+| `bluetooth.select` | Let the user choose one nearby Bluetooth LE device (identity only) |
+| `bluetooth.scan` | Stream nearby Bluetooth LE advertisements (iOS and Android) |
+| `permission.query` | Read the status of one permission without prompting |
+| `permission.request` | Ask the user for one permission |
+
+See the [Capability Reference](/docs/device/capabilities) for parameters,
+results and platform support.
+
+## Where it runs
+
+| Side | Supported |
+|------|-----------|
+| Server | TypeScript (Bun/Node `RemoteServer`), Cloudflare Workers (`@hypen-space/cf`), Go, Kotlin, Swift, Rust (`hypen-server` `RemoteSession`) |
+| Client | Web (`@hypen-space/device-web`), iOS (`DeviceHost.iOS()`), Android (`AndroidDeviceHost.create()`), desktop (`hypen-renderer-desktop` remote mode) |
+
+Device capabilities need a Remote UI connection. A local app that embeds the
+engine in the same process (for example the desktop renderer's in-process
+mode) has no device plane: every call answers `unavailable`
+(`device-disabled`).
+
+<Callout type="warn">
+The protocol is **version 1 and provisional**. It is implemented and tested
+in every SDK listed above and in real Chromium. The native iOS and Android
+hosts have not yet been validated on physical devices, and the wire format may
+change before it is frozen. See [Limits & Known Limitations](/docs/device/limits).
+</Callout>
+
+## In this section
+
+- **[Enabling on the Server](/docs/device/server-setup)**: choose who may connect, tune or opt out of the device plane, in each server SDK
+- **[Client Setup](/docs/device/client-setup)**: web, iOS, Android and desktop device hosts, required `Info.plist` keys and manifest permissions
+- **[Capability Reference](/docs/device/capabilities)**: every capability's parameters, results and platform behavior
+- **[Requests & Streams](/docs/device/requests-and-streams)**: `request`, `stream`, `save`, `supports`, options, cancellation
+- **[Errors](/docs/device/errors)**: the ten error codes and when each one happens
+- **[Lifetimes & Navigation](/docs/device/lifetimes)**: how device work follows module activation
+- **[Consent & Security](/docs/device/security)**: consent gates, indicators, cooldowns, connection admission
+- **[Limits & Known Limitations](/docs/device/limits)**: sizes, budgets, deadlines, and what isn't done yet

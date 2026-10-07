@@ -97,7 +97,8 @@ class MockEngine : IEngine {
 
     override fun triggerAction(name: String, payload: Any?) {
         val action = Action(name, payload?.toJsonElement())
-        actionHandlers[name]?.invoke(action)
+        val scoped = actionHandlers.keys.filter { it.startsWith("__hypen_scoped:") && it.endsWith(":$name") }
+        (actionHandlers[name] ?: scoped.singleOrNull()?.let { actionHandlers[it] })?.invoke(action)
     }
 
     override fun renderSource(source: String): List<Patch> {
@@ -153,7 +154,7 @@ class MockEngine : IEngine {
     /**
      * Check if an action handler is registered
      */
-    fun hasAction(name: String): Boolean = actionHandlers.containsKey(name)
+    fun hasAction(name: String): Boolean = actionHandlers.containsKey(name) || actionHandlers.keys.any { it.startsWith("__hypen_scoped:") && it.endsWith(":$name") }
 
     /**
      * Get all registered action names

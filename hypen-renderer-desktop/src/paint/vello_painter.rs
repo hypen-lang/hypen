@@ -21,7 +21,7 @@ use crate::style::{
 use crate::text::TextEngine;
 use crate::window::Selection;
 use std::collections::HashMap;
-use vello::kurbo::{Affine, BezPath, Cap, Rect as KRect, RoundedRect, Stroke};
+use vello::kurbo::{Affine, BezPath, Cap, Join, Rect as KRect, RoundedRect, Shape, Stroke};
 use vello::peniko::{Brush, Color, Fill};
 use vello::Scene;
 
@@ -40,6 +40,9 @@ pub struct InteractionState {
     pub focus_visible: bool,
     pub input_selections: HashMap<String, Selection>,
     pub ime_preedit: Option<(String, String)>,
+    /// Per-Textarea inner scroll offset (physical px), mirrored from
+    /// `App`. Absent → 0.
+    pub textarea_scroll: HashMap<String, f32>,
 }
 
 /// One cached encoded scene for a single subtree (e.g. one Post in the
@@ -122,6 +125,14 @@ pub struct VelloPainter {
     /// the user resized the window (which dropped the cache as a
     /// side-effect of the viewport change).
     last_image_load_gen: u64,
+    /// Renderer node ids the drag-and-drop runtime wants painted LAST
+    /// (the lifted item and its subtree — `DesktopDnd::raised_ids`), so
+    /// the ghost floats above its siblings while it is dragged / held.
+    /// Empty in the overwhelmingly common no-drag frame, where the
+    /// cached-subtree paint path runs untouched; a non-empty set paints
+    /// every item individually (the drag frame invalidates the fragment
+    /// cache anyway) with the raised ids deferred to a final pass.
+    raised: std::collections::HashSet<String>,
     /// Hit / miss telemetry for tests and ad-hoc profiling. Reset by
     /// `invalidate_subtree_cache`. Not used in production logic.
     #[cfg(test)]
@@ -149,6 +160,10 @@ pub struct VelloPainter {
     /// production painters retain no field, branch, or paint work.
     #[cfg(feature = "dev-overlay")]
     dev_overlay: Option<(String, f32)>,
+    /// Device host UI (consent dialogs, capture panel, chooser, activity
+    /// indicators): painted after everything else, see
+    /// `crate::device::overlay`.
+    device_overlay: Option<std::sync::Arc<crate::device::overlay::OverlayLayout>>,
 }
 
 const IMAGE_CACHE_CAP: usize = 128;
@@ -173,6 +188,8 @@ impl VelloPainter {
             last_image_load_gen: 0,
             #[cfg(feature = "dev-overlay")]
             dev_overlay: None,
+            device_overlay: None,
+            raised: std::collections::HashSet::new(),
             #[cfg(test)]
             subtree_cache_hits: 0,
             #[cfg(test)]
@@ -233,6 +250,12 @@ impl VelloPainter {
         &mut self.text
     }
 
+    /// Replace the set of node ids painted last (the drag-and-drop
+    /// ghost subtree). Pass an empty set when no drag is lifted.
+    pub fn set_raised(&mut self, ids: std::collections::HashSet<String>) {
+        self.raised = ids;
+    }
+
     pub fn interaction_mut(&mut self) -> &mut InteractionState {
         &mut self.interaction
     }
@@ -249,6 +272,14 @@ impl VelloPainter {
             }
             None => self.dev_overlay = Some((label.into(), top)),
         }
+    }
+
+    /// The device overlay for the next scenes (`None` = nothing shown).
+    pub(crate) fn set_device_overlay(
+        &mut self,
+        overlay: Option<std::sync::Arc<crate::device::overlay::OverlayLayout>>,
+    ) {
+        self.device_overlay = overlay;
     }
 
     /// Reset and rebuild the scene from the given layout. Returns a
@@ -298,7 +329,29 @@ impl VelloPainter {
         // group with their neighbours sharing the same id and go
         // through `paint_subtree` for cache lookup.
         let items = &layout.items;
-        let mut i = 0;
+        if !self.raised.is_empty() {
+            // Drag-and-drop ghost frame: paint everything but the raised
+            // subtree in order, then the raised items on top. Bypasses
+            // the fragment cache for this frame only — a lifted drag
+            // moves transforms every frame, so the cache has no hits to
+            // offer here anyway.
+            let mut deferred: Vec<&crate::layout::LayoutItem> = Vec::new();
+            for item in items.iter() {
+                if self.raised.contains(&item.node_id) {
+                    deferred.push(item);
+                    continue;
+                }
+                if rects_intersect(item.visual_rect(), viewport_rect) {
+                    self.draw_item(item, scale_factor);
+                }
+            }
+            for item in deferred {
+                if rects_intersect(item.visual_rect(), viewport_rect) {
+                    self.draw_item(item, scale_factor);
+                }
+            }
+        }
+        let mut i = if self.raised.is_empty() { 0 } else { items.len() };
         while i < items.len() {
             match items[i].subtree_root.as_deref() {
                 None => {
@@ -358,7 +411,80 @@ impl VelloPainter {
         }
         #[cfg(feature = "dev-overlay")]
         self.draw_dev_overlay(viewport, scale_factor);
+        self.draw_device_overlay();
         &self.scene
+    }
+
+    /// The device host UI, above the app and the dev HUD: app content can
+    /// neither cover nor restyle it.
+    fn draw_device_overlay(&mut self) {
+        use crate::device::overlay::DrawOp;
+        let Some(overlay) = self.device_overlay.clone() else {
+            return;
+        };
+        for op in &overlay.ops {
+            match op {
+                DrawOp::Fill {
+                    rect,
+                    color,
+                    radius,
+                } => fill_rect(&mut self.scene, *rect, *color, *radius),
+                DrawOp::Stroke {
+                    rect,
+                    color,
+                    radius,
+                    width,
+                } => stroke_rect(&mut self.scene, *rect, *color, *radius, *width),
+                DrawOp::Text {
+                    x,
+                    y,
+                    text,
+                    size,
+                    weight,
+                    color,
+                    wrap,
+                } => {
+                    self.text.draw_text_into_scene_line_height(
+                        &mut self.scene,
+                        text,
+                        *x,
+                        *y,
+                        *size,
+                        *color,
+                        *wrap,
+                        *weight,
+                        *size * 1.2,
+                    );
+                }
+                DrawOp::Image { rect, frame } => self.draw_preview_frame(*rect, frame),
+            }
+        }
+    }
+
+    /// A camera preview frame, contain-fitted into `rect` (the caller filled
+    /// the letterbox).
+    fn draw_preview_frame(&mut self, rect: LayoutRect, frame: &crate::device::ui::PreviewFrame) {
+        use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
+        if frame.width == 0
+            || frame.height == 0
+            || rect.w <= 0.0
+            || rect.h <= 0.0
+            || frame.rgba.len() < frame.width as usize * frame.height as usize * 4
+        {
+            return;
+        }
+        let img = ImageData {
+            data: Blob::new(frame.rgba.clone()),
+            format: ImageFormat::Rgba8,
+            alpha_type: ImageAlphaType::AlphaPremultiplied,
+            width: frame.width,
+            height: frame.height,
+        };
+        let s = (rect.w / frame.width as f32).min(rect.h / frame.height as f32);
+        let dx = rect.x as f64 + ((rect.w - frame.width as f32 * s) * 0.5) as f64;
+        let dy = rect.y as f64 + ((rect.h - frame.height as f32 * s) * 0.5) as f64;
+        let transform = Affine::translate((dx, dy)).pre_scale(s as f64);
+        self.scene.draw_image(&img, transform);
     }
 
     /// Paint after every Hypen item and scrollbar, making this a true native
@@ -979,6 +1105,21 @@ impl VelloPainter {
             ItemKind::Input {
                 value,
                 placeholder,
+                multiline: true,
+                color,
+                ..
+            } => {
+                self.draw_textarea(
+                    item,
+                    value,
+                    placeholder.as_deref(),
+                    fg_override.unwrap_or(*color),
+                    scale_factor,
+                );
+            }
+            ItemKind::Input {
+                value,
+                placeholder,
                 font_size,
                 color,
                 padding,
@@ -1335,6 +1476,17 @@ impl VelloPainter {
                 let fraction = crate::video_v2::scrubber_fraction(video_id.as_deref(), *preview);
                 draw_scrubber(&mut self.scene, item.rect, fraction, scale_factor);
             }
+            ItemKind::Chart(chart) => {
+                // The chart resolved every mark into device-pixel shapes at
+                // layout time (`crate::chart::build_scene`); painting is a
+                // straight walk of that draw list.
+                self.draw_chart(chart);
+            }
+            ItemKind::ChartMark(_) => {
+                // Interaction only: the chart item above already drew this
+                // mark's geometry. Emitting it as its own item is what makes
+                // it hit-testable, focusable and dispatchable.
+            }
             ItemKind::Icon {
                 paths,
                 view_box,
@@ -1365,6 +1517,72 @@ impl VelloPainter {
         }
         if outer_clip_active {
             self.scene.pop_layer();
+        }
+    }
+
+    /// Paint a resolved chart: fills, strokes, dashes and labels straight
+    /// off [`crate::chart::ChartScene::shapes`], which is already in
+    /// absolute device pixels.
+    fn draw_chart(&mut self, chart: &crate::chart::ChartScene) {
+        use crate::chart::ChartShape;
+        // Disjoint field borrows: labels need the text engine while the
+        // geometry goes into the scene.
+        let VelloPainter {
+            scene,
+            text: text_engine,
+            ..
+        } = self;
+        for shape in &chart.shapes {
+            match shape {
+                ChartShape::Label {
+                    x,
+                    y,
+                    text,
+                    size,
+                    color,
+                    align,
+                    rotated,
+                } => {
+                    let (w, _) = text_engine.measure_weighted(text, *size, None, 400);
+                    let tx = match align {
+                        crate::chart::LabelAlign::Start => *x,
+                        crate::chart::LabelAlign::Middle => x - w * 0.5,
+                        crate::chart::LabelAlign::End => x - w,
+                    };
+                    if *rotated {
+                        // The y-axis title reads bottom-to-top. Vello has no
+                        // transform on the text call, so the label is drawn
+                        // into a fragment and appended rotated about its
+                        // anchor.
+                        let mut fragment = Scene::new();
+                        text_engine.draw_text_into_scene(
+                            &mut fragment,
+                            text,
+                            tx,
+                            y - size * 0.5,
+                            *size,
+                            *color,
+                            None,
+                            400,
+                        );
+                        scene.append(
+                            &fragment,
+                            Some(Affine::rotate_about(
+                                -std::f64::consts::FRAC_PI_2,
+                                vello::kurbo::Point::new(*x as f64, *y as f64),
+                            )),
+                        );
+                    } else {
+                        text_engine
+                            .draw_text_into_scene(scene, text, tx, *y, *size, *color, None, 400);
+                    }
+                }
+                other => {
+                    if let Some((path, paint)) = chart_shape_path(other) {
+                        draw_chart_path(scene, &path, paint);
+                    }
+                }
+            }
         }
     }
 
@@ -1399,7 +1617,12 @@ impl VelloPainter {
         };
         let mut painted = content.to_string();
         if let Some(limit) = max_lines {
-            let max_height = scaled_line_height * limit as f32;
+            // `measure_weighted_line_height` ceils its height, so a
+            // fractional line height (`leading-[1.3]` at 12px = 15.6)
+            // reports two lines as 32, not 31.2. Compare against the
+            // ceiled cap or every text that fits in exactly `limit`
+            // lines would be ellipsized down to `limit - 1`.
+            let max_height = (scaled_line_height * limit as f32).ceil();
             let (original_width, original_height) = self.text.measure_weighted_line_height(
                 content,
                 scaled_size,
@@ -1613,6 +1836,178 @@ impl VelloPainter {
         }
 
         // Close the single-line content clip pushed at the top.
+        self.scene.pop_layer();
+    }
+
+    /// Paint a `Textarea`: the value (or muted placeholder) soft-wrapped
+    /// to the content width, shifted by the inner scroll offset and
+    /// clipped to the padding box; plus, when focused, the multi-line
+    /// selection bands, caret, and IME preedit. All geometry comes from
+    /// [`crate::textarea::FieldFrame`] + `TextEngine::visual_lines`, the
+    /// same layout the window uses for click / arrow-key caret math.
+    fn draw_textarea(
+        &mut self,
+        item: &crate::layout::LayoutItem,
+        value: &str,
+        placeholder: Option<&str>,
+        color: Rgba,
+        scale_factor: f32,
+    ) {
+        use crate::textarea::{caret_position, selection_bands, FieldFrame};
+        let Some(frame) = FieldFrame::of(item, scale_factor) else {
+            return;
+        };
+        let disabled = item.state_variants.disabled;
+        let dim = |c: Rgba| {
+            if disabled {
+                Rgba(c.0, c.1, c.2, (c.3 as u16 * 5 / 10) as u8)
+            } else {
+                c
+            }
+        };
+        let stored = self
+            .interaction
+            .textarea_scroll
+            .get(&item.node_id)
+            .copied()
+            .unwrap_or(0.0);
+        let scroll = frame.clamp_scroll_for(&mut self.text, value, stored);
+        let origin_y = frame.text_y - scroll;
+
+        // Clip: content box horizontally (plus a caret's width so an
+        // end-of-line caret stays visible), padding box vertically —
+        // scrolled lines disappear under the padding edge like the DOM.
+        let caret_w = 1.5 * scale_factor;
+        let content_clip = vello::kurbo::Rect::new(
+            frame.text_x as f64,
+            frame.clip_top as f64,
+            (frame.text_x + frame.inner_w + caret_w) as f64,
+            frame.clip_bottom as f64,
+        );
+        self.scene.push_layer(
+            vello::peniko::Fill::NonZero,
+            vello::peniko::BlendMode::default(),
+            1.0,
+            Affine::IDENTITY,
+            &content_clip,
+        );
+
+        let focused = self.interaction.focused.as_deref() == Some(&item.node_id);
+        let preedit = self
+            .interaction
+            .ime_preedit
+            .as_ref()
+            .filter(|(id, _)| focused && id == &item.node_id)
+            .map(|(_, t)| t.clone());
+
+        // Selection bands under the glyphs, like native text views.
+        let sel = focused.then(|| {
+            self.interaction
+                .input_selections
+                .get(&item.node_id)
+                .copied()
+                .unwrap_or_else(|| Selection::caret(value.len()))
+                .clamped(value.len())
+        });
+        let lines = if focused {
+            frame.lines(&mut self.text, value)
+        } else {
+            Vec::new()
+        };
+        if let Some(sel) = sel.filter(|s| !s.is_collapsed() && preedit.is_none()) {
+            for (x0, top, x1, h) in selection_bands(&lines, sel.min(), sel.max(), frame.font_px * 0.3)
+            {
+                fill_rect(
+                    &mut self.scene,
+                    LayoutRect {
+                        x: frame.text_x + x0,
+                        y: origin_y + top,
+                        w: x1 - x0,
+                        h,
+                    },
+                    Rgba(0x00, 0x7a, 0xff, 0x55),
+                    0.0,
+                );
+            }
+        }
+
+        if value.is_empty() {
+            if let Some(p) = placeholder {
+                self.text.draw_text_into_scene_line_height(
+                    &mut self.scene,
+                    p,
+                    frame.text_x,
+                    origin_y,
+                    frame.font_px,
+                    dim(Rgba(0x90, 0x96, 0xa1, 0xff)),
+                    Some(frame.inner_w),
+                    frame.weight,
+                    frame.line_px,
+                );
+            }
+        } else {
+            self.text.draw_text_into_scene_line_height(
+                &mut self.scene,
+                value,
+                frame.text_x,
+                origin_y,
+                frame.font_px,
+                dim(color),
+                Some(frame.inner_w),
+                frame.weight,
+                frame.line_px,
+            );
+        }
+
+        if let Some(sel) = sel {
+            let (cx, ctop, ch) = caret_position(&lines, sel.head.min(value.len()));
+            let line_h = if ch > 0.0 { ch } else { frame.line_px };
+            let caret_h = line_h.min(frame.font_px * 1.2);
+            let caret_y = origin_y + ctop + (line_h - caret_h) * 0.5;
+            let mut caret_x = frame.text_x + cx;
+            if let Some(pre) = preedit.as_deref() {
+                self.text.draw_text_into_scene_line_height(
+                    &mut self.scene,
+                    pre,
+                    caret_x,
+                    origin_y + ctop,
+                    frame.font_px,
+                    color,
+                    None,
+                    frame.weight,
+                    frame.line_px,
+                );
+                let (pre_w, _) =
+                    self.text
+                        .measure_weighted(pre, frame.font_px, None, frame.weight);
+                fill_rect(
+                    &mut self.scene,
+                    LayoutRect {
+                        x: caret_x,
+                        y: caret_y + caret_h - 1.0 * scale_factor,
+                        w: pre_w,
+                        h: 1.0 * scale_factor,
+                    },
+                    Rgba(0x00, 0x7a, 0xff, 0xff),
+                    0.0,
+                );
+                caret_x += pre_w;
+            }
+            if sel.is_collapsed() || preedit.is_some() {
+                fill_rect(
+                    &mut self.scene,
+                    LayoutRect {
+                        x: caret_x,
+                        y: caret_y,
+                        w: caret_w,
+                        h: caret_h,
+                    },
+                    Rgba(0x00, 0x7a, 0xff, 0xff),
+                    0.0,
+                );
+            }
+        }
+
         self.scene.pop_layer();
     }
 
@@ -1883,6 +2278,167 @@ fn fill_radial_gradient_rect(
             Some(brush_transform),
             &kr,
         );
+    }
+}
+
+/// Build the kurbo path for one chart shape, paired with how to paint it.
+/// `Label` has no path — the caller draws text for that one.
+fn chart_shape_path(
+    shape: &crate::chart::ChartShape,
+) -> Option<(BezPath, &crate::chart::ShapePaint)> {
+    use crate::chart::ChartShape;
+    match shape {
+        ChartShape::Path {
+            points,
+            smooth,
+            close_to_y,
+            paint,
+        } => {
+            if points.is_empty() {
+                return None;
+            }
+            let mut path = BezPath::new();
+            path.move_to((points[0].0 as f64, points[0].1 as f64));
+            let segments = if *smooth {
+                crate::chart::smooth_segments(points)
+            } else {
+                Vec::new()
+            };
+            if segments.is_empty() {
+                for p in &points[1..] {
+                    path.line_to((p.0 as f64, p.1 as f64));
+                }
+            } else {
+                for (c1, c2, end) in segments {
+                    path.curve_to(
+                        (c1.0 as f64, c1.1 as f64),
+                        (c2.0 as f64, c2.1 as f64),
+                        (end.0 as f64, end.1 as f64),
+                    );
+                }
+            }
+            if let Some(base) = close_to_y {
+                let last = points[points.len() - 1];
+                let first = points[0];
+                path.line_to((last.0 as f64, *base as f64));
+                path.line_to((first.0 as f64, *base as f64));
+                path.close_path();
+            }
+            Some((path, paint))
+        }
+        ChartShape::Rect {
+            rect,
+            radius,
+            paint,
+        } => {
+            if rect.w <= 0.0 && rect.h <= 0.0 {
+                return None;
+            }
+            let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0) as f64;
+            let rounded = RoundedRect::new(
+                rect.x as f64,
+                rect.y as f64,
+                (rect.x + rect.w) as f64,
+                (rect.y + rect.h) as f64,
+                r,
+            );
+            Some((rounded.to_path(0.1), paint))
+        }
+        ChartShape::Circle { cx, cy, r, paint } => {
+            if *r <= 0.0 {
+                return None;
+            }
+            let circle = vello::kurbo::Circle::new((*cx as f64, *cy as f64), *r as f64);
+            Some((circle.to_path(0.1), paint))
+        }
+        ChartShape::Segment {
+            x1,
+            y1,
+            x2,
+            y2,
+            paint,
+        } => {
+            let mut path = BezPath::new();
+            path.move_to((*x1 as f64, *y1 as f64));
+            path.line_to((*x2 as f64, *y2 as f64));
+            Some((path, paint))
+        }
+        ChartShape::SvgPath {
+            d,
+            transform,
+            paint,
+        } => {
+            let mut path = svg_path_to_kurbo(d)?;
+            let [a, b, c, dd, e, f] = *transform;
+            // Data units -> pixels is baked into the geometry, so the
+            // stroke stays non-scaling exactly like the SVG
+            // `vector-effect: non-scaling-stroke` the DOM renderer sets.
+            path.apply_affine(Affine::new([
+                a as f64, b as f64, c as f64, dd as f64, e as f64, f as f64,
+            ]));
+            Some((path, paint))
+        }
+        ChartShape::Label { .. } => None,
+    }
+}
+
+/// How many strokes approximate one glow / mark shadow.
+///
+/// Vello's only blur primitive is `draw_blurred_rounded_rect`, which cannot
+/// take an arbitrary path, so a mark's `glow(...)` (and the shape-shadow
+/// family that means the same thing on a path) is drawn as a stack of
+/// progressively wider, lower-alpha strokes behind the geometry rather than
+/// a true Gaussian blur. Close enough to read as a soft halo; cheap, and it
+/// degrades to nothing when the radius is zero.
+const CHART_GLOW_PASSES: usize = 3;
+
+fn draw_chart_path(scene: &mut Scene, path: &BezPath, paint: &crate::chart::ShapePaint) {
+    if let Some(glow) = paint.glow {
+        if glow.radius > 0.0 && glow.color.3 > 0 {
+            let offset = Affine::translate((glow.dx as f64, glow.dy as f64));
+            for pass in (1..=CHART_GLOW_PASSES).rev() {
+                let spread = glow.radius * (pass as f32 / CHART_GLOW_PASSES as f32);
+                let alpha = (glow.color.3 as f32 * 0.35 / pass as f32).clamp(0.0, 255.0) as u8;
+                if alpha == 0 {
+                    continue;
+                }
+                let color = color_to_peniko(Rgba(glow.color.0, glow.color.1, glow.color.2, alpha));
+                let width = (paint.width.max(1.0) + spread * 2.0) as f64;
+                scene.stroke(&Stroke::new(width), offset, color, None, path);
+                if paint.fill.is_some() {
+                    scene.fill(Fill::NonZero, offset, color, None, path);
+                }
+            }
+        }
+    }
+    if let Some(fill) = paint.fill {
+        if fill.3 > 0 {
+            scene.fill(
+                Fill::NonZero,
+                Affine::IDENTITY,
+                color_to_peniko(fill),
+                None,
+                path,
+            );
+        }
+    }
+    if let Some(stroke_color) = paint.stroke {
+        if stroke_color.3 > 0 && paint.width > 0.0 {
+            let mut stroke = Stroke::new(paint.width as f64);
+            if paint.round_cap {
+                stroke = stroke.with_caps(Cap::Round).with_join(Join::Round);
+            }
+            if let Some((on, off)) = paint.dash {
+                stroke = stroke.with_dashes(0.0, [on as f64, off as f64]);
+            }
+            scene.stroke(
+                &stroke,
+                Affine::IDENTITY,
+                color_to_peniko(stroke_color),
+                None,
+                path,
+            );
+        }
     }
 }
 
@@ -2177,8 +2733,19 @@ fn subtree_cache_key(
         }
         if interaction.focused.as_deref() == Some(id) {
             state |= 0b100;
+            // The focused field's caret / selection / preedit are painted
+            // into the fragment: a caret move must miss the cache.
+            if let Some(sel) = interaction.input_selections.get(id) {
+                (sel.anchor, sel.head).hash(&mut h);
+            }
+            if let Some((_, pre)) = interaction.ime_preedit.as_ref().filter(|(pid, _)| pid == id) {
+                pre.hash(&mut h);
+            }
         }
         state.hash(&mut h);
+        if let Some(scroll) = interaction.textarea_scroll.get(id) {
+            scroll.to_bits().hash(&mut h);
+        }
     }
     h.finish()
 }
@@ -2564,6 +3131,68 @@ mod tests {
         it
     }
 
+    /// The device host UI is encoded after every app item: a real
+    /// overlay layout (scrim, panel, text, buttons, a camera preview)
+    /// adds paths and an image to an otherwise empty scene, and clearing
+    /// it removes them again.
+    #[test]
+    fn device_overlay_paints_last_and_clears() {
+        use crate::device::ui::{
+            CameraPhase, CameraPrompt, DeviceUi, OverlayHub, PreviewFrame, Surface, SurfaceUpdate,
+        };
+        let empty = LayoutPass {
+            items: vec![],
+            content_size: (0.0, 0.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+        let mut painter = VelloPainter::new();
+        let baseline = painter.build_scene(&empty, (800, 600), 1.0, 0.0).encoding().path_tags.len();
+
+        let hub = std::sync::Arc::new(OverlayHub::new());
+        hub.attach_window(std::sync::Arc::new(|| {}));
+        let id = hub
+            .show(
+                Surface::Camera(CameraPrompt {
+                    origin: "wss://app.example".into(),
+                    video: false,
+                    max_duration_ms: None,
+                }),
+                std::sync::Arc::new(|_| {}),
+            )
+            .unwrap();
+        hub.update(id, SurfaceUpdate::CameraPhase(CameraPhase::Live));
+        hub.update(
+            id,
+            SurfaceUpdate::Preview(PreviewFrame {
+                width: 4,
+                height: 3,
+                rgba: std::sync::Arc::new(vec![200; 48]),
+            }),
+        );
+        let mut ctl = crate::device::overlay::OverlayController::new(hub);
+        ctl.sync();
+        let layout = ctl
+            .layout((800, 600), 1.0, std::time::Instant::now(), &mut |t: &str, size: f32, wrap: Option<f32>, weight: u16| {
+                painter
+                    .text_engine_mut()
+                    .measure_weighted_line_height(t, size, wrap, weight, size * 1.2)
+            })
+            .expect("a shown surface lays out");
+        assert!(layout.ops.iter().any(|o| matches!(o, crate::device::overlay::DrawOp::Image { .. })));
+        painter.set_device_overlay(Some(layout));
+        let with_overlay = painter.build_scene(&empty, (800, 600), 1.0, 0.0).encoding().path_tags.len();
+        assert!(with_overlay > baseline, "{with_overlay} > {baseline}");
+        painter.set_device_overlay(None);
+        let cleared = painter.build_scene(&empty, (800, 600), 1.0, 0.0).encoding().path_tags.len();
+        assert_eq!(cleared, baseline);
+    }
+
     #[test]
     fn build_scene_skips_offscreen_items() {
         let mut painter = VelloPainter::new();
@@ -2649,6 +3278,112 @@ mod tests {
         let plain = encoded_paths(ItemKind::Container);
         let card = encoded_paths(ItemKind::Card);
         assert!(card > plain, "Card should add a blurred shadow path");
+    }
+
+    /// The chart draw list has to reach the GPU encoder: a chart with
+    /// marks must encode strictly more paths than the same box empty, and
+    /// a glow must add its halo strokes on top of that. Also the panic
+    /// guard for `draw_chart` — every shape variant runs through here.
+    #[test]
+    fn a_chart_encodes_its_marks_and_its_glow() {
+        use crate::tree::Tree;
+        use serde_json::json;
+
+        let encoded = |props: &[(&str, serde_json::Value)]| {
+            let mut tree = Tree::new();
+            let mut create = |id: &str, ty: &str, props: &[(&str, serde_json::Value)]| {
+                let mut map: indexmap::IndexMap<String, serde_json::Value> =
+                    indexmap::IndexMap::new();
+                for (k, v) in props {
+                    map.insert((*k).into(), v.clone());
+                }
+                tree.apply(&hypen_engine::Patch::Create {
+                    id: id.into(),
+                    element_type: ty.into(),
+                    props: std::sync::Arc::new(map),
+                    semantics: None,
+                });
+            };
+            create("c", "Chart", &[]);
+            create("ax", "Axis", &[("0", json!("x")), ("grid", json!(true))]);
+            create(
+                "ay",
+                "Axis",
+                &[("0", json!("y")), ("label", json!("Units"))],
+            );
+            create("b", "Bars", &[("data", json!([3, 1, 2]))]);
+            create("l", "Line", props);
+            create("a", "Area", &[("points", json!([1, 2, 3]))]);
+            create("p", "Points", &[("points", json!([[0, 1]]))]);
+            create("r", "Rule", &[("y", json!(2))]);
+            create("q", "Path", &[("d", json!("M0,0 L2,3"))]);
+            for id in ["ax", "ay", "b", "l", "a", "p", "r", "q"] {
+                tree.apply(&hypen_engine::Patch::Insert {
+                    parent_id: "c".into(),
+                    id: id.into(),
+                    before_id: None,
+                });
+            }
+            let rect = LayoutRect {
+                x: 0.0,
+                y: 0.0,
+                w: 320.0,
+                h: 200.0,
+            };
+            let scene = std::sync::Arc::new(crate::chart::build_scene(
+                &tree,
+                "c",
+                rect,
+                crate::style::Viewport::new(800.0, 600.0),
+                1.0,
+            ));
+            let mut chart = item("c", 0.0, 0.0, 320.0, 200.0);
+            chart.kind = ItemKind::Chart(scene);
+            let layout = LayoutPass {
+                items: vec![chart],
+                content_size: (320.0, 200.0),
+                by_node_id: std::collections::HashMap::new(),
+                actionable_ids: vec![],
+                focusable_ids: vec![],
+                scrollable_ids: vec![],
+                hoverable_ids: vec![],
+                a11y: std::collections::HashMap::new(),
+                a11y_hash: 0,
+            };
+            VelloPainter::new()
+                .build_scene(&layout, (320, 200), 1.0, 0.0)
+                .encoding()
+                .n_paths
+        };
+
+        let empty = {
+            let layout = LayoutPass {
+                items: vec![item("c", 0.0, 0.0, 320.0, 200.0)],
+                content_size: (320.0, 200.0),
+                by_node_id: std::collections::HashMap::new(),
+                actionable_ids: vec![],
+                focusable_ids: vec![],
+                scrollable_ids: vec![],
+                hoverable_ids: vec![],
+                a11y: std::collections::HashMap::new(),
+                a11y_hash: 0,
+            };
+            VelloPainter::new()
+                .build_scene(&layout, (320, 200), 1.0, 0.0)
+                .encoding()
+                .n_paths
+        };
+
+        let plain = encoded(&[("points", json!([1, 2, 3]))]);
+        assert!(
+            plain > empty,
+            "a chart's marks must encode paths ({plain} vs {empty} for an empty box)"
+        );
+        let glowing = encoded(&[("points", json!([1, 2, 3])), ("glow.0", json!(10))]);
+        assert!(
+            glowing > plain,
+            "a glow adds its halo strokes behind the mark ({glowing} vs {plain})"
+        );
     }
 
     #[test]

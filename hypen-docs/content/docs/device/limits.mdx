@@ -1,0 +1,94 @@
+---
+title: Limits & Known Limitations
+description: Item counts, item and connection size budgets, message size, deadlines and flow-control defaults for device capabilities, plus what is not implemented or validated yet
+---
+
+# Limits & Known Limitations
+
+## Limits
+
+Every server SDK runs the same Rust broker, so the protocol limits are the
+same everywhere. Only the memory budgets depend on the host.
+
+| Limit | Value |
+|-------|-------|
+| Items per `gallery.pick` / `file.pick` | 1–16 (`maxCount`) |
+| Size of one uploaded item | 64 MiB (`gallery.pick`, `file.pick`, `camera.capture`, `mic.record`) |
+| Size of one `file.save` | 1 byte to 64 MiB |
+| Upload bytes one connection may hold | **128 MiB** on Node/Bun, Go, Kotlin, Swift and Rust; **16 MiB** on Cloudflare Durable Objects |
+| Upload bytes held across all connections | 1 GiB per process by default (`configureDevice({ processRetainedBytes })` in TypeScript, `AggregateRetainedBytes` in Go, `poolBytes` in Kotlin, `processRetainedBytes` in Swift, `aggregate_retained_bytes` per `DeviceServer` in Rust). On Cloudflare, three connection budgets per Durable Object. |
+| One device JSON message | 1 MiB, checked before parsing. Nesting depth is at most 32, and numbers must be integers of at most 2^53−1. |
+| One binary frame | 64 KiB of payload, plus a 12-byte header |
+| Default deadline | 300 s, clamped per capability: `permission.query` 30 s; pickers, `file.save`, `permission.request` and `bluetooth.select` 300 s; `camera.capture`, `mic.record` and `bluetooth.scan` 600 s |
+| Client deadline ceiling | 300 s on the web host (`maxTimeoutMs`), 600 s on iOS by default |
+| Lease | Renewed every 5 s, expires after 15 s without an acknowledged renewal |
+| Default initial upload credit | 256 KiB for uploads, 64 events for JSON streams |
+| `file.save` credit window | At most 256 KiB outstanding, granted only after the user picks a destination |
+| Recording length | `maxDurationMs` up to 600000 (10 min) for `mic.record` and camera video |
+| Bluetooth filters | Up to 16 service UUIDs; `namePrefix` 1–64 characters |
+| Background work | Not available in revision 1. At most 2 modules per connection may hold background work in the future. |
+
+What happens when a limit is crossed:
+
+- **An item larger than 64 MiB, or larger than its declared size**, ends the
+  request with `invalidParams`. If the client declared the size up front, the
+  server refuses before it allocates anything. Otherwise it enforces the limit
+  as bytes arrive, because live recordings don't know their size in advance.
+- **A full connection or process budget** ends the request with `throttled`.
+- **A JSON message over the limits** counts as a protocol violation on the
+  connection. It's discarded, and repeated violations close the connection.
+- **Completed results count toward the budget until your handler returns.**
+  Copy what you need, for example upload it to storage, inside the handler.
+
+On Cloudflare, one isolate (128 MB) serves every session in a Durable Object.
+That's why the per-connection budget is 16 MiB, and why a single item must
+also fit within 16 MiB there, even though the protocol allows 64 MiB.
+
+The TypeScript `RemoteServer` also caps a single WebSocket message at 4 MiB
+by default while the device plane is on (`maxPayloadLength`).
+
+A host may enforce **lower** limits than the registry allows, for example a
+smaller `MaxItemBytes` in Go, or `maxDownloadBytes` on the web host. Protocol
+version 1 has no way to advertise lowered limits in advance, so a request
+over a host's lower limit fails when it runs.
+
+## Known limitations
+
+The protocol is **version 1 and provisional**. It won't be frozen until
+real-device validation is complete. Current gaps:
+
+- **Native hosts haven't run on physical devices.** The iOS and Android
+  device hosts are covered by unit and protocol tests with the platform faked.
+  The iOS UIKit, AVFoundation and CoreBluetooth code is parse-checked only,
+  and the Android adapters compile and lint clean. Real pickers, capture,
+  recording, BLE and permission prompts still need on-device testing.
+- **Web validation used Chromium's fake media devices** and emulated
+  Bluetooth. It hasn't been run with a physical microphone, camera or BLE
+  peripheral. Web `file.save` has unit tests only, with no real-browser test
+  yet.
+- **`bluetooth.scan` is native-only.** The web offers `bluetooth.select`
+  (Chromium-based browsers only), but no scanning.
+- **Bluetooth is identity-only.** `bluetooth.select` returns an id and a
+  name. There is no connection or GATT access.
+- **`mic.record` supports only PCM16.** There is no compressed audio format
+  in revision 1.
+- **No background lifetime.** Every capability is activation-scoped, and
+  work stops when the user leaves the screen.
+- **No resume.** An operation interrupted by a disconnect fails with
+  `connectionLost` and has to be started again.
+- **Desktop video has no audio track**, and the desktop's camera,
+  microphone, Bluetooth and OS dialogs have been tested with fake hardware
+  and scripted UI only, not yet on real devices.
+- **Rust handlers get results asynchronously.** Rust handlers are
+  synchronous, so a device call returns a `DeviceCall` whose result is
+  applied later with `then` (or read with `on_settled` / `wait` off the
+  handler thread), not awaited inline.
+- **Cloudflare:** the device path hasn't been run under `workerd` itself.
+  Durable Objects stay resident while a device plane is live.
+- **Built-in web clients have no device host.** The client page that
+  `RemoteServer` serves, and the Cloudflare `serveClient` bundle, don't attach
+  a `WebDeviceHost`. Build your own client entry.
+- **Lowered host limits can't be advertised**, as described above.
+- **Go allowlist matching is exact.** Go compares `AllowedOrigins` strings
+  exactly, while the other SDKs normalize the scheme, host and default port
+  first. List origins in their canonical `scheme://host[:port]` form.

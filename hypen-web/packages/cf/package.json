@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/cf",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "description": "Hypen Cloudflare Workers SDK — HypenDurableObject, CFEngine, defineHypenWorker",
   "type": "module",
   "main": "./dist/index.js",
@@ -32,8 +32,9 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@hypen-space/core": "^0.6.4",
-    "@hypen-space/web": "^0.6.4"
+    "@hypen-space/core": "^0.6.5",
+    "@hypen-space/device-web": "^0.6.5",
+    "@hypen-space/web": "^0.6.5"
   },
   "peerDependencies": {
     "hypen-engine": "*"

@@ -22,9 +22,13 @@ public struct HypenView: View {
     ///   - applicatorRegistry: Custom applicator registry (defaults to standard applicators)
     ///   - loadingContent: View to show while connecting
     ///   - errorContent: View to show on error
+    ///   - device: optional DeviceHost (RFC 001 Device Capability Protocol),
+    ///     e.g. `DeviceHost.iOS()`, attached to every socket the view's engine
+    ///     opens. Nil keeps the legacy wire (no `hello.device`).
     public init(
         url: String,
         config: RemoteEngineConfig = .default,
+        device: DeviceEndpoint? = nil,
         componentRegistry: ComponentRegistry = .withDefaults(),
         applicatorRegistry: ApplicatorRegistry = .withDefaults(),
         @ViewBuilder loadingContent: () -> some View = { DefaultLoadingView() },
@@ -36,7 +40,7 @@ public struct HypenView: View {
         self.applicatorRegistry = applicatorRegistry
         self.loadingContent = AnyView(loadingContent())
         self.errorContent = { AnyView(errorContent($0)) }
-        self._viewModel = StateObject(wrappedValue: HypenViewModel(url: url, config: config))
+        self._viewModel = StateObject(wrappedValue: HypenViewModel(url: url, config: config, device: device))
     }
 
     @Environment(\.backNavigationOptions) private var backNavigationOptions
@@ -134,6 +138,10 @@ public struct HypenView: View {
             .id(viewModel.renderer.resetEpoch)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        // The drag-and-drop host: declares the coordinate space pointer
+        // locations and node frames are both resolved in, and feeds the
+        // measured frames to the renderer's DnD coordinator.
+        .hypenDndHost(viewModel.renderer.dnd)
     }
 }
 
@@ -149,10 +157,10 @@ final class HypenViewModel: ObservableObject {
 
     private(set) var actionDispatcher: ActionDispatcher = MockActionDispatcher()
 
-    init(url: String, config: RemoteEngineConfig) {
+    init(url: String, config: RemoteEngineConfig, device: DeviceEndpoint? = nil) {
         log.debug("Creating HypenViewModel for URL: %@", url)
         do {
-            engine = try RemoteEngine(urlString: url, config: config)
+            engine = try RemoteEngine(urlString: url, config: config, device: device)
             log.debug("RemoteEngine created successfully")
             setupBindings()
         } catch {
@@ -165,8 +173,10 @@ final class HypenViewModel: ObservableObject {
         guard let engine = engine else { return }
         self.actionDispatcher = RemoteActionDispatcher(engine: engine)
         // `.onAnimationComplete` dispatches ride the same channel as every
-        // other event applicator.
+        // other event applicator — as do the drag-and-drop outcomes
+        // (`__hypen_reorder` / `__hypen_pin`) and the six `.on*` DnD events.
         renderer.animator.actionDispatcher = self.actionDispatcher
+        renderer.dnd.actionDispatcher = self.actionDispatcher
 
         // Element views observe their own HypenElement, so per-patch
         // invalidation never goes through this view model. The HypenView

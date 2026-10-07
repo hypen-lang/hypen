@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * Canvas → DOM parity fixtures.
  *
@@ -1035,7 +1036,7 @@ describe("Hit test stays in CSS pixels under HiDPI", () => {
     const dispatched: Array<{ name: string; payload: any }> = [];
     const engine = {
       dispatchAction: (name: string, payload: any) => {
-        dispatched.push({ name, payload });
+        dispatched.push(semanticAction(name, payload));
       },
     };
     const mgr = new CanvasEventManager(canvas, engine);

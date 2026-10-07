@@ -844,6 +844,13 @@ export class ApplicatorRegistry {
       "flex-grow",
       "flex-shrink",
       "order",
+      // SVG presentation properties that take a bare number (chart marks,
+      // icons): "0.2px" is invalid and silently dropped.
+      "fill-opacity",
+      "stroke-opacity",
+      "stroke-miterlimit",
+      "stop-opacity",
+      "flood-opacity",
     ];
     return !unitless.includes(prop);
   }

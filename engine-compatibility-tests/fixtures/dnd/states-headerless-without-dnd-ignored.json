@@ -1,0 +1,31 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "states-headerless-without-dnd-ignored",
+  "description": "A header-less .states block is only accepted on a node carrying a __dnd.* prop. Without one the existing 'missing state reference' warning fires and the block is ignored: no __anim.states, no __anim.statePoses, no synthesized __anim.transition, base props untouched",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Card(\"x\").opacity(1).states {\n    onState(lifted).opacity(0.6)\n}",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+
+  "expected": {
+    "patchCount": 2,
+    "patchTypes": ["create", "insert"],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Card",
+        "props": { "opacity.0": 1 },
+        "absentProps": ["__anim.states", "__anim.statePoses", "__anim.transition", "states.0", "onState.0"]
+      },
+      { "type": "insert" }
+    ]
+  }
+}

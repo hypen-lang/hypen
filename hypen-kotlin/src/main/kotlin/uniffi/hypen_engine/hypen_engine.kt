@@ -762,17 +762,45 @@ internal object IntegrityCheckingUniffiLib {
 
   external fun uniffi_hypen_engine_checksum_func_portable_path_has(): Short
 
+  external fun uniffi_hypen_engine_checksum_func_portable_path_move(): Short
+
   external fun uniffi_hypen_engine_checksum_func_portable_path_set(): Short
 
   external fun uniffi_hypen_engine_checksum_func_portable_session_step(): Short
 
   external fun uniffi_hypen_engine_checksum_func_version(): Short
 
+  external fun uniffi_hypen_engine_checksum_func_device_constants_json(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_file_save_params_json(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_handshake(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_is_oversize_text(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_negotiate(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_select_ack(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_server_advertisement_json(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_server_consumes(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_sha256_hex(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_validate_ack(): Short
+
+  external fun uniffi_hypen_engine_checksum_func_device_validate_hello(): Short
+
   external fun uniffi_hypen_engine_checksum_method_hypenengine_action_scope_for(): Short
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_clear_tree(): Short
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_dispatch_action(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_dispatch_external(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_external_builtin_names(): Short
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_get_default_primitives(): Short
 
@@ -781,6 +809,16 @@ internal object IntegrityCheckingUniffiLib {
   external fun uniffi_hypen_engine_checksum_method_hypenengine_get_pending_imports(): Short
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_get_revision(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_get_state_at(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_list_bindings(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_list_external_actions(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_list_routes(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_mcp_manifest(): Short
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_parse_to_json(): Short
 
@@ -806,11 +844,85 @@ internal object IntegrityCheckingUniffiLib {
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_set_module(): Short
 
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_unregister_module(): Short
+
   external fun uniffi_hypen_engine_checksum_method_hypenengine_update_state(): Short
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_update_state_sparse(): Short
 
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_admits_background(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_cancel(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_close(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_consumed_data(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_consumed_events(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_core_stream_id(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_has_background_work(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_info_json(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_is_closed(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_is_live(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_live_count(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_next_deadline(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_on_frame(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_on_text(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_open(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_outstanding_credit(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_outstanding_event_credit(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_owner_activated(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_owner_deactivated(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_owner_destroyed(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_owner_is_active(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_poll(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_release_result(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_reopen_core_capabilities(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_report_violation(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_retained_bytes(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_revision_json(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_selected_version(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_set_transport_buffered(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_start(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_supports(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_devicebroker_tick(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_deviceretainedbytespool_in_use(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_deviceretainedbytespool_limit(): Short
+
   external fun uniffi_hypen_engine_checksum_constructor_hypenengine_new(): Short
+
+  external fun uniffi_hypen_engine_checksum_constructor_devicebroker_new(): Short
+
+  external fun uniffi_hypen_engine_checksum_constructor_deviceretainedbytespool_new(): Short
 
   external fun ffi_hypen_engine_uniffi_contract_version(): Int
 }
@@ -855,6 +967,18 @@ internal object UniffiLib {
     uniffi_out_err: UniffiRustCallStatus,
   ): Unit
 
+  external fun uniffi_hypen_engine_fn_method_hypenengine_dispatch_external(
+    `ptr`: Long,
+    `actionName`: RustBuffer.ByValue,
+    `payloadJson`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_hypenengine_external_builtin_names(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
   external fun uniffi_hypen_engine_fn_method_hypenengine_get_default_primitives(
     `ptr`: Long,
     uniffi_out_err: UniffiRustCallStatus,
@@ -874,6 +998,33 @@ internal object UniffiLib {
     `ptr`: Long,
     uniffi_out_err: UniffiRustCallStatus,
   ): Long
+
+  external fun uniffi_hypen_engine_fn_method_hypenengine_get_state_at(
+    `ptr`: Long,
+    `module`: RustBuffer.ByValue,
+    `path`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_hypenengine_list_bindings(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_hypenengine_list_external_actions(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_hypenengine_list_routes(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_hypenengine_mcp_manifest(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
 
   external fun uniffi_hypen_engine_fn_method_hypenengine_parse_to_json(
     `ptr`: Long,
@@ -948,6 +1099,12 @@ internal object UniffiLib {
     uniffi_out_err: UniffiRustCallStatus,
   ): Unit
 
+  external fun uniffi_hypen_engine_fn_method_hypenengine_unregister_module(
+    `ptr`: Long,
+    `name`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
   external fun uniffi_hypen_engine_fn_method_hypenengine_update_state(
     `ptr`: Long,
     `scope`: RustBuffer.ByValue,
@@ -962,6 +1119,250 @@ internal object UniffiLib {
     `valuesJson`: RustBuffer.ByValue,
     uniffi_out_err: UniffiRustCallStatus,
   ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_clone_devicebroker(
+    `handle`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Long
+
+  external fun uniffi_hypen_engine_fn_free_devicebroker(
+    `handle`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_constructor_devicebroker_new(
+    `configJson`: RustBuffer.ByValue,
+    `pool`: RustBuffer.ByValue,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Long
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_admits_background(
+    `ptr`: Long,
+    `moduleInstanceId`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_cancel(
+    `ptr`: Long,
+    `id`: Int,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_close(
+    `ptr`: Long,
+    `code`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_consumed_data(
+    `ptr`: Long,
+    `id`: Int,
+    `chunks`: Int,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_consumed_events(
+    `ptr`: Long,
+    `id`: Int,
+    `n`: Long,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_core_stream_id(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_has_background_work(
+    `ptr`: Long,
+    `moduleInstanceId`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_info_json(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_is_closed(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_is_live(
+    `ptr`: Long,
+    `id`: Int,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_live_count(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Int
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_next_deadline(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_on_frame(
+    `ptr`: Long,
+    `frame`: RustBuffer.ByValue,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_on_text(
+    `ptr`: Long,
+    `text`: RustBuffer.ByValue,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_open(
+    `ptr`: Long,
+    `specJson`: RustBuffer.ByValue,
+    `download`: RustBuffer.ByValue,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_outstanding_credit(
+    `ptr`: Long,
+    `id`: Int,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_outstanding_event_credit(
+    `ptr`: Long,
+    `id`: Int,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_owner_activated(
+    `ptr`: Long,
+    `moduleInstanceId`: RustBuffer.ByValue,
+    `activationId`: Int,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_owner_deactivated(
+    `ptr`: Long,
+    `moduleInstanceId`: RustBuffer.ByValue,
+    `activationId`: Int,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_owner_destroyed(
+    `ptr`: Long,
+    `moduleInstanceId`: RustBuffer.ByValue,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_owner_is_active(
+    `ptr`: Long,
+    `moduleInstanceId`: RustBuffer.ByValue,
+    `activationId`: Int,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_poll(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_release_result(
+    `ptr`: Long,
+    `id`: Int,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_reopen_core_capabilities(
+    `ptr`: Long,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_report_violation(
+    `ptr`: Long,
+    `reason`: RustBuffer.ByValue,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_retained_bytes(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Long
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_revision_json(
+    `ptr`: Long,
+    `capability`: RustBuffer.ByValue,
+    `version`: Int,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_selected_version(
+    `ptr`: Long,
+    `capability`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_set_transport_buffered(
+    `ptr`: Long,
+    `bytes`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_start(
+    `ptr`: Long,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_supports(
+    `ptr`: Long,
+    `capability`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_method_devicebroker_tick(
+    `ptr`: Long,
+    `nowMs`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_clone_deviceretainedbytespool(
+    `handle`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Long
+
+  external fun uniffi_hypen_engine_fn_free_deviceretainedbytespool(
+    `handle`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_constructor_deviceretainedbytespool_new(
+    `limit`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Long
+
+  external fun uniffi_hypen_engine_fn_method_deviceretainedbytespool_in_use(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Long
+
+  external fun uniffi_hypen_engine_fn_method_deviceretainedbytespool_limit(
+    `ptr`: Long,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Long
 
   external fun uniffi_hypen_engine_fn_func_discover_routers(
     `source`: RustBuffer.ByValue,
@@ -1019,6 +1420,15 @@ internal object UniffiLib {
     uniffi_out_err: UniffiRustCallStatus,
   ): RustBuffer.ByValue
 
+  external fun uniffi_hypen_engine_fn_func_portable_path_move(
+    `valueJson`: RustBuffer.ByValue,
+    `fromPath`: RustBuffer.ByValue,
+    `from`: Int,
+    `toPath`: RustBuffer.ByValue,
+    `to`: Int,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
   external fun uniffi_hypen_engine_fn_func_portable_path_set(
     `valueJson`: RustBuffer.ByValue,
     `path`: RustBuffer.ByValue,
@@ -1033,6 +1443,63 @@ internal object UniffiLib {
   ): RustBuffer.ByValue
 
   external fun uniffi_hypen_engine_fn_func_version(uniffi_out_err: UniffiRustCallStatus): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_func_device_constants_json(uniffi_out_err: UniffiRustCallStatus): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_func_device_file_save_params_json(
+    `name`: RustBuffer.ByValue,
+    `contentType`: RustBuffer.ByValue,
+    `bytes`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_func_device_handshake(
+    `helloJson`: RustBuffer.ByValue,
+    `binaryRoute`: Byte,
+    `serverCapabilitiesJson`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_func_device_is_oversize_text(
+    `text`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_func_device_negotiate(
+    `helloJson`: RustBuffer.ByValue,
+    `binaryRoute`: Byte,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_func_device_select_ack(
+    `helloJson`: RustBuffer.ByValue,
+    `serverProtocolVersions`: RustBuffer.ByValue,
+    `serverCapabilitiesJson`: RustBuffer.ByValue,
+    `serverBinary`: Byte,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_func_device_server_advertisement_json(uniffi_out_err: UniffiRustCallStatus): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_func_device_server_consumes(
+    `revisionJson`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Byte
+
+  external fun uniffi_hypen_engine_fn_func_device_sha256_hex(
+    `bytes`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_func_device_validate_ack(
+    `ackJson`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
+  external fun uniffi_hypen_engine_fn_func_device_validate_hello(
+    `helloJson`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
 
   external fun ffi_hypen_engine_rustbuffer_alloc(
     `size`: Long,
@@ -1278,6 +1745,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
   if (lib.uniffi_hypen_engine_checksum_func_portable_path_has() != 26095.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
+  if (lib.uniffi_hypen_engine_checksum_func_portable_path_move() != 30685.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
   if (lib.uniffi_hypen_engine_checksum_func_portable_path_set() != 30972.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
@@ -1287,6 +1757,39 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
   if (lib.uniffi_hypen_engine_checksum_func_version() != 40847.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
+  if (lib.uniffi_hypen_engine_checksum_func_device_constants_json() != 43686.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_file_save_params_json() != 56970.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_handshake() != 47835.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_is_oversize_text() != 18419.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_negotiate() != 24746.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_select_ack() != 64236.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_server_advertisement_json() != 64876.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_server_consumes() != 7001.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_sha256_hex() != 25198.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_validate_ack() != 13791.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_func_device_validate_hello() != 35123.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_action_scope_for() != 30596.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
@@ -1294,6 +1797,12 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_dispatch_action() != 61576.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_dispatch_external() != 21907.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_external_builtin_names() != 47225.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_get_default_primitives() != 51381.toShort()) {
@@ -1306,6 +1815,21 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_get_revision() != 37374.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_get_state_at() != 24215.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_list_bindings() != 24562.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_list_external_actions() != 37543.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_list_routes() != 35448.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_mcp_manifest() != 8313.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_parse_to_json() != 19998.toShort()) {
@@ -1344,13 +1868,124 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_module() != 9330.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_unregister_module() != 32749.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_update_state() != 65422.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_update_state_sparse() != 14668.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_admits_background() != 28222.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_cancel() != 27195.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_close() != 29203.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_consumed_data() != 26367.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_consumed_events() != 61402.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_core_stream_id() != 28282.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_has_background_work() != 43895.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_info_json() != 23381.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_is_closed() != 10740.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_is_live() != 42596.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_live_count() != 3925.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_next_deadline() != 62760.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_on_frame() != 64139.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_on_text() != 35312.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_open() != 47980.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_outstanding_credit() != 28204.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_outstanding_event_credit() != 32257.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_owner_activated() != 55691.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_owner_deactivated() != 55293.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_owner_destroyed() != 57606.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_owner_is_active() != 38338.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_poll() != 42457.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_release_result() != 63315.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_reopen_core_capabilities() != 8318.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_report_violation() != 19269.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_retained_bytes() != 11687.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_revision_json() != 16799.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_selected_version() != 23862.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_set_transport_buffered() != 25200.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_start() != 36192.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_supports() != 55273.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_devicebroker_tick() != 21660.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_deviceretainedbytespool_in_use() != 64193.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_deviceretainedbytespool_limit() != 28639.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
   if (lib.uniffi_hypen_engine_checksum_constructor_hypenengine_new() != 42970.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_constructor_devicebroker_new() != 18621.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_constructor_deviceretainedbytespool_new() != 17059.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
 }
@@ -1529,6 +2164,46 @@ private class JavaLangRefCleanable(
 /**
  * @suppress
  */
+public object FfiConverterUShort : FfiConverter<UShort, Short> {
+  override fun lift(value: Short): UShort = value.toUShort()
+
+  override fun read(buf: ByteBuffer): UShort = lift(buf.getShort())
+
+  override fun lower(value: UShort): Short = value.toShort()
+
+  override fun allocationSize(value: UShort) = 2UL
+
+  override fun write(
+    value: UShort,
+    buf: ByteBuffer,
+  ) {
+    buf.putShort(value.toShort())
+  }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterUInt : FfiConverter<UInt, Int> {
+  override fun lift(value: Int): UInt = value.toUInt()
+
+  override fun read(buf: ByteBuffer): UInt = lift(buf.getInt())
+
+  override fun lower(value: UInt): Int = value.toInt()
+
+  override fun allocationSize(value: UInt) = 4UL
+
+  override fun write(
+    value: UInt,
+    buf: ByteBuffer,
+  ) {
+    buf.putInt(value.toInt())
+  }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterULong : FfiConverter<ULong, Long> {
   override fun lift(value: Long): ULong = value.toULong()
 
@@ -1623,6 +2298,1234 @@ public object FfiConverterString : FfiConverter<String, RustBuffer.ByValue> {
     val byteBuf = toUtf8(value)
     buf.putInt(byteBuf.limit())
     buf.put(byteBuf)
+  }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterByteArray : FfiConverterRustBuffer<ByteArray> {
+  override fun read(buf: ByteBuffer): ByteArray {
+    val len = buf.getInt()
+    val byteArr = ByteArray(len)
+    buf.get(byteArr)
+    return byteArr
+  }
+
+  override fun allocationSize(value: ByteArray): ULong = 4UL + value.size.toULong()
+
+  override fun write(
+    value: ByteArray,
+    buf: ByteBuffer,
+  ) {
+    buf.putInt(value.size)
+    buf.put(value)
+  }
+}
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+/**
+ * The server-side device broker for one device-enabled connection
+ * (sans-IO: the host feeds text/frames/time and drains `poll`).
+ *
+ * Releasing the object (its last Kotlin `destroy()`/`close()`, Swift
+ * reference or Python reference) closes the broker with `connectionLost`
+ * if the host did not, so its retained bytes always return to a shared
+ * [`DeviceRetainedBytesPool`] (see `device_binding::OwnedBroker`).
+ */
+public interface DeviceBrokerInterface {
+  fun `admitsBackground`(`moduleInstanceId`: kotlin.String): kotlin.Boolean
+
+  /**
+   * Server-initiated cancel (sends `cancel`, settles `cancelled`).
+   */
+  fun `cancel`(
+    `id`: kotlin.UInt,
+    `nowMs`: kotlin.ULong,
+  )
+
+  /**
+   * Close the device plane locally with a wire error code.
+   */
+  fun `close`(`code`: kotlin.String)
+
+  /**
+   * The consumer finished the next `chunks` data chunks of stream `id`.
+   */
+  fun `consumedData`(
+    `id`: kotlin.UInt,
+    `chunks`: kotlin.UInt,
+    `nowMs`: kotlin.ULong,
+  )
+
+  /**
+   * The consumer finished `n` JSON events of stream `id`.
+   */
+  fun `consumedEvents`(
+    `id`: kotlin.UInt,
+    `n`: kotlin.ULong,
+    `nowMs`: kotlin.ULong,
+  )
+
+  fun `coreStreamId`(): kotlin.UInt?
+
+  fun `hasBackgroundWork`(`moduleInstanceId`: kotlin.String): kotlin.Boolean
+
+  /**
+   * A JSON snapshot of the broker state (`device_binding::info_json`).
+   */
+  fun `infoJson`(): kotlin.String
+
+  fun `isClosed`(): kotlin.Boolean
+
+  fun `isLive`(`id`: kotlin.UInt): kotlin.Boolean
+
+  fun `liveCount`(): kotlin.UInt
+
+  /**
+   * The next deadline without running anything.
+   */
+  fun `nextDeadline`(): kotlin.ULong?
+
+  /**
+   * Feed one client → server binary frame.
+   */
+  fun `onFrame`(
+    `frame`: kotlin.ByteArray,
+    `nowMs`: kotlin.ULong,
+  ): kotlin.Boolean
+
+  /**
+   * Feed one client → server device text message.
+   */
+  fun `onText`(
+    `text`: kotlin.String,
+    `nowMs`: kotlin.ULong,
+  ): kotlin.Boolean
+
+  /**
+   * Open a request from the open JSON; `download` carries `file.save`
+   * bytes.
+   */
+  fun `open`(
+    `specJson`: kotlin.String,
+    `download`: kotlin.ByteArray?,
+    `nowMs`: kotlin.ULong,
+  ): DeviceOpenResult
+
+  fun `outstandingCredit`(`id`: kotlin.UInt): kotlin.ULong?
+
+  fun `outstandingEventCredit`(`id`: kotlin.UInt): kotlin.ULong?
+
+  /**
+   * Record a module activation; false for a stale one.
+   */
+  fun `ownerActivated`(
+    `moduleInstanceId`: kotlin.String,
+    `activationId`: kotlin.UInt,
+    `nowMs`: kotlin.ULong,
+  ): kotlin.Boolean
+
+  /**
+   * The activation ended: activation-owned work is cancelled.
+   */
+  fun `ownerDeactivated`(
+    `moduleInstanceId`: kotlin.String,
+    `activationId`: kotlin.UInt,
+    `nowMs`: kotlin.ULong,
+  )
+
+  /**
+   * The module instance was destroyed: all of its work is cancelled.
+   */
+  fun `ownerDestroyed`(
+    `moduleInstanceId`: kotlin.String,
+    `nowMs`: kotlin.ULong,
+  )
+
+  fun `ownerIsActive`(
+    `moduleInstanceId`: kotlin.String,
+    `activationId`: kotlin.UInt,
+  ): kotlin.Boolean
+
+  /**
+   * Drain every output (and at most one bulk turn).
+   */
+  fun `poll`(): List<DeviceOutput>
+
+  /**
+   * Release a held result's retained-bytes charge (idempotent).
+   */
+  fun `releaseResult`(`id`: kotlin.UInt)
+
+  /**
+   * Planned reopen of `core.capabilities`; the new id, if reopened.
+   */
+  fun `reopenCoreCapabilities`(`nowMs`: kotlin.ULong): kotlin.UInt?
+
+  /**
+   * Count a connection-level violation the host detected itself.
+   */
+  fun `reportViolation`(
+    `reason`: kotlin.String,
+    `nowMs`: kotlin.ULong,
+  )
+
+  fun `retainedBytes`(): kotlin.ULong
+
+  /**
+   * The revision this broker enforces for `capability@version`
+   * (`device_binding::revision_json`: the registry revision or its
+   * configured override, `maxItemBytes` capped by the broker's) as JSON,
+   * or `None` when it is not a registry revision.
+   */
+  fun `revisionJson`(
+    `capability`: kotlin.String,
+    `version`: kotlin.UInt,
+  ): kotlin.String?
+
+  fun `selectedVersion`(`capability`: kotlin.String): kotlin.UInt?
+
+  /**
+   * Report the transport's buffered (accepted, unwritten) bytes.
+   */
+  fun `setTransportBuffered`(`bytes`: kotlin.ULong)
+
+  /**
+   * Open the connection-owned `core.capabilities` stream.
+   */
+  fun `start`(`nowMs`: kotlin.ULong): DeviceOpenResult
+
+  fun `supports`(`capability`: kotlin.String): kotlin.Boolean
+
+  /**
+   * Run due timers; the next deadline (absolute ms), if any.
+   */
+  fun `tick`(`nowMs`: kotlin.ULong): kotlin.ULong?
+
+  companion object
+}
+
+/**
+ * The server-side device broker for one device-enabled connection
+ * (sans-IO: the host feeds text/frames/time and drains `poll`).
+ *
+ * Releasing the object (its last Kotlin `destroy()`/`close()`, Swift
+ * reference or Python reference) closes the broker with `connectionLost`
+ * if the host did not, so its retained bytes always return to a shared
+ * [`DeviceRetainedBytesPool`] (see `device_binding::OwnedBroker`).
+ */
+open class DeviceBroker :
+  Disposable,
+  AutoCloseable,
+  DeviceBrokerInterface {
+  /**
+   * @suppress
+   */
+  @Suppress("UNUSED_PARAMETER")
+  constructor(withHandle: UniffiWithHandle, handle: Long) {
+    this.handle = handle
+    this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+  }
+
+  /**
+   * @suppress
+   *
+   * This constructor can be used to instantiate a fake object. Only used for tests. Any
+   * attempt to actually use an object constructed this way will fail as there is no
+   * connected Rust object.
+   */
+  @Suppress("UNUSED_PARAMETER")
+  constructor(noHandle: NoHandle) {
+    this.handle = 0
+    this.cleanable = null
+  }
+
+  /**
+   * A broker from the configuration JSON (only `ack` is required),
+   * optionally sharing `pool`'s aggregate budget.
+   */
+  constructor(`configJson`: kotlin.String, `pool`: DeviceRetainedBytesPool?, `nowMs`: kotlin.ULong) :
+    this(
+      UniffiWithHandle,
+      uniffiRustCallWithError(DeviceBindingException) { _status ->
+        UniffiLib.uniffi_hypen_engine_fn_constructor_devicebroker_new(
+          FfiConverterString.lower(`configJson`),
+          FfiConverterOptionalTypeDeviceRetainedBytesPool.lower(`pool`),
+          FfiConverterULong.lower(`nowMs`),
+          _status,
+        )
+      },
+    )
+
+  protected val handle: Long
+  protected val cleanable: UniffiCleaner.Cleanable?
+
+  private val wasDestroyed = AtomicBoolean(false)
+  private val callCounter = AtomicLong(1)
+
+  override fun destroy() {
+    // Only allow a single call to this method.
+    // TODO: maybe we should log a warning if called more than once?
+    if (this.wasDestroyed.compareAndSet(false, true)) {
+      // This decrement always matches the initial count of 1 given at creation time.
+      if (this.callCounter.decrementAndGet() == 0L) {
+        cleanable?.clean()
+      }
+    }
+  }
+
+  @Synchronized
+  override fun close() {
+    this.destroy()
+  }
+
+  internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+    // Check and increment the call counter, to keep the object alive.
+    // This needs a compare-and-set retry loop in case of concurrent updates.
+    do {
+      val c = this.callCounter.get()
+      if (c == 0L) {
+        throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+      }
+      if (c == Long.MAX_VALUE) {
+        throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+      }
+    } while (!this.callCounter.compareAndSet(c, c + 1L))
+    // Now we can safely do the method call without the handle being freed concurrently.
+    try {
+      return block(this.uniffiCloneHandle())
+    } finally {
+      // This decrement always matches the increment we performed above.
+      if (this.callCounter.decrementAndGet() == 0L) {
+        cleanable?.clean()
+      }
+    }
+  }
+
+  // Use a static inner class instead of a closure so as not to accidentally
+  // capture `this` as part of the cleanable's action.
+  private class UniffiCleanAction(
+    private val handle: Long,
+  ) : Runnable {
+    override fun run() {
+      if (handle == 0.toLong()) {
+        // Fake object created with `NoHandle`, don't try to free.
+        return
+      }
+      uniffiRustCall { status ->
+        UniffiLib.uniffi_hypen_engine_fn_free_devicebroker(handle, status)
+      }
+    }
+  }
+
+  /**
+   * @suppress
+   */
+  fun uniffiCloneHandle(): Long {
+    if (handle == 0.toLong()) {
+      throw InternalException("uniffiCloneHandle() called on NoHandle object")
+    }
+    return uniffiRustCall { status ->
+      UniffiLib.uniffi_hypen_engine_fn_clone_devicebroker(handle, status)
+    }
+  }
+
+  override fun `admitsBackground`(`moduleInstanceId`: kotlin.String): kotlin.Boolean =
+    FfiConverterBoolean.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_admits_background(
+            it,
+            FfiConverterString.lower(`moduleInstanceId`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Server-initiated cancel (sends `cancel`, settles `cancelled`).
+   */
+  override fun `cancel`(
+    `id`: kotlin.UInt,
+    `nowMs`: kotlin.ULong,
+  ) = callWithHandle {
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_cancel(
+        it,
+        FfiConverterUInt.lower(`id`),
+        FfiConverterULong.lower(`nowMs`),
+        _status,
+      )
+    }
+  }
+
+  /**
+   * Close the device plane locally with a wire error code.
+   */
+  @Throws(DeviceBindingException::class)
+  override fun `close`(`code`: kotlin.String) =
+    callWithHandle {
+      uniffiRustCallWithError(DeviceBindingException) { _status ->
+        UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_close(
+          it,
+          FfiConverterString.lower(`code`),
+          _status,
+        )
+      }
+    }
+
+  /**
+   * The consumer finished the next `chunks` data chunks of stream `id`.
+   */
+  override fun `consumedData`(
+    `id`: kotlin.UInt,
+    `chunks`: kotlin.UInt,
+    `nowMs`: kotlin.ULong,
+  ) = callWithHandle {
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_consumed_data(
+        it,
+        FfiConverterUInt.lower(`id`),
+        FfiConverterUInt.lower(`chunks`),
+        FfiConverterULong.lower(`nowMs`),
+        _status,
+      )
+    }
+  }
+
+  /**
+   * The consumer finished `n` JSON events of stream `id`.
+   */
+  override fun `consumedEvents`(
+    `id`: kotlin.UInt,
+    `n`: kotlin.ULong,
+    `nowMs`: kotlin.ULong,
+  ) = callWithHandle {
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_consumed_events(
+        it,
+        FfiConverterUInt.lower(`id`),
+        FfiConverterULong.lower(`n`),
+        FfiConverterULong.lower(`nowMs`),
+        _status,
+      )
+    }
+  }
+
+  override fun `coreStreamId`(): kotlin.UInt? =
+    FfiConverterOptionalUInt.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_core_stream_id(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  override fun `hasBackgroundWork`(`moduleInstanceId`: kotlin.String): kotlin.Boolean =
+    FfiConverterBoolean.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_has_background_work(
+            it,
+            FfiConverterString.lower(`moduleInstanceId`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * A JSON snapshot of the broker state (`device_binding::info_json`).
+   */
+  override fun `infoJson`(): kotlin.String =
+    FfiConverterString.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_info_json(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  override fun `isClosed`(): kotlin.Boolean =
+    FfiConverterBoolean.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_is_closed(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  override fun `isLive`(`id`: kotlin.UInt): kotlin.Boolean =
+    FfiConverterBoolean.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_is_live(
+            it,
+            FfiConverterUInt.lower(`id`),
+            _status,
+          )
+        }
+      },
+    )
+
+  override fun `liveCount`(): kotlin.UInt =
+    FfiConverterUInt.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_live_count(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * The next deadline without running anything.
+   */
+  override fun `nextDeadline`(): kotlin.ULong? =
+    FfiConverterOptionalULong.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_next_deadline(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Feed one client → server binary frame.
+   */
+  override fun `onFrame`(
+    `frame`: kotlin.ByteArray,
+    `nowMs`: kotlin.ULong,
+  ): kotlin.Boolean =
+    FfiConverterBoolean.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_on_frame(
+            it,
+            FfiConverterByteArray.lower(`frame`),
+            FfiConverterULong.lower(`nowMs`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Feed one client → server device text message.
+   */
+  override fun `onText`(
+    `text`: kotlin.String,
+    `nowMs`: kotlin.ULong,
+  ): kotlin.Boolean =
+    FfiConverterBoolean.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_on_text(
+            it,
+            FfiConverterString.lower(`text`),
+            FfiConverterULong.lower(`nowMs`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Open a request from the open JSON; `download` carries `file.save`
+   * bytes.
+   */
+  @Throws(DeviceBindingException::class)
+  override fun `open`(
+    `specJson`: kotlin.String,
+    `download`: kotlin.ByteArray?,
+    `nowMs`: kotlin.ULong,
+  ): DeviceOpenResult =
+    FfiConverterTypeDeviceOpenResult.lift(
+      callWithHandle {
+        uniffiRustCallWithError(DeviceBindingException) { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_open(
+            it,
+            FfiConverterString.lower(`specJson`),
+            FfiConverterOptionalByteArray.lower(`download`),
+            FfiConverterULong.lower(`nowMs`),
+            _status,
+          )
+        }
+      },
+    )
+
+  override fun `outstandingCredit`(`id`: kotlin.UInt): kotlin.ULong? =
+    FfiConverterOptionalULong.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_outstanding_credit(
+            it,
+            FfiConverterUInt.lower(`id`),
+            _status,
+          )
+        }
+      },
+    )
+
+  override fun `outstandingEventCredit`(`id`: kotlin.UInt): kotlin.ULong? =
+    FfiConverterOptionalULong.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_outstanding_event_credit(
+            it,
+            FfiConverterUInt.lower(`id`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Record a module activation; false for a stale one.
+   */
+  override fun `ownerActivated`(
+    `moduleInstanceId`: kotlin.String,
+    `activationId`: kotlin.UInt,
+    `nowMs`: kotlin.ULong,
+  ): kotlin.Boolean =
+    FfiConverterBoolean.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_owner_activated(
+            it,
+            FfiConverterString.lower(`moduleInstanceId`),
+            FfiConverterUInt.lower(`activationId`),
+            FfiConverterULong.lower(`nowMs`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * The activation ended: activation-owned work is cancelled.
+   */
+  override fun `ownerDeactivated`(
+    `moduleInstanceId`: kotlin.String,
+    `activationId`: kotlin.UInt,
+    `nowMs`: kotlin.ULong,
+  ) = callWithHandle {
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_owner_deactivated(
+        it,
+        FfiConverterString.lower(`moduleInstanceId`),
+        FfiConverterUInt.lower(`activationId`),
+        FfiConverterULong.lower(`nowMs`),
+        _status,
+      )
+    }
+  }
+
+  /**
+   * The module instance was destroyed: all of its work is cancelled.
+   */
+  override fun `ownerDestroyed`(
+    `moduleInstanceId`: kotlin.String,
+    `nowMs`: kotlin.ULong,
+  ) = callWithHandle {
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_owner_destroyed(
+        it,
+        FfiConverterString.lower(`moduleInstanceId`),
+        FfiConverterULong.lower(`nowMs`),
+        _status,
+      )
+    }
+  }
+
+  override fun `ownerIsActive`(
+    `moduleInstanceId`: kotlin.String,
+    `activationId`: kotlin.UInt,
+  ): kotlin.Boolean =
+    FfiConverterBoolean.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_owner_is_active(
+            it,
+            FfiConverterString.lower(`moduleInstanceId`),
+            FfiConverterUInt.lower(`activationId`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Drain every output (and at most one bulk turn).
+   */
+  override fun `poll`(): List<DeviceOutput> =
+    FfiConverterSequenceTypeDeviceOutput.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_poll(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Release a held result's retained-bytes charge (idempotent).
+   */
+  override fun `releaseResult`(`id`: kotlin.UInt) =
+    callWithHandle {
+      uniffiRustCall { _status ->
+        UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_release_result(
+          it,
+          FfiConverterUInt.lower(`id`),
+          _status,
+        )
+      }
+    }
+
+  /**
+   * Planned reopen of `core.capabilities`; the new id, if reopened.
+   */
+  override fun `reopenCoreCapabilities`(`nowMs`: kotlin.ULong): kotlin.UInt? =
+    FfiConverterOptionalUInt.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_reopen_core_capabilities(
+            it,
+            FfiConverterULong.lower(`nowMs`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Count a connection-level violation the host detected itself.
+   */
+  override fun `reportViolation`(
+    `reason`: kotlin.String,
+    `nowMs`: kotlin.ULong,
+  ) = callWithHandle {
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_report_violation(
+        it,
+        FfiConverterString.lower(`reason`),
+        FfiConverterULong.lower(`nowMs`),
+        _status,
+      )
+    }
+  }
+
+  override fun `retainedBytes`(): kotlin.ULong =
+    FfiConverterULong.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_retained_bytes(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * The revision this broker enforces for `capability@version`
+   * (`device_binding::revision_json`: the registry revision or its
+   * configured override, `maxItemBytes` capped by the broker's) as JSON,
+   * or `None` when it is not a registry revision.
+   */
+  override fun `revisionJson`(
+    `capability`: kotlin.String,
+    `version`: kotlin.UInt,
+  ): kotlin.String? =
+    FfiConverterOptionalString.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_revision_json(
+            it,
+            FfiConverterString.lower(`capability`),
+            FfiConverterUInt.lower(`version`),
+            _status,
+          )
+        }
+      },
+    )
+
+  override fun `selectedVersion`(`capability`: kotlin.String): kotlin.UInt? =
+    FfiConverterOptionalUInt.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_selected_version(
+            it,
+            FfiConverterString.lower(`capability`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Report the transport's buffered (accepted, unwritten) bytes.
+   */
+  override fun `setTransportBuffered`(`bytes`: kotlin.ULong) =
+    callWithHandle {
+      uniffiRustCall { _status ->
+        UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_set_transport_buffered(
+          it,
+          FfiConverterULong.lower(`bytes`),
+          _status,
+        )
+      }
+    }
+
+  /**
+   * Open the connection-owned `core.capabilities` stream.
+   */
+  override fun `start`(`nowMs`: kotlin.ULong): DeviceOpenResult =
+    FfiConverterTypeDeviceOpenResult.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_start(
+            it,
+            FfiConverterULong.lower(`nowMs`),
+            _status,
+          )
+        }
+      },
+    )
+
+  override fun `supports`(`capability`: kotlin.String): kotlin.Boolean =
+    FfiConverterBoolean.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_supports(
+            it,
+            FfiConverterString.lower(`capability`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Run due timers; the next deadline (absolute ms), if any.
+   */
+  override fun `tick`(`nowMs`: kotlin.ULong): kotlin.ULong? =
+    FfiConverterOptionalULong.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_devicebroker_tick(
+            it,
+            FfiConverterULong.lower(`nowMs`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * @suppress
+   */
+  companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceBroker : FfiConverter<DeviceBroker, Long> {
+  override fun lower(value: DeviceBroker): Long = value.uniffiCloneHandle()
+
+  override fun lift(value: Long): DeviceBroker = DeviceBroker(UniffiWithHandle, value)
+
+  override fun read(buf: ByteBuffer): DeviceBroker = lift(buf.getLong())
+
+  override fun allocationSize(value: DeviceBroker) = 8UL
+
+  override fun write(
+    value: DeviceBroker,
+    buf: ByteBuffer,
+  ) {
+    buf.putLong(lower(value))
+  }
+}
+
+// This template implements a class for working with a Rust struct via a handle
+// to the live Rust struct on the other side of the FFI.
+//
+// There's some subtlety here, because we have to be careful not to operate on a Rust
+// struct after it has been dropped, and because we must expose a public API for freeing
+// theq Kotlin wrapper object in lieu of reliable finalizers. The core requirements are:
+//
+//   * Each instance holds an opaque handle to the underlying Rust struct.
+//     Method calls need to read this handle from the object's state and pass it in to
+//     the Rust FFI.
+//
+//   * When an instance is no longer needed, its handle should be passed to a
+//     special destructor function provided by the Rust FFI, which will drop the
+//     underlying Rust struct.
+//
+//   * Given an instance, calling code is expected to call the special
+//     `destroy` method in order to free it after use, either by calling it explicitly
+//     or by using a higher-level helper like the `use` method. Failing to do so risks
+//     leaking the underlying Rust struct.
+//
+//   * We can't assume that calling code will do the right thing, and must be prepared
+//     to handle Kotlin method calls executing concurrently with or even after a call to
+//     `destroy`, and to handle multiple (possibly concurrent!) calls to `destroy`.
+//
+//   * We must never allow Rust code to operate on the underlying Rust struct after
+//     the destructor has been called, and must never call the destructor more than once.
+//     Doing so may trigger memory unsafety.
+//
+//   * To mitigate many of the risks of leaking memory and use-after-free unsafety, a `Cleaner`
+//     is implemented to call the destructor when the Kotlin object becomes unreachable.
+//     This is done in a background thread. This is not a panacea, and client code should be aware that
+//      1. the thread may starve if some there are objects that have poorly performing
+//     `drop` methods or do significant work in their `drop` methods.
+//      2. the thread is shared across the whole library. This can be tuned by using `android_cleaner = true`,
+//         or `android = true` in the [`kotlin` section of the `uniffi.toml` file](https://mozilla.github.io/uniffi-rs/kotlin/configuration.html).
+//
+// If we try to implement this with mutual exclusion on access to the handle, there is the
+// possibility of a race between a method call and a concurrent call to `destroy`:
+//
+//    * Thread A starts a method call, reads the value of the handle, but is interrupted
+//      before it can pass the handle over the FFI to Rust.
+//    * Thread B calls `destroy` and frees the underlying Rust struct.
+//    * Thread A resumes, passing the already-read handle value to Rust and triggering
+//      a use-after-free.
+//
+// One possible solution would be to use a `ReadWriteLock`, with each method call taking
+// a read lock (and thus allowed to run concurrently) and the special `destroy` method
+// taking a write lock (and thus blocking on live method calls). However, we aim not to
+// generate methods with any hidden blocking semantics, and a `destroy` method that might
+// block if called incorrectly seems to meet that bar.
+//
+// So, we achieve our goals by giving each instance an associated `AtomicLong` counter to track
+// the number of in-flight method calls, and an `AtomicBoolean` flag to indicate whether `destroy`
+// has been called. These are updated according to the following rules:
+//
+//    * The initial value of the counter is 1, indicating a live object with no in-flight calls.
+//      The initial value for the flag is false.
+//
+//    * At the start of each method call, we atomically check the counter.
+//      If it is 0 then the underlying Rust struct has already been destroyed and the call is aborted.
+//      If it is nonzero them we atomically increment it by 1 and proceed with the method call.
+//
+//    * At the end of each method call, we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+//    * When `destroy` is called, we atomically flip the flag from false to true.
+//      If the flag was already true we silently fail.
+//      Otherwise we atomically decrement and check the counter.
+//      If it has reached zero then we destroy the underlying Rust struct.
+//
+// Astute readers may observe that this all sounds very similar to the way that Rust's `Arc<T>` works,
+// and indeed it is, with the addition of a flag to guard against multiple calls to `destroy`.
+//
+// The overall effect is that the underlying Rust struct is destroyed only when `destroy` has been
+// called *and* all in-flight method calls have completed, avoiding violating any of the expectations
+// of the underlying Rust code.
+//
+// This makes a cleaner a better alternative to _not_ calling `destroy()` as
+// and when the object is finished with, but the abstraction is not perfect: if the Rust object's `drop`
+// method is slow, and/or there are many objects to cleanup, and it's on a low end Android device, then the cleaner
+// thread may be starved, and the app will leak memory.
+//
+// In this case, `destroy`ing manually may be a better solution.
+//
+// The cleaner can live side by side with the manual calling of `destroy`. In the order of responsiveness, uniffi objects
+// with Rust peers are reclaimed:
+//
+// 1. By calling the `destroy` method of the object, which calls `rustObject.free()`. If that doesn't happen:
+// 2. When the object becomes unreachable, AND the Cleaner thread gets to call `rustObject.free()`. If the thread is starved then:
+// 3. The memory is reclaimed when the process terminates.
+//
+// [1] https://stackoverflow.com/questions/24376768/can-java-finalize-an-object-when-it-is-still-in-scope/24380219
+//
+
+/**
+ * An aggregate retained-bytes budget shared by several brokers.
+ */
+public interface DeviceRetainedBytesPoolInterface {
+  /**
+   * Bytes currently reserved across every broker using this pool.
+   */
+  fun `inUse`(): kotlin.ULong
+
+  fun `limit`(): kotlin.ULong
+
+  companion object
+}
+
+/**
+ * An aggregate retained-bytes budget shared by several brokers.
+ */
+open class DeviceRetainedBytesPool :
+  Disposable,
+  AutoCloseable,
+  DeviceRetainedBytesPoolInterface {
+  /**
+   * @suppress
+   */
+  @Suppress("UNUSED_PARAMETER")
+  constructor(withHandle: UniffiWithHandle, handle: Long) {
+    this.handle = handle
+    this.cleanable = UniffiLib.CLEANER.register(this, UniffiCleanAction(handle))
+  }
+
+  /**
+   * @suppress
+   *
+   * This constructor can be used to instantiate a fake object. Only used for tests. Any
+   * attempt to actually use an object constructed this way will fail as there is no
+   * connected Rust object.
+   */
+  @Suppress("UNUSED_PARAMETER")
+  constructor(noHandle: NoHandle) {
+    this.handle = 0
+    this.cleanable = null
+  }
+  constructor(`limit`: kotlin.ULong) :
+    this(
+      UniffiWithHandle,
+      uniffiRustCall { _status ->
+        UniffiLib.uniffi_hypen_engine_fn_constructor_deviceretainedbytespool_new(FfiConverterULong.lower(`limit`), _status)
+      },
+    )
+
+  protected val handle: Long
+  protected val cleanable: UniffiCleaner.Cleanable?
+
+  private val wasDestroyed = AtomicBoolean(false)
+  private val callCounter = AtomicLong(1)
+
+  override fun destroy() {
+    // Only allow a single call to this method.
+    // TODO: maybe we should log a warning if called more than once?
+    if (this.wasDestroyed.compareAndSet(false, true)) {
+      // This decrement always matches the initial count of 1 given at creation time.
+      if (this.callCounter.decrementAndGet() == 0L) {
+        cleanable?.clean()
+      }
+    }
+  }
+
+  @Synchronized
+  override fun close() {
+    this.destroy()
+  }
+
+  internal inline fun <R> callWithHandle(block: (handle: Long) -> R): R {
+    // Check and increment the call counter, to keep the object alive.
+    // This needs a compare-and-set retry loop in case of concurrent updates.
+    do {
+      val c = this.callCounter.get()
+      if (c == 0L) {
+        throw IllegalStateException("${this.javaClass.simpleName} object has already been destroyed")
+      }
+      if (c == Long.MAX_VALUE) {
+        throw IllegalStateException("${this.javaClass.simpleName} call counter would overflow")
+      }
+    } while (!this.callCounter.compareAndSet(c, c + 1L))
+    // Now we can safely do the method call without the handle being freed concurrently.
+    try {
+      return block(this.uniffiCloneHandle())
+    } finally {
+      // This decrement always matches the increment we performed above.
+      if (this.callCounter.decrementAndGet() == 0L) {
+        cleanable?.clean()
+      }
+    }
+  }
+
+  // Use a static inner class instead of a closure so as not to accidentally
+  // capture `this` as part of the cleanable's action.
+  private class UniffiCleanAction(
+    private val handle: Long,
+  ) : Runnable {
+    override fun run() {
+      if (handle == 0.toLong()) {
+        // Fake object created with `NoHandle`, don't try to free.
+        return
+      }
+      uniffiRustCall { status ->
+        UniffiLib.uniffi_hypen_engine_fn_free_deviceretainedbytespool(handle, status)
+      }
+    }
+  }
+
+  /**
+   * @suppress
+   */
+  fun uniffiCloneHandle(): Long {
+    if (handle == 0.toLong()) {
+      throw InternalException("uniffiCloneHandle() called on NoHandle object")
+    }
+    return uniffiRustCall { status ->
+      UniffiLib.uniffi_hypen_engine_fn_clone_deviceretainedbytespool(handle, status)
+    }
+  }
+
+  /**
+   * Bytes currently reserved across every broker using this pool.
+   */
+  override fun `inUse`(): kotlin.ULong =
+    FfiConverterULong.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_deviceretainedbytespool_in_use(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  override fun `limit`(): kotlin.ULong =
+    FfiConverterULong.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_deviceretainedbytespool_limit(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * @suppress
+   */
+  companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceRetainedBytesPool : FfiConverter<DeviceRetainedBytesPool, Long> {
+  override fun lower(value: DeviceRetainedBytesPool): Long = value.uniffiCloneHandle()
+
+  override fun lift(value: Long): DeviceRetainedBytesPool = DeviceRetainedBytesPool(UniffiWithHandle, value)
+
+  override fun read(buf: ByteBuffer): DeviceRetainedBytesPool = lift(buf.getLong())
+
+  override fun allocationSize(value: DeviceRetainedBytesPool) = 8UL
+
+  override fun write(
+    value: DeviceRetainedBytesPool,
+    buf: ByteBuffer,
+  ) {
+    buf.putLong(lower(value))
   }
 }
 
@@ -1749,6 +3652,28 @@ public interface HypenEngineInterface {
   )
 
   /**
+   * Dispatch on behalf of an external caller.
+   *
+   * Authorises against exactly what `list_external_actions` advertises,
+   * then queues the *resolved* internal action for the host to poll — so
+   * `navigate` arrives as `router.push` and `set_input` as `__hypen_bind`
+   * with a payload built here, never one the caller supplied.
+   */
+  fun `dispatchExternal`(
+    `actionName`: kotlin.String,
+    `payloadJson`: kotlin.String?,
+  )
+
+  /**
+   * The built-in external action names, as JSON
+   * `{ navigate, back, setInput, bindAction }`.
+   *
+   * Exported so SDKs bind to these rather than hardcoding the literals —
+   * hardcoding is why one rename broke four SDKs silently.
+   */
+  fun `externalBuiltinNames`(): kotlin.String
+
+  /**
    * Return the list of standard Hypen primitive element names.
    */
   fun `getDefaultPrimitives`(): List<kotlin.String>
@@ -1769,6 +3694,45 @@ public interface HypenEngineInterface {
    * Get the current revision number
    */
   fun `getRevision`(): kotlin.ULong
+
+  /**
+   * Read module state, whole or at a path, as a JSON string.
+   *
+   * `module` is `None` for the primary module or a registered module's
+   * name (case-insensitive). Returns `None` when the module is unknown or
+   * the path is absent.
+   */
+  fun `getStateAt`(
+    `module`: kotlin.String?,
+    `path`: kotlin.String?,
+  ): kotlin.String?
+
+  /**
+   * List `.bind()`-declared writable inputs as a JSON array of
+   * `{ path, prop, elementType, moduleScope }`, backing `set_input`'s
+   * argument schema.
+   */
+  fun `listBindings`(): kotlin.String
+
+  /**
+   * List every action an external caller may dispatch, as a JSON array of
+   * `{ name, module, builtin }`.
+   */
+  fun `listExternalActions`(): kotlin.String
+
+  /**
+   * List declared routes as a JSON array of `{ path, params, moduleScope }`,
+   * backing `navigate`'s argument schema.
+   */
+  fun `listRoutes`(): kotlin.String
+
+  /**
+   * The full MCP handshake for this app, as a JSON string.
+   *
+   * Composed in the engine so every SDK transports the same bytes rather
+   * than writing its own prose and drifting.
+   */
+  fun `mcpManifest`(): kotlin.String
 
   /**
    * Parse Hypen DSL and return AST as JSON
@@ -1857,6 +3821,15 @@ public interface HypenEngineInterface {
    * Set module configuration
    */
   fun `setModule`(`config`: ModuleConfig)
+
+  /**
+   * Drop a module and every action it declared.
+   *
+   * **Call on destroy only**, never on unmount: under the default
+   * `persist: true` an off-screen module stays registered on purpose so
+   * siblings can read its state.
+   */
+  fun `unregisterModule`(`name`: kotlin.String)
 
   /**
    * Update engine state with a JSON patch and re-render affected nodes.
@@ -2066,6 +4039,48 @@ open class HypenEngine :
   }
 
   /**
+   * Dispatch on behalf of an external caller.
+   *
+   * Authorises against exactly what `list_external_actions` advertises,
+   * then queues the *resolved* internal action for the host to poll — so
+   * `navigate` arrives as `router.push` and `set_input` as `__hypen_bind`
+   * with a payload built here, never one the caller supplied.
+   */
+  @Throws(HypenException::class)
+  override fun `dispatchExternal`(
+    `actionName`: kotlin.String,
+    `payloadJson`: kotlin.String?,
+  ) = callWithHandle {
+    uniffiRustCallWithError(HypenException) { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_dispatch_external(
+        it,
+        FfiConverterString.lower(`actionName`),
+        FfiConverterOptionalString.lower(`payloadJson`),
+        _status,
+      )
+    }
+  }
+
+  /**
+   * The built-in external action names, as JSON
+   * `{ navigate, back, setInput, bindAction }`.
+   *
+   * Exported so SDKs bind to these rather than hardcoding the literals —
+   * hardcoding is why one rename broke four SDKs silently.
+   */
+  override fun `externalBuiltinNames`(): kotlin.String =
+    FfiConverterString.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_external_builtin_names(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
    * Return the list of standard Hypen primitive element names.
    */
   override fun `getDefaultPrimitives`(): List<kotlin.String> =
@@ -2120,6 +4135,97 @@ open class HypenEngine :
       callWithHandle {
         uniffiRustCall { _status ->
           UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_get_revision(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * Read module state, whole or at a path, as a JSON string.
+   *
+   * `module` is `None` for the primary module or a registered module's
+   * name (case-insensitive). Returns `None` when the module is unknown or
+   * the path is absent.
+   */
+  override fun `getStateAt`(
+    `module`: kotlin.String?,
+    `path`: kotlin.String?,
+  ): kotlin.String? =
+    FfiConverterOptionalString.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_get_state_at(
+            it,
+            FfiConverterOptionalString.lower(`module`),
+            FfiConverterOptionalString.lower(`path`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * List `.bind()`-declared writable inputs as a JSON array of
+   * `{ path, prop, elementType, moduleScope }`, backing `set_input`'s
+   * argument schema.
+   */
+  override fun `listBindings`(): kotlin.String =
+    FfiConverterString.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_list_bindings(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * List every action an external caller may dispatch, as a JSON array of
+   * `{ name, module, builtin }`.
+   */
+  override fun `listExternalActions`(): kotlin.String =
+    FfiConverterString.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_list_external_actions(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * List declared routes as a JSON array of `{ path, params, moduleScope }`,
+   * backing `navigate`'s argument schema.
+   */
+  override fun `listRoutes`(): kotlin.String =
+    FfiConverterString.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_list_routes(
+            it,
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
+   * The full MCP handshake for this app, as a JSON string.
+   *
+   * Composed in the engine so every SDK transports the same bytes rather
+   * than writing its own prose and drifting.
+   */
+  override fun `mcpManifest`(): kotlin.String =
+    FfiConverterString.lift(
+      callWithHandle {
+        uniffiRustCall { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_mcp_manifest(
             it,
             _status,
           )
@@ -2339,6 +4445,24 @@ open class HypenEngine :
     }
 
   /**
+   * Drop a module and every action it declared.
+   *
+   * **Call on destroy only**, never on unmount: under the default
+   * `persist: true` an off-screen module stays registered on purpose so
+   * siblings can read its state.
+   */
+  override fun `unregisterModule`(`name`: kotlin.String) =
+    callWithHandle {
+      uniffiRustCall { _status ->
+        UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_unregister_module(
+          it,
+          FfiConverterString.lower(`name`),
+          _status,
+        )
+      }
+    }
+
+  /**
    * Update engine state with a JSON patch and re-render affected nodes.
    *
    * # Arguments
@@ -2500,6 +4624,91 @@ public object FfiConverterTypeComponentDef : FfiConverterRustBuffer<ComponentDef
     FfiConverterString.write(value.`name`, buf)
     FfiConverterString.write(value.`source`, buf)
     FfiConverterString.write(value.`path`, buf)
+  }
+}
+
+/**
+ * One verified upload item of a successful unary result.
+ */
+data class DeviceBlob(
+  var `channel`: kotlin.UShort,
+  var `name`: kotlin.String?,
+  var `contentType`: kotlin.String,
+  var `bytes`: kotlin.ByteArray,
+) {
+  companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceBlob : FfiConverterRustBuffer<DeviceBlob> {
+  override fun read(buf: ByteBuffer): DeviceBlob =
+    DeviceBlob(
+      FfiConverterUShort.read(buf),
+      FfiConverterOptionalString.read(buf),
+      FfiConverterString.read(buf),
+      FfiConverterByteArray.read(buf),
+    )
+
+  override fun allocationSize(value: DeviceBlob) =
+    (
+      FfiConverterUShort.allocationSize(value.`channel`) +
+        FfiConverterOptionalString.allocationSize(value.`name`) +
+        FfiConverterString.allocationSize(value.`contentType`) +
+        FfiConverterByteArray.allocationSize(value.`bytes`)
+    )
+
+  override fun write(
+    value: DeviceBlob,
+    buf: ByteBuffer,
+  ) {
+    FfiConverterUShort.write(value.`channel`, buf)
+    FfiConverterOptionalString.write(value.`name`, buf)
+    FfiConverterString.write(value.`contentType`, buf)
+    FfiConverterByteArray.write(value.`bytes`, buf)
+  }
+}
+
+/**
+ * The server-side handshake for a raw `hello.device`: strict validation
+ * and selection in one call, with a diagnostic when the plane is disabled.
+ */
+data class DeviceHandshake(
+  /**
+   * The `sessionAck.device` JSON to send, or `None` (ack without device).
+   */
+  var `ackJson`: kotlin.String?,
+  /**
+   * Why the device plane is disabled (server log only), when it is.
+   */
+  var `reason`: kotlin.String?,
+) {
+  companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceHandshake : FfiConverterRustBuffer<DeviceHandshake> {
+  override fun read(buf: ByteBuffer): DeviceHandshake =
+    DeviceHandshake(
+      FfiConverterOptionalString.read(buf),
+      FfiConverterOptionalString.read(buf),
+    )
+
+  override fun allocationSize(value: DeviceHandshake) =
+    (
+      FfiConverterOptionalString.allocationSize(value.`ackJson`) +
+        FfiConverterOptionalString.allocationSize(value.`reason`)
+    )
+
+  override fun write(
+    value: DeviceHandshake,
+    buf: ByteBuffer,
+  ) {
+    FfiConverterOptionalString.write(value.`ackJson`, buf)
+    FfiConverterOptionalString.write(value.`reason`, buf)
   }
 }
 
@@ -2692,6 +4901,475 @@ public object FfiConverterTypePatch : FfiConverterRustBuffer<Patch> {
     FfiConverterOptionalString.write(value.`semanticsJson`, buf)
     FfiConverterBoolean.write(value.`transition`, buf)
     FfiConverterOptionalString.write(value.`specJson`, buf)
+  }
+}
+
+/**
+ * A host error: malformed configuration, open spec, server list or error
+ * code. Protocol refusals are values ([`DeviceOpenResult::Refused`]).
+ */
+sealed class DeviceBindingException : kotlin.Exception() {
+  class InvalidInput(
+    val v1: kotlin.String,
+  ) : DeviceBindingException() {
+    override val message
+      get() = "v1=${ v1 }"
+  }
+
+  companion object ErrorHandler : UniffiRustCallStatusErrorHandler<DeviceBindingException> {
+    override fun lift(error_buf: RustBuffer.ByValue): DeviceBindingException = FfiConverterTypeDeviceBindingError.lift(error_buf)
+  }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceBindingError : FfiConverterRustBuffer<DeviceBindingException> {
+  override fun read(buf: ByteBuffer): DeviceBindingException =
+    when (buf.getInt()) {
+      1 -> {
+        DeviceBindingException.InvalidInput(
+          FfiConverterString.read(buf),
+        )
+      }
+
+      else -> {
+        throw RuntimeException("invalid error enum value, something is very wrong!!")
+      }
+    }
+
+  override fun allocationSize(value: DeviceBindingException): ULong =
+    when (value) {
+      is DeviceBindingException.InvalidInput -> (
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        4UL +
+          FfiConverterString.allocationSize(value.v1)
+      )
+    }
+
+  override fun write(
+    value: DeviceBindingException,
+    buf: ByteBuffer,
+  ) {
+    when (value) {
+      is DeviceBindingException.InvalidInput -> {
+        buf.putInt(1)
+        FfiConverterString.write(value.v1, buf)
+        Unit
+      }
+    }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+  }
+}
+
+/**
+ * `start` / `open`: the new request id, or a local refusal (nothing sent).
+ */
+sealed class DeviceOpenResult {
+  data class Opened(
+    val `id`: kotlin.UInt,
+  ) : DeviceOpenResult() {
+    companion object
+  }
+
+  data class Refused(
+    val `code`: kotlin.String,
+    val `detail`: kotlin.String?,
+  ) : DeviceOpenResult() {
+    companion object
+  }
+
+  companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceOpenResult : FfiConverterRustBuffer<DeviceOpenResult> {
+  override fun read(buf: ByteBuffer): DeviceOpenResult =
+    when (buf.getInt()) {
+      1 -> {
+        DeviceOpenResult.Opened(
+          FfiConverterUInt.read(buf),
+        )
+      }
+
+      2 -> {
+        DeviceOpenResult.Refused(
+          FfiConverterString.read(buf),
+          FfiConverterOptionalString.read(buf),
+        )
+      }
+
+      else -> {
+        throw RuntimeException("invalid enum value, something is very wrong!!")
+      }
+    }
+
+  override fun allocationSize(value: DeviceOpenResult) =
+    when (value) {
+      is DeviceOpenResult.Opened -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterUInt.allocationSize(value.`id`)
+        )
+      }
+
+      is DeviceOpenResult.Refused -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterString.allocationSize(value.`code`) +
+            FfiConverterOptionalString.allocationSize(value.`detail`)
+        )
+      }
+    }
+
+  override fun write(
+    value: DeviceOpenResult,
+    buf: ByteBuffer,
+  ) {
+    when (value) {
+      is DeviceOpenResult.Opened -> {
+        buf.putInt(1)
+        FfiConverterUInt.write(value.`id`, buf)
+        Unit
+      }
+
+      is DeviceOpenResult.Refused -> {
+        buf.putInt(2)
+        FfiConverterString.write(value.`code`, buf)
+        FfiConverterOptionalString.write(value.`detail`, buf)
+        Unit
+      }
+    }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+  }
+}
+
+/**
+ * A request's terminal outcome.
+ */
+sealed class DeviceOutcome {
+  /**
+   * `result_json` is the client's validated result; `blobs` the verified
+   * upload items in result order (buffered unary uploads).
+   */
+  data class Success(
+    val `resultJson`: kotlin.String,
+    val `blobs`: List<uniffi.hypen_engine.DeviceBlob>,
+    val `simulated`: kotlin.Boolean,
+    val `held`: kotlin.Boolean,
+  ) : DeviceOutcome() {
+    companion object
+  }
+
+  /**
+   * `code` is the wire error code (`"cancelled"`, `"invalidParams"`…).
+   */
+  data class Failure(
+    val `code`: kotlin.String,
+    val `detail`: kotlin.String?,
+  ) : DeviceOutcome() {
+    companion object
+  }
+
+  companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceOutcome : FfiConverterRustBuffer<DeviceOutcome> {
+  override fun read(buf: ByteBuffer): DeviceOutcome =
+    when (buf.getInt()) {
+      1 -> {
+        DeviceOutcome.Success(
+          FfiConverterString.read(buf),
+          FfiConverterSequenceTypeDeviceBlob.read(buf),
+          FfiConverterBoolean.read(buf),
+          FfiConverterBoolean.read(buf),
+        )
+      }
+
+      2 -> {
+        DeviceOutcome.Failure(
+          FfiConverterString.read(buf),
+          FfiConverterOptionalString.read(buf),
+        )
+      }
+
+      else -> {
+        throw RuntimeException("invalid enum value, something is very wrong!!")
+      }
+    }
+
+  override fun allocationSize(value: DeviceOutcome) =
+    when (value) {
+      is DeviceOutcome.Success -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterString.allocationSize(value.`resultJson`) +
+            FfiConverterSequenceTypeDeviceBlob.allocationSize(value.`blobs`) +
+            FfiConverterBoolean.allocationSize(value.`simulated`) +
+            FfiConverterBoolean.allocationSize(value.`held`)
+        )
+      }
+
+      is DeviceOutcome.Failure -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterString.allocationSize(value.`code`) +
+            FfiConverterOptionalString.allocationSize(value.`detail`)
+        )
+      }
+    }
+
+  override fun write(
+    value: DeviceOutcome,
+    buf: ByteBuffer,
+  ) {
+    when (value) {
+      is DeviceOutcome.Success -> {
+        buf.putInt(1)
+        FfiConverterString.write(value.`resultJson`, buf)
+        FfiConverterSequenceTypeDeviceBlob.write(value.`blobs`, buf)
+        FfiConverterBoolean.write(value.`simulated`, buf)
+        FfiConverterBoolean.write(value.`held`, buf)
+        Unit
+      }
+
+      is DeviceOutcome.Failure -> {
+        buf.putInt(2)
+        FfiConverterString.write(value.`code`, buf)
+        FfiConverterOptionalString.write(value.`detail`, buf)
+        Unit
+      }
+    }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
+  }
+}
+
+/**
+ * Everything the broker asks the host to do, in order.
+ */
+sealed class DeviceOutput {
+  /**
+   * Send this device JSON text message.
+   */
+  data class SendText(
+    val `text`: kotlin.String,
+  ) : DeviceOutput() {
+    companion object
+  }
+
+  /**
+   * Send this binary frame (download bytes), already scheduled.
+   */
+  data class SendFrame(
+    val `frame`: kotlin.ByteArray,
+  ) : DeviceOutput() {
+    companion object
+  }
+
+  /**
+   * A validated JSON stream event; call `consumed_events` when done.
+   */
+  data class Event(
+    val `id`: kotlin.UInt,
+    val `eventJson`: kotlin.String,
+  ) : DeviceOutput() {
+    companion object
+  }
+
+  /**
+   * Upload bytes of a binary-upload stream; call `consumed_data` when done.
+   */
+  data class Data(
+    val `id`: kotlin.UInt,
+    val `channel`: kotlin.UShort,
+    val `bytes`: kotlin.ByteArray,
+  ) : DeviceOutput() {
+    companion object
+  }
+
+  /**
+   * Request `id` ended (exactly once per opened request).
+   */
+  data class Settled(
+    val `id`: kotlin.UInt,
+    val `outcome`: uniffi.hypen_engine.DeviceOutcome,
+  ) : DeviceOutput() {
+    companion object
+  }
+
+  /**
+   * The broker closed the device plane: close the socket with this code.
+   */
+  data class CloseConnection(
+    val `code`: kotlin.UShort,
+    val `reason`: kotlin.String,
+  ) : DeviceOutput() {
+    companion object
+  }
+
+  companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeDeviceOutput : FfiConverterRustBuffer<DeviceOutput> {
+  override fun read(buf: ByteBuffer): DeviceOutput =
+    when (buf.getInt()) {
+      1 -> {
+        DeviceOutput.SendText(
+          FfiConverterString.read(buf),
+        )
+      }
+
+      2 -> {
+        DeviceOutput.SendFrame(
+          FfiConverterByteArray.read(buf),
+        )
+      }
+
+      3 -> {
+        DeviceOutput.Event(
+          FfiConverterUInt.read(buf),
+          FfiConverterString.read(buf),
+        )
+      }
+
+      4 -> {
+        DeviceOutput.Data(
+          FfiConverterUInt.read(buf),
+          FfiConverterUShort.read(buf),
+          FfiConverterByteArray.read(buf),
+        )
+      }
+
+      5 -> {
+        DeviceOutput.Settled(
+          FfiConverterUInt.read(buf),
+          FfiConverterTypeDeviceOutcome.read(buf),
+        )
+      }
+
+      6 -> {
+        DeviceOutput.CloseConnection(
+          FfiConverterUShort.read(buf),
+          FfiConverterString.read(buf),
+        )
+      }
+
+      else -> {
+        throw RuntimeException("invalid enum value, something is very wrong!!")
+      }
+    }
+
+  override fun allocationSize(value: DeviceOutput) =
+    when (value) {
+      is DeviceOutput.SendText -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterString.allocationSize(value.`text`)
+        )
+      }
+
+      is DeviceOutput.SendFrame -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterByteArray.allocationSize(value.`frame`)
+        )
+      }
+
+      is DeviceOutput.Event -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterUInt.allocationSize(value.`id`) +
+            FfiConverterString.allocationSize(value.`eventJson`)
+        )
+      }
+
+      is DeviceOutput.Data -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterUInt.allocationSize(value.`id`) +
+            FfiConverterUShort.allocationSize(value.`channel`) +
+            FfiConverterByteArray.allocationSize(value.`bytes`)
+        )
+      }
+
+      is DeviceOutput.Settled -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterUInt.allocationSize(value.`id`) +
+            FfiConverterTypeDeviceOutcome.allocationSize(value.`outcome`)
+        )
+      }
+
+      is DeviceOutput.CloseConnection -> {
+        // Add the size for the Int that specifies the variant plus the size needed for all fields
+        (
+          4UL +
+            FfiConverterUShort.allocationSize(value.`code`) +
+            FfiConverterString.allocationSize(value.`reason`)
+        )
+      }
+    }
+
+  override fun write(
+    value: DeviceOutput,
+    buf: ByteBuffer,
+  ) {
+    when (value) {
+      is DeviceOutput.SendText -> {
+        buf.putInt(1)
+        FfiConverterString.write(value.`text`, buf)
+        Unit
+      }
+
+      is DeviceOutput.SendFrame -> {
+        buf.putInt(2)
+        FfiConverterByteArray.write(value.`frame`, buf)
+        Unit
+      }
+
+      is DeviceOutput.Event -> {
+        buf.putInt(3)
+        FfiConverterUInt.write(value.`id`, buf)
+        FfiConverterString.write(value.`eventJson`, buf)
+        Unit
+      }
+
+      is DeviceOutput.Data -> {
+        buf.putInt(4)
+        FfiConverterUInt.write(value.`id`, buf)
+        FfiConverterUShort.write(value.`channel`, buf)
+        FfiConverterByteArray.write(value.`bytes`, buf)
+        Unit
+      }
+
+      is DeviceOutput.Settled -> {
+        buf.putInt(5)
+        FfiConverterUInt.write(value.`id`, buf)
+        FfiConverterTypeDeviceOutcome.write(value.`outcome`, buf)
+        Unit
+      }
+
+      is DeviceOutput.CloseConnection -> {
+        buf.putInt(6)
+        FfiConverterUShort.write(value.`code`, buf)
+        FfiConverterString.write(value.`reason`, buf)
+        Unit
+      }
+    }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
   }
 }
 
@@ -2954,6 +5632,70 @@ public object FfiConverterTypePatchType : FfiConverterRustBuffer<PatchType> {
 /**
  * @suppress
  */
+public object FfiConverterOptionalUInt : FfiConverterRustBuffer<kotlin.UInt?> {
+  override fun read(buf: ByteBuffer): kotlin.UInt? {
+    if (buf.get().toInt() == 0) {
+      return null
+    }
+    return FfiConverterUInt.read(buf)
+  }
+
+  override fun allocationSize(value: kotlin.UInt?): ULong {
+    if (value == null) {
+      return 1UL
+    } else {
+      return 1UL + FfiConverterUInt.allocationSize(value)
+    }
+  }
+
+  override fun write(
+    value: kotlin.UInt?,
+    buf: ByteBuffer,
+  ) {
+    if (value == null) {
+      buf.put(0)
+    } else {
+      buf.put(1)
+      FfiConverterUInt.write(value, buf)
+    }
+  }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalULong : FfiConverterRustBuffer<kotlin.ULong?> {
+  override fun read(buf: ByteBuffer): kotlin.ULong? {
+    if (buf.get().toInt() == 0) {
+      return null
+    }
+    return FfiConverterULong.read(buf)
+  }
+
+  override fun allocationSize(value: kotlin.ULong?): ULong {
+    if (value == null) {
+      return 1UL
+    } else {
+      return 1UL + FfiConverterULong.allocationSize(value)
+    }
+  }
+
+  override fun write(
+    value: kotlin.ULong?,
+    buf: ByteBuffer,
+  ) {
+    if (value == null) {
+      buf.put(0)
+    } else {
+      buf.put(1)
+      FfiConverterULong.write(value, buf)
+    }
+  }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?> {
   override fun read(buf: ByteBuffer): kotlin.String? {
     if (buf.get().toInt() == 0) {
@@ -2979,6 +5721,98 @@ public object FfiConverterOptionalString : FfiConverterRustBuffer<kotlin.String?
     } else {
       buf.put(1)
       FfiConverterString.write(value, buf)
+    }
+  }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalByteArray : FfiConverterRustBuffer<kotlin.ByteArray?> {
+  override fun read(buf: ByteBuffer): kotlin.ByteArray? {
+    if (buf.get().toInt() == 0) {
+      return null
+    }
+    return FfiConverterByteArray.read(buf)
+  }
+
+  override fun allocationSize(value: kotlin.ByteArray?): ULong {
+    if (value == null) {
+      return 1UL
+    } else {
+      return 1UL + FfiConverterByteArray.allocationSize(value)
+    }
+  }
+
+  override fun write(
+    value: kotlin.ByteArray?,
+    buf: ByteBuffer,
+  ) {
+    if (value == null) {
+      buf.put(0)
+    } else {
+      buf.put(1)
+      FfiConverterByteArray.write(value, buf)
+    }
+  }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterOptionalTypeDeviceRetainedBytesPool : FfiConverterRustBuffer<DeviceRetainedBytesPool?> {
+  override fun read(buf: ByteBuffer): DeviceRetainedBytesPool? {
+    if (buf.get().toInt() == 0) {
+      return null
+    }
+    return FfiConverterTypeDeviceRetainedBytesPool.read(buf)
+  }
+
+  override fun allocationSize(value: DeviceRetainedBytesPool?): ULong {
+    if (value == null) {
+      return 1UL
+    } else {
+      return 1UL + FfiConverterTypeDeviceRetainedBytesPool.allocationSize(value)
+    }
+  }
+
+  override fun write(
+    value: DeviceRetainedBytesPool?,
+    buf: ByteBuffer,
+  ) {
+    if (value == null) {
+      buf.put(0)
+    } else {
+      buf.put(1)
+      FfiConverterTypeDeviceRetainedBytesPool.write(value, buf)
+    }
+  }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceUInt : FfiConverterRustBuffer<List<kotlin.UInt>> {
+  override fun read(buf: ByteBuffer): List<kotlin.UInt> {
+    val len = buf.getInt()
+    return List<kotlin.UInt>(len) {
+      FfiConverterUInt.read(buf)
+    }
+  }
+
+  override fun allocationSize(value: List<kotlin.UInt>): ULong {
+    val sizeForLength = 4UL
+    val sizeForItems = value.map { FfiConverterUInt.allocationSize(it) }.sum()
+    return sizeForLength + sizeForItems
+  }
+
+  override fun write(
+    value: List<kotlin.UInt>,
+    buf: ByteBuffer,
+  ) {
+    buf.putInt(value.size)
+    value.iterator().forEach {
+      FfiConverterUInt.write(it, buf)
     }
   }
 }
@@ -3042,6 +5876,34 @@ public object FfiConverterSequenceTypeAction : FfiConverterRustBuffer<List<Actio
 /**
  * @suppress
  */
+public object FfiConverterSequenceTypeDeviceBlob : FfiConverterRustBuffer<List<DeviceBlob>> {
+  override fun read(buf: ByteBuffer): List<DeviceBlob> {
+    val len = buf.getInt()
+    return List<DeviceBlob>(len) {
+      FfiConverterTypeDeviceBlob.read(buf)
+    }
+  }
+
+  override fun allocationSize(value: List<DeviceBlob>): ULong {
+    val sizeForLength = 4UL
+    val sizeForItems = value.map { FfiConverterTypeDeviceBlob.allocationSize(it) }.sum()
+    return sizeForLength + sizeForItems
+  }
+
+  override fun write(
+    value: List<DeviceBlob>,
+    buf: ByteBuffer,
+  ) {
+    buf.putInt(value.size)
+    value.iterator().forEach {
+      FfiConverterTypeDeviceBlob.write(it, buf)
+    }
+  }
+}
+
+/**
+ * @suppress
+ */
 public object FfiConverterSequenceTypeImportInfo : FfiConverterRustBuffer<List<ImportInfo>> {
   override fun read(buf: ByteBuffer): List<ImportInfo> {
     val len = buf.getInt()
@@ -3091,6 +5953,34 @@ public object FfiConverterSequenceTypePatch : FfiConverterRustBuffer<List<Patch>
     buf.putInt(value.size)
     value.iterator().forEach {
       FfiConverterTypePatch.write(it, buf)
+    }
+  }
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeDeviceOutput : FfiConverterRustBuffer<List<DeviceOutput>> {
+  override fun read(buf: ByteBuffer): List<DeviceOutput> {
+    val len = buf.getInt()
+    return List<DeviceOutput>(len) {
+      FfiConverterTypeDeviceOutput.read(buf)
+    }
+  }
+
+  override fun allocationSize(value: List<DeviceOutput>): ULong {
+    val sizeForLength = 4UL
+    val sizeForItems = value.map { FfiConverterTypeDeviceOutput.allocationSize(it) }.sum()
+    return sizeForLength + sizeForItems
+  }
+
+  override fun write(
+    value: List<DeviceOutput>,
+    buf: ByteBuffer,
+  ) {
+    buf.putInt(value.size)
+    value.iterator().forEach {
+      FfiConverterTypeDeviceOutput.write(it, buf)
     }
   }
 }
@@ -3257,6 +6147,35 @@ fun `portablePathHas`(
   )
 
 /**
+ * Move element `from` of the array at `from_path` to index `to` of the
+ * array at `to_path` (the `__hypen_reorder` primitive; see
+ * [`crate::portable::path_move`] for the exact semantics — `to` is the
+ * final index, clamped after removal). Returns
+ * `{"json": <updated>, "moved": bool}`; on `moved: false` the JSON is the
+ * input unchanged.
+ */
+@Throws(HypenException::class)
+fun `portablePathMove`(
+  `valueJson`: kotlin.String,
+  `fromPath`: kotlin.String,
+  `from`: kotlin.UInt,
+  `toPath`: kotlin.String,
+  `to`: kotlin.UInt,
+): kotlin.String =
+  FfiConverterString.lift(
+    uniffiRustCallWithError(HypenException) { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_portable_path_move(
+        FfiConverterString.lower(`valueJson`),
+        FfiConverterString.lower(`fromPath`),
+        FfiConverterUInt.lower(`from`),
+        FfiConverterString.lower(`toPath`),
+        FfiConverterUInt.lower(`to`),
+        _status,
+      )
+    },
+  )
+
+/**
  * Set `new_value_json` at `path` inside `value_json`; returns the
  * updated JSON. Intermediate objects are created; arrays are extended
  * with `null` padding.
@@ -3307,5 +6226,165 @@ fun `version`(): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCall { _status ->
       UniffiLib.uniffi_hypen_engine_fn_func_version(_status)
+    },
+  )
+
+/**
+ * Protocol and broker constants JSON.
+ */
+fun `deviceConstantsJson`(): kotlin.String =
+  FfiConverterString.lift(
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_constants_json(_status)
+    },
+  )
+
+/**
+ * The `file.save@1` announcement params JSON for `bytes`.
+ */
+fun `deviceFileSaveParamsJson`(
+  `name`: kotlin.String,
+  `contentType`: kotlin.String,
+  `bytes`: kotlin.ByteArray,
+): kotlin.String =
+  FfiConverterString.lift(
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_file_save_params_json(
+        FfiConverterString.lower(`name`),
+        FfiConverterString.lower(`contentType`),
+        FfiConverterByteArray.lower(`bytes`),
+        _status,
+      )
+    },
+  )
+
+/**
+ * `hello.device` JSON → [`DeviceHandshake`]. `server_capabilities_json`
+ * (`[{name, versions}]`) replaces the default advertisement (every
+ * capability the broker consumes); a malformed one is an error.
+ */
+@Throws(DeviceBindingException::class)
+fun `deviceHandshake`(
+  `helloJson`: kotlin.String,
+  `binaryRoute`: kotlin.Boolean,
+  `serverCapabilitiesJson`: kotlin.String?,
+): DeviceHandshake =
+  FfiConverterTypeDeviceHandshake.lift(
+    uniffiRustCallWithError(DeviceBindingException) { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_handshake(
+        FfiConverterString.lower(`helloJson`),
+        FfiConverterBoolean.lower(`binaryRoute`),
+        FfiConverterOptionalString.lower(`serverCapabilitiesJson`),
+        _status,
+      )
+    },
+  )
+
+/**
+ * Whether `text` is device text over the size limit (decided without
+ * parsing): report it with `report_violation` instead of parsing it.
+ */
+fun `deviceIsOversizeText`(`text`: kotlin.String): kotlin.Boolean =
+  FfiConverterBoolean.lift(
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_is_oversize_text(FfiConverterString.lower(`text`), _status)
+    },
+  )
+
+/**
+ * `hello.device` JSON → the `sessionAck.device` JSON of a broker-backed
+ * server, or `None` (invalid hello or nothing mutual: device disabled).
+ */
+fun `deviceNegotiate`(
+  `helloJson`: kotlin.String,
+  `binaryRoute`: kotlin.Boolean,
+): kotlin.String? =
+  FfiConverterOptionalString.lift(
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_negotiate(
+        FfiConverterString.lower(`helloJson`),
+        FfiConverterBoolean.lower(`binaryRoute`),
+        _status,
+      )
+    },
+  )
+
+/**
+ * `select_device_ack` with explicit server lists (`server_capabilities_json`
+ * = `[{name, versions}]`); the ack JSON or `None`.
+ */
+@Throws(DeviceBindingException::class)
+fun `deviceSelectAck`(
+  `helloJson`: kotlin.String,
+  `serverProtocolVersions`: List<kotlin.UInt>,
+  `serverCapabilitiesJson`: kotlin.String,
+  `serverBinary`: kotlin.Boolean,
+): kotlin.String? =
+  FfiConverterOptionalString.lift(
+    uniffiRustCallWithError(DeviceBindingException) { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_select_ack(
+        FfiConverterString.lower(`helloJson`),
+        FfiConverterSequenceUInt.lower(`serverProtocolVersions`),
+        FfiConverterString.lower(`serverCapabilitiesJson`),
+        FfiConverterBoolean.lower(`serverBinary`),
+        _status,
+      )
+    },
+  )
+
+/**
+ * What a broker-backed server advertises: `[{name, versions}]` JSON.
+ */
+fun `deviceServerAdvertisementJson`(): kotlin.String =
+  FfiConverterString.lift(
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_server_advertisement_json(_status)
+    },
+  )
+
+/**
+ * Whether a broker-backed server has a consuming API for a capability
+ * revision JSON with `mode` and `data` (e.g. a
+ * [`DeviceBroker::revision_json`] answer): unary, or a stream whose data
+ * plane flows client to server. A missing or unknown `mode`/`data` is an
+ * error.
+ */
+@Throws(DeviceBindingException::class)
+fun `deviceServerConsumes`(`revisionJson`: kotlin.String): kotlin.Boolean =
+  FfiConverterBoolean.lift(
+    uniffiRustCallWithError(DeviceBindingException) { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_server_consumes(FfiConverterString.lower(`revisionJson`), _status)
+    },
+  )
+
+/**
+ * Lowercase hex SHA-256.
+ */
+fun `deviceSha256Hex`(`bytes`: kotlin.ByteArray): kotlin.String =
+  FfiConverterString.lift(
+    uniffiRustCall { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_sha256_hex(FfiConverterByteArray.lower(`bytes`), _status)
+    },
+  )
+
+/**
+ * Strictly decode `sessionAck.device`; the normalized JSON, or the reason.
+ */
+@Throws(DeviceBindingException::class)
+fun `deviceValidateAck`(`ackJson`: kotlin.String): kotlin.String =
+  FfiConverterString.lift(
+    uniffiRustCallWithError(DeviceBindingException) { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_validate_ack(FfiConverterString.lower(`ackJson`), _status)
+    },
+  )
+
+/**
+ * Strictly decode `hello.device`; the normalized JSON, or the reason.
+ */
+@Throws(DeviceBindingException::class)
+fun `deviceValidateHello`(`helloJson`: kotlin.String): kotlin.String =
+  FfiConverterString.lift(
+    uniffiRustCallWithError(DeviceBindingException) { _status ->
+      UniffiLib.uniffi_hypen_engine_fn_func_device_validate_hello(FfiConverterString.lower(`helloJson`), _status)
     },
   )

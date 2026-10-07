@@ -1,0 +1,147 @@
+---
+title: Consent & Security
+description: How the device decides — host-owned consent, activity indicators, cooldowns and one-prompt-at-a-time, connection admission with Origin allowlists and authenticators, and what the server may and may not trust
+---
+
+# Consent & Security
+
+Letting a server ask for someone's camera is a big deal. The protocol is
+built around one rule: **the server asks, the device decides.** The device
+host enforces every policy on this page. Nothing the server sends can
+establish an OS permission or a user grant.
+
+## Consent gates
+
+Each sensitive operation passes a gate that your app can't draw, click or
+hide:
+
+| Capability | Gate |
+|------------|------|
+| `gallery.pick`, `file.pick` | The system picker. On the web, the host's dialog comes first, because the browser needs a fresh gesture. |
+| `file.save` | The host dialog, then the destination picker. No data is sent before a destination is chosen. |
+| `camera.capture` | The host's capture UI: live preview, Capture/Record, Cancel. Nothing is captured before the user taps it. |
+| `mic.record` | The host dialog, then the recording indicator for the whole recording |
+| `bluetooth.select` | The host-owned chooser (the browser's chooser on the web) |
+| `bluetooth.scan` | The host dialog, whose grant can be remembered for a limited time, then the indicator for the whole scan |
+| `permission.request` | The host dialog, then the OS prompt |
+| `permission.query` | None. It never prompts. |
+
+The **host dialog** is part of the device host, not your UI:
+
+- It names the **authenticated server origin** and the requested operation,
+  and offers Continue and Cancel.
+- Its labels and explanations come from the host. A server can't supply text
+  that impersonates it.
+- It sits outside the patch tree, so your app can't restyle, cover or click it.
+- It is independent of the element that triggered the action. The request may
+  have come from a lifecycle handler, and the app's button may already be
+  disabled or gone. Continue still works, and it doesn't dispatch an app
+  action.
+
+### Protection against click-through
+
+On the web, Continue ignores input that wasn't meant for it:
+
+- It stays **disabled for 500 ms** after the dialog appears, and again
+  whenever the page regains visibility or focus. Change this with the
+  `inputProtectionMs` option.
+- Only an activation that **starts** on the enabled button counts: a trusted
+  pointer-down, or Enter or Space pressed on it.
+
+So a fast-clicking user, or a hostile server that pops up a request in the
+middle of a game or a typing session, can't turn a stray click or keystroke
+into consent. Other app gestures never consume a pending request.
+
+### One prompt at a time, and cooldowns
+
+- **One prompt per device host.** While a consent dialog or picker is open,
+  any other request that needs a prompt fails at once with `throttled`
+  (`prompt-in-progress`), even across connections. Requests aren't queued
+  invisibly.
+- **Refusals cool down.** When the user refuses (for example, taps Cancel in
+  the host dialog), that capability can't prompt again for a while: 30
+  seconds by default on the web and Android hosts. Requests during the
+  cooldown fail with `throttled` (`cooldown`). Cooldowns persist across
+  reconnects and app restarts for authenticated `https:`/`wss:` origins.
+- **Grants are keyed by origin and capability.** A remembered grant, like the
+  one for `bluetooth.scan`, is stored per normalized server origin and per
+  capability. A photo picker never grants anything else. Grants are
+  persisted only for `wss://` origins. On plaintext `ws://` connections they
+  last only for that connection.
+
+## Indicators
+
+`mic.record` and `bluetooth.scan` run under an **always-visible indicator**
+that names the origin and has a **Stop** button:
+
+- It's host UI outside the patch tree. The app can't hide or restyle it.
+- **Stop ends a recording normally**: your handler gets a successful result
+  with what was captured. Stop on a scan settles it as `cancelled`.
+- **No indicator, no capability.** Native hosts offer `mic.record` and
+  `bluetooth.scan` only while their indicator can be shown. On iOS this is an
+  overlay window. On Android it's the Compose overlay that `HypenApp` renders.
+  When the indicator stops being visible (the app goes to the background,
+  the overlay is removed), running streams stop.
+- The web host ends a recording when the page becomes hidden
+  (`stopRecordingWhenHidden`). The web grants no background capture.
+- While the `bluetooth.select` chooser is open, the chooser itself is the
+  visible indicator.
+
+## Connection admission
+
+The server decides at the WebSocket upgrade who may connect at all, for UI
+and device traffic alike. The device plane is on by default, so set this up
+before you deploy. Admission [works the same in every SDK](/docs/device/server-setup#connection-admission):
+
+- **Browsers**: with an allowlist configured, an upgrade that carries an
+  `Origin` must name an origin on it, or the server answers 403. This defends against
+  cross-site WebSocket hijacking: another site's page can't open a socket to
+  your server with the user's cookies.
+- **Native apps**: with an allowlist configured, an upgrade without an
+  `Origin` is admitted **only** if your `authenticate` hook returns true. Native clients send app credentials,
+  such as an `Authorization` header, which you set in `RemoteEngineConfig` on
+  iOS and Android.
+- **Nothing configured**: with neither an allowlist nor an authenticator,
+  every upgrade is admitted, as on any UI-only server, and the server logs one
+  startup warning. The device plane doesn't widen what such a peer can do: it
+  only lets the server ask *that peer's own* device for input, behind that
+  device's consent UI. It does mean any page can open a socket to your server,
+  so configure admission in production.
+- A configured authenticator runs for **every** upgrade, including browser
+  upgrades with an allowed `Origin`.
+
+`Origin` authenticates nothing on its own. Treat the allowlist as a browser
+defense, and your authenticator as the real gate.
+
+### Other connection protections
+
+- **Each message is compressed on its own.** Servers negotiate
+  `permessage-deflate` with no context takeover in both directions, and
+  clients refuse device traffic on a socket compressed with shared history.
+  Compressing secrets together with attacker-influenced data can leak them
+  through message sizes; compressing every message separately keeps them
+  apart.
+- **Resume credentials.** The server sends a fresh random `resumeToken` with
+  every `sessionAck`. To resume a session that negotiated a device plane, a
+  client must present the latest token. A session id alone doesn't let anyone take over a
+  live session.
+- **Replay firewall.** Device work can't start from a replayed or broadcast
+  dispatch (see [Lifetimes](/docs/device/lifetimes#replayed-dispatches)).
+- **Request ids are not secrets.** They correlate messages on one
+  authenticated connection. A message on one connection can never settle a
+  request on another.
+
+## What the server can trust
+
+- **Bytes arrive intact.** Before your handler sees an upload, the server
+  checks every item's size and SHA-256 against what the client declared, and
+  checks the item count and content types against the capability's rules.
+- **Bytes aren't vouched for.** A hash detects corruption and mismatch. It
+  doesn't establish that the content is what it claims to be, or that the
+  client is honest. Validate uploads before using them.
+- **Client reports aren't proof.** A permission status, a device id or an
+  advertised capability is information from the client, not proof that the
+  user authorized anything in your app.
+- **Deletion is your job.** When a permission is revoked, the device stops
+  capturing and clears its own buffers. Deleting data your server already
+  derived from it is up to your handlers.

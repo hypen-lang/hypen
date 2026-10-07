@@ -479,6 +479,83 @@ fn focused_input_remains_editable_between_keypress_and_redraw() {
     assert_eq!(state, Some(("pi".into(), "query".into())));
 }
 
+fn textarea_tree(props: &[(&str, serde_json::Value)]) -> Tree {
+    let mut tree = Tree::new();
+    tree.apply(&Patch::Create {
+        id: "bio".into(),
+        element_type: "Textarea".into(),
+        props: std::sync::Arc::new(
+            props
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        ),
+        semantics: None,
+    });
+    tree
+}
+
+#[test]
+fn textarea_is_an_editable_bound_field() {
+    let tree = textarea_tree(&[("bind", json!("bio")), ("value", json!("line one\nline two"))]);
+    let state = input_impl::controlled_input_state(&tree, &HashMap::new(), "bio");
+    assert_eq!(
+        state,
+        Some(("line one\nline two".into(), "bio".into())),
+        "a Textarea resolves value + bind path like an Input"
+    );
+}
+
+#[test]
+fn textarea_enter_inserts_a_newline_and_writes_back_the_multiline_value() {
+    // Type "hi", Enter, "there" through the same primitives
+    // `handle_keyboard` uses, then check what `.bind` would dispatch: the
+    // optimistic draft the next keystroke (and `__hypen_bind`) reads.
+    let mut value = String::new();
+    let mut sel = Selection::caret(0);
+    for step in ["h", "i", "\n", "t", "here"] {
+        let (v, s) = if step == "\n" {
+            input_impl::textarea_enter_edit(&value, sel)
+        } else {
+            App::replace_selection_with(&value, sel, step)
+        };
+        value = v;
+        sel = s;
+    }
+    assert_eq!(value, "hi\nthere");
+    assert_eq!(sel, Selection::caret(value.len()));
+
+    // Enter over a selection replaces it with the newline.
+    let (v, s) = input_impl::textarea_enter_edit("abcdef", Selection::range(2, 4));
+    assert_eq!(v, "ab\nef");
+    assert_eq!(s, Selection::caret(3));
+
+    let tree = textarea_tree(&[("bind", json!("bio")), ("value", json!("hi"))]);
+    let mut optimistic = HashMap::new();
+    let mut edit = OptimisticInputEdit::default();
+    edit.push(value.clone());
+    optimistic.insert("bio".to_string(), edit);
+    assert_eq!(
+        input_impl::controlled_input_state(&tree, &optimistic, "bio"),
+        Some(("hi\nthere".into(), "bio".into())),
+        "the bound write-back carries the newline intact"
+    );
+}
+
+#[test]
+fn disabled_text_fields_take_no_edits() {
+    for props in [
+        vec![("bind", json!("bio")), ("disabled", json!(true))],
+        vec![("bind", json!("bio")), ("enabled", json!(false))],
+    ] {
+        let tree = textarea_tree(&props);
+        assert_eq!(
+            input_impl::controlled_input_state(&tree, &HashMap::new(), "bio"),
+            None
+        );
+    }
+}
+
 #[test]
 fn authoritative_server_input_change_supersedes_an_optimistic_draft() {
     let mut edits = HashMap::new();
@@ -1504,7 +1581,8 @@ mod media_errors {
             &lookup,
         );
         assert_eq!(out.len(), 1, "exactly one onError dispatch expected");
-        let (action, payload) = &out[0];
+        let (node, action, payload) = &out[0];
+        assert_eq!(node, "vid", "addressed to the failing Video node");
         assert_eq!(action, "playbackFailed");
         assert_eq!(payload["type"], json!("error"));
         assert_eq!(payload["src"], json!("https://cdn/clip.mp4"));
@@ -1537,7 +1615,7 @@ mod media_errors {
             &lookup,
         );
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].1["src"], json!("https://cdn/frame.jpg"));
+        assert_eq!(out[0].2["src"], json!("https://cdn/frame.jpg"));
     }
 
     #[test]
@@ -1957,8 +2035,9 @@ fn scrub_tree_with_own_bind(
 #[test]
 fn scrubber_commits_through_the_enclosing_videos_bind() {
     let tree = scrub_tree(Some("playback"), Some("@actions.seek"));
-    let (action, payload) =
+    let (node, action, payload) =
         scrub_commit_dispatch(&tree, "sc", Some("vid"), 42.5).expect("a commit dispatch");
+    assert_eq!(node, "vid", "addressed to the Video that declares the bind");
     assert_eq!(action, "__hypen_bind");
     assert_eq!(payload["path"], json!("playback.position"));
     assert_eq!(payload["value"], json!(42.5));
@@ -1968,8 +2047,12 @@ fn scrubber_commits_through_the_enclosing_videos_bind() {
 fn scrubbers_own_bind_wins_over_the_enclosing_videos_bind() {
     // R2 commit precedence: own bind → enclosing Video's bind → onSeek.
     let tree = scrub_tree_with_own_bind(Some("playback"), Some("scrub.pb"), Some("@actions.seek"));
-    let (action, payload) =
+    let (node, action, payload) =
         scrub_commit_dispatch(&tree, "sc", Some("vid"), 12.0).expect("a commit dispatch");
+    assert_eq!(
+        node, "sc",
+        "addressed to the Scrubber that declares the bind"
+    );
     assert_eq!(action, "__hypen_bind");
     assert_eq!(
         payload["path"],
@@ -1982,8 +2065,9 @@ fn scrubbers_own_bind_wins_over_the_enclosing_videos_bind() {
 #[test]
 fn scrubbers_own_bind_commits_even_when_the_player_is_bindless() {
     let tree = scrub_tree_with_own_bind(None, Some("scrub.pb"), Some("@actions.seek"));
-    let (action, payload) =
+    let (node, action, payload) =
         scrub_commit_dispatch(&tree, "sc", Some("vid"), 3.5).expect("a commit dispatch");
+    assert_eq!(node, "sc");
     assert_eq!(action, "__hypen_bind");
     assert_eq!(payload["path"], json!("scrub.pb.position"));
     assert_eq!(payload["value"], json!(3.5));
@@ -1992,8 +2076,9 @@ fn scrubbers_own_bind_commits_even_when_the_player_is_bindless() {
 #[test]
 fn scrubber_falls_back_to_its_own_on_seek_when_the_player_is_bindless() {
     let tree = scrub_tree(None, Some("@actions.seek"));
-    let (action, payload) =
+    let (node, action, payload) =
         scrub_commit_dispatch(&tree, "sc", Some("vid"), 7.0).expect("a commit dispatch");
+    assert_eq!(node, "sc");
     assert_eq!(
         action, "seek",
         "the `@actions.` prefix is stripped at resolve time"
@@ -3360,4 +3445,220 @@ fn resize_action_drops_the_layout_on_a_minimise_so_restore_is_not_skipped() {
         ResizeAction::Paint,
         "restore after a minimise must repaint, not be skipped as a repeat"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Multi-module routing: every element-originated dispatch is node-addressed
+// (`__hypen_dispatch {node, action, payload}`), so two modules that both
+// handle `tap` / `typed` / `__hypen_bind` resolve to the module that owns
+// the element — a bare name is ambiguous there and the engine rejects it.
+// ---------------------------------------------------------------------------
+
+mod multi_module_routing {
+    use super::*;
+    use crate::module::HypenModule;
+    use crate::window::input_impl::controlled_input_state;
+    use hypen_engine::action_routing::scoped_action_name;
+    use hypen_engine::dispatch::Action;
+    use hypen_engine::lifecycle::{Module, ModuleInstance};
+    use std::sync::{Arc, Mutex};
+
+    /// Records what the window hands the module, so the test can feed the
+    /// exact `(name, payload)` into the real engine.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<(String, Option<serde_json::Value>)>>);
+    impl HypenModule for Recorder {
+        fn on_patches(&self, _cb: Arc<dyn Fn(&[Patch]) + Send + Sync>) {}
+        fn mount(&self) {}
+        fn dispatch_action(&self, name: &str, payload: Option<serde_json::Value>) {
+            self.0.lock().unwrap().push((name.to_string(), payload));
+        }
+    }
+    impl Recorder {
+        fn take(&self) -> Vec<(String, Option<serde_json::Value>)> {
+            std::mem::take(&mut *self.0.lock().unwrap())
+        }
+    }
+
+    type Calls = Arc<Mutex<Vec<(String, String, Option<serde_json::Value>)>>>;
+
+    /// Two sibling modules (`alpha`, `beta`) with IDENTICAL handler names,
+    /// rendered by the real engine into a renderer tree + layout.
+    fn two_module_app() -> (hypen_engine::Engine, Tree, LayoutPass, Calls) {
+        let mut engine = hypen_engine::Engine::new();
+        engine.set_module(ModuleInstance::new(Module::new("App"), json!({})));
+        let calls: Calls = Arc::new(Mutex::new(Vec::new()));
+        for scope in ["alpha", "beta"] {
+            engine.register_module(
+                scope,
+                ModuleInstance::new(
+                    Module::new(scope).with_state_keys(vec!["name".into()]),
+                    json!({"name": ""}),
+                ),
+            );
+            for name in ["tap", "typed", "__hypen_bind"] {
+                let calls = calls.clone();
+                engine.on_action(scoped_action_name(scope, name), move |a: &Action| {
+                    calls.lock().unwrap().push((
+                        scope.to_string(),
+                        name.to_string(),
+                        a.payload.clone(),
+                    ));
+                });
+            }
+        }
+        let collected: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = collected.clone();
+        engine.set_render_callback(move |patches| {
+            sink.lock().unwrap().extend(patches.iter().cloned());
+        });
+        let ast = hypen_parser::parse_component(
+            r#"Column {
+                Column {
+                    Button { Text("A") }.onClick(@actions.tap, who: "a").size(100, 40)
+                    Input(placeholder: "a").bind(@state.name).onInput(@actions.typed)
+                }
+                Column {
+                    Button { Text("B") }.onClick(@actions.tap, who: "b").size(100, 40)
+                    Input(placeholder: "b").bind(@state.name).onInput(@actions.typed)
+                }
+            }"#,
+        )
+        .expect("parse");
+        let mut ir = hypen_engine::ast_to_ir_node(&ast);
+        let hypen_engine::IRNode::Element(root) = &mut ir else {
+            panic!("root element");
+        };
+        for (child, scope) in root.ir_children.iter_mut().zip(["alpha", "beta"]) {
+            hypen_engine::ir::walk::walk_ir_mut(child, &mut |n| {
+                if let hypen_engine::IRNode::Element(el) = n {
+                    el.module_scope = Some(scope.to_string());
+                }
+            });
+        }
+        engine.render_ir_node(&ir);
+        let raw = std::mem::take(&mut *collected.lock().unwrap());
+        let mut tree = Tree::new();
+        tree.apply_batch(&hypen_engine::TemplateExpander::new().expand(raw));
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        (engine, tree, pass, calls)
+    }
+
+    /// The node of `element_type` whose `marker` lives in the `who` module
+    /// (`"a"` = alpha, `"b"` = beta): Buttons by their `.onClick` `who`
+    /// arg, Inputs by their placeholder. Tree iteration order is not
+    /// document order, so match on content, not position.
+    fn node_of(tree: &Tree, pass: &LayoutPass, element_type: &str, who: &str) -> String {
+        tree.nodes()
+            .filter(|n| n.element_type.eq_ignore_ascii_case(element_type))
+            .find(|n| {
+                n.props.get("placeholder") == Some(&json!(who))
+                    || pass
+                        .item_by_id(&n.id)
+                        .and_then(|it| it.action_payload.as_ref())
+                        .is_some_and(|p| p["who"] == json!(who))
+            })
+            .map(|n| n.id.clone())
+            .expect("node present")
+    }
+
+    fn feed(engine: &mut hypen_engine::Engine, sent: Vec<(String, Option<serde_json::Value>)>) {
+        for (name, payload) in sent {
+            let mut action = Action::new(name);
+            action.payload = payload;
+            engine
+                .dispatch_action(action)
+                .expect("node-addressed dispatch resolves");
+        }
+    }
+
+    #[test]
+    fn click_on_the_second_modules_button_reaches_that_module() {
+        let (mut engine, _tree, pass, calls) = two_module_app();
+        // A bare `tap` is exactly the reported bug.
+        let bare = engine.dispatch_action(Action::new("tap"));
+        assert!(bare.is_err(), "bare name must be ambiguous with two owners");
+
+        // Click path: hit-test beta's button, dispatch what `handle_click`
+        // dispatches (`item.node_id`, `item.action`, `action_payload_at`).
+        let recorder = Recorder::default();
+        let beta_btn = pass
+            .items
+            .iter()
+            .filter(|it| it.action.as_deref() == Some("tap"))
+            .nth(1)
+            .expect("beta button item");
+        let (cx, cy) = (
+            beta_btn.rect.x + beta_btn.rect.w / 2.0,
+            beta_btn.rect.y + beta_btn.rect.h / 2.0,
+        );
+        let hit = pass.hit_excluding(cx, cy, &|_| false).expect("hit");
+        assert_eq!(hit.node_id, beta_btn.node_id);
+        recorder.dispatch_ui_action(
+            &hit.node_id,
+            hit.action.as_deref().unwrap(),
+            hit.action_payload_at(Some((cx, cy))),
+        );
+        feed(&mut engine, recorder.take());
+        let got = calls.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].0, "beta");
+        assert_eq!(got[0].1, "tap");
+        assert_eq!(got[0].2.as_ref().unwrap()["who"], json!("b"));
+    }
+
+    #[test]
+    fn keyboard_activation_of_the_first_modules_button_reaches_that_module() {
+        let (mut engine, tree, pass, calls) = two_module_app();
+        let alpha_btn = node_of(&tree, &pass, "Button", "a");
+        // `dispatch_focused`: resolve via `focused_dispatch`, address the
+        // focused node.
+        let (action, payload) =
+            focused_dispatch(&pass, Some(&alpha_btn), &|_| false).expect("actionable");
+        let recorder = Recorder::default();
+        recorder.dispatch_ui_action(&alpha_btn, &action, payload);
+        feed(&mut engine, recorder.take());
+        let got = calls.lock().unwrap().clone();
+        assert_eq!(got.len(), 1);
+        assert_eq!((got[0].0.as_str(), got[0].1.as_str()), ("alpha", "tap"));
+        assert_eq!(got[0].2.as_ref().unwrap()["who"], json!("a"));
+    }
+
+    #[test]
+    fn input_change_binds_and_fires_on_input_in_the_owning_module() {
+        let (mut engine, tree, pass, calls) = two_module_app();
+        let beta_input = node_of(&tree, &pass, "Input", "b");
+        // `edit_focused_input`: `__hypen_bind` with the Input's bind path,
+        // then `.onInput`, both addressed to the Input node.
+        let (_, bind_path) =
+            controlled_input_state(&tree, &Default::default(), &beta_input).expect("bound");
+        assert_eq!(bind_path, "name");
+        let recorder = Recorder::default();
+        recorder.dispatch_ui_action(
+            &beta_input,
+            "__hypen_bind",
+            Some(json!({"path": bind_path, "value": "hi"})),
+        );
+        let node = tree.get(&beta_input).unwrap();
+        let (action, _) =
+            crate::layout::resolve_named_event_action(node, "onInput").expect("wired");
+        recorder.dispatch_ui_action(&beta_input, &action, Some(json!({"value": "hi"})));
+        let sent = recorder.take();
+        assert!(sent.iter().all(|(n, _)| n == "__hypen_dispatch"));
+        feed(&mut engine, sent);
+        let got: Vec<(String, String)> = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(s, n, _)| (s.clone(), n.clone()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                ("beta".to_string(), "__hypen_bind".to_string()),
+                ("beta".to_string(), "typed".to_string()),
+            ]
+        );
+    }
 }

@@ -1,0 +1,27 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-root-array-shrink-granular",
+  "description": "A ROOT-level array that shrinks emits per-index null deletions: the whole-array-replacement rule only applies at a non-empty prefix, and the root has none.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": [
+      1,
+      2,
+      3
+    ],
+    "new": [
+      1
+    ]
+  },
+  "expected": [
+    {
+      "path": "1",
+      "value": null
+    },
+    {
+      "path": "2",
+      "value": null
+    }
+  ]
+}

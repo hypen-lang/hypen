@@ -446,13 +446,15 @@ export class DomAnimator {
    */
   private motionEssential = new Set<string>();
   /**
-   * Scrub-ownership check (Option G), installed by the renderer. Precedence
-   * (normative): scrub > structural playbacks > transaction > node
-   * `.transition` — a scrub-active node (dragging, settling, or holding its
-   * post-settle styles) is excluded from transaction application and from
-   * enter/FLIP/shared-FLIP participation entirely: the scrubber owns its
-   * inline styles, and a playback or transaction retargeting them would
-   * fight the user's finger.
+   * Gesture-ownership check, installed by the renderer. Precedence
+   * (normative): dnd > scrub > structural playbacks > transaction > node
+   * `.transition` — a node owned by a gesture runtime (a DnD source/item
+   * dragging or holding its post-drop transforms, a shifted sibling, or a
+   * scrub dragging/settling/holding its post-settle styles) is excluded
+   * from transaction application and from enter/FLIP/shared-FLIP
+   * participation entirely: the runtime owns its inline styles, and a
+   * playback or transaction retargeting them would fight the user's finger.
+   * The renderer composes the check as `dnd.ownsNode || scrubber.ownsNode`.
    */
   private scrubActive: (id: string) => boolean = () => false;
 
@@ -495,7 +497,7 @@ export class DomAnimator {
     }
   }
 
-  /** Install the scrub-ownership check (see {@link scrubActive}). */
+  /** Install the gesture-ownership check (see {@link scrubActive}). */
   setScrubActiveCheck(check: (id: string) => boolean): void {
     this.scrubActive = check;
   }
@@ -601,6 +603,11 @@ export class DomAnimator {
    * Option D's snap-on-refresh guarantee. All other unstamped writes are
    * untouched.
    */
+  /** Whether the current batch is stamped with a transaction spec. */
+  get transactionActive(): boolean {
+    return this.transactionSpec !== null;
+  }
+
   noteTransactionProp(id: string, element: HTMLElement, name: string): void {
     // Applicator-namespaced names (`backgroundColor.0`) resolve to their
     // base; variant-marked names (`backgroundColor@md`, `color:hover`) are

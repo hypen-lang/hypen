@@ -127,9 +127,14 @@ async function findFixtures(dir: string): Promise<string[]> {
     for (const entry of entries) {
       const fullPath = join(currentDir, entry.name);
       if (entry.isDirectory()) {
-        if (entry.name === "portable" || entry.name === "variant") continue;
+        // `device/` is the Device Capability Protocol corpus, replayed by
+        // the engine crate and every SDK's device suite.
+        if (entry.name === "portable" || entry.name === "variant" || entry.name === "device") continue;
         await walk(fullPath);
       } else if (entry.name.endsWith(".json")) {
+        // `dnd/path-move.json` is a state-transform fixture (fixtures/dnd/README.md),
+        // replayed by the engine crate and host SDKs — not a test-case fixture.
+        if (entry.name === "path-move.json") continue;
         fixtures.push(fullPath);
       }
     }
@@ -168,34 +173,18 @@ function matchPatchSequence(actual: EnginePatch[], expected: ExpectedPatch[]): b
 }
 
 // Match patches by structure, ignoring IDs
-function matchPatchStructure(actual: EnginePatch[], expected: ExpectedPatch[]): boolean {
-  if (actual.length !== expected.length) return false;
-
-  // Group patches by type for structural comparison
-  const actualByType = groupByType(actual);
-  const expectedByType = groupByType(expected);
-
-  for (const [type, expectedPatches] of Object.entries(expectedByType)) {
-    const actualPatches = actualByType[type] || [];
-    if (actualPatches.length !== expectedPatches.length) return false;
-
-    // For each expected patch of this type, verify there's a matching actual patch
-    for (const exp of expectedPatches) {
-      const hasMatch = actualPatches.some((act) => patchMatches(act, exp));
-      if (!hasMatch) return false;
-    }
-  }
-
-  return true;
-}
-
-function groupByType<T extends { type: string }>(patches: T[]): Record<string, T[]> {
-  const groups: Record<string, T[]> = {};
-  for (const patch of patches) {
-    if (!groups[patch.type]) groups[patch.type] = [];
-    groups[patch.type].push(patch);
-  }
-  return groups;
+function matchPatchStructure(actual: EnginePatch[], expected: ExpectedPatch[], allowExtra = false): boolean {
+  // DnD fixtures pin selected nodes/props; explicit counts and type lists
+  // assert the complete batch separately. Never reuse one actual patch to
+  // satisfy two expected rows.
+  if (allowExtra ? actual.length < expected.length : actual.length !== expected.length) return false;
+  const used = new Set<number>();
+  return expected.every(exp => {
+    const index = actual.findIndex((act, i) => !used.has(i) && patchMatches(act, exp));
+    if (index < 0) return false;
+    used.add(index);
+    return true;
+  });
 }
 
 function patchMatches(actual: EnginePatch, expected: ExpectedPatch): boolean {
@@ -353,7 +342,7 @@ describe("Engine Compatibility Tests", async () => {
           if (testCase.expected.patches) {
             const matches = testCase.expected.strictPatchOrder
               ? matchPatchSequence(collectedPatches, testCase.expected.patches)
-              : matchPatchStructure(collectedPatches, testCase.expected.patches);
+              : matchPatchStructure(collectedPatches, testCase.expected.patches, testCase.category === "dnd");
             if (!matches) {
               console.log("Expected patches:", JSON.stringify(testCase.expected.patches, null, 2));
               console.log("Actual patches:", JSON.stringify(collectedPatches, null, 2));
@@ -391,7 +380,9 @@ describe("Engine Compatibility Tests", async () => {
                   engine.updateStateSparse(
                     null,
                     step.stateChange.paths,
-                    step.stateChange.newValues,
+                    Object.fromEntries(step.stateChange.paths.map(path => [
+                      path, path.split(".").reduce((value, key) => value?.[key], currentState as any),
+                    ])),
                     step.animation
                   );
                 }
@@ -422,7 +413,7 @@ describe("Engine Compatibility Tests", async () => {
             if (step.expectedPatches) {
               const matches = step.strictPatchOrder
                 ? matchPatchSequence(collectedPatches, step.expectedPatches)
-                : matchPatchStructure(collectedPatches, step.expectedPatches);
+                : matchPatchStructure(collectedPatches, step.expectedPatches, testCase.category === "dnd");
               if (!matches) {
                 console.log("Step:", step.description || step.action);
                 console.log("Expected patches:", JSON.stringify(step.expectedPatches, null, 2));

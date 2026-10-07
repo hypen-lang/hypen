@@ -26,10 +26,35 @@ import java.util.concurrent.TimeUnit
  * A `compression = false` flag on this class could not be honoured, so it is
  * omitted rather than shipped as a knob that silently does nothing.
  *
+ * The device plane (RFC 001) runs on a compressed socket only when the
+ * negotiated permessage-deflate carries BOTH `server_no_context_takeover` and
+ * `client_no_context_takeover` (every message compressed on its own — what the
+ * Hypen servers negotiate; OkHttp honours both). With context takeover in
+ * either direction the connection runs UI-only (see [RemoteEngine]).
+ *
  * Outbound compression is gated separately by OkHttp's
  * `minWebSocketMessageToCompress` (1024 bytes by default), which the engine
  * leaves alone — client→server traffic is small hello/action JSON below that
  * threshold, where deflate costs more than it saves.
+ *
+ * ## Connection admission (RFC 001 §5, decision D1)
+ *
+ * A device-enabled server admits an upgrade **without** an `Origin` header
+ * only when its app-supplied authenticator accepts the request, and refuses
+ * it (403) when none is configured. `Origin` is a browser-only defence
+ * against cross-site WebSocket hijacking; it authenticates nothing, so a
+ * native client sends none by default and authenticates with app
+ * credentials instead:
+ *
+ * ```kotlin
+ * RemoteEngineConfig(headers = mapOf("Authorization" to "Bearer $token"))
+ * // or, for credentials that rotate between reconnects:
+ * RemoteEngineConfig(headersProvider = { mapOf("Authorization" to "Bearer ${tokens.current()}") })
+ * ```
+ *
+ * [origin] sends an explicit `Origin` (it must then be on the server's
+ * allowlist; the server's authenticator still runs). Header values are
+ * secrets: they are omitted from [toString] and never logged.
  */
 data class RemoteEngineConfig(
     /**
@@ -79,7 +104,49 @@ data class RemoteEngineConfig(
      * Enable logging of WebSocket messages.
      */
     val enableLogging: Boolean = false,
+    /**
+     * Extra headers sent on every WebSocket upgrade, e.g. `Authorization`
+     * (see "Connection admission" above). `Origin`, `Host`, `Upgrade`,
+     * `Connection` and `Sec-WebSocket-*` are not allowed here.
+     */
+    val headers: Map<String, String> = emptyMap(),
+    /**
+     * Evaluated on every connection attempt (reconnects included) and merged
+     * over [headers]: for credentials that rotate. Same restrictions.
+     */
+    val headersProvider: (() -> Map<String, String>)? = null,
+    /**
+     * An explicit `Origin` for the upgrade, or null (default) to send none.
+     * Only for servers that route native clients by an allowlisted origin;
+     * it is not authentication.
+     */
+    val origin: String? = null,
 ) {
+    init {
+        headers.keys.forEach(::requireAllowedHeader)
+        origin?.let { require(it.isNotBlank()) { "origin must not be blank" } }
+    }
+
+    /** The upgrade headers for one connection attempt ([headers], then [headersProvider], then [origin]). */
+    fun upgradeHeaders(): Map<String, String> {
+        val out = LinkedHashMap<String, String>()
+        headers.forEach { (k, v) -> out[k] = v }
+        headersProvider?.invoke()?.forEach { (k, v) ->
+            requireAllowedHeader(k)
+            out.keys.firstOrNull { it.equals(k, ignoreCase = true) }?.let(out::remove)
+            out[k] = v
+        }
+        origin?.let { out["Origin"] = it }
+        return out
+    }
+
+    override fun toString(): String =
+        "RemoteEngineConfig(autoReconnect=$autoReconnect, reconnectIntervalMs=$reconnectIntervalMs, " +
+            "maxReconnectAttempts=$maxReconnectAttempts, connectTimeoutMs=$connectTimeoutMs, readTimeoutMs=$readTimeoutMs, " +
+            "writeTimeoutMs=$writeTimeoutMs, pingIntervalMs=$pingIntervalMs, enableLogging=$enableLogging, " +
+            "headers=${headers.keys.map { "$it: <redacted>" }}, headersProvider=${if (headersProvider != null) "<set>" else "null"}, " +
+            "origin=$origin)"
+
     companion object {
         /**
          * Default configuration.
@@ -95,5 +162,14 @@ data class RemoteEngineConfig(
                 reconnectIntervalMs = 1000,
                 maxReconnectAttempts = Int.MAX_VALUE,
             )
+    }
+}
+
+private val FORBIDDEN_UPGRADE_HEADERS = setOf("origin", "host", "upgrade", "connection")
+
+private fun requireAllowedHeader(name: String) {
+    val lower = name.lowercase()
+    require(lower !in FORBIDDEN_UPGRADE_HEADERS && !lower.startsWith("sec-websocket-")) {
+        "header '$name' is managed by the WebSocket upgrade" + if (lower == "origin") " (use RemoteEngineConfig.origin)" else ""
     }
 }

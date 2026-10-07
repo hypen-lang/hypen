@@ -1,0 +1,4429 @@
+{
+  "description": "Shared envelope-level conformance corpus (RFC 001 §2.1). Every SDK decodes each case from its JSON text with its strict device-message decoder + validator. `valid` cases must be accepted and must round-trip to an equal JSON value. `invalid` cases must be rejected at decode/validate. A case carries either `message` (a JSON value: serialize it to text, then decode) or `raw` (exact JSON text: needed for duplicate keys and number spellings a JSON value cannot hold). `beyondSchema: true` marks rules no JSON Schema keyword expresses (owner/lifetime agreement): the exported envelope schema accepts them, every decoder rejects them. All other invalid `message` cases are rejected by envelope-v1.schema.json too. String bounds count Unicode code points. Capability payloads (params/result/event) are covered by payloads.json, not here. A case carries exactly one of `message`, `raw` (exact JSON text), `rawHex` (hex of the exact text bytes, for bytes a JSON string cannot carry such as invalid UTF-8) or `rawRepeat` ({prefix, repeat, count, suffix}: text = prefix + repeat*count + suffix, for the 1 MiB size limit). The RFC 001 §2.1 JSON limits (1 MiB text checked before parsing, depth 32, integer tokens only within 2^53-1, no -0, valid UTF-8, no raw control characters or lone surrogates in keys and values, duplicate keys rejected) and canonical shapes (no array for an object, no map for an enum) apply to every decoder. `handshake` holds hello.device / sessionAck.device / core.capabilities snapshot cases ({name, kind: hello|ack|capabilitiesEvent, value|raw|rawRepeat, valid, beyondSchema?}); duplicate capability names are invalid in all three, names compare by exact code points.",
+  "valid": [
+    {
+      "name": "request-rfc-example",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "name": "request-connection-owner",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "name": "request-background-owner",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "recorder-2"
+        },
+        "lifetime": "background",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "name": "request-max-bounds",
+      "message": {
+        "type": "deviceRequest",
+        "id": 4294967295,
+        "capability": "gallery.pick",
+        "version": 4294967295,
+        "owner": {
+          "moduleInstanceId": "m",
+          "activationId": 4294967295
+        },
+        "lifetime": "activation",
+        "timeoutMs": 86400000,
+        "initialCredit": 4194304,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "name": "request-min-bounds",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 1,
+        "initialCredit": 0,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "name": "request-capability-name-128",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "name": "request-capability-name-1",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "c",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "name": "request-module-instance-id-256-astral-code-points",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "name": "request-module-instance-id-1",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      }
+    },
+    {
+      "name": "request-params-empty-object",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {}
+      }
+    },
+    {
+      "name": "request-params-opaque-nested-object",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "a": {
+            "b": [
+              1,
+              {
+                "c": null
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "name": "response-result",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": {
+          "items": [
+            {
+              "channel": 0,
+              "contentType": "image/jpeg",
+              "bytes": 17,
+              "sha256": "5ed7ddab0fc86c9cadfcd6033e603644db19c156e7167dcced16b839f422a347"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "response-result-empty-object",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": {}
+      }
+    },
+    {
+      "name": "response-error-with-detail",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "denied",
+          "platformDetail": "user-declined"
+        }
+      }
+    },
+    {
+      "name": "response-error-without-detail",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "denied"
+        }
+      }
+    },
+    {
+      "name": "response-error-platform-detail-empty-string-is-present",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "internal",
+          "platformDetail": ""
+        }
+      }
+    },
+    {
+      "name": "response-error-platform-detail-512-astral-code-points",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "internal",
+          "platformDetail": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+        }
+      }
+    },
+    {
+      "name": "response-simulated-result",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": {
+          "items": []
+        },
+        "simulated": true
+      }
+    },
+    {
+      "name": "response-simulated-error",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "denied",
+          "platformDetail": "user-declined"
+        },
+        "simulated": true
+      }
+    },
+    {
+      "name": "response-error-code-unsupported",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "unsupported"
+        }
+      }
+    },
+    {
+      "name": "response-error-code-unavailable",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "unavailable"
+        }
+      }
+    },
+    {
+      "name": "response-error-code-denied",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "denied"
+        }
+      }
+    },
+    {
+      "name": "response-error-code-revoked",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "revoked"
+        }
+      }
+    },
+    {
+      "name": "response-error-code-cancelled",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "cancelled"
+        }
+      }
+    },
+    {
+      "name": "response-error-code-timeout",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "timeout"
+        }
+      }
+    },
+    {
+      "name": "response-error-code-throttled",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "throttled"
+        }
+      }
+    },
+    {
+      "name": "response-error-code-connectionLost",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "connectionLost"
+        }
+      }
+    },
+    {
+      "name": "response-error-code-invalidParams",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "invalidParams"
+        }
+      }
+    },
+    {
+      "name": "response-error-code-internal",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "internal"
+        }
+      }
+    },
+    {
+      "name": "event-blob-start",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "image/jpeg",
+          "bytes": 120000
+        }
+      }
+    },
+    {
+      "name": "event-progress",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": {
+          "kind": "progress",
+          "state": "pendingConsent"
+        }
+      }
+    },
+    {
+      "name": "event-empty-object",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": {}
+      }
+    },
+    {
+      "name": "control-grant-1",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "grant": 1
+        }
+      }
+    },
+    {
+      "name": "control-grant-max-outstanding",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "grant": 8388608
+        }
+      }
+    },
+    {
+      "name": "control-cancel",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "cancel": true
+        }
+      }
+    },
+    {
+      "name": "control-renew-lease-1",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "renewLease": 1
+        }
+      }
+    },
+    {
+      "name": "control-renew-lease-u32-max",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "renewLease": 4294967295
+        }
+      }
+    },
+    {
+      "name": "control-lease-ack-1",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "leaseAck": 1
+        }
+      }
+    },
+    {
+      "name": "control-lease-ack-u32-max",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "leaseAck": 4294967295
+        }
+      }
+    },
+    {
+      "name": "control-paused-true",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "paused": true
+        }
+      }
+    },
+    {
+      "name": "control-paused-false",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "paused": false
+        }
+      }
+    },
+    {
+      "name": "id-max-u32",
+      "message": {
+        "type": "deviceEvent",
+        "id": 4294967295,
+        "control": {
+          "cancel": true
+        }
+      }
+    },
+    {
+      "name": "event-opaque-integer-2^53-minus-1",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": {
+          "a": 9007199254740991,
+          "b": -9007199254740991
+        }
+      }
+    },
+    {
+      "name": "event-opaque-depth-32",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": {
+          "a": [
+            [
+              [
+                [
+                  [
+                    [
+                      [
+                        [
+                          [
+                            [
+                              [
+                                [
+                                  [
+                                    [
+                                      [
+                                        [
+                                          [
+                                            [
+                                              [
+                                                [
+                                                  [
+                                                    [
+                                                      [
+                                                        [
+                                                          [
+                                                            [
+                                                              [
+                                                                [
+                                                                  [
+                                                                    []
+                                                                  ]
+                                                                ]
+                                                              ]
+                                                            ]
+                                                          ]
+                                                        ]
+                                                      ]
+                                                    ]
+                                                  ]
+                                                ]
+                                              ]
+                                            ]
+                                          ]
+                                        ]
+                                      ]
+                                    ]
+                                  ]
+                                ]
+                              ]
+                            ]
+                          ]
+                        ]
+                      ]
+                    ]
+                  ]
+                ]
+              ]
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "name": "raw-escapes-and-surrogate-pair",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":\"\\ud83d\\ude00 \\u00e9 \\/ \\b\\f\\n\\r\\t \\\\ \\\"\",\"\\u0062\":1}}"
+    },
+    {
+      "name": "raw-json-whitespace",
+      "raw": " \t\r\n{ \"type\" : \"deviceEvent\" ,\n\"id\":1 ,\"control\":{\"cancel\":true} } \n"
+    },
+    {
+      "name": "raw-depth-32",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}"
+    },
+    {
+      "name": "raw-integer-bounds",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":9007199254740991,\"b\":-9007199254740991,\"c\":0}}"
+    },
+    {
+      "name": "raw-message-exactly-1-mib",
+      "rawRepeat": {
+        "prefix": "{\"type\":\"deviceEvent\",\"id\":1,\"control\":{\"cancel\":true}",
+        "repeat": " ",
+        "count": 1048521,
+        "suffix": "}"
+      }
+    },
+    {
+      "name": "request-camera-capture-video",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "camera.capture",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 4194304,
+        "params": {
+          "mode": "video",
+          "facing": "back",
+          "maxDurationMs": 15000
+        }
+      }
+    },
+    {
+      "name": "request-bluetooth-select",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "bluetooth.select",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 0,
+        "params": {
+          "services": [
+            "0000180d-0000-1000-8000-00805f9b34fb"
+          ],
+          "namePrefix": "Polar"
+        }
+      }
+    },
+    {
+      "name": "request-mic-record-stereo",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "mic.record",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 600000,
+        "initialCredit": 262144,
+        "params": {
+          "sampleRate": 48000,
+          "format": "pcm16",
+          "channels": 2
+        }
+      }
+    },
+    {
+      "name": "request-permission-query-typed",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "contacts"
+        }
+      }
+    },
+    {
+      "name": "response-bluetooth-select-device",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": {
+          "device": {
+            "id": "dev-1",
+            "name": "Polar H10"
+          }
+        }
+      }
+    },
+    {
+      "name": "response-permission-unsupported-names-the-permission",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "unsupported",
+          "platformDetail": "contacts"
+        }
+      }
+    },
+    {
+      "name": "event-camera-blob-start-undeclared",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "video/webm"
+        }
+      }
+    }
+  ],
+  "invalid": [
+    {
+      "name": "request-missing-id",
+      "message": {
+        "type": "deviceRequest",
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "required member id missing"
+    },
+    {
+      "name": "request-missing-capability",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "required member capability missing"
+    },
+    {
+      "name": "request-missing-version",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "required member version missing"
+    },
+    {
+      "name": "request-missing-owner",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "required member owner missing"
+    },
+    {
+      "name": "request-missing-lifetime",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "required member lifetime missing"
+    },
+    {
+      "name": "request-missing-timeoutMs",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "required member timeoutMs missing"
+    },
+    {
+      "name": "request-missing-initialCredit",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "required member initialCredit missing"
+    },
+    {
+      "name": "request-missing-params",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536
+      },
+      "reason": "required member params missing"
+    },
+    {
+      "name": "request-null-id",
+      "message": {
+        "type": "deviceRequest",
+        "id": null,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "null for required id"
+    },
+    {
+      "name": "request-null-capability",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": null,
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "null for required capability"
+    },
+    {
+      "name": "request-null-version",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": null,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "null for required version"
+    },
+    {
+      "name": "request-null-owner",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": null,
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "null for required owner"
+    },
+    {
+      "name": "request-null-lifetime",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": null,
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "null for required lifetime"
+    },
+    {
+      "name": "request-null-timeoutMs",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": null,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "null for required timeoutMs"
+    },
+    {
+      "name": "request-null-initialCredit",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": null,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "null for required initialCredit"
+    },
+    {
+      "name": "request-null-params",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": null
+      },
+      "reason": "null for required params"
+    },
+    {
+      "name": "request-missing-type",
+      "message": {
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "type discriminator missing"
+    },
+    {
+      "name": "request-unknown-type",
+      "message": {
+        "type": "deviceBogus",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "unknown message type"
+    },
+    {
+      "name": "request-type-wrong-case",
+      "message": {
+        "type": "DeviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "type values are exact-case"
+    },
+    {
+      "name": "request-key-wrong-case-ID",
+      "message": {
+        "type": "deviceRequest",
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        },
+        "ID": 17
+      },
+      "reason": "keys are exact-case: ID is unknown and id missing"
+    },
+    {
+      "name": "request-key-wrong-case-Capability",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        },
+        "Capability": "gallery.pick"
+      },
+      "reason": "keys are exact-case"
+    },
+    {
+      "name": "request-extra-key",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        },
+        "extra": 1
+      },
+      "reason": "closed object"
+    },
+    {
+      "name": "request-id-zero",
+      "message": {
+        "type": "deviceRequest",
+        "id": 0,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "id 0 is reserved"
+    },
+    {
+      "name": "request-id-2^32",
+      "message": {
+        "type": "deviceRequest",
+        "id": 4294967296,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "id is a u32"
+    },
+    {
+      "name": "request-id-negative",
+      "message": {
+        "type": "deviceRequest",
+        "id": -1,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "id is a u32"
+    },
+    {
+      "name": "request-id-string",
+      "message": {
+        "type": "deviceRequest",
+        "id": "17",
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "id is an integer"
+    },
+    {
+      "name": "request-id-fraction",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17.5,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "id is an integer"
+    },
+    {
+      "name": "request-version-zero",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 0,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "version 0 is reserved"
+    },
+    {
+      "name": "request-timeout-zero",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 0,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "timeoutMs is positive"
+    },
+    {
+      "name": "request-timeout-over-registry-max",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 86400001,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "timeoutMs above the largest registry max_timeout_ms"
+    },
+    {
+      "name": "request-initial-credit-over-registry-max",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 4194305,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "initialCredit above the largest registry max_initial_credit"
+    },
+    {
+      "name": "request-initial-credit-negative",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": -1,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "initialCredit is unsigned"
+    },
+    {
+      "name": "request-params-number",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": 5
+      },
+      "reason": "params must be an object"
+    },
+    {
+      "name": "request-params-array",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": []
+      },
+      "reason": "params must be an object"
+    },
+    {
+      "name": "request-lifetime-unknown",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "forever",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "closed lifetime enum"
+    },
+    {
+      "name": "request-capability-empty",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "capability name is 1..128 code points"
+    },
+    {
+      "name": "request-capability-129",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "capability name is 1..128 code points"
+    },
+    {
+      "name": "request-owner-activation-id-negative",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "activationId": -1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "malformed activation owner is rejected, never downgraded to a module owner"
+    },
+    {
+      "name": "request-owner-activation-id-string",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "activationId": "3"
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "malformed activation owner is rejected, never downgraded to a module owner"
+    },
+    {
+      "name": "request-owner-activation-id-zero",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "activationId": 0
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "activationId >= 1"
+    },
+    {
+      "name": "request-owner-activation-id-2^32",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "activationId": 4294967296
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "activationId is a u32"
+    },
+    {
+      "name": "request-owner-activation-id-null",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "activationId": null
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "null activationId"
+    },
+    {
+      "name": "request-owner-connection-false",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "connection": false
+        },
+        "lifetime": "connection",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "connection is const true"
+    },
+    {
+      "name": "request-owner-connection-null",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "connection": null
+        },
+        "lifetime": "connection",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "connection is const true"
+    },
+    {
+      "name": "request-owner-module-plus-connection",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "connection": true
+        },
+        "lifetime": "background",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "owner is exactly one shape; no mixing"
+    },
+    {
+      "name": "request-owner-activation-null-sibling",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "activationId": 1,
+          "connection": null
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "a null sibling is still a present key"
+    },
+    {
+      "name": "request-owner-extra-key",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "activationId": 1,
+          "extra": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "closed owner object"
+    },
+    {
+      "name": "request-owner-wrong-case",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "ModuleInstanceId": "x",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "keys are exact-case"
+    },
+    {
+      "name": "request-owner-empty",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {},
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "owner must have one of the three shapes"
+    },
+    {
+      "name": "request-owner-module-instance-id-empty",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "moduleInstanceId is 1..256 code points"
+    },
+    {
+      "name": "request-owner-module-instance-id-257",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "moduleInstanceId is 1..256 code points"
+    },
+    {
+      "name": "request-owner-module-instance-id-257-astral",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀",
+          "activationId": 1
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "maxLength counts code points: 257 > 256"
+    },
+    {
+      "name": "request-owner-activation-with-background-lifetime",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x",
+          "activationId": 1
+        },
+        "lifetime": "background",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "owner shape must match lifetime",
+      "beyondSchema": true
+    },
+    {
+      "name": "request-owner-module-with-activation-lifetime",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "x"
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "owner shape must match lifetime (no silent downgrade)",
+      "beyondSchema": true
+    },
+    {
+      "name": "request-owner-connection-with-activation-lifetime",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "owner shape must match lifetime",
+      "beyondSchema": true
+    },
+    {
+      "name": "request-camera-capture-params-array",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "camera.capture",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": [
+          "photo"
+        ]
+      },
+      "reason": "params must be an object (an array never stands in for an object)"
+    },
+    {
+      "name": "request-permission-query-params-string",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": "camera"
+      },
+      "reason": "params must be an object, not the bare permission name"
+    },
+    {
+      "name": "response-both-result-and-error",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": {
+          "items": []
+        },
+        "error": {
+          "code": "denied"
+        }
+      },
+      "reason": "terminal XOR"
+    },
+    {
+      "name": "response-neither-result-nor-error",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17
+      },
+      "reason": "terminal XOR"
+    },
+    {
+      "name": "response-result-null-with-error",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "denied",
+          "platformDetail": "user-declined"
+        },
+        "result": null
+      },
+      "reason": "a null result is present, and not an object"
+    },
+    {
+      "name": "response-error-null-with-result",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": {
+          "items": []
+        },
+        "error": null
+      },
+      "reason": "a null error is present, and not an error object"
+    },
+    {
+      "name": "response-simulated-false",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": {
+          "items": []
+        },
+        "simulated": false
+      },
+      "reason": "simulated is const true when present"
+    },
+    {
+      "name": "response-simulated-null",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": {
+          "items": []
+        },
+        "simulated": null
+      },
+      "reason": "simulated is const true when present"
+    },
+    {
+      "name": "response-result-number",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": 5
+      },
+      "reason": "result must be an object"
+    },
+    {
+      "name": "response-result-array",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": []
+      },
+      "reason": "result must be an object"
+    },
+    {
+      "name": "response-result-string",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": "x"
+      },
+      "reason": "result must be an object"
+    },
+    {
+      "name": "response-error-unknown-code",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "nuked"
+        }
+      },
+      "reason": "closed error code enum"
+    },
+    {
+      "name": "response-error-code-wrong-case",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "Denied"
+        }
+      },
+      "reason": "closed error code enum"
+    },
+    {
+      "name": "response-error-platform-detail-null",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "denied",
+          "platformDetail": null
+        }
+      },
+      "reason": "platformDetail is a string when present"
+    },
+    {
+      "name": "response-error-platform-detail-513",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "denied",
+          "platformDetail": "ddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+        }
+      },
+      "reason": "platformDetail is at most 512 code points"
+    },
+    {
+      "name": "response-error-platform-detail-513-astral",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "denied",
+          "platformDetail": "😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀😀"
+        }
+      },
+      "reason": "maxLength counts code points: 513 > 512"
+    },
+    {
+      "name": "response-error-extra-key",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": "denied",
+          "extra": 1
+        }
+      },
+      "reason": "closed error object"
+    },
+    {
+      "name": "response-error-wrong-case-key",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "Code": "denied"
+        }
+      },
+      "reason": "keys are exact-case"
+    },
+    {
+      "name": "response-extra-key",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "result": {
+          "items": []
+        },
+        "extra": 1
+      },
+      "reason": "closed object"
+    },
+    {
+      "name": "response-id-zero",
+      "message": {
+        "type": "deviceResponse",
+        "id": 0,
+        "result": {
+          "items": []
+        }
+      },
+      "reason": "id 0 is reserved"
+    },
+    {
+      "name": "response-id-2^32",
+      "message": {
+        "type": "deviceResponse",
+        "id": 4294967296,
+        "result": {
+          "items": []
+        }
+      },
+      "reason": "id is a u32"
+    },
+    {
+      "name": "response-missing-id",
+      "message": {
+        "type": "deviceResponse",
+        "result": {
+          "items": []
+        }
+      },
+      "reason": "required member id missing"
+    },
+    {
+      "name": "event-both-event-and-control",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "image/jpeg",
+          "bytes": 120000
+        },
+        "control": {
+          "cancel": true
+        }
+      },
+      "reason": "event XOR control"
+    },
+    {
+      "name": "event-neither-event-nor-control",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17
+      },
+      "reason": "event XOR control"
+    },
+    {
+      "name": "event-null-event-with-control",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "cancel": true
+        },
+        "event": null
+      },
+      "reason": "a null event is present, and not an object"
+    },
+    {
+      "name": "event-null-control-with-event",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "image/jpeg",
+          "bytes": 120000
+        },
+        "control": null
+      },
+      "reason": "a null control is present, and not a control"
+    },
+    {
+      "name": "event-array",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": []
+      },
+      "reason": "event must be an object"
+    },
+    {
+      "name": "event-string",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": "x"
+      },
+      "reason": "event must be an object"
+    },
+    {
+      "name": "event-id-zero",
+      "message": {
+        "type": "deviceEvent",
+        "id": 0,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "image/jpeg",
+          "bytes": 120000
+        }
+      },
+      "reason": "id 0 is reserved"
+    },
+    {
+      "name": "event-extra-key",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "event": {
+          "kind": "blobStart",
+          "channel": 0,
+          "contentType": "image/jpeg",
+          "bytes": 120000
+        },
+        "extra": 1
+      },
+      "reason": "closed object"
+    },
+    {
+      "name": "control-cancel-false",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "cancel": false
+        }
+      },
+      "reason": "cancel is const true"
+    },
+    {
+      "name": "control-cancel-null",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "cancel": null
+        }
+      },
+      "reason": "cancel is const true"
+    },
+    {
+      "name": "control-grant-zero",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "grant": 0
+        }
+      },
+      "reason": "grant is positive"
+    },
+    {
+      "name": "control-grant-negative",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "grant": -1
+        }
+      },
+      "reason": "grant is positive"
+    },
+    {
+      "name": "control-grant-string",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "grant": "5"
+        }
+      },
+      "reason": "grant is an integer"
+    },
+    {
+      "name": "control-grant-over-registry-max",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "grant": 8388609
+        }
+      },
+      "reason": "grant above the largest registry max_outstanding_credit"
+    },
+    {
+      "name": "control-renew-lease-zero",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "renewLease": 0
+        }
+      },
+      "reason": "lease sequences start at 1"
+    },
+    {
+      "name": "control-renew-lease-2^32",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "renewLease": 4294967296
+        }
+      },
+      "reason": "lease sequences are u32"
+    },
+    {
+      "name": "control-renew-lease-json-safe-max",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "renewLease": 9007199254740991
+        }
+      },
+      "reason": "lease sequences are u32, not JSON-safe integers"
+    },
+    {
+      "name": "control-lease-ack-2^32",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "leaseAck": 4294967296
+        }
+      },
+      "reason": "lease sequences are u32"
+    },
+    {
+      "name": "control-lease-ack-zero",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "leaseAck": 0
+        }
+      },
+      "reason": "lease sequences start at 1"
+    },
+    {
+      "name": "control-paused-null",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "paused": null
+        }
+      },
+      "reason": "paused is a boolean"
+    },
+    {
+      "name": "control-paused-string",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "paused": "true"
+        }
+      },
+      "reason": "paused is a boolean"
+    },
+    {
+      "name": "control-two-keys",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "grant": 5,
+          "cancel": true
+        }
+      },
+      "reason": "exactly one control variant"
+    },
+    {
+      "name": "control-null-sibling",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "grant": 5,
+          "cancel": null
+        }
+      },
+      "reason": "a null sibling is still a second variant"
+    },
+    {
+      "name": "control-empty",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {}
+      },
+      "reason": "exactly one control variant"
+    },
+    {
+      "name": "control-unknown-variant",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "nuke": true
+        }
+      },
+      "reason": "closed control variants"
+    },
+    {
+      "name": "control-wrong-case",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "Grant": 5
+        }
+      },
+      "reason": "keys are exact-case"
+    },
+    {
+      "name": "response-error-as-array",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": [
+          "denied"
+        ]
+      },
+      "reason": "an array never stands in for the error object"
+    },
+    {
+      "name": "response-error-as-array-with-detail",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": [
+          "denied",
+          "detail"
+        ]
+      },
+      "reason": "an array never stands in for the error object"
+    },
+    {
+      "name": "response-error-code-as-map",
+      "message": {
+        "type": "deviceResponse",
+        "id": 17,
+        "error": {
+          "code": {
+            "denied": null
+          }
+        }
+      },
+      "reason": "a one-key map never stands in for an enum string"
+    },
+    {
+      "name": "request-lifetime-as-map",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": {
+          "activation": null
+        },
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "a one-key map never stands in for an enum string"
+    },
+    {
+      "name": "request-owner-as-array",
+      "message": {
+        "type": "deviceRequest",
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": [
+          "profile-7",
+          3
+        ],
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "an array never stands in for the owner object"
+    },
+    {
+      "name": "control-as-array",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": [
+          65536
+        ]
+      },
+      "reason": "an array never stands in for the control object"
+    },
+    {
+      "name": "control-grant-as-array",
+      "message": {
+        "type": "deviceEvent",
+        "id": 17,
+        "control": {
+          "grant": [
+            1
+          ]
+        }
+      },
+      "reason": "grant is an integer"
+    },
+    {
+      "name": "request-type-as-map",
+      "message": {
+        "type": {
+          "deviceRequest": null
+        },
+        "id": 17,
+        "capability": "gallery.pick",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 300000,
+        "initialCredit": 65536,
+        "params": {
+          "mediaTypes": [
+            "photo"
+          ],
+          "maxCount": 1
+        }
+      },
+      "reason": "type is a string"
+    },
+    {
+      "name": "raw-duplicate-id",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"id\":2,\"control\":{\"cancel\":true}}",
+      "reason": "duplicate key id"
+    },
+    {
+      "name": "raw-duplicate-id-wrong-case-sibling",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":0,\"Id\":1,\"control\":{\"cancel\":true}}",
+      "reason": "case-folded sibling is an unknown key, and id 0 is reserved"
+    },
+    {
+      "name": "raw-duplicate-type",
+      "raw": "{\"type\":\"deviceRequest\",\"type\":\"deviceEvent\",\"id\":1,\"control\":{\"cancel\":true}}",
+      "reason": "duplicate key type: never reinterpret as another message"
+    },
+    {
+      "name": "raw-duplicate-result",
+      "raw": "{\"type\":\"deviceResponse\",\"id\":1,\"result\":{\"a\":1},\"result\":{}}",
+      "reason": "duplicate key result"
+    },
+    {
+      "name": "raw-duplicate-control-key",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"control\":{\"grant\":1,\"grant\":2}}",
+      "reason": "duplicate key inside control"
+    },
+    {
+      "name": "raw-duplicate-owner-key",
+      "raw": "{\"type\":\"deviceRequest\",\"id\":1,\"capability\":\"gallery.pick\",\"version\":1,\"owner\":{\"moduleInstanceId\":\"a\",\"moduleInstanceId\":\"b\",\"activationId\":1},\"lifetime\":\"activation\",\"timeoutMs\":1000,\"initialCredit\":0,\"params\":{}}",
+      "reason": "duplicate key inside owner"
+    },
+    {
+      "name": "raw-duplicate-key-inside-params",
+      "raw": "{\"type\":\"deviceRequest\",\"id\":1,\"capability\":\"gallery.pick\",\"version\":1,\"owner\":{\"moduleInstanceId\":\"a\",\"activationId\":1},\"lifetime\":\"activation\",\"timeoutMs\":1000,\"initialCredit\":0,\"params\":{\"maxCount\":1,\"maxCount\":2}}",
+      "reason": "duplicate key at any depth, including params"
+    },
+    {
+      "name": "raw-duplicate-key-inside-result",
+      "raw": "{\"type\":\"deviceResponse\",\"id\":1,\"result\":{\"items\":[{\"channel\":0,\"channel\":1}]}}",
+      "reason": "duplicate key at any depth, including result"
+    },
+    {
+      "name": "raw-duplicate-key-inside-event",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"kind\":\"progress\",\"kind\":\"blobStart\"}}",
+      "reason": "duplicate key at any depth, including event"
+    },
+    {
+      "name": "raw-duplicate-error-key",
+      "raw": "{\"type\":\"deviceResponse\",\"id\":1,\"error\":{\"code\":\"denied\",\"code\":\"internal\"}}",
+      "reason": "duplicate key inside error"
+    },
+    {
+      "name": "raw-id-minus-zero",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":-0,\"control\":{\"cancel\":true}}",
+      "reason": "-0 is not an integer literal for integer fields"
+    },
+    {
+      "name": "raw-grant-minus-zero",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"control\":{\"grant\":-0}}",
+      "reason": "-0 is not an integer literal for integer fields"
+    },
+    {
+      "name": "raw-activation-id-minus-zero",
+      "raw": "{\"type\":\"deviceRequest\",\"id\":1,\"capability\":\"gallery.pick\",\"version\":1,\"owner\":{\"moduleInstanceId\":\"a\",\"activationId\":-0},\"lifetime\":\"activation\",\"timeoutMs\":1000,\"initialCredit\":0,\"params\":{}}",
+      "reason": "-0 is not an integer literal for integer fields"
+    },
+    {
+      "name": "raw-typed-number-1.0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1.0,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-1.0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":1.0}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-1e0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1e0,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-1e0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":1e0}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-1E0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1E0,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-1E0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":1E0}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-1e+0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1e+0,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-1e+0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":1e+0}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-10E-1",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":10E-1,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-10E-1",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":10E-1}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number--0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":-0,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number--0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":-0}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number--0.0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":-0.0,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number--0.0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":-0.0}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-0.5",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":0.5,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-0.5",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":0.5}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-01",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":01,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-01",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":01}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-+1",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":+1,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-+1",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":+1}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-1.",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1.,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-1.",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":1.}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-.5",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":.5,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-.5",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":.5}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-1.0000000000000001",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1.0000000000000001,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-1.0000000000000001",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":1.0000000000000001}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-typed-number-4.294967295e9",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":4.294967295e9,\"control\":{\"cancel\":true}}",
+      "reason": "numbers are integer tokens: no fraction, exponent, -0, leading zero or plus sign"
+    },
+    {
+      "name": "raw-opaque-number-4.294967295e9",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":4.294967295e9}}",
+      "reason": "the number rules hold inside params/result/event too"
+    },
+    {
+      "name": "raw-grant-1.0",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"control\":{\"grant\":1.0}}",
+      "reason": "integer tokens only"
+    },
+    {
+      "name": "raw-opaque-2^53",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":9007199254740992}}",
+      "reason": "integer magnitude above 2^53-1"
+    },
+    {
+      "name": "raw-opaque-minus-2^53",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":-9007199254740992}}",
+      "reason": "integer magnitude above 2^53-1"
+    },
+    {
+      "name": "raw-opaque-17-digits",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":12345678901234567}}",
+      "reason": "at most 16 digits (2^53-1)"
+    },
+    {
+      "name": "raw-opaque-huge-integer",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":9999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999999}}",
+      "reason": "at most 16 digits (2^53-1)"
+    },
+    {
+      "name": "raw-opaque-1e400",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":1e400}}",
+      "reason": "exponent, and out of range"
+    },
+    {
+      "name": "raw-typed-integer-million-digits",
+      "rawRepeat": {
+        "prefix": "{\"type\":\"deviceEvent\",\"id\":1",
+        "repeat": "0",
+        "count": 1000000,
+        "suffix": ",\"control\":{\"cancel\":true}}"
+      },
+      "reason": "at most 16 digits; reject without a big-number parse"
+    },
+    {
+      "name": "raw-params-float",
+      "raw": "{\"type\":\"deviceRequest\",\"id\":1,\"capability\":\"gallery.pick\",\"version\":1,\"owner\":{\"moduleInstanceId\":\"a\",\"activationId\":1},\"lifetime\":\"activation\",\"timeoutMs\":1000,\"initialCredit\":0,\"params\":{\"mediaTypes\":[\"photo\"],\"maxCount\":1.0}}",
+      "reason": "maxCount 1.0 is not an integer token (JSON Schema `integer` would accept it)"
+    },
+    {
+      "name": "raw-bare-token-NaN",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":NaN}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token-Infinity",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":Infinity}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token--Infinity",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":-Infinity}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token-True",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":True}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token-TRUE",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":TRUE}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token-Null",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":Null}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token-nul",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":nul}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token-tru",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":tru}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token-abc",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":abc}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token-undefined",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":undefined}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-bare-token-1abc",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":1abc}}",
+      "reason": "not JSON: only true/false/null literals"
+    },
+    {
+      "name": "raw-control-char-in-value",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":\"x\u0001y\"}}",
+      "reason": "raw control character (< 0x20) in a string value"
+    },
+    {
+      "name": "raw-control-char-in-key",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\u0001\":1}}",
+      "reason": "raw control character (< 0x20) in a key"
+    },
+    {
+      "name": "raw-tab-in-typed-value",
+      "raw": "{\"type\":\"deviceRequest\",\"id\":1,\"capability\":\"gallery\tpick\",\"version\":1,\"owner\":{\"moduleInstanceId\":\"a\",\"activationId\":1},\"lifetime\":\"activation\",\"timeoutMs\":1000,\"initialCredit\":0,\"params\":{}}",
+      "reason": "raw TAB in a string"
+    },
+    {
+      "name": "raw-newline-in-platform-detail",
+      "raw": "{\"type\":\"deviceResponse\",\"id\":1,\"error\":{\"code\":\"denied\",\"platformDetail\":\"a\nb\"}}",
+      "reason": "raw LF in a string"
+    },
+    {
+      "name": "raw-nul-in-module-instance-id",
+      "raw": "{\"type\":\"deviceRequest\",\"id\":1,\"capability\":\"gallery.pick\",\"version\":1,\"owner\":{\"moduleInstanceId\":\"a\u0000\",\"activationId\":1},\"lifetime\":\"activation\",\"timeoutMs\":1000,\"initialCredit\":0,\"params\":{}}",
+      "reason": "raw NUL in a string"
+    },
+    {
+      "name": "raw-lone-high-surrogate-value",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":\"\\ud800\"}}",
+      "reason": "lone surrogate escape"
+    },
+    {
+      "name": "raw-lone-low-surrogate-value",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":\"\\udc00x\"}}",
+      "reason": "lone surrogate escape"
+    },
+    {
+      "name": "raw-reversed-surrogate-pair",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":\"\\udc00\\ud800\"}}",
+      "reason": "lone surrogate escapes"
+    },
+    {
+      "name": "raw-lone-surrogate-key",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"\\ud800\":1}}",
+      "reason": "lone surrogate escape in a key"
+    },
+    {
+      "name": "raw-lone-surrogate-typed",
+      "raw": "{\"type\":\"deviceResponse\",\"id\":1,\"error\":{\"code\":\"denied\",\"platformDetail\":\"\\ud800\"}}",
+      "reason": "lone surrogate escape in a typed string"
+    },
+    {
+      "name": "raw-invalid-escape",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":\"\\x41\"}}",
+      "reason": "not a JSON escape"
+    },
+    {
+      "name": "rawhex-invalid-utf8-in-value",
+      "rawHex": "7b2274797065223a226465766963654576656e74222c226964223a312c226576656e74223a7b2261223a2278ff79227d7d",
+      "reason": "invalid UTF-8 byte 0xff in a string value"
+    },
+    {
+      "name": "rawhex-invalid-utf8-in-key",
+      "rawHex": "7b2274797065223a226465766963654576656e74222c226964223a312c226576656e74223a7b2261c062223a317d7d",
+      "reason": "invalid UTF-8 byte 0xc0 in a key"
+    },
+    {
+      "name": "rawhex-overlong-utf8",
+      "rawHex": "7b2274797065223a226465766963654576656e74222c226964223a312c226576656e74223a7b2261223a22c0af227d7d",
+      "reason": "overlong UTF-8 encoding"
+    },
+    {
+      "name": "rawhex-encoded-surrogate",
+      "rawHex": "7b2274797065223a226465766963654576656e74222c226964223a312c226576656e74223a7b2261223a22eda080227d7d",
+      "reason": "UTF-8-encoded surrogate (CESU)"
+    },
+    {
+      "name": "rawhex-truncated-utf8",
+      "rawHex": "7b2274797065223a226465766963654576656e74222c226964223a312c226576656e74223a7b2261223a22e282227d7d",
+      "reason": "truncated UTF-8 sequence"
+    },
+    {
+      "name": "raw-bom-prefix",
+      "raw": "﻿{\"type\":\"deviceEvent\",\"id\":1,\"control\":{\"cancel\":true}}",
+      "reason": "a byte-order mark is not JSON whitespace"
+    },
+    {
+      "name": "raw-trailing-data",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"control\":{\"cancel\":true}} x",
+      "reason": "trailing data after the message"
+    },
+    {
+      "name": "raw-escaped-duplicate-key",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"\\u0069d\":2,\"control\":{\"cancel\":true}}",
+      "reason": "duplicate keys compare after unescaping"
+    },
+    {
+      "name": "raw-escaped-duplicate-key-in-event",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"k\":1,\"\\u006b\":2}}",
+      "reason": "duplicate keys compare after unescaping, at any depth"
+    },
+    {
+      "name": "raw-depth-33",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}",
+      "reason": "nesting deeper than 32 containers"
+    },
+    {
+      "name": "raw-depth-33-objects",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":{\"a\":1}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}",
+      "reason": "nesting deeper than 32 containers"
+    },
+    {
+      "name": "raw-depth-2000",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":1,\"event\":{\"a\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}}",
+      "reason": "nesting deeper than 32 containers"
+    },
+    {
+      "name": "raw-message-1-mib-plus-1",
+      "rawRepeat": {
+        "prefix": "{\"type\":\"deviceEvent\",\"id\":1,\"control\":{\"cancel\":true}",
+        "repeat": " ",
+        "count": 1048522,
+        "suffix": "}"
+      },
+      "reason": "device message larger than 1048576 bytes"
+    },
+    {
+      "name": "raw-garbage-over-1-mib",
+      "rawRepeat": {
+        "prefix": "",
+        "repeat": "x",
+        "count": 1048577,
+        "suffix": ""
+      },
+      "reason": "the size check precedes parsing"
+    },
+    {
+      "name": "raw-top-level-array",
+      "raw": "[\"deviceEvent\",1,null,{\"cancel\":true}]",
+      "reason": "a message is an object"
+    },
+    {
+      "name": "raw-top-level-null",
+      "raw": "null",
+      "reason": "a message is an object"
+    },
+    {
+      "name": "raw-top-level-string",
+      "raw": "\"deviceEvent\"",
+      "reason": "a message is an object"
+    }
+  ],
+  "handshake": [
+    {
+      "name": "hello-rfc-example",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "hello-empty-capabilities",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": []
+      },
+      "valid": true
+    },
+    {
+      "name": "hello-canonically-equivalent-names-are-distinct",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "é",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "é",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "hello-duplicate-capability-name",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              2
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "capability names are unique in an advertisement",
+      "beyondSchema": true
+    },
+    {
+      "name": "hello-duplicate-protocol-version",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1,
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "protocolVersions is a set"
+    },
+    {
+      "name": "hello-duplicate-offer-version",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1,
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "versions is a set"
+    },
+    {
+      "name": "hello-protocol-version-zero",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          0,
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "0 is reserved"
+    },
+    {
+      "name": "hello-offer-version-zero",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              0
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "0 is reserved"
+    },
+    {
+      "name": "hello-9-protocol-versions",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "at most 8 protocol versions"
+    },
+    {
+      "name": "hello-65-capabilities",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "c0",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c1",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c2",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c3",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c4",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c5",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c6",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c7",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c8",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c9",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c10",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c11",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c12",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c13",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c14",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c15",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c16",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c17",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c18",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c19",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c20",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c21",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c22",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c23",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c24",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c25",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c26",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c27",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c28",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c29",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c30",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c31",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c32",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c33",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c34",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c35",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c36",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c37",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c38",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c39",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c40",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c41",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c42",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c43",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c44",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c45",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c46",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c47",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c48",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c49",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c50",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c51",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c52",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c53",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c54",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c55",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c56",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c57",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c58",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c59",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c60",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c61",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c62",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c63",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "c64",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "at most 64 capabilities"
+    },
+    {
+      "name": "hello-empty-name",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "names are 1..128 code points"
+    },
+    {
+      "name": "hello-name-129",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "names are 1..128 code points"
+    },
+    {
+      "name": "hello-extra-key",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ],
+        "extra": 1
+      },
+      "valid": false,
+      "reason": "closed object"
+    },
+    {
+      "name": "hello-binary-null",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": null,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1,
+              2
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "binary is a boolean"
+    },
+    {
+      "name": "hello-offer-as-array",
+      "kind": "hello",
+      "value": {
+        "protocolVersions": [
+          1
+        ],
+        "binary": true,
+        "capabilities": [
+          [
+            "core.capabilities",
+            [
+              1
+            ]
+          ]
+        ]
+      },
+      "valid": false,
+      "reason": "an array never stands in for an offer object"
+    },
+    {
+      "name": "hello-as-array",
+      "kind": "hello",
+      "value": [
+        [
+          1
+        ],
+        true,
+        [
+          [
+            "core.capabilities",
+            [
+              1
+            ]
+          ]
+        ]
+      ],
+      "valid": false,
+      "reason": "an array never stands in for hello.device"
+    },
+    {
+      "name": "hello-raw-duplicate-key",
+      "kind": "hello",
+      "raw": "{\"protocolVersions\":[1],\"binary\":false,\"binary\":true,\"capabilities\":[]}",
+      "valid": false,
+      "reason": "duplicate key"
+    },
+    {
+      "name": "hello-raw-float-version",
+      "kind": "hello",
+      "raw": "{\"protocolVersions\":[1.0],\"binary\":true,\"capabilities\":[]}",
+      "valid": false,
+      "reason": "integer tokens only"
+    },
+    {
+      "name": "hello-raw-400k-protocol-versions",
+      "kind": "hello",
+      "rawRepeat": {
+        "prefix": "{\"protocolVersions\":[",
+        "repeat": "1,",
+        "count": 400000,
+        "suffix": "1],\"binary\":true,\"capabilities\":[]}"
+      },
+      "valid": false,
+      "reason": "at most 8 protocol versions (and a set)"
+    },
+    {
+      "name": "capabilities-event-raw-200k-versions",
+      "kind": "capabilitiesEvent",
+      "rawRepeat": {
+        "prefix": "{\"capabilities\":[{\"name\":\"core.capabilities\",\"versions\":[",
+        "repeat": "1,",
+        "count": 200000,
+        "suffix": "1]}]}"
+      },
+      "valid": false,
+      "reason": "at most 32 versions per offer (and a set)"
+    },
+    {
+      "name": "ack-rfc-example",
+      "kind": "ack",
+      "value": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "gallery.pick",
+            "version": 1
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "ack-duplicate-capability-name",
+      "kind": "ack",
+      "value": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "gallery.pick",
+            "version": 1
+          },
+          {
+            "name": "gallery.pick",
+            "version": 2
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "a selection names each capability once",
+      "beyondSchema": true
+    },
+    {
+      "name": "ack-protocol-version-zero",
+      "kind": "ack",
+      "value": {
+        "protocolVersion": 0,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "gallery.pick",
+            "version": 1
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "0 is reserved"
+    },
+    {
+      "name": "ack-version-zero",
+      "kind": "ack",
+      "value": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 0
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "0 is reserved"
+    },
+    {
+      "name": "ack-65-capabilities",
+      "kind": "ack",
+      "value": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "c0",
+            "version": 1
+          },
+          {
+            "name": "c1",
+            "version": 1
+          },
+          {
+            "name": "c2",
+            "version": 1
+          },
+          {
+            "name": "c3",
+            "version": 1
+          },
+          {
+            "name": "c4",
+            "version": 1
+          },
+          {
+            "name": "c5",
+            "version": 1
+          },
+          {
+            "name": "c6",
+            "version": 1
+          },
+          {
+            "name": "c7",
+            "version": 1
+          },
+          {
+            "name": "c8",
+            "version": 1
+          },
+          {
+            "name": "c9",
+            "version": 1
+          },
+          {
+            "name": "c10",
+            "version": 1
+          },
+          {
+            "name": "c11",
+            "version": 1
+          },
+          {
+            "name": "c12",
+            "version": 1
+          },
+          {
+            "name": "c13",
+            "version": 1
+          },
+          {
+            "name": "c14",
+            "version": 1
+          },
+          {
+            "name": "c15",
+            "version": 1
+          },
+          {
+            "name": "c16",
+            "version": 1
+          },
+          {
+            "name": "c17",
+            "version": 1
+          },
+          {
+            "name": "c18",
+            "version": 1
+          },
+          {
+            "name": "c19",
+            "version": 1
+          },
+          {
+            "name": "c20",
+            "version": 1
+          },
+          {
+            "name": "c21",
+            "version": 1
+          },
+          {
+            "name": "c22",
+            "version": 1
+          },
+          {
+            "name": "c23",
+            "version": 1
+          },
+          {
+            "name": "c24",
+            "version": 1
+          },
+          {
+            "name": "c25",
+            "version": 1
+          },
+          {
+            "name": "c26",
+            "version": 1
+          },
+          {
+            "name": "c27",
+            "version": 1
+          },
+          {
+            "name": "c28",
+            "version": 1
+          },
+          {
+            "name": "c29",
+            "version": 1
+          },
+          {
+            "name": "c30",
+            "version": 1
+          },
+          {
+            "name": "c31",
+            "version": 1
+          },
+          {
+            "name": "c32",
+            "version": 1
+          },
+          {
+            "name": "c33",
+            "version": 1
+          },
+          {
+            "name": "c34",
+            "version": 1
+          },
+          {
+            "name": "c35",
+            "version": 1
+          },
+          {
+            "name": "c36",
+            "version": 1
+          },
+          {
+            "name": "c37",
+            "version": 1
+          },
+          {
+            "name": "c38",
+            "version": 1
+          },
+          {
+            "name": "c39",
+            "version": 1
+          },
+          {
+            "name": "c40",
+            "version": 1
+          },
+          {
+            "name": "c41",
+            "version": 1
+          },
+          {
+            "name": "c42",
+            "version": 1
+          },
+          {
+            "name": "c43",
+            "version": 1
+          },
+          {
+            "name": "c44",
+            "version": 1
+          },
+          {
+            "name": "c45",
+            "version": 1
+          },
+          {
+            "name": "c46",
+            "version": 1
+          },
+          {
+            "name": "c47",
+            "version": 1
+          },
+          {
+            "name": "c48",
+            "version": 1
+          },
+          {
+            "name": "c49",
+            "version": 1
+          },
+          {
+            "name": "c50",
+            "version": 1
+          },
+          {
+            "name": "c51",
+            "version": 1
+          },
+          {
+            "name": "c52",
+            "version": 1
+          },
+          {
+            "name": "c53",
+            "version": 1
+          },
+          {
+            "name": "c54",
+            "version": 1
+          },
+          {
+            "name": "c55",
+            "version": 1
+          },
+          {
+            "name": "c56",
+            "version": 1
+          },
+          {
+            "name": "c57",
+            "version": 1
+          },
+          {
+            "name": "c58",
+            "version": 1
+          },
+          {
+            "name": "c59",
+            "version": 1
+          },
+          {
+            "name": "c60",
+            "version": 1
+          },
+          {
+            "name": "c61",
+            "version": 1
+          },
+          {
+            "name": "c62",
+            "version": 1
+          },
+          {
+            "name": "c63",
+            "version": 1
+          },
+          {
+            "name": "c64",
+            "version": 1
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "at most 64 capabilities"
+    },
+    {
+      "name": "ack-extra-key",
+      "kind": "ack",
+      "value": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "version": 1
+          },
+          {
+            "name": "gallery.pick",
+            "version": 1
+          }
+        ],
+        "limits": {}
+      },
+      "valid": false,
+      "reason": "closed object: v1 acks carry no limits"
+    },
+    {
+      "name": "ack-selection-as-array",
+      "kind": "ack",
+      "value": {
+        "protocolVersion": 1,
+        "binary": true,
+        "capabilities": [
+          [
+            "core.capabilities",
+            1
+          ]
+        ]
+      },
+      "valid": false,
+      "reason": "an array never stands in for a selection object"
+    },
+    {
+      "name": "capabilities-event-snapshot",
+      "kind": "capabilitiesEvent",
+      "value": {
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "gallery.pick",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": true
+    },
+    {
+      "name": "capabilities-event-empty",
+      "kind": "capabilitiesEvent",
+      "value": {
+        "capabilities": []
+      },
+      "valid": true
+    },
+    {
+      "name": "capabilities-event-duplicate-name",
+      "kind": "capabilitiesEvent",
+      "value": {
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          },
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "capability names are unique in a snapshot",
+      "beyondSchema": true
+    },
+    {
+      "name": "capabilities-event-duplicate-version",
+      "kind": "capabilitiesEvent",
+      "value": {
+        "capabilities": [
+          {
+            "name": "core.capabilities",
+            "versions": [
+              1,
+              1
+            ]
+          }
+        ]
+      },
+      "valid": false,
+      "reason": "versions is a set"
+    }
+  ]
+}

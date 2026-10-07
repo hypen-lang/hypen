@@ -5,7 +5,12 @@
  * Eliminates `as any` casts throughout the codebase.
  */
 
-import { type DisposableStack, getElementDisposables } from "@hypen-space/core/disposable";
+import {
+  type DisposableStack,
+  disposeElement,
+  getElementDisposables,
+  hasElementDisposables,
+} from "@hypen-space/core/disposable";
 
 // ============================================================================
 // Types
@@ -76,10 +81,23 @@ export function clearHypenData(element: HTMLElement): void {
 // ============================================================================
 
 /**
- * Get the engine attached to an element
+ * Get the engine for an element: its own, or the nearest ancestor's.
+ *
+ * Template-instantiated nodes (list rows) carry no engine entry of their
+ * own — stamping one was a WeakMap write per node, ~17k per 1,000-row
+ * create — and resolve through the tree they are mounted in instead. Every
+ * caller runs from an event listener or an animation completion, i.e. on
+ * a mounted element; the walk is a handful of steps on a hot path that is
+ * one click.
  */
 export function getEngine(element: HTMLElement): IEngine | undefined {
-  return getHypenData(element).engine;
+  let current: HTMLElement | null = element;
+  while (current) {
+    const engine = elementDataMap.get(current)?.engine;
+    if (engine) return engine;
+    current = current.parentNode as HTMLElement | null;
+  }
+  return undefined;
 }
 
 /**
@@ -179,6 +197,30 @@ export function setMeta<T>(element: HTMLElement, key: string, value: T): void {
 }
 
 // ============================================================================
+// Event payload resolvers
+// ============================================================================
+
+/**
+ * Extra payload an element contributes to every action dispatched from it.
+ *
+ * Installed by components whose events mean more than "this element was hit"
+ * — a chart mark resolves the datum under the pointer, in data units — and
+ * merged by the event applicators on top of the extracted/static payload, so
+ * `.onClick(@actions.pick)` and `.onClick(@actions.pick, tag: "x")` both carry it.
+ */
+export type PayloadResolver = (event: Event) => Record<string, unknown> | undefined;
+
+const PAYLOAD_RESOLVER_KEY = "payload:resolver";
+
+export function setPayloadResolver(element: HTMLElement, resolver: PayloadResolver | null): void {
+  setMeta(element, PAYLOAD_RESOLVER_KEY, resolver ?? undefined);
+}
+
+export function getPayloadResolver(element: HTMLElement): PayloadResolver | undefined {
+  return getMeta<PayloadResolver>(element, PAYLOAD_RESOLVER_KEY);
+}
+
+// ============================================================================
 // Cleanup
 // ============================================================================
 
@@ -187,12 +229,16 @@ export function setMeta<T>(element: HTMLElement, key: string, value: T): void {
  * Call this when removing an element from the DOM
  */
 export function disposeHypenElement(element: HTMLElement): void {
-  // Dispose any registered disposables
-  try {
-    const disposables = getElementDisposables(element);
-    disposables.dispose();
-  } catch {
-    // Ignore if no disposables
+  // Dispose any registered disposables. Probe first: `getElementDisposables`
+  // creates a stack when none exists, and most elements never register one
+  // — tearing down a 1,000-row list allocated ~17k stacks just to dispose
+  // them empty.
+  if (hasElementDisposables(element)) {
+    try {
+      disposeElement(element);
+    } catch {
+      // A throwing disposer must not abort the rest of the teardown.
+    }
   }
 
   // Clear Hypen data

@@ -21,6 +21,25 @@ use crate::ir::node::{Element, IRNode, Props, Value};
 use crate::reactive::Binding;
 use serde::{Deserialize, Serialize};
 
+/// Read access to a resolved prop map, so semantics resolve identically
+/// against the flat `IndexMap` a fresh node resolves into and against an
+/// instance node's layered map (`reconcile::layered`).
+pub trait PropLookup {
+    fn lookup(&self, key: &str) -> Option<&serde_json::Value>;
+}
+
+impl PropLookup for indexmap::IndexMap<String, serde_json::Value> {
+    fn lookup(&self, key: &str) -> Option<&serde_json::Value> {
+        self.get(key)
+    }
+}
+
+impl<T: PropLookup> PropLookup for std::sync::Arc<T> {
+    fn lookup(&self, key: &str) -> Option<&serde_json::Value> {
+        (**self).lookup(key)
+    }
+}
+
 /// An accessibility role — a platform-neutral statement of what a node *is*.
 ///
 /// Roles are emitted only where they are *structurally certain* from the
@@ -442,10 +461,7 @@ impl Semantics {
     /// element's own text/`alt` prop). The resolved value comes from the
     /// element's own resolved props; cross-node child templates are not
     /// resolved here.
-    pub fn with_resolved_name(
-        mut self,
-        resolved: &indexmap::IndexMap<String, serde_json::Value>,
-    ) -> Self {
+    pub fn with_resolved_name(mut self, resolved: &impl PropLookup) -> Self {
         let needs = matches!(
             self.role,
             Some(Role::Button)
@@ -472,7 +488,7 @@ impl Semantics {
             _ => &["__a11yName", "0", "text"],
         };
         for key in keys {
-            if let Some(text) = resolved.get(*key).and_then(|v| v.as_str()) {
+            if let Some(text) = resolved.lookup(key).and_then(|v| v.as_str()) {
                 let trimmed = text.trim();
                 if !trimmed.is_empty() {
                     self.name = Some(trimmed.to_string());
@@ -494,10 +510,7 @@ impl Semantics {
     ///
     /// Reactive *updates* after the initial render (re-emitting `checked` when
     /// the bound state changes) are not yet handled here.
-    pub fn with_resolved_state(
-        mut self,
-        resolved: &indexmap::IndexMap<String, serde_json::Value>,
-    ) -> Self {
+    pub fn with_resolved_state(mut self, resolved: &impl PropLookup) -> Self {
         // `aria-checked` from the Checkbox/Switch bind target.
         let checked_key = match self.role {
             Some(Role::Checkbox) => Some("checked"),
@@ -506,7 +519,7 @@ impl Semantics {
         };
         if let Some(key) = checked_key {
             if self.checked.is_none() {
-                if let Some(b) = resolved.get(key).and_then(|v| v.as_bool()) {
+                if let Some(b) = resolved.lookup(key).and_then(|v| v.as_bool()) {
                     self.checked = Some(b);
                 }
             }
@@ -518,20 +531,20 @@ impl Semantics {
         // available here. Without this, a bound `.expanded(@state.open)` would
         // silently emit nothing — the "worse than nothing" trap.
         if self.expanded.is_none() {
-            self.expanded = resolved.get("expanded.0").and_then(|v| v.as_bool());
+            self.expanded = resolved.lookup("expanded.0").and_then(|v| v.as_bool());
         }
         if self.pressed.is_none() {
-            self.pressed = resolved.get("pressed.0").and_then(|v| v.as_bool());
+            self.pressed = resolved.lookup("pressed.0").and_then(|v| v.as_bool());
         }
         if self.selected.is_none() {
-            self.selected = resolved.get("selected.0").and_then(|v| v.as_bool());
+            self.selected = resolved.lookup("selected.0").and_then(|v| v.as_bool());
         }
         if self.invalid.is_none() {
-            self.invalid = resolved.get("invalid.0").and_then(|v| v.as_bool());
+            self.invalid = resolved.lookup("invalid.0").and_then(|v| v.as_bool());
         }
         if self.current.is_none() {
             self.current = resolved
-                .get("current.0")
+                .lookup("current.0")
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
@@ -550,12 +563,8 @@ impl Semantics {
         // runs on the *base* (derive-time) block where a bound value is None,
         // and an *empty* resolved value must also clear a previously-set one,
         // so recompute unconditionally when the prop is present.
-        fn resolve_reference(
-            resolved: &indexmap::IndexMap<String, serde_json::Value>,
-            key: &str,
-            field: &mut Option<String>,
-        ) {
-            if let Some(value) = resolved.get(key) {
+        fn resolve_reference(resolved: &impl PropLookup, key: &str, field: &mut Option<String>) {
+            if let Some(value) = resolved.lookup(key) {
                 *field = value
                     .as_str()
                     .map(str::trim)

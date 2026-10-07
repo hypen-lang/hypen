@@ -1,0 +1,38 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "pinboard-reserved-without-group-dropped",
+  "description": "A reserved-state pinboard (no bind) needs a group to address __dnd.<group>.<key>: with neither group: nor a static id the engine warns and lowers NOTHING for the board — no __dnd.pin, no __dnd.pinGroup on the rows, no translate injection. The rows' own .draggable still lowers normally",
+  "category": "dnd",
+  "priority": "P0",
+
+  "input": {
+    "source": "Stack { ForEach(items: @state.notes, key: \"id\") { Note().draggable() } }.pinboard(grid: 4)",
+    "initialState": {
+      "notes": [{ "id": "n1" }]
+    },
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": ["notes"]
+    }
+  },
+
+  "expected": {
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Stack",
+        "absentProps": ["__dnd.pin", "pinboard.0", "pinboard.grid", "__dnd.pinGroup"]
+      },
+      {
+        "type": "create",
+        "elementType": "Note",
+        "props": {
+          "__dnd.key": "n1",
+          "__dnd.source": { "group": null, "handle": false, "activation": "auto" }
+        },
+        "absentProps": ["__dnd.pinGroup", "translateX.0", "translateY.0"]
+      }
+    ]
+  }
+}

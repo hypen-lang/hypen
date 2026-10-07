@@ -135,6 +135,7 @@ public final class SessionManager: @unchecked Sendable {
     private var activeSessions: [String: Session] = [:]
     private var pendingSessions: [String: PendingSession] = [:]
     private var sessionConnections: [String: Set<ObjectIdentifier>] = [:]
+    private let resumeTokens = DeviceResumeTokens()
     private let log = HypenLoggers.session
 
     public init(config: SessionConfig = SessionConfig()) {
@@ -186,6 +187,7 @@ public final class SessionManager: @unchecked Sendable {
             self?.lock.unlock()
 
             if pending != nil {
+                self?.resumeTokens.revoke(sessionId)
                 self?.log.info("Session %@ expired after %0.0fs TTL", sessionId, session.ttl)
                 onExpire()
             }
@@ -230,7 +232,33 @@ public final class SessionManager: @unchecked Sendable {
         pendingSessions.removeValue(forKey: sessionId)?.expiryTimer.cancel()
         sessionConnections.removeValue(forKey: sessionId)
         lock.unlock()
+        resumeTokens.revoke(sessionId)
         log.debug("Destroyed session %@", sessionId)
+    }
+
+    // MARK: Resume credential (RFC 001 §5)
+
+    /// Issue a fresh resume credential for `sessionId` (random 256-bit,
+    /// base64url). Rotated on every acknowledged connection: the previous
+    /// token stops working. Every `sessionAck` carries it. Pass
+    /// `devicePlane: true` when the connection negotiated a device plane:
+    /// from then on the session is resumed only with its current token in
+    /// `hello.resumeToken` (the public id alone never resumes it), while a
+    /// UI-only session keeps the legacy id-only resume.
+    public func issueResumeToken(_ sessionId: String, devicePlane: Bool = false) -> String {
+        resumeTokens.issue(sessionId, devicePlane: devicePlane)
+    }
+
+    /// Whether resuming `sessionId` requires its resume token: true once the
+    /// session has had a negotiated device plane.
+    public func resumeRequiresToken(_ sessionId: String) -> Bool {
+        resumeTokens.requiresToken(sessionId)
+    }
+
+    /// Whether `token` is the current resume credential for `sessionId`
+    /// (constant-time comparison).
+    public func verifyResumeToken(_ sessionId: String, _ token: String?) -> Bool {
+        resumeTokens.verify(sessionId, token)
     }
 
     /// Track a connection for a session, applying the concurrent connection policy.
@@ -324,6 +352,7 @@ public final class SessionManager: @unchecked Sendable {
         activeSessions.removeAll()
         sessionConnections.removeAll()
         lock.unlock()
+        resumeTokens.removeAll()
     }
 }
 

@@ -5,6 +5,9 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/hypen-space/core/device"
 )
 
 var logModule = LogModule
@@ -113,6 +116,30 @@ type ActionHandlerContext struct {
 	Action  ActionContext
 	State   *ObservableState
 	Context GlobalContext
+
+	// device is the invocation-scoped device plane (RFC 001); nil means
+	// unavailable. Read it through Device().
+	device *device.Device
+}
+
+// Device returns the handler's scoped device plane (RFC 001): the
+// connection's negotiated capabilities, acting for this module instance's
+// current activation and this dispatch's provenance. It is never nil —
+// without a device plane every call fails unavailable ("device-disabled")
+// and Supports reports false.
+func (c ActionHandlerContext) Device() *device.Device {
+	if c.device == nil {
+		return device.Unavailable("device-disabled")
+	}
+	return c.device
+}
+
+// WithDevice returns a copy of the context carrying d. Hosts (the remote
+// server) call it when they invoke a handler; application code does not
+// need it.
+func (c ActionHandlerContext) WithDevice(d *device.Device) ActionHandlerContext {
+	c.device = d
+	return c
 }
 
 // ActionHandler handles an action
@@ -564,6 +591,31 @@ type ModuleInstance struct {
 	routerContext        *RouterContext
 	globalContext        GlobalContext
 	stateChangeCallbacks []func()
+
+	// Device plane binding (RFC 001). deviceID is this instance's
+	// moduleInstanceId on the wire; activation is its current activation
+	// id (0 = never active). With deviceManaged the instance drives the
+	// plane's owner lifecycle from Activate/Deactivate/Destroy; without it
+	// the instance only stamps a fixed owner managed by its host.
+	devicePlane   device.Plane
+	deviceID      string
+	activation    uint32
+	deviceManaged bool
+}
+
+// deviceInstanceSeq numbers module instances for their device identity.
+var deviceInstanceSeq atomic.Uint64
+
+// newDeviceInstanceID returns a process-unique moduleInstanceId for name.
+func newDeviceInstanceID(name string) string {
+	base := strings.ToLower(name)
+	if base == "" {
+		base = "module"
+	}
+	if len(base) > 200 {
+		base = base[:200]
+	}
+	return fmt.Sprintf("%s#%d", base, deviceInstanceSeq.Add(1))
 }
 
 // RouterContext provides router information
@@ -591,6 +643,32 @@ type instanceConfig struct {
 	// primary slot was already filled by an earlier engine.SetModule
 	// call at session init. Opt in via AsAlreadyInEngine().
 	skipEngineRegister bool
+
+	devicePlane device.Plane
+	deviceOwner *device.Owner
+}
+
+// WithDevicePlane binds the instance to a connection's device plane
+// (RFC 001). The instance gets its own moduleInstanceId, and its lifecycle
+// drives activation authority: Activate starts a new activation (the
+// previous one's work is swept), Deactivate sweeps the activation's work,
+// Destroy sweeps everything. Action handlers see the plane through
+// ActionHandlerContext.Device(), scoped to the activation live when the
+// handler started. The ManagedRouter passes this for routed modules.
+func WithDevicePlane(plane device.Plane) InstanceOption {
+	return func(c *instanceConfig) { c.devicePlane = plane }
+}
+
+// WithDeviceOwner binds the instance to plane under an owner whose
+// lifecycle is managed elsewhere (e.g. the remote session's primary
+// module): handlers act for owner, and Activate/Deactivate/Destroy do not
+// touch the plane.
+func WithDeviceOwner(plane device.Plane, owner device.Owner) InstanceOption {
+	return func(c *instanceConfig) {
+		c.devicePlane = plane
+		o := owner
+		c.deviceOwner = &o
+	}
 }
 
 // WithEngine overrides the default embedded WASM engine. Only meaningful
@@ -702,6 +780,14 @@ func newModuleInstance(
 		definition:    definition,
 		routerContext: cfg.routerContext,
 		globalContext: cfg.globalContext,
+		devicePlane:   cfg.devicePlane,
+	}
+	if cfg.deviceOwner != nil {
+		m.deviceID = cfg.deviceOwner.ModuleInstanceID
+		m.activation = cfg.deviceOwner.ActivationID
+	} else {
+		m.deviceID = newDeviceInstanceID(definition.Name)
+		m.deviceManaged = cfg.devicePlane != nil
 	}
 
 	// State change notification routes via the primary or named-scope path
@@ -755,22 +841,27 @@ func newModuleInstance(
 		handler := handler       // Capture for closure
 		logModule.Debug("Registering action handler: %s for module %s (nested=%v)", actionName, definition.Name, nested)
 
-		engine.OnAction(actionName, func(action Action) {
+		engine.OnAction("__hypen_scoped:"+strings.ToLower(notifyScope)+":"+actionName, func(action Action) {
 			logModule.Debug("Action handler fired: %s %+v", actionName, action)
 
 			actionCtx := ActionContext{
-				Name:    action.Name,
+				Name:    actionName,
 				Payload: action.Payload,
 				Sender:  action.Sender,
 			}
 
+			// The Device is scoped to this invocation: results it receives
+			// keep their retained-bytes charge until the handler returns.
+			dev, endScope := m.Device().Scoped()
 			ctx := ActionHandlerContext{
 				Action:  actionCtx,
 				State:   m.state,
 				Context: m.globalContext,
+				device:  dev,
 			}
 
 			func() {
+				defer endScope()
 				defer func() {
 					if r := recover(); r != nil {
 						err, ok := r.(error)
@@ -789,7 +880,7 @@ func newModuleInstance(
 	}
 
 	// Auto-register __hypen_bind for .bind() two-way binding support.
-	engine.OnAction("__hypen_bind", func(action Action) {
+	engine.OnAction("__hypen_scoped:"+strings.ToLower(notifyScope)+":"+"__hypen_bind", func(action Action) {
 		payload, ok := action.Payload.(map[string]interface{})
 		if !ok {
 			return
@@ -800,6 +891,16 @@ func newModuleInstance(
 		}
 		value := payload["value"]
 		m.state.Set(path, value)
+	})
+
+	// Auto-register the drag-and-drop outcome actions (.sortable / .pinboard
+	// drops). Like __hypen_bind they write through the tracked state so the
+	// change notification reaches the engine; see dnd.go.
+	engine.OnAction("__hypen_scoped:"+strings.ToLower(notifyScope)+":"+ReorderActionName, func(action Action) {
+		ApplyReorderAction(m.state, action.Payload)
+	})
+	engine.OnAction("__hypen_scoped:"+strings.ToLower(notifyScope)+":"+PinActionName, func(action Action) {
+		ApplyPinAction(m.state, action.Payload)
 	})
 
 	// Call onCreated lifecycle hook.
@@ -965,7 +1066,18 @@ func (m *ModuleInstance) Activate() {
 		return
 	}
 	m.isActive = true
+	var plane device.Plane
+	var activation uint32
+	if m.deviceManaged {
+		m.activation++
+		plane, activation = m.devicePlane, m.activation
+	}
 	m.mu.Unlock()
+
+	// Authority first: the new activation is live before OnActivated runs.
+	if plane != nil {
+		plane.OwnerActivated(m.deviceID, activation)
+	}
 
 	if m.definition.Handlers.OnActivated != nil {
 		func() {
@@ -998,7 +1110,17 @@ func (m *ModuleInstance) Deactivate() {
 		return
 	}
 	m.isActive = false
+	var plane device.Plane
+	activation := m.activation
+	if m.deviceManaged {
+		plane = m.devicePlane
+	}
 	m.mu.Unlock()
+
+	// The activation's device work is swept as it leaves the active slot.
+	if plane != nil {
+		plane.OwnerDeactivated(m.deviceID, activation)
+	}
 
 	if m.definition.Handlers.OnDeactivated != nil {
 		func() {
@@ -1016,6 +1138,81 @@ func (m *ModuleInstance) Deactivate() {
 			m.definition.Handlers.OnDeactivated(m.state, m.globalContext)
 		}()
 	}
+}
+
+// Device returns the instance's device plane scoped to its current
+// activation and to the dispatch running now (RFC 001). Handlers get the
+// same value through ActionHandlerContext.Device(); lifecycle code (e.g.
+// an OnActivated that starts background work) may call it on the
+// instance. Never nil: without a plane every call fails unavailable.
+func (m *ModuleInstance) Device() *device.Device {
+	m.mu.RLock()
+	plane, owner := m.devicePlane, device.Owner{ModuleInstanceID: m.deviceID, ActivationID: m.activation}
+	m.mu.RUnlock()
+	return device.Bind(plane, owner)
+}
+
+// BindDevicePlane binds an instance that was constructed without a device
+// plane to plane, as WithDevicePlane would have at construction: from now
+// on its lifecycle drives the plane's activation authority. An instance
+// that is active right now starts a new activation at once (its handlers
+// running from then on act for it); an inactive one starts its first on
+// the next Activate. Returns false — and changes nothing — when the
+// instance already has a plane, is destroyed, or plane is nil.
+//
+// Used when a connection's device plane appears after the instance was
+// built (ManagedRouter.SetDevicePlane on a router already running).
+func (m *ModuleInstance) BindDevicePlane(plane device.Plane) bool {
+	if plane == nil {
+		return false
+	}
+	m.mu.Lock()
+	if m.isDestroyed || m.devicePlane != nil {
+		m.mu.Unlock()
+		return false
+	}
+	m.devicePlane = plane
+	m.deviceManaged = true
+	var activation uint32
+	if m.isActive {
+		m.activation++
+		activation = m.activation
+	}
+	m.mu.Unlock()
+	if activation != 0 {
+		plane.OwnerActivated(m.deviceID, activation)
+	}
+	return true
+}
+
+// BindDeviceOwner binds an instance that was constructed without a device
+// plane to plane under owner, as WithDeviceOwner would have at
+// construction: handlers act for owner and the instance's lifecycle does
+// not touch the plane (owner's activation is managed by the caller).
+// Returns false — and changes nothing — when the instance already has a
+// plane, is destroyed, or plane is nil.
+func (m *ModuleInstance) BindDeviceOwner(plane device.Plane, owner device.Owner) bool {
+	if plane == nil {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.isDestroyed || m.devicePlane != nil {
+		return false
+	}
+	m.devicePlane = plane
+	m.deviceID = owner.ModuleInstanceID
+	m.activation = owner.ActivationID
+	m.deviceManaged = false
+	return true
+}
+
+// DeviceOwner is the instance's device identity: its moduleInstanceId and
+// current activation id (0 before the first activation).
+func (m *ModuleInstance) DeviceOwner() device.Owner {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return device.Owner{ModuleInstanceID: m.deviceID, ActivationID: m.activation}
 }
 
 // IsActive reports whether the module is currently the active route target.
@@ -1043,7 +1240,15 @@ func (m *ModuleInstance) Destroy() {
 		return
 	}
 	m.isDestroyed = true
+	var plane device.Plane
+	if m.deviceManaged {
+		plane = m.devicePlane
+	}
 	m.mu.Unlock()
+
+	if plane != nil {
+		plane.OwnerDestroyed(m.deviceID)
+	}
 
 	if m.definition.Handlers.OnDestroyed != nil {
 		func() {

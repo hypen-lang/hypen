@@ -20,6 +20,7 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
         didSet {
             cachedApplicatorResult = nil
             cachedAnimSpecs = nil
+            cachedDndSpecs = nil
         }
     }
     public var children: [String] {
@@ -80,6 +81,57 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     /// playback restarts (a changed spec restarts; a removed channel stops).
     public var animateGeneration: Int = 0 {
         willSet { objectWillChange.send() }
+    }
+
+    // MARK: - Drag-and-drop state (owned by `HypenDndCoordinator`)
+
+    /// Runtime `.states` label overlaid on this node (`lifted` on the dragged
+    /// source, `over` on the hovered zone). `nil` = base pose. The view
+    /// layer overlays `__anim.statePoses[label]` onto the resolved
+    /// applicator result; clearing the label restores the base by
+    /// construction.
+    public var dndPoseLabel: String? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// Ghost translation of the moving item (sortable row, pinboard note, or
+    /// loose draggable) while lifted, and the pin snap during the
+    /// post-drop hold. Never animated — it follows the finger.
+    public var dndPinOffset: CGSize = .zero {
+        willSet { if newValue != dndPinOffset { objectWillChange.send() } }
+    }
+
+    public var dndGhostOffset: CGSize = .zero {
+        willSet { objectWillChange.send() }
+    }
+
+    /// Gap-opening shift of a sortable sibling while a drag hovers its list.
+    public var dndShift: CGSize = .zero {
+        willSet { objectWillChange.send() }
+    }
+
+    /// The animation the next `dndShift` change should ride (`nil` snaps —
+    /// the release, and reduced motion).
+    public var dndShiftAnimation: Animation? {
+        willSet { objectWillChange.send() }
+    }
+
+    /// The moving item is raised above its siblings for the drag's duration.
+    public var dndRaised: Bool = false {
+        willSet { objectWillChange.send() }
+    }
+
+    private var cachedDndSpecs: NodeDndSpecs?
+
+    /// The node's parsed `__dnd.*` surface (plus the header-less `.states`
+    /// poses), memoized until `props` change. Parsing is defensive: a
+    /// malformed channel degrades to `nil` (no such role) and never poisons
+    /// its siblings.
+    public var dndSpecs: NodeDndSpecs {
+        if let cached = cachedDndSpecs { return cached }
+        let parsed = HypenDnd.parseSpecs(props)
+        cachedDndSpecs = parsed
+        return parsed
     }
 
     private var cachedAnimSpecs: NodeAnimSpecs?

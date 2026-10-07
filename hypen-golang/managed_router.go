@@ -3,6 +3,8 @@ package core
 import (
 	"strings"
 	"sync"
+
+	"github.com/hypen-space/core/device"
 )
 
 // RouteDefinition maps a route path to a component and optional module.
@@ -53,6 +55,40 @@ type ManagedRouter struct {
 	// lowercase module id. Populated on unmount (when persistence
 	// applies) and consulted on mount to restore state.
 	persistedModules map[string]*ModuleInstance
+	// devicePlane, when set, binds every module instance this router
+	// constructs to the connection's device plane (WithDevicePlane):
+	// mount activates it, unmount deactivates it, eviction destroys it.
+	devicePlane device.Plane
+}
+
+// SetDevicePlane binds the router's module instances to plane (RFC 001
+// activation authority follows the router's lifecycle). Instances
+// constructed from now on get it at construction; instances the router
+// already holds without a plane — the active route's module and the
+// persisted ones — are bound in place (ModuleInstance.BindDevicePlane),
+// so a plane that appears after Start (a device hello that arrived after
+// the router was wired) reaches every routed module. The active module
+// starts a fresh activation on the plane at once; a persisted one does on
+// its next Activate. Instances that already carry a plane keep it.
+func (m *ManagedRouter) SetDevicePlane(plane device.Plane) *ManagedRouter {
+	m.mu.Lock()
+	m.devicePlane = plane
+	var held []*ModuleInstance
+	if plane != nil {
+		if m.activeModule != nil {
+			held = append(held, m.activeModule)
+		}
+		for _, inst := range m.persistedModules {
+			held = append(held, inst)
+		}
+	}
+	m.mu.Unlock()
+	// Outside the router lock: binding an active instance calls into the
+	// plane (OwnerActivated).
+	for _, inst := range held {
+		inst.BindDevicePlane(plane)
+	}
+	return m
 }
 
 // NewManagedRouter creates a new ManagedRouter.
@@ -153,6 +189,22 @@ func (m *ManagedRouter) Stop() {
 	for moduleId, instance := range persisted {
 		instance.Destroy()
 		m.globalContext.UnregisterModule(moduleId)
+		m.unregisterFromEngine(moduleId)
+	}
+}
+
+// unregisterFromEngine drops a destroyed module's state and declared
+// actions from the engine, so they stop being externally reachable
+// (see agent.go).
+//
+// DESTROY SITES ONLY. Under the default persist behaviour an off-screen
+// module deliberately stays registered so siblings can still read its
+// state through the GlobalContext — calling this on an ordinary unmount
+// would empty the persist cache's state and break every cross-module read.
+// The engine's registry is append-only precisely for that reason.
+func (m *ManagedRouter) unregisterFromEngine(moduleId string) {
+	if u, ok := m.engine.(moduleUnregisterer); ok {
+		u.UnregisterModule(moduleId)
 	}
 }
 
@@ -247,19 +299,31 @@ func (m *ManagedRouter) handleRouteChange(path string) {
 	// Construct fresh. OnCreated fires in NewModuleInstance, then we
 	// fire OnActivated right after. AsNested() keeps the primary slot
 	// (App) intact — omitting it clobbers the initial tree's bindings.
-	instance := NewModuleInstance(
-		m.engine,
-		def,
+	m.mu.Lock()
+	plane := m.devicePlane
+	m.mu.Unlock()
+	opts := []InstanceOption{
 		AsNested(),
 		WithRouter(&RouterContext{Root: m.router}),
 		WithGlobalContext(m.globalContext),
-	)
+	}
+	if plane != nil {
+		opts = append(opts, WithDevicePlane(plane))
+	}
+	instance := NewModuleInstance(m.engine, def, opts...)
 	m.globalContext.RegisterModule(moduleId, instance)
 
 	m.mu.Lock()
 	m.activeModule = instance
 	m.activeRoute = matched
+	// A plane set while the instance was being constructed (SetDevicePlane
+	// saw neither the old active module nor this one) is bound here, before
+	// the first activation, so the instance never runs plane-less.
+	late := m.devicePlane
 	m.mu.Unlock()
+	if plane == nil && late != nil {
+		instance.BindDevicePlane(late)
+	}
 
 	instance.Activate()
 }
@@ -340,6 +404,7 @@ func (m *ManagedRouter) finishUnmount(
 		toDestroy.Destroy()
 		if destroyID != "" {
 			m.globalContext.UnregisterModule(destroyID)
+			m.unregisterFromEngine(destroyID)
 		}
 	}
 }

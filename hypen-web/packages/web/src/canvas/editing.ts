@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * Native Canvas Text Editing
  *
@@ -455,7 +456,7 @@ export class TextEditController {
 
   private dispatchBind(value: string): void {
     if (!this.bindPath) return;
-    this.engine.dispatchAction("__hypen_bind", { path: this.bindPath, value });
+    dispatchUIAction(this.engine, this.state?.node.id, "__hypen_bind", { path: this.bindPath, value });
   }
 
   /** Common tail for anything that edited or moved the caret. */

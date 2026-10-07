@@ -106,6 +106,7 @@ export class FakeElement {
   public style: FakeStyle;
   public dataset: Record<string, string> = {};
   public parentNode: FakeElement | FakeDocument | null = null;
+  get parentElement(): FakeElement | null { return this.parentNode instanceof FakeElement ? this.parentNode : null; }
   public children: FakeElement[] = [];
   private _textContent = "";
 
@@ -157,6 +158,8 @@ export class FakeElement {
     this.selectionEnd = end;
   }
   public ownerDocument: FakeDocument | null = null;
+  /** Set by `createElementNS`; null for plain `createElement` (the real DOM says XHTML). */
+  public namespaceURI: string | null = null;
   public id = "";
   public sheet: FakeCSSStyleSheet | null = null;
 
@@ -214,6 +217,14 @@ export class FakeElement {
       this.children.splice(index, 1);
     }
     child.parentNode = null;
+    // Real-DOM focus fixup: removing the focused element (or an ancestor of
+    // it) from the tree drops focus to the body. No blur is fired here
+    // (Firefox semantics; Chromium additionally fires one).
+    const doc = (globalThis as any).document;
+    const active = doc?.activeElement ?? null;
+    if (active instanceof FakeElement && child.contains(active)) {
+      doc.activeElement = null;
+    }
     return child;
   }
 
@@ -290,7 +301,23 @@ export class FakeElement {
     if (!("type" in event)) {
       event.type = type;
     }
+    // Propagation control, real-DOM shaped: `stopImmediatePropagation()`
+    // ends this element's listener loop, `stopPropagation()` ends
+    // `bubbleEvent`'s climb. Test-provided implementations are wrapped so
+    // both the test's own bookkeeping and the fake's flags run.
+    const userImmediate = event.stopImmediatePropagation;
+    event.stopImmediatePropagation = () => {
+      event.__immediateStopped = true;
+      event.__propagationStopped = true;
+      if (typeof userImmediate === "function") userImmediate.call(event);
+    };
+    const userStop = event.stopPropagation;
+    event.stopPropagation = () => {
+      event.__propagationStopped = true;
+      if (typeof userStop === "function") userStop.call(event);
+    };
     for (const listener of listeners) {
+      if (event.__immediateStopped) break;
       listener(event);
     }
   }
@@ -336,6 +363,7 @@ export class FakeElement {
     let el: FakeElement | FakeDocument | null = this;
     while (el instanceof FakeElement) {
       el.dispatchEvent(type, event);
+      if (event.__propagationStopped) break;
       el = el.parentNode;
     }
   }
@@ -401,6 +429,13 @@ export class FakeElement {
     return this.children[0] ?? null;
   }
 
+  get nextElementSibling(): FakeElement | null {
+    const parent = this.parentNode;
+    if (!(parent instanceof FakeElement)) return null;
+    const index = parent.children.indexOf(this);
+    return index === -1 ? null : (parent.children[index + 1] ?? null);
+  }
+
   set innerHTML(_: string) {
     for (const child of this.children) {
       child.parentNode = null;
@@ -438,8 +473,9 @@ export class FakeDocument {
    * Without this the Icon handler throws on its resolved-paths branch, so
    * that branch could not be covered at all.
    */
-  createElementNS(_namespace: string, tag: string): FakeElement {
+  createElementNS(namespace: string, tag: string): FakeElement {
     const element = new FakeElement(tag.toLowerCase());
+    element.namespaceURI = namespace;
     element.ownerDocument = this;
     this.nodes.push(element);
     return element;

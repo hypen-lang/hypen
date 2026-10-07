@@ -244,7 +244,9 @@ const commonComponents = [
   // Navigation
   "Router", "Route", "Link",
   // Media
-  "Video", "Audio"
+  "Video", "Audio",
+  // Charts (data-space marks inside a Chart)
+  "Chart", "Axis", "Line", "Area", "Bars", "Points", "Rule", "Marker", "Path"
 ];
 
 // ─── Applicators ─────────────────────────────────────────────────────────────
@@ -282,7 +284,7 @@ const commonApplicators = [
   // Position
   "position", "offset", "zIndex",
   // Grid
-  "gridColumns", "gridTemplateColumns", "gridAutoFlow", "gridAutoRows",
+  "gridColumns", "gridColumn",
   // Background
   "linearGradient", "radialGradient",
   // Display
@@ -293,6 +295,9 @@ const commonApplicators = [
   "onClick", "onPress", "onChange", "onSubmit", "onInput",
   "onKey", "onScroll", "onLongClick", "onLongPress",
   "onFocus", "onBlur", "onMouseEnter", "onMouseLeave",
+  // Drag and drop
+  "draggable", "dropZone", "sortable", "pinboard",
+  "onDragStart", "onDragOver", "onDrop", "onSort", "onPin", "onDragEnd",
   // Binding
   "bind",
   // Composition
@@ -625,10 +630,8 @@ const applicatorSignatures: Record<string, ComponentSignature> = {
   offset:             { label: ".offset(x: Number, y: Number)", documentation: "Position offset (requires position: absolute/relative)", parameters: [{ label: "x", documentation: "Horizontal offset pixels" }, { label: "y", documentation: "Vertical offset pixels" }] },
   zIndex:             { label: ".zIndex(value: Number)", documentation: "Stacking order (higher = in front)", parameters: [{ label: "value", documentation: "Integer z-index" }] },
   // Grid
+  gridColumn:         { label: ".gridColumn(span: String)", documentation: "Columns a Grid item spans", parameters: [{ label: "span", documentation: "\"span 2\" (or 2)" }] },
   gridColumns:        { label: ".gridColumns(count: Number)", documentation: "Number of grid columns", parameters: [{ label: "count", documentation: "Column count" }] },
-  gridTemplateColumns: { label: ".gridTemplateColumns(template: String)", documentation: "CSS grid-template-columns", parameters: [{ label: "template", documentation: "e.g. \"1fr 2fr 1fr\", \"repeat(3, 1fr)\"" }] },
-  gridAutoFlow:       { label: ".gridAutoFlow(value: String)", documentation: "How auto-placed items flow", parameters: [{ label: "value", documentation: "row, column, dense" }] },
-  gridAutoRows:       { label: ".gridAutoRows(value: String)", documentation: "Default size of auto-created rows", parameters: [{ label: "value", documentation: "e.g. \"minmax(100px, auto)\"" }] },
   // Background
   linearGradient:     { label: ".linearGradient(direction: String, ...colors)", documentation: "Linear gradient background", parameters: [{ label: "direction", documentation: "Angle or direction, e.g. \"to right\", \"135deg\"" }] },
   radialGradient:     { label: ".radialGradient(...colors)", documentation: "Radial gradient background", parameters: [] },
@@ -652,6 +655,17 @@ const applicatorSignatures: Record<string, ComponentSignature> = {
   onBlur:             { label: ".onBlur(action: @actions.name)", documentation: "Fires when the element loses focus", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
   onMouseEnter:       { label: ".onMouseEnter(action: @actions.name)", documentation: "Fires when the mouse enters the element (desktop)", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
   onMouseLeave:       { label: ".onMouseLeave(action: @actions.name)", documentation: "Fires when the mouse leaves the element (desktop)", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  // Drag and drop (see hypen-web/docs/dnd.md)
+  draggable:          { label: ".draggable(group?: String, payload?: Any, handle?: Boolean, activation?: auto|slop|press|immediate, enabled?: Boolean)", documentation: "Marks the node as a lift surface. Named args only. `group` (static) defaults to the enclosing `.sortable`/`.pinboard`'s group; `payload` (bindable) rides in every drag event; `handle: true` is informational (no renderer reads it — a `.draggable` always lifts from its own subtree, so put `.draggable()` on the grip node); `activation` defaults to `auto` (mouse/pen 6px slop; touch: cross-axis slop inside an axis-constrained `.sortable`, 300ms press elsewhere); `enabled` is bindable.\n\n```hypen\nForEach(items: @state.tasks, key: \"id\") {\n  TaskRow(\"@{item.title}\").draggable()\n}\n```\n\nIdentity is the ForEach key — never pass an id.", parameters: [{ label: "group", documentation: "Static string — which zones/sortables/pinboards accept this source" }, { label: "payload", documentation: "Any value (may bind) — delivered as `payload` in every event" }, { label: "handle", documentation: "Boolean — informational in v1: no renderer reads it; a .draggable always lifts from its own subtree (place .draggable() on the grip)" }, { label: "activation", documentation: "auto (default: mouse 6px slop; touch cross-axis slop in an axis-constrained sortable, 300ms press elsewhere) | slop | press | immediate" }, { label: "enabled", documentation: "Boolean (may bind) — false makes the node inert to drag; flipping to false mid-drag cancels silently (no onDragEnd)" }] },
+  dropZone:           { label: ".dropZone(group?: String, id?: String, enabled?: Boolean, band?: Number)", documentation: "Makes the node a drop target a compatible drag can be dropped INTO. `id` (bindable, defaults to the node's `id` prop) is what `to.zone` carries; `enabled` (bindable) disables the target; `band` (0..1, default 0.5) is the middle fraction of a sortable item that means \"into\" — the outer parts fall through to reorder.\n\n```hypen\nRow { Text(\"Trash\") }\n  .dropZone(group: \"cards\", id: \"trash\")\n  .onDrop(@actions.deleteCard)\n  .states { onState(over).backgroundColor(\"#fee2e2\") }\n```", parameters: [{ label: "group", documentation: "Static string — which sources may land here (null = ungrouped sources)" }, { label: "id", documentation: "String (may bind / template) — the zone name in event payloads" }, { label: "enabled", documentation: "Boolean (may bind) — a disabled zone is transparent to drags" }, { label: "band", documentation: "0..1 (default 0.5) — 'into' band on a sortable item" }] },
+  sortable:           { label: ".sortable(group?: String, axis?: x|y)", documentation: "Declares a container whose ForEach children reorder by dragging. Add `.bind(@state.list)` and the engine reorders the list for you (`path_move`); omit it to own the mutation in `.onSort`. `group` defaults to the node's static `id` (else self-only); lists sharing a group transfer items between each other.\n\n```hypen\nColumn { ForEach(items: @state.tasks, key: \"id\") { TaskRow(\"@{item.title}\").draggable() } }\n  .sortable(axis: y)\n  .bind(@state.tasks)\n```", parameters: [{ label: "group", documentation: "Static string — defaults to the node's static id; null = self-only" }, { label: "axis", documentation: "x | y (default y) — the sort axis; also drives the touch activation rule" }] },
+  pinboard:           { label: ".pinboard(group?: String, x?: String, y?: String, grid?: Number, bounds?: clamp|free, units?: px|fraction)", documentation: "Declares a Stack whose ForEach children can be dropped anywhere and stay there. Without `.bind`, positions live in the reserved `__dnd.<group>.<key>` module state (group REQUIRED) and the engine injects the translates; with `.bind(@state.list)` the drop writes the `x`/`y` fields of your items and you author `.translateX(@item.x).translateY(@item.y)` yourself.\n\n```hypen\nStack { ForEach(items: @state.notes, key: \"id\") { StickyNote(\"@{item.text}\").draggable() } }\n  .size(1200, 800)\n  .pinboard(group: \"board\", grid: 8)\n```", parameters: [{ label: "group", documentation: "Static string — defaults to the node's static id; required in reserved-state mode" }, { label: "x", documentation: "Field name for the x coordinate (default \"x\")" }, { label: "y", documentation: "Field name for the y coordinate (default \"y\")" }, { label: "grid", documentation: "Snap increment (> 0)" }, { label: "bounds", documentation: "clamp (default) | free" }, { label: "units", documentation: "px (default) | fraction of the board's content box" }] },
+  onDragStart:        { label: ".onDragStart(action: @actions.name)", documentation: "Fires when a drag is claimed (after activation). On a draggable, or on a sortable/pinboard to cover all its children. Payload: `{ item, payload?, from, to }`. For a draggable outside any sortable/pinboard, `from.zone` is the nearest enclosing `.dropZone` id (else the parent node id) and `from.index` is null.", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  onDragOver:         { label: ".onDragOver(action: @actions.name, dwell?: Number)", documentation: "On a drop zone: fires once per entry after the pointer has rested over it for `dwell` ms (default 500) — the spring-loaded-folder hook. `dwell` is stripped from the payload.", parameters: [{ label: "action", documentation: "@actions.actionName" }, { label: "dwell", documentation: "Milliseconds the pointer must rest before firing (default 500)" }] },
+  onDrop:             { label: ".onDrop(action: @actions.name)", documentation: "On a drop zone: fires when a drop resolves INTO this zone. Nothing is written for you — the handler moves the data. Payload: `{ item, payload?, from: {zone, index}, to: {zone, index: null} }`.", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  onSort:             { label: ".onSort(action: @actions.name)", documentation: "On a sortable: fires on the DESTINATION list when a drop resolves as a reorder or a cross-list transfer, after the `.bind` write (if any) has been applied. Payload: `{ item, payload?, from: {zone, index}, to: {zone, index} }`.", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  onPin:              { label: ".onPin(action: @actions.name)", documentation: "On a pinboard: fires when a drop resolves as a position on the same board, after the position write. Payload adds `x`, `y` in the board's content-box units (after grid/units).", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
+  onDragEnd:          { label: ".onDragEnd(action: @actions.name)", documentation: "Fires on drop AND cancel, on the draggable or its enclosing sortable/pinboard. Payload adds `dropped: true | false`; a cancel fires only this event.", parameters: [{ label: "action", documentation: "@actions.actionName" }] },
   // Binding
   bind:               { label: ".bind(stateRef: @state.path)", documentation: "Two-way data binding. Syncs the element's value with the given state path automatically.\n\nWorks with: Input, Textarea, Checkbox, Switch, Select, Slider.\n\nOn **Video** it binds a playback struct instead of a scalar — `{ playing, position, duration, state }`. `playing`/`position` are read-write (a `position` write seeks); `duration`/`state` are renderer-owned. Initialize the struct in `defineState` or the writes drop.\n\n```hypen\nVideo(src: \"@{state.url}\")\n  .bind(@state.playback)\n```\n\nOn **Scrubber** it overrides which struct a seek commits to (otherwise the enclosing Video's bind is used).", parameters: [{ label: "stateRef", documentation: "@state.fieldName — the state path to bind to" }] },
   // Composition

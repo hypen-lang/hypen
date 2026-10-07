@@ -1,0 +1,67 @@
+{
+  "name": "violation-json-limits-are-connection-level",
+  "description": "Text that breaks the RFC 001 \u00a72.1 JSON limits (a duplicate key, a 1.0 number token, nesting deeper than 32) is attributable to no request: it is discarded and counted as a connection-level violation, never terminates the request its id seems to name (decision D3/D8), and the request completes normally.",
+  "protocol": 1,
+  "steps": [
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 1,
+        "capability": "core.capabilities",
+        "version": 1,
+        "owner": {
+          "connection": true
+        },
+        "lifetime": "connection",
+        "timeoutMs": 86400000,
+        "initialCredit": 8,
+        "params": {}
+      }
+    },
+    {
+      "dir": "s2c",
+      "message": {
+        "type": "deviceRequest",
+        "id": 2,
+        "capability": "permission.query",
+        "version": 1,
+        "owner": {
+          "moduleInstanceId": "profile-7",
+          "activationId": 3
+        },
+        "lifetime": "activation",
+        "timeoutMs": 30000,
+        "initialCredit": 0,
+        "params": {
+          "permission": "microphone"
+        }
+      }
+    },
+    {
+      "dir": "c2s",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":2,\"id\":2,\"event\":{\"kind\":\"progress\",\"state\":\"running\"}}",
+      "expectViolation": "malformed"
+    },
+    {
+      "dir": "c2s",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":2,\"event\":{\"kind\":\"progress\",\"state\":\"running\",\"n\":1.0}}",
+      "expectViolation": "malformed"
+    },
+    {
+      "dir": "s2c",
+      "raw": "{\"type\":\"deviceEvent\",\"id\":2,\"control\":{\"renewLease\":1},\"x\":[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]}",
+      "expectViolation": "malformed"
+    },
+    {
+      "dir": "c2s",
+      "message": {
+        "type": "deviceResponse",
+        "id": 2,
+        "result": {
+          "status": "granted"
+        }
+      }
+    }
+  ]
+}

@@ -50,13 +50,13 @@ type Expected struct {
 
 // Step represents a step in a multi-step test
 type Step struct {
-	Description        string       `json:"description"`
-	Action             string       `json:"action"`
-	StateChange        *StateChange `json:"stateChange,omitempty"`
-	DispatchAction     *Action      `json:"dispatchAction,omitempty"`
-	ExpectedPatches    []Patch      `json:"expectedPatches,omitempty"`
-	ExpectedPatchCount *int         `json:"expectedPatchCount,omitempty"`
-	ForbiddenPatches   []Patch      `json:"forbiddenPatches,omitempty"`
+	Description        string         `json:"description"`
+	Action             string         `json:"action"`
+	StateChange        *StateChange   `json:"stateChange,omitempty"`
+	DispatchAction     *Action        `json:"dispatchAction,omitempty"`
+	ExpectedPatches    []Patch        `json:"expectedPatches,omitempty"`
+	ExpectedPatchCount *int           `json:"expectedPatchCount,omitempty"`
+	ForbiddenPatches   []Patch        `json:"forbiddenPatches,omitempty"`
 	ExpectedState      map[string]any `json:"expectedState,omitempty"`
 }
 
@@ -104,10 +104,17 @@ func findFixtures(dir string) ([]string, error) {
 		if err != nil {
 			return err
 		}
-		if info.IsDir() && (info.Name() == "portable" || info.Name() == "variant") {
+		// device/ is the Device Capability Protocol corpus, replayed by the
+		// engine crate and every SDK's device suite.
+		if info.IsDir() && (info.Name() == "portable" || info.Name() == "variant" || info.Name() == "device") {
 			return filepath.SkipDir
 		}
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".json") {
+			// dnd/path-move.json is a state-transform fixture (fixtures/dnd/README.md),
+			// replayed by the engine crate and host SDKs — not a test-case fixture.
+			if info.Name() == "path-move.json" {
+				return nil
+			}
 			fixtures = append(fixtures, path)
 		}
 		return nil
@@ -193,6 +200,8 @@ func TestEngineCompatibility(t *testing.T) {
 
 			// Run the appropriate test based on category
 			switch tc.Category {
+			case "dnd":
+				runDndFixture(t, fixturePath)
 			case "actions":
 				runActionTest(t, tc)
 			case "lifecycle":

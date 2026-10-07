@@ -13,7 +13,8 @@ A Kotlin implementation of the Hypen SDK for building stateful UI modules. This 
 - **Nested Modules** — compose a parent module from independently stateful child modules
 - **Router** — built-in routing with pattern matching
 - **Global Context** — cross-module communication and events
-- **HypenServer** — WebSocket server for streaming UI to iOS / Android / Web clients, with permessage-deflate compression on by default
+- **HypenServer** — WebSocket server for streaming UI to iOS / Android / Web clients, with device access (RFC 001) and per-message permessage-deflate both on by default (see Compression)
+- **Attach mode** — `HypenServer.attach(sessionId)` hands an agent a guarded, non-owning `AgentHandle` over a live user session
 
 ## Installation
 
@@ -263,19 +264,101 @@ context.emit("custom:event", mapOf("data" to "value"))
 
 ## WebSocket transport
 
-`HypenServer` is transport-agnostic: it exposes `handleConnect` / `handleMessage` /
-`handleDisconnect` and leaves the socket itself to your application. On Ktor that
-means **your app installs the `WebSockets` plugin**, not the SDK.
+`HypenServer` is transport-agnostic: it exposes `admit` / `openConnection` /
+`handleMessage` / `handleBinary` / `handleDisconnect` and leaves the socket itself to
+your application. On Ktor that means **your app installs the `WebSockets` plugin**,
+not the SDK.
+
+### Wiring a connection
+
+1. **Admit the upgrade before accepting the socket.** `server.admit(UpgradeRequest(...))`
+   returns `Admission.Admitted` or `Admission.Rejected(status = 403, …)`; answer the
+   status instead of upgrading when it refuses. Each check applies exactly when you
+   configure it: with `allowedOrigins(...)`, a browser `Origin` must be in the list and a
+   request without one (a native client) is admitted only by your `authenticate { }` hook;
+   a configured authenticator runs for every request. With neither configured every
+   upgrade is admitted and the server logs a startup warning — set them in production.
+2. **Open a hello-driven connection.** `openConnection(key, transport)` sends nothing
+   until the client's `hello`, which creates or resumes the session. Feed text frames to
+   `handleMessage`, binary frames to `handleBinary`, and call `handleDisconnect` when the
+   socket closes. Every write goes through one ordered queue over your `HypenTransport`.
+   `handleMessage` never throws for a bad client message: a malformed text, a UI action
+   the engine refuses (e.g. on a node a re-render just removed) or a failing handler is
+   logged and dropped, so one message cannot end your read loop and the connection.
+
+The UI messages match the TypeScript server member for member — `initialTree`
+`{type, module, state, patches, revision}` (plus `routes`) and `patch`
+`{type, module, patches, revision}` — which the Android (Moshi) and native desktop
+(serde) clients require; `RemoteWireConformanceTest` pins the shapes. These plus
+`sessionAck` and `sessionExpired` are the only UI message types the server sends:
+a route-table `navigate` answers with a `patch` that replaces the screen, and a
+`watchComponents` hot reload closes hello-driven sockets with 1012 so the client
+reconnects into the new sources (as the TypeScript server does).
+
+```kotlin
+routing {
+    route("/ws") {
+        install(HypenAdmission)   // 403 unless server.admit(...) admits the upgrade
+        webSocket {
+            val key = this
+            server.openConnection(key, object : HypenTransport {
+                override suspend fun sendText(text: String) = send(Frame.Text(text))
+                override suspend fun sendBinary(bytes: ByteArray) = send(Frame.Binary(true, bytes))
+                override suspend fun close(code: Int, reason: String) = close(CloseReason(code.toShort(), reason))
+            }, webSocketExtensions = extensionOrNull(HypenDeflate)?.negotiated ?: "")  // see Compression
+            try {
+                for (frame in incoming) when (frame) {
+                    is Frame.Text -> server.handleMessage(key, frame.readText()) {}
+                    is Frame.Binary -> server.handleBinary(key, frame.readBytes())
+                    else -> {}
+                }
+            } finally {
+                server.handleDisconnect(key)
+            }
+        }
+    }
+}
+```
+
+`HypenAdmission` is a small route-scoped plugin that builds the `UpgradeRequest` from
+the call and responds 403; the example server defines it.
+
+**Device access (RFC 001) is on by default.** A client whose `hello` offers `device`
+gets a device plane (`sessionAck.device`) with no server call needed; a client that
+offers none gets an ordinary UI session. Tune limits and budgets with
+`configureDevice { … }` (e.g. `maxBackgroundOwners`, `revisionOverride(…)`,
+`helloTimeoutMs`), or opt out entirely with `disableDevice()` (the server then behaves
+exactly like a UI-only server). Every `sessionAck` carries a rotating `resumeToken`.
+Resuming a session that had a device plane, or taking it over under
+`ConcurrentPolicy.KICK_OLD`, requires that token — the public session id alone starts a
+new session; a UI-only session still resumes by id. The legacy hello-less
+`handleConnect` (session ack + initial tree sent right away) works on every server; its
+sessions have no device plane, and a device session's id there starts a new session.
+
+Incoming text is bounded before any parsing: device messages over 1 MiB, and any
+message nested deeper than 256 containers, are never handed to the JSON parser.
+Device-typed ones count as connection-level violations in the device broker (whose
+strict decoder allows at most 32 levels).
 
 ### Compression
 
-Hypen streams JSON patch batches, which deflate very well, so
-permessage-deflate (RFC 7692) is **recommended and on by default** — the
-`compression` flag on the `HypenServer { … }` block defaults to `true`.
-Compression is negotiated per connection, so clients that don't advertise the
-extension keep receiving raw frames and nothing breaks.
+Hypen streams JSON patch batches, which deflate very well, so `server.compression`
+(WebSocket permessage-deflate, RFC 7692) is `true` by default — with or without the
+device plane. Compression is negotiated per connection, so clients that don't
+advertise the extension keep receiving raw frames and nothing breaks.
 
-Because the SDK never installs the plugin, read the flag where you do:
+Device data (RFC 001) may only be compressed **one message at a time**: the
+negotiated extension must carry both `server_no_context_takeover` and
+`client_no_context_takeover`, so every message is compressed on its own and device
+data never shares a compression history with other messages (the cross-message
+context CRIME/BREACH-style attacks rely on). Hypen clients keep a socket that
+negotiated context takeover in either direction UI-only (no device plane), and so
+does `openConnection` when you pass it the negotiated `Sec-WebSocket-Extensions`
+(`webSocketExtensions`; `null` means you don't report it and vouch for the
+configuration yourself).
+
+Because the SDK never installs the plugin, read the flag where you do — and
+negotiate no context takeover in both directions:
 
 ```kotlin
 import io.ktor.server.websocket.*
@@ -290,7 +373,9 @@ fun Application.configureSockets() {
 
         if (hypenServer.compression) {
             extensions {
-                install(WebSocketDeflateExtension) {
+                // WebSocketDeflateExtension with clientNoContextTakeOver = true and
+                // serverNoContextTakeOver = true, negotiated as such (see below).
+                install(HypenDeflate) {
                     compressionLevel = Deflater.DEFAULT_COMPRESSION
                     compressIfBiggerThan(bytes = 1024)
                 }
@@ -299,14 +384,31 @@ fun Application.configureSockets() {
     }
 
     routing {
-        webSocket("/ws") { /* handleConnect / handleMessage / handleDisconnect */ }
+        route("/ws") {
+            install(HypenAdmission)
+            webSocket {
+                // … openConnection(key, transport,
+                //       webSocketExtensions = extensionOrNull(HypenDeflate)?.negotiated ?: "")
+            }
+        }
     }
 }
 ```
 
-`WebSocketDeflateExtension` ships with `io.ktor:ktor-server-websockets` — no extra
-dependency needed. `compressIfBiggerThan` skips tiny frames (session acks, single
-`setProp` patches) where deflate framing overhead outweighs the saving.
+Why not plain `WebSocketDeflateExtension { clientNoContextTakeOver = true;
+serverNoContextTakeOver = true }`? In Ktor 3.1.1 those two settings only shape Ktor's
+own *client* offer: as a server it answers just the no-context-takeover parameters
+the client offered — and browsers (`permessage-deflate; client_max_window_bits`) and
+OkHttp (`permessage-deflate`) offer none, so every socket would negotiate context
+takeover and run UI-only. Ktor also writes negotiated parameters comma-separated
+(`permessage-deflate , a,b`), which clients reject. `HypenDeflate`
+([`example-server/src/main/kotlin/HypenDeflate.kt`](example-server/src/main/kotlin/HypenDeflate.kt),
+a small wrapper — copy it into your app) wraps `WebSocketDeflateExtension` with both settings
+on, adds both parameters to the client's offer, and answers
+`permessage-deflate; server_no_context_takeover; client_no_context_takeover`.
+`HypenDeflateTest` checks it against a real Ktor/Netty server, including that each
+message inflates on its own. `compressIfBiggerThan` skips tiny frames (session acks,
+single `setProp` patches) where deflate framing overhead outweighs the saving.
 
 Opt out for raw-wire debugging — a deflated payload is opaque to `tcpdump` and to
 most WebSocket frame inspectors:
@@ -320,6 +422,41 @@ val server = HypenServer {
 
 A complete, runnable wiring lives in
 [`example-server/src/main/kotlin/Sockets.kt`](example-server/src/main/kotlin/Sockets.kt).
+
+## Attach mode (agent surface)
+
+Callers that are not the rendered UI — an MCP server, an operator route, an
+LLM agent — reach a session through the engine's **guarded** external surface:
+only declared `onAction` names, `Router { Route }` targets and `.bind()` fields
+are dispatchable, and only the state paths the template renders are readable.
+`HypenServer.attach(sessionId)` binds such a caller to a **live user session**,
+so the dispatch runs on that user's engine and the user's own WebSocket
+receives the result. The client learns its id from `sessionAck` (the bundled
+web client exposes it as `window.__hypen.getSessionId()`) and hands it to your
+backend; it is a resume token, so accept it only over a channel you trust.
+
+```kotlin
+// From a route that has already authenticated the caller for sessionId —
+// attach() does no authorization of its own; whoever calls it is the authorizer.
+val handle = hypenServer.attach(sessionId)
+    ?: return@post call.respond(HttpStatusCode.NotFound) // unknown, mid-handshake, disconnected or kicked
+
+handle.listActions()                                   // declared surface only
+handle.dispatch("addToCart", mapOf("sku" to "A1"))    // suspend; the user's socket gets one `patch`
+handle.getState(path = "cart.total")                   // JsonElement?, bounded to rendered paths
+handle.revision()
+handle.manifest()                                      // MCP manifest JSON, verbatim from the engine
+```
+
+A successful `dispatch` puts exactly one `{"type":"patch","module":…,"patches":[...],"revision":N}`
+frame on the user's socket — the same frame a renderer click produces — and
+emits `HypenEvents.actionDispatched`. A guard refusal throws
+`EngineError.ActionNotFound` before anything reaches the wire: nothing is sent
+and the revision does not move. The handle **never owns the session**: it
+cannot destroy, suspend or close it; once the client disconnects, is kicked, or
+the server shuts down, `isAlive` is `false` and every member throws
+`AgentSessionGoneException`. Under `ConcurrentPolicy.ALLOW_MULTIPLE` the first
+ready connection with that id wins.
 
 ## Compatibility Tests
 
@@ -358,6 +495,7 @@ space.hypen.core/
 ├── GlobalContext.kt        # Cross-module communication
 ├── Router.kt / ManagedRouter.kt # Navigation and route-driven lifecycle
 ├── HypenServer.kt          # WebSocket server for remote UI
+├── AgentHandle.kt          # Attach mode: guarded agent view of one live session
 ├── ComponentLoader.kt      # Template/module registry
 ├── ComponentResolver.kt    # Import resolution
 ├── ComponentWatcher.kt     # Filesystem watcher for hot reload

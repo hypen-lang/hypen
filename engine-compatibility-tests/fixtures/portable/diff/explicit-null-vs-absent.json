@@ -1,0 +1,33 @@
+{
+  "$schema": "../../../schema/portable.schema.json",
+  "name": "diff-explicit-null-vs-absent",
+  "description": "A key removed and a key set to null are indistinguishable in output (both emit null); a key that stays null emits nothing.",
+  "function": "diff_paths",
+  "priority": "P1",
+  "input": {
+    "old": {
+      "removed": 1,
+      "staysNull": null,
+      "becomesNull": 2
+    },
+    "new": {
+      "staysNull": null,
+      "becomesNull": null,
+      "addedNull": null
+    }
+  },
+  "expected": [
+    {
+      "path": "becomesNull",
+      "value": null
+    },
+    {
+      "path": "removed",
+      "value": null
+    },
+    {
+      "path": "addedNull",
+      "value": null
+    }
+  ]
+}

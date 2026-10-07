@@ -20,10 +20,17 @@ serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 indexmap = { version = "2.0", features = ["serde"] }
 slotmap = "1.0"
-hypen-parser = { version = "0.6.4", path = "../parser" }
+hypen-parser = { version = "0.6.5", path = "../parser" }
 exprimo = "0.6.1"
 im = { version = "15.1", features = ["serde"] }  # Persistent/immutable data structures for O(1) clone
-hypen-tailwind-parse = { version = "0.6.4", path = "../tailwind-parse" }
+hypen-tailwind-parse = { version = "0.6.5", path = "../tailwind-parse" }
+# Device broker (RFC 001 §2.4): SHA-256 over received upload bytes and of
+# download announcements. Pure Rust, no platform code (wasm32-safe).
+sha2 = "0.10"
+# Device payload diagnostics (RFC 001): a refused params/result/event names
+# the failing JSON path (`$.items[1].sha256: …`) instead of a generic schema
+# mismatch. Tiny, serde-only, wasm32-safe.
+serde_path_to_error = "0.1"
 
 # UniFFI for native bindings (Kotlin, Swift, Python, Ruby)
 # NOTE: the `cli` feature is intentionally NOT enabled here — it pulls in
@@ -49,17 +56,29 @@ uniffi = { version = "0.31", features = ["build"], optional = true }
 default = []
 # JavaScript runtimes (Node.js, Bun, Deno, browsers) via wasm-bindgen
 js = ["wasm-bindgen", "serde-wasm-bindgen", "js-sys", "web-sys"]
+# Device broker (RFC 001) binding surfaces: `WasmDeviceBroker` + `device*`
+# helpers in the JS build, `hypen_device_*` in the WASI build. Server-side
+# only: browsers never broker device requests, so the browser bundle is built
+# with `js` alone and stays free of the broker, SHA-256 and the payload
+# validators (~0.5 MB raw). Node/Bun and Cloudflare builds use
+# `js,device-broker`; `wasi` (Go) and `uniffi` (Kotlin, Swift server) are
+# server surfaces and imply it.
+device-broker = []
 # WASI runtimes (Go, Python, Rust, etc.) via C-compatible FFI
 # Use this for basic WASI support with manual FFI
-wasi = []
+wasi = ["device-broker"]
 # Component Model support (requires wit-bindgen)
 # Use this for type-safe cross-language bindings via WIT interfaces
 # Generates bindings from wit/hypen.wit
 component-model = ["wasi"]
 # Better panic messages in browser console (JS only)
 console_error_panic_hook = ["dep:console_error_panic_hook"]
+# Device Capability Protocol JSON Schema export (RFC 001). Non-default and
+# never enabled by runtime builds: the export machinery stays out of the WASM
+# binary (the runtime device broker in `src/device/` does not need it).
+schema-export = []
 # UniFFI bindings for native platforms (Kotlin, Swift, Python, Ruby)
-uniffi = ["dep:uniffi", "dep:thiserror"]
+uniffi = ["dep:uniffi", "dep:thiserror", "device-broker"]
 # Only enable when running the `uniffi-bindgen` binary to regenerate
 # Swift/Kotlin bindings. Adds ~30 MB of codegen deps to the static lib.
 uniffi-cli = ["uniffi", "uniffi/cli"]
@@ -67,6 +86,11 @@ uniffi-cli = ["uniffi", "uniffi/cli"]
 [dev-dependencies]
 lazy_static = "1.4"
 criterion = { version = "0.5", features = ["html_reports"] }
+# Device Capability Protocol conformance (RFC 001): the transcript runner and
+# the shared corpus validate every message against the exported JSON Schemas
+# and hash transferred bytes against declared items.
+jsonschema = { version = "0.57", default-features = false }
+sha2 = "0.10"
 
 [[bench]]
 name = "state_clone"

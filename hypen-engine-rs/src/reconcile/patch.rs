@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use slotmap::Key;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Serde shim so `ResolvedProps` (`Arc<IndexMap<...>>`) serializes exactly
@@ -39,24 +38,49 @@ fn is_false(value: &bool) -> bool {
     !*value
 }
 
-/// Cap on the per-thread id-string cache in [`node_id_str`]. When the map
-/// grows past this it is cleared wholesale: ids are cheap to re-format, so
-/// occasionally re-paying the formatting cost for live ids beats tracking
-/// LRU order per lookup — and unbounded growth across a long session (ids
-/// are never reused once their slot version bumps) is not acceptable.
-const ID_STR_CACHE_CAP: usize = 262_144;
+/// Highest slot index the id-string cache will grow to hold (16M slots,
+/// ~24 bytes each when populated). Slots beyond it are formatted uncached.
+const ID_STR_CACHE_MAX_SLOTS: usize = 1 << 24;
 
 thread_local! {
-    /// Memoized formatted id per `NodeId` FFI value, shared into patches by
-    /// refcount. A node's id is mentioned in many patches over its lifetime
-    /// (Create, Insert as child, Insert as parent of each child, SetProp,
-    /// Move, Remove, Instantiate nodes lists...) — formatting it once and
+    /// Memoized formatted id per slot, shared into patches by refcount. A
+    /// node's id is mentioned in many patches over its lifetime (Create,
+    /// Insert as child, Insert as parent of each child, SetProp, Move,
+    /// Remove, Instantiate node lists...) — formatting it once and
     /// Arc-cloning thereafter removes a heap allocation per mention.
+    ///
+    /// Indexed by slot index (the low half of the slotmap key), holding the
+    /// slot's current version and string. A slot reused for a new node has
+    /// a new version, so the stale entry is simply overwritten: the cache
+    /// is bounded by the high-water mark of live nodes, never rehashes, and
+    /// needs no cap or wholesale clear. The `HashMap` this replaced was
+    /// keyed by the full key, which never repeats, so every created node
+    /// was a miss plus an insert and a 1,000-row create paid the table's
+    /// doubling steps each time (~5% of the engine's share of a create).
     ///
     /// Thread-local rather than global: WASM (the hot deployment target) is
     /// single-threaded so this IS the one cache; on native each thread just
     /// keeps its own copy, which is merely less shared, still correct.
-    static ID_STR_CACHE: RefCell<HashMap<u64, Arc<str>>> = RefCell::new(HashMap::new());
+    static ID_STR_CACHE: RefCell<Vec<Option<(u32, Arc<str>)>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Decimal form of an id FFI value, written into a stack buffer so the
+/// `Arc<str>` below is ONE allocation. `ffi.to_string()` then
+/// `Arc::from(String)` was an allocation, a copy, and a free per new id.
+fn format_id(ffi: u64) -> Arc<str> {
+    let mut buf = [0u8; 20]; // u64::MAX has 20 decimal digits
+    let mut pos = buf.len();
+    let mut n = ffi;
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    // Only ASCII digits were written.
+    Arc::from(std::str::from_utf8(&buf[pos..]).expect("decimal digits are UTF-8"))
 }
 
 /// Stable, compact serialization for NodeId.
@@ -76,16 +100,29 @@ thread_local! {
 #[doc(hidden)]
 pub fn node_id_str(id: NodeId) -> Arc<str> {
     let ffi = id.data().as_ffi();
+    // `KeyData::as_ffi` packs the slot index in the low 32 bits and the
+    // version in the high 32.
+    let index = ffi as u32 as usize;
+    let version = (ffi >> 32) as u32;
+    // The cache is sized by slot index, so an implausible index (the null
+    // key `NodeId::default()` is slot `u32::MAX`) is formatted uncached
+    // rather than growing the vector to it.
+    if index >= ID_STR_CACHE_MAX_SLOTS {
+        return format_id(ffi);
+    }
     ID_STR_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(s) = cache.get(&ffi) {
-            return Arc::clone(s);
+        if let Some(Some((cached_version, s))) = cache.get(index) {
+            if *cached_version == version {
+                return Arc::clone(s);
+            }
         }
-        if cache.len() >= ID_STR_CACHE_CAP {
-            cache.clear();
+        if index >= cache.len() {
+            let grown = (index + 1).max(cache.len() * 2).min(ID_STR_CACHE_MAX_SLOTS);
+            cache.resize_with(grown, || None);
         }
-        let s: Arc<str> = Arc::from(ffi.to_string());
-        cache.insert(ffi, Arc::clone(&s));
+        let s = format_id(ffi);
+        cache[index] = Some((version, Arc::clone(&s)));
         s
     })
 }
@@ -486,5 +523,41 @@ impl Patch {
             id: node_id_str(id),
             before_id: before_id.map(node_id_str),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_id_matches_to_string() {
+        for ffi in [
+            0u64,
+            1,
+            9,
+            10,
+            99,
+            100,
+            4_294_967_297, // slot 1, version 1 — a typical first id
+            u32::MAX as u64,
+            u64::MAX - 1,
+            u64::MAX,
+        ] {
+            assert_eq!(&*format_id(ffi), ffi.to_string());
+        }
+    }
+
+    #[test]
+    fn node_id_str_is_memoized_and_stable() {
+        let mut map: slotmap::SlotMap<NodeId, ()> = slotmap::SlotMap::with_key();
+        let id = map.insert(());
+        let a = node_id_str(id);
+        let b = node_id_str(id);
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "second mention must share the cached Arc"
+        );
+        assert_eq!(&*a, id.data().as_ffi().to_string());
     }
 }

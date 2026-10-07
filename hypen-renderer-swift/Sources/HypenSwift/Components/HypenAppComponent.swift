@@ -154,6 +154,9 @@ private struct EmbeddedHypenView: View {
                 // Rebuild the element view tree when the renderer is reset
                 // (initialTree replay on reconnect) — see HypenView.
                 .id(viewModel.renderer.resetEpoch)
+                // The embedded app is its own drag-and-drop host: its
+                // renderer's coordinator, its own coordinate space.
+                .hypenDndHost(viewModel.renderer.dnd)
             } else {
                 loadingView
             }
@@ -222,6 +225,12 @@ private final class EmbeddedHypenViewModel: ObservableObject {
 
     private func setupBindings() {
         guard let engine = engine else { return }
+
+        // Drag-and-drop outcomes and events dispatch to the embedded
+        // app's own engine.
+        renderer.dnd.actionDispatcher = actionDispatcher
+        // `.onAnimationComplete` completions likewise go to the embedded engine.
+        renderer.animator.actionDispatcher = actionDispatcher
 
         // Element views observe their own HypenElement; the embedded root
         // only needs to re-render when the root element changes.

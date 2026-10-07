@@ -211,6 +211,7 @@ fn slow_release_below_the_midpoint_settles_to_from_and_writes_its_label() {
     assert_eq!(
         s.take_binds(),
         vec![ScrubBind {
+            node: "sheet".into(),
             path: "sheetPhase".into(),
             value: "closed".into()
         }]
@@ -238,6 +239,7 @@ fn fast_flick_at_p_0_3_projects_to_the_far_endpoint() {
     assert_eq!(
         s.take_binds(),
         vec![ScrubBind {
+            node: "sheet".into(),
             path: "sheetPhase".into(),
             value: "open".into()
         }]
@@ -259,6 +261,7 @@ fn projected_progress_of_exactly_0_5_settles_to_the_to_pose() {
     assert_eq!(
         s.take_binds(),
         vec![ScrubBind {
+            node: "sheet".into(),
             path: "sheetPhase".into(),
             value: "open".into()
         }]
@@ -281,6 +284,7 @@ fn drag_hold_release_discards_the_stale_burst_and_settles_nearest() {
     assert_eq!(
         s.take_binds(),
         vec![ScrubBind {
+            node: "sheet".into(),
             path: "sheetPhase".into(),
             value: "closed".into()
         }]
@@ -476,6 +480,7 @@ fn a_second_drag_after_a_settle_anchors_at_the_settled_pose() {
     assert_eq!(
         s.take_binds(),
         vec![ScrubBind {
+            node: "sheet".into(),
             path: "sheetPhase".into(),
             value: "open".into()
         }]
@@ -709,6 +714,7 @@ fn focus_loss_mid_drag_settles_and_frees_the_grab_for_new_gestures() {
     assert_eq!(
         s.take_binds(),
         vec![ScrubBind {
+            node: "sheet".into(),
             path: "sheetPhase".into(),
             value: "open".into()
         }]
@@ -770,6 +776,7 @@ fn reduced_motion_drags_live_but_settles_instantly_and_writes() {
     assert_eq!(
         s.take_binds(),
         vec![ScrubBind {
+            node: "sheet".into(),
             path: "sheetPhase".into(),
             value: "open".into()
         }]
@@ -802,6 +809,7 @@ fn motion_essential_release_settle_animates_under_reduced_motion() {
     assert_eq!(
         s.take_binds(),
         vec![ScrubBind {
+            node: "sheet".into(),
             path: "sheetPhase".into(),
             value: "open".into()
         }]
@@ -905,6 +913,7 @@ fn scroll_offset_maps_through_over_and_writes_only_after_resting_at_endpoint() {
     assert_eq!(
         s.take_binds(),
         vec![ScrubBind {
+            node: "header".into(),
             path: "headerMode".into(),
             value: "collapsed".into()
         }]

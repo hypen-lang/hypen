@@ -13,6 +13,8 @@ import space.hypen.renderer.applicators.ApplicatorRegistry
 import space.hypen.renderer.applicators.createDefaultApplicatorRegistry
 import space.hypen.renderer.components.ComponentRegistry
 import space.hypen.renderer.components.createDefaultComponentRegistry
+import space.hypen.renderer.dnd.DndCoordinator
+import space.hypen.renderer.dnd.DndHost
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.model.Patch
 import space.hypen.renderer.model.PatchType
@@ -34,8 +36,42 @@ class ComposeRenderer(
      * supply a deterministic scheduler.
      */
     private val animation: AnimationCoordinator = AnimationCoordinator(),
+    /**
+     * Owns every `__dnd.*` decision (see [DndCoordinator]): the drag state
+     * machine, zone resolution, the drop commit and the post-drop hold.
+     * Injectable so hosts can supply the reduced-motion preference and tests
+     * a deterministic scheduler.
+     */
+    private val dnd: DndCoordinator = DndCoordinator(),
 ) : Renderer {
     init {
+        // The drag runtime dispatches its outcomes (reserved writes, `.on*`
+        // events) through the renderer's action channel, gated like every
+        // other dispatch on the exiting-subtree rule, and re-applies the
+        // engine writes it deferred through the ordinary SetProp path.
+        dnd.setHost(
+            object : DndHost {
+                override fun dispatch(sourceId: String, action: String, payload: Map<String, Any?>) {
+                    if (animation.isInExitingSubtree(sourceId)) {
+                        log.debug { "Dropping dnd '$action' from exiting subtree $sourceId" }
+                        return
+                    }
+                    actionDispatcher?.dispatch(action, payload)
+                }
+
+                override fun applyProp(id: String, name: String, value: Any?) {
+                    synchronized(lock) { onSetProp(Patch.setProp(id, name, value)) }
+                }
+
+                override fun setPoseOverrides(id: String, pose: Map<String, Any?>) {
+                    getElement(id)?.setPoseOverrides(pose)
+                }
+
+                override fun clearPoseOverrides(id: String) {
+                    getElement(id)?.clearPoseOverrides()
+                }
+            },
+        )
         // Naturally-settled playbacks dispatch the element's
         // `.onAnimationComplete` action through the renderer's own action
         // channel, ungated: an exit completion by definition fires from
@@ -273,6 +309,9 @@ class ComposeRenderer(
         // suppressed so initial render doesn't cascade.
         animation.noteCreate(id, props)
 
+        // Mirror the node for the drag runtime and parse its `__dnd.*` channels.
+        dnd.noteCreate(id, elementType, props)
+
         deferred.add { listeners -> listeners.forEach { it.onElementCreated(element) } }
     }
 
@@ -281,6 +320,13 @@ class ComposeRenderer(
         val name = patch.name ?: return
 
         val element = elements[id] ?: return
+        // Drag precedence (`dnd > … > .transition`): an engine translate on
+        // the dragged node is deferred until release; `__dnd.*` channels and
+        // the props the runtime reads are mirrored on the way through.
+        if (dnd.noteSetProp(id, name, patch.value)) {
+            log.debug { "Set prop deferred by drag: $id.$name" }
+            return
+        }
         // Captured BEFORE the write: it is the glide's start value.
         val previous = element.rawProps[name]
         element.setProp(name, patch.value)
@@ -321,6 +367,7 @@ class ComposeRenderer(
         }
 
         noteAnimation(id, name, null, previous)
+        dnd.noteRemoveProp(id, name)
 
         if (name == "0" || name == "text") {
             element.textContent = null
@@ -354,6 +401,7 @@ class ComposeRenderer(
         // Handle root insertion
         if (parentId == "root") {
             rootIdState = id
+            dnd.noteInsert(parentId, id, patch.beforeId)
             log.debug { "Inserted as root: $id" }
             return
         }
@@ -365,6 +413,10 @@ class ComposeRenderer(
         child.parentId = parentId
 
         parent.addChild(id, patch.beforeId)
+
+        // The drag runtime mirrors the link; during a post-drop hold this is
+        // the engine's re-render landing (it releases the held transforms).
+        dnd.noteInsert(parentId, id, patch.beforeId)
 
         log.debug { "Inserted: $id into $parentId" }
     }
@@ -410,6 +462,9 @@ class ComposeRenderer(
             val subtree = mutableSetOf(id)
             collectSubtreeIds(element, subtree)
             if (animation.beginExit(id, subtree) { finalizeDeferredRemove(id) }) {
+                // Engine-side the subtree is already dead: a drag inside it
+                // ends now, dispatching nothing (plan §6.6).
+                dnd.cancelSubtree(id)
                 log.debug { "REMOVE: exit deferred for $id (${subtree.size} ids held)" }
                 return
             }
@@ -427,6 +482,9 @@ class ComposeRenderer(
         val element = elements.remove(id) ?: return
         detachedIds.remove(id)
         animation.forget(id)
+        // Cancels (silently) any drag inside the subtree, releases a hold on
+        // the dragged item, and drops the runtime's mirror of every id under it.
+        dnd.noteRemove(id)
 
         // Remove from parent's children
         element.parentId?.let { parentId ->
@@ -508,6 +566,8 @@ class ComposeRenderer(
         }
         element.parentId = null
         detachedIds.add(id)
+        // A drag inside a detaching route cancels with NO dispatch (plan §6.6).
+        dnd.noteDetach(id)
 
         if (rootIdState == id) {
             rootIdState = null
@@ -546,6 +606,7 @@ class ComposeRenderer(
             rootIdState = id
             detachedIds.remove(id)
             animation.noteAttach(id)
+            dnd.noteInsert(parentId, id, patch.beforeId)
             log.debug { "Attached at root: $id" }
             return
         }
@@ -567,6 +628,7 @@ class ComposeRenderer(
 
         detachedIds.remove(id)
         animation.noteAttach(id)
+        dnd.noteInsert(parentId, id, patch.beforeId)
         log.debug { "Attached: $id -> $parentId (before: ${patch.beforeId ?: "end"})" }
     }
 
@@ -592,6 +654,8 @@ class ComposeRenderer(
         // Drops in-flight playbacks and their finalize timers without
         // running them — the tree they would tear down is already gone.
         animation.reset()
+        // Cancels any drag silently and drops the runtime's tree mirror.
+        dnd.reset()
         _treeVersion.value++
     }
 
@@ -621,6 +685,9 @@ class ComposeRenderer(
     /** The animation state machine driving this tree's `__anim.*` channels. */
     fun getAnimationCoordinator(): AnimationCoordinator = animation
 
+    /** The drag-and-drop state machine driving this tree's `__dnd.*` channels. */
+    fun getDndCoordinator(): DndCoordinator = dnd
+
     /**
      * Fire an element's `.onAnimationComplete` action for a NATURALLY settled
      * playback. Payload is the applicator's own named args with the
@@ -633,8 +700,37 @@ class ComposeRenderer(
         val payload = LinkedHashMap<String, Any?>(action.payload)
         payload.putAll(completion.toPayload())
         log.debug { "Animation complete on $id: ${completion.animation}" }
-        actionDispatcher?.dispatch(action.actionName, payload)
+        // Node-addressed like every element event: the engine resolves the
+        // owning module from `node` (a bare name is ambiguous in multi-module
+        // apps). No exiting-subtree gate here — the coordinator already
+        // suppresses non-root members, and an EXIT completion is addressed to
+        // the exiting root's OWN (engine-removed) id, which the engine's exit
+        // tombstone accepts for that node's `onAnimationComplete` action.
+        actionDispatcher?.dispatch(
+            "__hypen_dispatch",
+            mapOf("node" to id, "action" to action.actionName, "payload" to payload),
+        )
     }
+
+    /**
+     * Wrap [base] so every action it dispatches is a node-addressed
+     * `__hypen_dispatch` envelope for [id] (already-built envelopes pass
+     * through untouched, so nested wrappers keep the innermost node), gated
+     * on the exiting-subtree rule: an element inside a deferred (exiting)
+     * subtree is engine-side DEAD, so nothing under it may dispatch. The
+     * gate is checked at dispatch time — a handler can fire from focus, IME
+     * or a timer long after the wrapper was built.
+     */
+    fun nodeActionDispatcher(id: String, base: ActionDispatcher): ActionDispatcher =
+        ActionDispatcher { action, payload ->
+            if (animation.isInExitingSubtree(id)) {
+                log.debug { "Dropping '$action' from exiting subtree $id" }
+            } else if (action == "__hypen_dispatch") {
+                base.dispatch(action, payload)
+            } else {
+                base.dispatch("__hypen_dispatch", mapOf("node" to id, "action" to action, "payload" to payload))
+            }
+        }
 
     override fun dispatchAction(
         action: String,
@@ -684,18 +780,7 @@ class ComposeRenderer(
         return ApplicatorContext(
             element = element,
             viewport = viewport,
-            actionDispatcher =
-                if (dispatcher == null) {
-                    null
-                } else {
-                    ActionDispatcher { action, payload ->
-                        if (animation.isInExitingSubtree(element.id)) {
-                            log.debug { "Dropping '$action' from exiting subtree ${element.id}" }
-                        } else {
-                            dispatcher.dispatch(action, payload)
-                        }
-                    }
-                },
+            actionDispatcher = dispatcher?.let { nodeActionDispatcher(element.id, it) },
         )
     }
 

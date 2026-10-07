@@ -19,6 +19,9 @@
 //!         EngineError::ActionNotFound(name) => {
 //!             eprintln!("No handler for action '{}'", name);
 //!         }
+//!         EngineError::NotDeclared(msg) => {
+//!             eprintln!("External request refused: {}", msg);
+//!         }
 //!         EngineError::RenderError(msg) => {
 //!             eprintln!("Render failed: {}", msg);
 //!         }
@@ -59,6 +62,19 @@ pub enum EngineError {
     /// Contains the action name that had no handler.
     ActionNotFound(String),
 
+    /// An external caller asked for something the app never declared.
+    ///
+    /// Distinct from [`ActionNotFound`](Self::ActionNotFound), which means no
+    /// handler exists. This one means the handler is there and the request was
+    /// *refused* — a navigation target outside the declared route table, a
+    /// `set_input` field no `.bind()` declares, a framework-internal name. The
+    /// distinction is not pedantry: these messages are read by agents, and
+    /// "No handler registered for action: hypen.navigate: '/admin' is not a
+    /// declared route" tells one both that the action is missing and that it
+    /// isn't. It also maps cleanly onto a transport — this is a 403, while
+    /// `ActionNotFound` is a 404.
+    NotDeclared(String),
+
     /// Error related to state operations (invalid patch, deserialization failure).
     StateError(String),
 
@@ -77,6 +93,9 @@ impl fmt::Display for EngineError {
             }
             EngineError::RenderError(msg) => {
                 write!(f, "Render error: {}", msg)
+            }
+            EngineError::NotDeclared(detail) => {
+                write!(f, "Not declared by this app: {}", detail)
             }
             EngineError::ActionNotFound(name) => {
                 write!(f, "No handler registered for action: {}", name)

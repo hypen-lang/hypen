@@ -1,3 +1,4 @@
+import { dispatchUIAction } from "@hypen-space/core";
 /**
  * Event Management System
  *
@@ -53,7 +54,7 @@ export class EventManager {
       // Dispatch action to engine
       log.debug(`Calling engine.dispatchAction(${actionName})`);
       try {
-        this.engine.dispatchAction(actionName, payload);
+        dispatchUIAction(this.engine, elementId, actionName, payload);
         log.debug(`dispatchAction succeeded`);
       } catch (error) {
         log.error(`dispatchAction failed:`, error);

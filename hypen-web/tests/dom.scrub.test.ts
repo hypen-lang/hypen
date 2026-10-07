@@ -1,3 +1,4 @@
+import { semanticAction } from "./helpers";
 /**
  * DOM scrub-binding runtime (Option G — `__anim.scrub*` channel consumption).
  *
@@ -22,7 +23,7 @@ class StubEngine {
   public dispatchCalls: Array<{ name: string; payload: any }> = [];
 
   dispatchAction(name: string, payload: any): void {
-    this.dispatchCalls.push({ name, payload });
+    this.dispatchCalls.push(semanticAction(name, payload));
   }
 }
 

@@ -22,11 +22,12 @@ type Modules = indexmap::IndexMap<String, crate::lifecycle::ModuleInstance>;
 /// as at the Create sites. The single resolution rule shared by initial
 /// create and the reactive [`Patch::SetSemantics`] delta paths.
 pub(crate) fn resolve_semantics(
-    base: &Option<crate::ir::Semantics>,
-    resolved_props: &IndexMap<String, serde_json::Value>,
+    base: Option<&crate::ir::Semantics>,
+    resolved_props: &impl crate::ir::semantics::PropLookup,
 ) -> Option<crate::ir::Semantics> {
-    base.clone().map(|s| {
-        s.with_resolved_name(resolved_props)
+    base.map(|s| {
+        s.clone()
+            .with_resolved_name(resolved_props)
             .with_resolved_state(resolved_props)
     })
 }
@@ -49,11 +50,11 @@ pub(crate) fn emit_semantics_delta(
     if node.semantics.is_none() && node.last_semantics.is_none() {
         return;
     }
-    let new_semantics = resolve_semantics(&node.semantics, &node.props);
-    if new_semantics != node.last_semantics {
+    let new_semantics = resolve_semantics(node.semantics.as_deref(), &node.props);
+    if new_semantics.as_ref() != node.last_semantics.as_deref() {
         patches.push(Patch::set_semantics(node_id, new_semantics.clone()));
         if let Some(node) = tree.get_mut(node_id) {
-            node.last_semantics = new_semantics;
+            node.last_semantics = new_semantics.map(Box::new);
         }
     }
 }
@@ -233,10 +234,11 @@ fn create_element_node(
         })
         .unwrap_or(false);
 
+    // A just-created node has nothing layered, so this is an `Arc::clone`.
     let mut props = ctx
         .tree
         .get(node_id)
-        .map(|n| n.props.clone())
+        .map(|n| n.props.to_flat())
         .unwrap_or_else(|| std::sync::Arc::new(indexmap::IndexMap::new()));
     if is_lazy && !element.ir_children.is_empty() {
         if let Some(IRNode::Element(first_child)) = element.ir_children.first() {
@@ -251,9 +253,9 @@ fn create_element_node(
     // Resolve any deferred (templated) accessible name from the now-resolved
     // props before emitting the Create patch, and remember the resolved
     // block so later dirty re-renders can diff against it (SetSemantics).
-    let semantics = resolve_semantics(&element.semantics, &props);
+    let semantics = resolve_semantics(element.semantics.as_ref(), &props);
     if let Some(node) = ctx.tree.get_mut(node_id) {
-        node.last_semantics = semantics.clone();
+        node.last_semantics = semantics.clone().map(Box::new);
     }
     strip_engine_internal_props(&mut props);
     ctx.patches.push(Patch::create(
@@ -365,16 +367,16 @@ fn create_list_tree_impl(
 
     // Store the original element template for re-reconciliation
     if let Some(node) = ctx.tree.get_mut(node_id) {
-        node.raw_props = element.props.clone();
+        node.raw_props = super::tree::NodeRawProps::from(element.props.clone());
         node.element_template = Some(std::sync::Arc::new(element.clone()));
     }
 
     // Generate Create patch for container
     let node = ctx.tree.get(node_id).unwrap();
-    let semantics = resolve_semantics(&node.semantics, &node.props);
-    let (element_type, mut props) = (node.element_type.clone(), node.props.clone());
+    let semantics = resolve_semantics(node.semantics.as_deref(), &node.props);
+    let (element_type, mut props) = (node.element_type.clone(), node.props.to_flat());
     if let Some(node) = ctx.tree.get_mut(node_id) {
-        node.last_semantics = semantics.clone();
+        node.last_semantics = semantics.clone().map(Box::new);
     }
     strip_engine_internal_props(&mut props);
     ctx.patches
@@ -567,13 +569,15 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
     // shared borrow and the patch push coexist).
     let new_props = resolve_props_full(&element.props, effective_state, None, ctx.data_sources);
     if let Some(node) = ctx.tree.get(node_id) {
-        let prop_patches = diff_props(node_id, &node.props, &new_props);
+        let prop_patches = diff_props_layered(node_id, &node.props, &new_props);
         ctx.patches.extend(prop_patches);
     }
 
     if let Some(node) = ctx.tree.get_mut(node_id) {
-        node.props = new_props; // move the Arc directly — no extra clone
-        node.raw_props = element.props.clone();
+        // Move the Arc directly — no extra clone. The fresh map replaces
+        // whatever was layered before.
+        node.props = super::tree::NodeProps::flat(new_props);
+        node.raw_props = super::tree::NodeRawProps::from(element.props.clone());
     }
 
     // Re-resolve semantics against the fresh props; emit SetSemantics when
@@ -614,8 +618,7 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
                 .copied()
                 .collect();
             for &old_child_id in &doomed {
-                emit_subtree_removal(ctx.tree, old_child_id, ctx.patches, ctx.dependencies);
-                ctx.tree.remove(old_child_id);
+                remove_subtree(ctx.tree, old_child_id, ctx.patches, ctx.dependencies);
             }
             // Unlink all of them in ONE pass over the parent's child vector.
             // `InstanceTree::remove_child` rebuilds the whole `im::Vector`,
@@ -642,7 +645,7 @@ fn replace_subtree_impl(
         None
     };
 
-    emit_subtree_removal(ctx.tree, old_node_id, ctx.patches, ctx.dependencies);
+    emit_subtree_removal(ctx.tree, old_node_id, ctx.patches);
 
     // Unlink by index — the old filter-collect rebuilt the parent's entire
     // child vector to drop a single entry.
@@ -654,7 +657,8 @@ fn replace_subtree_impl(
         }
     }
 
-    ctx.tree.remove(old_node_id);
+    ctx.tree
+        .remove_subtree_with(old_node_id, |id| ctx.dependencies.remove_node(id));
 
     let is_root = parent_id.is_none();
     let new_node_id = create_element_node(ctx, new_element, parent_id, parent_id, is_root);
@@ -729,23 +733,52 @@ pub fn diff_props(
     old_props: &IndexMap<String, serde_json::Value>,
     new_props: &IndexMap<String, serde_json::Value>,
 ) -> Vec<Patch> {
+    diff_props_with(
+        node_id,
+        |key| old_props.get(key),
+        old_props.keys().map(String::as_str),
+        new_props,
+    )
+}
+
+/// [`diff_props`] with the old side read from an instance node's layered
+/// props — same patches, same order, no flattening.
+pub(crate) fn diff_props_layered(
+    node_id: NodeId,
+    old_props: &super::tree::NodeProps,
+    new_props: &IndexMap<String, serde_json::Value>,
+) -> Vec<Patch> {
+    diff_props_with(
+        node_id,
+        |key| old_props.get(key),
+        old_props.keys(),
+        new_props,
+    )
+}
+
+fn diff_props_with<'a>(
+    node_id: NodeId,
+    old_get: impl Fn(&str) -> Option<&'a serde_json::Value>,
+    old_keys: impl Iterator<Item = &'a str>,
+    new_props: &IndexMap<String, serde_json::Value>,
+) -> Vec<Patch> {
     let mut patches = Vec::new();
 
     for (key, new_value) in new_props {
         if is_engine_internal_prop(key) {
             continue;
         }
-        if old_props.get(key) != Some(new_value) {
+        if old_get(key) != Some(new_value) {
             patches.push(Patch::set_prop(node_id, key.clone(), new_value.clone()));
         }
     }
 
-    for key in old_props.keys() {
+    for key in old_keys {
         if is_engine_internal_prop(key) {
             continue;
         }
         if !new_props.contains_key(key) {
-            patches.push(Patch::remove_prop(node_id, key.clone()));
+            patches.push(Patch::remove_prop(node_id, key.to_string()));
         }
     }
 
@@ -1188,7 +1221,7 @@ fn create_router_tree(
         if let Some(router_node) = ctx.tree.get_mut(node_id) {
             if let Some(ControlFlowKind::Router {
                 current_route_key, ..
-            }) = router_node.control_flow.as_mut()
+            }) = router_node.control_flow.as_deref_mut()
             {
                 *current_route_key = Some(route_key.clone());
             }
@@ -1224,10 +1257,7 @@ fn rebuild_foreach_children(
     template: &[IRNode],
 ) {
     for &old_child_id in old_children {
-        let patch = root_remove_patch(ctx.tree, old_child_id);
-        ctx.dependencies.remove_node(old_child_id);
-        ctx.tree.remove(old_child_id);
-        ctx.patches.push(patch);
+        remove_child_subtree(ctx, old_child_id);
     }
 
     if let Some(node) = ctx.tree.get_mut(node_id) {
@@ -1489,15 +1519,18 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             // Read the current cache state out of the existing node. Each
             // Router instance carries its own detached-subtree cache keyed
             // by route pattern (see ControlFlowKind::Router).
-            let (mut cache, prev_route_key, max_cache_size) =
-                match ctx.tree.get(node_id).and_then(|n| n.control_flow.as_ref()) {
-                    Some(ControlFlowKind::Router {
-                        cache,
-                        current_route_key,
-                        max_cache_size,
-                    }) => (cache.clone(), current_route_key.clone(), *max_cache_size),
-                    _ => (IndexMap::new(), None, DEFAULT_ROUTER_CACHE_SIZE),
-                };
+            let (mut cache, prev_route_key, max_cache_size) = match ctx
+                .tree
+                .get(node_id)
+                .and_then(|n| n.control_flow.as_deref())
+            {
+                Some(ControlFlowKind::Router {
+                    cache,
+                    current_route_key,
+                    max_cache_size,
+                }) => (cache.clone(), current_route_key.clone(), *max_cache_size),
+                _ => (IndexMap::new(), None, DEFAULT_ROUTER_CACHE_SIZE),
+            };
 
             let matched = find_matching_route_with_key(&location_str, routes, fallback.as_deref());
             let new_route_key = matched.as_ref().map(|(k, _)| k.clone());
@@ -1610,11 +1643,11 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             // fallback) we keep the cache but clear current_route_key
             // so the next reconcile treats this as a fresh state.
             if let Some(router_node) = ctx.tree.get_mut(node_id) {
-                router_node.control_flow = Some(ControlFlowKind::Router {
+                router_node.control_flow = Some(Box::new(ControlFlowKind::Router {
                     cache,
                     current_route_key: new_route_key,
                     max_cache_size,
-                });
+                }));
             }
         }
     }
@@ -1624,21 +1657,39 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
 /// when the node's resolved props carry an `"__anim.exit"` spec. Must be
 /// called BEFORE the node is removed from `tree` — afterwards the props
 /// (and the spec) are gone and the removal silently loses its animation.
-pub(crate) fn root_remove_patch(tree: &InstanceTree, id: NodeId) -> Patch {
+///
+/// A flagged root also leaves an exit tombstone
+/// ([`InstanceTree::record_exit_tombstone`]): its `.exit` completion arrives
+/// from the renderer after this Remove, addressed to this id, and the
+/// tombstone is what lets UI routing still find the owning module.
+pub(crate) fn root_remove_patch(tree: &mut InstanceTree, id: NodeId) -> Patch {
     let exits = tree
         .get(id)
         .is_some_and(|node| node.props.contains_key(crate::ir::anim::ANIM_EXIT_PROP));
     if exits {
+        tree.record_exit_tombstone(id);
         Patch::remove_with_transition(id)
     } else {
         Patch::remove(id)
     }
 }
 
-/// Emit the Remove patches for the subtree rooted at `root_id` and clear its
-/// dependency registrations, without mutating the tree — callers unlink and
-/// `tree.remove(...)` afterwards (`&InstanceTree` enforces that the removal
-/// root's `"__anim.exit"` spec is read before any mutation).
+/// Tear down one iterable child (keyed / ForEach-rebuild paths): a single
+/// root Remove goes over the wire, and the whole subtree leaves the tree and
+/// the dependency graph. The exit spec must be read (`root_remove_patch`)
+/// before the removal drops the node's props.
+pub(crate) fn remove_child_subtree(ctx: &mut ReconcileCtx, child_id: NodeId) {
+    let patch = root_remove_patch(ctx.tree, child_id);
+    ctx.tree
+        .remove_subtree_with(child_id, |id| ctx.dependencies.remove_node(id));
+    ctx.patches.push(patch);
+}
+
+/// Emit the Remove patches for the subtree rooted at `root_id` without
+/// changing the tree's structure — callers unlink and remove afterwards, so
+/// the removal root's `"__anim.exit"` spec is read before any mutation. (The
+/// only write is the exit tombstone side table.) Dependency registrations are dropped by
+/// the removal itself (`InstanceTree::remove_subtree_with`).
 ///
 /// Ordering (the contract documented on [`Patch::Remove`]):
 /// - root has an exit spec → flagged root Remove FIRST, then descendants as
@@ -1654,12 +1705,7 @@ pub(crate) fn root_remove_patch(tree: &InstanceTree, id: NodeId) -> Patch {
 ///   renderer's `sweepDetachedDescendants` exists exactly for it). Emitting
 ///   one patch per descendant meant ~17k patches to clear a 1,000-row list
 ///   that the renderer discards in a single subtree unlink.
-fn emit_subtree_removal(
-    tree: &InstanceTree,
-    root_id: NodeId,
-    patches: &mut Vec<Patch>,
-    dependencies: &mut DependencyGraph,
-) {
+fn emit_subtree_removal(tree: &mut InstanceTree, root_id: NodeId, patches: &mut Vec<Patch>) {
     let root_patch = root_remove_patch(tree, root_id);
     let animated = matches!(
         root_patch,
@@ -1669,29 +1715,12 @@ fn emit_subtree_removal(
         }
     );
 
+    patches.push(root_patch);
     if animated {
-        let ids = collect_subtree_ids(tree, root_id);
-        patches.push(root_patch);
-        for &id in &ids {
+        for id in collect_subtree_ids(&*tree, root_id) {
             if id != root_id {
                 patches.push(Patch::remove(id));
             }
-        }
-        for &id in &ids {
-            dependencies.remove_node(id);
-        }
-        return;
-    }
-
-    patches.push(root_patch);
-    // Engine-side bookkeeping still has to drop every descendant's reactive
-    // registrations; walked with a plain stack so no id vector is
-    // materialized for what is now a single patch.
-    let mut stack = vec![root_id];
-    while let Some(id) = stack.pop() {
-        dependencies.remove_node(id);
-        if let Some(node) = tree.get(id) {
-            stack.extend(node.children.iter().copied());
         }
     }
 }
@@ -1703,8 +1732,8 @@ fn remove_subtree(
     patches: &mut Vec<Patch>,
     dependencies: &mut DependencyGraph,
 ) {
-    emit_subtree_removal(tree, node_id, patches, dependencies);
-    tree.remove(node_id);
+    emit_subtree_removal(tree, node_id, patches);
+    tree.remove_subtree_with(node_id, |id| dependencies.remove_node(id));
 }
 
 #[cfg(test)]
@@ -1744,6 +1773,94 @@ mod tests {
             .iter()
             .find(|p| matches!(p, Patch::Insert { parent_id, .. } if parent_id.as_ref() == "root"));
         assert!(root_insert.is_some(), "Root insert patch should exist");
+    }
+
+    /// Keyed removal used to unregister only the removed row's ROOT from
+    /// the dependency graph; a `@{state.*}` binding on any descendant kept
+    /// its dead NodeId registered for the life of the engine, so every
+    /// replace/clear grew the set that each later state change walked.
+    #[test]
+    fn keyed_row_removal_unregisters_descendant_dependencies() {
+        use crate::reactive::DependencyGraph;
+
+        let component = hypen_parser::parse_component(
+            r#"Column {
+                List(@state.rows, key: "id") {
+                    Row { Text("@{state.label} @{item.name}") }
+                }
+            }"#,
+        )
+        .expect("parse");
+        let ir = crate::ir::ast_to_ir_node(&component);
+
+        let rows = |n: usize| {
+            json!({
+                "label": "L",
+                "rows": (0..n).map(|i| json!({ "id": i, "name": format!("r{i}") })).collect::<Vec<_>>(),
+            })
+        };
+        let mut tree = InstanceTree::new();
+        let mut dependencies = DependencyGraph::new();
+
+        let state = rows(3);
+        let mut patches = Vec::new();
+        let root = {
+            let mut ctx = ReconcileCtx {
+                tree: &mut tree,
+                state: &state,
+                patches: &mut patches,
+                dependencies: &mut dependencies,
+                data_sources: None,
+                modules: None,
+            };
+            create_ir_node_tree_full(&mut ctx, &ir, None, None, true)
+        };
+        assert_eq!(
+            dependencies
+                .get_dependent_nodes("label")
+                .map_or(0, |s| s.len()),
+            3,
+            "each row's Text registers its state binding"
+        );
+
+        let state = rows(1);
+        let mut patches = Vec::new();
+        {
+            let mut ctx = ReconcileCtx {
+                tree: &mut tree,
+                state: &state,
+                patches: &mut patches,
+                dependencies: &mut dependencies,
+                data_sources: None,
+                modules: None,
+            };
+            reconcile_ir_node_impl(&mut ctx, root, &ir);
+        }
+        assert_eq!(
+            patches
+                .iter()
+                .filter(|p| matches!(p, Patch::Remove { .. }))
+                .count(),
+            2
+        );
+
+        let live: Vec<NodeId> = dependencies
+            .get_dependent_nodes("label")
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect();
+        assert_eq!(
+            live.len(),
+            1,
+            "removed rows' descendants must leave the graph"
+        );
+        for id in live {
+            assert!(
+                tree.get(id).is_some(),
+                "registered node {id:?} is not in the tree"
+            );
+        }
     }
 
     #[test]

@@ -579,7 +579,7 @@ pub fn state_variants(node: &Node, viewport: Viewport) -> StateVariants {
 /// Derive the node's disabled state from `enabled` / `disabled` props
 /// (each via the standard `.0` / direct chain). `disabled: true` or
 /// `enabled: false` both count; absent → not disabled.
-fn is_disabled(node: &Node) -> bool {
+pub(crate) fn is_disabled(node: &Node) -> bool {
     let as_bool = |name: &str| -> Option<bool> {
         node.props
             .get(name)
@@ -1260,13 +1260,6 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
     let mut color: Option<Rgba> = None;
     let mut line_style = BorderLineStyle::Solid;
     let mut uniform_set = false;
-    // Per-side widths feed `sides` and the eventual stroke width
-    // — set when tw `border-b` / `border-t` / etc. emits a directional
-    // key (e.g. `border-bottom-width: 1px`).
-    let mut top: Option<f32> = None;
-    let mut right: Option<f32> = None;
-    let mut bottom: Option<f32> = None;
-    let mut left: Option<f32> = None;
 
     if let Some(v) = prop_f32_with(node, "border", vs) {
         width = v;
@@ -1361,16 +1354,27 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
     // Per-side: tw `border-b` → `border-bottom-width: 1px`. We accept
     // both camelCase + kebab via the standard `prop_f32_with` chain
     // (variant-aware so `borderBottomWidth:hover` reaches layout).
-    top = prop_f32_with(node, "borderTopWidth", vs);
-    right = prop_f32_with(node, "borderRightWidth", vs);
-    bottom = prop_f32_with(node, "borderBottomWidth", vs);
-    left = prop_f32_with(node, "borderLeftWidth", vs);
+    // Per-side widths feed `sides` and the eventual stroke width.
+    let mut top = prop_f32_with(node, "borderTopWidth", vs);
+    let mut right = prop_f32_with(node, "borderRightWidth", vs);
+    let mut bottom = prop_f32_with(node, "borderBottomWidth", vs);
+    let mut left = prop_f32_with(node, "borderLeftWidth", vs);
 
-    let sides = if uniform_set {
-        BORDER_SIDES_ALL
-    } else if top.is_some() || right.is_some() || bottom.is_some() || left.is_some() {
-        // Only the explicitly-set sides draw. Width is the max of the
-        // per-side widths (uniform stroke per visible side).
+    let any_side = top.is_some() || right.is_some() || bottom.is_some() || left.is_some();
+    if uniform_set && any_side {
+        // CSS cascade: the uniform width is the base for every side and a
+        // per-side width overrides its own edge. tw `border-0 border-t`
+        // (the social composer's hairline) is `border-width: 0` +
+        // `border-top-width: 1px` — previously the uniform key returned
+        // early with all sides at width 0 and the top hairline vanished.
+        top = top.or(Some(width));
+        right = right.or(Some(width));
+        bottom = bottom.or(Some(width));
+        left = left.or(Some(width));
+    }
+    let sides = if any_side {
+        // Only the sides with a positive width draw. Width is the max of
+        // the per-side widths (uniform stroke per visible side).
         let mut s = 0u8;
         if top.is_some_and(|w| w > 0.0) {
             s |= BORDER_SIDE_TOP;
@@ -1388,7 +1392,13 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
             .iter()
             .filter_map(|v| *v)
             .fold(0.0_f32, |a, b| a.max(b));
-        s
+        if s == BORDER_SIDES_ALL || width <= 0.0 {
+            // Every side visible (e.g. `border border-t-2`): the regular
+            // full-rect stroke path. All zero: invisible either way.
+            BORDER_SIDES_ALL
+        } else {
+            s
+        }
     } else {
         BORDER_SIDES_ALL
     };

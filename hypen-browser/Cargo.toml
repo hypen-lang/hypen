@@ -22,10 +22,10 @@ dev-overlay = ["hypen-renderer-desktop/dev-overlay"]
 dev = ["dev-overlay"]
 
 [dependencies]
-hypen-engine = { version = "0.6.4", path = "../hypen-engine-rs" }
-hypen-parser = { version = "0.6.4", path = "../parser" }
-hypen-server = { version = "0.6.4", path = "../hypen-sdk-rs" }
-hypen-renderer-desktop = { version = "0.6.4", path = "../hypen-renderer-desktop" }
+hypen-engine = { version = "0.6.5", path = "../hypen-engine-rs" }
+hypen-parser = { version = "0.6.5", path = "../parser" }
+hypen-server = { version = "0.6.5", path = "../hypen-sdk-rs" }
+hypen-renderer-desktop = { version = "0.6.5", path = "../hypen-renderer-desktop" }
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -69,4 +69,12 @@ depends = [
     "libxkbcommon-x11-0",
     "libwayland-client0",
     "libvulkan1",
+    # Device capabilities (hypen-renderer-desktop camera/mic/bluetooth):
+    # ALSA for microphone capture, D-Bus for BlueZ.
+    "libasound2",
+    "libdbus-1-3",
 ]
+
+# Usage descriptions for the camera, microphone and Bluetooth prompts.
+[package.metadata.packager.macos]
+info-plist-path = "assets/Info.plist"

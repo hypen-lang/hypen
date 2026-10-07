@@ -1,0 +1,86 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "drop-zone-files",
+  "description": "A .dropZone(files: true, accept:) adds \"files\": true and \"accept\" to __dnd.zone, so renderers show the `over` pose while matching OS files hover the zone (and fire .onFileDragEnter). The files never cross to the server. Without files: true the wire is unchanged",
+  "category": "dnd",
+  "priority": "P1",
+  "input": {
+    "source": "Column { Row().dropZone(files: true, accept: \"image/*,.pdf\") Row().dropZone(files: true) Row().dropZone(accept: \"image/*\") }",
+    "initialState": {},
+    "module": {
+      "name": "TestModule",
+      "actions": [],
+      "stateKeys": []
+    }
+  },
+  "expected": {
+    "patchCount": 8,
+    "patchTypes": [
+      "create",
+      "insert",
+      "create",
+      "insert",
+      "create",
+      "insert",
+      "create",
+      "insert"
+    ],
+    "patches": [
+      {
+        "type": "create",
+        "elementType": "Column"
+      },
+      {
+        "type": "insert"
+      },
+      {
+        "type": "create",
+        "elementType": "Row",
+        "props": {
+          "__dnd.zone": {
+            "group": null,
+            "band": 0.5,
+            "files": true,
+            "accept": "image/*,.pdf"
+          }
+        },
+        "absentProps": [
+          "dropZone.0",
+          "dropZone.files",
+          "dropZone.accept"
+        ]
+      },
+      {
+        "type": "insert"
+      },
+      {
+        "type": "create",
+        "elementType": "Row",
+        "props": {
+          "__dnd.zone": {
+            "group": null,
+            "band": 0.5,
+            "files": true,
+            "accept": null
+          }
+        }
+      },
+      {
+        "type": "insert"
+      },
+      {
+        "type": "create",
+        "elementType": "Row",
+        "props": {
+          "__dnd.zone": {
+            "group": null,
+            "band": 0.5
+          }
+        }
+      },
+      {
+        "type": "insert"
+      }
+    ]
+  }
+}

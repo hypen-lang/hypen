@@ -176,6 +176,139 @@ public final class NativeEngine: @unchecked Sendable {
         }
     }
 
+    // MARK: - External capability surface
+
+    // For callers that are NOT the rendered UI — MCP servers, REST handlers,
+    // CLIs, agents. `dispatchAction` above queues any registered action, which
+    // is right for a renderer (it owns `router.push` and `__hypen_bind`) and
+    // wrong for anyone else. These entry points go through the engine's guard,
+    // which accepts only what the app declares. Never route an external caller
+    // to `dispatchAction`, and never reimplement the allowlist here — the
+    // engine owns it so the rule can't drift between SDKs.
+    //
+    // The UniFFI layer hands these back as JSON strings (same convention as
+    // `discoverRouters`); we decode so callers get typed values.
+
+    /// The built-in external names as the engine spells them today.
+    ///
+    /// The engine exports these so SDKs read them instead of hardcoding the
+    /// literals; `ExternalAction` mirrors them for compile-time use and is
+    /// pinned to this call by test.
+    public func builtinActionNames() throws -> ExternalBuiltinNames {
+        try decodeSurface(
+            ExternalBuiltinNames.self,
+            from: engine.externalBuiltinNames(),
+            what: "built-in names"
+        )
+    }
+
+    /// Every action an external caller may dispatch right now.
+    ///
+    /// Module actions come from each module's declared `onAction` names;
+    /// built-ins (`navigate`, `back`, `set_input`) appear only when the app
+    /// declares the surface backing them.
+    public func listActions() throws -> [AgentAction] {
+        try decodeSurface([AgentAction].self, from: engine.listExternalActions(), what: "actions")
+    }
+
+    /// Every route the app declares, in declaration order. Backs `navigate`'s
+    /// argument schema.
+    public func listRoutes() throws -> [AgentRoute] {
+        try decodeSurface([AgentRoute].self, from: engine.listRoutes(), what: "routes")
+    }
+
+    /// Every `.bind()`-declared writable input. Backs `set_input`'s argument
+    /// schema — `BoundInput.path` is what goes in the `field` argument.
+    public func listBindings() throws -> [BoundInput] {
+        try decodeSurface([BoundInput].self, from: engine.listBindings(), what: "bindings")
+    }
+
+    /// Dispatch on behalf of a caller that is not the rendered UI.
+    ///
+    /// Accepts exactly what `listActions()` advertises and nothing else, so
+    /// `__hypen_bind` and `router.replace` are refused by name however they are
+    /// spelled. The engine resolves the aliases itself — `navigate` arrives at
+    /// the host as `router.push`, `set_input` as `__hypen_bind` with a payload
+    /// the engine built, never one the caller supplied.
+    ///
+    /// Queues the resolved action; call `processPendingActions()` to drain it,
+    /// exactly as with `dispatchAction`.
+    ///
+    /// - Throws: `HypenError.ActionError` when the name is not externally
+    ///   dispatchable, or when a `set_input` field isn't `.bind()`-declared.
+    public func dispatchExternal(_ name: String, payload: [String: Any]? = nil) throws {
+        var payloadJson: String? = nil
+        if let payload = payload {
+            let data = try JSONSerialization.data(withJSONObject: payload)
+            guard let json = String(data: data, encoding: .utf8) else {
+                throw NativeEngineError.stateSerializationFailed(
+                    "Failed to encode payload for '\(name)' as UTF-8"
+                )
+            }
+            payloadJson = json
+        }
+        try engine.dispatchExternal(actionName: name, payloadJson: payloadJson)
+    }
+
+    /// Read module state, whole or at a path.
+    ///
+    /// `module` is nil for the primary module set via `setModule`, or the name
+    /// of one registered via `registerModule` (matched case-insensitively).
+    /// Returns nil when the module is unknown *or* the path is absent — the
+    /// engine deliberately doesn't distinguish the two, so a caller can't probe
+    /// for state it isn't being shown.
+    ///
+    /// The value is a JSON fragment, so scalars come back as `Int`/`String`/
+    /// `Bool` and containers as `[String: Any]` / `[Any]`.
+    public func getStateAt(module: String? = nil, path: String? = nil) -> Any? {
+        guard let json = engine.getStateAt(module: module, path: path) else { return nil }
+        // `.fragmentsAllowed`: a path read commonly lands on a scalar, which
+        // isn't a legal top-level JSON document without it.
+        guard let value = try? JSONSerialization.jsonObject(
+            with: Data(json.utf8), options: [.fragmentsAllowed]
+        ) else { return nil }
+        return value is NSNull ? nil : value
+    }
+
+    /// The MCP handshake for this app, composed by the engine from the same
+    /// declaration tables `listActions()` reads — `tools`, `resources`,
+    /// `instructions`, MCP-shaped and camelCase already.
+    ///
+    /// Returned as the JSON string the engine produced. A host forwards it
+    /// verbatim; paraphrasing it here would be hand-writing protocol prose
+    /// again, which composing it in the engine exists to remove.
+    public func mcpManifest() -> String {
+        engine.mcpManifest()
+    }
+
+    /// Drop a module and every action it declared from the engine.
+    ///
+    /// **Destroy only — never on unmount.** The engine's module registry is
+    /// otherwise append-only, and that retention is load-bearing: under the
+    /// default `persist: true` an off-screen module deliberately stays
+    /// registered so siblings can still read its state. Calling this when a
+    /// module merely leaves the screen breaks the persist cache and every
+    /// cross-module read. See `ManagedRouter.executeUnmount` for the one place
+    /// that gets this right.
+    public func unregisterModule(_ name: String) {
+        engine.unregisterModule(name: name)
+    }
+
+    /// Decode one of the capability listings, which the FFI returns as JSON.
+    private func decodeSurface<T: Decodable>(
+        _ type: T.Type,
+        from json: String,
+        what: String
+    ) throws -> T {
+        do {
+            return try JSONDecoder().decode(type, from: Data(json.utf8))
+        } catch {
+            throw NativeEngineError.surfaceDecodingFailed(
+                "Failed to decode external \(what): \(error)"
+            )
+        }
+    }
+
     // MARK: - Components
 
     /// Register a component from source.
@@ -297,9 +430,13 @@ public final class NativeEngine: @unchecked Sendable {
         if let name = patch.name {
             dict["name"] = name
         }
+        // `setProp` values are frequently bare scalars (`120`, `"red"`,
+        // `true`, `null`) — the DnD translate injection re-resolves as
+        // `SetProp translateX.0 = <number>` — so fragments must be allowed
+        // or the value is silently dropped from the wire dictionary.
         if let valueJson = patch.valueJson,
            let data = valueJson.data(using: .utf8),
-           let value = try? JSONSerialization.jsonObject(with: data) {
+           let value = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) {
             dict["value"] = value
         }
         if let text = patch.text {
@@ -324,7 +461,7 @@ public final class NativeEngine: @unchecked Sendable {
         // when true, matching the engine's serde skip-if-false — the wire
         // stays byte-identical for non-animated removals. Consumer:
         // `HypenRenderer.applyRemove` on iOS (see
-        // `.notes/ANIMATION_IOS.md`).
+        // `hypen-web/docs/animation.md`).
         if patch.transition {
             dict["transition"] = true
         }
@@ -380,10 +517,14 @@ public struct RenderDocumentWithModulesResult {
 /// Errors from the NativeEngine wrapper (not from the Rust engine itself).
 public enum NativeEngineError: Error, CustomStringConvertible {
     case stateSerializationFailed(String)
+    /// A capability listing came back in a shape we couldn't decode. Signals
+    /// engine/SDK drift, not a caller mistake — refusals arrive as `HypenError`.
+    case surfaceDecodingFailed(String)
 
     public var description: String {
         switch self {
         case .stateSerializationFailed(let msg): return "State serialization failed: \(msg)"
+        case .surfaceDecodingFailed(let msg): return "External surface decoding failed: \(msg)"
         }
     }
 }

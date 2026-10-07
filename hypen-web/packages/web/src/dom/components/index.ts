@@ -141,8 +141,7 @@ export class ComponentRegistry {
    * Let a component re-register the per-element state a `cloneNode`-built
    * template instance lost. No-op for handlers without an `adopt` hook.
    */
-  adopt(element: HTMLElement): void {
-    const type = element.dataset.hypenType;
+  adopt(element: HTMLElement, type: string | undefined = element.dataset.hypenType): void {
     if (!type) return;
     this.get(type)?.adopt?.(element);
   }
@@ -189,6 +188,10 @@ export class ComponentRegistry {
     const { visuallyHiddenHandler } = require("./visuallyhidden.js");
     const { tabsHandler, tabHandler, tabPanelHandler, optionHandler } = require("./tabs.js");
     const { safeAreaHandler } = require("./safearea.js");
+    const {
+      chartHandler, lineHandler, areaHandler, barsHandler, pointsHandler,
+      axisHandler, ruleHandler, markerHandler, pathHandler,
+    } = require("./chart.js");
 
     this.register("app", appHandler);
     this.register("visuallyhidden", visuallyHiddenHandler);
@@ -231,5 +234,15 @@ export class ComponentRegistry {
     this.register("route", routeHandler);
     this.register("hypenapp", hypenAppHandler);
     this.register("safearea", safeAreaHandler);
+    // Charts: a data-space <svg> host plus its marks (see chart.ts)
+    this.register("chart", chartHandler);
+    this.register("line", lineHandler);
+    this.register("area", areaHandler);
+    this.register("bars", barsHandler);
+    this.register("points", pointsHandler);
+    this.register("axis", axisHandler);
+    this.register("rule", ruleHandler);
+    this.register("marker", markerHandler);
+    this.register("path", pathHandler);
   }
 }

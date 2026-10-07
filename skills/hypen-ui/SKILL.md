@@ -1,6 +1,6 @@
 ---
 name: hypen-ui
-description: Build cross-platform UI with the Hypen declarative language. Covers all components, applicators, modules, state, typed actions, control flow, styling, and animation across TypeScript, Kotlin, Go, Swift, and Rust SDKs.
+description: Build cross-platform UI with the Hypen declarative language. Covers all components, applicators, modules, state, typed actions, agent exposure, control flow, styling, and animation across TypeScript, Kotlin, Go, Swift, and Rust SDKs.
 ---
 
 # Building UI with Hypen
@@ -187,6 +187,25 @@ import HomePage from "./pages/HomePage"
 | `Spinner` | Loading indicator | - | No |
 | `ProgressBar` | Progress indicator | value | No |
 
+### Chart Components
+
+| Component | Description | Key Props | Has Children |
+|-----------|-------------|-----------|-------------|
+| `Chart` | Coordinate space; lays its marks out in data units | x/y (optional `[min, max]` ranges), padding | Yes (marks) |
+| `Line` / `Area` | Polyline / filled region | points or data, x, y (field names), smooth | No |
+| `Bars` | One bar per row (zero-based) | data, x, y (or label, value), highlight, barWidth, radius | No |
+| `Points` | One dot per row | points or data, x, y, radius, highlight | No |
+| `Axis` | Axis line, ticks, labels | `x`/`y` (positional), ticks, label, grid | No |
+| `Rule` | Dashed reference line | x **or** y | No |
+| `Marker` | Pins its children to a data point | x, y, anchor | Yes |
+| `Path` | SVG path in data units | d | No |
+
+> **Chart data:** `points:`/`data:` accepts `[3, 5, 2]` (index as x), `[[x, y], …]` tuples, or objects with field names from `x:`/`y:`. A string x makes the x axis categorical. Bind rows from state (`Bars(data: @state.rows, x: "month", y: "count")`); the chart re-lays out when the array changes. No `Axis` children = sparkline (edge to edge).
+
+> **Chart styling:** marks take any CSS-resolving applicator — `stroke`, `fill`, `strokeWidth`, `strokeDasharray`, `fillOpacity`, `opacity`, `mixBlendMode`, `transition`. For a glow use `.glow(color)` / `.glow(color: c, radius: r)`; `shadow`/`boxShadow`/`elevation` become a `drop-shadow` filter on SVG marks (box shadows are invisible on geometry). Layout applicators on a mark are no-ops — size the `Chart`.
+
+> **Chart events:** `.onClick` / `.onPress` / `.onLongPress` / `.onHover` / `.onMove` / `.onMouseLeave` on a mark dispatch `{series, index, x, y, datum}` in **data units** (never pixels). Selection and tooltips go through state: bind `highlight:` on `Bars`/`Points`, and position a `Marker(x: @state.hover.x, y: @state.hover.y) { Card { … } }` — a Marker with missing coordinates is hidden, so no `If` is needed.
+
 ### Media Components
 
 | Component | Description | Key Props | Has Children |
@@ -206,7 +225,7 @@ import HomePage from "./pages/HomePage"
 
 > **List shorthand:** `List(@state.items) { ... }` auto-expands to `ForEach(items: @state.items, key: "id")`. The positional argument is the binding source — there is no separate `items` prop shorthand.
 
-> **Grid:** `Grid` is **data-driven**, exactly like `List` — it expands to a ForEach over an array binding with a grid-layout wrapper. `Grid(@state.buttons, key: "label") { ...item template... }` renders one child per record; apply `.gridColumns(3)` (shorthand for `repeat(3, 1fr)`) or `.gridTemplateColumns("1fr 2fr 1fr")` on the Grid, and `.gridColumn("span 2")` (bindable per item, e.g. `"@{item.span}"`) inside the template. A **static** `Grid { ... }` with no array binding does NOT work — the engine renders an `__Error` node ("Grid requires an array binding"). For a fixed grid of hand-written children, use nested `Row`s/`Column`s instead.
+> **Grid:** `Grid` is **data-driven**, exactly like `List` — it expands to a ForEach over an array binding with a grid-layout wrapper. `Grid(@state.buttons, key: "label") { ...item template... }` renders one child per record; apply `.gridColumns(3)` on the Grid (a count of equal-width columns; the only column form every renderer supports — there is no template/track-list syntax). `.tw("grid-cols-3")` is the same thing. Breakpoint variants of it (`md:grid-cols-4`, `.gridColumns({default: 2, md: 4})`) only apply on web and desktop; iOS and Android always use the base count, and `.gridColumn("span 2")` (bindable per item, e.g. `"@{item.span}"`) inside the template. A **static** `Grid { ... }` with no array binding does NOT work — the engine renders an `__Error` node ("Grid requires an array binding"). For a fixed grid of hand-written children, use nested `Row`s/`Column`s instead.
 
 ## Control Flow
 
@@ -403,9 +422,8 @@ Stack {
 ### Grid
 
 ```hypen
-.gridColumns(3)
-.gridTemplateColumns("1fr 2fr 1fr")
-.gridColumn("span 2")
+.gridColumns(3)          // column count
+.gridColumn("span 2")    // on an item: column span
 ```
 
 ### Effects
@@ -556,6 +574,72 @@ Input(placeholder: "Search")
 ```
 
 Same shape for `Checkbox { }.bind(@state.agreed).onChange(@actions.submit)`, etc.
+
+### Drag and Drop
+
+Four role applicators (`.draggable` / `.dropZone` / `.sortable` / `.pinboard`), `.bind()` as the write, six events. **Flat named args only** (a positional `.draggable("cards")` warns and is ignored); invalid args warn and fall back, never error. The drag preview runs renderer-side; opted-in start/hover events and the final write/events reach the host. Identity is the `ForEach` key — never pass an id to `.draggable()`.
+
+```hypen
+// Reorder — two applicators, no handler (the engine path_moves state.tasks)
+Column { ForEach(items: @state.tasks, key: "id") { TaskRow("@{item.title}").draggable() } }
+    .sortable(axis: y)                               // group: defaults to the node's static id (else self-only); axis: x|y
+    .bind(@state.tasks)                              // omit .bind to own the mutation yourself (.onSort still fires)
+
+// Kanban — sort AND transfer between lists sharing a group, then sync
+Column { ForEach(items: @state.todo,  key: "id") { Card("@{item.title}").draggable() } }
+    .sortable(group: "board").bind(@state.todo).onSort(@actions.persistBoard)   // fires on the DESTINATION list, after the write
+
+// Drop INTO a target — your handler moves the data; `over` is a runtime-driven pose (no state path)
+Row { Text("Trash") }
+    .dropZone(group: "board", id: "trash")           // id: defaults to the node's id prop; enabled: bindable; band: 0..1 (0.5)
+    .onDrop(@actions.deleteCard)
+    .states { onState(over).backgroundColor("#fee2e2") }
+
+// Files dragged in from the OS / other apps — `over` lights up while matching files hover (no file data);
+// answer .onFileDragEnter with context.device.request("file.pick", …): the host dialog takes the actual drop
+Column { Text("Drop photos here") }
+    .dropZone(files: true, accept: "image/*")         // accept: "<input accept>" filter, static
+    .onFileDragEnter(@actions.upload)                 // once per entry, payload {type, timestamp, items}
+    .states { onState(over).borderColor("#6366f1") }
+
+// Draggable options — group inherits from the enclosing sortable/pinboard; payload rides in every event
+Card("@{item.title}")
+    .draggable(group: "cards", payload: @item, activation: press, enabled: @state.canEdit)
+    .states { onState(lifted).opacity(0.6).scale(1.04) }   // `lifted` = the other runtime label
+Row { Icon("grip").draggable(handle: true) Text("@{item.title}") Button("Edit").onClick(@actions.edit) }  // only the grip lifts (because .draggable() is ON the grip; handle: is informational — no renderer reads it)
+
+// Pinboard — drop anywhere, stay there. No .bind ⇒ positions in reserved state __dnd.<group>.<key> (group REQUIRED)
+Stack { ForEach(items: @state.notes, key: "id") { StickyNote("@{item.text}").draggable() } }
+    .size(1200, 800).pinboard(group: "board", grid: 8)      // bounds: clamp|free; use units: px for automatic positions
+// .bind ⇒ your fields: author the translates yourself
+Stack { ForEach(items: @state.seats, key: "id") { Seat().translateX(@item.x).translateY(@item.y).draggable() } }
+    .pinboard(x: "x", y: "y").bind(@state.seats).onPin(@actions.seatMoved)
+
+// Folder row in a sortable list — the band rule: middle 50% = INTO (.onDrop), edges = reorder
+Row { Icon("@{item.kind}") Text("@{item.name}") }
+    .draggable(group: "fs")
+    .dropZone(group: "fs", id: "@{item.id}", enabled: @item.isFolder)
+    .onDragOver(@actions.openFolder, dwell: 600)     // opt-in mid-drag escalation, once per entry (default dwell 500ms)
+    .onDrop(@actions.moveInto)
+
+// Lifecycle: .onDragStart / .onDragEnd on the draggable or its container; onDragEnd fires on drop AND cancel
+    .onDragStart(@actions.dragBegan).onDragEnd(@actions.dragEnded)   // payload.dropped: true | false
+```
+
+**Payload (every event):** `{ item, payload?, from: {zone, index|null}, to: {zone, index|null}, x?, y?, dropped? }` — `index: null` = "into"; `zone` = a sortable/pinboard's group (else id, else node id) or a dropZone's `id:`. Order on drop: reserved write (`__hypen_reorder` / `__hypen_pin`) → `.onSort`/`.onPin`/`.onDrop` → `.onDragEnd {dropped: true}`. Cancel: only `.onDragEnd {dropped: false}`.
+
+**Key rules:**
+- Standard renderers attach DnD automatically. Use a matching engine and host build; TS/Go/Kotlin/Swift/Rust register outcome handlers automatically, including Rust local sync/async and Remote UI. Stable ForEach keys and the role + bind are sufficient; no reserved-action boilerplate.
+- Omitting `.bind` disables automatic writes only for a sortable. An unbound pinboard writes reserved positions. Reserved pinboards support custom `x:`/`y:` leaf names. `units: fraction` automatically projects normalized coordinates against the current board content box in reserved and bound modes, including after resize. Omit authored translates for fractional axes; an authored translate overrides that axis. Pixel bound mode still needs authored translates.
+- A shared `group` controls acceptance and is also the event's `zone` label. Two lists sharing a group cannot be distinguished by `from.zone`/`to.zone`; use stable item keys, payload data, or separately named destination handlers.
+- No autoscroll. Native keyboard dragging is absent; provide ordinary move controls (Android also offers TalkBack reorder actions).
+- `activation: auto` = mouse 6px slop; touch in an axis-constrained sortable = cross-axis slop (main axis scrolls); touch elsewhere = 300ms press. A tap is a total no-op. **Prefer a grip on mobile** — `.draggable()` on the grip node; the lift surface is always the `.draggable` node's own subtree and `handle: true` alone changes nothing.
+- Group compatibility: a source's group is its own, else its container's. A sortable/pinboard always accepts its own children; with a group it also accepts foreign sources of that group. Drops into a `.dropZone` never write — the module moves the data.
+- Reserved `__dnd` is ordinary module state (persists, restores, may be seeded in `defineState`). Typed hosts (Kotlin/Swift/Rust) preserve `__` keys; for `.pinboard(...).bind()` the `x:`/`y:` fields must exist on the item type (the SDK warns once per dropped path). Sort adds no fields. Matching engine/host/renderer builds route reserved writes and callbacks from live node ownership; repeated paths and action names across modules are safe. Cross-module list transfers require the destination `.onSort` handler to mutate both modules explicitly (`fromScope`/`toScope` identify them). Stale nodes and ambiguous legacy dispatches are rejected. Upgrade all three layers together; old engines ignore the new envelope.
+- DOM/Canvas sortable keyboard support is automatic: Tab → Space lifts → arrows move / Tab switches zones → Space drops → Esc cancels; identical events. Not for pinboard items (v1).
+- Edge rules: a loose draggable (no enclosing sortable/pinboard) reports `from: {zone: <nearest .dropZone id, else parent node id>, index: null}`; `enabled:` flipping to false mid-drag cancels silently (no `.onDragEnd`); a press during the post-drop hold window (≤500ms) is ignored.
+- Header-less `.states { onState(lifted|over) … }` is accepted only on a node with a DnD role; pose values static as always.
+- Renderer support: web (mouse + touch + keyboard) is the reference; Canvas and desktop are mouse-only (Canvas has keyboard drag with `aria-grabbed` but no announcements, desktop none); iOS and Android run the touch rules, snap or glide poses per platform, and have no keyboard drag (Android exposes TalkBack "Move up/down"). Renderers that ignore `__dnd.*` show a static, correct list — never depend on the drag for correctness. Full matrix: `hypen-web/docs/dnd.md`.
 
 ### Tailwind CSS Support
 
@@ -1019,6 +1103,12 @@ Go types the **state** through `TypedActionContext[T]` but does **not** type the
 })
 ```
 
+## Agent actions and state exposure
+
+When building an agent-enabled Hypen app or adapting its transport, read [the agent interface reference](references/agent-interface.md). Exposure is derived from declarations: registered public module actions are callable, `.bind(@state.x)` declares writes, and template state references declare reads. There is no `.expose()` API; prefix an action with `_` to make it private to the UI. A hidden or disabled button is not authorization.
+
+External adapters must use the guarded `dispatchExternal` family, never renderer `dispatchAction` or arbitrary state updates. Keep payload validation and business authorization in handlers. The host separately enables MCP/REST or attaches an authorized caller to a live session.
+
 ## Complete Examples
 
 ### Counter
@@ -1367,7 +1457,7 @@ Column {
 4. **Any unknown applicator** falls through to CSS: `.wordBreak("break-word")`, `.cursor("pointer")` just work.
 5. **`@{state.xxx}`** resolves against the active module's state. Cross-module state requires explicit prop passing or context.
 6. **Always use `key` in ForEach** for lists that change dynamically.
-7. **`.bind()` only works with `@state.*`**, not `@item.*`. Use it on Input, Textarea, Checkbox, Switch, Select.
+7. **`.bind()` only works with `@state.*`**, not `@item.*`. Use it on Input, Textarea, Checkbox, Switch, Select, or sortable/pinboard containers (subject to the host limits above).
 8. **Action payloads** are passed as additional named arguments on event applicators, not wrapped in `{payload: ...}`.
 9. **Typed actions (Kotlin)** derive action names from class names by default. Use `override val _actionName` to customize the name that maps to `@actions.xxx` in the DSL.
 10. **Trailing commas are allowed** in argument lists: `Component(a: 1, b: 2,)`.

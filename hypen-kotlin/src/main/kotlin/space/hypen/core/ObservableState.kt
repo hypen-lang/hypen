@@ -121,6 +121,77 @@ class ObservableState<T : Any>(
     }
 
     /**
+     * Move element [from] of the array at [fromPath] so it becomes index [to]
+     * of the array at [toPath] (the two paths may be equal). This is the
+     * `__hypen_reorder` primitive (hypen-web/docs/dnd.md) and
+     * delegates to the engine's canonical `portable_path_move`, so the
+     * semantics — `to` is the FINAL index clamped to `[0, len]` after
+     * removal, `from == to` on one array is a no-op that still succeeds,
+     * a destination re-addressed when it lives under a later sibling of
+     * the source array, a destination inside the moved element refused —
+     * match every other SDK byte for byte.
+     *
+     * Returns `false` and leaves the state untouched unless both paths
+     * resolve to arrays and [from] is in range. On success a change is
+     * notified for both paths (collapsed to the common ancestor when one
+     * path contains the other) carrying the updated arrays, so the engine
+     * re-renders the affected `ForEach`es and persistence sees the write.
+     *
+     * Inside [batch]: the move lands in `state` immediately (later reads in
+     * the block see it) and is notified with the batch flush. Earlier
+     * pending sets in the same batch that touch either array — the array
+     * itself, one of its elements/sub-paths, or an ancestor object — are
+     * applied to `state` FIRST so the move operates on the array the block
+     * has built up so far (`set("tasks.0", x); move("tasks", 0, "tasks", 2)`
+     * moves `x`). Their pending entries are then reconciled with the move:
+     * sub-path entries are subsumed by the whole-array notification and
+     * dropped, equal/ancestor entries are refreshed to their post-move
+     * value, so the flush replay is idempotent and every notified value
+     * matches the final state. A set to a sub-path issued AFTER the move in
+     * the same batch still wins (flush order). Pending sets to unrelated
+     * paths are untouched and stay deferred as usual.
+     */
+    fun move(fromPath: String, from: Int, toPath: String, to: Int): Boolean {
+        if (from < 0 || to < 0) return false
+        lock.write {
+            if (batchingUpdates) {
+                // Materialise the pending sets the move depends on, in
+                // insertion order, so the move sees the batch's writes.
+                pendingChanges
+                    .filter { (path, _) -> overlapsMove(path, fromPath, toPath) }
+                    .forEach { (path, value) -> setValueAtPath(state, path, value) }
+            }
+            val moved = moveValueAtPath(state, fromPath, from, toPath, to)
+            if (!moved) return false
+            val paths = changedPathsForMove(fromPath, toPath)
+            val values = paths.associateWith { getValueAtPath(state, it) }
+            if (batchingUpdates) {
+                // Reconcile the pending list with the move so the flush
+                // replay (insertion order, whole values) cannot undo it:
+                //  - strict sub-paths of either array (`tasks.0`) are covered
+                //    by the whole-array entry and may not even exist any
+                //    more (cross-array moves shrink the source), so drop them;
+                //  - the arrays themselves / ancestor objects are refreshed
+                //    to their post-move value (idempotent on replay).
+                val reconciled = pendingChanges.mapNotNull { (path, value) ->
+                    when {
+                        isStrictSubPath(path, fromPath) || isStrictSubPath(path, toPath) -> null
+                        overlapsMove(path, fromPath, toPath) -> path to getValueAtPath(state, path)
+                        else -> path to value
+                    }
+                }
+                pendingChanges.clear()
+                pendingChanges.addAll(reconciled)
+                val queued = pendingChanges.mapTo(HashSet()) { it.first }
+                paths.forEach { if (it !in queued) pendingChanges.add(it to values[it]) }
+            } else {
+                notifyChange(paths, values)
+            }
+            return true
+        }
+    }
+
+    /**
      * Get a snapshot of the entire state
      */
     @Suppress("UNCHECKED_CAST")
@@ -203,8 +274,71 @@ class ObservableState<T : Any>(
             val valueJson = toJsonElement(value).toString()
             val resultJson = uniffi.hypen_engine.portablePathSet(stateJson, path, valueJson)
             val parsed = portableJson.parseToJsonElement(resultJson) as? JsonObject ?: return
-            // Mirror the engine's root back into the caller's map so
-            // holders of the same map reference see the mutation.
+            mirrorRoot(obj, parsed)
+        }
+
+        /**
+         * Move `from` of the array at `fromPath` to index `to` of the array
+         * at `toPath`, mutating `obj` in place. Delegates to the engine's
+         * canonical `portable_path_move`; see [ObservableState.move] for the
+         * semantics. Returns the engine's `moved` flag; `obj` is untouched
+         * when it is `false`.
+         */
+        fun moveValueAtPath(
+            obj: MutableMap<String, Any?>,
+            fromPath: String,
+            from: Int,
+            toPath: String,
+            to: Int,
+        ): Boolean {
+            if (from < 0 || to < 0) return false
+            val stateJson = toJsonElement(obj).toString()
+            val resultJson = uniffi.hypen_engine.portablePathMove(
+                stateJson, fromPath, from.toUInt(), toPath, to.toUInt(),
+            )
+            val result = portableJson.parseToJsonElement(resultJson) as? JsonObject ?: return false
+            val moved = (result["moved"] as? JsonPrimitive)?.booleanOrNull ?: false
+            if (!moved) return false
+            val parsed = result["json"] as? JsonObject ?: return false
+            mirrorRoot(obj, parsed)
+            return true
+        }
+
+        /**
+         * The paths a successful move dirties: both arrays, collapsed to the
+         * shorter one when it is an ancestor of the other (a destination
+         * under `entries.2.children` is re-addressed by the removal, so the
+         * only stable path to report is `entries` itself).
+         */
+        internal fun changedPathsForMove(fromPath: String, toPath: String): List<String> {
+            if (fromPath == toPath) return listOf(fromPath)
+            if (isAncestorPath(fromPath, toPath)) return listOf(fromPath)
+            if (isAncestorPath(toPath, fromPath)) return listOf(toPath)
+            return listOf(fromPath, toPath)
+        }
+
+        private fun isAncestorPath(ancestor: String, path: String): Boolean =
+            ancestor.isEmpty() || path.startsWith("$ancestor.")
+
+        /** `path` lies strictly inside the array at `arrayPath` (`tasks.0` under `tasks`). */
+        private fun isStrictSubPath(path: String, arrayPath: String): Boolean =
+            path != arrayPath && isAncestorPath(arrayPath, path)
+
+        /**
+         * Whether a pending set at `path` interacts with a move between
+         * `fromPath` and `toPath`: it IS one of the arrays, lives inside one
+         * of them, or is an ancestor object that contains one of them.
+         */
+        internal fun overlapsMove(path: String, fromPath: String, toPath: String): Boolean =
+            path == fromPath || path == toPath ||
+                isAncestorPath(fromPath, path) || isAncestorPath(toPath, path) ||
+                isAncestorPath(path, fromPath) || isAncestorPath(path, toPath)
+
+        /**
+         * Mirror the engine's root back into the caller's map so holders of
+         * the same map reference see the mutation.
+         */
+        private fun mirrorRoot(obj: MutableMap<String, Any?>, parsed: JsonObject) {
             val keysToRemove = obj.keys - parsed.keys
             for (k in keysToRemove) obj.remove(k)
             for ((k, v) in parsed) obj[k] = fromJsonElement(v)

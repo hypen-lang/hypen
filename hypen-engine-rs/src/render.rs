@@ -151,8 +151,10 @@ pub fn render_dirty_nodes_full(
                 reconcile_ir_node_impl(&mut ctx, node_id, &template);
             }
         } else {
-            // Regular node: just update props
-            let old_props = tree.get(node_id).map(|n| n.props.clone());
+            // Regular node: just update props. The old map is taken out
+            // rather than cloned — it is only needed for the comparison,
+            // and the node's props are replaced wholesale just below.
+            let old_props = tree.get_mut(node_id).map(|n| std::mem::take(&mut n.props));
 
             // Determine the effective state: if this node belongs to a module scope,
             // use that module's state; otherwise use the primary module's state.
@@ -181,8 +183,8 @@ pub fn render_dirty_nodes_full(
                     if is_engine_internal_prop(key) {
                         continue;
                     }
-                    if old.get(key.as_str()) != Some(new_value) {
-                        patches.push(Patch::set_prop(node_id, key.clone(), new_value.clone()));
+                    if old.get(key) != Some(new_value) {
+                        patches.push(Patch::set_prop(node_id, key.to_string(), new_value.clone()));
                     }
                 }
                 // Remove props that no longer exist
@@ -190,8 +192,8 @@ pub fn render_dirty_nodes_full(
                     if is_engine_internal_prop(key) {
                         continue;
                     }
-                    if !node.props.contains_key(key.as_str()) {
-                        patches.push(Patch::remove_prop(node_id, key.clone()));
+                    if !node.props.contains_key(key) {
+                        patches.push(Patch::remove_prop(node_id, key.to_string()));
                     }
                 }
             }
@@ -625,7 +627,6 @@ mod tests {
     #[test]
     fn dirty_node_with_templated_name_emits_set_semantics() {
         use crate::ir::{Semantics, Value};
-        use crate::reconcile::resolve_props;
 
         let mut scheduler = Scheduler::new();
         let mut tree = InstanceTree::new();
@@ -644,9 +645,10 @@ mod tests {
         // Simulate the create-time emit: resolve + record last_semantics,
         // exactly as create_element_node does.
         if let Some(node) = tree.get_mut(node_id) {
-            node.props = resolve_props(&node.raw_props, instance.get_state());
+            node.update_props(instance.get_state());
             node.last_semantics =
-                crate::reconcile::diff::resolve_semantics(&node.semantics, &node.props);
+                crate::reconcile::diff::resolve_semantics(node.semantics.as_deref(), &node.props)
+                    .map(Box::new);
             assert_eq!(
                 node.last_semantics.as_ref().and_then(|s| s.name.as_deref()),
                 Some("Save")

@@ -28,6 +28,14 @@ pub trait HypenModule: Send + Sync + 'static {
     /// Errors (unknown action, async-only handler) are logged but not
     /// propagated — the renderer keeps running.
     fn dispatch_action(&self, name: &str, payload: Option<Value>);
+
+    /// Dispatch a renderer event using the engine's live node ownership.
+    fn dispatch_ui_action(&self, node: &str, action: &str, payload: Option<Value>) {
+        self.dispatch_action(
+            "__hypen_dispatch",
+            Some(serde_json::json!({"node":node,"action":action,"payload":payload})),
+        );
+    }
 }
 
 impl<S: State> HypenModule for ModuleInstance<S> {
@@ -143,6 +151,69 @@ mod tests {
             concrete.get_state().count,
             1,
             "blanket impl must forward dispatch into ModuleInstance",
+        );
+    }
+
+    /// Element events reach a local (Rust SDK) module as node-addressed
+    /// `__hypen_dispatch` envelopes; `ModuleInstance` must resolve them
+    /// against its engine and run the handler (plus `__hypen_bind`).
+    #[test]
+    fn local_module_accepts_node_addressed_envelopes() {
+        #[derive(Clone, Default, Serialize, Deserialize, Debug)]
+        struct FormState {
+            count: i32,
+            name: String,
+        }
+        let def = ModuleBuilder::<FormState>::new("Form")
+            .state(FormState::default())
+            .ui(r#"Column {
+                Button { Text("+") }.onClick(@actions.incr)
+                Input(placeholder: "n").bind(@state.name)
+            }"#)
+            .on_action::<()>("incr", |state, _, _| {
+                state.count += 1;
+            })
+            .build();
+        let concrete =
+            Arc::new(ModuleInstance::<FormState>::new(Arc::new(def), None).expect("instantiate"));
+        let erased: Arc<dyn HypenModule> = concrete.clone();
+        let creates: Arc<Mutex<Vec<(String, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&creates);
+        erased.on_patches(Arc::new(move |patches: &[Patch]| {
+            for p in patches {
+                if let Patch::Create {
+                    id, element_type, ..
+                } = p
+                {
+                    sink.lock()
+                        .unwrap()
+                        .push((element_type.clone(), id.to_string()));
+                }
+            }
+        }));
+        erased.mount();
+        let id_of = |ty: &str| {
+            creates
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(t, _)| t == ty)
+                .map(|(_, id)| id.clone())
+                .expect("element rendered")
+        };
+        let (button, input) = (id_of("Button"), id_of("Input"));
+
+        erased.dispatch_ui_action(&button, "incr", None);
+        assert_eq!(concrete.get_state().count, 1, "envelope runs the handler");
+        erased.dispatch_ui_action(
+            &input,
+            "__hypen_bind",
+            Some(serde_json::json!({"path": "name", "value": "Ada"})),
+        );
+        assert_eq!(
+            concrete.get_state().name,
+            "Ada",
+            "envelope bind writes state"
         );
     }
 

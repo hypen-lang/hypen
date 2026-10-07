@@ -129,9 +129,12 @@ export function markConversationRead(conversationId: string, currentUserId: stri
 
 export function formatTimeAgo(dateStr: string): string {
   const now = Date.now();
-  const then = new Date(dateStr).getTime();
+  // SQLite's CURRENT_TIMESTAMP is UTC with no zone marker ("2026-09-27 10:00:00").
+  const iso = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(dateStr) ? `${dateStr.replace(" ", "T")}Z` : dateStr;
+  const then = new Date(iso).getTime();
   const diffMs = now - then;
   const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "now";
   if (diffMin < 60) return `${diffMin}m`;
   const diffH = Math.floor(diffMin / 60);
   if (diffH < 24) return `${diffH}h`;

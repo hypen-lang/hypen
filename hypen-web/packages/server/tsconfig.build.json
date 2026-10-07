@@ -10,6 +10,13 @@
     "verbatimModuleSyntax": false,
     "paths": {}
   },
-  "include": ["src/**/*"],
-  "exclude": ["node_modules", "dist", "src/remote/web-client-entry.ts"]
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist",
+    "src/remote/web-client-entry.ts",
+    "src/**/*.test.ts"
+  ]
 }
