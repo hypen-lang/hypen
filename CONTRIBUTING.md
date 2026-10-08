@@ -200,6 +200,10 @@ bun test tests/variant-handling.test.ts
 - Open a [GitHub Discussion](https://github.com/hypen-lang/hypen/discussions)
 - Check existing documentation in `hypen-docs/`
 
+## Repository roadmap
+
+This is a monorepo on purpose while the protocol and SDKs settle. After 1.0 stabilizes, the server and renderer SDKs will move into their own repositories; the engine, parser and docs stay here.
+
 ## License
 
 By contributing, you agree that your contributions will be licensed under the MIT License.

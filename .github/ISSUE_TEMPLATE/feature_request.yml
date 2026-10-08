@@ -1,0 +1,41 @@
+name: Feature request
+description: Propose a change to the language, engine, an SDK or a renderer
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What are you trying to do?
+      description: The use case, not the solution. What does the app need to do that it cannot today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: How would you like it to work? A DSL snippet or SDK call is ideal.
+      render: hypen
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      multiple: true
+      options:
+        - Language / parser
+        - Engine
+        - TypeScript SDK
+        - Rust SDK
+        - Go SDK
+        - Kotlin SDK
+        - Swift SDK
+        - Web renderer (DOM / Canvas)
+        - iOS renderer
+        - Android renderer
+        - Desktop renderer
+        - CLI / Studio
+        - Docs
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered

@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Question or help
+    url: https://github.com/hypen-lang/hypen/discussions/categories/q-a
+    about: Ask in Discussions. Bugs and feature requests go in issues.
+  - name: Documentation
+    url: https://docs.hypen.space/docs
+    about: Guides, language reference and SDK docs.
+  - name: Security report
+    url: https://github.com/hypen-lang/hypen/security/advisories/new
+    about: Report a vulnerability privately.

@@ -23,10 +23,19 @@
   <a href="https://github.com/hypen-lang/hypen/discussions">
     <img alt="Discussions" src="https://img.shields.io/badge/discussions-join-FFECA7?style=flat-square&labelColor=161616" />
   </a>
+  <a href="https://github.com/hypen-lang/hypen/actions/workflows/rust.yml">
+    <img alt="Rust CI" src="https://img.shields.io/github/actions/workflow/status/hypen-lang/hypen/rust.yml?branch=main&style=flat-square&labelColor=161616&label=rust" />
+  </a>
+  <a href="https://github.com/hypen-lang/hypen/actions/workflows/typescript.yml">
+    <img alt="TypeScript CI" src="https://img.shields.io/github/actions/workflow/status/hypen-lang/hypen/typescript.yml?branch=main&style=flat-square&labelColor=161616&label=typescript" />
+  </a>
+  <a href="https://github.com/hypen-lang/hypen/actions/workflows/cross-platform.yml">
+    <img alt="Cross-platform SDK CI" src="https://img.shields.io/github/actions/workflow/status/hypen-lang/hypen/cross-platform.yml?branch=main&style=flat-square&labelColor=161616&label=sdks" />
+  </a>
 </p>
 
 <p align="center">
-  An open-source cross-platform language and engine for building universal software that runs natively on all platforms via UI streaming. Fastest dev experience ever with out of the box reactivity, routing, hot reload, preview studio, Tailwind shorthands and all kinds of niceties.
+  An open-source declarative UI language and engine. Write the UI once, keep state and logic in Rust, TypeScript, Go, Kotlin or Swift, and stream it to web, iOS, Android and desktop renderers as native UI. Reactivity, routing, hot reload, a preview studio and Tailwind shorthands are built in.
 </p>
 
 <p align="center">
@@ -43,8 +52,8 @@
 </p>
 
 ## Why Hypen?
-- **Native UI Streaming and portable (coming soon)** - Hypen supports native UI streaming from different languages - Rust, TS, Go, Kotlin, Swift and more coming soon
-- **Crossplatform native rendering** - Render hypen in web, canvas, iOS or Android, all native.
+- **Native UI streaming from your language** — Server SDKs for Rust, TypeScript, Go, Kotlin and Swift speak one WebSocket patch protocol. Your backend owns state and logic; the client only renders.
+- **Cross-platform native rendering** — DOM, Canvas, SwiftUI, Jetpack Compose and a Vello desktop renderer, all driven by the same patches.
 - **Declarative and familiar** — Hypen is a declarative language that will be familiar to both developers and machines.
 - **Highly portable** — Hypen clients are thin layers over native UI, enabling you to automatically support any platform that Hypen supports.
 - **Reactivity, Tailwind, routing, hot reload** — All of your favorite features, out of the box. Develop faster than ever with Hypen.
@@ -104,8 +113,6 @@ export default app
 Learn more about using Hypen here:
 
 [ [Docs](https://docs.hypen.space/docs) ] [ [TS Server SDK](https://docs.hypen.space/docs/servers/typescript) ] [ [Go Server SDK](https://docs.hypen.space/docs/servers/golang) ] [ [Swift Server SDK](https://docs.hypen.space/docs/servers/swift) ] [ [Kotlin Server SDK](https://docs.hypen.space/docs/servers/kotlin) ] [ [Rust Server SDK](https://docs.hypen.space/docs/servers/rust) ] [ [Language references](https://docs.hypen.space/docs/hypen/basics) ]
-
-> **Warning:** After the 1.0 version stabilizes, all server and renderer SDKs will move into their own repositories.
 
 ## Quick Start
 
@@ -255,8 +262,20 @@ let app = HypenApp::builder()
         .build())
     .build();
 
-// Plug `app` into your Axum/Actix/etc. server via the framework integration.
+// The Rust SDK is framework-agnostic: hand each WebSocket connection a
+// RemoteSession and pump messages through it (Axum, Actix, Warp, ...).
+async fn ws_handler(ws: WebSocket, session: RemoteSession) {
+    let (mut tx, mut rx) = ws.split();
+    for msg in session.handle_hello(None) { tx.send(Message::Text(msg)).await.unwrap(); }
+    while let Some(Ok(msg)) = rx.next().await {
+        for out in session.handle_message(msg.to_text().unwrap()) {
+            tx.send(Message::Text(out)).await.unwrap();
+        }
+    }
+}
 ```
+
+Full Axum wiring is in the [Rust SDK docs](https://docs.hypen.space/docs/servers/rust).
 
 </details>
 
@@ -355,13 +374,17 @@ The engine is renderer-agnostic. All platforms receive the same patch format.
 | `hypen-cli/` | CLI tools (`init`, `dev`, `build`, `studio`) | TypeScript |
 | `hypen-renderer-swift/` | iOS/macOS native renderer | Swift |
 | `hypen-renderer-android/` | Android native renderer | Kotlin |
+| `hypen-renderer-desktop/` | Desktop native renderer (Vello) | Rust |
+| `hypen-browser/` | Desktop Hypen browser built on the desktop renderer | Rust |
 | `hypen-server-swift/` | Swift server SDK (`HypenServer`) | Swift |
 | `hypen-kotlin/` | Kotlin/JVM SDK with Kotlin DSL | Kotlin |
 | `hypen-golang/` | Go SDK (module system) | Go |
 | `hypen-lsp/` | Language Server Protocol implementation | TypeScript |
 | `tailwind-parse/` | Tailwind CSS class parser | Rust |
-| `hypen-landing/` | Landing page | TypeScript |
+| `hypen-ios-streamer/` | Streams iOS Simulators over HTTP for Studio and tests | TypeScript |
 | `hypen-docs/` | Documentation site (Fumadocs) | Markdown |
+| `benchmarks/` | React vs Hypen runtime benchmark | TypeScript |
+| `releases/` | Cloudflare Worker that serves gallery app downloads | JavaScript |
 | `engine-compatibility-tests/` | Cross-SDK compatibility test suite | Multi |
 | `examples/` | Example apps | Multi |
 | `component-gallery-server/` | Server for x-platform screenshot tests | TypeScript |
