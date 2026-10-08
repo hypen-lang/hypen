@@ -3205,16 +3205,19 @@ impl LayoutPass {
     ///
     /// `affected` ids without an emitted item (culled / detached) are
     /// skipped — the next full pass re-resolves them from the same
-    /// tree when they re-enter the window. The post-passes and index
-    /// rebuild run over ALL items (not just affected) because opacity
-    /// and transforms inherit downward and the indexes are positional;
-    /// both are O(items) with O(1) gates, the same cost every full
-    /// compute already pays.
+    /// tree when they re-enter the window.
     ///
-    /// The a11y semantics map is rebuilt from the tree wholesale:
-    /// `SetSemantics` patches qualify as paint-only but do NOT
-    /// contribute ids to `affected`, so a per-id refresh would miss
-    /// them.
+    /// Everything here is O(affected), not O(visible items): the
+    /// classifier puts every DESCENDANT of a patched node into
+    /// `affected` (opacity and transforms inherit downward, and an
+    /// item with no patched ancestor can see no change), so the
+    /// post-passes run over the affected items alone; the item set and
+    /// order are untouched, so `by_node_id` stands and the positional
+    /// index lists are rebuilt only when an affected item's membership
+    /// actually flipped (adding `onClick` makes it actionable AND
+    /// focusable); and the a11y map is patched per affected id —
+    /// `SetSemantics` ids are in `affected` for exactly this reason —
+    /// with its order-independent hash updated entry by entry.
     pub fn refresh_paint_only(
         &mut self,
         tree: &Tree,
@@ -3222,49 +3225,64 @@ impl LayoutPass {
         viewport: Viewport,
         scale: f32,
     ) {
+        let mut touched: Vec<usize> = Vec::with_capacity(affected.len());
+        let mut membership_changed = false;
         for id in affected {
+            // Semantics first: a `SetSemantics` id may have no item at all.
+            if let Some(old) = self.a11y.remove(id) {
+                self.a11y_hash ^= semantics_entry_hash(id, &old);
+            }
             let Some(&idx) = self.by_node_id.get(id) else {
                 continue;
             };
             let Some(node) = tree.get(id) else {
                 continue;
             };
+            if let Some(sem) = node.semantics.as_ref() {
+                self.a11y_hash ^= semantics_entry_hash(id, sem);
+                self.a11y.insert(id.clone(), sem.clone());
+            }
+            let before = index_membership(&self.items[idx]);
             refresh_item_paint(&mut self.items[idx], node, tree, viewport);
+            if index_membership(&self.items[idx]) != before {
+                membership_changed = true;
+            }
+            touched.push(idx);
         }
         // Same post-pass recipe as `compute_inner_state`, including the
         // gate-closed reset: if the batch REMOVED the tree's last
         // opacity / transform prop, stale non-default values must
-        // return to their defaults, exactly as a fresh emit would.
+        // return to their defaults, exactly as a fresh emit would. The
+        // node that carried the removed prop is affected, and so is
+        // everything under it, so the reset reaches every item it can
+        // concern.
         if tree.has_opacity_props() {
             let mut memo: HashMap<String, f32> = HashMap::new();
-            for it in self.items.iter_mut() {
-                it.opacity = effective_opacity(tree, &it.node_id, viewport, &mut memo);
+            for &idx in &touched {
+                let id = std::mem::take(&mut self.items[idx].node_id);
+                self.items[idx].opacity = effective_opacity(tree, &id, viewport, &mut memo);
+                self.items[idx].node_id = id;
             }
         } else {
-            for it in self.items.iter_mut() {
-                it.opacity = 1.0;
+            for &idx in &touched {
+                self.items[idx].opacity = 1.0;
             }
         }
-        compute_item_transforms_gated(
+        compute_item_transforms_for(
             tree,
             &mut self.items,
+            &touched,
             viewport,
             scale,
             tree.has_transform_props(),
         );
-        // Paint-only writes can still flip derived-index membership
-        // (adding `onClick` makes an item actionable AND focusable;
-        // adding `.onHover` makes it hoverable), so rebuild them with
-        // the same shared helper `compute_inner_state` uses.
-        let indexes = build_item_indexes(&self.items);
-        self.by_node_id = indexes.by_node_id;
-        self.actionable_ids = indexes.actionable_ids;
-        self.focusable_ids = indexes.focusable_ids;
-        self.scrollable_ids = indexes.scrollable_ids;
-        self.hoverable_ids = indexes.hoverable_ids;
-        let (a11y, a11y_hash) = collect_item_semantics(tree, &self.items);
-        self.a11y = a11y;
-        self.a11y_hash = a11y_hash;
+        if membership_changed {
+            let indexes = build_item_indexes(&self.items);
+            self.actionable_ids = indexes.actionable_ids;
+            self.focusable_ids = indexes.focusable_ids;
+            self.scrollable_ids = indexes.scrollable_ids;
+            self.hoverable_ids = indexes.hoverable_ids;
+        }
     }
 
     /// Container-scroll fast path: shift the emitted rects of
@@ -7560,19 +7578,41 @@ pub(crate) fn collect_item_semantics(
     tree: &Tree,
     items: &[LayoutItem],
 ) -> (HashMap<String, hypen_engine::ir::Semantics>, u64) {
-    use std::hash::{Hash, Hasher};
     let mut a11y = HashMap::new();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hash = 0u64;
     for it in items {
         if let Some(node) = tree.get(&it.node_id) {
             if let Some(sem) = node.semantics.as_ref() {
-                it.node_id.hash(&mut hasher);
-                format!("{sem:?}").hash(&mut hasher);
+                hash ^= semantics_entry_hash(&it.node_id, sem);
                 a11y.insert(it.node_id.clone(), sem.clone());
             }
         }
     }
-    (a11y, hasher.finish())
+    (a11y, hash)
+}
+
+/// Content hash of one `(id, semantics)` entry. The map hash is the XOR
+/// of these, so it is order-independent and [`LayoutPass::refresh_paint_only`]
+/// can retire and re-add single entries without rehashing every item.
+fn semantics_entry_hash(id: &str, sem: &hypen_engine::ir::Semantics) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    format!("{sem:?}").hash(&mut hasher);
+    // Mix so that XOR-folding two entries never cancels on a shared prefix
+    // pattern; the finish of SipHash is already well distributed.
+    hasher.finish()
+}
+
+/// Which derived index lists an item belongs to — the predicates
+/// `build_item_indexes` applies, in the same order.
+fn index_membership(it: &LayoutItem) -> [bool; 4] {
+    [
+        it.action.is_some() || it.video_intent.is_some(),
+        it.is_focusable(),
+        it.scrollable.is_some(),
+        it.hover_action.is_some(),
+    ]
 }
 
 /// Re-resolve one item's PAINT fields from its (already-mutated) tree
@@ -7940,7 +7980,7 @@ fn cumulative_transform(
     id: &str,
     viewport: Viewport,
     scale: f32,
-    rects: &HashMap<String, Rect>,
+    rects: &HashMap<&str, Rect>,
     memo: &mut HashMap<String, Affine2>,
 ) -> Affine2 {
     if let Some(m) = memo.get(id) {
@@ -8028,14 +8068,58 @@ pub(crate) fn compute_item_transforms_gated(
     }
     // Rect side-map for origin resolution — ancestors of an emitted
     // item are always emitted themselves (culling skips whole
-    // subtrees), so every origin an item needs is present.
-    let rects: HashMap<String, Rect> = items
+    // subtrees), so every origin an item needs is present. Keyed by
+    // borrowed ids: the transforms are computed into a side vector
+    // first, then written back, so the map never has to own a copy of
+    // every id.
+    let rects: HashMap<&str, Rect> = items
         .iter()
-        .map(|it| (it.node_id.clone(), it.rect))
+        .map(|it| (it.node_id.as_str(), it.rect))
         .collect();
     let mut memo: HashMap<String, Affine2> = HashMap::new();
-    for it in items.iter_mut() {
-        it.transform = cumulative_transform(tree, &it.node_id, viewport, scale, &rects, &mut memo);
+    let transforms: Vec<Affine2> = items
+        .iter()
+        .map(|it| cumulative_transform(tree, &it.node_id, viewport, scale, &rects, &mut memo))
+        .collect();
+    for (it, transform) in items.iter_mut().zip(transforms) {
+        it.transform = transform;
+    }
+}
+
+/// [`compute_item_transforms_gated`] for the items at `indices` only.
+/// Sound when every item whose cumulative transform can have changed is
+/// among them — the paint-only classifier's affected set includes all
+/// descendants of a patched node, which is exactly that set.
+pub(crate) fn compute_item_transforms_for(
+    tree: &Tree,
+    items: &mut [LayoutItem],
+    indices: &[usize],
+    viewport: Viewport,
+    scale: f32,
+    has_transform: bool,
+) {
+    if !has_transform {
+        for &idx in indices {
+            items[idx].transform = Affine2::IDENTITY;
+        }
+        return;
+    }
+    if indices.is_empty() {
+        return;
+    }
+    let rects: HashMap<&str, Rect> = items
+        .iter()
+        .map(|it| (it.node_id.as_str(), it.rect))
+        .collect();
+    let mut memo: HashMap<String, Affine2> = HashMap::new();
+    let transforms: Vec<Affine2> = indices
+        .iter()
+        .map(|&idx| {
+            cumulative_transform(tree, &items[idx].node_id, viewport, scale, &rects, &mut memo)
+        })
+        .collect();
+    for (&idx, transform) in indices.iter().zip(transforms) {
+        items[idx].transform = transform;
     }
 }
 

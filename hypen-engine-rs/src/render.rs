@@ -8,8 +8,8 @@ use crate::{
     lifecycle::ModuleInstance,
     reactive::{DependencyGraph, Scheduler},
     reconcile::{
-        diff::is_engine_internal_prop, emit_semantics_delta, reconcile_ir_node_impl, InstanceTree,
-        Patch, ReconcileCtx,
+        diff::is_engine_internal_prop, emit_semantics_delta, reconcile_ir_node_impl,
+        tree::PropDelta, InstanceTree, Patch, ReconcileCtx,
     },
 };
 
@@ -151,10 +151,7 @@ pub fn render_dirty_nodes_full(
                 reconcile_ir_node_impl(&mut ctx, node_id, &template);
             }
         } else {
-            // Regular node: just update props. The old map is taken out
-            // rather than cloned — it is only needed for the comparison,
-            // and the node's props are replaced wholesale just below.
-            let old_props = tree.get_mut(node_id).map(|n| std::mem::take(&mut n.props));
+            // Regular node: re-evaluate its state-dependent props.
 
             // Determine the effective state: if this node belongs to a module scope,
             // use that module's state; otherwise use the primary module's state.
@@ -165,35 +162,59 @@ pub fn render_dirty_nodes_full(
                 .map(|m| m.get_state())
                 .unwrap_or(state);
 
-            // Update props with new state (and data sources if available)
-            if let Some(node) = tree.get_mut(node_id) {
-                if data_sources.is_some() {
-                    node.update_props_with_data_sources(effective_state, data_sources);
-                } else {
-                    node.update_props(effective_state);
+            // Fast path: only the bindings / templates / switches are
+            // re-resolved, in place, and only those are compared — the
+            // static majority of a node's props is never touched. Engine-
+            // internal carriers (hoisted `__a11yName`) never emit; their
+            // change reaches renderers via SetSemantics below.
+            let refreshed = tree
+                .get_mut(node_id)
+                .and_then(|node| node.refresh_dynamic_props(effective_state, data_sources));
+            match refreshed {
+                Some(deltas) => {
+                    for delta in deltas {
+                        match delta {
+                            PropDelta::Set(key, value) if !is_engine_internal_prop(&key) => {
+                                patches.push(Patch::set_prop(node_id, key, value));
+                            }
+                            PropDelta::Removed(key) if !is_engine_internal_prop(&key) => {
+                                patches.push(Patch::remove_prop(node_id, key));
+                            }
+                            _ => {}
+                        }
+                    }
                 }
-            }
-
-            // Compare and generate patches only for changed props. Deref
-            // the Arc<IndexMap> explicitly to get a `&IndexMap` iterator.
-            // Engine-internal carriers (hoisted `__a11yName`) never emit —
-            // their change reaches renderers via SetSemantics below.
-            if let (Some(old), Some(node)) = (old_props, tree.get(node_id)) {
-                for (key, new_value) in node.props.iter() {
-                    if is_engine_internal_prop(key) {
-                        continue;
+                None => {
+                    // A prop that resolved to *absent* last time is present
+                    // now: rebuild the map wholesale so it lands at its raw-
+                    // prop position. The old map is taken out rather than
+                    // cloned — it is only needed for the comparison.
+                    let old_props = tree.get_mut(node_id).map(|n| std::mem::take(&mut n.props));
+                    if let Some(node) = tree.get_mut(node_id) {
+                        node.update_props_with_data_sources(effective_state, data_sources);
                     }
-                    if old.get(key) != Some(new_value) {
-                        patches.push(Patch::set_prop(node_id, key.to_string(), new_value.clone()));
-                    }
-                }
-                // Remove props that no longer exist
-                for key in old.keys() {
-                    if is_engine_internal_prop(key) {
-                        continue;
-                    }
-                    if !node.props.contains_key(key) {
-                        patches.push(Patch::remove_prop(node_id, key.to_string()));
+                    if let (Some(old), Some(node)) = (old_props, tree.get(node_id)) {
+                        for (key, new_value) in node.props.iter() {
+                            if is_engine_internal_prop(key) {
+                                continue;
+                            }
+                            if old.get(key) != Some(new_value) {
+                                patches.push(Patch::set_prop(
+                                    node_id,
+                                    key.to_string(),
+                                    new_value.clone(),
+                                ));
+                            }
+                        }
+                        // Remove props that no longer exist
+                        for key in old.keys() {
+                            if is_engine_internal_prop(key) {
+                                continue;
+                            }
+                            if !node.props.contains_key(key) {
+                                patches.push(Patch::remove_prop(node_id, key.to_string()));
+                            }
+                        }
                     }
                 }
             }

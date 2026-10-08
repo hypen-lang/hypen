@@ -35,13 +35,64 @@ impl std::io::Write for HashWriter {
 }
 
 /// Content hash of a list item for the iterable memo — the write side of
-/// [`IterMemo::item_hash`]. Serializes into the hasher, so no allocation.
-pub(crate) fn item_fingerprint(item: &serde_json::Value) -> u64 {
-    let mut w = HashWriter(std::collections::hash_map::DefaultHasher::new());
-    if serde_json::to_writer(&mut w, item).is_err() {
-        w.0.write_u64(u64::MAX);
+/// [`IterMemo::item_hash`]. Walks the JSON structurally, feeding the
+/// hasher raw string bytes and number bits: no allocation, and none of
+/// the formatting (number printing, string escaping) a serialization
+/// pass pays. A wholesale array replacement fingerprints every item even
+/// on a memo hit, so this is the floor of that pass.
+pub fn item_fingerprint(item: &serde_json::Value) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_json(item, &mut hasher);
+    hasher.finish()
+}
+
+/// Structural JSON hash. Each variant writes a tag first so `[1]` and
+/// `{"0":1}` (or `"1"` and `1`) never collide by content alone. Objects
+/// hash in iteration order, the same order serialization would have
+/// visited them.
+fn hash_json(value: &serde_json::Value, h: &mut std::collections::hash_map::DefaultHasher) {
+    use serde_json::Value;
+    match value {
+        Value::Null => h.write_u8(0),
+        Value::Bool(b) => {
+            h.write_u8(1);
+            h.write_u8(*b as u8);
+        }
+        Value::Number(n) => {
+            h.write_u8(2);
+            if let Some(i) = n.as_i64() {
+                h.write_u8(0);
+                h.write_i64(i);
+            } else if let Some(u) = n.as_u64() {
+                h.write_u8(1);
+                h.write_u64(u);
+            } else {
+                h.write_u8(2);
+                h.write_u64(n.as_f64().unwrap_or(f64::NAN).to_bits());
+            }
+        }
+        Value::String(s) => {
+            h.write_u8(3);
+            h.write_usize(s.len());
+            h.write(s.as_bytes());
+        }
+        Value::Array(items) => {
+            h.write_u8(4);
+            h.write_usize(items.len());
+            for item in items {
+                hash_json(item, h);
+            }
+        }
+        Value::Object(map) => {
+            h.write_u8(5);
+            h.write_usize(map.len());
+            for (key, item) in map {
+                h.write_usize(key.len());
+                h.write(key.as_bytes());
+                hash_json(item, h);
+            }
+        }
     }
-    w.0.finish()
 }
 
 /// Templates fingerprint with the per-container cache. `stable` asserts the

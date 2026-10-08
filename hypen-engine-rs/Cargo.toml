@@ -96,6 +96,10 @@ sha2 = "0.10"
 name = "state_clone"
 harness = false
 
+[[bench]]
+name = "item_fingerprint"
+harness = false
+
 [[bin]]
 name = "uniffi-bindgen"
 required-features = ["uniffi-cli"]

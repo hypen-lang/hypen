@@ -370,28 +370,58 @@ impl EngineCore {
     ///
     /// Each path is recorded with its marking (`mark_dirty_for_path`) so the
     /// renderer can narrow iterable re-reconciliation to touched indices.
+    ///
+    /// A batch that writes a nested object records every level of it
+    /// (`user`, `user.name`, `user.email`, …). The dependency lookup for
+    /// `user` already yields every node bound at or beneath it, so the
+    /// descendants are recorded for the hint but not looked up again —
+    /// `get_affected_nodes` on each would re-walk the same prefix-index
+    /// entries and hand the scheduler the same node ids.
     fn schedule_dirty_for_paths<'p>(
         &mut self,
         scope: Option<&str>,
         paths: impl IntoIterator<Item = &'p str>,
     ) {
-        for path in paths {
-            let key = match scope {
+        let keys: Vec<String> = paths
+            .into_iter()
+            .map(|path| match scope {
                 Some(name) => format!("mod:{}:{}", name, path),
                 None => path.to_string(),
-            };
-            let affected = self.dependencies.get_affected_nodes(&key);
-            self.scheduler
-                .mark_dirty_for_path(&key, affected.iter().copied());
-        }
+            })
+            .collect();
+        self.schedule_dirty_for_keys(keys);
     }
 
     /// Schedule dirty nodes from a `StateChange` (primary module paths).
     pub fn schedule_from_state_change(&mut self, change: &StateChange) {
-        for path in change.paths() {
-            let affected = self.dependencies.get_affected_nodes(path);
+        let keys: Vec<String> = change.paths().map(str::to_string).collect();
+        self.schedule_dirty_for_keys(keys);
+    }
+
+    /// Mark every node bound under one of the (already scope-prefixed)
+    /// `keys` dirty, looking each key up in the dependency graph only when
+    /// no ancestor of it is in the same batch. Every key is still recorded
+    /// with the scheduler, so the iterable narrowing hint sees the exact
+    /// paths the host reported.
+    fn schedule_dirty_for_keys(&mut self, keys: Vec<String>) {
+        if keys.len() == 1 {
+            let key = &keys[0];
+            let affected = self.dependencies.get_affected_nodes(key);
             self.scheduler
-                .mark_dirty_for_path(path, affected.iter().copied());
+                .mark_dirty_for_path(key, affected.iter().copied());
+            return;
+        }
+        // Membership probe per ancestor prefix: O(keys × depth), not
+        // O(keys²) — a wholesale list write records thousands of keys.
+        let present: std::collections::HashSet<&str> = keys.iter().map(String::as_str).collect();
+        for key in &keys {
+            if has_present_ancestor(key, &present) {
+                self.scheduler.mark_dirty_for_path(key, std::iter::empty());
+            } else {
+                let affected = self.dependencies.get_affected_nodes(key);
+                self.scheduler
+                    .mark_dirty_for_path(key, affected.iter().copied());
+            }
         }
     }
 
@@ -823,6 +853,19 @@ impl Default for EngineCore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether a strict dotted ancestor of `path` (`user` of `user.name`;
+/// never `user` of `username`) is in `present`.
+fn has_present_ancestor(path: &str, present: &std::collections::HashSet<&str>) -> bool {
+    let mut current = path;
+    while let Some(dot) = current.rfind('.') {
+        current = &current[..dot];
+        if present.contains(current) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

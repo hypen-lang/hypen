@@ -536,3 +536,86 @@ fn test_update_props_re_evaluates_bindings() {
     let node = tree.get(id).unwrap();
     assert_eq!(node.props.get("count"), Some(&json!(10)));
 }
+
+#[test]
+fn test_refresh_dynamic_props_touches_only_bound_props() {
+    use hypen_engine::reconcile::tree::PropDelta;
+
+    // GIVEN: a node with many static props and one binding
+    let mut element = Element::new("Text").with_prop(
+        "count",
+        Value::Binding(Binding::state(vec!["count".to_string()])),
+    );
+    for i in 0..10 {
+        element = element.with_prop(format!("style{i}"), Value::Static(json!(i)));
+    }
+    element = element.with_prop("onClick", Value::Action("tap".to_string()));
+    let mut tree = InstanceTree::new();
+    let id = tree.create_node(&element, &json!({"count": 5}));
+
+    // WHEN: the bound state changes
+    let deltas = tree
+        .get_mut(id)
+        .unwrap()
+        .refresh_dynamic_props(&json!({"count": 6}), None)
+        .expect("in-place refresh");
+
+    // THEN: exactly the binding is reported, and every prop (static ones
+    //       included) still reads correctly from the node
+    assert_eq!(deltas, vec![PropDelta::Set("count".to_string(), json!(6))]);
+    let node = tree.get(id).unwrap();
+    assert_eq!(node.props.get("count"), Some(&json!(6)));
+    assert_eq!(node.props.get("style3"), Some(&json!(3)));
+    assert_eq!(node.props.get("onClick"), Some(&json!("@tap")));
+    assert_eq!(node.props.len(), 12);
+
+    // AND: an unchanged state reports nothing
+    let deltas = tree
+        .get_mut(id)
+        .unwrap()
+        .refresh_dynamic_props(&json!({"count": 6}), None)
+        .expect("in-place refresh");
+    assert!(deltas.is_empty());
+}
+
+#[test]
+fn test_refresh_dynamic_props_handles_absent_switches() {
+    use hypen_engine::reconcile::tree::PropDelta;
+
+    // GIVEN: a `.states`-style switch with no default: present only when
+    //        the state matches a case
+    let mut cases = indexmap::IndexMap::new();
+    cases.insert("on".to_string(), json!(1.0));
+    let element = Element::new("Box").with_prop(
+        "opacity",
+        Value::StateSwitch {
+            path: "pose".to_string(),
+            cases,
+            default: None,
+        },
+    );
+    let mut tree = InstanceTree::new();
+    let id = tree.create_node(&element, &json!({"pose": "on"}));
+    assert_eq!(
+        tree.get(id).unwrap().props.get("opacity"),
+        Some(&json!(1.0))
+    );
+
+    // WHEN: the switch stops matching → the prop is removed in place
+    let deltas = tree
+        .get_mut(id)
+        .unwrap()
+        .refresh_dynamic_props(&json!({"pose": "off"}), None)
+        .expect("in-place refresh");
+    assert_eq!(deltas, vec![PropDelta::Removed("opacity".to_string())]);
+    assert!(!tree.get(id).unwrap().props.contains_key("opacity"));
+
+    // WHEN: it matches again → the in-place path declines (the key must
+    //       return to its raw position) and leaves the node untouched
+    let refreshed = tree
+        .get_mut(id)
+        .unwrap()
+        .refresh_dynamic_props(&json!({"pose": "on"}), None);
+    assert!(refreshed.is_none());
+    assert!(!tree.get(id).unwrap().props.contains_key("opacity"));
+}

@@ -1,5 +1,5 @@
 use super::layered::LayeredProps;
-use super::resolve::{resolve_props_full, resolve_props_iter};
+use super::resolve::{resolve_props_full, resolve_props_iter, resolve_single_value};
 use crate::ir::{Element, IRNode, NodeId, Props, Semantics, Value};
 use indexmap::IndexMap;
 use slotmap::SlotMap;
@@ -173,6 +173,17 @@ pub struct InstanceNode {
     pub iter_fp_cache: Option<u64>,
 }
 
+/// One resolved-prop change reported by
+/// [`InstanceNode::refresh_dynamic_props`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropDelta {
+    /// The prop now resolves to this value (it resolved differently before).
+    Set(String, serde_json::Value),
+    /// The prop resolved to *absent* (a `.states` switch with no match and
+    /// no default) and has been dropped from the node.
+    Removed(String),
+}
+
 /// See [`InstanceNode::iter_memo`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IterMemo {
@@ -255,6 +266,61 @@ impl InstanceNode {
     /// Update props by re-evaluating bindings against new state
     pub fn update_props(&mut self, state: &serde_json::Value) {
         self.update_props_with_data_sources(state, None);
+    }
+
+    /// Re-evaluate only the state-dependent raw props (bindings, template
+    /// strings, `.states` switches) against `state` / `data_sources`, in
+    /// place, and report what changed. A static prop (`Static`, `Action`,
+    /// `Resource`) resolves to the same value on every render, so it is
+    /// neither re-resolved nor compared: a dirty node with forty styling
+    /// props and one bound label costs one binding evaluation, not forty
+    /// clones and forty comparisons.
+    ///
+    /// Returns `None` — with the node untouched — when a previously absent
+    /// prop (a `.states` switch that matched nothing) is now present: the
+    /// in-place path cannot restore that key to its raw-prop position, so
+    /// the caller rebuilds the map wholesale instead.
+    pub fn refresh_dynamic_props(
+        &mut self,
+        state: &serde_json::Value,
+        data_sources: Option<&IndexMap<String, serde_json::Value>>,
+    ) -> Option<Vec<PropDelta>> {
+        let mut evaluator: Option<exprimo::Evaluator> = None;
+        let mut pending: Vec<(String, Option<serde_json::Value>)> = Vec::new();
+        for (key, raw) in self.raw_props.iter() {
+            if matches!(
+                raw,
+                Value::Static(_) | Value::Action(_) | Value::Resource(_)
+            ) {
+                continue;
+            }
+            match resolve_single_value(raw, state, None, data_sources, &mut evaluator) {
+                Some(value) => match self.props.get(key) {
+                    Some(current) if *current == value => {}
+                    Some(_) => pending.push((key.to_string(), Some(value))),
+                    None => return None,
+                },
+                None => {
+                    if self.props.contains_key(key) {
+                        pending.push((key.to_string(), None));
+                    }
+                }
+            }
+        }
+        let mut deltas = Vec::with_capacity(pending.len());
+        for (key, value) in pending {
+            match value {
+                Some(value) => {
+                    self.props.insert(&key, value.clone());
+                    deltas.push(PropDelta::Set(key, value));
+                }
+                None => {
+                    self.props.shift_remove(&key);
+                    deltas.push(PropDelta::Removed(key));
+                }
+            }
+        }
+        Some(deltas)
     }
 
     /// Update props by re-evaluating bindings against state and data sources

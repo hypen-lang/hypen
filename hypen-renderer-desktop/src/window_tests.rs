@@ -185,7 +185,14 @@ mod paint_only_gate {
         }];
         let affected = paint_only_affected_ids(&batch, &[], &tree, false, false, false)
             .expect("semantics-only batch qualifies");
-        assert!(affected.is_empty(), "semantics repaint nothing");
+        // Semantics are per node and repaint nothing, but the pass's a11y
+        // map is patched per affected id, so the node itself — and
+        // nothing beneath it — is named.
+        assert_eq!(
+            affected,
+            std::collections::HashSet::from(["text".to_string()]),
+            "semantics name their node only"
+        );
     }
 }
 
@@ -2731,9 +2738,21 @@ mod review_regressions {
             "a semantics-only change must alter the a11y fingerprint"
         );
         // And the in-place refresh produces the same fingerprint as the
-        // full recompute (Phase B keeps the pass instead of dropping it).
+        // full recompute (Phase B keeps the pass instead of dropping it),
+        // given the affected set the classifier hands it for that batch.
         let mut refreshed = before;
-        let affected: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let affected = paint_only_affected_ids(
+            &[Patch::SetSemantics {
+                id: "panel".into(),
+                semantics: None,
+            }],
+            &[],
+            &tree,
+            false,
+            false,
+            false,
+        )
+        .expect("semantics-only batch qualifies");
         refreshed.refresh_paint_only(
             &tree,
             &affected,

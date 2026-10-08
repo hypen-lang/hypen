@@ -8614,10 +8614,97 @@ fn unsized_image_loading_rebuilds_layout_exactly_once() {
     assert_eq!(state.bulk_rebuilds(), built + 1, "the awaited size arrived");
     let rect = after.item_by_id(&id).unwrap().rect;
     assert_ne!(before.item_by_id(&id).unwrap().rect, rect);
-    assert!((rect.w - 300.0).abs() < 0.5 && (rect.h - 150.0).abs() < 0.5, "{rect:?}");
+    assert!(
+        (rect.w - 300.0).abs() < 0.5 && (rect.h - 150.0).abs() < 0.5,
+        "{rect:?}"
+    );
 
     // Once rebuilt on the real size, further loads are no concern.
     crate::paint::image::bump_image_load_generation_for_test();
     let _ = compute(&mut state, &mut text);
     assert_eq!(state.bulk_rebuilds(), built + 1);
+}
+
+/// Painter-side scoping of a structural batch
+/// (`window::structural_fragment_invalidation`): which fragments go, and
+/// when the whole cache must.
+#[test]
+fn structural_fragment_invalidation_scopes_to_patched_subtrees() {
+    use crate::window::structural_fragment_invalidation;
+    use std::collections::HashSet;
+    let vp = crate::style::Viewport::new(800.0, 600.0);
+    let mut tree = Tree::new();
+    // feed (scrollable) > post_a > {title_a, body_a}, post_b > {title_b}
+    tree.apply(&create_patch(
+        "feed",
+        "Column",
+        &[("scrollable.0", json!(true))],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "feed"));
+    for post in ["post_a", "post_b"] {
+        tree.apply(&create_patch(post, "Column", &[]));
+        tree.apply(&insert_patch("feed", post));
+    }
+    tree.apply(&create_patch("title_a", "Text", &[("0", json!("a"))]));
+    tree.apply(&insert_patch("post_a", "title_a"));
+    tree.apply(&create_patch("body_a", "Text", &[("0", json!("body"))]));
+    tree.apply(&insert_patch("post_a", "body_a"));
+    tree.apply(&create_patch("title_b", "Text", &[("0", json!("b"))]));
+    tree.apply(&insert_patch("post_b", "title_b"));
+
+    let set = |id: &str, name: &str| Patch::SetProp {
+        id: id.into(),
+        name: name.to_string(),
+        value: json!("#ff0000"),
+    };
+
+    // A paint write inside a post drops that post's subtree only.
+    let dropped = structural_fragment_invalidation(&[set("post_a", "color")], &[], &tree, vp)
+        .expect("inside a scrollable: scoped");
+    let mut expect: HashSet<String> = HashSet::new();
+    for id in ["post_a", "title_a", "body_a"] {
+        expect.insert(id.to_string());
+    }
+    assert_eq!(dropped, expect);
+
+    // A removed post drops its own fragments and nothing else; the
+    // neighbours re-validate their geometry on the next paint instead.
+    let dropped = structural_fragment_invalidation(
+        &[Patch::Remove {
+            id: "post_b".into(),
+            transition: false,
+        }],
+        &[],
+        &tree,
+        vp,
+    )
+    .expect("structural only: scoped");
+    assert_eq!(dropped, HashSet::from(["post_b".to_string()]));
+
+    // An insert of a brand-new post names the new node; the feed's
+    // membership key does the rest.
+    tree.apply(&create_patch("post_c", "Column", &[]));
+    let dropped = structural_fragment_invalidation(
+        &[
+            create_patch("post_c", "Column", &[]),
+            insert_patch("feed", "post_c"),
+        ],
+        &[],
+        &tree,
+        vp,
+    )
+    .expect("insert: scoped");
+    assert_eq!(dropped, HashSet::from(["post_c".to_string()]));
+
+    // The animator's end-of-batch restyle writes count like paint writes.
+    let dropped = structural_fragment_invalidation(&[], &["title_b".to_string()], &tree, vp)
+        .expect("restyle inside a post: scoped");
+    assert_eq!(dropped, HashSet::from(["title_b".to_string()]));
+
+    // A paint write on the scrollable itself (or anything above it) can
+    // inherit into every fragment: whole cache.
+    assert!(structural_fragment_invalidation(&[set("feed", "color")], &[], &tree, vp).is_none());
+    tree.apply(&create_patch("header", "Text", &[("0", json!("h"))]));
+    tree.apply(&insert_patch(ROOT_ID, "header"));
+    assert!(structural_fragment_invalidation(&[set("header", "color")], &[], &tree, vp).is_none());
 }
